@@ -228,8 +228,13 @@ pub struct ReplicationRule {
     pub filter: Option<RuleFilter>,
     /// `DeleteMarkerReplication` `Enabled`.
     pub delete_markers: bool,
-    /// The destination bucket (a roll bucket, by name).
+    /// The destination bucket: a roll bucket, or (with `target`) a bucket of that replication
+    /// target, by name.
     pub destination: String,
+    /// The replication target (`targets.rs`) the destination bucket is on, for buckets outside
+    /// roll; `None`: a roll bucket of this deployment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     pub storage_class: Option<String>,
     /// `AccessControlTranslation` `Owner=Destination`: replicas are private to the destination.
     pub owner_override: bool,
@@ -265,6 +270,20 @@ impl ReplicationRule {
     pub fn replicates_markers(&self) -> bool {
         self.delete_markers || self.legacy_prefix.is_some()
     }
+
+    /// Where its replicas go, as outbox rows name it (`replicate:<this>`): the bucket, or
+    /// `<bucket>@<target>` for a bucket outside roll.
+    pub fn dest_key(&self) -> String {
+        dest_key(&self.destination, self.target.as_deref())
+    }
+}
+
+/// See [`ReplicationRule::dest_key`].
+pub fn dest_key(bucket: &str, target: Option<&str>) -> String {
+    match target {
+        Some(t) => format!("{bucket}@{t}"),
+        None => bucket.to_string(),
+    }
 }
 
 impl ReplicationConfig {
@@ -299,7 +318,7 @@ impl ReplicationConfig {
             if r.destination.is_empty() {
                 return Err("every rule needs a destination bucket".into());
             }
-            if r.destination == source {
+            if r.destination == source && r.target.is_none() {
                 return Err("Destination bucket cannot be the same as the source bucket.".into());
             }
         }
@@ -380,6 +399,22 @@ pub struct ReplicateTask {
     /// S3's version id (`null` for the null version).
     pub version_id: String,
     pub owner_override: bool,
+    /// The replication target of a destination outside roll (`s3-server` copies the bytes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// The version's size (none for delete markers), for `BytesPendingReplication`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+impl ReplicateTask {
+    fn new(rule: &ReplicationRule, version_id: &str, size: Option<u64>) -> Self {
+        Self { rule: rule.id.clone(), destination: rule.destination.clone(), version_id: version_id.to_string(), owner_override: rule.owner_override, target: rule.target.clone(), size }
+    }
+
+    pub fn dest_key(&self) -> String {
+        dest_key(&self.destination, self.target.as_deref())
+    }
 }
 
 /// What an outbox row of kind [`BACKFILL`] carries: `ExistingObjectReplication` walking the
@@ -494,6 +529,12 @@ fn insert_event(c: &Connection, seq: i64, bucket_id: &str, key: &str, dest: &str
     Ok(())
 }
 
+/// Whether a [`REPLICATE`] row goes to a bucket outside roll (its destination is
+/// `<bucket>@<target>`; bucket names have no `@`).
+pub fn is_external(ev: &PendingEvent) -> bool {
+    ev.kind == REPLICATE && ev.dest.contains('@')
+}
+
 /// Delete an outbox row; the next one for its destination and key becomes due. `false`: it was
 /// gone already.
 fn remove_event(c: &Connection, seq: i64, now: i64) -> Result<bool> {
@@ -513,6 +554,25 @@ fn set_status(c: &Connection, bucket_id: &str, key: &str, version_id: &str, stat
             .execute(params![bucket_id, key, version_id, s])?,
         None => c.prepare_cached("DELETE FROM replication_status WHERE bucket_id = ?1 AND key = ?2 AND version_id = ?3")?.execute(params![bucket_id, key, version_id])?,
     };
+    Ok(())
+}
+
+/// A source version is `COMPLETED` once no other destination still waits for it (and it isn't
+/// `FAILED` for one).
+fn complete_if_last(c: &Connection, bucket_id: &str, key: &str, version_id: &str) -> Result<()> {
+    let others = c
+        .prepare_cached("SELECT body FROM events WHERE bucket_id = ?1 AND key = ?2 AND kind = 'replicate'")?
+        .query_map(params![bucket_id, key], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter_map(|b| serde_json::from_str::<ReplicateTask>(&b).ok())
+        .any(|t| t.version_id == version_id);
+    if !others {
+        let cur: Option<String> = c.prepare_cached("SELECT status FROM replication_status WHERE bucket_id = ?1 AND key = ?2 AND version_id = ?3")?.query_row(params![bucket_id, key, version_id], |r| r.get(0)).optional()?;
+        if cur.as_deref() != Some("FAILED") {
+            set_status(c, bucket_id, key, version_id, Some("COMPLETED"))?;
+        }
+    }
     Ok(())
 }
 
@@ -582,9 +642,10 @@ pub(crate) fn emit(c: &Connection, b: &BucketRow, ch: Change<'_>, now: i64) -> R
     if let (Some(cfg), Some(tags), Some(vid)) = (&replicate, ch.replicate, &ch.version_id) {
         let marker = ch.size.is_none();
         for r in cfg.rules.iter().filter(|r| r.enabled && r.matches(ch.key, tags) && (!marker || r.replicates_markers())) {
-            let better = replicas.get(&r.destination).is_none_or(|cur| r.priority.unwrap_or(0) > cur.priority.unwrap_or(0));
+            let dest = r.dest_key();
+            let better = replicas.get(&dest).is_none_or(|cur| r.priority.unwrap_or(0) > cur.priority.unwrap_or(0));
             if better {
-                replicas.insert(r.destination.clone(), r);
+                replicas.insert(dest, r);
             }
         }
         if replicas.is_empty() {
@@ -603,7 +664,7 @@ pub(crate) fn emit(c: &Connection, b: &BucketRow, ch: Change<'_>, now: i64) -> R
     }
     if let Some(vid) = &ch.version_id {
         for (dest, rule) in &replicas {
-            let task = ReplicateTask { rule: rule.id.clone(), destination: dest.clone(), version_id: vid.clone(), owner_override: rule.owner_override };
+            let task = ReplicateTask::new(rule, vid, ch.size);
             rows.push((format!("replicate:{dest}"), REPLICATE, serde_json::to_string(&task)?));
         }
         if !replicas.is_empty() {
@@ -684,6 +745,14 @@ impl Store {
                 return Err(StoreError::InvalidRequest("Versioning must be 'Enabled' on the bucket to apply a replication configuration".into()));
             }
             for r in &cfg.rules {
+                // A bucket outside roll: its target must exist; its versioning was checked
+                // (over the network) by the caller.
+                if let Some(t) = &r.target {
+                    if !crate::targets::exists(c, t)? {
+                        return Err(StoreError::InvalidRequest(format!("no replication target {t}")));
+                    }
+                    continue;
+                }
                 let d = match find_bucket(c, &r.destination) {
                     Ok(d) => d,
                     Err(StoreError::NoSuchBucket(_)) => return Err(StoreError::InvalidRequest(format!("Destination bucket must exist: {}", r.destination))),
@@ -830,6 +899,11 @@ impl Store {
     /// replica is written once however often this runs. An error means "try again".
     pub async fn replicate(&self, ev: &PendingEvent) -> Result<Replicated> {
         let task: ReplicateTask = serde_json::from_str(&ev.body)?;
+        if task.target.is_some() {
+            // Its bytes have to move: `s3-server` copies them, then calls
+            // `finish_external_replication`.
+            return Err(StoreError::internal("a replication row for a bucket outside roll can't be applied by the store alone"));
+        }
         let now = self.now();
         let out = self
             .write(|c| {
@@ -889,23 +963,7 @@ impl Store {
                     emit(c, &dest, ch, now)?;
                 }
                 set_status(c, &dest.id, &ev.key, &task.version_id, Some("REPLICA"))?;
-                // COMPLETED once no other destination still waits for this version.
-                let others = c
-                    .prepare_cached("SELECT body FROM events WHERE bucket_id = ?1 AND key = ?2 AND kind = 'replicate'")?
-                    .query_map(params![src.id, ev.key], |r| r.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-                    .into_iter()
-                    .filter_map(|b| serde_json::from_str::<ReplicateTask>(&b).ok())
-                    .any(|t| t.version_id == task.version_id);
-                if !others {
-                    let cur: Option<String> = c
-                        .prepare_cached("SELECT status FROM replication_status WHERE bucket_id = ?1 AND key = ?2 AND version_id = ?3")?
-                        .query_row(params![src.id, ev.key, task.version_id], |r| r.get(0))
-                        .optional()?;
-                    if cur.as_deref() != Some("FAILED") {
-                        set_status(c, &src.id, &ev.key, &task.version_id, Some("COMPLETED"))?;
-                    }
-                }
+                complete_if_last(c, &src.id, &ev.key, &task.version_id)?;
                 Ok(Replicated::Completed)
             })
             .await?;
@@ -968,8 +1026,8 @@ impl Store {
                         continue;
                     }
                     let seq = take_seqs(c, 1)?;
-                    let t = ReplicateTask { rule: rule.id.clone(), destination: rule.destination.clone(), version_id: v.version_id.clone(), owner_override: rule.owner_override };
-                    insert_event(c, seq, &b.id, &v.key, &format!("replicate:{}", rule.destination), REPLICATE, &rows::json(&t)?, now)?;
+                    let t = ReplicateTask::new(&rule, &v.version_id, row.blob_id.is_some().then_some(row.size));
+                    insert_event(c, seq, &b.id, &v.key, &format!("replicate:{}", rule.dest_key()), REPLICATE, &rows::json(&t)?, now)?;
                     set_status(c, &b.id, &v.key, &v.version_id, Some("PENDING"))?;
                 }
                 if !page.truncated {
@@ -1070,6 +1128,138 @@ impl Store {
             Ok(())
         })
         .await
+    }
+}
+
+/// What an external replication (a destination outside roll) copies: the source version as it
+/// is now.
+#[derive(Clone, Debug)]
+pub struct ReplicaSource {
+    pub bucket: Bucket,
+    pub task: ReplicateTask,
+    /// The version; `blob_id` is empty for a delete marker.
+    pub meta: ObjectMeta,
+    pub delete_marker: bool,
+    /// The blob's CRC32C, as S3 verified it when it was written.
+    pub crc32c: u32,
+    pub encryption: Option<crate::sse::Encryption>,
+    /// The bucket's replication rule the row was queued for (`None`: it's gone since).
+    pub rule: Option<ReplicationRule>,
+}
+
+/// One destination's replication backlog (Replication Time Control's metrics).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ReplicationBacklog {
+    /// `OperationsPendingReplication`.
+    pub operations: u64,
+    /// `BytesPendingReplication`.
+    pub bytes: u64,
+    /// When the oldest pending version was queued (Unix ms).
+    pub oldest_at: Option<i64>,
+}
+
+impl Store {
+    /// The source of a [`REPLICATE`] row for a destination outside roll, read (not changed):
+    /// `None` if there's nothing to replicate any more (the row, bucket or version is gone).
+    pub fn replica_source(&self, ev: &PendingEvent) -> Result<Option<ReplicaSource>> {
+        let task: ReplicateTask = serde_json::from_str(&ev.body)?;
+        self.read(|c| {
+            if !c.prepare_cached("SELECT 1 FROM events WHERE seq = ?1")?.exists([ev.seq])? {
+                return Ok(None);
+            }
+            let Some(src) = find_bucket_id(c, &ev.bucket_id)? else { return Ok(None) };
+            let chain = rows::chain(c, &src.id)?;
+            let Some((row, _)) = versioning::find_version(c, &chain, &ev.key, &task.version_id)? else { return Ok(None) };
+            let (crc32c, encryption) = match &row.blob_id {
+                Some(blob) => {
+                    let crc: i64 = c.query_row("SELECT crc32c FROM blobs WHERE id = ?1", [blob], |r| r.get(0))?;
+                    (crc as u32, crate::sse::load(c, blob)?)
+                }
+                None => (0, None),
+            };
+            let rule = targets(c, &src.id)?.and_then(|(_, r)| r).and_then(|r| r.rules.into_iter().find(|x| x.id == task.rule));
+            let delete_marker = row.delete_marker;
+            let mut meta = if delete_marker {
+                ObjectMeta {
+                    key: row.key.clone(),
+                    blob_id: String::new(),
+                    size: 0,
+                    etag: String::new(),
+                    headers: ObjectHeaders::default(),
+                    checksum: None,
+                    parts: 0,
+                    part_sizes: Vec::new(),
+                    part_checksums: Vec::new(),
+                    modified_at: row.modified_at,
+                    version_id: row.version_id(),
+                    lock: ObjectLock::default(),
+                }
+            } else {
+                row.meta()?
+            };
+            meta.version_id = row.version_id();
+            let bucket = crate::store::bucket_view(c, src)?;
+            Ok(Some(ReplicaSource { bucket, task: task.clone(), meta, delete_marker, crc32c, encryption, rule }))
+        })
+    }
+
+    /// End a [`REPLICATE`] row for a destination outside roll, in one durable write: `Ok`
+    /// (the target has the version) makes the source `COMPLETED` once no other destination
+    /// waits; `Err(why)` makes it `FAILED` with an `OperationFailedReplication` event. `None`:
+    /// out of the rule's scope after all (an SSE-KMS version without `SseKmsEncryptedObjects`),
+    /// no status. Returns how it ended (`Skipped` if the row was gone already).
+    pub async fn finish_external_replication(&self, ev: &PendingEvent, outcome: Option<std::result::Result<(), String>>) -> Result<Replicated> {
+        let task: ReplicateTask = serde_json::from_str(&ev.body)?;
+        let now = self.now();
+        let out = self
+            .write(|c| {
+                if !remove_event(c, ev.seq, now)? {
+                    return Ok(Replicated::Skipped);
+                }
+                match outcome {
+                    None => {
+                        set_status(c, &ev.bucket_id, &ev.key, &task.version_id, None)?;
+                        Ok(Replicated::Skipped)
+                    }
+                    Some(Ok(())) => {
+                        complete_if_last(c, &ev.bucket_id, &ev.key, &task.version_id)?;
+                        Ok(Replicated::Completed)
+                    }
+                    Some(Err(why)) => {
+                        set_status(c, &ev.bucket_id, &ev.key, &task.version_id, Some("FAILED"))?;
+                        if let Some(src) = find_bucket_id(c, &ev.bucket_id)? {
+                            let mut ch = Change::new("Replication:OperationFailedReplication", &ev.key);
+                            ch.version_id = Some(task.version_id.clone());
+                            ch.size = task.size;
+                            ch.reason = Some(&why);
+                            ch.replication_destination = Some(&task.destination);
+                            emit(c, &src, ch, now)?;
+                        }
+                        Ok(Replicated::Failed(why))
+                    }
+                }
+            })
+            .await?;
+        self.events.has_status.store(true, Ordering::Relaxed);
+        Ok(out)
+    }
+
+    /// A bucket's pending replication by destination ([`ReplicationRule::dest_key`]): what
+    /// S3's Replication Time Control metrics report.
+    pub fn replication_backlog(&self, bucket_id: &str) -> Result<BTreeMap<String, ReplicationBacklog>> {
+        self.read(|c| {
+            let rows = c
+                .prepare_cached(
+                    "SELECT dest, count(*), coalesce(sum(json_extract(body, '$.size')), 0), min(created_at) FROM events
+                     WHERE bucket_id = ?1 AND kind = 'replicate' GROUP BY dest",
+                )?
+                .query_map([bucket_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<i64>>(3)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows
+                .into_iter()
+                .map(|(d, n, b, at)| (d.strip_prefix("replicate:").unwrap_or(&d).to_string(), ReplicationBacklog { operations: n.max(0) as u64, bytes: b.max(0) as u64, oldest_at: at }))
+                .collect())
+        })
     }
 }
 

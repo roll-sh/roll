@@ -221,7 +221,7 @@ pub(crate) fn find_bucket_id(c: &Connection, id: &str) -> Result<Option<BucketRo
     Ok(c.prepare_cached(&format!("SELECT {BUCKET_COLS} FROM buckets WHERE id = ?1"))?.query_row([id], bucket_row).optional()?)
 }
 
-fn bucket_view(c: &Connection, b: BucketRow) -> Result<Bucket> {
+pub(crate) fn bucket_view(c: &Connection, b: BucketRow) -> Result<Bucket> {
     let parent = match (&b.parent_id, b.parent_at) {
         (Some(pid), Some(at)) => {
             let name: String = c.query_row("SELECT name FROM buckets WHERE id = ?1", [pid], |r| r.get(0)).optional()?.unwrap_or_default();

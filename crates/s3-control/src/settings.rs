@@ -70,6 +70,10 @@ pub(crate) struct RuleInput {
     pub storage_class: Option<String>,
     #[serde(default)]
     pub owner_override: Option<bool>,
+    /// The replication target (`/v1/storage/replication-targets`) the destination bucket is
+    /// on; omitted: the target listing the bucket, else a roll bucket.
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -104,6 +108,7 @@ fn rule_view(r: &ReplicationRule) -> Value {
         "delete_markers": r.replicates_markers(),
         "existing_objects": r.existing_objects,
         "destination": r.destination,
+        "target": r.target,
         "storage_class": r.storage_class,
         "owner_override": r.owner_override,
     })
@@ -168,6 +173,12 @@ impl Control {
     pub(crate) fn settings_view(&self, b: &Bucket, v: &mut Value, has_notifications: bool, website: bool) {
         let replication = self.store.replication(&b.name).ok().flatten();
         let backlog = self.backlog(b, has_notifications || replication.is_some());
+        // Replication Time Control's metrics, per destination.
+        let (pending, latency) = match &replication {
+            Some(_) => (self.store.replication_backlog(&b.id).unwrap_or_default(), self.notifier.get().map(|n| n.replication_latency(&b.id)).unwrap_or_default()),
+            None => Default::default(),
+        };
+        let now = self.store.now();
         v["replication"] = match &replication {
             Some(cfg) => {
                 let rules: Vec<Value> = cfg
@@ -175,7 +186,18 @@ impl Control {
                     .iter()
                     .map(|r| {
                         let mut rv = rule_view(r);
-                        let w = backlog.replicate.get(&r.destination);
+                        let dest = r.dest_key();
+                        let w = backlog.replicate.get(&dest);
+                        let p = pending.get(&dest).cloned().unwrap_or_default();
+                        let l = latency.get(&dest);
+                        rv["metrics"] = json!({
+                            "operations_pending": p.operations,
+                            "bytes_pending": p.bytes,
+                            "oldest_pending_ms": p.oldest_at.map(|at| (now - at).max(0)),
+                            "latency_ms": l.map(|l| l.last_ms),
+                            "max_latency_ms": l.map(|l| l.max_ms),
+                            "replicated": l.map_or(0, |l| l.replicated),
+                        });
                         rv["pending"] = json!(w.map_or(0, |w| w.pending));
                         rv["last_error"] = json!(w.and_then(|w| w.last_error.clone()));
                         rv["backfilling"] = json!(backlog.backfilling.contains(&r.id));
@@ -286,6 +308,10 @@ impl Control {
                 filter: Some(RuleFilter { prefix, tags, and }),
                 delete_markers: r.delete_markers.unwrap_or(false),
                 destination: r.destination.trim().to_string(),
+                target: match r.target.filter(|t| !t.is_empty()) {
+                    Some(t) => Some(t),
+                    None => self.store.target_for_bucket(r.destination.trim())?,
+                },
                 storage_class: r.storage_class.filter(|s| !s.is_empty()),
                 owner_override: r.owner_override.unwrap_or(false),
                 account: kept.and_then(|k| k.account.clone()),
@@ -305,6 +331,12 @@ impl Control {
             return Err(invalid("Versioning must be 'Enabled' on the bucket to apply a replication configuration"));
         }
         for r in &cfg.rules {
+            if let Some(t) = &r.target {
+                if self.store.replication_target(t)?.is_none() {
+                    return Err(invalid(format!("no replication target {t}")));
+                }
+                continue;
+            }
             match self.store.bucket(&r.destination) {
                 Ok(d) if !enabled(d.versioning.as_deref()) => return Err(invalid(format!("Destination bucket must have versioning enabled: {}", r.destination))),
                 Ok(_) => {}
@@ -315,6 +347,17 @@ impl Control {
             }
         }
         Ok(cfg)
+    }
+
+    /// Check the destinations of replication rules on targets outside roll (the bucket has
+    /// versioning enabled there), as PutBucketReplication does.
+    pub(crate) async fn check_replication_targets(&self, p: &mut Prepared) -> Result<()> {
+        let Some(Some(cfg)) = &mut p.replication else { return Ok(()) };
+        if cfg.rules.iter().all(|r| r.target.is_none()) {
+            return Ok(());
+        }
+        let n = self.notifier.get().ok_or_else(|| ControlError::Unavailable("replication to buckets outside roll needs the S3 API, which isn't running".into()))?;
+        n.check_replication(cfg).await.map_err(invalid)
     }
 
     /// Apply checked settings: the public access block before the store's own update (it

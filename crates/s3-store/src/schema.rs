@@ -178,6 +178,26 @@ CREATE TABLE roles (
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 "#,
+// Access points and Object Lambda access points (`access_points.rs`), per account: `bucket` is
+// the bucket's name (`ap`) or the supporting access point's (`olap`); `block` the access
+// point's own public access block (JSON); `config` an Object Lambda configuration (JSON).
+// Replication targets (`targets.rs`): S3 buckets outside roll that replication rules name;
+// `secret` is sealed (AES-256-GCM) under a dedicated key in `state` (`replication_target_key`),
+// never stored in the clear.
+r#"
+CREATE TABLE access_points (
+  account TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, alias TEXT NOT NULL UNIQUE,
+  bucket TEXT NOT NULL, network_origin TEXT NOT NULL, vpc_id TEXT, policy TEXT,
+  block TEXT NOT NULL, config TEXT, created_at INTEGER NOT NULL,
+  PRIMARY KEY (account, kind, name)
+) WITHOUT ROWID;
+CREATE INDEX access_points_bucket ON access_points (bucket);
+CREATE TABLE replication_targets (
+  name TEXT PRIMARY KEY, endpoint TEXT, region TEXT NOT NULL, access_key_id TEXT, secret TEXT,
+  path_style INTEGER NOT NULL, buckets TEXT NOT NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+) WITHOUT ROWID;
+"#,
 ];
 
 pub(crate) const LATEST: u32 = MIGRATIONS.len() as u32;

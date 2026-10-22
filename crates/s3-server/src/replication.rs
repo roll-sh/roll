@@ -1,8 +1,10 @@
 //! Get/Put/DeleteBucketReplication and the `x-amz-replication-status` header.
 //!
-//! Replication goes between roll buckets of the same deployment and is metadata-only: the
-//! replica shares the source version's blob (`s3_store::Store::replicate`). A destination that
-//! isn't a roll bucket would be a real AWS bucket, which isn't supported (`NotImplemented`).
+//! A destination is a roll bucket of the same deployment (metadata-only: the replica shares the
+//! source version's blob, `s3_store::Store::replicate`), or a bucket outside roll on a
+//! replication target (`replicate_ext.rs`: the bytes are copied). `arn:aws:s3:::<bucket>` names
+//! either: the target named by roll's `<RollReplicationTarget>` extension element in the
+//! `Destination`, else the replication target that lists the bucket, else the roll bucket.
 
 use crate::config::{Doc, malformed, node_xml, read_xml, reading, writing};
 use crate::ctx::{Ctx, no_content};
@@ -32,6 +34,9 @@ fn tag(t: &Node) -> Result<(String, String), S3Error> {
 pub(crate) fn arn_bucket(arn: &str) -> Option<&str> {
     arn.trim().strip_prefix("arn:aws:s3:::").filter(|b| !b.is_empty() && !b.contains('/'))
 }
+
+/// roll's extension element in a rule's `Destination`: the replication target the bucket is on.
+const TARGET_ELEMENT: &str = "RollReplicationTarget";
 
 fn parse_rule(r: &Node) -> Result<ReplicationRule, S3Error> {
     let enabled = match r.text_of("Status").map(str::trim) {
@@ -83,6 +88,7 @@ fn parse_rule(r: &Node) -> Result<ReplicationRule, S3Error> {
         Some(_) => return Err(malformed()),
     };
     let extra: String = d.children.iter().filter(|c| matches!(c.name.as_str(), "EncryptionConfiguration" | "ReplicationTime" | "Metrics")).map(node_xml).collect();
+    let target = d.text_of(TARGET_ELEMENT).map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
     Ok(ReplicationRule {
         id: r.text_of("ID").map(str::trim).unwrap_or_default().to_string(),
         priority,
@@ -91,6 +97,7 @@ fn parse_rule(r: &Node) -> Result<ReplicationRule, S3Error> {
         filter,
         delete_markers: status(r, "DeleteMarkerReplication")?.unwrap_or(false),
         destination,
+        target,
         storage_class: d.text_of("StorageClass").map(|s| s.trim().to_string()),
         owner_override,
         account: d.text_of("Account").map(|s| s.trim().to_string()),
@@ -144,6 +151,7 @@ pub(crate) fn render(cfg: &ReplicationConfig) -> String {
             d.open("ExistingObjectReplication").el("Status", "Enabled").close("ExistingObjectReplication");
         }
         d.open("Destination").el("Bucket", &format!("arn:aws:s3:::{}", r.destination));
+        d.opt(TARGET_ELEMENT, r.target.as_deref());
         d.opt("Account", r.account.as_deref());
         d.opt("StorageClass", r.storage_class.as_deref());
         if r.owner_override {
@@ -172,20 +180,35 @@ pub(crate) async fn put(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     let n = read_xml(ctx, body, "ReplicationConfiguration").await?;
     let mut cfg = parse(&n)?;
     cfg.validate(&bucket.name).map_err(|m| S3Error::msg(Code::InvalidRequest, m))?;
-    for r in &cfg.rules {
-        match ctx.store().bucket(&r.destination) {
-            Ok(_) => {}
-            Err(StoreError::NoSuchBucket(_)) => {
-                return Err(S3Error::msg(
-                    Code::NotImplemented,
-                    format!("Replication to {} isn't supported: the destination must be a bucket in this roll deployment (replication to buckets outside roll, such as AWS S3 buckets, is not implemented).", r.destination),
-                ));
-            }
-            Err(e) => return Err(crate::error::store_error(e)),
-        }
-    }
+    resolve_destinations(&ctx.server.notifier, &mut cfg).await.map_err(|m| S3Error::msg(Code::InvalidRequest, m))?;
     ctx.store().set_replication(&bucket.name, Some(&cfg)).await.s3()?;
     Ok(response::empty(StatusCode::OK))
+}
+
+/// Where each rule's destination is: the rule's target, the target listing the bucket, or a
+/// roll bucket. A bucket outside roll must have versioning enabled, as S3 requires (asked of
+/// the target now). `Err` says what's wrong.
+pub(crate) async fn resolve_destinations(n: &crate::Notifier, cfg: &mut ReplicationConfig) -> Result<(), String> {
+    let store = n.store();
+    for r in &mut cfg.rules {
+        if r.target.is_none() {
+            r.target = store.target_for_bucket(&r.destination).map_err(|e| e.to_string())?;
+        }
+        match &r.target {
+            Some(t) => n.external.check_destination(t, &r.destination).await?,
+            None => match store.bucket(&r.destination) {
+                Ok(_) => {}
+                Err(StoreError::NoSuchBucket(_)) => {
+                    return Err(format!(
+                        "Destination bucket must exist: {} isn't a bucket of this roll deployment, and no replication target lists it (add one with POST /v1/storage/replication-targets to replicate to a bucket outside roll)",
+                        r.destination
+                    ));
+                }
+                Err(e) => return Err(e.to_string()),
+            },
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn delete(ctx: &mut Ctx, bucket: &Bucket) -> Reply {

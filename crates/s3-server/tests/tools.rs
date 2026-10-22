@@ -537,3 +537,57 @@ async fn aws_cli_sts() {
     let got = t.client.get_object().bucket("ststool").key("up.txt").send().await.unwrap();
     assert_eq!(got.body.collect().await.unwrap().into_bytes().as_ref(), b"deployed by a role\n");
 }
+
+/// Access points with the AWS CLI: `aws s3control create-access-point` (S3 Control, which the
+/// CLI sends to `<account>.<endpoint host>`), then `aws s3` by access point ARN (sent to
+/// `<name>-<account>.<endpoint host>`) and by alias. The containers resolve those names to the
+/// host, as DNS for a wildcard domain would.
+#[tokio::test(flavor = "multi_thread")]
+async fn aws_cli_access_points() {
+    if !docker_ok() {
+        return;
+    }
+    let t = start().await;
+    t.client.create_bucket().bucket("apcli").send().await.unwrap();
+    t.client.put_object().bucket("apcli").key("seen/by-arn.txt").body(aws_sdk_s3::primitives::ByteStream::from_static(b"through an access point\n")).send().await.unwrap();
+    let account = t.store.account_id();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("up.txt"), b"uploaded by arn\n").unwrap();
+    let port = t.port;
+    let path = dir.path().to_path_buf();
+    let alias = blocking(move || {
+        let endpoint = format!("http://localhost:{port}");
+        let aws = |args: &[&str]| -> String {
+            let mut cmd = Command::new("docker");
+            cmd.args(["run", "--rm", "--network", "host", "--user", &uid_gid(), "-e", "HOME=/tmp", "-v"]).arg(format!("{}:/data", path.display()));
+            for h in [format!("{account}.localhost"), format!("cli-ap-{account}.localhost")] {
+                cmd.arg("--add-host").arg(format!("{h}:127.0.0.1"));
+            }
+            for (k, v) in [("AWS_ACCESS_KEY_ID", ACCESS), ("AWS_SECRET_ACCESS_KEY", SECRET), ("AWS_DEFAULT_REGION", REGION)] {
+                cmd.arg("-e").arg(format!("{k}={v}"));
+            }
+            cmd.args(["amazon/aws-cli", "--endpoint-url", &endpoint]).args(args);
+            let out = cmd.output().expect("docker run");
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            assert!(out.status.success(), "aws {args:?} failed:\n{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+            stdout
+        };
+        let created: serde_json::Value = serde_json::from_str(&aws(&["s3control", "create-access-point", "--account-id", &account, "--name", "cli-ap", "--bucket", "apcli"])).unwrap();
+        let arn = created["AccessPointArn"].as_str().unwrap().to_string();
+        assert_eq!(arn, format!("arn:aws:s3:us-east-1:{account}:accesspoint/cli-ap"));
+        let got: serde_json::Value = serde_json::from_str(&aws(&["s3control", "get-access-point", "--account-id", &account, "--name", "cli-ap"])).unwrap();
+        assert_eq!(got["Bucket"], "apcli");
+        let listed = aws(&["s3control", "list-access-points", "--account-id", &account, "--bucket", "apcli"]);
+        assert!(listed.contains("cli-ap"), "{listed}");
+        let ls = aws(&["s3", "ls", "--recursive", &format!("s3://{arn}/")]);
+        assert!(ls.contains("seen/by-arn.txt"), "{ls}");
+        aws(&["s3", "cp", "/data/up.txt", &format!("s3://{arn}/up.txt")]);
+        aws(&["s3api", "get-object", "--bucket", &arn, "--key", "up.txt", "/data/back.txt"]);
+        assert_eq!(std::fs::read(path.join("back.txt")).unwrap(), b"uploaded by arn\n");
+        created["Alias"].as_str().unwrap().to_string()
+    })
+    .await;
+    let got = t.client.get_object().bucket(&alias).key("up.txt").send().await.unwrap();
+    assert_eq!(got.body.collect().await.unwrap().into_bytes().as_ref(), b"uploaded by arn\n");
+    assert!(t.client.head_object().bucket("apcli").key("up.txt").send().await.is_ok());
+}

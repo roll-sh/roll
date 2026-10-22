@@ -53,6 +53,29 @@ pub struct NotifyConfig {
     /// How often inventory configurations are checked for a due report; `None`: only on
     /// [`Server::run_inventory`].
     pub inventory_interval: Option<Duration>,
+    /// Where AWS services are reached instead of `https://<service>.<region>.amazonaws.com`:
+    /// one endpoint for every service (`ROLL_S3_NOTIFY_AWS_ENDPOINT`), and per service
+    /// (`sqs`, `sns`, `lambda`, `events`; `ROLL_S3_NOTIFY_AWS_ENDPOINTS`), which wins. For
+    /// LocalStack and VPC endpoints. An operator's endpoint is trusted: the webhook address
+    /// guard doesn't apply to it.
+    pub aws_endpoint: Option<String>,
+    pub aws_endpoints: std::collections::BTreeMap<String, String>,
+    /// Credentials for AWS instead of the default chain (tests).
+    pub aws_credentials: Option<AwsCredentials>,
+}
+
+/// Static AWS credentials (never printed).
+#[derive(Clone)]
+pub struct AwsCredentials {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: Option<String>,
+}
+
+impl std::fmt::Debug for AwsCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwsCredentials").field("access_key_id", &self.access_key_id).finish_non_exhaustive()
+    }
 }
 
 impl Default for NotifyConfig {
@@ -66,6 +89,9 @@ impl Default for NotifyConfig {
             webhook_allow_private: false,
             webhook_timeout: Duration::from_secs(10),
             inventory_interval: Some(Duration::from_secs(3600)),
+            aws_endpoint: None,
+            aws_endpoints: Default::default(),
+            aws_credentials: None,
         }
     }
 }
@@ -163,6 +189,13 @@ impl Destination {
     }
 }
 
+/// An AWS service's answer.
+pub(crate) struct AwsResponse {
+    pub status: u16,
+    pub headers: reqwest::header::HeaderMap,
+    pub body: Bytes,
+}
+
 /// Why a delivery didn't happen.
 #[derive(Debug)]
 pub(crate) enum Failure {
@@ -215,8 +248,12 @@ pub struct Notifier {
     region: String,
     sink: RwLock<Option<Arc<dyn EventSink>>>,
     http: reqwest::Client,
+    /// For AWS services (and operator-configured endpoints): no address guard.
+    aws_http: reqwest::Client,
     aws: tokio::sync::OnceCell<Option<aws_sdk_s3::config::SharedCredentialsProvider>>,
     counters: Counters,
+    /// Replication to buckets outside roll.
+    pub(crate) external: crate::replicate_ext::External,
 }
 
 /// Resolves webhook hosts, refusing addresses inside the network unless allowed.
@@ -376,7 +413,9 @@ impl Notifier {
             .user_agent("roll-storage-events/1")
             .build()
             .expect("an HTTP client");
-        Arc::new(Self { store, cfg, region, sink: RwLock::new(None), http, aws: Default::default(), counters: Counters::default() })
+        let aws_http = reqwest::Client::builder().timeout(cfg.webhook_timeout.max(Duration::from_secs(70))).redirect(reqwest::redirect::Policy::none()).user_agent("roll-storage/1").build().expect("an HTTP client");
+        let external = crate::replicate_ext::External::new(store.clone());
+        Arc::new(Self { store, cfg, region, sink: RwLock::new(None), http, aws_http, aws: Default::default(), counters: Counters::default(), external })
     }
 
     /// Install the delivery into roll queues and streams (rolld does, once they're up).
@@ -386,6 +425,34 @@ impl Notifier {
 
     fn sink(&self) -> Option<Arc<dyn EventSink>> {
         self.sink.read().unwrap().clone()
+    }
+
+    /// Replication latency (Replication Time Control's `ReplicationLatency`) of a bucket's
+    /// destinations, by destination (`<bucket>` or `<bucket>@<target>`), since start.
+    pub fn replication_latency(&self, bucket_id: &str) -> std::collections::BTreeMap<String, crate::replicate_ext::Latency> {
+        self.external.latency(bucket_id)
+    }
+
+    /// Replicate to buckets outside roll in parts of `part_size` bytes from `threshold` bytes
+    /// on (defaults: 16 MiB from 64 MiB).
+    pub fn set_replication_part_size(&self, part_size: u64, threshold: u64) {
+        self.external.part_size.store(part_size, Ordering::Relaxed);
+        self.external.multipart_threshold.store(threshold, Ordering::Relaxed);
+    }
+
+    /// How many replicas to buckets outside roll were copied server-side (`CopyObject`).
+    pub fn server_side_copies(&self) -> u32 {
+        self.external.server_side.load(Ordering::Relaxed)
+    }
+
+    pub fn store(&self) -> &Arc<Store> {
+        &self.store
+    }
+
+    /// Resolve and check a replication configuration's destinations as PutBucketReplication
+    /// does (roll buckets, or buckets of replication targets with versioning enabled).
+    pub async fn check_replication(&self, cfg: &mut s3_store::ReplicationConfig) -> Result<(), String> {
+        crate::replication::resolve_destinations(self, cfg).await
     }
 
     pub fn stats(&self) -> EventStats {
@@ -472,6 +539,19 @@ impl Notifier {
     /// Handle one row. `Ok(true)`: delivered, delete it; `Ok(false)`: the store already did.
     async fn handle(&self, ev: &PendingEvent) -> Result<bool, Failure> {
         match ev.kind.as_str() {
+            REPLICATE if s3_store::events::is_external(ev) => match self.external.replicate(self, ev).await {
+                Ok(Replicated::Failed(why)) => {
+                    self.counters.replication_failed.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(bucket = ev.bucket_id, key = ev.key, why, "replication to a bucket outside roll failed");
+                    Ok(false)
+                }
+                Ok(Replicated::Completed) => {
+                    self.counters.replicated.fetch_add(1, Ordering::Relaxed);
+                    Ok(false)
+                }
+                Ok(Replicated::Skipped) => Ok(false),
+                Err(e) => Err(Failure::Retry(e)),
+            },
             REPLICATE => match self.store.replicate(ev).await {
                 Ok(Replicated::Failed(why)) => {
                     self.counters.replication_failed.fetch_add(1, Ordering::Relaxed);
@@ -480,6 +560,7 @@ impl Notifier {
                 }
                 Ok(Replicated::Completed) => {
                     self.counters.replicated.fetch_add(1, Ordering::Relaxed);
+                    self.external.record(&ev.bucket_id, ev.dest.strip_prefix("replicate:").unwrap_or(&ev.dest), ev.created_at, self.store.now());
                     Ok(false)
                 }
                 Ok(Replicated::Skipped) => Ok(false),
@@ -518,7 +599,10 @@ impl Notifier {
                 self.aws_call("events", &region, "/", Some("AWSEvents.PutEvents"), "application/x-amz-json-1.1", body.into_bytes(), &[]).await
             }
             Destination::Sqs { region, account, name } => {
-                let queue_url = format!("https://sqs.{region}.amazonaws.com/{account}/{name}");
+                let queue_url = match self.endpoint_of("sqs") {
+                    Some(e) => format!("{}/{account}/{name}", e.trim_end_matches('/')),
+                    None => format!("https://sqs.{region}.amazonaws.com/{account}/{name}"),
+                };
                 let body = json!({ "QueueUrl": queue_url, "MessageBody": String::from_utf8_lossy(&d.body) }).to_string();
                 self.aws_call("sqs", region, "/", Some("AmazonSQS.SendMessage"), "application/x-amz-json-1.0", body.into_bytes(), &[]).await
             }
@@ -537,6 +621,43 @@ impl Notifier {
                 self.aws_call("lambda", region, &path, None, "application/json", d.body.to_vec(), &[("x-amz-invocation-type", "Event")]).await
             }
         }
+    }
+
+    /// A signed webhook POST (as for notifications) whose answer is wanted: its body (at most
+    /// 8 MiB) on a 2xx.
+    pub(crate) async fn webhook_call(&self, url: &str, secret: &str, d: &Delivery, timeout: Duration) -> Result<Bytes, String> {
+        let u = url::Url::parse(url).map_err(|e| e.to_string())?;
+        if !self.cfg.webhook_allow_private
+            && let Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) = u.host()
+            && let Some(ip) = u.host_str().and_then(|h| h.trim_matches(['[', ']']).parse::<IpAddr>().ok())
+            && !public_ip(ip)
+        {
+            return Err(format!("{ip} is inside the network; webhooks can't reach it"));
+        }
+        let now_s = self.store.now().div_euclid(1000);
+        let mut resp = self
+            .http
+            .post(u)
+            .timeout(timeout)
+            .header("content-type", "application/json")
+            .header("x-roll-event", &d.event_name)
+            .header("x-roll-delivery", &d.id)
+            .header("x-roll-signature", webhook_signature(secret, now_s, &d.body))
+            .body(d.body.clone())
+            .send()
+            .await
+            .map_err(|e| format!("webhook request failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("webhook answered {}", resp.status()));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(|e| format!("webhook answer failed: {e}"))? {
+            if body.len() + chunk.len() > 8 << 20 {
+                return Err("the webhook's answer is over 8 MiB".into());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(Bytes::from(body))
     }
 
     async fn webhook(&self, url: &str, secret: &str, d: &Delivery) -> Result<(), String> {
@@ -567,6 +688,9 @@ impl Notifier {
 
     async fn credentials(&self) -> Option<aws_sdk_s3::config::Credentials> {
         use aws_sdk_s3::config::ProvideCredentials;
+        if let Some(c) = &self.cfg.aws_credentials {
+            return Some(aws_sdk_s3::config::Credentials::new(&c.access_key_id, &c.secret_access_key, c.session_token.clone(), None, "roll-config"));
+        }
         let p = self
             .aws
             .get_or_init(|| async {
@@ -578,15 +702,40 @@ impl Notifier {
         p.provide_credentials().await.ok()
     }
 
-    /// A SigV4-signed POST to an AWS service.
+    /// The endpoint configured for an AWS service, if any (see [`NotifyConfig::aws_endpoint`]).
+    pub(crate) fn endpoint_of(&self, service: &str) -> Option<&str> {
+        self.cfg.aws_endpoints.get(service).or(self.cfg.aws_endpoint.as_ref()).map(String::as_str)
+    }
+
+    /// A SigV4-signed POST to an AWS service that must answer 2xx.
     #[allow(clippy::too_many_arguments)]
     async fn aws_call(&self, service: &str, region: &str, path: &str, target: Option<&str>, content_type: &str, body: Vec<u8>, extra: &[(&str, &str)]) -> Result<(), Failure> {
+        let r = self.aws_request(service, region, path, target, content_type, body, extra, None).await?;
+        if (200..300).contains(&r.status) {
+            return Ok(());
+        }
+        Err(Failure::Retry(format!("{service} answered {}: {}", r.status, String::from_utf8_lossy(&r.body).chars().take(300).collect::<String>())))
+    }
+
+    /// A SigV4-signed POST to an AWS service (on its configured endpoint), whatever it
+    /// answers. `timeout` overrides the client's.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn aws_request(&self, service: &str, region: &str, path: &str, target: Option<&str>, content_type: &str, body: Vec<u8>, extra: &[(&str, &str)], timeout: Option<Duration>) -> Result<AwsResponse, Failure> {
         if !self.cfg.aws {
             return Err(Failure::Permanent("delivery to AWS isn't enabled on this deployment (ROLL_S3_NOTIFY_AWS)".into()));
         }
         let creds = self.credentials().await.ok_or_else(|| Failure::Retry("no AWS credentials".into()))?;
-        let host = format!("{service}.{region}.amazonaws.com");
-        let mut headers: Vec<(String, String)> = vec![("content-type".into(), content_type.into()), ("host".into(), host.clone()), ("x-amz-date".into(), amz_date(self.store.now().div_euclid(1000)))];
+        let base = match self.endpoint_of(service) {
+            Some(e) => e.trim_end_matches('/').to_string(),
+            None => format!("https://{service}.{region}.amazonaws.com"),
+        };
+        let u = url::Url::parse(&base).map_err(|_| Failure::Permanent(format!("the {service} endpoint {base} isn't a URL")))?;
+        let host = match (u.host_str(), u.port()) {
+            (Some(h), Some(p)) => format!("{h}:{p}"),
+            (Some(h), None) => h.to_string(),
+            (None, _) => return Err(Failure::Permanent(format!("the {service} endpoint {base} has no host"))),
+        };
+        let mut headers: Vec<(String, String)> = vec![("content-type".into(), content_type.into()), ("host".into(), host), ("x-amz-date".into(), amz_date(self.store.now().div_euclid(1000)))];
         if let Some(t) = target {
             headers.push(("x-amz-target".into(), t.into()));
         }
@@ -595,19 +744,28 @@ impl Notifier {
         }
         headers.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
         let auth = sigv4("POST", path, "", &headers, &body, creds.access_key_id(), creds.secret_access_key(), region, service);
-        let mut req = self.http.post(format!("https://{host}{path}")).header("authorization", auth).body(body);
+        let mut req = self.aws_http.post(format!("{base}{path}")).header("authorization", auth).body(body);
+        if let Some(t) = timeout {
+            req = req.timeout(t);
+        }
         for (k, v) in &headers {
             if k != "host" {
                 req = req.header(k.as_str(), v.as_str());
             }
         }
         let resp = req.send().await.map_err(|e| Failure::Retry(format!("{service}: {e}")))?;
-        let status = resp.status();
-        if status.is_success() {
-            return Ok(());
+        let status = resp.status().as_u16();
+        let headers = resp.headers().clone();
+        // AWS answers here are small (a Lambda function's result is at most 6 MB).
+        let mut body = Vec::new();
+        let mut resp = resp;
+        while let Some(chunk) = resp.chunk().await.map_err(|e| Failure::Retry(format!("{service}: {e}")))? {
+            if body.len() + chunk.len() > 8 << 20 {
+                return Err(Failure::Retry(format!("{service}: the answer is over 8 MiB")));
+            }
+            body.extend_from_slice(&chunk);
         }
-        let text = resp.text().await.unwrap_or_default();
-        Err(Failure::Retry(format!("{service} answered {status}: {}", text.chars().take(300).collect::<String>())))
+        Ok(AwsResponse { status, headers, body: Bytes::from(body) })
     }
 
     /// Check a configuration and its destinations the way S3 does (unless `skip_validation`),

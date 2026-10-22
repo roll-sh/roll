@@ -108,7 +108,7 @@ pub struct Control {
     presign_secret: String,
     /// The S3 API's event notifier (validates notification destinations); set by
     /// [`Control::set_notifier`].
-    notifier: std::sync::OnceLock<Arc<s3_server::Notifier>>,
+    pub(crate) notifier: std::sync::OnceLock<Arc<s3_server::Notifier>>,
 }
 
 fn random_secret() -> String {

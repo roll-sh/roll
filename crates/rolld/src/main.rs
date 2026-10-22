@@ -144,6 +144,18 @@ struct Args {
     /// host's AWS credentials. Off, AWS destinations fail validation.
     #[arg(long, env = "ROLL_S3_NOTIFY_AWS", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     s3_notify_aws: bool,
+    /// Reach AWS services for storage notifications, Object Lambda and replication checks at
+    /// this endpoint instead of AWS (LocalStack, a VPC endpoint).
+    #[arg(long, env = "ROLL_S3_NOTIFY_AWS_ENDPOINT")]
+    s3_notify_aws_endpoint: Option<String>,
+    /// Per-service endpoints, `sqs=<url>,sns=<url>,lambda=<url>,events=<url>` (win over
+    /// ROLL_S3_NOTIFY_AWS_ENDPOINT).
+    #[arg(long, env = "ROLL_S3_NOTIFY_AWS_ENDPOINTS")]
+    s3_notify_aws_endpoints: Option<String>,
+    /// How Object Lambda functions reach the S3 API (`inputS3Url`); default
+    /// `http://<public host>:<S3 port>`.
+    #[arg(long, env = "ROLL_S3_PUBLIC_ENDPOINT")]
+    s3_public_endpoint: Option<String>,
     /// Let storage webhooks reach loopback and private addresses (single-tenant installs).
     #[arg(long, env = "ROLL_S3_WEBHOOK_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     s3_webhook_allow_private: bool,
@@ -352,6 +364,9 @@ struct StorageOpts {
     s3_access_key: Option<String>,
     s3_secret_key: Option<String>,
     s3_notify_aws: bool,
+    s3_notify_aws_endpoint: Option<String>,
+    s3_notify_aws_endpoints: Option<String>,
+    s3_public_endpoint: Option<String>,
     s3_webhook_allow_private: bool,
 }
 
@@ -370,6 +385,9 @@ impl From<&Args> for StorageOpts {
             s3_access_key: a.s3_access_key.clone(),
             s3_secret_key: a.s3_secret_key.clone(),
             s3_notify_aws: a.s3_notify_aws,
+            s3_notify_aws_endpoint: a.s3_notify_aws_endpoint.clone(),
+            s3_notify_aws_endpoints: a.s3_notify_aws_endpoints.clone(),
+            s3_public_endpoint: a.s3_public_endpoint.clone(),
             s3_webhook_allow_private: a.s3_webhook_allow_private,
         }
     }
@@ -393,6 +411,12 @@ async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &Sto
     };
     scfg.notify.aws = args.s3_notify_aws;
     scfg.notify.webhook_allow_private = args.s3_webhook_allow_private;
+    scfg.notify.aws_endpoint = args.s3_notify_aws_endpoint.clone().filter(|e| !e.is_empty());
+    for pair in args.s3_notify_aws_endpoints.as_deref().unwrap_or_default().split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (service, url) = pair.split_once('=').ok_or_else(|| anyhow::anyhow!("ROLL_S3_NOTIFY_AWS_ENDPOINTS: {pair} isn't <service>=<url>"))?;
+        scfg.notify.aws_endpoints.insert(service.trim().to_string(), url.trim().to_string());
+    }
+    scfg.public_endpoint = Some(args.s3_public_endpoint.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.s3.port())));
     let mut cfg = s3_store::StoreConfig::new(home.join("storage"));
     cfg.node = args.node.clone();
     cfg.block_public_access = args.s3_block_public_access;

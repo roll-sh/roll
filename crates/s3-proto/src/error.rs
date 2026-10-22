@@ -98,6 +98,17 @@ codes! {
     ReplicationConfigurationNotFoundError 404 "The replication configuration was not found",
     TooManyConfigurations 400 "You are attempting to create a new configuration but have already reached the 1,000-configuration limit.",
     UnresolvableGrantByEmailAddress 400 "The email address you provided does not match any account on record.",
+    // S3 Control (access points) and S3 Object Lambda.
+    AccessPointAlreadyOwnedByYou 409 "Your previous request to create the named accesspoint succeeded and you already own it.",
+    InvalidAccessPoint 400 "The specified access point name or account is not valid.",
+    InvalidAccessPointAliasError 400 "The specified access point alias name is not valid.",
+    NoSuchAccessPoint 404 "The specified accesspoint does not exist",
+    NoSuchAccessPointPolicy 404 "The specified accesspoint policy does not exist",
+    LambdaInvocationFailed 400 "Lambda was unable to satisfy the request.",
+    LambdaResponseNotReceived 400 "The Lambda function exited without successfully calling WriteGetObjectResponse.",
+    LambdaTimeout 400 "The Lambda function did not respond in the allowed time.",
+    LambdaRuntimeError 400 "The Lambda function failed during execution.",
+    ValidationError 400 "The request was not valid.",
 }
 
 /// An S3 error response.

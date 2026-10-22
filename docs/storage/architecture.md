@@ -162,6 +162,17 @@ roles   (name TEXT PRIMARY KEY /* IAM role name rules */, id TEXT /* RR + 18 upp
          trust TEXT /* JSON { keys, oidc, external_id } */, max_session_s,
          generation INTEGER /* +1 on every change */, revoked_before INTEGER /* ms; 0 = none */,
          created_at, updated_at)                               -- migration 6
+access_points (account TEXT /* 12 digits */, kind TEXT /* ap | olap */, name TEXT,
+         alias TEXT UNIQUE /* <name>-<random>-s3alias | …--ol-s3 */,
+         bucket TEXT /* ap: the bucket's name; olap: the supporting access point's */,
+         network_origin TEXT /* Internet | VPC */, vpc_id, policy TEXT /* JSON */,
+         block TEXT /* the access point's public access block, JSON */,
+         config TEXT /* olap: the transformations, JSON */, created_at,
+         PRIMARY KEY (account, kind, name)) WITHOUT ROWID       -- migration 7
+replication_targets (name TEXT PRIMARY KEY, endpoint /* NULL = AWS S3 */, region,
+         access_key_id /* NULL = the deployment's AWS credentials */,
+         secret TEXT /* AES-256-GCM-sealed under state.replication_target_key */,
+         path_style, buckets TEXT /* JSON */, created_at, updated_at)   -- migration 7
 ```
 
 Object ACLs and website redirects live in the row, so every row copy carries them: branch
@@ -181,7 +192,8 @@ added bucket configuration and object ACLs; migration 3 added versioning and Obj
 from before it became null versions, with a `vid` made from their `modified_at` the same way
 new ids are); migration 4 added `blob_sse`; migration 5 added the event outbox
 and replication statuses; migration 6 added `roles` (temporary credentials; sessions themselves
-are never stored, see [Temporary credentials](#temporary-credentials-sts)).
+are never stored, see [Temporary credentials](#temporary-credentials-sts)); migration 7 added
+`access_points` and `replication_targets`.
 
 A blob's encryption is fixed when it's written, so `blob_sse` is keyed by blob: every row that
 shares the blob (copies, branches, the trash) shares its encryption, and no row of `objects`,
@@ -412,6 +424,24 @@ rules:
   more reference.
 - **Backfill** rows (`ExistingObjectReplication`) walk the bucket's versions 500 at a time,
   queueing replication for those without a status, keeping their cursor in the row.
+- **Buckets outside roll** (`s3-server/src/replicate_ext.rs`): a rule whose destination is on a
+  replication target (`s3-store/src/targets.rs`) queues rows for `replicate:<bucket>@<target>`.
+  They can't be applied in one metadata transaction (bytes have to move), so the dispatcher reads
+  the source version (`Store::replica_source`), copies it, then ends the row in one durable
+  write (`Store::finish_external_replication`: delete the row, `COMPLETED` once no other
+  destination waits, or `FAILED` with its event). A crash in between copies the version again:
+  rewriting the same bytes to the same key is harmless, and nothing is lost. The copy is S3
+  `CopyObject`/`UploadPartCopy` when the target is the backing bucket's own service with the
+  same credentials (`Backend::s3_location`), and otherwise streamed from the blob (multipart
+  from 64 MiB, each part a ranged read retried on its own, bounded memory). The blob's CRC32C
+  must match on the target: sent as `x-amz-checksum-crc32c` with a single PUT, and combined from
+  the parts' (each sent with its own) before a multipart upload is completed, or compared with a
+  copy's. 4xx answers other than 408/409/429 fail the version at once; anything else is retried
+  with the outbox's backoff.
+- **Replication Time Control's metrics** come from the outbox (`Store::replication_backlog`:
+  pending operations and bytes, the oldest pending row, per destination) and from the
+  dispatcher (`Notifier::replication_latency`: the last and largest latency from a write to its
+  replica, in memory since start).
 
 The dispatcher, event JSON and delivery are `s3-server`'s (`notify.rs`): every 250 ms it takes up
 to 256 due rows, handles up to 32 at once (deliveries, or `replicate`/`backfill` in the store),
@@ -421,6 +451,12 @@ process with mq-core (publish to the queue, confirmed) and stream-broker (produc
 object key, `acks=all`); the s3 crates don't depend on either. Webhooks go out over HTTPS with a
 resolver that refuses internal addresses; AWS destinations are SigV4-signed calls with the
 deployment's credentials. See [compatibility](compatibility.md#event-notifications).
+
+**Replication targets' secrets** are sealed with AES-256-GCM (the session tokens' scheme) under
+a dedicated 32-byte key in `state` (`replication_target_key`, created once and never rotated
+away, so a sealed secret stays readable as long as the metadata exists). They're opened only to
+build the target's S3 client, never returned by the API, and never printed (`Secret`'s `Debug`
+is redacted).
 
 **Inventory reports** (`s3-server/src/inventory.rs`) are checked hourly: each enabled inventory
 configuration whose last run (`state` `job:inventory:<bucket id>:<id>`) is a day (or week) old
@@ -667,6 +703,25 @@ condition keys and the canonical ids. `ROLL_S3_BLOCK_PUBLIC_ACCESS` (store confi
     is the bucket's configured default encryption rule (`None`: the default SSE-S3), for SSE-KMS.
 - **Website endpoint** (`website.rs`): `<bucket>.<website_domain>` (`ROLL_S3_WEBSITE_DOMAIN`)
   serves S3 website semantics: index and error documents, routing rules, redirects.
+- **Access points** (`accesspoint/`): the S3 Control API (`control.rs`; `/v20180820/…` with
+  `x-amz-account-id`, on any host, the account the store's `account_id()`), and requests through
+  access points (`mod.rs`): right after addressing, a request naming an access point (its
+  `<name>-<account>` host label, the `/arn:…` path, or its alias as the bucket) is pointed at the
+  access point's bucket and keeps the access point (`Ctx::access_point`). `access.rs` hands its
+  authorization to `accesspoint::authorize`: a `Deny` in either policy refuses, the key's own
+  permission allows, otherwise both the access point's policy (resources
+  `arn:aws:s3:<region>:<account>:accesspoint/<name>[/object/<key>]`) and the bucket's must allow;
+  `s3:DataAccessPointArn`, `s3:DataAccessPointAccount` and `s3:AccessPointNetworkOrigin` are
+  condition keys. Only object and listing operations go through access points. `VPC` access
+  points take requests from internal peers only.
+- **Object Lambda** (`accesspoint/lambda.rs`): an Object Lambda access point's `GetObject`,
+  `HeadObject` and `ListObjects(V2)` run its function (AWS Lambda through the notifier's AWS
+  path, or a signed webhook) with S3's event and an `inputS3Url` presigned with the caller's
+  credentials through the supporting access point (`Config::public_endpoint`). A `GetObject`
+  registers a route with a random 256-bit token (in memory, one use, removed when the caller
+  stops waiting, 60 s at most) and waits for `WriteGetObjectResponse` on it, whose body is piped
+  to the caller through a bounded channel; `HeadObject` and listings use the function's result.
+  Everything else passes through to the supporting access point.
 - **Server access logs** (`logging.rs`): lines are buffered in memory (at most 100 000) and
   written as objects to the target bucket every `access_log_interval` (5 min) through the
   normal put path, so they're durable once written and billed to the target. Best effort.
@@ -763,6 +818,14 @@ POST   /v1/storage/roles/{name}/sessions  { session_name?, duration_s? (60 to ma
                                             policy?: IamPolicy, tags?: Record<string,string>,
                                             transitive_tag_keys?: [string], source_identity? } → Session
 POST   /v1/storage/session-keys/rotate           → { key_id }
+
+GET    /v1/storage/replication-targets           → [Target]
+POST   /v1/storage/replication-targets  { name, endpoint? /* none: AWS S3 */, region? (us-east-1),
+                                          access_key_id?, secret_access_key? /* with the key; write-only */,
+                                          path_style? (true), buckets?: [string] } → Target
+GET    /v1/storage/replication-targets/{name}    → Target
+PUT    /v1/storage/replication-targets/{name}  { same, without name; no secret_access_key keeps it } → Target
+DELETE /v1/storage/replication-targets/{name}    → { deleted }   (409 while a bucket's replication uses it)
 ```
 
 ```ts
@@ -782,11 +845,16 @@ Bucket = { id, name, region, public, recover_days, created_at,
            endpoint, url /* path-style */, virtual_host_url: string | null,
            website_url: string | null /* with a website domain and a website configuration */ }
 ReplicationRule = { id, priority: number | null, enabled, prefix /* "" = every key */, tags: Record<string,string>,
-                    delete_markers, existing_objects, destination /* a roll bucket */, storage_class: string | null,
+                    delete_markers, existing_objects, destination /* a bucket */, target: string | null /* its replication target; null: a roll bucket */,
+                    storage_class: string | null,
                     owner_override, pending /* versions waiting for this destination, at most 1000 counted */,
-                    last_error: string | null, backfilling /* existing objects still being queued */ }
-ReplicationRuleInput = { destination, id?, priority?, enabled? (default true), prefix?, tags?, delete_markers?,
-                         existing_objects?, storage_class?, owner_override? }
+                    last_error: string | null, backfilling /* existing objects still being queued */,
+                    metrics: { operations_pending, bytes_pending, oldest_pending_ms: number | null,
+                               latency_ms: number | null, max_latency_ms: number | null, replicated } /* Replication Time Control's */ }
+ReplicationRuleInput = { destination, target? /* default: the target listing the bucket, else a roll bucket */, id?, priority?,
+                         enabled? (default true), prefix?, tags?, delete_markers?, existing_objects?, storage_class?, owner_override? }
+Target = { name, endpoint: string | null, region, access_key_id: string | null,
+           credentials: "access_key" | "deployment", path_style, buckets: [string], created_at, updated_at }
 PublicAccessBlock = { block_public_acls, ignore_public_acls, block_public_policy, restrict_public_buckets }
 NotificationConfig = { id /* generated when empty */, type: "queue" | "topic" | "function" /* from the ARN when omitted */,
                        destination /* arn:roll:queues:<vhost>:<queue> | arn:roll:streams:<stream>:<topic> |
@@ -879,12 +947,15 @@ Details:
   (`ROLL_S3_WEBSITE_DOMAIN`), only when the bucket has a website configuration; it serves what
   anonymous users may read.
 - `replication` is validated exactly as `PutBucketReplication` is: unique ids and priorities,
-  destinations that are other roll buckets, and versioning `Enabled` on the bucket and every
-  destination (a `versioning` in the same PATCH counts). Rules are always written in S3's V2
-  (`Filter`) form; what a rule set through the S3 API stores but the control plane doesn't show
-  (`SourceSelectionCriteria`, the destination's encryption, RTC and metrics, `Account`) is kept for
-  rules whose id is unchanged. Replication inside roll is metadata-only: the replica shares the
-  source version's blob, so it's instant and its bytes cost nothing to move.
+  destinations that are other roll buckets or buckets of replication targets (`target`, or the
+  target listing the bucket), and versioning `Enabled` on the bucket and every destination (a
+  `versioning` in the same PATCH counts; a target's bucket is asked over the network before
+  anything is applied). Rules are always written in S3's V2 (`Filter`) form; what a rule set
+  through the S3 API stores but the control plane doesn't show (`SourceSelectionCriteria`, the
+  destination's encryption, RTC and metrics, `Account`) is kept for rules whose id is unchanged.
+  Replication inside roll is metadata-only: the replica shares the source version's blob, so it's
+  instant and its bytes cost nothing to move. Replication to a target copies the bytes (see
+  [Events](#events-notifications-replication-inventory)).
 - `policy` is validated as `PutBucketPolicy` validates it (20 KB, resources in this bucket,
   `MalformedPolicy` messages as 400s); a public policy is refused while `BlockPublicPolicy` is in
   force (the bucket's own block, a `public_access_block` in the same PATCH, or the deployment's).

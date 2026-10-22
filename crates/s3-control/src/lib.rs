@@ -9,5 +9,6 @@ pub mod api;
 pub mod control;
 pub mod roles;
 pub mod settings;
+mod targets;
 
 pub use control::{Control, ControlConfig, ControlError, Pricing};

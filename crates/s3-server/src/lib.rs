@@ -12,6 +12,7 @@
 //! ```
 
 mod access;
+mod accesspoint;
 mod acl;
 mod attributes;
 mod auth;
@@ -31,6 +32,7 @@ mod object;
 mod owner;
 mod policy;
 mod post;
+mod replicate_ext;
 mod replication;
 mod response;
 mod sse;
@@ -50,7 +52,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use error::store_error;
-pub use notify::{Delivery, EventSink, EventStats, Notifier, NotifyConfig, NotifyError, RollDestination};
+pub use notify::{AwsCredentials, Delivery, EventSink, EventStats, Notifier, NotifyConfig, NotifyError, RollDestination};
+pub use replicate_ext::Latency;
 pub use sts::oidc::{HttpFetch, JwksFetch};
 pub use upload::put_object;
 
@@ -91,6 +94,9 @@ pub struct Config {
     /// Fetch OIDC providers' keys (`AssumeRoleWithWebIdentity`) over plain HTTP too. Tests
     /// only: in production the keys must come over HTTPS.
     pub oidc_allow_http: bool,
+    /// How Object Lambda functions reach this deployment (`inputS3Url`), e.g.
+    /// `https://s3.example.com`; `None`: the request's own host.
+    pub public_endpoint: Option<String>,
 }
 
 impl Default for Config {
@@ -104,6 +110,7 @@ impl Default for Config {
             access_log_interval: Some(std::time::Duration::from_secs(300)),
             notify: NotifyConfig::default(),
             oidc_allow_http: false,
+            public_endpoint: None,
         }
     }
 }
@@ -126,6 +133,8 @@ pub struct Server {
     pub notifier: Arc<Notifier>,
     /// Verifies web identity tokens (STS `AssumeRoleWithWebIdentity`).
     pub(crate) oidc: sts::oidc::Oidc,
+    /// Object Lambda `GetObject`s waiting for their `WriteGetObjectResponse`.
+    pub(crate) lambda: accesspoint::lambda::Routes,
 }
 
 impl Server {
@@ -133,7 +142,7 @@ impl Server {
         let notifier = Notifier::new(store.clone(), cfg.notify.clone(), cfg.region.clone());
         notifier.spawn();
         let oidc = sts::oidc::Oidc::new(Arc::new(HttpFetch::new(cfg.oidc_allow_http)));
-        let server = Arc::new(Self { store, cfg, logs: Default::default(), notifier, oidc });
+        let server = Arc::new(Self { store, cfg, logs: Default::default(), notifier, oidc, lambda: Default::default() });
         if let (Some(every), Ok(rt)) = (server.cfg.notify.inventory_interval, tokio::runtime::Handle::try_current()) {
             let weak = Arc::downgrade(&server);
             rt.spawn(async move {
