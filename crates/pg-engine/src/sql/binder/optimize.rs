@@ -501,6 +501,12 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             let (old_hs, old_kf) = (meta.hash_swapped.clone(), meta.key_flipped.clone());
             let mut kept = meta.kept;
             let old_pushed = meta.pushed;
+            // (An inner join's inputs' own restrictions are class members too.)
+            let (lhave, rhave) = if kind == JoinKind::Inner && params.is_empty() {
+                (input_restrictions(&left), input_restrictions(&right))
+            } else {
+                (Vec::new(), Vec::new())
+            };
             ec_constants(
                 cat,
                 &mut lpush,
@@ -510,6 +516,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 nleft,
                 (to_right, to_left),
                 &mut kept,
+                (&lhave, &rhave),
             );
             let mut l = Arc::try_unwrap(left).unwrap_or_else(|a| (*a).clone());
             let mut r = Arc::try_unwrap(right).unwrap_or_else(|a| (*a).clone());
@@ -1417,6 +1424,7 @@ fn ec_constants(
     nleft: usize,
     (to_right, to_left): (bool, bool),
     kept: &mut Vec<usize>,
+    (lhave, rhave): (&[Expr], &[Expr]),
 ) {
     // `x = k`: (x, k, the clause).
     let const_eq = |e: &Expr| -> Option<(Expr, Expr)> {
@@ -1479,20 +1487,24 @@ fn ec_constants(
     // (Under row-level security the statement's quals sit above a security level: one that
     // isn't leakproof is no equivalence class member (process_equivalence).)
     let rls = QUERY_RLS.with(|f| f.get());
-    let lconst: Vec<(Expr, Expr, Expr)> = lpush
-        .iter()
-        .filter(|_| to_right)
-        .filter(|e| !(rls && leaks(cat, e)))
-        .filter_map(|e| const_eq(e).map(|(x, k)| (x, k, e.clone())))
-        .filter(|(_, k, _)| !(outer_join && k.has_outer_refs()))
-        .collect();
-    let rconst: Vec<(Expr, Expr, Expr)> = rpush
-        .iter()
-        .filter(|_| to_left)
-        .filter(|e| !(rls && leaks(cat, e)))
-        .filter_map(|e| const_eq(e).map(|(x, k)| (x, k, e.clone())))
-        .filter(|(_, k, _)| !(outer_join && k.has_outer_refs()))
-        .collect();
+    // (The restrictions already in each input count too, `lhave` / `rhave`: a pulled-up
+    // subquery's `x = k` in its scan. They are the class's sources, never pushed again.)
+    let consts = |push: &[Expr], have: &[Expr], to: bool| -> Vec<(Expr, Expr, Expr, bool)> {
+        push.iter()
+            .map(|e| (e, false))
+            .chain(have.iter().map(|e| (e, true)))
+            .filter(|_| to)
+            .filter(|(e, _)| !(rls && leaks(cat, e)))
+            // (Not one under a nondeterministic collation: its class is that collation's.)
+            .filter(|(e, old)| {
+                !*old || !matches!(e, Expr::Call(d, ..) if d.coll.as_ref().is_some_and(|c| !c.deterministic))
+            })
+            .filter_map(|(e, old)| const_eq(e).map(|(x, k)| (x, k, e.clone(), old)))
+            .filter(|(_, k, _, old)| !((outer_join || *old) && k.has_outer_refs()))
+            .collect()
+    };
+    let lconst = consts(lpush, lhave, to_right);
+    let rconst = consts(rpush, rhave, to_left);
     let mut drop_hash = Vec::new();
     let mut drop_cond = false;
     let derive = |clause: &Expr, from: &Expr, to: &Expr| -> Expr {
@@ -1517,15 +1529,16 @@ fn ec_constants(
     for (n, (a, b, hi)) in pairs.iter().enumerate() {
         let mut used = false;
         // (The join clause goes when both columns compare with the constant.)
-        for (x, k, clause) in &lconst {
+        for (x, k, clause, old) in &lconst {
             if x.same_as(a) && derivable(b, k) {
                 let d = derive(clause, a, b);
-                if !rpush.iter().any(|e| e.same_as(&d)) {
+                if !rpush.iter().chain(rhave).any(|e| e.same_as(&d)) {
                     rpush.push(d);
                 }
                 used |= derivable(a, k);
             } else if x.same_as(a)
                 && derivable(a, k)
+                && !old
                 && !right_first.iter().any(|&(p, r)| p == n && r)
             {
                 // A broken class: the constant's own clause comes back besides the one
@@ -1533,15 +1546,16 @@ fn ec_constants(
                 lpush.push(clause.clone());
             }
         }
-        for (x, k, clause) in &rconst {
+        for (x, k, clause, old) in &rconst {
             if x.same_as(b) && derivable(a, k) {
                 let d = derive(clause, b, a);
-                if !lpush.iter().any(|e| e.same_as(&d)) {
+                if !lpush.iter().chain(lhave).any(|e| e.same_as(&d)) {
                     lpush.push(d);
                 }
                 used |= derivable(b, k);
             } else if x.same_as(b)
                 && derivable(b, k)
+                && !old
                 && right_first.iter().any(|&(p, r)| p == n && r)
             {
                 rpush.push(clause.clone());
@@ -1705,6 +1719,61 @@ fn oj_class_clauses(above: Vec<Expr>, nleft: usize, all: &[Expr]) -> Vec<Expr> {
     }
     let mut out: Vec<Expr> = above.into_iter().enumerate().filter(|(i, _)| !used[*i]).map(|(_, e)| e).collect();
     out.extend(derived);
+    out
+}
+
+/// The restrictions an inner join's input already applies to its rows, over its output
+/// columns: its scans' filters and the filters above them, through projections of plain
+/// columns and the inner joins below (a pulled-up subquery's WHERE, pushed into its scan
+/// before the join above is formed). For `ec_constants`, which takes only their
+/// `column = constant` equalities.
+fn input_restrictions(p: &Plan) -> Vec<Expr> {
+    let mut out = Vec::new();
+    match p {
+        Plan::Scan(s) => {
+            if let Some(f) = &s.filter {
+                conjuncts(f.clone(), &mut out);
+            }
+        }
+        Plan::Filter { input, pred } => {
+            conjuncts(pred.clone(), &mut out);
+            out.extend(input_restrictions(input));
+        }
+        Plan::Project { input, exprs } => {
+            for e in input_restrictions(input) {
+                // (Only over columns the projection returns as they are.)
+                let mut ok = true;
+                let mapped = e
+                    .transform(&mut |x| {
+                        Ok(match x {
+                            Expr::Col(i, t) => match exprs.iter().position(|o| matches!(o, Expr::Col(j, _) if *j == i)) {
+                                Some(j) => Expr::Col(j, t),
+                                None => {
+                                    ok = false;
+                                    Expr::Col(i, t)
+                                }
+                            },
+                            x => x,
+                        })
+                    })
+                    .ok();
+                if let Some(m) = mapped.filter(|_| ok) {
+                    out.push(m);
+                }
+            }
+        }
+        Plan::Join {
+            kind: JoinKind::Inner,
+            left,
+            right,
+            nleft,
+            ..
+        } => {
+            out.extend(input_restrictions(left));
+            out.extend(input_restrictions(right).into_iter().map(|e| e.shift_cols(*nleft as isize)));
+        }
+        _ => {}
+    }
     out
 }
 
@@ -2222,7 +2291,8 @@ pub fn join(
     let mut kept: Vec<usize> = Vec::new();
     if kind == JoinKind::Inner && params.is_empty() {
         let mut no_hash = None;
-        ec_constants(cat, &mut lpush, &mut rpush, &mut no_hash, &mut rest, nleft, (true, true), &mut kept);
+        let (lhave, rhave) = (input_restrictions(&left), input_restrictions(&right));
+        ec_constants(cat, &mut lpush, &mut rpush, &mut no_hash, &mut rest, nleft, (true, true), &mut kept, (&lhave, &rhave));
     }
     // (An outer join's ON conditions pushed into its nullable side: their columns.)
     let mut pushed: Vec<usize> = Vec::new();
