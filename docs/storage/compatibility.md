@@ -48,6 +48,8 @@ fails if anything changes either way:
 | Website endpoint (`<bucket>.<website domain>`) | ✅ when `ROLL_S3_WEBSITE_DOMAIN` is set |
 | STS temporary credentials (`x-amz-security-token`, `AWS_SESSION_TOKEN`) | ✅ `GetSessionToken`, `AssumeRole`, `AssumeRoleWithWebIdentity`, `GetCallerIdentity` on the same endpoint (see [STS](#sts-temporary-credentials)) |
 | IAM users, groups, managed policies | ❌ use roll access keys (`read`, `write`, `admin`, optionally scoped to buckets), roles and bucket policies |
+| Access points (by ARN, `<name>-<account>.…` host, `/arn:…` path, or `-s3alias` alias) | ✅ see [Access points](#access-points) |
+| S3 Control API (`<account>.s3-control.<domain>`, or `/v20180820/…` with `x-amz-account-id` on the S3 endpoint) | ✅ access points and Object Lambda access points only |
 
 ## Operations
 
@@ -76,7 +78,7 @@ fails if anything changes either way:
 | Get/PutBucketLogging | ✅ server access logs delivered to the target bucket every 5 minutes, best effort |
 | Get/PutBucketAccelerateConfiguration | ✅ stored and returned; a no-op (there's one endpoint) |
 | Get/PutBucketRequestPayment | ✅ `BucketOwner`; `Requester` is `NotImplemented` |
-| Get/Put/DeleteBucketReplication | ✅ between roll buckets, metadata-only (see [Replication](#replication)); a destination outside roll is `NotImplemented` |
+| Get/Put/DeleteBucketReplication | ✅ between roll buckets (metadata-only) and to buckets outside roll (AWS S3 in any account or region, any S3-compatible endpoint) through replication targets (see [Replication](#replication)) |
 | Get/PutBucketNotificationConfiguration | ✅ Topic, Queue, CloudFunction and EventBridge configurations, event wildcards, `prefix`/`suffix` filter rules, `x-amz-skip-destination-validation`, `s3:TestEvent` (see [Event notifications](#event-notifications)) |
 | Inventory configurations (Get/Put/Delete/List) | ✅ reports generated Daily/Weekly as CSV (see [Inventory](#inventory-reports)); ORC and Parquet are `NotImplemented` |
 | Analytics, metrics and intelligent-tiering configurations (Get/Put/Delete/List) | ✅ validated and stored. Analytics aren't computed and metrics aren't published yet. Intelligent-tiering archive tiers are `NotImplemented` (nothing is ever archived). |
@@ -150,7 +152,10 @@ Details:
   TLS-terminating proxy), but customer keys should only ever be sent over HTTPS.
 - **SSE-KMS** needs AWS KMS behind the backing bucket: it's on by default for AWS S3 without a
   custom endpoint, and off (`NotImplemented`) for S3-compatible services and the local
-  directory backend. `ROLL_S3_KMS=true|false` overrides it.
+  directory backend. `ROLL_S3_KMS=true|false` overrides it. `pnpm test:storage-aws` runs it end
+  to end with the backing bucket on LocalStack S3 and keys from LocalStack KMS: PUT, GET, HEAD,
+  multipart, copies between encryptions, the bucket's default encryption with a bucket key, and
+  every blob checked on the backing bucket itself.
 - **S3-compatible backends.** Every encrypted write checks that the backing service confirmed the
   encryption. One that ignores SSE headers (or doesn't confirm them for an operation, as
   SeaweedFS does for multipart uploads and copies with SSE-C) gets `NotImplemented` for that
@@ -163,12 +168,11 @@ Details:
 | feature | notes |
 |---|---|
 | MFA Delete | No MFA devices. Object Lock protects versions instead. |
-| Replication to buckets outside roll (real AWS S3 buckets, other deployments) | `NotImplemented`, with a message saying so. The backing bucket can be replicated by the operator. |
-| Replication Time Control, replica modification sync, `SourceSelectionCriteria` (SSE-KMS objects) | stored and returned, not acted on (replication between roll buckets is immediate, and copies no data) |
+| Replication Time Control's 15-minute SLA and its `OperationMissedThreshold` events, replica modification sync | stored and returned, not acted on; RTC's metrics are in the control plane (see [Replication](#replication)) |
 | Requester Pays | |
 | ORC and Parquet inventory reports | `NotImplemented` when the configuration is put; CSV works |
 | Storage Class Analysis, CloudWatch request metrics | The configurations are stored, nothing is produced yet. |
-| S3 Select, Object Lambda | |
+| S3 Select | |
 | Torrent | |
 | Directory buckets (S3 Express) | |
 
@@ -352,7 +356,7 @@ every change, so a key's events order by comparing them as strings.
 | `arn:roll:queues:<vhost>:<queue>` | published into the roll queue (persistent, `content-type: application/json`, `type` = the event name, `message-id` = a delivery id), confirmed before it counts. `<vhost>` may be percent-encoded (`%2F` for `/`). |
 | `arn:roll:streams:<stream>:<topic>` | produced to the roll stream's topic (Kafka), keyed by the object key, so a key's events stay in one partition in order; headers `s3-event`, `s3-bucket`, `delivery-id`; durable (`acks=all`) before it counts |
 | `arn:roll:webhook:<url>` | an HTTP(S) POST of the JSON, signed: `X-Roll-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>`, plus `X-Roll-Event` and `X-Roll-Delivery` (stable across retries). The secret is per bucket, created with the first webhook, shown (and rotated) in the control plane. Redirects aren't followed. Loopback, private, link-local (cloud metadata) and CGNAT addresses are refused unless `ROLL_S3_WEBHOOK_ALLOW_PRIVATE` is set. Any 2xx counts as delivered. |
-| `arn:aws:sqs:…`, `arn:aws:sns:…`, `arn:aws:lambda:…`, `EventBridgeConfiguration` | real AWS, SigV4-signed with the deployment's AWS credentials (the default chain), when `ROLL_S3_NOTIFY_AWS` is on: SQS `SendMessage`, SNS `Publish` (subject `Amazon S3 Notification`), Lambda `Invoke` (`Event`), EventBridge `PutEvents` on the default bus in the deployment's region (source `roll.s3`, since `aws.s3` is reserved for AWS). Otherwise these fail destination validation. |
+| `arn:aws:sqs:…`, `arn:aws:sns:…`, `arn:aws:lambda:…`, `EventBridgeConfiguration` | real AWS, SigV4-signed with the deployment's AWS credentials (the default chain), when `ROLL_S3_NOTIFY_AWS` is on: SQS `SendMessage`, SNS `Publish` (subject `Amazon S3 Notification`), Lambda `Invoke` (`Event`), EventBridge `PutEvents` on the default bus in the deployment's region (source `roll.s3`, since `aws.s3` is reserved for AWS). Otherwise these fail destination validation. `ROLL_S3_NOTIFY_AWS_ENDPOINT` sends every service's calls to another endpoint (a VPC endpoint, LocalStack), `ROLL_S3_NOTIFY_AWS_ENDPOINTS` (`sqs=<url>,sns=<url>,lambda=<url>,events=<url>`) one per service; `pnpm test:storage-aws` delivers to each of the four on LocalStack, test events and validation failures included. |
 
 **Validation.** Unless `x-amz-skip-destination-validation: true`, each destination is checked
 and sent an `s3:TestEvent` before the configuration is stored, as S3 does: a roll queue or stream
@@ -374,14 +378,23 @@ secret); a branch can have its own.
 `PutBucketReplication` takes S3's `ReplicationConfiguration`: `Role` (accepted, returned, not
 needed), and rules with `ID`, `Priority`, `Status`, `Filter` (`Prefix`, `Tag`, or `And`) or the
 legacy rule `Prefix`, `DeleteMarkerReplication`, `Destination` (`Bucket` ARN, `StorageClass`,
-`Account`, `AccessControlTranslation`; `EncryptionConfiguration`, `ReplicationTime` and `Metrics`
-are stored and returned), `ExistingObjectReplication` and `SourceSelectionCriteria` (stored). As
-on S3, the source and every destination need versioning `Enabled` (`InvalidRequest` otherwise),
-priorities must be unique, V2 rules need `DeleteMarkerReplication`, and the destination can't be
-the source.
+`Account`, `AccessControlTranslation`, `EncryptionConfiguration`; `ReplicationTime` and `Metrics`
+are stored and returned), `ExistingObjectReplication` and `SourceSelectionCriteria`. As on S3, the
+source and every destination need versioning `Enabled` (`InvalidRequest` otherwise), priorities
+must be unique, V2 rules need `DeleteMarkerReplication`, and the destination can't be the source.
 
-- **The destination is a roll bucket** of the same deployment, named by `arn:aws:s3:::<bucket>`.
-  A name that isn't a roll bucket would be a real AWS bucket: that's `NotImplemented`.
+`arn:aws:s3:::<bucket>` names, in this order:
+1. the bucket on the replication target named by roll's extension element
+   `<RollReplicationTarget>name</RollReplicationTarget>` in the rule's `Destination` (or the
+   control plane's `target`);
+2. the bucket on the replication target whose `buckets` list it (so SDKs and the AWS CLI work
+   unchanged);
+3. a roll bucket of the same deployment.
+
+Anything else is `InvalidRequest` (*Destination bucket must exist*), as on S3.
+
+### Replication between roll buckets
+
 - **Metadata-only.** A replica shares the source version's blob (one more reference): it's
   instant whatever the size, and copies no bytes. It keeps the source's version id and
   `Last-Modified`, and takes its place in the destination's history by version id. Deleting the
@@ -405,6 +418,129 @@ the source.
   branch like any write: the branch's own branches keep their view (push-down), and the parent
   doesn't see it.
 - `DeleteBucketReplication` stops new versions from replicating; ones already queued still go.
+
+### Replication to buckets outside roll
+
+A **replication target** is an S3 service roll can write to: AWS S3 in another account or region,
+or any S3-compatible endpoint (MinIO, R2, another roll deployment). It's managed in the control
+plane (`/v1/storage/replication-targets`): a name, an `endpoint` (none: AWS S3), a `region`,
+credentials (an access key, or none to use the deployment's own AWS credentials), `path_style`,
+and the `buckets` of that service that rules may name. The secret access key is write-only: it's
+sealed with AES-256-GCM under a dedicated key in the metadata and never shown again.
+
+- **Checked like S3 checks a destination:** when the configuration is put, the target must
+  exist and the bucket there must have versioning enabled (asked of the target).
+- **Through the same durable outbox** as everything else: the source version is `PENDING`, then
+  `COMPLETED`, or `FAILED` with an `s3:Replication:OperationFailedReplication` event when the
+  target refuses it (no such bucket, access denied). Network errors and 5xx are retried with
+  backoff for up to 3 days, then the version is `FAILED`.
+- **The bytes move server-side when they can:** a target on the backing bucket's own service with
+  the same credentials (no access key of its own, same endpoint) gets an S3 `CopyObject`
+  (`UploadPartCopy` beyond 5 GiB) from the blob. Otherwise they're streamed from the blob to the
+  target, as a multipart upload from 64 MiB (16 MiB parts, each read and retried on its own), in
+  bounded memory.
+- **Checksums end to end:** the blob's CRC32C (verified by S3 when it was written) goes with a
+  single PUT as `x-amz-checksum-crc32c`, so the target refuses anything else; multipart parts
+  each carry their CRC32C, and the parts' combined CRC32C must equal the blob's before the upload
+  is completed; a server-side copy's CRC32C must equal it before the version counts as
+  replicated.
+- **What's applied on the target:** the data, `Content-Type`, `Cache-Control`,
+  `Content-Disposition`, `Content-Encoding`, `Content-Language`, `Expires`, user metadata, tags and
+  the website redirect; the rule's `StorageClass`; `AccessControlTranslation` as
+  `x-amz-acl: bucket-owner-full-control`. Delete markers replicate as a `DeleteObject` (a delete
+  marker on the versioned target).
+- **SSE-KMS versions** replicate only with `SourceSelectionCriteria` `SseKmsEncryptedObjects`
+  `Enabled`, encrypted on the target with the destination's `EncryptionConfiguration`
+  `ReplicaKmsKeyID` (else the target's default KMS key), as on S3. Out of scope otherwise.
+- **SSE-C versions** can't be replicated outside roll (roll never keeps customer keys): `FAILED`.
+- **`ExistingObjectReplication`** backfills to targets like to roll buckets.
+- **Differences from S3:** the target assigns its own version ids (S3 keeps the source's), and
+  Object Lock retention isn't copied to the target.
+- **Replication Time Control's metrics** are in the control plane, per rule (`metrics` in the
+  bucket's `replication.rules`): `operations_pending` (`OperationsPendingReplication`),
+  `bytes_pending` (`BytesPendingReplication`), `oldest_pending_ms`, and `latency_ms` /
+  `max_latency_ms` (`ReplicationLatency`, from the write to the replica) with the count
+  `replicated`. They cover replication between roll buckets too.
+
+## Access points
+
+Access points are named entry points to a bucket with their own policy, public access block and
+network origin, managed with the S3 Control API on the S3 endpoint.
+
+**S3 Control API.** SDKs and the AWS CLI with a custom endpoint send it to
+`<account>.<endpoint host>` (the account id is a host prefix) with `x-amz-account-id`; roll
+recognises `/v20180820/…` with that header on any host, and the account must be the
+deployment's (`account_id` in `GET /v1/storage`). Point a wildcard DNS name at roll (or use
+`<account>.s3-control.<domain>`). Errors are S3 Control's (`<ErrorResponse>`).
+
+| operation | status |
+|---|---|
+| CreateAccessPoint | ✅ `Bucket`, `VpcConfiguration`, `PublicAccessBlockConfiguration` (all four on when omitted, as on S3), `BucketAccountId`; returns the ARN and the alias. Needs an `admin` key covering the bucket. |
+| GetAccessPoint, ListAccessPoints, DeleteAccessPoint | ✅ `bucket`, `maxResults` and `nextToken` pages; `NetworkOrigin`, `Endpoints`, `CreationDate` |
+| Put/Get/DeleteAccessPointPolicy, GetAccessPointPolicyStatus | ✅ resources must be the access point (`arn:aws:s3:<region>:<account>:accesspoint/<name>` and `…/object/<key>`); a public policy is refused while `BlockPublicPolicy` is on (the access point's, the bucket's or the deployment's) |
+| `NetworkOrigin` `VPC` | ✅ accepted; such an access point only takes requests from inside roll's network (`ROLL_S3_INTERNAL_CIDRS`): roll can't see VPC ids, so the VPC is the deployment's network |
+| Create/Get/Delete/ListAccessPointsForObjectLambda, Get/PutAccessPointConfigurationForObjectLambda, Put/Get/DeleteAccessPointPolicyForObjectLambda, GetAccessPointPolicyStatusForObjectLambda | ✅ see [Object Lambda](#object-lambda) |
+| Every other S3 Control operation (Batch Operations, Storage Lens, Multi-Region Access Points, account Public Access Block, …) | `NotImplemented` |
+
+**Requests through an access point** work on its bucket:
+- by ARN: aws-sdk-s3, boto3 and the AWS CLI turn `arn:aws:s3:<region>:<account>:accesspoint/<name>`
+  into the host `<name>-<account>.<endpoint host>` (with AWS's own domain,
+  `<name>-<account>.s3-accesspoint.<region>.<domain>`); roll takes any host whose first label is
+  `<name>-<account>` for one of its access points;
+- by the ARN as the first path segment (`/arn:aws:s3:…:accesspoint/<name>/<key>`, encoded or not);
+- by alias (`<name>-<random>-s3alias`) wherever a bucket name goes, path style or virtual-host.
+
+Object operations, multipart uploads, DeleteObjects, ListObjects(V2), ListObjectVersions,
+ListMultipartUploads, HeadBucket and GetBucketLocation work through access points; bucket
+configuration doesn't (`InvalidRequest`), as on S3.
+
+**Authorization** is AWS's for access points: a `Deny` in the access point policy or the bucket
+policy refuses; the key's own permission on the bucket allows (an identity allow in the same
+account); otherwise both the access point policy and the bucket policy must allow. A bucket
+policy can delegate to its access points with `s3:DataAccessPointAccount` or
+`s3:DataAccessPointArn` (and sees `s3:AccessPointNetworkOrigin`). A public grant doesn't apply
+while the access point's or the bucket's block restricts public buckets. Differences: ACL grants
+and the bucket's `public` flag don't apply through access points, and copy sources are named by
+bucket, not by access point ARN.
+
+## Object Lambda
+
+Object Lambda access points (`arn:aws:s3-object-lambda:<region>:<account>:accesspoint/<name>`,
+alias `<name>-<random>--ol-s3`) transform `GetObject`, `HeadObject`, `ListObjects` and
+`ListObjectsV2` answers with a function and pass every other request to their supporting access
+point. Requests signed for `s3-object-lambda` are accepted on the S3 endpoint.
+
+- **The configuration** is S3's: `SupportingAccessPoint`, `AllowedFeatures`
+  (`GetObject-Range`, `GetObject-PartNumber`, `HeadObject-Range`, `HeadObject-PartNumber`;
+  otherwise such requests are `InvalidRequest`), `CloudWatchMetricsEnabled` (stored), and
+  `TransformationConfigurations` with `Actions` and `ContentTransformation.AwsLambda`
+  (`FunctionArn`, `FunctionPayload`).
+- **The function** is an AWS Lambda ARN, invoked synchronously (`RequestResponse`) through the
+  notification path (`ROLL_S3_NOTIFY_AWS`, its endpoints and credentials), or roll's extension
+  `arn:roll:webhook:<url>`: an HTTP POST of the same event, signed like notification webhooks
+  with the bucket's webhook secret (`X-Roll-Signature`), under the same address rules.
+- **The event** is S3's: `xAmzRequestId`, `getObjectContext` (`inputS3Url`, `outputRoute`,
+  `outputToken`) or `headObjectContext`/`listObjectsContext`/`listObjectsV2Context`
+  (`inputS3Url`), `configuration` (`accessPointArn`, `supportingAccessPointArn`, `payload`),
+  `userRequest` (`url`, `headers` without credentials), `userIdentity`, `protocolVersion` `1.00`.
+  `inputS3Url` is the original request through the supporting access point, presigned with the
+  caller's own credentials (and session token) for 5 minutes, so the function reads exactly what
+  the caller may. It's on `ROLL_S3_PUBLIC_ENDPOINT` (default `http://<public host>:<S3 port>`).
+- **`GetObject`'s answer comes through `WriteGetObjectResponse`** (`POST /WriteGetObjectResponse`
+  with `x-amz-request-route` and `x-amz-request-token`; SDKs need host prefixes off or a
+  wildcard name for `<route>.<endpoint host>`): `StatusCode`, the `x-amz-fwd-header-*` headers,
+  user metadata, `ErrorCode`/`ErrorMessage`, and the body, streamed to the waiting caller as it
+  arrives. The token authorizes the call (a random 256-bit secret, valid once, while the caller
+  waits, at most 60 s), not a signature, so the function needs no roll credentials; the body
+  must be plain (not `aws-chunked`). `HeadObject` and `ListObjects` answers are the function's
+  result: `statusCode`, `headers`, `metadata`, `errorCode`/`errorMessage`, and `listResultXml` or
+  `listBucketResult`.
+- **Errors** are S3's: `LambdaInvocationFailed`, `LambdaRuntimeError`, `LambdaTimeout`,
+  `LambdaResponseNotReceived` (the function returned without calling `WriteGetObjectResponse`).
+- **Authorization:** the Object Lambda access point's policy (`s3-object-lambda:*` actions) or the
+  key's own permission on the bucket; pass-through requests are then authorized through the
+  supporting access point. `pnpm test:storage-aws` runs a Python Lambda function on LocalStack
+  that reads `inputS3Url` and answers through `WriteGetObjectResponse` with boto3.
 
 ## Inventory reports
 

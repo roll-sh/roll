@@ -156,8 +156,8 @@ async fn data_plane() {
         assert_eq!(r.status(), 200, "{path}");
         assert_eq!(r.bytes().await.unwrap().as_ref(), b"via arn");
     }
-    let other = format!("/arn:aws:s3:us-east-1:111111111111:accesspoint/front/dir/a.txt");
-    assert_eq!(status_code(Raw::new("GET", &other).send(&t).await).await, (403, "AccessDenied".into()));
+    let other = "/arn:aws:s3:us-east-1:111111111111:accesspoint/front/dir/a.txt";
+    assert_eq!(status_code(Raw::new("GET", other).send(&t).await).await, (403, "AccessDenied".into()));
     let missing = format!("/arn:aws:s3:us-east-1:{account}:accesspoint/nothere/x");
     assert_eq!(status_code(Raw::new("GET", &missing).send(&t).await).await, (404, "NoSuchAccessPoint".into()));
 

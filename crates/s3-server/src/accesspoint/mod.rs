@@ -323,7 +323,7 @@ mod tests {
     fn policies() {
         let arn = "arn:aws:s3:us-east-1:123456789012:accesspoint/ap1";
         let ok = format!(r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"RKX"}},"Action":"s3:GetObject","Resource":"{arn}/object/*"}}]}}"#);
-        assert_eq!(validate_policy(&ok, arn).unwrap(), false);
+        assert!(!validate_policy(&ok, arn).unwrap());
         let public = format!(r#"{{"Statement":[{{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"{arn}/object/*"}}]}}"#);
         assert!(validate_policy(&public, arn).unwrap());
         let other = r#"{"Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::bucket/*"}]}"#;

@@ -146,9 +146,11 @@ fn read_key(c: &Connection) -> Result<Option<[u8; 32]>> {
     Ok(Some(out))
 }
 
+/// A spec, checked and normalized: `(endpoint, region, access key, path style, buckets)`.
+type Checked = (Option<String>, String, Option<String>, bool, Vec<String>);
+
 impl TargetSpec {
-    /// Checked and normalized: `(endpoint, region, access key, path style, buckets)`.
-    fn check(&self) -> Result<(Option<String>, String, Option<String>, bool, Vec<String>)> {
+    fn check(&self) -> Result<Checked> {
         let endpoint = self.endpoint.as_deref().map(str::trim).filter(|e| !e.is_empty()).map(|e| e.trim_end_matches('/').to_string());
         if let Some(e) = &endpoint {
             let u = url::Url::parse(e).map_err(|_| invalid(format!("endpoint {e:?} isn't a URL")))?;
