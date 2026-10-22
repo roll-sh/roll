@@ -974,6 +974,7 @@ async fn every_tool_is_authorized_like_its_route() {
             assert_eq!(seen.len(), TOOLS.len(), "every tool is checked");
         }
     }
+}
 
 /// The auth matrix through MCP tools: every caller × read and write, public and private, as the
 /// routes answer them; and a bad token gets no session. Open mode lets any token in.
