@@ -94,6 +94,32 @@ unique1:int4 | ten:int4
 2 | 2
 -- SELECT 3
 
+> SET LOCAL max_parallel_workers_per_gather = 2
+-- SET
+
+> RESET enable_seqscan
+-- RESET
+
+> EXPLAIN SELECT ten, four, sum(thousand) FROM a6_pp GROUP BY 1, 2
+QUERY PLAN:text
+Finalize GroupAggregate  (cost=267.41..269.63 rows=40 width=16)
+  Group Key: ten, four
+  ->  Gather Merge  (cost=267.41..268.51 rows=96 width=16)
+        Workers Planned: 2
+        ->  Sort  (cost=267.38..267.48 rows=40 width=16)
+              Sort Key: ten, four
+              ->  Partial HashAggregate  (cost=265.92..266.32 rows=40 width=16)
+                    Group Key: ten, four
+                    ->  Parallel Seq Scan on a6_pp  (cost=0.00..234.67 rows=4167 width=12)
+-- EXPLAIN
+
+> SELECT ten, four, sum(thousand) FROM a6_pp GROUP BY 1, 2 ORDER BY 1, 2 LIMIT 3
+ten:int4 | four:int4 | sum:int8
+0 | 0 | 245000
+0 | 2 | 250000
+1 | 1 | 245500
+-- SELECT 3
+
 > ROLLBACK
 -- ROLLBACK
 

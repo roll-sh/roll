@@ -34,8 +34,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50851 (**99.42%**) |
-| units differing | 299 |
+| units matching | 50852 (**99.42%**) |
+| units differing | 298 |
 | files fully matching | 190 |
 | engine output == expected/*.out (pg_regress "ok") | 165 files |
 | engine crashes / panics | none |
@@ -44,7 +44,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 287 | 96.0% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 286 | 96.0% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 11 | 3.7% |
 | by design (a parallel plan's combine function) | 1 | 0.3% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -52,8 +52,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 287 units
-join (87), partition_join (35), partition_prune (38), subselect (10), collate.icu.utf8 (8), incremental_sort (11), select_parallel (5), updatable_views (5), groupingsets (9), with (5), memoize (8), equivclass (8), aggregates (7), rowtypes (6), rowsecurity (6), generated_virtual (6), join_hash (4), collate (4), window (3), returning (2), merge (2), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
+### EXPLAIN (group C1) — 286 units
+join (87), partition_join (35), partition_prune (38), subselect (10), collate.icu.utf8 (8), incremental_sort (11), select_parallel (5), updatable_views (5), groupingsets (9), with (5), memoize (8), equivclass (8), aggregates (7), rowtypes (6), rowsecurity (6), generated_virtual (6), join_hash (3), collate (4), window (3), returning (2), merge (2), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -124,6 +124,7 @@ batch (on 4186dde) fixed 2 more in the same subset, none broken.
 |---|---|
 | incremental_sort | 26, 27, 44, 45 |
 | select_parallel | 35, 75, 116, 138, 170, 203; second batch: 167, 217 |
+| join_hash | third batch: 123 |
 | partition_aggregate | 19, 50, 67, 111, 120 |
 
 What changed:
@@ -166,6 +167,8 @@ What changed:
 - Second batch: a partial plan already in a leading part of the ORDER BY's order is sorted
   incrementally under the Gather Merge (select_parallel 167); a Subquery Scan whose filter
   workers can't run gathers the subquery's own plan below it (217).
+- Third batch: a Gather (Merge) of partial groupings returns their rows times the parallel
+  divisor (compute_gather_rows), not times the workers: join_hash 123's Finalize Aggregate.
 
 Goldens added: `tests/sql/a6_dummy_rel_keys.sql`, `a6_parallel_plans.sql`,
 `a6_incremental_sort_analyze.sql`.
@@ -1184,7 +1187,7 @@ produces no units on Linux (skipped by the file itself).
 | password | 53 | 53 | 100% | yes | yes |  |
 | identity | 288 | 288 | 100% | yes | yes |  |
 | generated_stored | 468 | 468 | 100% | yes | yes |  |
-| join_hash | 279 | 273 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (4) |
+| join_hash | 279 | 274 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
 | brin_bloom | 40 | 40 | 100% | yes | yes |  |
 | brin_multi | 172 | 172 | 100% | yes | yes |  |
 | create_table_like | 191 | 191 | 100% | yes | yes |  |

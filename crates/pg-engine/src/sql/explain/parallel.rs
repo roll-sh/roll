@@ -457,7 +457,7 @@ impl Builder<'_, '_> {
             pa.total_cost = pa.startup_cost + costs::CPU_TUPLE_COST;
             pa.output = partial_out.clone();
             let mut gt = self.gather_of(&pa);
-            gt.rows = costs::clamp_rows(pa.rows * workers as f64);
+            gt.rows = costs::clamp_rows(pa.rows * cfg.divisor(workers));
             gt.total_cost = pa.total_cost + cfg.setup_cost + cfg.tuple_cost * gt.rows;
             let mut f = make("Plain", "Finalize", gt);
             let gi = &f.children[0];
@@ -485,7 +485,7 @@ impl Builder<'_, '_> {
             ps.output = partial_out.clone();
             let gathered = |b: &Self, pa: &ExNode, merge: bool| -> ExNode {
                 let mut gt = if merge { b.gather_merge_of(pa) } else { b.gather_of(pa) };
-                let rows = costs::clamp_rows(pa.rows * workers as f64);
+                let rows = costs::clamp_rows(pa.rows * cfg.divisor(workers));
                 if merge {
                     let n = workers as f64 + 1.0;
                     let comparison = 2.0 * costs::CPU_OPERATOR_COST;

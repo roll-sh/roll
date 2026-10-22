@@ -1,6 +1,7 @@
 -- Partial paths for the orderings the planner finds useful: a parallel index scan in a
 -- leading part of the ORDER BY's order sorted incrementally under the Gather Merge (and
 -- fully when incremental sort is off); a full sort of the cheapest partial path otherwise.
+-- A Gather of partial groupings returns their rows times the parallel divisor.
 CREATE TABLE a6_pp (unique1 int, two int, four int, ten int, hundred int, thousand int,
   filler text);
 INSERT INTO a6_pp SELECT i, i % 2, i % 4, i % 10, i % 100, i % 1000, repeat('x', 100)
@@ -27,6 +28,10 @@ SELECT * FROM a6_pp WHERE four = 2 ORDER BY four, hundred, a6_psv(thousand);
 EXPLAIN (COSTS OFF)
 SELECT unique1, ten FROM a6_pp ORDER BY unique1, ten;
 SELECT unique1, ten FROM a6_pp ORDER BY unique1, ten LIMIT 3;
+SET LOCAL max_parallel_workers_per_gather = 2;
+RESET enable_seqscan;
+EXPLAIN SELECT ten, four, sum(thousand) FROM a6_pp GROUP BY 1, 2;
+SELECT ten, four, sum(thousand) FROM a6_pp GROUP BY 1, 2 ORDER BY 1, 2 LIMIT 3;
 ROLLBACK;
 DROP TABLE a6_pp;
 DROP FUNCTION a6_psv(int);
