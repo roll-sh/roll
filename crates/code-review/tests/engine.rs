@@ -558,3 +558,164 @@ async fn oversized_answers_and_redirects_are_refused() {
     }
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0, "the redirect target was never called");
 }
+
+/// The effort table in reviews.md, cell by cell (mode × speed), through real requests: the
+/// review request's `output_config.effort`, the model (`fast` uses the secondary one) and whether
+/// a verification pass runs (`max` or `thorough`, never `fast`). `effort` overrides every cell.
+#[tokio::test]
+async fn effort_follows_the_table_for_every_mode_and_speed() {
+    let m = mock(Arc::new(|path, body, _| {
+        if path.ends_with("count_tokens") {
+            return (200, vec![], json!({"input_tokens": 10}));
+        }
+        let user = body["messages"][0]["content"][0]["text"].as_str().unwrap_or("");
+        if user.contains("checking another reviewer's findings") {
+            return ok(json!({"results": [{"index": 0, "confirmed": true, "reason": "ok"}]}), json!({}));
+        }
+        ok(answer_for(body), json!({}))
+    }))
+    .await;
+    let e = Engine::new(anthropic(&m.url), Some("claude-haiku-5-5".into()));
+    let table = [
+        (Mode::Standard, Speed::Fast, "low"),
+        (Mode::Deep, Speed::Fast, "low"),
+        (Mode::Max, Speed::Fast, "low"),
+        (Mode::Standard, Speed::Balanced, "medium"),
+        (Mode::Deep, Speed::Balanced, "high"),
+        (Mode::Max, Speed::Balanced, "high"),
+        (Mode::Standard, Speed::Thorough, "xhigh"),
+        (Mode::Deep, Speed::Thorough, "xhigh"),
+        (Mode::Max, Speed::Thorough, "xhigh"),
+    ];
+    let messages = |from: usize| m.seen.lock()[from..].iter().filter(|s| s.path == "/v1/messages").cloned().collect::<Vec<Seen>>();
+    for (mode, speed, effort) in table {
+        assert_eq!(Engine::effort_for(mode, speed, &ReviewerSettings::default()).as_str(), effort, "{mode:?} × {speed:?}");
+        let from = m.seen.lock().len();
+        let r = e.review(&input(vec![file("a.rs", 2)], mode, speed), None).await.unwrap();
+        assert_eq!(r.effort.map(|x| x.as_str()), Some(effort));
+        let msgs = messages(from);
+        assert_eq!(msgs[0].body["output_config"]["effort"], effort, "{mode:?} × {speed:?}");
+        let fast = speed == Speed::Fast;
+        assert_eq!(msgs[0].body["model"] == "claude-haiku-5-5", fast, "{mode:?} × {speed:?}: {}", msgs[0].body["model"]);
+        let verifies = !fast && (mode == Mode::Max || speed == Speed::Thorough);
+        assert_eq!(msgs.len(), 1 + verifies as usize, "{mode:?} × {speed:?}: verification pass");
+        if verifies {
+            assert!(msgs[1].body["messages"][0]["content"][0]["text"].as_str().unwrap().contains("checking another reviewer's findings"));
+        }
+    }
+    // The `effort` setting wins over every cell.
+    for over in ["low", "medium", "high", "xhigh", "max"] {
+        for (mode, speed, _) in table {
+            let mut i = input(vec![file("a.rs", 2)], mode, speed);
+            i.settings.effort = code_review::Effort::parse(over);
+            assert_eq!(Engine::effort_for(mode, speed, &i.settings).as_str(), over);
+            let from = m.seen.lock().len();
+            e.review(&i, None).await.unwrap();
+            assert_eq!(messages(from)[0].body["output_config"]["effort"], over, "{over} over {mode:?} × {speed:?}");
+        }
+    }
+}
+
+/// Provider error classes at the provider and engine level: a timeout is retried and then
+/// reported as exhausted; 403 (like 401 and 400) is rejected at once; 500/502 are retried until
+/// an answer; an answer that isn't JSON is a decode error, not retried.
+#[tokio::test]
+async fn timeouts_forbidden_server_errors_and_garbage() {
+    use code_review::provider::Request;
+    let req = Request { model: String::new(), system: vec![], user: "x".into(), schema: schema::reply(), schema_name: "reply", effort: code_review::Effort::Low, max_tokens: 10 };
+    // Timeouts: a server slower than the policy's timeout.
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let h2 = hits.clone();
+    let app = Router::new().fallback(move || {
+        let h = h2.clone();
+        async move {
+            h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            axum::Json(json!({}))
+        }
+    });
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let slow = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    let policy = RetryPolicy { attempts: 2, base: Duration::from_millis(5), max_delay: Duration::from_millis(20), timeout: Duration::from_millis(100) };
+    let p = Anthropic::new("k", None).with_base_url(&slow).with_retry(policy.clone());
+    match p.complete(&req).await {
+        Err(ProviderError::Exhausted { attempts: 2, last, .. }) => assert_eq!(last, "timed out"),
+        other => panic!("expected a timeout to exhaust the retries, got {other:?}"),
+    }
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2, "a timeout is retried");
+    let o = OpenAiCompatible::new(&slow, "k", "m").unwrap().with_retry(policy);
+    assert!(matches!(o.complete(&req).await, Err(ProviderError::Exhausted { .. })));
+
+    // 403: rejected at once (a key without permission), surfaced with its message.
+    let forbidden = mock(Arc::new(|_, _, _| (403, vec![], json!({"type": "error", "error": {"type": "permission_error", "message": "key lacks access"}})))).await;
+    let p = Anthropic::new("k", None).with_base_url(&forbidden.url).with_retry(fast_retry());
+    match p.complete(&req).await {
+        Err(ProviderError::Rejected { status: 403, message, .. }) => assert_eq!(message, "key lacks access"),
+        other => panic!("expected 403 rejected, got {other:?}"),
+    }
+    assert_eq!(forbidden.seen.lock().len(), 1, "403 is not retried");
+
+    // 500 then 502, then an answer.
+    let flaky = mock(Arc::new(|path, body, n| {
+        if path.ends_with("count_tokens") {
+            return (200, vec![], json!({"input_tokens": 10}));
+        }
+        match n {
+            1 => (500, vec![], json!({"error": {"message": "internal"}})),
+            2 => (502, vec![], json!({"error": {"message": "bad gateway"}})),
+            _ => ok(answer_for(body), json!({})),
+        }
+    }))
+    .await;
+    let r = Engine::new(anthropic(&flaky.url), None).review(&input(vec![file("a.rs", 1)], Mode::Standard, Speed::Balanced), None).await.unwrap();
+    assert_eq!(r.findings.len(), 1);
+    assert_eq!(flaky.seen.lock().iter().filter(|s| s.path == "/v1/messages").count(), 3);
+
+    // A 200 that isn't JSON: a decode error, once.
+    let garbage = Router::new().fallback(|| async { (StatusCode::OK, "<html>proxy error</html>") });
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let g = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, garbage).await.unwrap() });
+    let p = Anthropic::new("k", None).with_base_url(&g).with_retry(fast_retry());
+    assert!(matches!(p.complete(&req).await, Err(ProviderError::Decode(_, "anthropic"))));
+}
+
+/// One group failing doesn't sink the review: the other groups' findings stand, and the failed
+/// group's files are listed as not reviewed with the provider's error. A refusal without a
+/// category is still listed, and code-control's guard lowers the clean verdict.
+#[tokio::test]
+async fn a_failing_group_is_listed_and_the_rest_is_reviewed() {
+    let m = mock(Arc::new(|path, body, _| {
+        if path.ends_with("count_tokens") {
+            return (200, vec![], json!({"input_tokens": 10}));
+        }
+        let user = body["messages"][0]["content"][0]["text"].as_str().unwrap_or("");
+        if user.contains("## bad.rs") {
+            return (400, vec![], json!({"type": "error", "error": {"type": "invalid_request_error", "message": "prompt is too long"}}));
+        }
+        ok(answer_for(body), json!({}))
+    }))
+    .await;
+    let mut e = Engine::new(anthropic(&m.url), None);
+    e.limits.group_tokens = 50; // one file per group
+    let r = e.review(&input(vec![file("good.rs", 2), file("bad.rs", 2)], Mode::Standard, Speed::Balanced), None).await.unwrap();
+    assert_eq!(r.findings.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["good.rs"]);
+    let s = r.skipped.iter().find(|s| s.path == "bad.rs").expect("bad.rs listed");
+    assert!(s.reason.starts_with("not reviewed:") && s.reason.contains("prompt is too long"), "{}", s.reason);
+    assert_eq!(r.files_reviewed, 1);
+
+    let refuse = mock(Arc::new(|path, _, _| {
+        if path.ends_with("count_tokens") {
+            return (200, vec![], json!({"input_tokens": 10}));
+        }
+        (200, vec![], json!({"stop_reason": "refusal", "content": [], "usage": {}}))
+    }))
+    .await;
+    let r = Engine::new(anthropic(&refuse.url), None).review(&input(vec![file("x.rs", 1)], Mode::Standard, Speed::Balanced), None).await.unwrap();
+    assert_eq!(r.skipped[0].reason, "declined by the model");
+    assert_eq!(r.verdict, "approve", "the engine's own verdict");
+    let (v, why) = code_review::engine::guard_approval(&r.verdict, &r.skipped, false, 0);
+    assert_eq!(v, "comment");
+    assert!(why.is_some());
+}
