@@ -1183,3 +1183,71 @@ fn helpers() {
     assert_eq!(enc("a b+c/ü"), "a%20b%2Bc%2F%C3%BC");
     assert_ne!(pattern(64)[..32], pattern(64)[32..]);
 }
+
+#[tokio::test]
+async fn roles_and_sessions() {
+    let t = start().await;
+    t.ok(&["create", "uploads"]).await;
+    t.ok(&["create", "private"]).await;
+    let k = t.json(&["keys", "create", "backend", "--permission", "read"]).await;
+    let key_id = k["id"].as_str().unwrap().to_string();
+
+    // No roles yet: just the header.
+    assert_eq!(t.json(&["roles"]).await, json!([]));
+    let text = t.ok(&["roles", "create", "web", "--permission", "write", "--bucket", "uploads", "--bucket", "private", "--trust-key", &key_id, "--max-session", "2h", "--description", "browser uploads"]).await;
+    let arn = format!("arn:aws:iam::{}:role/web", t.store.account_id());
+    assert_eq!(text.trim(), format!("created role {arn}"));
+    std::fs::write(t.path("policy.json"), r#"{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#).unwrap();
+    let g = t
+        .json(&["roles", "create", "google", "--oidc-issuer", "https://accounts.google.com", "--audience", "123.apps.googleusercontent.com", "--subject", "1*", "--policy", "@policy.json"])
+        .await;
+    assert_eq!(g["trust"]["oidc"][0]["issuer"], "https://accounts.google.com");
+    assert_eq!(g["policy"]["Statement"][0]["Action"], "s3:GetObject");
+    assert_eq!(g["permission"], "read");
+    let list = t.ok(&["roles"]).await;
+    assert!(list.lines().next().unwrap().contains("trusted"), "{list}");
+    assert!(list.contains(&key_id) && list.contains("oidc:https://accounts.google.com"), "{list}");
+    let show = t.ok(&["roles", "show", "web"]).await;
+    assert!(show.contains(&arn) && show.contains("uploads,private") && show.contains("7200s") && show.contains("browser uploads"), "{show}");
+
+    // Credentials for a backend to hand out: env vars on stdout only.
+    let o = t.run(&["sessions", "create", "web", "--duration", "15m", "--bucket", "uploads", "--name", "user-7", "--tag", "user=7"]).await;
+    assert_eq!(o.code, Some(0), "{}", o.stderr);
+    assert!(o.stderr.contains("assumed-role/web/user-7"), "{}", o.stderr);
+    let text = o.text();
+    assert_eq!(text.lines().count(), 5, "{text}");
+    let env = |name: &str| text.lines().find_map(|l| l.strip_prefix(&format!("{name}="))).unwrap_or_else(|| panic!("{name} in {text}")).to_string();
+    assert!(env("AWS_ACCESS_KEY_ID").starts_with("RT"));
+    assert_eq!(env("AWS_ENDPOINT_URL"), t.s3);
+    let creds = Credentials::new(env("AWS_ACCESS_KEY_ID"), env("AWS_SECRET_ACCESS_KEY"), Some(env("AWS_SESSION_TOKEN")), None, "cli");
+    let conf = aws_sdk_s3::Config::builder().behavior_version(BehaviorVersion::latest()).region(Region::new("us-east-1")).endpoint_url(&t.s3).credentials_provider(creds).force_path_style(true).build();
+    let s3 = aws_sdk_s3::Client::from_conf(conf);
+    s3.put_object().bucket("uploads").key("from-session.txt").body(b"temp".to_vec().into()).send().await.unwrap();
+    assert_eq!(t.get("uploads", "from-session.txt").await.unwrap(), b"temp");
+    assert!(s3.put_object().bucket("private").key("x").body(b"x".to_vec().into()).send().await.is_err(), "narrowed to --bucket uploads");
+
+    // JSON, a read-only narrowing, and errors.
+    let j = t.json(&["sessions", "create", "web", "--permission", "read"]).await;
+    assert_eq!(j["permission"], "read");
+    assert_eq!(j["env"]["AWS_SESSION_TOKEN"], j["session_token"]);
+    assert!(t.fail(&["sessions", "create", "web", "--permission", "admin"]).await.contains("more than the role"));
+    assert!(t.fail(&["sessions", "create", "web", "--duration", "3h"]).await.contains("duration_s"));
+    assert!(t.fail(&["sessions", "create", "nope"]).await.contains("no role"));
+    assert!(t.fail(&["sessions", "create", "web", "--tag", "novalue"]).await.contains("key=value"));
+    assert!(t.fail(&["roles", "create", "bad", "--oidc-issuer", "https://x"]).await.contains("--audience"));
+    assert!(t.fail(&["roles", "create", "bad", "--policy", "{not json"]).await.contains("JSON"));
+    assert!(t.fail(&["roles", "update", "web"]).await.contains("nothing to change"));
+
+    // Updating, revoking and deleting end the sessions.
+    let updated = t.ok(&["roles", "update", "web", "--all-buckets", "--max-session", "1h"]).await;
+    assert!(updated.contains("no longer work"), "{updated}");
+    let err = s3.put_object().bucket("uploads").key("y").body(b"y".to_vec().into()).send().await.unwrap_err();
+    assert!(format!("{err:?}").contains("InvalidToken"), "{err:?}");
+    let r = t.json(&["roles", "show", "web"]).await;
+    assert_eq!((r["buckets"].clone(), r["max_session_s"].as_i64(), r["generation"].as_i64()), (Value::Null, Some(3600), Some(2)));
+    assert!(t.ok(&["roles", "revoke", "web"]).await.contains("revoked"));
+    assert!(t.ok(&["sessions", "rotate-key"]).await.contains("sealed with key"));
+    assert_eq!(t.ok(&["roles", "delete", "google"]).await.trim(), "deleted role google");
+    assert!(t.fail(&["roles", "show", "google"]).await.contains("no role"));
+    assert_eq!(t.json(&["roles"]).await.as_array().unwrap().len(), 1);
+}

@@ -265,6 +265,7 @@ fn key_row(r: &rusqlite::Row) -> rusqlite::Result<AccessKey> {
         buckets: buckets.and_then(|s| serde_json::from_str(&s).ok()),
         created_at: r.get(5)?,
         last_used_at: r.get(6)?,
+        session: None,
     })
 }
 
@@ -604,7 +605,7 @@ impl Store {
         if name.is_empty() || name.len() > 128 {
             return Err(StoreError::InvalidArgument("key names are 1-128 characters".into()));
         }
-        let key = AccessKey { id: ids::access_key_id(), secret: ids::secret_key(), name: name.to_string(), permission, buckets, created_at: self.now(), last_used_at: None };
+        let key = AccessKey { id: ids::access_key_id(), secret: ids::secret_key(), name: name.to_string(), permission, buckets, created_at: self.now(), last_used_at: None, session: None };
         let k = key.clone();
         self.write(move |c| {
             let buckets = k.buckets.as_ref().map(rows::json).transpose()?;

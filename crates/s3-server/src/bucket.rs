@@ -18,6 +18,7 @@ use s3_store::{Bucket, BucketOptions, BucketUpdate, Class, CorsRule, LifecycleRu
 
 pub(crate) fn list_buckets(ctx: &mut Ctx) -> Reply {
     let Some(a) = &ctx.auth else { return Err(S3Error::new(Code::AccessDenied)) };
+    ctx.require_session("s3:ListAllMyBuckets", None, None)?;
     let buckets = ctx.store().buckets().s3()?;
     let entries: Vec<xml::BucketEntry> = buckets
         .into_iter()
@@ -104,6 +105,7 @@ async fn create(ctx: &mut Ctx, body: Body) -> Reply {
     if !ctx.auth.as_ref().is_some_and(|a| a.key.is_admin() && a.key.covers(&name)) {
         return Err(S3Error::new(Code::AccessDenied));
     }
+    ctx.require_session("s3:CreateBucket", Some(&name), None)?;
     // Object Lock (which turns versioning on) from the start.
     let object_lock = ctx.h("x-amz-bucket-object-lock-enabled").is_some_and(|v| v.trim().eq_ignore_ascii_case("true"));
     if !s3_proto::http::valid_bucket_name(&name) {

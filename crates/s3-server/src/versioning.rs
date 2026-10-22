@@ -109,7 +109,10 @@ pub(crate) fn bypass(ctx: &Ctx) -> Result<bool, S3Error> {
         return Ok(false);
     }
     match &ctx.auth {
-        Some(a) if a.key.is_admin() => Ok(true),
+        Some(a) if a.key.is_admin() => {
+            ctx.require_session("s3:BypassGovernanceRetention", ctx.bucket.as_deref(), ctx.key.as_deref())?;
+            Ok(true)
+        }
         _ => Err(S3Error::msg(Code::AccessDenied, "Bypassing a governance retention needs an admin key.")),
     }
 }

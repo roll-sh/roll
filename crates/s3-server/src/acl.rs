@@ -111,7 +111,7 @@ impl Acl {
             (g.permission == perm || g.permission == "FULL_CONTROL")
                 && match (&g.grantee, who) {
                     (Grantee::Group { uri }, _) if uri == ALL_USERS => !ignore_public,
-                    (Grantee::Group { uri }, Principal::Key { .. }) if uri == AUTHENTICATED_USERS => !ignore_public,
+                    (Grantee::Group { uri }, Principal::Key { .. } | Principal::Session { .. }) if uri == AUTHENTICATED_USERS => !ignore_public,
                     (Grantee::Key { id }, Principal::Key { id: k, .. }) => id == k,
                     _ => false,
                 }

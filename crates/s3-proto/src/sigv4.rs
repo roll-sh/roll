@@ -110,6 +110,11 @@ pub struct Credential {
 
 impl Credential {
     pub fn parse(s: &str, code: Code) -> Result<Self, S3Error> {
+        Self::parse_for(s, code, "s3")
+    }
+
+    /// [`Self::parse`] for another service on this endpoint (`sts`).
+    pub fn parse_for(s: &str, code: Code, service: &str) -> Result<Self, S3Error> {
         let parts: Vec<&str> = s.trim().split('/').collect();
         let bad = |why: &str| S3Error::msg(code, format!("Error parsing the X-Amz-Credential parameter; {why}"));
         if parts.len() != 5 || parts[4] != "aws4_request" {
@@ -121,8 +126,8 @@ impl Credential {
         if parts[1].len() != 8 || !parts[1].bytes().all(|c| c.is_ascii_digit()) {
             return Err(bad(&format!("incorrect date format \"{}\". This date in the credential must be in the format \"yyyyMMdd\".", parts[1])));
         }
-        if parts[3] != "s3" {
-            return Err(bad(&format!("incorrect service \"{}\". This endpoint belongs to \"s3\".", parts[3])));
+        if parts[3] != service {
+            return Err(bad(&format!("incorrect service \"{}\". This endpoint belongs to \"{service}\".", parts[3])));
         }
         Ok(Self { access_key: parts[0].into(), date: parts[1].into(), region: parts[2].into(), service: parts[3].into() })
     }
@@ -238,13 +243,24 @@ pub(crate) fn malformed(why: impl Into<String>) -> S3Error {
 /// (anonymous, or another scheme: see [`crate::auth::scheme`]). Doesn't check the clock or the
 /// signature.
 pub fn parse(req: &Request) -> Result<Option<Signed>, S3Error> {
+    parse_with(req, "s3", None)
+}
+
+/// [`parse`] for another service on the same endpoint (STS): the credential scope must name
+/// `service`, and the payload is the body whose SHA-256 (hex) is `body_sha256`. Such services
+/// sign the payload without sending `x-amz-content-sha256`.
+pub fn parse_service(req: &Request, service: &str, body_sha256: &str) -> Result<Option<Signed>, S3Error> {
+    parse_with(req, service, Some(body_sha256))
+}
+
+fn parse_with(req: &Request, service: &str, body_sha256: Option<&str>) -> Result<Option<Signed>, S3Error> {
     if let Some(auth) = req.header("authorization") {
-        return parse_header(req, auth).map(Some);
+        return parse_header(req, auth, service, body_sha256).map(Some);
     }
     let query = crate::http::parse_query(req.query);
     let q = |name: &str| query.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
     if q("X-Amz-Algorithm").is_some() || q("X-Amz-Signature").is_some() || q("X-Amz-Credential").is_some() {
-        return parse_presigned(&query).map(Some);
+        return parse_presigned(&query, service, body_sha256).map(Some);
     }
     if q("Signature").is_some() && q("AWSAccessKeyId").is_some() {
         return Err(S3Error::msg(Code::InvalidRequest, "This is a Signature Version 2 request, not AWS4-HMAC-SHA256."));
@@ -290,17 +306,20 @@ pub(crate) fn request_time(req: &Request) -> Result<(String, i64), S3Error> {
     })
 }
 
-fn parse_header(req: &Request, auth: &str) -> Result<Signed, S3Error> {
+fn parse_header(req: &Request, auth: &str, service: &str, body_sha256: Option<&str>) -> Result<Signed, S3Error> {
     let auth = auth.trim();
     if auth.starts_with("AWS ") {
         return Err(S3Error::msg(Code::InvalidRequest, "This is a Signature Version 2 request, not AWS4-HMAC-SHA256."));
     }
     let rest = auth.strip_prefix(ALGORITHM).ok_or_else(|| malformed("Unsupported authorization type"))?;
     let (cred, signed_headers, signature) = components(rest)?;
-    let credential = Credential::parse(cred, Code::AuthorizationHeaderMalformed)?;
+    let credential = Credential::parse_for(cred, Code::AuthorizationHeaderMalformed, service)?;
     let (amz_date, timestamp) = request_time(req)?;
     if amz_date[..8] != credential.date {
         return Err(malformed(format!("The authorization header is malformed; Invalid credential date \"{}\". This date is not the same as X-Amz-Date: \"{}\".", credential.date, &amz_date[..8])));
+    }
+    if let Some(h) = body_sha256 {
+        return Ok(Signed { credential, signed_headers, signature, amz_date, timestamp, payload: Payload::Sha256(h.to_ascii_lowercase()), presigned_expires: None });
     }
     let payload = Payload::parse(req.header("x-amz-content-sha256").ok_or_else(|| S3Error::msg(Code::InvalidRequest, "Missing required header for this request: x-amz-content-sha256"))?)?;
     if matches!(payload, Payload::StreamingEcdsa { .. }) {
@@ -309,15 +328,18 @@ fn parse_header(req: &Request, auth: &str) -> Result<Signed, S3Error> {
     Ok(Signed { credential, signed_headers, signature, amz_date, timestamp, payload, presigned_expires: None })
 }
 
-fn parse_presigned(query: &[(String, String)]) -> Result<Signed, S3Error> {
+fn parse_presigned(query: &[(String, String)], service: &str, body_sha256: Option<&str>) -> Result<Signed, S3Error> {
     let q = |name: &str| query.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
     let missing = || S3Error::msg(Code::AuthorizationQueryParametersError, "Query-string authentication version 4 requires the X-Amz-Algorithm, X-Amz-Credential, X-Amz-Signature, X-Amz-Date, X-Amz-SignedHeaders, and X-Amz-Expires parameters.");
     if q("X-Amz-Algorithm").ok_or_else(missing)? != ALGORITHM {
         return Err(S3Error::msg(Code::AuthorizationQueryParametersError, "X-Amz-Algorithm only supports \"AWS4-HMAC-SHA256\" and \"AWS4-ECDSA-P256-SHA256\""));
     }
-    let credential = Credential::parse(q("X-Amz-Credential").ok_or_else(missing)?, Code::AuthorizationQueryParametersError)?;
+    let credential = Credential::parse_for(q("X-Amz-Credential").ok_or_else(missing)?, Code::AuthorizationQueryParametersError, service)?;
     let mut s = presigned_rest(query, &credential.date)?;
     s.credential = credential;
+    if let Some(h) = body_sha256 {
+        s.payload = Payload::Sha256(h.to_ascii_lowercase());
+    }
     Ok(s)
 }
 
@@ -459,6 +481,15 @@ pub fn verify(req: &Request, s: &Signed, signing_key: &[u8; 32]) -> Result<Verif
 /// `None`). [`crate::auth::authenticate`] handles every scheme.
 pub fn authenticate(req: &Request, now: i64, lookup: impl FnOnce(&str) -> Option<String>) -> Result<Option<Verified>, S3Error> {
     let Some(s) = parse(req)? else { return Ok(None) };
+    let secret = lookup(&s.credential.access_key).ok_or_else(|| S3Error::new(Code::InvalidAccessKeyId).with("AWSAccessKeyId", s.credential.access_key.clone()))?;
+    check_time(&s, now)?;
+    let key = signing_key(&secret, &s.credential.date, &s.credential.region, &s.credential.service);
+    verify(req, &s, &key).map(Some)
+}
+
+/// [`authenticate`] for another service on this endpoint (STS; see [`parse_service`]).
+pub fn authenticate_service(req: &Request, now: i64, service: &str, body_sha256: &str, lookup: impl FnOnce(&str) -> Option<String>) -> Result<Option<Verified>, S3Error> {
+    let Some(s) = parse_service(req, service, body_sha256)? else { return Ok(None) };
     let secret = lookup(&s.credential.access_key).ok_or_else(|| S3Error::new(Code::InvalidAccessKeyId).with("AWSAccessKeyId", s.credential.access_key.clone()))?;
     check_time(&s, now)?;
     let key = signing_key(&secret, &s.credential.date, &s.credential.region, &s.credential.service);
@@ -711,6 +742,37 @@ pub(crate) mod tests {
         assert!(verify(&req2, &s, &key).is_err());
         assert_eq!(authenticate(&req, T, |_| None).unwrap_err().code, Code::InvalidAccessKeyId);
         assert_eq!(authenticate(&req, T + 3600, |_| Some(SK.into())).unwrap_err().code, Code::RequestTimeTooSkewed);
+    }
+
+    /// Another service on this endpoint (STS): its scope, and the body as the payload without
+    /// `x-amz-content-sha256`.
+    #[test]
+    fn other_services() {
+        let body = b"Action=GetCallerIdentity&Version=2011-06-15";
+        let hash = hex::encode(Sha256::digest(body));
+        let headers = [("host", "h"), ("x-amz-date", "20130524T000000Z"), ("content-type", "application/x-www-form-urlencoded")];
+        let mut s = Signed {
+            credential: Credential { access_key: AK.into(), date: "20130524".into(), region: "us-east-1".into(), service: "sts".into() },
+            signed_headers: vec!["content-type".into(), "host".into(), "x-amz-date".into()],
+            signature: String::new(),
+            amz_date: "20130524T000000Z".into(),
+            timestamp: T,
+            payload: Payload::Sha256(hash.clone()),
+            presigned_expires: None,
+        };
+        let req = Request { method: "POST", path: "/", query: "", headers: &headers };
+        let key = signing_key(SK, "20130524", "us-east-1", "sts");
+        s.signature = sign(&key, &string_to_sign(&s.amz_date, &s.credential.scope(), &canonical_request(&req, &s)));
+        let auth = format!("{ALGORITHM} Credential={AK}/20130524/us-east-1/sts/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature={}", s.signature);
+        let mut h = headers.to_vec();
+        h.push(("authorization", &auth));
+        let req = Request { headers: &h, ..req };
+        authenticate_service(&req, T, "sts", &hash, |_| Some(SK.into())).unwrap().unwrap();
+        // The body is what's signed, and the scope must be the service's.
+        let other = hex::encode(Sha256::digest(b"Action=AssumeRole"));
+        assert_eq!(authenticate_service(&req, T, "sts", &other, |_| Some(SK.into())).unwrap_err().code, Code::SignatureDoesNotMatch);
+        assert_eq!(authenticate_service(&req, T, "iam", &hash, |_| Some(SK.into())).unwrap_err().code, Code::AuthorizationHeaderMalformed);
+        assert_eq!(parse(&req).unwrap_err().code, Code::AuthorizationHeaderMalformed, "S3 refuses an sts scope");
     }
 
     #[test]

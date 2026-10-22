@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
+mod roles;
+
 #[derive(Subcommand)]
 pub enum Storage {
     /// Endpoint, region, totals and prices.
@@ -140,6 +142,16 @@ pub enum Storage {
     Keys {
         #[command(subcommand)]
         action: Option<KeysCmd>,
+    },
+    /// List roles (temporary credentials through STS or `sessions create`), or manage one.
+    Roles {
+        #[command(subcommand)]
+        action: Option<roles::RolesCmd>,
+    },
+    /// Temporary credentials of a role.
+    Sessions {
+        #[command(subcommand)]
+        action: roles::SessionsCmd,
     },
 }
 
@@ -1060,6 +1072,14 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
             }
             v
         }
+        Storage::Roles { action } => match roles::roles(api, as_json, action).await? {
+            Some(v) => v,
+            None => return Ok(()),
+        },
+        Storage::Sessions { action } => match roles::sessions(api, as_json, action).await? {
+            Some(v) => v,
+            None => return Ok(()),
+        },
         Storage::Keys { action: Some(KeysCmd::Delete { id }) } => {
             let v = api.call(Method::DELETE, &format!("/v1/storage/keys/{}", enc(&id)), None).await?;
             if !as_json {

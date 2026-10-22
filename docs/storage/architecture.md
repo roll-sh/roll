@@ -156,6 +156,12 @@ events  (seq INTEGER PRIMARY KEY /* the sequencer; from state.event_seq, never r
 replication_status (bucket_id, key, version_id /* S3's: 'null' or the vid */,
          status TEXT /* PENDING | COMPLETED | FAILED | REPLICA */,
          PRIMARY KEY (bucket_id, key, version_id)) WITHOUT ROWID
+roles   (name TEXT PRIMARY KEY /* IAM role name rules */, id TEXT /* RR + 18 upper base32 */,
+         description, permission /* read | write | admin */, buckets /* JSON; NULL = all */,
+         policy TEXT /* inline IAM policy, JSON; NULL = none */,
+         trust TEXT /* JSON { keys, oidc, external_id } */, max_session_s,
+         generation INTEGER /* +1 on every change */, revoked_before INTEGER /* ms; 0 = none */,
+         created_at, updated_at)                               -- migration 6
 ```
 
 Object ACLs and website redirects live in the row, so every row copy carries them: branch
@@ -174,7 +180,8 @@ version they were written with and replay migrates before applying newer ones. M
 added bucket configuration and object ACLs; migration 3 added versioning and Object Lock (rows
 from before it became null versions, with a `vid` made from their `modified_at` the same way
 new ids are); migration 4 added `blob_sse`; migration 5 added the event outbox
-and replication statuses.
+and replication statuses; migration 6 added `roles` (temporary credentials; sessions themselves
+are never stored, see [Temporary credentials](#temporary-credentials-sts)).
 
 A blob's encryption is fixed when it's written, so `blob_sse` is keyed by blob: every row that
 shares the blob (copies, branches, the trash) shares its encryption, and no row of `objects`,
@@ -495,11 +502,104 @@ Usage writes are relaxed: they ride the next group commit without waiting.
   `STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD(-TRAILER)` and `STREAMING-UNSIGNED-PAYLOAD-TRAILER`
   (current SDKs send CRC trailers by default).
 - The credential scope's region is accepted as given (any region; R2 does the same). The
-  service must be `s3`.
+  service must be `s3` (`sts` for the STS query API on the same listener).
+- Temporary credentials (`RT…` keys) carry their session token in `x-amz-security-token`
+  (`X-Amz-Security-Token` in presigned URLs, a form field in POST uploads). See below.
 - Clock skew is limited to 15 minutes (header-signed SigV2 too); presigned URLs until they
   expire.
 - Anonymous requests get what the bucket's policy, ACLs or `public` flag allow.
 - `x-amz-expected-bucket-owner` must be the deployment's 12-digit account id when sent.
+
+### Temporary credentials (STS)
+
+Browsers, phones and CI shouldn't hold long-lived keys. roll issues short-lived, scoped
+credentials that every AWS SDK understands (`AWS_SESSION_TOKEN`, credential providers, web
+identity):
+
+- **The STS query API** on the S3 listener (`s3-server/src/sts`): `POST /` (or
+  `GET /?Action=…`), form-encoded, `Version=2011-06-15`, answered in STS's XML, errors in STS's
+  `<ErrorResponse>`. SDKs reach it with `endpoint_url` for `sts`. Calls are SigV4-signed with
+  service `sts` (the payload is the body; STS clients don't send `x-amz-content-sha256`),
+  except `AssumeRoleWithWebIdentity`, which is unsigned. Bodies are capped at 64 KiB.
+  - `GetSessionToken` (900 s–36 h, default 12 h): a session of the calling permanent key.
+  - `AssumeRole` (900 s up to the role's maximum, default 1 h): a session of a role whose
+    trust names the calling key (permanent, or a `GetSessionToken` session of one). `ExternalId`
+    is checked in constant time when the role requires it. A session policy (`Policy`, at most
+    2 KB) narrows it; `PolicyArns` are refused (no managed policies). Session tags and
+    transitive tag keys (at most 50, 2 KB together), `SourceIdentity`.
+  - `AssumeRoleWithWebIdentity`: an OIDC ID token of a provider in the role's trust (below).
+  - `GetCallerIdentity`.
+  - Role chaining (a role session assuming a role), MFA, SAML and `GetFederationToken` are
+    refused with clear errors.
+- **Roles** (`roles` table): a trust (permanent keys; OIDC providers with issuer, audiences,
+  an optional subject pattern and `jwks_uri`; an optional external id), a permission and
+  bucket scope like a key's, an optional inline IAM policy (at most 10 KB) and a maximum
+  session duration (15 min–12 h). `RoleArn` is `arn:aws:iam::<account>:role/<name>`; a session's
+  ARN is `arn:aws:sts::<account>:assumed-role/<name>/<session>` and its `aws:userid` is
+  `<role id>:<session>`.
+- **The control plane mints too**: `POST /v1/storage/roles/{name}/sessions` hands a trusted
+  backend a role's credentials, optionally narrower (permission, buckets, session policy, tags,
+  60 s up to the role's maximum), for it to pass to a browser. No STS client needed.
+
+**Session tokens are self-contained** (`s3-store/src/sts.rs`). Nothing is written per session,
+so minting is cheap at any scale and checking a request needs no session lookup:
+
+```text
+token = base64url( version (1) | key id (4) | salt (16) | nonce (12) | AES-256-GCM(claims) + tag (16) )
+AES key = HMAC-SHA256(deployment key, "roll sts session token v1\0" | salt)
+associated data = version | key id | salt | nonce
+claims = JSON { access key id, secret, issued/expires (ms), key, role { name, id, generation },
+                session name, permission, buckets, session policy, tags, transitive keys,
+                source identity, web identity { issuer, subject, audience } }
+```
+
+- The **deployment key** (32 random bytes) is created on first use and kept in the metadata
+  (`state`, `sts_session_keys`), so it's as durable as the rest of the metadata and every node
+  of a deployment shares it. `POST /v1/storage/session-keys/rotate` (`roll storage sessions
+  rotate-key`) makes a new current key; tokens of the previous key keep working and older ones
+  stop. Rotating at most once per 36 h never cuts a live session short.
+- **One AES key per token.** Each token's key is derived from a random 128-bit salt, so random
+  96-bit nonces never meet the GCM birthday bound however many tokens are minted.
+- **Authenticated, not just encrypted.** Any change to any byte (header included) fails the
+  tag check: `InvalidToken`. The claims name their access key id, so a token only works with
+  its own key (compared in constant time); the secret inside it is what the request must be
+  signed with.
+- **Checks on every request:** the token's size (at most 12 KiB, before decoding), the tag,
+  the key id, expiry (`ExpiredToken`, by the store's clock, before the request's time is
+  checked), then revocation:
+  - a role session reads its role (a local SQLite read, no write): a deleted role, another
+    role of the same name (`id`), a changed role (`generation`) or a revocation
+    (`issued_at <= revoked_before`) is `InvalidToken`;
+  - a `GetSessionToken` session acts with its key's current permission and dies with the key.
+- **Errors as on AWS:** a temporary key without its token is `InvalidAccessKeyId`; a permanent
+  key with a token is `InvalidToken`.
+- **What a session may do:** its permission and scope (the role's, narrowed when it was minted,
+  never more), bounded by the role's inline policy and the session policy: both must allow
+  every action, whatever else allows it (a bucket policy or an ACL included). That's stricter
+  than AWS, where a resource policy naming the session can exceed its session policy.
+  CreateBucket, ListBuckets and bypassing governance retention are bounded the same way.
+- **Principals and condition keys:** a role session is `Principal: {"AWS": <role ARN>}` or its
+  assumed-role ARN in bucket policies. It sets `aws:PrincipalArn` (the role ARN, as on AWS),
+  `aws:userid`, `aws:PrincipalType` (`AssumedRole`), `aws:PrincipalTag/<key>`,
+  `aws:TokenIssueTime`, `aws:SourceIdentity`, `aws:MultiFactorAuthPresent` (`false`),
+  `aws:FederatedProvider` and `<provider>:sub`/`<provider>:aud` for web identities. A
+  `GetSessionToken` session is its key.
+- **Never logged:** secrets and tokens stay out of logs and `Debug` output; server access logs
+  show `X-Amz-Security-Token=REDACTED`.
+- **Billing doesn't change:** requests are metered to buckets as usual.
+
+**Web identity** (`s3-server/src/sts/oidc.rs`). Only issuers in the role's trust are ever
+fetched from, so a token can't make roll connect anywhere. The provider's JWKS (`jwks_uri`, or
+the issuer's `/.well-known/openid-configuration`) is fetched over HTTPS only, without
+redirects, with a 5 s timeout and size caps (64 KiB discovery, 256 KiB JWKS, 100 keys), cached
+for an hour, refetched early at most every 30 s when a token names an unknown key id, and kept
+for a day if the provider is down. Tokens (at most 20 000 bytes) must be RS256 or ES256 (no
+`none`, no HMAC, no `crit`), and `iss` (exact), `aud` (one of the provider's audiences),
+`exp` and `nbf` (60 s leeway) and the subject pattern are checked. Session tags come from the
+`https://aws.amazon.com/tags` claim and `SourceIdentity` from
+`https://aws.amazon.com/source_identity`, as on AWS. The fetch is behind
+`s3_server::JwksFetch` (`Server::set_jwks_fetcher`) so tests serve their own keys;
+`Config::oidc_allow_http` allows plain HTTP for tests only.
 
 ### Server-side encryption
 
@@ -643,6 +743,21 @@ GET    /v1/storage/usage?days=30                 → { days, cost: Cost, daily: 
 GET    /v1/storage/keys                          → [Key]
 POST   /v1/storage/keys  { name, permission, buckets?: [string] } → Key & { secret_access_key }
 DELETE /v1/storage/keys/{id}                     → { deleted }
+
+GET    /v1/storage/roles                         → [Role]
+POST   /v1/storage/roles  { name, permission, description?, buckets?: [string], policy?: IamPolicy,
+                            trust?: Trust, max_session_s? (900–43200, default 3600) } → Role
+GET    /v1/storage/roles/{name}                  → Role
+PATCH  /v1/storage/roles/{name}  { any of: description, permission, buckets /* null: all */,
+                                   policy /* null: none */, trust, max_session_s } → Role
+                                 /* every change invalidates the role's sessions */
+DELETE /v1/storage/roles/{name}                  → { deleted }
+POST   /v1/storage/roles/{name}/revoke           → Role   (sessions issued until now stop working)
+POST   /v1/storage/roles/{name}/sessions  { session_name?, duration_s? (60 to max_session_s, default 3600),
+                                            permission? /* ≤ the role's */, buckets? /* within the role's */,
+                                            policy?: IamPolicy, tags?: Record<string,string>,
+                                            transitive_tag_keys?: [string], source_identity? } → Session
+POST   /v1/storage/session-keys/rotate           → { key_id }
 ```
 
 ```ts
@@ -684,6 +799,17 @@ ObjectInfo = ObjectSummary & { metadata: Record<string,string>, tags: Record<str
 ObjectVersion = { key, version_id, is_latest, delete_marker, size, etag, last_modified }
 TrashEntry = { key, size, etag, deleted_at, expires_at, version_id }
 Key = { id /* access key id */, name, permission, buckets: string[] | null, created_at, last_used_at }
+Role = { name, id /* RR… */, arn, description, permission, buckets: string[] | null,
+         policy: IamPolicy | null, trust: Trust, max_session_s, generation, revoked_before /* ms, 0 = never */,
+         created_at, updated_at }
+Trust = { keys: string[] /* permanent access key ids (AssumeRole) */,
+          oidc: [{ issuer /* exactly the tokens' iss */, audiences: string[], subject?: string /* * and ? */,
+                   jwks_uri?: string /* default: the issuer's discovery document */ }],
+          external_id?: string }
+IamPolicy = an IAM identity policy document (no Principal), as JSON
+Session = { access_key_id /* RT… */, secret_access_key, session_token, expiration /* ms */,
+            role_arn, assumed_role_arn, permission, buckets: string[] | null, endpoint, region,
+            env: { AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, AWS_ENDPOINT_URL, AWS_REGION } }
 Pricing = { usd_per_gb_month, usd_per_million_class_a, usd_per_million_class_b,
             usd_per_gb_egress_internet, usd_per_gb_egress_internal }
 Usage = { bucket, days, class_a, class_b, bytes_in, egress_internet_bytes, egress_internal_bytes,
@@ -735,6 +861,12 @@ Details:
   each destination must exist and take an `s3:TestEvent` unless `skip_destination_validation`.
   A refused configuration is a 400 and nothing in the PATCH is applied. The webhook secret is
   created with the first webhook destination; `rotate_webhook_secret` replaces it.
+- Roles: `trust.keys` must name existing permanent keys; `policy` must be a valid identity
+  policy (no `Principal`) of at most 10 KB; issuers and `jwks_uri` are URLs (keys are only ever
+  fetched over HTTPS). Invalid input is a 400, a duplicate name a 409, an unknown role a 404.
+- `POST /roles/{name}/sessions` has no trust check: the control plane's callers are trusted
+  (a backend minting credentials for its users). The secret and token are returned once and
+  never stored.
 
 `ROLL_S3_ACCESS_KEY` and `ROLL_S3_SECRET_KEY`, if set, create (or update) an `admin` key with
 that id and secret at startup, the way MinIO's root user works. This is for local dev and

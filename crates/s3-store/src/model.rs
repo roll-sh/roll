@@ -446,9 +446,28 @@ pub struct AccessKey {
     pub buckets: Option<Vec<String>>,
     pub created_at: i64,
     pub last_used_at: Option<i64>,
+    /// Temporary credentials (STS): the session they belong to. `permission` and `buckets` are
+    /// then the session's (see `sts.rs`).
+    #[serde(skip)]
+    pub session: Option<std::sync::Arc<crate::sts::Session>>,
 }
 
 impl AccessKey {
+    /// Whether these are temporary credentials.
+    pub fn is_temporary(&self) -> bool {
+        self.session.is_some()
+    }
+
+    /// The permanent key that acts: the key itself, or the key behind a `GetSessionToken`
+    /// session. `None` for role sessions (they act as the role).
+    pub fn acting_key(&self) -> Option<&str> {
+        match &self.session {
+            None => Some(&self.id),
+            Some(s) if s.role.is_none() => s.key.as_deref(),
+            Some(_) => None,
+        }
+    }
+
     /// Whether the key may see `bucket` at all.
     pub fn covers(&self, bucket: &str) -> bool {
         self.buckets.as_ref().is_none_or(|b| b.iter().any(|n| n == bucket))

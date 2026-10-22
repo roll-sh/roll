@@ -116,6 +116,7 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - Never size an allocation from a count or length a peer sent. Stream bodies, and cap XML bodies.
     - SSE-C and SSE-KMS are the backing object store's: pass them through on the blob's requests, never re-encrypt bytes on S3, and never store a customer key (only its MD5). An encrypted write the backend doesn't confirm fails and keeps nothing.
     - A change S3 can notify about records its events in its own transaction (`events::emit`), and the dispatcher only delivers rows `Store::due_events` returns (they're durable). Replication shares blobs (a new reference), never copies them.
+    - Temporary credentials (STS) are never stored: a session token is AES-256-GCM-sealed claims under the deployment key in `state` (`s3-store/src/sts.rs`). Never log or `Debug`-print a secret, session token or JWT; never echo a token in an error. A session never gets more than its role, and its role's and session's policies bound every allow. Only fetch OIDC keys from issuers in a role's trust, over HTTPS, with timeouts and size caps.
   - After touching anything storage-related, run `pnpm test:storage`. It skips itself when nothing relevant changed and runs real S3 tools in Docker (`amazon/aws-cli`, `rclone/rclone`, MinIO's `mc` from `bitnamilegacy/minio-client`, `d3fk/s3cmd` for SigV2).
   - Put new tests in the matching place:
     - protocol vectors and parsers: unit tests in `s3-proto`

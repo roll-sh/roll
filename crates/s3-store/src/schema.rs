@@ -165,6 +165,19 @@ CREATE TABLE replication_status (
   PRIMARY KEY (bucket_id, key, version_id)
 ) WITHOUT ROWID;
 "#,
+// Roles for temporary credentials (STS AssumeRole, AssumeRoleWithWebIdentity and the control
+// plane's sessions). Sessions themselves are never stored: their tokens are sealed claims (see
+// `sts.rs`). `generation` goes up on every change and `revoked_before` (Unix ms) on a
+// revocation; either invalidates the role's existing sessions. The session-token keys live in
+// `state` (`sts_session_keys`).
+r#"
+CREATE TABLE roles (
+  name TEXT PRIMARY KEY, id TEXT NOT NULL, description TEXT NOT NULL, permission TEXT NOT NULL,
+  buckets TEXT, policy TEXT, trust TEXT NOT NULL, max_session_s INTEGER NOT NULL,
+  generation INTEGER NOT NULL, revoked_before INTEGER NOT NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+) WITHOUT ROWID;
+"#,
 ];
 
 pub(crate) const LATEST: u32 = MIGRATIONS.len() as u32;
