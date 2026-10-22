@@ -177,7 +177,12 @@ pub(crate) fn same_operand(a: &Expr, b: &Expr) -> bool {
             _ => None,
         }
     };
+    // (Or the same expression: a virtual generated column's, say.)
     matches!((strip(a), strip(b)), (Some(x), Some(y)) if x == y)
+        || (!matches!(a, Expr::Col(..) | Expr::Const(..))
+            && !a.columns().is_empty()
+            && !a.is_volatile()
+            && a.same_as(b))
 }
 
 fn numeric(t: &DataType) -> bool {

@@ -42,6 +42,7 @@ mod mergeappend;
 pub use mergeappend::{PartOrder, count_members, partition_order, plan_ordered_append};
 mod syscat;
 pub use syscat::{sys_index_order, sys_size, sys_table};
+pub(crate) use syscat::sys_unique_col;
 
 pub const CPU_INDEX_TUPLE_COST: f64 = 0.005;
 /// DEFAULT_PAGE_CPU_MULTIPLIER.
@@ -205,8 +206,16 @@ impl IndexInfo {
 
     /// A partial index's predicate implies restriction clause `q` (it is left out of the
     /// index's indrestrictinfo).
+    /// (Not for a target relation of UPDATE / DELETE / row locking: its quals are rechecked
+    /// (check_index_predicates' is_target_rel); nor for an index without amoptionalkey
+    /// (hash), whose first key's clauses could all go.)
     fn implies(&self, q: &Expr) -> bool {
-        !self.pred.is_empty() && implied_by(std::slice::from_ref(q), &self.pred)
+        self.am != Am::Hash && self.implies_plan(q)
+    }
+
+    /// The same, as create_indexscan_plan leaves the implied quals out of the scan's filter.
+    fn implies_plan(&self, q: &Expr) -> bool {
+        !self.target && !self.pred.is_empty() && implied_by(std::slice::from_ref(q), &self.pred)
     }
 }
 
@@ -219,6 +228,8 @@ struct IndexInfo {
     /// Columns an index-only scan can return.
     canreturn: Vec<usize>,
     pred: Vec<Expr>,
+    /// The relation is a result relation or row-marked (its quals all stay).
+    target: bool,
     pages: f64,
     tuples: f64,
     /// btree height (-1: unknown).
@@ -460,6 +471,7 @@ fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo>
             keys: b.keys.clone(),
             canreturn,
             pred,
+            target: false,
             pages,
             tuples,
             height,
@@ -3232,7 +3244,10 @@ impl Planner<'_, '_> {
                 }
             }
         }
-        let indexes = index_infos(self.ctx, &t, size.tuples);
+        let mut indexes = index_infos(self.ctx, &t, size.tuples);
+        if s.with_key || s.mark.is_some() {
+            indexes.iter_mut().for_each(|ii| ii.target = true);
+        }
         let mut exprs = Vec::new();
         let mut booleq = None;
         // examine_variable: an index expression's statistics only for a user who may read
@@ -4010,7 +4025,7 @@ pub fn describe_with(ctx: &ExecCtx, s: &ScanPlan, par: Option<(usize, f64)>) -> 
                 .iter()
                 .filter(|q| {
                     !quals.iter().any(|x| !x.lossy && x.orig.same_as(q))
-                        && !ii.implies(q)
+                        && !ii.implies_plan(q)
                         && !(q.is_immutable() && implied_by(std::slice::from_ref(q), &conds))
                 })
                 .cloned()
@@ -5582,6 +5597,7 @@ fn plan_level_ordered(
     p.remove_useless_joins(plan, needed);
     p.reduce_dummies(plan);
     joinpath::whole_rows(plan, &mut p.whole_rows.borrow_mut());
+    p.null_unused_level_outputs(plan, needed);
     p.drop_unused_outputs(plan, needed);
     p.walk(plan, needed, lim);
     if !p.lifted.borrow().is_empty() {

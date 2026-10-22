@@ -272,6 +272,9 @@ impl VarRef {
         if self.expr.is_some() {
             return false;
         }
+        if crate::sql::paths::sys_unique_col(&self.table, self.col) {
+            return true;
+        }
         self.table
             .indexes
             .iter()

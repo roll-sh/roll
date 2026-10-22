@@ -1,0 +1,405 @@
+> CREATE TABLE ga4_tk (unique1 int, unique2 int, two int, four int, ten int, twenty int, hundred int, thousand int, tenthous int)
+-- CREATE TABLE
+
+> INSERT INTO ga4_tk SELECT i, (i * 7919) % 10000, i % 2, i % 4, i % 10, i % 20, i % 100, i % 1000, i
+>   FROM generate_series(0, 9999) i
+-- INSERT 0 10000
+
+> CREATE INDEX ga4_tk_u1 ON ga4_tk (unique1)
+-- CREATE INDEX
+
+> CREATE INDEX ga4_tk_hundred ON ga4_tk (hundred)
+-- CREATE INDEX
+
+> VACUUM ANALYZE ga4_tk
+-- VACUUM
+
+> EXPLAIN (COSTS OFF)
+> SELECT unique1 FROM ga4_tk t0
+> WHERE unique1 < 3
+>   AND EXISTS (
+> 	SELECT 1 FROM ga4_tk t1
+> 	INNER JOIN ga4_tk t2 ON t1.unique1 = t2.hundred
+> 	WHERE t0.ten = t1.twenty AND t0.two <> t2.four OFFSET 0)
+QUERY PLAN:text
+Index Scan using ga4_tk_u1 on ga4_tk t0
+  Index Cond: (unique1 < 3)
+  Filter: EXISTS(SubPlan 1)
+  SubPlan 1
+    ->  Nested Loop
+          ->  Seq Scan on ga4_tk t2
+                Filter: (t0.two <> four)
+          ->  Memoize
+                Cache Key: t2.hundred
+                Cache Mode: logical
+                ->  Index Scan using ga4_tk_u1 on ga4_tk t1
+                      Index Cond: (unique1 = t2.hundred)
+                      Filter: (t0.ten = twenty)
+-- EXPLAIN
+
+> SELECT unique1 FROM ga4_tk t0
+> WHERE unique1 < 3
+>   AND EXISTS (
+> 	SELECT 1 FROM ga4_tk t1
+> 	INNER JOIN ga4_tk t2 ON t1.unique1 = t2.hundred
+> 	WHERE t0.ten = t1.twenty AND t0.two <> t2.four OFFSET 0)
+unique1:int4
+2
+-- SELECT 1
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM ga4_tk t1 JOIN ga4_tk t2 ON t1.unique1 = t2.hundred AND t1.ten = t2.four WHERE t2.unique1 < 50
+QUERY PLAN:text
+Nested Loop
+  ->  Index Scan using ga4_tk_u1 on ga4_tk t2
+        Index Cond: (unique1 < 50)
+  ->  Memoize
+        Cache Key: t2.hundred, t2.four
+        Cache Mode: logical
+        ->  Index Scan using ga4_tk_u1 on ga4_tk t1
+              Index Cond: (unique1 = t2.hundred)
+              Filter: (ten = t2.four)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM ga4_tk t1 JOIN ga4_tk t2 ON t1.unique1 = t2.hundred AND t1.ten < t2.four WHERE t2.unique1 < 50
+QUERY PLAN:text
+Nested Loop
+  ->  Index Scan using ga4_tk_u1 on ga4_tk t2
+        Index Cond: (unique1 < 50)
+  ->  Memoize
+        Cache Key: t2.four, t2.hundred
+        Cache Mode: binary
+        ->  Index Scan using ga4_tk_u1 on ga4_tk t1
+              Index Cond: (unique1 = t2.hundred)
+              Filter: (ten < t2.four)
+-- EXPLAIN
+
+> CREATE TABLE ga4_ek (x numeric, t text)
+-- CREATE TABLE
+
+> INSERT INTO ga4_ek (x, t) SELECT d1::numeric, d1::text
+>   FROM (SELECT round((d / pi())::numeric, 7) AS d1 FROM generate_series(1, 20) AS d) t
+-- INSERT 0 20
+
+> INSERT INTO ga4_ek SELECT * FROM ga4_ek
+-- INSERT 0 20
+
+> CREATE INDEX ga4_ek_idx_x_t ON ga4_ek (x, t)
+-- CREATE INDEX
+
+> VACUUM ANALYZE ga4_ek
+-- VACUUM
+
+> SET enable_seqscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM ga4_ek t1 INNER JOIN ga4_ek t2 ON t1.x = t2.t::numeric AND t1.t::numeric = t2.x
+QUERY PLAN:text
+Nested Loop
+  ->  Index Only Scan using ga4_ek_idx_x_t on ga4_ek t1
+  ->  Memoize
+        Cache Key: t1.x, (t1.t)::numeric
+        Cache Mode: logical
+        ->  Index Only Scan using ga4_ek_idx_x_t on ga4_ek t2
+              Index Cond: (x = (t1.t)::numeric)
+              Filter: (t1.x = (t)::numeric)
+-- EXPLAIN
+
+> SELECT count(*) FROM ga4_ek t1 INNER JOIN ga4_ek t2 ON t1.x = t2.t::numeric AND t1.t::numeric = t2.x
+count:int8
+80
+-- SELECT 1
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_mergejoin
+-- RESET
+
+> CREATE TABLE ga4_pi (a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO ga4_pi SELECT i, chr(65 + i % 26) FROM generate_series(1, 2000) i
+-- INSERT 0 2000
+
+> CREATE INDEX ga4_pi_part ON ga4_pi (a) WHERE b < 'B'
+-- CREATE INDEX
+
+> CREATE INDEX ga4_pi_hash ON ga4_pi USING hash (a) WHERE a = 77
+-- CREATE INDEX
+
+> VACUUM ANALYZE ga4_pi
+-- VACUUM
+
+> EXPLAIN (COSTS OFF) SELECT a FROM ga4_pi WHERE a = 26 AND b < 'B'
+QUERY PLAN:text
+Index Only Scan using ga4_pi_part on ga4_pi
+  Index Cond: (a = 26)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT a FROM ga4_pi WHERE a = 26 AND b < 'B' FOR UPDATE
+QUERY PLAN:text
+LockRows
+  ->  Index Scan using ga4_pi_part on ga4_pi
+        Index Cond: (a = 26)
+        Filter: (b < 'B'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ga4_pi WHERE a = 77
+QUERY PLAN:text
+Index Scan using ga4_pi_hash on ga4_pi
+  Index Cond: (a = 77)
+-- EXPLAIN
+
+> SELECT * FROM ga4_pi WHERE a = 77
+a:int4 | b:text
+77 | Z
+-- SELECT 1
+
+> CREATE TABLE ga4_e (a int, b text, p point)
+-- CREATE TABLE
+
+> INSERT INTO ga4_e SELECT i, 'v' || i, point(i, i) FROM generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> CREATE INDEX ga4_e_ab ON ga4_e ((a + 1), a)
+-- CREATE INDEX
+
+> CREATE INDEX ga4_e_b ON ga4_e (b)
+-- CREATE INDEX
+
+> CREATE INDEX ga4_e_gist ON ga4_e USING gist (p, circle(p, 1))
+-- CREATE INDEX
+
+> VACUUM ANALYZE ga4_e
+-- VACUUM
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT a FROM ga4_e WHERE a + 1 > 5 AND a < 7
+QUERY PLAN:text
+Index Only Scan using ga4_e_ab on ga4_e
+  Index Cond: ((((a + 1)) > 5) AND (a < 7))
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT a FROM ga4_e WHERE a + 1 = 5
+QUERY PLAN:text
+Index Only Scan using ga4_e_ab on public.ga4_e
+  Output: a
+  Index Cond: (((ga4_e.a + 1)) = 5)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT p FROM ga4_e WHERE circle(p, 1) @> circle(point(0, 0), 0.95)
+QUERY PLAN:text
+Index Only Scan using ga4_e_gist on public.ga4_e
+  Output: p
+  Index Cond: ((circle(ga4_e.p, '1'::double precision)) @> '<(0,0),0.95>'::circle)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT p FROM ga4_e ORDER BY circle(p, 1) <-> point(0, 0) LIMIT 1
+QUERY PLAN:text
+Limit
+  Output: p, ((circle(p, '1'::double precision) <-> '(0,0)'::point))
+  ->  Index Only Scan using ga4_e_gist on public.ga4_e
+        Output: p, (circle(p, '1'::double precision) <-> '(0,0)'::point)
+        Order By: ((circle(ga4_e.p, '1'::double precision)) <-> '(0,0)'::point)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT a FROM ga4_e ORDER BY p <-> point(0, 0)
+QUERY PLAN:text
+Index Scan using ga4_e_gist on public.ga4_e
+  Output: a, (p <-> '(0,0)'::point)
+  Order By: (ga4_e.p <-> '(0,0)'::point)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT a FROM ga4_e ORDER BY b
+QUERY PLAN:text
+Index Scan using ga4_e_b on public.ga4_e
+  Output: a, b
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT a FROM ga4_e ORDER BY b LIMIT 2
+QUERY PLAN:text
+Limit
+  Output: a, b
+  ->  Index Scan using ga4_e_b on public.ga4_e
+        Output: a, b
+-- EXPLAIN
+
+> SELECT a FROM ga4_e ORDER BY b LIMIT 2
+a:int4
+1
+10
+-- SELECT 2
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET enable_bitmapscan
+-- RESET
+
+> CREATE TABLE ga4_few (id int, dataa text, datab text)
+-- CREATE TABLE
+
+> INSERT INTO ga4_few VALUES (1, 'a', 'foo'), (2, 'a', 'bar'), (3, 'b', 'bar')
+-- INSERT 0 3
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM ga4_few f1, (SELECT unnest(ARRAY[1, 2]) FROM ga4_few f2 WHERE false OFFSET 0) ss
+QUERY PLAN:text
+Result
+  Output: f1.id, f1.dataa, f1.datab, ss.unnest
+  One-Time Filter: false
+-- EXPLAIN
+
+> SELECT * FROM ga4_few f1, (SELECT unnest(ARRAY[1, 2]) FROM ga4_few f2 WHERE false OFFSET 0) ss
+id:int4 | dataa:text | datab:text | unnest:int4
+-- SELECT 0
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM ga4_few f1 LEFT JOIN (SELECT unnest(ARRAY[1, 2]) u FROM ga4_few f2 WHERE false OFFSET 0) ss ON true
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: f1.id, f1.dataa, f1.datab, u
+  ->  Seq Scan on public.ga4_few f1
+        Output: f1.id, f1.dataa, f1.datab
+  ->  Result
+        Output: u
+        One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM ga4_few f1, ga4_few f2 WHERE f2.id = 1 AND f2.id = 2
+QUERY PLAN:text
+Result
+  Output: f1.id, f1.dataa, f1.datab, f2.id, f2.dataa, f2.datab
+  One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM ga4_few f1 WHERE f1.id = 1 AND f1.id = 2
+QUERY PLAN:text
+Result
+  Output: id, dataa, datab
+  One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM ga4_few f1 JOIN (SELECT * FROM ga4_few f2 WHERE false) s ON true
+QUERY PLAN:text
+Result
+  Output: f1.id, f1.dataa, f1.datab, f2.id, f2.dataa, f2.datab
+  One-Time Filter: false
+-- EXPLAIN
+
+> CREATE FUNCTION ga4_void1(a int) RETURNS void LANGUAGE sql AS $$ SELECT a + 1 $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION ga4_void2(a int, b int) RETURNS void LANGUAGE sql AS $$ SELECT ga4_void1(a + b) $$
+-- CREATE FUNCTION
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT ga4_void2(11, 22)
+QUERY PLAN:text
+Result
+  Output: ga4_void1(33)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT ga4_void1(11)
+QUERY PLAN:text
+Result
+  Output: ga4_void1(11)
+-- EXPLAIN
+
+> SELECT ga4_void2(11, 22), ga4_void1(1)
+ga4_void2:void | ga4_void1:void
+NULL | NULL
+-- SELECT 1
+
+> CREATE TEMP TABLE ga4_undername (f1 name, f2 int)
+-- CREATE TABLE
+
+> CREATE TEMP VIEW ga4_overview AS SELECT f1::information_schema.sql_identifier AS sqli, f2 FROM ga4_undername
+-- CREATE VIEW
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ga4_overview WHERE sqli = 'foo' ORDER BY sqli
+QUERY PLAN:text
+Seq Scan on ga4_undername
+  Filter: (f1 = 'foo'::name)
+-- EXPLAIN
+
+> CREATE TABLE ga4_ct (a int, x text COLLATE "C", y text COLLATE "POSIX", z text, n name)
+-- CREATE TABLE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ga4_ct ORDER BY x, y
+QUERY PLAN:text
+Sort
+  Sort Key: x COLLATE "C", y COLLATE "POSIX"
+  ->  Seq Scan on ga4_ct
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ga4_ct ORDER BY x DESC, y COLLATE "C" ASC NULLS FIRST
+QUERY PLAN:text
+Sort
+  Sort Key: x COLLATE "C" DESC, y COLLATE "C" NULLS FIRST
+  ->  Seq Scan on ga4_ct
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ga4_ct ORDER BY z, n
+QUERY PLAN:text
+Sort
+  Sort Key: z, n
+  ->  Seq Scan on ga4_ct
+-- EXPLAIN
+
+> CREATE TABLE ga4_g33 (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL NOT NULL, CHECK (b > 10))
+-- CREATE TABLE
+
+> SET constraint_exclusion TO on
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ga4_g33 WHERE b < 10
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ga4_g33 WHERE b IS NULL
+QUERY PLAN:text
+Result
+  One-Time Filter: false
+-- EXPLAIN
+
+> RESET constraint_exclusion
+-- RESET
+
+> CREATE TABLE ga4_bl (a int)
+-- CREATE TABLE
+
+> INSERT INTO ga4_bl VALUES (3), (4)
+-- INSERT 0 2
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ga4_few WHERE id % 2 = 0 AND id NOT IN (SELECT a FROM ga4_bl)
+QUERY PLAN:text
+Seq Scan on ga4_few
+  Filter: ((NOT (ANY (id = (hashed SubPlan 1).col1))) AND ((id % 2) = 0))
+  SubPlan 1
+    ->  Seq Scan on ga4_bl
+-- EXPLAIN
+
+> SELECT * FROM ga4_few WHERE id % 2 = 0 AND id NOT IN (SELECT a FROM ga4_bl)
+id:int4 | dataa:text | datab:text
+2 | a | bar
+-- SELECT 1
+

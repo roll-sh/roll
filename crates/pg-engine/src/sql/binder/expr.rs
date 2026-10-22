@@ -824,7 +824,9 @@ impl Binder<'_, '_> {
                                     &s.name,
                                     was.clone(),
                                 ),
-                                _ => crate::sql::expr::raising(
+                                // (EXPLAIN shows it by the view's name for it, qualified by
+                                // its relation's.)
+                                _ => crate::sql::expr::raising_shown(
                                     Error::new(
                                         code::UNDEFINED_COLUMN,
                                         format!(
@@ -832,6 +834,9 @@ impl Binder<'_, '_> {
                                         ),
                                     ),
                                     was.clone(),
+                                    (!r.alias.is_empty()).then(|| {
+                                        format!("{}.{}", crate::catalog::quote_ident(&r.alias), crate::catalog::quote_ident(col))
+                                    }),
                                 ),
                             });
                         }
@@ -7004,9 +7009,15 @@ impl Binder<'_, '_> {
                 } else {
                     Value::Text(Arc::from(""))
                 };
+                // (A body computing a void value itself: that value, as inlining keeps it.)
+                let e = if fdef.language == "sql" && cols.len() == 1 && matches!(cols[0].ty, DataType::Void) {
+                    Expr::Col(0, DataType::Void)
+                } else {
+                    Expr::Const(v, DataType::Void)
+                };
                 Plan::Project {
                     input: Arc::new(plan),
-                    exprs: vec![Expr::Const(v, DataType::Void)],
+                    exprs: vec![e],
                 }
             } else if cols.len() > 1 {
                 // Composite result in a scalar position: one record value.
@@ -7091,9 +7102,13 @@ impl Binder<'_, '_> {
             a.walk(&mut |x| f |= matches!(x, Expr::CaseTest(_)));
             f
         });
+        // (A void function's body must return void itself: inline_function's exprType check.)
+        let void_mismatch = matches!(ret, DataType::Void)
+            && !(cols.len() == 1 && matches!(cols[0].ty, DataType::Void));
         if fdef.language == "sql"
             && !self.deparse
             && !context_dependent
+            && !void_mismatch
             && at.is_some_and(|c| matches!(c.at, SqlFnAt::Inlining) && !c.fold)
             && let Some(e) = inline_scalar(&plan, &coerced)
         {
@@ -7137,7 +7152,8 @@ impl Binder<'_, '_> {
                 def: func::display_def(&fdef),
                 nargs,
                 cost: fdef.procost() as f64,
-                inline: at.is_some_and(|c| c.fold || matches!(c.at, SqlFnAt::Inlining)),
+                inline: !void_mismatch
+                    && at.is_some_and(|c| c.fold || matches!(c.at, SqlFnAt::Inlining)),
             })),
             test_op: None,
         }));

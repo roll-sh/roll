@@ -756,10 +756,18 @@ fn plain_cols(p: &Plan) -> Option<Vec<(String, Option<String>)>> {
             }
             Some(v)
         }
+        // (A subquery's columns by its alias.)
+        Plan::Barrier { input, alias, cols, .. } => {
+            if cols.len() == crate::sql::binder::plan_width(input) {
+                Some(cols.iter().map(|c| (crate::catalog::quote_ident(c), Some(alias.clone()))).collect())
+            } else {
+                plain_cols(input)
+            }
+        }
         Plan::Filter { input, .. }
         | Plan::Sort { input, .. }
         | Plan::Limit { input, .. }
-        | Plan::Barrier { input, .. } | Plan::Context { input, .. } => plain_cols(input),
+        | Plan::Context { input, .. } => plain_cols(input),
         // (Its members' columns are the parent's.)
         Plan::Append {
             inputs,
@@ -910,6 +918,14 @@ impl Planner<'_, '_> {
                 Plan::Empty { .. } => true,
                 Plan::Project { input, .. } => empty(input),
                 Plan::Filter { input, .. } | Plan::Sort { input, .. } => empty(input),
+                // (A subquery whose final rel is dummy is (set_subquery_pathlist), a
+                // set-returning projection over it too (is_dummy_rel), an OFFSET 0 no node.)
+                Plan::Barrier { input, .. } | Plan::ProjectSet { input, .. } => empty(input),
+                Plan::Limit { input, limit: None, offset, .. }
+                    if offset.as_ref().is_none_or(|o| matches!(o, Expr::Const(Value::Int8(0), _))) =>
+                {
+                    empty(input)
+                }
                 _ => false,
             }
         }
@@ -958,6 +974,8 @@ impl Planner<'_, '_> {
                     JoinKind::Full => empty(left) && empty(right),
                 }
             }
+            // (A subquery whose plan is proven empty: a dummy rel of its columns.)
+            Plan::Barrier { input, .. } => !matches!(&**input, Plan::Empty { .. }) && empty(input),
             Plan::Filter { input, pred } => {
                 empty(input)
                     || (constant_false(&Some(pred.clone()))

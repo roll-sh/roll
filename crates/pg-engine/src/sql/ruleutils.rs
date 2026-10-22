@@ -1106,6 +1106,13 @@ impl Deparser<'_, '_> {
                     Some(f) if f.name == def.name => {
                         self.cat.function_name(f, &self.ctx.search_path)
                     }
+                    // (information_schema's own, qualified unless it is on the search path:
+                    // generate_function_name.)
+                    _ if crate::sql::func::monitor::INFORMATION_SCHEMA_FUNCS.contains(&def.name)
+                        && !self.ctx.search_path.iter().any(|s| s == "information_schema") =>
+                    {
+                        format!("information_schema.{}", quote_ident(def.name))
+                    }
                     _ => quote_ident(def.name),
                 };
                 self.buf.push_str(&name);

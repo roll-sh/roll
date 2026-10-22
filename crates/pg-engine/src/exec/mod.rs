@@ -161,7 +161,9 @@ pub struct NodeStats {
     /// A Memoize's cache hits and misses, and the bytes its cache holds.
     pub cache_hits: u64,
     pub cache_misses: u64,
+    /// (Its peak.)
     pub cache_bytes: u64,
+    pub cache_evictions: u64,
     /// Seconds until the first row, and in total, summed over loops.
     pub startup: f64,
     pub total: f64,

@@ -1794,6 +1794,19 @@ pub fn dropped_column(attnum: i16, sibling: Expr, sibling_name: &str, ty: DataTy
     Expr::Call(Arc::new(def), args, ty)
 }
 
+/// `raising`, shown by EXPLAIN as `shown` (a dropped column a stored view still reads, by
+/// its name there).
+pub fn raising_shown(err: Error, ty: DataType, shown: Option<String>) -> Expr {
+    let e = raising(err, ty);
+    match (e, shown) {
+        (Expr::Call(d, mut args, t), Some(n)) => {
+            args.push(Expr::Const(Value::text(n), DataType::Text));
+            Expr::Call(d, args, t)
+        }
+        (e, _) => e,
+    }
+}
+
 /// An expression of type `ty` failing with `err` when it is evaluated (an error Postgres
 /// raises when it initializes or runs the expression, not when it plans it).
 pub fn raising(err: Error, ty: DataType) -> Expr {

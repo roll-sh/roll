@@ -186,7 +186,10 @@ fn leaks(cat: &Catalog, e: &Expr) -> bool {
     let mut leak = false;
     e.walk(&mut |x| match x {
         Expr::Call(d, args, _) => {
-            let proof = leakproof_procs().contains(&d.oid)
+            // (A made type's operator over a built-in's implementation (`LANGUAGE internal
+            // AS 'int8eq'`) is its own function, not leakproof.)
+            let made = args.iter().any(|a| matches!(a.ty(), DataType::Base(_)));
+            let proof = (leakproof_procs().contains(&d.oid) && !made)
                 || cat.functions.get(&d.oid).is_some_and(|f| f.leakproof);
             if !proof && reads_cols(args) {
                 leak = true;
@@ -1389,6 +1392,13 @@ fn ec_constants(
         if def.name != "=" || args.len() != 2 || e.is_volatile() {
             return None;
         }
+        // (A made type's `=` in no btree family isn't mergejoinable: no class.)
+        if args
+            .iter()
+            .any(|a| matches!(a.ty(), DataType::Base(_)) && alias_family(&a.ty()).is_none())
+        {
+            return None;
+        }
         let colish = |x: &Expr| match x {
             Expr::Col(..) => true,
             Expr::Cast(y, ..) | Expr::Relabel(y, _) => matches!(&**y, Expr::Col(..)),
@@ -1425,15 +1435,20 @@ fn ec_constants(
     // (Into an outer join's nullable side not an outer query's value: in Postgres a
     // sublink reading it was pulled up into a join before equivalence classes form.)
     let outer_join = !(to_right && to_left);
+    // (Under row-level security the statement's quals sit above a security level: one that
+    // isn't leakproof is no equivalence class member (process_equivalence).)
+    let rls = QUERY_RLS.with(|f| f.get());
     let lconst: Vec<(Expr, Expr, Expr)> = lpush
         .iter()
         .filter(|_| to_right)
+        .filter(|e| !(rls && leaks(cat, e)))
         .filter_map(|e| const_eq(e).map(|(x, k)| (x, k, e.clone())))
         .filter(|(_, k, _)| !(outer_join && k.has_outer_refs()))
         .collect();
     let rconst: Vec<(Expr, Expr, Expr)> = rpush
         .iter()
         .filter(|_| to_left)
+        .filter(|e| !(rls && leaks(cat, e)))
         .filter_map(|e| const_eq(e).map(|(x, k)| (x, k, e.clone())))
         .filter(|(_, k, _)| !(outer_join && k.has_outer_refs()))
         .collect();
@@ -1796,6 +1811,19 @@ fn qual_cost(e: &Expr) -> f64 {
                 && !(from.is_string() && to.is_string()) =>
         {
             cost += 1.0
+        }
+        // (An uncorrelated `= ANY` over hashable values is a hashed SubPlan: per row, its
+        // comparisons (cost_subplan with useHashTable; the table is built once).)
+        Expr::Subquery(s)
+            if s.kind == crate::sql::expr::SubqueryKind::Any
+                && s.params.is_empty()
+                && s.test_op.is_none()
+                && !s.left.is_empty()
+                && s.ops.iter().all(|o| o.name == "=")
+                && s.left.iter().all(|l| hashable(&l.ty()))
+                && !crate::exec::reads_enclosing(&s.plan, 0) =>
+        {
+            cost += s.ops.len().max(1) as f64
         }
         Expr::Subquery(_) => cost += 1000.0,
         _ => {}

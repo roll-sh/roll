@@ -122,6 +122,16 @@ fn sys_indexes(t: SysTable) -> Vec<Arc<Index>> {
     out
 }
 
+/// Whether stand-in table `t`'s column `col` is the one key of a unique index of its
+/// catalog's (examine_variable's isunique).
+pub(crate) fn sys_unique_col(t: &Table, col: usize) -> bool {
+    stand_in_of(t).is_some_and(|st| {
+        sys_indexes(st).iter().any(|ix| {
+            ix.unique && ix.columns.len() == 1 && matches!(ix.columns[0].key, IndexKey::Column(c) if c == col)
+        })
+    })
+}
+
 /// The catalog's size: its rows, and the heap pages they'd fill.
 pub fn sys_size(t: SysTable, ctx: &ExecCtx) -> RelSize {
     let tuples = crate::sql::explain::sys_tuples(t, ctx);
@@ -164,6 +174,7 @@ pub(super) fn sys_index_infos(t: SysTable, tuples: f64) -> Vec<IndexInfo> {
                 am: Am::Btree,
                 keys,
                 pred: Vec::new(),
+                target: false,
                 pages,
                 tuples,
                 height,

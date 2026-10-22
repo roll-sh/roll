@@ -1204,7 +1204,9 @@ impl Search<'_, '_, '_> {
                 })
                 .collect();
             // The clauses with the outer value as a parameter.
-            let mut prel = r.shallow_with_quals();
+            let Some(mut prel) = r.shallow_param() else {
+                continue;
+            };
             let mut params = Vec::new();
             let mut enforced = Vec::new();
             for (k, (col, other, _, ci)) in used.iter().enumerate() {
@@ -1226,7 +1228,9 @@ impl Search<'_, '_, '_> {
                     && args.len() == 2
                     && args[0].ty() == args[1].ty()
                     && def.name == "=";
-                let mine_first = if symmetric { index_key } else { mine_first };
+                // (A written clause between exactly these members is reused as written:
+                // ec_search_clause_for_ems.)
+                let mine_first = if symmetric && self.clauses[*ci].derived { index_key } else { mine_first };
                 let q = if mine_first {
                     Expr::Call(def.clone(), vec![colx, param], ty.clone())
                 } else {
@@ -1239,9 +1243,16 @@ impl Search<'_, '_, '_> {
             // get_baserel_parampathinfo: the other join clauses movable into the leaf with
             // these outer leaves are the path's too (its filter), their values of the
             // outer leaves parameters.
+            // (An equality of an equivalence class no clause enforced so far has too:
+            // generate_join_implied_equalities' one clause per class.)
+            let mut ecs: Vec<usize> = enforced
+                .iter()
+                .filter_map(|&ci| self.clause_ec(&self.clauses[ci]))
+                .collect();
             for (ci, c) in self.clauses.iter().enumerate() {
+                let ec_taken = c.eq.is_some() && self.clause_ec(c).is_some_and(|e| ecs.contains(&e));
                 if enforced.contains(&ci)
-                    || c.eq.is_some()
+                    || ec_taken
                     || c.leaves & set == 0
                     || c.leaves == set
                     || c.leaves & !(set | req) != 0
@@ -1278,8 +1289,54 @@ impl Search<'_, '_, '_> {
                 }) else {
                     continue;
                 };
+                if let Some(e) = self.clause_ec(c) {
+                    ecs.push(e);
+                }
                 prel.quals.push(q);
                 enforced.push(ci);
+            }
+            // ppi_clauses' order: the movable join clauses, then the equivalence classes'
+            // (in the order the classes formed): the parameters (a Memoize's cache keys)
+            // in the order the clauses read them.
+            {
+                let nrq = r.quals.len();
+                let mut order: Vec<usize> = (0..enforced.len()).collect();
+                order.sort_by_key(|&i| {
+                    let c = &self.clauses[enforced[i]];
+                    (c.eq.is_some(), self.clause_ec(c).unwrap_or(usize::MAX), enforced[i])
+                });
+                let tail: Vec<Expr> = prel.quals.drain(nrq..).collect();
+                let mut quals: Vec<Expr> = order.iter().map(|&i| tail[i].clone()).collect();
+                enforced = order.iter().map(|&i| enforced[i]).collect();
+                let mut renum: Vec<usize> = Vec::new();
+                for q in &quals {
+                    q.walk(&mut |x| {
+                        if let Expr::Outer(1, k, _) = x
+                            && !renum.contains(k)
+                        {
+                            renum.push(*k);
+                        }
+                    });
+                }
+                for k in 0..params.len() {
+                    if !renum.contains(&k) {
+                        renum.push(k);
+                    }
+                }
+                for q in &mut quals {
+                    *q = std::mem::replace(q, Expr::Const(Value::Null, DataType::Unknown))
+                        .transform(&mut |x| {
+                            Ok(match x {
+                                Expr::Outer(1, k, t) => {
+                                    Expr::Outer(1, renum.iter().position(|&j| j == k).unwrap(), t)
+                                }
+                                x => x,
+                            })
+                        })
+                        .unwrap();
+                }
+                params = renum.iter().map(|&k| params[k].clone()).collect();
+                prel.quals.extend(quals);
             }
             let nrq = r.quals.len();
             prel.loop_count = (0..self.leaves.len())
@@ -1485,7 +1542,9 @@ impl Search<'_, '_, '_> {
             };
             let req = c.leaves & !set;
             let nrq = r.quals.len();
-            let mut prel = r.shallow_with_quals();
+            let Some(mut prel) = r.shallow_param() else {
+                continue;
+            };
             prel.quals.push(q.clone());
             prel.loop_count = self.loop_count(req);
             prel.rows = costs::clamp_rows(prel.size.tuples * self.pl.sel(&prel, &prel.quals));
@@ -1679,7 +1738,9 @@ impl Search<'_, '_, '_> {
             let mut scans = Vec::new();
             let mut any_index = false;
             for m in members {
-                let mut prel = m.rel.shallow_with_quals();
+                let Some(mut prel) = m.rel.shallow_param() else {
+                    continue 'req;
+                };
                 let nrq = prel.quals.len();
                 for (k, (mine, other, _, ci)) in used.iter().enumerate() {
                     // The leaf's value as the member has it (its columns: columns, or a
@@ -1826,6 +1887,33 @@ fn cheapest_param(list: &[JP]) -> Option<&JP> {
     best
 }
 
+/// query_is_distinct_for: a query level's plan returns no two rows equal in `cols` (its
+/// output columns): grouped by columns among them, DISTINCT on them, or one row.
+fn distinct_for(p: &Plan, cols: &[usize]) -> bool {
+    match p {
+        Plan::Sort { input, .. } | Plan::Limit { input, .. } | Plan::Filter { input, .. } => distinct_for(input, cols),
+        Plan::Project { input, exprs } => {
+            let mut inner = Vec::new();
+            for &c in cols {
+                if let Some(Expr::Col(j, _)) = exprs.get(c) {
+                    inner.push(*j);
+                }
+            }
+            match &**input {
+                Plan::Agg { groups, sets: None, .. } => {
+                    (0..groups.len()).all(|g| inner.contains(&g))
+                }
+                _ => distinct_for(input, &inner),
+            }
+        }
+        Plan::Agg { groups, sets: None, .. } => (0..groups.len()).all(|g| cols.contains(&g)),
+        Plan::Distinct { input, on: None, .. } => {
+            (0..crate::sql::binder::plan_width(input)).all(|g| cols.contains(&g))
+        }
+        _ => false,
+    }
+}
+
 impl Rel {
     /// A copy to add parameterized quals to.
     fn shallow_with_quals(&self) -> Rel {
@@ -1833,6 +1921,37 @@ impl Rel {
         r.quals = self.quals.clone();
         r
     }
+
+    /// The same, for a nested loop's parameterized inner side: it runs with the outer row
+    /// as a frame of its own (`Outer(1, k)`), so the values of enclosing query levels its
+    /// quals read are a level further out. None when a sub-select in them reads those.
+    fn shallow_param(&self) -> Option<Rel> {
+        let mut r = self.shallow();
+        r.quals = self.quals.iter().map(deepen_outer).collect::<Option<_>>()?;
+        Some(r)
+    }
+}
+
+/// `e` read one frame further in (see `Rel::shallow_param`); None when a sub-select in it
+/// reads an enclosing query level's values itself.
+pub(super) fn deepen_outer(e: &Expr) -> Option<Expr> {
+    let mut ok = true;
+    e.walk(&mut |x| {
+        if let Expr::Subquery(s) = x {
+            ok &= !crate::exec::reads_enclosing(&s.plan, usize::from(!s.params.is_empty()));
+        }
+    });
+    if !ok {
+        return None;
+    }
+    e.clone()
+        .transform(&mut |x| {
+            Ok(match x {
+                Expr::Outer(d, k, t) => Expr::Outer(d + 1, k, t),
+                x => x,
+            })
+        })
+        .ok()
 }
 
 // ── join relations ──
@@ -2228,6 +2347,32 @@ impl Search<'_, '_, '_> {
         }
         let l = inner.trailing_zeros() as usize;
         let leaf = &self.leaves[l];
+        // A subquery distinct on the columns the join equates (rel_is_distinct_for's
+        // query_is_distinct_for: its GROUP BY keys, DISTINCT outputs, or a single row).
+        if leaf.scan.is_none()
+            && let Plan::Barrier { input, .. } = &leaf.plan
+        {
+            let mut cols = Vec::new();
+            for &c in restrict {
+                // (Equal under a nondeterministic collation isn't the grouping's equal.)
+                if matches!(&self.clauses[c].expr, Expr::Call(d, ..)
+                    if d.coll.as_ref().is_some_and(|c| !c.deterministic))
+                {
+                    continue;
+                }
+                if let Some((a, b, al, bl)) = &self.clauses[c].eq {
+                    for (x, xl, yl) in [(a, al, bl), (b, bl, al)] {
+                        if *xl == inner
+                            && *yl & inner == 0
+                            && let Some(g) = key_col(x)
+                        {
+                            cols.push(g - leaf.off);
+                        }
+                    }
+                }
+            }
+            return distinct_for(input, &cols);
+        }
         // (A pulled-up subquery's scan computing its PlaceHolderVars: through the
         // projection's columns.)
         let (t, proj): (&std::sync::Arc<crate::catalog::Table>, Option<&Vec<Expr>>) = match (&leaf.scan, &leaf.plan) {
@@ -3741,6 +3886,9 @@ impl Search<'_, '_, '_> {
                     if let Some(f) = s.filter.take() {
                         conjuncts(f, &mut all);
                     }
+                    for q in &mut all {
+                        *q = deepen_outer(q).expect("checked by shallow_param");
+                    }
                     all.extend(extra);
                     s.filter = Some(if all.len() == 1 {
                         all.pop().unwrap()
@@ -3776,6 +3924,9 @@ impl Search<'_, '_, '_> {
                     let mut all = Vec::new();
                     if let Some(f) = s.filter.take() {
                         conjuncts(f, &mut all);
+                    }
+                    for q in &mut all {
+                        *q = deepen_outer(q).expect("checked by shallow_param");
                     }
                     all.extend(extra);
                     s.filter = Some(if all.len() == 1 {

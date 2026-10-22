@@ -820,7 +820,26 @@ fn rowmarks_under(p: &Plan, marks: &std::collections::HashSet<usize>) -> usize {
 
 /// The output columns of every node its consumers use (PG's reltargets), by address.
 fn needed_masks(root: &Arc<Plan>) -> HashMap<usize, Vec<bool>> {
-    needed_masks_of(root)
+    let mut out = needed_masks_of(root);
+    // (The statement's top projection only dropping the resjunk sort columns of a scan
+    // read in their order: the scan's target list keeps them.)
+    let scan_proj = |mut q: &Plan| {
+        while let Plan::Limit { input, .. } | Plan::LockRows { input, .. } = q {
+            q = input;
+        }
+        matches!(q, Plan::Project { input: pi, .. } if matches!(&**pi, Plan::Scan(_)))
+    };
+    if let Plan::Project { input, exprs } = &**root
+        && scan_proj(input)
+        && exprs.len() < super::binder::plan_width(input)
+        && exprs.iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i))
+    {
+        let w = super::binder::plan_width(input);
+        let inner = needed_masks_of(input);
+        out.extend(inner);
+        out.insert(addr(input), vec![true; w]);
+    }
+    out
 }
 
 fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
@@ -2272,6 +2291,33 @@ impl Builder<'_, '_> {
 
     /// `e` over columns `cols`, deparsed bare and qualified.
     fn name(&mut self, e: &Expr, cols: &[Name], aggs: &[AggCall]) -> Name {
+        // A column a stored view reads that has been dropped since: by the name the view
+        // knows it by (its RTE's column names), qualified as the relation's others are.
+        let is_dropped = |x: &Expr| {
+            matches!(x, Expr::Call(d, args, _) if d.oid == 0
+                && d.name == "raise_error"
+                && args.len() == 4)
+        };
+        let mut dropped = false;
+        e.walk(&mut |x| dropped |= is_dropped(x));
+        if dropped {
+            let mut more: Vec<Name> = cols.to_vec();
+            let e = e
+                .clone()
+                .transform(&mut |x| {
+                    if !is_dropped(&x) {
+                        return Ok(x);
+                    }
+                    let Expr::Call(_, args, ty) = &x else { unreachable!() };
+                    let Expr::Const(Value::Text(shown), _) = &args[3] else {
+                        return Ok(x);
+                    };
+                    more.push(split_qualified(shown));
+                    Ok(Expr::Col(more.len() - 1, ty.clone()))
+                })
+                .unwrap_or_else(|_| e.clone());
+            return self.name(&e, &more, aggs);
+        }
         // GROUPING(keys): a test of the grouping set mask column, shown by the keys.
         let is_grouping = |x: &Expr| {
             matches!(x, Expr::Call(d, args, _) if d.oid == 0 && d.name == "grouping"
@@ -2879,6 +2925,27 @@ impl Builder<'_, '_> {
                 pt.output = b.node.output.clone();
             }
         }
+        // (A dummy relation's Result: its Vars, then the PlaceHolderVars it evaluates, as
+        // its reltarget lists them.)
+        if self.o.verbose
+            && let Plan::Project { input, exprs } = &**p
+            && matches!(&**input, Plan::Empty { .. })
+            && b.node.node_type == "Result"
+        {
+            let mask = self.needed.get(&addr(p));
+            let shown: Vec<&Expr> = exprs
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| b.node.output.len() == exprs.len() || mask.is_none_or(|m| m.get(*i).copied().unwrap_or(true)))
+                .map(|(_, e)| e)
+                .collect();
+            let (vars, rest): (Vec<_>, Vec<_>) = if shown.len() == b.node.output.len() {
+                b.node.output.drain(..).zip(shown).partition(|(_, e)| matches!(e, Expr::Col(..)))
+            } else {
+                (Vec::new(), b.node.output.drain(..).map(|o| (o, &exprs[0])).collect())
+            };
+            b.node.output = vars.into_iter().chain(rest).map(|(o, _)| o).collect();
+        }
         b
     }
 
@@ -3009,7 +3076,8 @@ impl Builder<'_, '_> {
                     .push(Detail::Text("One-Time Filter", "false".into()));
                 // (Qualified by the relation each was read from, which has a name only when
                 // the plan scans no relation at all: set_rtable_names names just the
-                // relations scanned, or every one when none is.)
+                // relations scanned, or every one when none is. With several, the range
+                // table has several entries: qualified.)
                 let named = self.refnames.is_empty();
                 let rel = |i: usize| {
                     info.as_ref()
@@ -3017,17 +3085,21 @@ impl Builder<'_, '_> {
                         .and_then(|d| d.rels.get(i).cloned().flatten())
                 };
                 let names = match cols {
-                    Some(c) if c.len() == *ncols => c
-                        .iter()
-                        .enumerate()
-                        .map(|(i, x)| match rel(i) {
-                            Some(r) => Name {
-                                plain: x.clone(),
-                                full: format!("{}.{}", quote_ident(&r), x),
-                            },
-                            None => Name::same(x.clone()),
-                        })
-                        .collect(),
+                    Some(c) if c.len() == *ncols => {
+                        let rels: Vec<Option<String>> = (0..c.len()).map(rel).collect();
+                        let several = rels.iter().flatten().any(|r| rels.iter().flatten().any(|q| q != r));
+                        c.iter()
+                            .zip(rels)
+                            .map(|(x, r)| match r {
+                                Some(r) if several => Name::same(format!("{}.{}", quote_ident(&r), x)),
+                                Some(r) => Name {
+                                    plain: x.clone(),
+                                    full: format!("{}.{}", quote_ident(&r), x),
+                                },
+                                None => Name::same(x.clone()),
+                            })
+                            .collect()
+                    }
                     _ => vec![Name::same("NULL"); *ncols],
                 };
                 Built::passthrough(n, names)
@@ -3216,9 +3288,30 @@ impl Builder<'_, '_> {
                     .unwrap_or_default();
                     n.details.push(Detail::Text("Table Function Call", t));
                 }
+                // (cost_tablefuncscan: the TableFunc's expressions once — a JSON_TABLE's
+                // row pattern and each column's path, ordinality columns none — then a
+                // tuple's CPU cost for each of its 100 rows.)
+                fn path_cols(p: &crate::sql::func::sqljson::PathSpec) -> (usize, u32) {
+                    let mut ops = p.columns.iter().filter(|c| c.query.is_some()).count();
+                    let mut width: u32 = p.columns.iter().map(|c| type_width(&c.ty)).sum();
+                    for n in &p.nested {
+                        let (o, w) = path_cols(n);
+                        ops += o;
+                        width += w;
+                    }
+                    (ops, width)
+                }
+                let (ops, width) = match calls[0].args.get(1) {
+                    Some(Expr::Const(Value::Text(spec), _)) => {
+                        serde_json::from_str::<crate::sql::func::sqljson::TableSpec>(spec)
+                            .map_or((1, 32), |t| path_cols(&t.root))
+                    }
+                    _ => (1, 32),
+                };
                 n.rows = 100.0;
-                n.total_cost = 3.0;
-                n.width = calls.iter().map(|c| type_width(&c.ty)).sum();
+                n.startup_cost = costs::CPU_OPERATOR_COST * (ops + 1) as f64;
+                n.total_cost = n.startup_cost + costs::CPU_TUPLE_COST * 100.0;
+                n.width = width;
                 Built::passthrough(n, names)
             }
             Plan::FunctionScan {
@@ -3425,7 +3518,9 @@ impl Builder<'_, '_> {
                 if self.o.verbose
                     && (addr(p) == self.top || self.level_tops.contains(&addr(p)))
                     && (matches!(c.node.node_type, "Sort" | "Incremental Sort" | "Limit")
-                        || c.node.node_type == "Result" && matches!(&**input, Plan::Project { .. }))
+                        || c.node.node_type == "Result" && matches!(&**input, Plan::Project { .. })
+                        // (A scan read in the ORDER BY's order computing its keys.)
+                        || matches!(&**input, Plan::Project { input: pi, .. } if matches!(&**pi, Plan::Scan(_))))
                     && exprs.len() < c.internal.len()
                     && exprs
                         .iter()
@@ -3643,6 +3738,10 @@ impl Builder<'_, '_> {
                     .zip(&internal)
                     .map(|(e, n)| match e {
                         Expr::Col(j, _) => c.exported.get(*j).cloned().unwrap_or_else(|| n.clone()),
+                        // (A constant isn't referenced from above: fix_upper_expr leaves it.
+                        // Only a subquery's unread output NULLed in its select list is known
+                        // to be one here; others may stand for PlaceHolderVars, referenced.)
+                        Expr::Const(Value::Null, _) if UNREAD_NULLS.with(|u| u.borrow().contains(&addr(p))) => n.clone(),
                         _ => n.wrapped(),
                     })
                     .collect();
@@ -4052,6 +4151,23 @@ impl Builder<'_, '_> {
                             format!("({t})")
                         } else {
                             t
+                        };
+                        // (A column of a collation other than its type's default shows it
+                        // (show_sortorder_options), byte-ordered ones ("C", "POSIX") too.)
+                        let declared = match &k.expr {
+                            Expr::Col(j, ty) if k.using.is_none() => c
+                                .node
+                                .cols
+                                .get(*j)
+                                .and_then(|ci| ci.var.as_ref())
+                                .filter(|v| v.expr.is_none())
+                                .and_then(|v| v.table.columns.get(v.col).and_then(|col| col.collation.clone()))
+                                .filter(|n| n != "default" && !(*ty == DataType::Name && n == "C")),
+                            _ => None,
+                        };
+                        let t = match declared {
+                            Some(n) => format!("{t} COLLATE {}", quote_ident(&n)),
+                            None => t,
                         };
                         t + &sort_suffix(k)
                     })
@@ -6995,6 +7111,36 @@ impl Builder<'_, '_> {
         self.show(&e, names, Cx::Scan)
     }
 
+    /// An index-only scan's expression key columns (its conditions read them as index
+    /// columns: `INDEX_VAR`s, which ruleutils parenthesizes when they aren't Vars).
+    fn ios_expr_keys(&self, s: &ScanPlan) -> Vec<Expr> {
+        let (super::plan::Access::Index { only: true, .. }, Some((ix, _))) = (&s.access, &s.index)
+        else {
+            return Vec::new();
+        };
+        let Ok(bound) = crate::sql::binder::bound_indexes(&s.table, self.ctx) else {
+            return Vec::new();
+        };
+        bound
+            .iter()
+            .find(|b| b.index.oid == ix.oid)
+            .map(|b| b.keys.iter().filter(|k| !matches!(k, Expr::Col(..))).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// `text` (condition `e` shown) with the index expression columns it reads in parentheses.
+    fn paren_index_exprs(&mut self, mut text: String, e: &Expr, keys: &[Expr], names: &[Name]) -> String {
+        for k in keys {
+            let mut found = false;
+            e.walk(&mut |x| found |= x.same_as(k));
+            if found {
+                let shown = self.show(k, names, Cx::Scan);
+                text = text.replace(&shown, &format!("({shown})"));
+            }
+        }
+        text
+    }
+
     /// A scan the planner chose by cost: its node (and bitmap children) with the planner's
     /// estimates.
     fn planned_scan(
@@ -7060,10 +7206,14 @@ impl Builder<'_, '_> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let keys = self.ios_expr_keys(s);
             let texts = d
                 .index_conds
                 .iter()
-                .map(|e| self.index_cond(e, names, &plain))
+                .map(|e| {
+                    let text = self.index_cond(e, names, &plain);
+                    self.paren_index_exprs(text, e, &keys, names)
+                })
                 .collect();
             n.details
                 .push(Detail::Text("Index Cond", and_text(texts).unwrap_or_default()));
@@ -7088,10 +7238,14 @@ impl Builder<'_, '_> {
             n.details.push(Detail::Text("TID Cond", text));
         }
         if !d.order_by.is_empty() {
+            let keys = self.ios_expr_keys(s);
             let texts = d
                 .order_by
                 .iter()
-                .map(|e| self.index_cond(e, names, &[]))
+                .map(|e| {
+                    let text = self.index_cond(e, names, &[]);
+                    self.paren_index_exprs(text, e, &keys, names)
+                })
                 .collect();
             n.details
                 .push(Detail::Text("Order By", and_text(texts).unwrap_or_default()));
@@ -10189,6 +10343,10 @@ impl Builder<'_, '_> {
                     &r.internal
                 };
                 h.output = src.iter().map(|x| self.pick(x, Cx::Output)).collect();
+                // (A Subquery Scan returns what the join reads of it.)
+                if r.node.node_type == "Subquery Scan" && !r.node.output.is_empty() {
+                    h.output = r.node.output.clone();
+                }
                 // The hashed side's scan returns just the columns the join needs
                 // (CP_SMALL_TLIST): those used above, then the keys' and quals'.
                 if r.node.is_scan() {
@@ -11588,15 +11746,15 @@ impl Render<'_> {
                             self.w.prop(
                                 "Hits",
                                 &format!(
-                                    "{}  Misses: {}  Evictions: 0  Overflows: 0  Memory Usage: {kb}kB",
-                                    st.cache_hits, st.cache_misses
+                                    "{}  Misses: {}  Evictions: {}  Overflows: 0  Memory Usage: {kb}kB",
+                                    st.cache_hits, st.cache_misses, st.cache_evictions
                                 ),
                                 true,
                             );
                         } else {
                             self.w.prop("Cache Hits", &st.cache_hits.to_string(), true);
                             self.w.prop("Cache Misses", &st.cache_misses.to_string(), true);
-                            self.w.prop("Cache Evictions", "0", true);
+                            self.w.prop("Cache Evictions", &st.cache_evictions.to_string(), true);
                             self.w.prop("Cache Overflows", "0", true);
                             self.w.prop("Peak Memory Usage", &kb.to_string(), true);
                         }
@@ -12895,6 +13053,100 @@ fn split_shared_subqueries(p: &Arc<Plan>) -> Option<Arc<Plan>> {
     Some(out)
 }
 
+thread_local! {
+    /// The select-list projections of the subqueries planned apart in the plan being
+    /// explained (remove_unused_subquery_outputs' NULLs are constants there).
+    static UNREAD_NULLS: std::cell::RefCell<std::collections::HashSet<usize>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// The subquery levels' select-list projections under `p` (`UNREAD_NULLS`).
+fn select_lists(p: &Plan, out: &mut std::collections::HashSet<usize>) {
+    if let Plan::Barrier { input, secure: false, .. } = p {
+        let mut q: &Plan = input;
+        while let Plan::Limit { input, .. } | Plan::Sort { input, .. } | Plan::LockRows { input, .. } = q {
+            q = input;
+        }
+        if matches!(q, Plan::Project { .. }) {
+            out.insert(addr(q));
+        }
+    }
+    let mut es = Vec::new();
+    node_exprs(p, &mut es);
+    let mut sq = Vec::new();
+    for e in es {
+        subqueries_in(e, &mut sq);
+    }
+    for s in sq {
+        select_lists(&s.plan, out);
+    }
+    for c in plan_inputs(p) {
+        select_lists(c, out);
+    }
+}
+
+/// `rel.col` as a name shown bare (`col`) or qualified; a name without a qualification as it
+/// is.
+fn split_qualified(s: &str) -> Name {
+    let mut quoted = false;
+    let mut dot = None;
+    for (i, c) in s.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '.' if !quoted => dot = Some(i),
+            _ => {}
+        }
+    }
+    match dot {
+        Some(i) => Name {
+            plain: s[i + 1..].to_string(),
+            full: s.to_string(),
+        },
+        None => Name::same(s),
+    }
+}
+
+/// Debugging aid: the plan tree EXPLAIN gets, on stderr, when the engine runs with
+/// `ROLL_DUMP_PLAN` set (node variants, widths, projections, scans, sort keys, sub-selects).
+pub fn dump_plan(p: &Plan, depth: usize) {
+    let dbg = format!("{p:?}");
+    let name: String = dbg.chars().take_while(|c| c.is_alphanumeric()).collect();
+    let extra = match p {
+        Plan::Project { exprs, .. } => exprs
+            .iter()
+            .map(|e| match e {
+                Expr::Col(i, _) => format!("#{i}"),
+                Expr::Const(..) => "K".into(),
+                Expr::Cast(x, from, to, ex) => format!("CAST({x:?} {from:?} -> {to:?} {ex})").chars().take(600).collect(),
+                e => format!("{e:?}").chars().take(300).collect(),
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        Plan::Scan(s) => format!("{} {:?} filter={:?}", s.table.name, s.access, s.filter).chars().take(400).collect(),
+        Plan::Filter { pred, .. } => format!("{pred:?}"),
+        Plan::Sort { keys, .. } => keys
+            .iter()
+            .map(|k| format!("{:?} using={:?}", k.expr, k.using.as_ref().map(|u| (u.name, u.coll.as_ref().map(|c| c.name.clone())))).chars().take(400).collect::<String>())
+            .collect::<Vec<_>>()
+            .join(" | "),
+        _ => String::new(),
+    };
+    eprintln!("{}{} w={} {}", "  ".repeat(depth), name, super::binder::plan_width(p), extra);
+    let mut es = Vec::new();
+    node_exprs(p, &mut es);
+    let mut sq = Vec::new();
+    for e in es {
+        subqueries_in(e, &mut sq);
+    }
+    for s in sq {
+        eprintln!("{}[subquery {}]", "  ".repeat(depth + 1), s.id);
+        dump_plan(&s.plan, depth + 2);
+    }
+    for c in plan_inputs(p) {
+        dump_plan(c, depth + 1);
+    }
+}
+
 pub fn explain(
     plan: &Arc<Plan>,
     hidden_rtes: usize,
@@ -12910,19 +13162,33 @@ pub fn explain(
     // (Built again when it groups partitionwise: the parents' names go unused then.)
     // (An inheritance tree that is a UNION ALL's arm is flattened into its Append: the
     // parent's name goes unused too.)
+    if std::env::var_os("ROLL_DUMP_PLAN").is_some() {
+        dump_plan(plan, 0);
+    }
+    UNREAD_NULLS.with(|u| {
+        let mut set = std::collections::HashSet::new();
+        select_lists(plan, &mut set);
+        *u.borrow_mut() = set;
+    });
     let mut skip: Vec<usize> = Vec::new();
     union_inh_appends(plan, &mut skip);
     let mut pw_named = false;
     let root = loop {
     let (refnames, results) = assign_refnames_skip(plan, Some(ctx), &skip);
     // ON CONFLICT DO UPDATE's EXCLUDED is a range table entry of its own.
-    let excluded = match &**plan {
-        Plan::Insert(i) => i
-            .on_conflict
-            .as_ref()
-            .is_some_and(|oc| matches!(oc.action, ConflictAction::Update { .. })) as usize,
-        _ => 0,
-    };
+    // (Under a rule's actions too: a CTE of them, a frame.)
+    fn excluded_rte(p: &Plan) -> bool {
+        match p {
+            Plan::Insert(i) => i
+                .on_conflict
+                .as_ref()
+                .is_some_and(|oc| matches!(oc.action, ConflictAction::Update { .. })),
+            Plan::Context { input, .. } | Plan::Project { input, .. } => excluded_rte(input),
+            Plan::With { body, ctes, .. } => excluded_rte(body) || ctes.iter().any(|(_, c)| excluded_rte(c)),
+            _ => false,
+        }
+    }
+    let excluded = excluded_rte(plan) as usize;
     let mut b = Builder {
         ctx,
         o,

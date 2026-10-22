@@ -15,11 +15,11 @@ compared statement by statement.
 
 ## Where it stands
 
-As of commit `e890fb0` (2026-10-21), plus server-side files (below) and round 13 (STATUS.md):
+As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 50,852 of 51,150 statements match (99.42%).** 298 differ. The full
+- **Regression suite: 50,877 of 51,150 statements match (99.47%).** 273 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 286 are `EXPLAIN` plan text (96%). Query results already match.
+  - 261 are `EXPLAIN` plan text (96%). Query results already match.
   - 11 are plan choices that show up in results (mostly which side a hash join builds on,
     grouping-set output order).
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
@@ -244,9 +244,10 @@ them all with the "Fixed in round N" sections describing what was already tried.
 7. **partition_aggregate**: done (137/137).
 8. The 18 plan-choice units listed in STATUS.md ("Plan choice visible in results").
 
-Smaller known differences that don't fail a unit today: a plain DISTINCT done by sorting shows
-the scan's full column list (Distinct arm of `explain.rs`); a NULLed-out unused subquery output
-is only shown as `NULL::type` when the projection sits directly over an aggregate.
+Smaller known difference that doesn't fail a unit today: `SELECT DISTINCT a + 1` by sorting
+shows the Unique's output as `(a + 1)` where Postgres refers to the Sort's (`((a + 1))`). (The
+two listed before round 14 are fixed: a plain DISTINCT's column lists, and unread subquery
+outputs as NULLs in the subquery's select list, shown as constants above.)
 
 Not started and lower priority: `roll_pk_clustered` adds a primary key's duplicate check by raw
 key bytes, so duplicates that are only equal under a nondeterministic collation aren't caught

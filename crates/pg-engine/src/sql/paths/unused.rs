@@ -53,6 +53,42 @@ fn droppable(e: &Expr) -> bool {
 }
 
 impl Planner<'_, '_> {
+    /// remove_unused_subquery_outputs on a query level's select list (its top projection,
+    /// under a LIMIT, sort or row locking): an output nothing reads that isn't a sort or
+    /// group key, volatile or set-returning is a NULL — plain columns too (`drop_unused_outputs`
+    /// leaves those to the projections below).
+    pub(super) fn null_unused_level_outputs(&self, p: &mut Plan, needed: &[bool]) {
+        if needed.iter().all(|n| *n) {
+            return;
+        }
+        match p {
+            Plan::Limit { .. } | Plan::Sort { .. } | Plan::LockRows { .. } => {
+                let n = child_needs(p, needed).pop().unwrap_or_default();
+                let (Plan::Limit { input, .. } | Plan::Sort { input, .. } | Plan::LockRows { input, .. }) = p else {
+                    unreachable!()
+                };
+                self.null_unused_level_outputs(take(input), &n);
+            }
+            Plan::Project { input, exprs } => {
+                // (Over an aggregation its group keys are sort / group clauses' outputs; over a
+                // set-returning projection the calls' outputs stay.)
+                let keys = match &**input {
+                    Plan::Agg { groups, .. } => groups.len(),
+                    Plan::ProjectSet { .. } | Plan::Window { .. } | Plan::Distinct { .. } => return,
+                    _ => 0,
+                };
+                for (i, e) in exprs.iter_mut().enumerate() {
+                    if !needed.get(i).copied().unwrap_or(true)
+                        && matches!(e, Expr::Col(j, _) if *j >= keys)
+                    {
+                        *e = Expr::Const(Value::Null, e.ty());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// `needed`: the columns of `p`'s row its consumers read.
     pub(super) fn drop_unused_outputs(&self, p: &mut Plan, needed: &[bool]) {
         let unused = |i: usize| !needed.get(i).copied().unwrap_or(true);

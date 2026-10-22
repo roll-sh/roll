@@ -604,7 +604,7 @@ pub fn estimated_rows(plan: &std::sync::Arc<crate::sql::plan::Plan>, ctx: &super
 }
 
 /// hash_mem in bytes.
-fn hash_mem(ctx: &super::ExecCtx) -> f64 {
+pub(crate) fn hash_mem(ctx: &super::ExecCtx) -> f64 {
     let s = ctx.sess.settings.borrow();
     let num = |n: &str, d: f64| {
         s.get_raw(n)

@@ -300,6 +300,11 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
                         keys: m.keys.clone(),
                         key: Arc::as_ptr(plan) as usize + 1,
                         cache: HashMap::new(),
+                        binary: m.binary,
+                        lru: Default::default(),
+                        stamp: 0,
+                        mem: 0,
+                        limit: super::pghash::hash_mem(ctx) as u64,
                     });
                 }
                 Box::new(nl)
@@ -1680,7 +1685,16 @@ fn concat_rows(l: &[Value], r: &[Value]) -> Row {
 struct Memoize {
     keys: Vec<Expr>,
     key: usize,
-    cache: HashMap<Vec<Value>, Rc<Vec<Row>>>,
+    /// Per key: its rows, its place in the LRU order, its bytes.
+    cache: HashMap<Vec<Value>, (Rc<Vec<Row>>, u64, u64)>,
+    /// Cache Mode: binary: keys equal only bit for bit (-0.0 isn't 0.0).
+    binary: bool,
+    /// The entries by last use (oldest first), the bytes they take and hash_mem's limit:
+    /// past it the least recently used go (cache_reduce_memory).
+    lru: std::collections::BTreeMap<u64, Vec<Value>>,
+    stamp: u64,
+    mem: u64,
+    limit: u64,
 }
 
 /// Nested loop: the right side is materialised once, or re-run per left row for LATERAL.
@@ -1744,12 +1758,31 @@ impl NestLoopNode {
         }
         if !self.params.is_empty() {
             let memo_key = match &self.memo {
-                Some(m) => Some(eval_all(&m.keys, left, ctx)?),
+                Some(m) => {
+                    let mut k = eval_all(&m.keys, left, ctx)?;
+                    if m.binary {
+                        for v in k.iter_mut() {
+                            match v {
+                                Value::Float8(f) => *v = Value::Int8(f.to_bits() as i64),
+                                Value::Float4(f) => *v = Value::Int4(f.to_bits() as i32),
+                                _ => {}
+                            }
+                        }
+                    }
+                    Some(k)
+                }
                 None => None,
             };
-            if let (Some(m), Some(k)) = (&self.memo, &memo_key)
-                && let Some(rows) = m.cache.get(k)
+            if let (Some(m), Some(k)) = (&mut self.memo, &memo_key)
+                && let Some((rows, at, _)) = m.cache.get_mut(k)
             {
+                // (Now the most recently used.)
+                m.stamp += 1;
+                let old = std::mem::replace(at, m.stamp);
+                if let Some(kk) = m.lru.remove(&old) {
+                    m.lru.insert(m.stamp, kk);
+                }
+                let rows = rows.clone();
                 let (n, key) = (rows.len() as u64, m.key);
                 ctx.count(key, |st| {
                     st.loops += 1;
@@ -1763,21 +1796,33 @@ impl NestLoopNode {
             let rows = Rc::new(rows);
             if let (Some(m), Some(k)) = (&mut self.memo, memo_key) {
                 // EMPTY_ENTRY_MEMORY_BYTES and CACHE_TUPLE_BYTES.
-                let mut bytes = 0;
-                if ctx.instrumented() {
-                    bytes = (24 + 24 + minimal_len(&k, ctx)) as u64;
-                    for r in rows.iter() {
-                        bytes += (16 + minimal_len(r, ctx)) as u64;
+                let mut bytes = (24 + 24 + minimal_len(&k, ctx)) as u64;
+                for r in rows.iter() {
+                    bytes += (16 + minimal_len(r, ctx)) as u64;
+                }
+                // (Over the limit: the least recently used entries go first.)
+                m.mem += bytes;
+                let mut evicted = 0u64;
+                while m.mem > m.limit
+                    && let Some((_, old)) = m.lru.pop_first()
+                {
+                    if let Some((_, _, b)) = m.cache.remove(&old) {
+                        m.mem -= b;
+                        evicted += 1;
                     }
                 }
+                let mem = m.mem;
                 let (n, key) = (rows.len() as u64, m.key);
                 ctx.count(key, |st| {
                     st.loops += 1;
                     st.rows += n;
                     st.cache_misses += 1;
-                    st.cache_bytes += bytes;
+                    st.cache_evictions += evicted;
+                    st.cache_bytes = st.cache_bytes.max(mem);
                 });
-                m.cache.insert(k, rows.clone());
+                m.stamp += 1;
+                m.lru.insert(m.stamp, k.clone());
+                m.cache.insert(k, (rows.clone(), m.stamp, bytes));
             }
             return Ok(rows);
         }

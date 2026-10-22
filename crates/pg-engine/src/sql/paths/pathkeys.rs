@@ -100,6 +100,9 @@ fn col_of(e: &Expr) -> Option<usize> {
         {
             col_of(x)
         }
+        // (A domain without constraints: a RelabelType once eval_const_expressions drops
+        // its CoerceToDomain, which equivalence classes see through.)
+        Expr::CoerceToDomain(x, d) if !d.array && !d.not_null && d.checks.is_empty() => col_of(x),
         _ => None,
     }
 }
