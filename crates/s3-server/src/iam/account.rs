@@ -19,10 +19,6 @@ pub(super) async fn run(c: &Call<'_>, action: &str) -> Result<Option<String>, St
         "ListOpenIDConnectProviders" => list_oidc(c)?,
         "DeleteOpenIDConnectProvider" => return delete_oidc(c).await.map(|_| None),
         "GetAccountSummary" => summary(c)?,
-        "ListAccountAliases" => {
-            c.allow("ListAccountAliases", "*")?;
-            "<AccountAliases/><IsTruncated>false</IsTruncated>".to_string()
-        }
         _ => unreachable!("routed here"),
     }))
 }
@@ -313,12 +309,14 @@ fn summary(c: &Call) -> Result<String, StsError> {
                 t.list::<Group>(acct, kind::GROUP)?,
                 t.list::<ManagedPolicy>(acct, kind::POLICY)?,
                 t.list::<MfaDevice>(acct, kind::MFA)?,
-                t.count(acct, kind::OIDC)?,
+                t.count(acct, kind::OIDC)? + t.count(acct, kind::SAML)?,
                 t.roles(acct)?,
                 t.account_keys(acct)?,
             ))
         })
         .map_err(store_error)?;
+    let (server_certs, signing) = c.store.iam_read(|t| Ok((t.count(acct, kind::SERVER_CERT)?, t.list::<si::SigningCert>(acct, kind::SIGNING_CERT)?))).map_err(store_error)?;
+    let root_signing = signing.iter().any(|s| s.user.is_none());
     let in_use = devices.iter().filter(|d| d.enabled_at.is_some()).count();
     let root_mfa = devices.iter().any(|d| d.root && d.enabled_at.is_some());
     let root_keys = account_keys.iter().any(|k| k.is_root() && !k.id.starts_with(CONTROL_KEY_PREFIX));
@@ -349,10 +347,10 @@ fn summary(c: &Call) -> Result<String, StsError> {
         ("MFADevicesInUse", in_use),
         ("AccountMFAEnabled", usize::from(root_mfa)),
         ("AccountAccessKeysPresent", usize::from(root_keys)),
-        ("AccountSigningCertificatesPresent", 0),
-        ("SigningCertificatesPerUserQuota", 2),
-        ("ServerCertificates", 0),
-        ("ServerCertificatesQuota", 20),
+        ("AccountSigningCertificatesPresent", usize::from(root_signing)),
+        ("SigningCertificatesPerUserQuota", si::MAX_SIGNING_CERTS_PER_USER),
+        ("ServerCertificates", server_certs),
+        ("ServerCertificatesQuota", si::MAX_SERVER_CERTS),
         ("Providers", oidc),
         ("InstanceProfiles", 0),
         ("InstanceProfilesQuota", 1000),

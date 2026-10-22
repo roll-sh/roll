@@ -19,6 +19,7 @@ mod auth;
 mod body;
 mod bucket;
 mod config;
+pub mod console;
 mod cors;
 mod ctx;
 mod error;
@@ -33,7 +34,10 @@ mod notification;
 pub mod notify;
 mod object;
 mod owner;
+mod password;
+mod x509;
 mod policy;
+mod principals;
 mod post;
 mod replicate_ext;
 mod replication;
@@ -76,6 +80,25 @@ pub fn validate_bucket_policy(doc: &str, bucket: &str) -> Result<bool, String> {
     policy::Policy::parse(doc.as_bytes(), bucket).map(|p| p.is_public()).map_err(|e| e.message)
 }
 
+/// Check a bucket policy's principals as PutBucketPolicy does (each user, role and account it
+/// names must exist). `Ok`: the principals to keep with the policy
+/// ([`Store::set_bucket_policy`]); `Err` says what's wrong.
+pub fn bucket_policy_principals(store: &Store, doc: &str) -> Result<String, String> {
+    match principals::bind(store, doc) {
+        Ok(b) => Ok(principals::to_stored(&b)),
+        Err(Some(p)) => Err(format!("{}: {p}", principals::INVALID)),
+        Err(None) => Err("couldn't check the policy's principals; try again".into()),
+    }
+}
+
+/// A bucket's policy as GetBucketPolicy returns it (principals deleted since it was put show as
+/// their unique ids).
+pub fn bucket_policy(store: &Store, bucket: &str) -> Option<String> {
+    let doc = store.bucket_config(bucket, s3_store::config::kind::POLICY, "").ok()??;
+    let bound = store.bucket_config(bucket, s3_store::config::kind::POLICY_PRINCIPALS, "").ok().flatten();
+    Some(principals::rewrite(store, &doc, &principals::from_stored(bound.as_ref())).into_owned())
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// `<bucket>.<domain>` addresses a bucket (virtual-host style). Path style always works.
@@ -100,6 +123,9 @@ pub struct Config {
     /// How Object Lambda functions reach this deployment (`inputS3Url`), e.g.
     /// `https://s3.example.com`; `None`: the request's own host.
     pub public_endpoint: Option<String>,
+    /// More endpoints SAML assertions may be for (`Recipient`, `Audience`), besides AWS's
+    /// sign-in endpoints (`AssumeRoleWithSAML`).
+    pub saml_audiences: Vec<String>,
 }
 
 impl Default for Config {
@@ -114,6 +140,7 @@ impl Default for Config {
             notify: NotifyConfig::default(),
             oidc_allow_http: false,
             public_endpoint: None,
+            saml_audiences: Vec::new(),
         }
     }
 }

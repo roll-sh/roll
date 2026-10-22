@@ -177,13 +177,15 @@ test_s3.py::test_put_bucket_ownership_bucket_owner_enforced  aws-default: ACLs a
 test_s3.py::test_versioned_object_acl  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
 test_s3.py::test_versioned_object_acl_no_version_specified  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
 
-# roll answers as S3 does; the suite expects RGW's answer. (10)
+# roll answers as S3 does; the suite expects RGW's answer. (12)
+test_s3.py::test_block_public_policy_with_principal  aws: its principal arn:aws:iam::s3tenant1:root names an RGW tenant, not an account; S3 refuses it as MalformedPolicy (Invalid principal in policy)
 test_s3.py::test_copy_part_enc[sse-c-sse-c-STANDARD-STANDARD-8388608]  aws: a part copy with another SSE-C key than its upload is 403 AccessDenied, as a wrong key on a read (RGW says 400)
 test_s3.py::test_copy_part_enc[sse-s3-sse-c-STANDARD-STANDARD-8388608]  aws: a part copy with another SSE-C key than its upload is 403 AccessDenied, as a wrong key on a read (RGW says 400)
 test_s3.py::test_encryption_sse_c_multipart_bad_download  aws: a read with the wrong SSE-C key is 403 AccessDenied on S3 (RGW says 400)
 test_s3.py::test_encryption_sse_c_multipart_invalid_chunks_1  aws: a part with another SSE-C key than its upload is 403 AccessDenied, as a wrong key on a read (RGW says 400)
 test_s3.py::test_encryption_sse_c_other_key  aws: a read with the wrong SSE-C key is 403 AccessDenied on S3 (RGW says 400)
 test_s3.py::test_get_bucket_policy_status  aws: GetBucketPolicyStatus without a policy is NoSuchBucketPolicy, as on S3
+test_s3.py::test_get_nonpublicpolicy_principal_bucket_policy_status  aws: its principal arn:aws:iam::s3tenant1:root names an RGW tenant, not an account; S3 refuses it as MalformedPolicy (Invalid principal in policy)
 test_s3.py::test_get_nonpublicpolicy_acl_bucket_policy_status  aws: GetBucketPolicyStatus without a policy is NoSuchBucketPolicy, as on S3
 test_s3.py::test_get_publicpolicy_acl_bucket_policy_status  aws: GetBucketPolicyStatus without a policy is NoSuchBucketPolicy, as on S3
 test_s3.py::test_post_object_upload_checksum  aws: every POST form field (x-amz-checksum-* too) must have a policy condition, as S3 documents; the test's policy has none for it
@@ -192,7 +194,7 @@ test_s3.py::test_put_bucket_logging_policy_wildcard  aws: its log-delivery polic
 # Features roll doesn't have: BitTorrent. (1)
 test_s3.py::test_get_object_torrent  gap: no BitTorrent (S3 dropped it in 2024): NotImplemented
 
-# The suite itself: RGW-specific expectations or tests that can't fail as written. (36)
+# The suite itself: RGW-specific expectations or tests that can't fail as written. (35)
 test_headers.py::test_bucket_create_bad_authorization_empty  suite: botocore signs after the test's header hook, replacing the bad Authorization (fails_on_rgw too)
 test_headers.py::test_bucket_create_bad_authorization_invalid_aws2  suite: botocore signs after the test's header hook, replacing the bad Authorization (fails_on_rgw too)
 test_headers.py::test_bucket_create_bad_authorization_none  suite: botocore signs after the test's header hook, so the request is valid (fails_on_rgw too)
@@ -205,7 +207,6 @@ test_headers.py::test_object_create_bad_contentlength_none  suite: the HTTP stac
 test_headers.py::test_object_create_bad_date_none_aws2  suite: SigV2 requests carry a Date header besides x-amz-date, so removing x-amz-date leaves a valid request (fails_on_rgw too)
 test_s3.py::test_bucket_list_prefix_unreadable  suite: S3 url-encodes Prefix in ListObjects (v1) with encoding-type=url, which botocore doesn't decode
 test_s3.py::test_bucket_logging_owner  suite: puts a policy statement without Resource, which S3 refuses as MalformedPolicy
-test_s3.py::test_bucket_policy_allow_notprincipal  suite: RGW refuses Allow with NotPrincipal; IAM accepts it (and advises against it), and so does roll
 test_s3.py::test_bucket_policy_different_tenant  suite: RGW tenants (`:bucket` and `tenant:bucket` names); AWS has no tenant-qualified bucket names (names are global), so this is RGW-only
 test_s3.py::test_bucket_policy_put_obj_request_obj_tag  suite: the test adds x-amz-tagging to the main client, not to alt's request it checks (see its TODO)
 test_s3.py::test_bucket_policy_set_condition_operator_end_with_IfExists  suite: expects the bucket owner to be refused when an Allow statement doesn't match; on S3 (and roll) the owner's own permission still allows it

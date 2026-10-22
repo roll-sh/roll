@@ -615,13 +615,14 @@ async fn query_api_errors_and_cors() {
     let r = form("Action=Nope&Version=2011-06-15").send().await.unwrap();
     assert_eq!(r.status(), 400);
     assert!(r.text().await.unwrap().contains("<Code>InvalidAction</Code>"));
-    let r = form("Action=AssumeRoleWithSAML&Version=2011-06-15").send().await.unwrap();
+    let r = form("Action=DecodeAuthorizationMessage&Version=2011-06-15").send().await.unwrap();
     assert!(r.text().await.unwrap().contains("supported by roll"));
     let r = form("Version=2011-06-15").send().await.unwrap();
     assert!(r.text().await.unwrap().contains("<Code>MissingAction</Code>"));
     let r = form("Action=GetCallerIdentity&Version=2010-01-01").send().await.unwrap();
     assert!(r.text().await.unwrap().contains("<Code>InvalidAction</Code>"));
-    let big = "Action=AssumeRoleWithWebIdentity&WebIdentityToken=".to_string() + &"a".repeat(70_000);
+    // Bodies are read whole, at most 1 MiB.
+    let big = "Action=AssumeRoleWithWebIdentity&WebIdentityToken=".to_string() + &"a".repeat(1_100_000);
     let r = http.post(format!("{}/", t.endpoint)).header("content-type", "application/x-www-form-urlencoded").body(big).send().await.unwrap();
     assert_eq!(r.status(), 400);
     // GET with the parameters in the query.

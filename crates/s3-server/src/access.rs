@@ -48,6 +48,8 @@ pub(crate) struct Access {
     pub bucket: Bucket,
     pub settings: HashMap<String, String>,
     pub policy: Option<Policy>,
+    /// The policy's text, as it reads now.
+    policy_doc: Option<String>,
     pub policy_public: bool,
     /// In force: the bucket's own block with the deployment's on top.
     pub block: PublicAccessBlock,
@@ -65,7 +67,9 @@ impl Access {
         let settings = store.bucket_settings(&bucket.id).s3()?;
         // A stored policy was valid when it was put; if it no longer parses, deny rather than
         // silently drop it.
-        let policy = match settings.get(kind::POLICY) {
+        // As it reads now: principals deleted since show as their unique ids (`principals.rs`).
+        let policy_doc = settings.get(kind::POLICY).map(|p| crate::principals::rewrite(store, p, &crate::principals::from_stored(settings.get(kind::POLICY_PRINCIPALS))).into_owned());
+        let policy = match &policy_doc {
             Some(p) => Some(Policy::load(p.as_bytes()).map_err(|e| {
                 tracing::error!(bucket = bucket.name, error = %e, "a stored bucket policy doesn't parse");
                 S3Error::new(Code::AccessDenied)
@@ -78,7 +82,12 @@ impl Access {
         let acls_enabled = ownership != Some(Ownership::BucketOwnerEnforced);
         let bucket_acl = acl::bucket_acl(settings.get(kind::ACL).map(String::as_str));
         let requester_pays = settings.get(kind::REQUEST_PAYMENT).is_some_and(|p| p == "Requester");
-        Ok(Self { policy_public: policy.as_ref().is_some_and(Policy::is_public), bucket, settings, policy, block, ownership, acls_enabled, bucket_acl, requester_pays })
+        Ok(Self { policy_public: policy.as_ref().is_some_and(Policy::is_public), bucket, settings, policy, policy_doc, block, ownership, acls_enabled, bucket_acl, requester_pays })
+    }
+
+    /// The bucket policy as `GetBucketPolicy` returns it.
+    pub fn policy_text(&self) -> Option<std::borrow::Cow<'_, str>> {
+        self.policy_doc.as_deref().map(std::borrow::Cow::Borrowed)
     }
 
     /// Whether anonymous users can read through the `public` flag or a public policy (what
@@ -311,17 +320,7 @@ fn authorize_as(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, action: &s
     if a.bucket.public && action == "s3:GetObject" && !a.block.restrict_public_buckets && resource_owner == a.owner() {
         grant = Some(Via::Direct);
     }
-    let allowed = match (who, own) {
-        (Who::Key(_, id), Some(v)) => {
-            if id.account.id == resource_owner {
-                v.allowed() || grant == Some(Via::Direct) || (grant == Some(Via::Role) && v.bounded)
-            } else {
-                v.allowed() && grant.is_some()
-            }
-        }
-        _ => grant == Some(Via::Direct),
-    };
-    if !allowed {
+    if !combine(own, grant, who.account() == Some(resource_owner.as_str())) {
         return Err(denied());
     }
     // As on S3, only the bucket owner's account may read or change its policy, whatever a
@@ -330,6 +329,17 @@ fn authorize_as(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, action: &s
         return Err(S3Error::msg(Code::MethodNotAllowed, "The bucket policy can only be managed by the bucket owner's account."));
     }
     Ok(())
+}
+
+/// AWS's combination of the requester's own side (`None`: anonymous) and the resource's grants,
+/// once no explicit `Deny` applies. Same account: its own side, or a grant naming it directly
+/// (unbounded), or naming its role (bounded). Another account: both.
+pub(crate) fn combine(own: Option<crate::identity::IdVerdict>, grant: Option<Via>, same_account: bool) -> bool {
+    match own {
+        Some(v) if same_account => v.allowed() || grant == Some(Via::Direct) || (grant == Some(Via::Role) && v.bounded),
+        Some(v) => v.allowed() && grant.is_some(),
+        None => grant == Some(Via::Direct),
+    }
 }
 
 /// Condition keys of a request.

@@ -184,7 +184,8 @@ pub(crate) async fn route(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
         "policy" if put => put_policy(ctx, bucket, body).await,
         "policy" => {
             writing(ctx, bucket)?;
-            save(ctx, bucket, kind::POLICY, None).await?;
+            ctx.store().set_bucket_policy(&bucket.name, None).await.s3()?;
+            ctx.forget_access(&bucket.name);
             no_content()
         }
         "policyStatus" if get => policy_status(ctx, bucket),
@@ -291,9 +292,9 @@ async fn put_tagging(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
 fn get_policy(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     reading(ctx, bucket)?;
     let a = ctx.access(&bucket.name)?;
-    let p = a.settings.get(kind::POLICY).ok_or_else(|| S3Error::new(Code::NoSuchBucketPolicy).with("BucketName", bucket.name.clone()))?;
+    let p = a.policy_text().ok_or_else(|| S3Error::new(Code::NoSuchBucketPolicy).with("BucketName", bucket.name.clone()))?;
     let mut r = response::empty(StatusCode::OK);
-    *r.body_mut() = Body::from(p.clone());
+    *r.body_mut() = Body::from(p.into_owned());
     r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
     Ok(r)
 }
@@ -309,7 +310,12 @@ async fn put_policy(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
         return Err(S3Error::msg(Code::AccessDenied, "Access Denied: public policies are blocked by the BlockPublicPolicy setting"));
     }
     let text = String::from_utf8(raw.to_vec()).map_err(|_| S3Error::new(Code::MalformedPolicy))?;
-    save(ctx, bucket, kind::POLICY, Some(&text)).await?;
+    let bound = crate::principals::bind(ctx.store(), &text).map_err(|e| match e {
+        Some(_) => S3Error::msg(Code::MalformedPolicy, crate::principals::INVALID),
+        None => S3Error::new(Code::InternalError),
+    })?;
+    ctx.store().set_bucket_policy(&bucket.name, Some((&text, &crate::principals::to_stored(&bound)))).await.s3()?;
+    ctx.forget_access(&bucket.name);
     no_content()
 }
 

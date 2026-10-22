@@ -19,6 +19,7 @@ pub mod sse;
 pub mod time;
 pub mod versioning;
 pub mod xml;
+pub mod xmldsig;
 
 pub use error::{Code, S3Error};
 

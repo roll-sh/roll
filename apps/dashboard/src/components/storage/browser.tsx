@@ -27,6 +27,7 @@ import {
   type ObjectSummary,
   type ObjectVersion,
 } from "@/lib/storage-api";
+import { sessionDownload } from "@/lib/storage-session";
 import { Drawer, iconBtn, LoadMore, Section, Spinner } from "../tasks/ui";
 import { btn, danger, ErrorNote, input, panel, primary, useCopy } from "../ui";
 import { Progress, Segmented } from "./shared";
@@ -483,7 +484,10 @@ export function ObjectBrowser({ bucket, onChanged }: { bucket: Bucket; onChanged
                     </td>
                     <td className="py-2 pr-4">
                       <div className="flex justify-end gap-0.5 opacity-60 transition group-hover:opacity-100">
-                        <a href={storageApi.downloadUrl(bucket.name, o.key)} className={iconBtn} title="Download" aria-label={`Download ${o.key}`}>
+                        <a
+                          href={storageApi.downloadUrl(bucket.name, o.key)}
+                          onClick={sessionDownload(storageApi.downloadUrl(bucket.name, o.key), o.key, setError)}
+                          className={iconBtn} title="Download" aria-label={`Download ${o.key}`}>
                           <Download className="size-3.5" />
                         </a>
                         <button onClick={() => copyUrl(o.key)} className={iconBtn} title="Copy presigned URL (1 hour)" aria-label={`Copy URL for ${o.key}`}>
@@ -678,6 +682,7 @@ function VersionsList({ bucket, prefix, onChanged }: { bucket: Bucket; prefix: s
                         {!v.delete_marker && (
                           <a
                             href={storageApi.downloadUrl(bucket.name, v.key, v.version_id)}
+                            onClick={sessionDownload(storageApi.downloadUrl(bucket.name, v.key, v.version_id), v.key, setError)}
                             className={iconBtn}
                             title="Download this version"
                             aria-label={`Download version ${v.version_id} of ${v.key}`}
@@ -842,7 +847,11 @@ function ObjectDrawer({
       title={<span className="font-mono text-[13px]">{objectKey}</span>}
       onClose={onClose}
       actions={
-        <a href={storageApi.downloadUrl(bucket.name, objectKey)} className={btn}>
+        <a
+          href={storageApi.downloadUrl(bucket.name, objectKey)}
+          onClick={sessionDownload(storageApi.downloadUrl(bucket.name, objectKey), objectKey, setError)}
+          className={btn}
+        >
           <Download className="size-3.5" /> Download
         </a>
       }

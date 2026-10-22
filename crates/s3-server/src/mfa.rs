@@ -7,11 +7,12 @@
 //!   durably before the request goes on.
 //! - Seeds are 20 random bytes (160 bits, RFC 4226's recommendation), shown once as Base32 and
 //!   as an `otpauth://` QR code. They're never logged.
+//! - Ten wrong codes within five minutes lock a device for the rest of those five minutes. The
+//!   count is durable (it survives a restart and holds across a takeover) and costs successful
+//!   checks no write.
 
 use s3_store::Store;
 use s3_store::iam::MfaDevice;
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 
 /// Seconds per step.
 pub(crate) const STEP_S: i64 = 30;
@@ -91,65 +92,55 @@ pub(crate) fn consecutive(seed: &[u8], first: u32, second: u32, now_s: i64) -> O
     (now - ENABLE_WINDOW..=now + DRIFT).find(|s| totp(seed, *s) == first && totp(seed, s + 1) == second).map(|s| s + 1)
 }
 
-/// Wrong codes a device takes within [`FAIL_WINDOW_S`] before it refuses every code until the
+/// Wrong codes a device takes within [`FAIL_WINDOW_MS`] before it refuses every code until the
 /// window passes (guessing six digits is then hopeless).
-const MAX_FAILS: u32 = 10;
-const FAIL_WINDOW_S: i64 = 300;
+pub(crate) const MAX_FAILS: u32 = 10;
+pub(crate) const FAIL_WINDOW_MS: i64 = 300_000;
 
-/// Recent wrong codes by (account, serial): (count, window start). In memory: a restart resets
-/// it, which costs a guesser more than it gains.
-type Failures = Mutex<HashMap<(String, String), (u32, i64)>>;
-
-fn failures() -> &'static Failures {
-    static F: OnceLock<Failures> = OnceLock::new();
-    F.get_or_init(Default::default)
-}
-
-fn throttled(account: &str, serial: &str, now_s: i64) -> bool {
-    let f = failures().lock().unwrap();
-    f.get(&(account.to_string(), serial.to_string())).is_some_and(|(n, at)| *n >= MAX_FAILS && now_s - at < FAIL_WINDOW_S)
-}
-
-fn record(account: &str, serial: &str, now_s: i64, ok: bool) {
-    let mut f = failures().lock().unwrap();
-    let k = (account.to_string(), serial.to_string());
-    if ok {
-        f.remove(&k);
-        return;
-    }
-    if f.len() >= 100_000 {
-        f.retain(|_, (_, at)| now_s - *at < FAIL_WINDOW_S);
-    }
-    let e = f.entry(k).or_insert((0, now_s));
-    if now_s - e.1 >= FAIL_WINDOW_S {
-        *e = (0, now_s);
-    }
-    e.0 += 1;
+/// What the throttle counts a device's wrong codes under (the device's own key).
+fn throttle_key(account: &str, serial: &str) -> Option<String> {
+    s3_store::iam::mfa_name_of(account, serial).map(|n| format!("mfa:{}", n.to_lowercase()))
 }
 
 /// Check `code` from the enabled device `serial` of `account` and use it up. `owner` says
 /// whose it must be: `None` the root user's, `Some(user)` that IAM user's. Any failure (an
 /// unknown device, someone else's, a wrong or reused code, too many wrong codes lately) is
 /// `false`.
+///
+/// Wrong codes are counted in the metadata (`s3-store`'s `throttle.rs`), so the throttle
+/// survives a restart and holds across a takeover; counting is a relaxed write, and a right
+/// code only reads unless there were wrong ones to forget.
 pub(crate) async fn check(store: &Store, account: &str, serial: &str, code: &str, owner: Option<&str>) -> Result<bool, s3_store::StoreError> {
     let now_s = store.now().div_euclid(1000);
-    if throttled(account, serial, now_s) {
+    let Some(key) = throttle_key(account, serial) else { return Ok(false) };
+    if store.throttled(account, &key, MAX_FAILS, FAIL_WINDOW_MS)? {
         return Ok(false);
     }
-    let ok = check_once(store, account, serial, code, owner, now_s).await?;
-    record(account, serial, now_s, ok);
-    Ok(ok)
+    match check_once(store, account, serial, code, owner, now_s).await? {
+        Some(true) => {
+            store.clear_failures(account, &key)?;
+            Ok(true)
+        }
+        // Only a device that exists counts wrong codes (nobody can grow the table with made-up
+        // serial numbers).
+        Some(false) => {
+            store.record_failure(account, &key, FAIL_WINDOW_MS)?;
+            Ok(false)
+        }
+        None => Ok(false),
+    }
 }
 
-async fn check_once(store: &Store, account: &str, serial: &str, code: &str, owner: Option<&str>, now_s: i64) -> Result<bool, s3_store::StoreError> {
-    let Some(code) = parse_code(code) else { return Ok(false) };
-    let Some(d) = store.mfa_device(account, serial)? else { return Ok(false) };
+/// `None`: no such enabled device of `owner`.
+async fn check_once(store: &Store, account: &str, serial: &str, code: &str, owner: Option<&str>, now_s: i64) -> Result<Option<bool>, s3_store::StoreError> {
+    let Some(d) = store.mfa_device(account, serial)? else { return Ok(None) };
     if !belongs(&d, owner) {
-        return Ok(false);
+        return Ok(None);
     }
-    let Some(seed) = base32_decode(&d.seed) else { return Ok(false) };
-    let Some(step) = step_of(&seed, code, now_s) else { return Ok(false) };
-    store.use_mfa_step(account, serial, step).await
+    let Some(code) = parse_code(code) else { return Ok(Some(false)) };
+    let Some(seed) = base32_decode(&d.seed) else { return Ok(Some(false)) };
+    let Some(step) = step_of(&seed, code, now_s) else { return Ok(Some(false)) };
+    store.use_mfa_step(account, serial, step).await.map(Some)
 }
 
 fn belongs(d: &MfaDevice, owner: Option<&str>) -> bool {
@@ -252,17 +243,9 @@ mod tests {
     }
 
     #[test]
-    fn wrong_codes_are_throttled() {
-        let (a, s) = ("123456789012", "arn:aws:iam::123456789012:mfa/throttle-test");
-        for _ in 0..MAX_FAILS {
-            assert!(!throttled(a, s, 1000));
-            record(a, s, 1000, false);
-        }
-        assert!(throttled(a, s, 1000));
-        assert!(throttled(a, s, 1000 + FAIL_WINDOW_S - 1));
-        assert!(!throttled(a, s, 1000 + FAIL_WINDOW_S), "the window passes");
-        record(a, s, 1000, true);
-        assert!(!throttled(a, s, 1000), "a good code clears it");
+    fn throttle_keys() {
+        assert_eq!(throttle_key("123456789012", "arn:aws:iam::123456789012:mfa/Team/Alice").as_deref(), Some("mfa:team/alice"));
+        assert_eq!(throttle_key("123456789012", "arn:aws:iam::999999999999:mfa/alice"), None);
     }
 
     #[test]

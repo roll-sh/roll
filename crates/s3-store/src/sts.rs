@@ -166,6 +166,10 @@ pub struct RoleIam {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub boundary: Option<String>,
     pub tags: Vec<(String, String)>,
+    /// The users and roles the trust policy's principals named when it was set: ARN → unique
+    /// id. A principal deleted (or replaced) since shows as its unique id, as on AWS.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub trust_principals: BTreeMap<String, String>,
 }
 
 impl Role {
@@ -419,6 +423,8 @@ pub struct IamRoleSpec {
     pub max_session_s: Option<i64>,
     pub boundary: Option<String>,
     pub tags: Vec<(String, String)>,
+    /// See [`RoleIam::trust_principals`].
+    pub trust_principals: BTreeMap<String, String>,
 }
 
 // ---- Sessions ----
@@ -445,6 +451,28 @@ pub struct WebIdentity {
     /// The `aud` the role accepted.
     #[serde(rename = "a")]
     pub audience: String,
+}
+
+/// The SAML assertion a session was issued for (`AssumeRoleWithSAML`): what the `saml:`
+/// condition keys say.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SamlIdentity {
+    /// The IAM SAML provider's name.
+    #[serde(rename = "p")]
+    pub provider: String,
+    #[serde(rename = "i")]
+    pub issuer: String,
+    #[serde(rename = "s")]
+    pub subject: String,
+    /// `persistent`, `transient`, or the `NameID` format URI.
+    #[serde(rename = "t")]
+    pub subject_type: String,
+    /// The recipient the assertion was for (`saml:aud`).
+    #[serde(rename = "a")]
+    pub audience: String,
+    /// `saml:namequalifier`.
+    #[serde(rename = "q")]
+    pub name_qualifier: String,
 }
 
 impl WebIdentity {
@@ -493,6 +521,11 @@ pub struct Session {
     pub source_identity: Option<String>,
     #[serde(rename = "w", default, skip_serializing_if = "Option::is_none")]
     pub web: Option<WebIdentity>,
+    #[serde(rename = "sa", default, skip_serializing_if = "Option::is_none")]
+    pub saml: Option<SamlIdentity>,
+    /// A dashboard sign-in session of the IAM user `user` (no access key is behind it).
+    #[serde(rename = "c", default, skip_serializing_if = "std::ops::Not::not")]
+    pub console: bool,
     /// The account the session acts in: its role's, or its key's. Empty in tokens from before
     /// accounts: the default account.
     #[serde(rename = "a", default, skip_serializing_if = "String::is_empty")]
@@ -535,6 +568,7 @@ impl std::fmt::Debug for Session {
             .field("account", &self.account)
             .field("user", &self.user)
             .field("federated", &self.federated)
+            .field("console", &self.console)
             .field("dead", &self.dead)
             .finish_non_exhaustive()
     }
@@ -558,6 +592,8 @@ impl Session {
             transitive_tag_keys: Vec::new(),
             source_identity: None,
             web: None,
+            saml: None,
+            console: false,
             account: String::new(),
             user: None,
             federated: None,
@@ -800,7 +836,7 @@ impl Store {
         }
         let now = self.now();
         let id = crate::iam::entity_id("AROA");
-        let iam = RoleIam { path: spec.path, trust_policy: Some(spec.trust_policy), boundary: spec.boundary, tags: spec.tags, ..Default::default() };
+        let iam = RoleIam { path: spec.path, trust_policy: Some(spec.trust_policy), boundary: spec.boundary, tags: spec.tags, trust_principals: spec.trust_principals, ..Default::default() };
         self.write(|c| {
             if crate::accounts::find(c, account)?.is_none() {
                 return Err(StoreError::NotFound(format!("no account {account}")));
@@ -1015,6 +1051,14 @@ impl Store {
                     nothing()
                 }
             },
+            // A dashboard sign-in: its user's, while the user exists and may sign in.
+            (None, None) if s.console => {
+                let user = s.user.clone().ok_or(SessionError::Invalid)?;
+                if !self.iam_user(&s.account, &user)?.is_some_and(|u| u.login.is_some()) {
+                    s.dead = true;
+                }
+                nothing()
+            }
             (None, None) => return Err(SessionError::Invalid),
         };
         Ok(AccessKey {

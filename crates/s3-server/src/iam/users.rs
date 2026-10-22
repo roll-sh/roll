@@ -161,6 +161,15 @@ async fn delete_user(c: &Call<'_>) -> Result<(), StsError> {
             if !t.mfa_devices_of(&acct, Some(&u.name))?.is_empty() {
                 return conflict("delete MFA device");
             }
+            if u.login.is_some() {
+                return conflict("delete login profile");
+            }
+            if t.list::<si::SigningCert>(&acct, kind::SIGNING_CERT)?.iter().any(|s| s.user.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(&u.name))) {
+                return conflict("delete signing certificates");
+            }
+            if !u.ssh_keys.is_empty() {
+                return conflict("delete SSH public keys");
+            }
             t.delete(&acct, kind::USER, &name)?;
             Ok(())
         })
@@ -203,6 +212,13 @@ async fn update_user(c: &Call<'_>) -> Result<(), StsError> {
                             d.user = Some(n.clone());
                             let key = d.name.clone();
                             t.put(&acct, kind::MFA, &key, &d)?;
+                        }
+                    }
+                    for mut s in t.list::<si::SigningCert>(&acct, kind::SIGNING_CERT)? {
+                        if s.user.as_deref() == Some(old.as_str()) {
+                            s.user = Some(n.clone());
+                            let key = s.id.clone();
+                            t.put(&acct, kind::SIGNING_CERT, &key, &s)?;
                         }
                     }
                     u.name = n.clone();

@@ -21,6 +21,7 @@ import { AppShell } from "../app-shell";
 import { iconBtn, LoadMore, Spinner } from "../tasks/ui";
 import { btn, Connecting, CopyButton, EmptyPanel, ErrorNote, input, Offline, Panel, panel, primary, Stats, useCopy } from "../ui";
 import { ObjectBrowser } from "./browser";
+import { StorageIdentity } from "./console";
 import { SdkSnippet } from "./keys";
 import { SettingsTab } from "./settings";
 import { PublicBadge, TabNav, useAction, useHashTab, useStorage, type Run } from "./shared";
@@ -51,7 +52,7 @@ export function StorageBucketLoading() {
 export function StorageBucket({ name: rawName }: { name: string }) {
   const name = decodeURIComponent(rawName);
   const router = useRouter();
-  const { info, buckets, offline, refresh } = useStorage();
+  const { info, buckets, offline, denied, refresh } = useStorage();
   const { busy, error, setError, run } = useAction(refresh);
   const [tab, setTabRaw] = useHashTab<Tab>(TAB_VALUES, "objects");
   const setTab = (t: Tab) => {
@@ -78,7 +79,7 @@ export function StorageBucket({ name: rawName }: { name: string }) {
   if (!info || !buckets) {
     return (
       <AppShell crumb={crumb}>
-        <Connecting />
+        {denied ? <ErrorNote error={denied} /> : <Connecting />}
       </AppShell>
     );
   }
@@ -86,10 +87,13 @@ export function StorageBucket({ name: rawName }: { name: string }) {
   if (!bucket) {
     return (
       <AppShell crumb={crumb}>
+        <StorageIdentity switcher={false} />
         <EmptyPanel>
           <HorizonMark state="sleep" size={40} />
           <h2 className="text-[15px] font-medium">No bucket {name}</h2>
-          <p className="max-w-md text-[13px] text-muted">It may have been deleted, or the link is wrong.</p>
+          <p className="max-w-md text-[13px] text-muted">
+            {denied ?? "It may have been deleted, or the link is wrong — or it belongs to another account."}
+          </p>
           <Link href="/dashboard/storage" className={btn}>
             <ArrowLeft className="size-3.5" /> All buckets
           </Link>
@@ -139,9 +143,12 @@ export function StorageBucket({ name: rawName }: { name: string }) {
             )}
           </p>
         </div>
-        <p className="font-mono text-[11px] text-subtle">
-          {bucket.region} · created {agoMs(bucket.created_at)}
-        </p>
+        <div className="flex flex-col items-start gap-1 sm:items-end">
+          <StorageIdentity switcher={false} />
+          <p className="font-mono text-[11px] text-subtle">
+            {bucket.region} · created {agoMs(bucket.created_at)}
+          </p>
+        </div>
       </div>
 
       <TabNav

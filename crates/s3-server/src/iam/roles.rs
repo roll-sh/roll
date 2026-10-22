@@ -16,7 +16,7 @@ pub(super) async fn run(c: &Call<'_>, action: &str) -> Result<Option<String>, St
             if action == "UpdateRole" {
                 return Ok(None);
             }
-            format!("<Role>{}</Role>", role_xml(&r))
+            format!("<Role>{}</Role>", role_xml(c.store, &r))
         }
         "UpdateAssumeRolePolicy" => return update_trust(c).await.map(|_| None),
         "PutRolePolicy" => return put_inline(c).await.map(|_| None),
@@ -32,10 +32,11 @@ pub(super) async fn run(c: &Call<'_>, action: &str) -> Result<Option<String>, St
     }))
 }
 
-/// A control-plane role's trust as the equivalent trust policy.
-pub(crate) fn trust_document(r: &Role) -> String {
+/// A role's trust policy as it reads now (principals deleted since show as their unique ids),
+/// or a control-plane role's trust as the equivalent trust policy.
+pub(crate) fn trust_document(store: &s3_store::Store, r: &Role) -> String {
     if let Some(d) = &r.iam.trust_policy {
-        return d.clone();
+        return crate::principals::rewrite(store, d, &r.iam.trust_principals).into_owned();
     }
     let mut statements = Vec::new();
     if !r.trust.keys.is_empty() {
@@ -58,7 +59,7 @@ pub(crate) fn trust_document(r: &Role) -> String {
     serde_json::json!({"Version": "2012-10-17", "Statement": statements}).to_string()
 }
 
-pub(crate) fn role_xml(r: &Role) -> String {
+pub(crate) fn role_xml(store: &s3_store::Store, r: &Role) -> String {
     let path = if r.iam.path.is_empty() { "/" } else { r.iam.path.as_str() };
     format!(
         "{}{}{}{}{}{}{}<MaxSessionDuration>{}</MaxSessionDuration>{}{}<RoleLastUsed/>",
@@ -67,7 +68,7 @@ pub(crate) fn role_xml(r: &Role) -> String {
         el("RoleId", &r.id),
         el("Arn", &r.own_arn()),
         el("CreateDate", &date(r.created_at)),
-        el("AssumeRolePolicyDocument", &url_encode(&trust_document(r))),
+        el("AssumeRolePolicyDocument", &url_encode(&trust_document(store, r))),
         if r.description.is_empty() { String::new() } else { el("Description", &r.description) },
         r.max_session_s,
         boundary_xml(&r.iam.boundary),
@@ -80,14 +81,20 @@ fn role(c: &Call) -> Result<Role, StsError> {
     c.store.role_in(&c.account, name).map_err(store_error)?.ok_or_else(|| no_such(format!("The role with name {name} cannot be found.")))
 }
 
-/// A trust policy parameter, checked and minified.
-fn trust_policy(c: &Call, param: &str) -> Result<String, StsError> {
+/// A trust policy parameter, checked and minified, with the users and roles its principals
+/// name (each must exist, as on AWS).
+fn trust_policy(c: &Call, param: &str) -> Result<(String, std::collections::BTreeMap<String, String>), StsError> {
     let doc = c.p.required(param, "assumeRolePolicyDocument")?;
     if doc.len() > MAX_TRUST_POLICY_BYTES {
         return Err(limit(format!("Cannot exceed quota for ACLSizePerRole: {MAX_TRUST_POLICY_BYTES}")));
     }
     Policy::parse_trust(doc.as_bytes(), MAX_TRUST_POLICY_BYTES).map_err(|e| StsError::new("MalformedPolicyDocument", 400, e.message))?;
-    serde_json::from_str::<serde_json::Value>(doc).map(|v| v.to_string()).map_err(|e| StsError::new("MalformedPolicyDocument", 400, e.to_string()))
+    let doc = serde_json::from_str::<serde_json::Value>(doc).map(|v| v.to_string()).map_err(|e| StsError::new("MalformedPolicyDocument", 400, e.to_string()))?;
+    let bound = crate::principals::bind(c.store, &doc).map_err(|e| match e {
+        Some(p) => StsError::new("MalformedPolicyDocument", 400, format!("{}: {p}", crate::principals::INVALID)),
+        None => StsError::new("ServiceFailure", 500, "The request processing has failed because of an unknown error, exception or failure."),
+    })?;
+    Ok((doc, bound))
 }
 
 fn max_session(c: &Call) -> Result<Option<i64>, StsError> {
@@ -112,22 +119,23 @@ async fn create(c: &Call<'_>) -> Result<String, StsError> {
     if let Some(b) = &boundary {
         super::users::attachable(c, b)?;
     }
-    let spec = IamRoleSpec { path, trust_policy: trust_policy(c, "AssumeRolePolicyDocument")?, description: description(c)?.unwrap_or_default(), max_session_s: max_session(c)?, boundary, tags: c.tags()? };
+    let (trust, trust_principals) = trust_policy(c, "AssumeRolePolicyDocument")?;
+    let spec = IamRoleSpec { path, trust_policy: trust, description: description(c)?.unwrap_or_default(), max_session_s: max_session(c)?, boundary, tags: c.tags()?, trust_principals };
     let r = c.store.create_iam_role(&c.account, &name, spec).await.map_err(store_error)?;
-    Ok(format!("<Role>{}</Role>", role_xml(&r)))
+    Ok(format!("<Role>{}</Role>", role_xml(c.store, &r)))
 }
 
 fn get(c: &Call) -> Result<String, StsError> {
     let r = role(c)?;
     c.allow("GetRole", &r.own_arn())?;
-    Ok(format!("<Role>{}</Role>", role_xml(&r)))
+    Ok(format!("<Role>{}</Role>", role_xml(c.store, &r)))
 }
 
 fn list(c: &Call) -> Result<String, StsError> {
     c.allow("ListRoles", &c.arn("role", "/", "*"))?;
     let prefix = c.p.get("PathPrefix").unwrap_or("/");
     let roles: Vec<Role> = c.store.roles_in(&c.account).map_err(store_error)?.into_iter().filter(|r| (if r.iam.path.is_empty() { "/" } else { r.iam.path.as_str() }).starts_with(prefix)).collect();
-    page(c.p, roles, |r| r.name.to_lowercase(), role_xml, "Roles")
+    page(c.p, roles, |r| r.name.to_lowercase(), |r| role_xml(c.store, r), "Roles")
 }
 
 async fn delete(c: &Call<'_>) -> Result<(), StsError> {
@@ -178,9 +186,10 @@ async fn update(c: &Call<'_>, action: &str) -> Result<Role, StsError> {
 async fn update_trust(c: &Call<'_>) -> Result<(), StsError> {
     let r = role(c)?;
     c.allow("UpdateAssumeRolePolicy", &r.own_arn())?;
-    let doc = trust_policy(c, "PolicyDocument")?;
+    let (doc, bound) = trust_policy(c, "PolicyDocument")?;
     edit(c, &r, |r| {
         r.iam.trust_policy = Some(doc);
+        r.iam.trust_principals = bound;
         Ok(())
     })
     .await

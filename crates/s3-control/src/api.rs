@@ -79,6 +79,10 @@ impl FromRequestParts<AppState> for Acct {
     type Rejection = ControlError;
 
     async fn from_request_parts(parts: &mut axum::http::request::Parts, c: &AppState) -> Result<Self, Self::Rejection> {
+        // A signed-in dashboard user acts in its own account.
+        if let Some(crate::console::Caller(s)) = parts.extensions.get::<crate::console::Caller>() {
+            return Ok(Self(s.account().to_string()));
+        }
         let header = parts.headers.get("x-roll-account").and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
         let query = || parts.uri.query().and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "account").map(|(_, v)| v.trim().to_string())).filter(|s| !s.is_empty());
         let id = header.or_else(query).unwrap_or_else(|| c.store.default_account_id());
@@ -110,6 +114,9 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/storage/keys/{id}", delete(delete_key))
         .merge(crate::roles::routes())
         .merge(crate::targets::routes())
+        .merge(crate::console::routes())
+        // A signed-in dashboard user's requests act as that IAM user (`console.rs`).
+        .route_layer(axum::middleware::from_fn_with_state(control.clone(), crate::console::guard))
         // The dashboard calls it from the browser, like the other control-plane APIs.
         .layer(CorsLayer::permissive())
         .with_state(control)
@@ -121,12 +128,14 @@ async fn show_info(State(c): State<AppState>, Acct(a): Acct) -> ApiResult<Value>
 
 async fn list_accounts(State(c): State<AppState>) -> ApiResult<Vec<Value>> {
     let default = c.store.default_account_id();
-    Ok(Json(c.store.accounts()?.into_iter().map(|a| account_view(&a, &default)).collect()))
+    Ok(Json(c.store.accounts()?.into_iter().map(|a| account_view(&c.store, &a, &default)).collect()))
 }
 
-fn account_view(a: &s3_store::Account, default: &str) -> Value {
+fn account_view(store: &Store, a: &s3_store::Account, default: &str) -> Value {
     let mut v = json!(a);
     v["default"] = json!(a.id == default);
+    // The account alias (IAM's `CreateAccountAlias`): dashboard sign-in takes it for the id.
+    v["alias"] = json!(store.account_alias(&a.id).ok().flatten());
     v
 }
 
@@ -143,7 +152,7 @@ struct CreateAccount {
 /// `root_key: false`. The secret is only returned here.
 async fn create_account(State(c): State<AppState>, JsonBody(r): JsonBody<CreateAccount>) -> ApiResult<Value> {
     let a = c.store.create_account(&r.name, r.email.as_deref()).await?;
-    let mut v = account_view(&a, &c.store.default_account_id());
+    let mut v = account_view(&c.store, &a, &c.store.default_account_id());
     if r.root_key.unwrap_or(true) {
         let k = c.store.create_key_in(&a.id, "root", s3_store::Permission::Admin, None).await?;
         let mut kv = json!(k);
@@ -154,11 +163,11 @@ async fn create_account(State(c): State<AppState>, JsonBody(r): JsonBody<CreateA
 }
 
 async fn show_account(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
-    Ok(Json(account_view(&c.store.require_account(&id)?, &c.store.default_account_id())))
+    Ok(Json(account_view(&c.store, &c.store.require_account(&id)?, &c.store.default_account_id())))
 }
 
 async fn update_account(State(c): State<AppState>, Path(id): Path<String>, JsonBody(u): JsonBody<s3_store::AccountUpdate>) -> ApiResult<Value> {
-    Ok(Json(account_view(&c.store.update_account(&id, u).await?, &c.store.default_account_id())))
+    Ok(Json(account_view(&c.store, &c.store.update_account(&id, u).await?, &c.store.default_account_id())))
 }
 
 /// `DELETE /accounts/{id}`: an account without buckets, with its keys, roles and IAM entities.

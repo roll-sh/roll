@@ -220,7 +220,11 @@ Migration 8 added accounts and IAM: `accounts`, `iam`, `usage_payer`, the owner 
 owner the default account, computing its id from `state.canonical_owner` in SQL exactly as
 `config::account_id` does, and moves every existing bucket, key and role into it; it's
 deterministic, so replaying the log over an older snapshot gives the same rows. A database
-without an owner yet gets its default account when the store first opens.
+without an owner yet gets its default account when the store first opens. A later migration
+indexes `iam` by `(kind, name)` (account aliases are unique across the deployment, and sign-in
+finds an account by its alias); login profiles, SSH keys, certificates, SAML providers,
+password policies, credential reports and the throttle counts are rows of `iam`, so it adds no
+tables.
 
 A blob's encryption is fixed when it's written, so `blob_sse` is keyed by blob: every row that
 shares the blob (copies, branches, the trash) shares its encryption, and no row of `objects`,
@@ -601,17 +605,85 @@ ACL changes of an object another account wrote (ACLs on) that account, whose ACL
 only grant.
 
 **IAM entities** are JSON documents in `iam` (users with their tags, inline policies, attached
-policy ARNs, group names and boundary; groups; customer-managed policies with their versions;
-virtual MFA devices with their seed and last accepted step; OIDC providers). The IAM query API
+policy ARNs, group names, boundary, login profile and SSH keys; groups; customer-managed policies
+with their versions; virtual MFA devices with their seed and last accepted step; OIDC and SAML
+providers; server and signing certificates; the password policy, the account alias and the last
+credential report, one per account; the throttle counts). The IAM query API
 (`s3-server/src/iam/`) checks and changes them inside one metadata transaction
 (`Store::iam_write`), so every IAM call is atomic and durable like any write. Users' access keys
 are rows of `keys` (`user_name`); roles are rows of `roles` (`iam` holds an IAM role's side).
+`iam` is indexed by `(kind, name)` too: aliases are unique across the deployment and sign-in
+looks an account up by its alias.
+
+**Principals in policies** (`principals.rs`). PutBucketPolicy, PutAccessPointPolicy, a role's
+trust policy (`CreateRole`, `UpdateAssumeRolePolicy`) and the control plane's `PATCH policy`
+check every principal: an ARN naming a user, role or account that doesn't exist (or an IAM ARN
+that can't be a principal, an OIDC or SAML provider that doesn't exist, a roll key id that
+doesn't exist) is `Invalid principal in policy`. The users and roles named are kept with the
+policy as ARN → unique id (`bucket_config` kind `policy_principals`, written in the policy's
+transaction; `RoleIam::trust_principals` for trust policies). A policy is read back, and
+evaluated, as it reads now: a principal whose entity was deleted or replaced by a new one of the
+same name reads as the old unique id (which matches nobody), a renamed user as its new ARN,
+as on AWS. `CanonicalUser` principals aren't checked.
+
+**Passwords** (`password.rs`, `iam/login.rs`): login profiles keep an argon2id PHC string
+(19 MiB, 2 passes, a random salt; hashed on the blocking pool), never the password, and the
+last `PasswordReusePrevention` hashes. New passwords are checked against the account's password
+policy, or AWS's default one (8 characters, three of four kinds, not the account's name or
+email address). Nothing logs or echoes a password or a hash (`LoginProfile`'s `Debug` leaves
+the hash out).
 
 **MFA** (`mfa.rs`): TOTP (RFC 6238) with 160-bit seeds. A code is accepted only if its 30-second
 step is newer than the device's last accepted one, written durably (`Store::use_mfa_step`)
-before the request goes on, so codes can't be replayed. MFA Delete is the bucket setting
+before the request goes on, so codes can't be replayed. Ten wrong codes in five minutes lock a
+device for the rest of them; the counts are rows of `iam` (`s3-store/src/throttle.rs`), so the
+lock survives a restart and holds across a takeover. Counting is a relaxed write, and a right
+code only reads unless there were wrong ones to forget, so it adds no latency to a successful
+check. Sign-in passwords are throttled the same way, per user. MFA Delete is the bucket setting
 `mfa_delete` (`bucket_config`), enforced by `PutBucketVersioning` and permanent version deletes
 with `x-amz-mfa`.
+
+**Certificates and keys** (`x509.rs`, `iam/certs.rs`): server and signing certificates are
+parsed with RustCrypto's `x509-cert` and must be valid now; a server certificate's private key
+(PKCS#1, PKCS#8 or SEC1) must match its certificate and isn't kept (IAM never returns it and
+nothing in roll uses it). SSH public keys are RSA (2048-16384 bits), `ssh-rsa` or PEM.
+
+**The policy simulator** (`iam/simulate.rs`) builds an `Identity` from the principal's policies
+as `identity.rs` collects them for a request (plus `PolicyInputList`; a
+`PermissionsBoundaryPolicyInputList` replaces the boundary), asks it for its verdict, evaluates
+a `ResourcePolicy` against the caller, and combines them with `access::combine`, the function
+requests are decided with. The only condition values are the `ContextEntries` given, as on AWS;
+`MatchedStatements` come from the statements that decided (`Policy::matching`), with their
+positions in the policy's text.
+
+### Dashboard sign-in
+
+The dashboard had no auth model: the control plane is the operator's, and acts as an account's
+root user. IAM users can now sign in to the storage dashboard (`s3-server/src/console.rs`,
+`s3-control/src/console.rs`), and then the dashboard acts as them:
+
+- `POST /v1/storage/console/signin` takes the account (its 12-digit id or alias), the user name,
+  the password, and a code of the user's MFA device if it has one; a password that must be reset
+  (or has expired) is changed as part of signing in. A wrong account, user or password, or a
+  user without a login profile, is one answer (and takes as long: a hash is verified either
+  way). Ten wrong passwords in five minutes lock the user's sign-in for the rest of them.
+- The session is an STS session of the user (`Session::console`, no access key behind it, 12 h,
+  `aws:MultiFactorAuthPresent` when MFA was used). The dashboard holds it as a bearer token,
+  `<temporary key id>.<session token>`; its secret is never handed out, so it can't sign SigV4
+  requests, and other STS sessions aren't accepted as bearer tokens. It ends when the user or
+  its login profile goes, or when it expires.
+- With `Authorization: Bearer <token>`, every control-plane request acts as the user in its
+  account: a guard (`route_layer`) maps each operation to the S3 request it stands for (listing
+  objects is `s3:ListBucket` on the bucket, an upload `s3:PutObject` on the key, each field of a
+  bucket `PATCH` its `Put…`/`Delete…` action, a prefix delete `s3:DeleteObject` on `<prefix>*`)
+  and authorizes it with `access::authorize`, bucket policies and cross-account rules included.
+  Operations with no S3 equivalent (accounts, `/keys`, `/roles`, replication targets, session
+  keys, every account's usage) are the operator's (`403 OperatorOnly`). `POST /v1/storage/iam`
+  runs the IAM API's own dispatch as the user.
+- Without a token, the control plane is the operator's, as before: keep its listener private.
+  Presigned URLs a signed-in user asks for are signed with the control plane's key, after the
+  user's permission is checked; they stay valid for their lifetime even if the user's
+  permissions change.
 
 ### Temporary credentials (STS)
 
@@ -623,7 +695,8 @@ identity):
   `GET /?Action=…`), form-encoded, `Version=2011-06-15`, answered in STS's XML, errors in STS's
   `<ErrorResponse>`. SDKs reach it with `endpoint_url` for `sts`. Calls are SigV4-signed with
   service `sts` (the payload is the body; STS clients don't send `x-amz-content-sha256`),
-  except `AssumeRoleWithWebIdentity`, which is unsigned. Bodies are capped at 64 KiB.
+  except `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML`, which are unsigned. Bodies are
+  read whole, at most 1 MiB (a 100 000-character SAML assertion, IdP metadata).
   - `GetSessionToken` (900 s–36 h, default 12 h; the root user's 900 s–1 h): a session of the
     calling permanent key, with MFA (`SerialNumber`, `TokenCode` of the caller's own device).
   - `AssumeRole` (900 s up to the role's maximum, default 1 h; a role session assuming a role:
@@ -642,7 +715,9 @@ identity):
   - `GetFederationToken` (900 s–36 h; root 1 h): a federated user acting with the caller's
     policies bounded by the session policies (none: no permissions of its own).
   - `GetCallerIdentity`.
-  - SAML is refused with a clear error.
+  - `AssumeRoleWithSAML`: a SAML response signed by an IAM SAML provider's IdP (below), whose
+    `Role` attribute pairs the role with the provider, for a role whose trust policy allows the
+    provider (`Federated`) with `sts:AssumeRoleWithSAML`.
 - **Roles** (`roles` table, per account): control-plane roles have a trust (permanent keys;
   OIDC providers with issuer, audiences, an optional subject pattern and `jwks_uri`; an optional
   external id), a permission and bucket scope like a key's, an optional inline IAM policy that
@@ -717,6 +792,44 @@ for a day if the provider is down. Tokens (at most 20 000 bytes) must be RS256 o
 `https://aws.amazon.com/source_identity`, as on AWS. The fetch is behind
 `s3_server::JwksFetch` (`Server::set_jwks_fetcher`) so tests serve their own keys;
 `Config::oidc_allow_http` allows plain HTTP for tests only.
+
+**SAML** (`s3-server/src/sts/saml.rs`, `s3-proto/src/xmldsig.rs`). A provider's metadata
+(`CreateSAMLProvider`) gives its `entityID` and RSA signing certificates (`KeyDescriptor`s
+without `use`, or `use="signing"`). `AssumeRoleWithSAML` never fetches anything. The response is
+hostile input, so:
+
+- It's parsed by `s3_proto::xmldsig` on `quick-xml`: no DTDs or entities (only the predefined
+  ones and character references), no processing instructions, 1 MiB, depth 64, 20 000 nodes;
+  duplicate attributes (by expanded name) and duplicate `ID`s are errors. An element's text is
+  all its text children together, so a comment can't cut a value short.
+- Exactly one `Assertion`, a direct child of the `Response`; `EncryptedAssertion` is refused.
+- Every `ds:Signature` must be a direct child of the `Response` or the `Assertion` and verify;
+  one must cover the assertion. A signature verifies when `SignedInfo` uses exclusive
+  canonicalization (`xml-exc-c14n#`, without comments), RSA-SHA256 or RSA-SHA1, and exactly one
+  `Reference`, whose `URI` is `#` and the `ID` of the signature's own parent, which must be the
+  element that `ID` names (so the node the assertion is read from is the node that was
+  signed: no wrapping), whose transforms are exactly enveloped-signature then exclusive
+  canonicalization (`InclusiveNamespaces` honoured), whose SHA-256 (or SHA-1) digest of the
+  canonical parent without the signature matches (constant-time), and whose canonical
+  `SignedInfo` verifies (`ring`, 2048-bit keys or more) with a certificate of the provider's
+  metadata. `KeyInfo` in the response is ignored.
+- Exclusive canonicalization is implemented in `xmldsig.rs` (namespaces rendered where visibly
+  used and not already in effect from an output ancestor, `xmlns=""` only to undo a rendered
+  default, attributes by namespace URI and local name, the recommendation's escaping); a unit
+  test checks it byte for byte against a response signed by signxml on lxml.
+- The assertion: its `Issuer` is the provider's `entityID` (and the response's, if it has one);
+  a bearer `SubjectConfirmation` whose `Recipient` is `https://signin.aws.amazon.com/saml`, the
+  region's sign-in endpoint, or one of `ROLL_S3_SAML_AUDIENCES` (`Config::saml_audiences`), within its `NotOnOrAfter`;
+  `Conditions` `NotBefore`/`NotOnOrAfter` (5 minutes of skew either way); every
+  `AudienceRestriction` naming an accepted audience (those endpoints or
+  `urn:amazon:webservices`); the response's `Destination`, if any, an accepted endpoint; a
+  `RoleSessionName`. `SessionNotOnOrAfter` caps the session.
+- The trust policy decides with the provider's ARN as the `Federated` principal and `saml:aud`
+  (the recipient), `saml:iss`, `saml:sub`, `saml:sub_type`, `saml:namequalifier`
+  (Base64(SHA-1(issuer + account + "/" + provider))), the eduPerson and X.500 attribute keys
+  AWS maps, `aws:FederatedProvider`, and the session tags (`PrincipalTag:*` attributes; they
+  need `sts:TagSession`). The session's claims keep the `saml:*` values for its own requests'
+  policies (`${saml:sub}`).
 
 ### Server-side encryption
 
@@ -871,6 +984,20 @@ PATCH  /v1/storage/accounts/{id}  { name?, email?: string | null } → Account
 DELETE /v1/storage/accounts/{id}                 → { deleted }   (409 while it owns buckets; deletes its keys, roles and IAM entities;
                                                                    the default account can't be deleted)
 
+POST   /v1/storage/iam  { Action, …params }     → the action's result as JSON   (the IAM query API: see Accounts and IAM)
+       params: AWS's names; arrays become Name.member.N, objects Name.Field, nested. The result: lists are arrays,
+       maps (SummaryMap) objects, leaves strings ("true", "3600"), empty elements null; PolicyDocument,
+       AssumeRolePolicyDocument and Document come back URL-decoded. Errors: IAM's status and { error, code }.
+       Without a session it acts as the account's root user; with one, as the signed-in IAM user.
+POST   /v1/storage/console/signin  { account /* id or alias */, user, password, mfa_code?, new_password? }
+  → Session & { token }   (401 InvalidCredentials | MfaRequired | InvalidMfaCode | PasswordResetRequired | PasswordExpired,
+                            400 PasswordPolicyViolation, 429 Throttled)
+GET    /v1/storage/console/session              → Session   (with Authorization: Bearer <token>; 401 otherwise)
+Session = { expires_at, account_id, account_alias: string | null, user, arn, mfa: boolean }
+  With Authorization: Bearer <token>, every /v1/storage request acts as that IAM user (see Dashboard sign-in):
+  403 { code: "AccessDenied" } when its policies don't allow the S3 action an operation stands for,
+  403 { code: "OperatorOnly" } for the operator's operations, 401 { code: "InvalidToken" | "ExpiredToken" }.
+
 GET    /v1/storage/buckets                       → [Bucket]
 POST   /v1/storage/buckets  { name, public?, recover_days?, object_lock?: bool }   → Bucket
 GET    /v1/storage/buckets/{name}                → Bucket
@@ -994,7 +1121,8 @@ ObjectInfo = ObjectSummary & { metadata: Record<string,string>, tags: Record<str
              lock: { mode, retain_until, legal_hold } | null }
 ObjectVersion = { key, version_id, is_latest, delete_marker, size, etag, last_modified }
 TrashEntry = { key, size, etag, deleted_at, expires_at, version_id }
-Account = { id /* 12 digits */, canonical /* 64 hex */, name, email: string | null, created_at, default: boolean }
+Account = { id /* 12 digits */, canonical /* 64 hex */, name, email: string | null, created_at, default: boolean,
+            alias: string | null /* CreateAccountAlias */ }
 Key = { id /* access key id */, name, permission, buckets: string[] | null, created_at, last_used_at,
         account, user: string | null /* an IAM user's key */, active }
 RequesterCharges = { class_a, class_b, egress_internet_bytes, egress_internal_bytes, cost: Cost, accounts: [string] }

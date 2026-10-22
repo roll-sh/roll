@@ -144,6 +144,13 @@ aws-sdk-sts = "1"
 # Tests only: the S3 Control client (access points).
 aws-sdk-s3control = "1"
 zeroize = "1"
+# IAM: login passwords (argon2id); X.509 certificates (server, signing, SAML metadata) and the
+# structure of private keys (matching a key to its certificate; no private-key operations).
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
+x509-cert = { version = "0.2", default-features = false, features = ["pem"] }
+pkcs1 = { version = "0.7", default-features = false, features = ["std"] }
+pkcs8 = { version = "0.10", default-features = false, features = ["std"] }
+sec1 = { version = "0.7", default-features = false, features = ["der", "std"] }
 s3-proto = { path = "crates/s3-proto" }
 s3-store = { path = "crates/s3-store" }
 s3-server = { path = "crates/s3-server" }
@@ -155,6 +162,13 @@ kafka-protocol = { path = "vendor/kafka-protocol" }
 
 # Tests generate RSA keys (web identity); unoptimised big-integer code makes that slow.
 [profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+# IAM login passwords are hashed with argon2id (19 MiB, 2 passes): unoptimised, a hash takes
+# seconds.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
 opt-level = 3
 
 [profile.release]

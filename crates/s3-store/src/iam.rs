@@ -36,13 +36,35 @@ pub const MAX_USER_INLINE_BYTES: usize = 2048;
 pub const MAX_GROUP_INLINE_BYTES: usize = 5120;
 pub const MAX_ROLE_INLINE_BYTES: usize = 10_240;
 
+pub const MAX_SAML_PROVIDERS: usize = 100;
+pub const MAX_SERVER_CERTS: usize = 20;
+pub const MAX_SIGNING_CERTS_PER_USER: usize = 2;
+pub const MAX_SSH_KEYS_PER_USER: usize = 5;
+
 pub mod kind {
     pub const USER: &str = "user";
     pub const GROUP: &str = "group";
     pub const POLICY: &str = "policy";
     pub const MFA: &str = "mfa";
     pub const OIDC: &str = "oidc";
+    /// SAML identity providers, by name.
+    pub const SAML: &str = "saml";
+    /// Server certificates, by name.
+    pub const SERVER_CERT: &str = "server_cert";
+    /// Signing certificates (users' and the root user's), by certificate id.
+    pub const SIGNING_CERT: &str = "signing_cert";
+    /// The account's password policy (one, named [`super::ACCOUNT`]).
+    pub const PASSWORD_POLICY: &str = "password_policy";
+    /// The account's alias (one; the name is the alias, unique across the deployment).
+    pub const ALIAS: &str = "alias";
+    /// The last credential report (one, named [`super::ACCOUNT`]).
+    pub const CREDENTIAL_REPORT: &str = "credential_report";
+    /// Recent failed attempts (MFA codes, sign-in passwords), by what was attempted.
+    pub const THROTTLE: &str = "throttle";
 }
+
+/// The name of an account's one-per-account entities.
+pub const ACCOUNT: &str = "account";
 
 /// An IAM-style unique id: a 4-letter prefix (`AIDA` users, `AGPA` groups, `ANPA` policies,
 /// `AROA` roles) and 17 random upper base32 characters.
@@ -69,6 +91,132 @@ pub struct User {
     pub groups: Vec<String>,
     /// Permissions boundary (a managed policy ARN).
     pub boundary: Option<String>,
+    /// The console password (`CreateLoginProfile`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login: Option<LoginProfile>,
+    /// `UploadSSHPublicKey`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ssh_keys: Vec<SshKey>,
+}
+
+/// A user's password: an argon2id PHC string, never the password. Never logged.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoginProfile {
+    pub hash: String,
+    pub created_at: i64,
+    /// When the password was last set (`password_last_changed`, expiry).
+    pub changed_at: i64,
+    /// The user must choose a new password at the next sign-in.
+    pub reset_required: bool,
+    /// Earlier passwords' hashes, newest first (`PasswordReusePrevention`).
+    pub previous: Vec<String>,
+    /// The last successful sign-in (Unix ms).
+    pub last_used_at: Option<i64>,
+}
+
+impl std::fmt::Debug for LoginProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginProfile").field("created_at", &self.created_at).field("changed_at", &self.changed_at).field("reset_required", &self.reset_required).finish_non_exhaustive()
+    }
+}
+
+/// An SSH public key (`UploadSSHPublicKey`): RSA, as IAM takes them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SshKey {
+    /// `APKA…`.
+    pub id: String,
+    /// As uploaded.
+    pub body: String,
+    /// MD5 of the key blob, `aa:bb:…`.
+    pub fingerprint: String,
+    pub active: bool,
+    pub uploaded_at: i64,
+}
+
+/// An X.509 signing certificate (`UploadSigningCertificate`) of a user or the root user.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SigningCert {
+    pub id: String,
+    /// `None`: the account's root user.
+    pub user: Option<String>,
+    /// PEM, as uploaded.
+    pub body: String,
+    /// SHA-256 of the DER certificate, hex (duplicates are refused).
+    pub fingerprint: String,
+    pub active: bool,
+    pub uploaded_at: i64,
+}
+
+/// A server certificate (`UploadServerCertificate`). Its private key was checked against the
+/// certificate and isn't kept: nothing in roll serves TLS with it, and IAM never returns it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerCert {
+    pub name: String,
+    /// `ASCA…`.
+    pub id: String,
+    pub path: String,
+    pub body: String,
+    pub chain: Option<String>,
+    pub uploaded_at: i64,
+    /// The certificate's notAfter (Unix ms).
+    pub expires_at: i64,
+    pub tags: Vec<(String, String)>,
+}
+
+/// A SAML 2.0 identity provider (`CreateSAMLProvider`): its metadata document, and what roll
+/// reads from it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SamlProviderEntry {
+    pub name: String,
+    pub metadata: String,
+    /// The IdP's `entityID` (an assertion's `Issuer` must be it).
+    pub entity_id: String,
+    /// The IdP's signing certificates (DER, base64).
+    pub certificates: Vec<String>,
+    pub created_at: i64,
+    /// The metadata's `validUntil` (Unix ms).
+    pub valid_until: i64,
+    /// `SAMLProviderUUID`.
+    pub uuid: String,
+    pub tags: Vec<(String, String)>,
+}
+
+/// An account's password policy (`UpdateAccountPasswordPolicy`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PasswordPolicy {
+    pub min_length: u32,
+    pub require_symbols: bool,
+    pub require_numbers: bool,
+    pub require_uppercase: bool,
+    pub require_lowercase: bool,
+    pub allow_users_to_change: bool,
+    /// Days; `None`: passwords don't expire.
+    pub max_age_days: Option<u32>,
+    /// How many earlier passwords can't be used again.
+    pub reuse_prevention: Option<u32>,
+    /// An expired password can't be changed by the user (an administrator must reset it).
+    pub hard_expiry: Option<bool>,
+}
+
+impl Default for PasswordPolicy {
+    /// What `UpdateAccountPasswordPolicy` sets for what it isn't given.
+    fn default() -> Self {
+        Self { min_length: 6, require_symbols: false, require_numbers: false, require_uppercase: false, require_lowercase: false, allow_users_to_change: false, max_age_days: None, reuse_prevention: None, hard_expiry: None }
+    }
+}
+
+/// The last credential report.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CredentialReport {
+    pub generated_at: i64,
+    pub csv: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,6 +419,17 @@ impl Iam<'_> {
         Ok(out)
     }
 
+    /// The account an alias belongs to (aliases are unique across the deployment, as across
+    /// AWS).
+    pub fn alias_owner(&self, alias: &str) -> Result<Option<String>> {
+        Ok(self.c.prepare_cached("SELECT account_id FROM iam WHERE kind = ?1 AND name = ?2")?.query_row(params![kind::ALIAS, alias.to_lowercase()], |r| r.get(0)).optional()?)
+    }
+
+    /// The account's alias.
+    pub fn alias_of(&self, account: &str) -> Result<Option<String>> {
+        Ok(self.list::<String>(account, kind::ALIAS)?.into_iter().next())
+    }
+
     /// The MFA devices enabled for a user (`Some`) or the root user (`None`).
     pub fn mfa_devices_of(&self, account: &str, user: Option<&str>) -> Result<Vec<MfaDevice>> {
         Ok(self
@@ -297,6 +456,13 @@ impl Store {
         self.write(|c| f(&Iam { c, now })).await
     }
 
+    /// Change IAM entities in a relaxed write (committed with the next group, without waiting):
+    /// bookkeeping a crash may lose, such as when a password was last used.
+    pub fn iam_write_relaxed<T>(&self, f: impl FnOnce(&Iam) -> Result<T>) -> Result<T> {
+        let now = self.now();
+        self.write_relaxed(|c| f(&Iam { c, now }))
+    }
+
     /// An IAM user.
     pub fn iam_user(&self, account: &str, name: &str) -> Result<Option<User>> {
         self.iam_read(|t| t.get(account, kind::USER, name))
@@ -313,6 +479,16 @@ impl Store {
 
     pub fn iam_oidc_provider(&self, account: &str, name: &str) -> Result<Option<OidcProviderEntry>> {
         self.iam_read(|t| t.get(account, kind::OIDC, name))
+    }
+
+    /// The account's alias (`CreateAccountAlias`).
+    pub fn account_alias(&self, account: &str) -> Result<Option<String>> {
+        self.iam_read(|t| t.alias_of(account))
+    }
+
+    /// The account with this alias.
+    pub fn account_by_alias(&self, alias: &str) -> Result<Option<String>> {
+        self.iam_read(|t| t.alias_owner(alias))
     }
 
     /// The enabled MFA device with this serial number, if it belongs to `account`.

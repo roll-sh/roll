@@ -1,33 +1,51 @@
 "use client";
 
 import { Globe } from "lucide-react";
+import Link from "next/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { storageApi, type Bucket, type StorageInfo } from "@/lib/storage-api";
+import { errorMessage, getScope, StorageError, subscribe } from "@/lib/storage-session";
 import { POLL_MS } from "../redis/shared";
 import { btn, primary } from "../ui";
 
 export { Field, Segmented, useAction, type Run } from "../redis/shared";
 
-/** Poll the control plane: storage info and every bucket. */
+/**
+ * Poll the control plane: storage info and every bucket, as whoever the dashboard acts as (it starts
+ * over when that changes). `offline`: rolld didn't answer; `denied`: it answered with an error (an
+ * IAM user without permission to list buckets, say), and the buckets read as none.
+ */
 export function useStorage() {
   const [info, setInfo] = useState<StorageInfo | null>(null);
   const [buckets, setBuckets] = useState<Bucket[] | null>(null);
   const [offline, setOffline] = useState(false);
+  const [denied, setDenied] = useState<string | null>(null);
+  const [scope, setScope] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    try {
-      const [i, b] = await Promise.all([storageApi.info(), storageApi.buckets()]);
-      setInfo(i);
-      setBuckets(b);
-      setOffline(false);
-    } catch {
+    const [i, b] = await Promise.allSettled([storageApi.info(), storageApi.buckets()]);
+    const failed = [i, b].filter((r): r is PromiseRejectedResult => r.status === "rejected");
+    if (failed.some((r) => !(r.reason instanceof StorageError))) {
       setOffline(true);
+      return;
     }
+    setOffline(false);
+    if (i.status === "fulfilled") setInfo(i.value);
+    setBuckets(b.status === "fulfilled" ? b.value : []);
+    setDenied(failed.length ? errorMessage(failed[0].reason) : null);
   }, []);
 
   useEffect(() => {
+    const update = () => setScope(getScope());
+    update();
+    return subscribe(update);
+  }, []);
+
+  useEffect(() => {
+    if (scope === null) return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout>;
+    setBuckets(null);
     const loop = async () => {
       await refresh();
       if (alive) timer = setTimeout(loop, POLL_MS * 2);
@@ -37,9 +55,9 @@ export function useStorage() {
       alive = false;
       clearTimeout(timer);
     };
-  }, [refresh]);
+  }, [refresh, scope]);
 
-  return { info, buckets, offline, refresh };
+  return { info, buckets, offline, denied, refresh };
 }
 
 /** Tabs kept in the URL hash, like the Redis pages. */
@@ -62,12 +80,15 @@ export function TabNav<T extends string>({
   onChange,
   label,
   counts = {},
+  links = [],
 }: {
   tabs: readonly { value: T; label: string }[];
   tab: T;
   onChange: (t: T) => void;
   label: string;
   counts?: Partial<Record<T, number>>;
+  /** Other pages, after the tabs and styled like them. */
+  links?: readonly { href: string; label: string }[];
 }) {
   return (
     <nav className="mt-6 flex gap-1 overflow-x-auto border-b border-line" aria-label={label}>
@@ -83,6 +104,12 @@ export function TabNav<T extends string>({
           {t.label}
           {!!counts[t.value] && <span className="ml-1.5 font-mono text-[11px] text-subtle">{counts[t.value]}</span>}
         </button>
+      ))}
+      {links.length > 0 && <span className="mx-1 my-2 w-px shrink-0 bg-line" aria-hidden />}
+      {links.map((l) => (
+        <Link key={l.href} href={l.href} className="-mb-px shrink-0 border-b border-transparent px-3 py-2 text-[13px] text-muted transition hover:text-fg">
+          {l.label}
+        </Link>
       ))}
     </nav>
   );

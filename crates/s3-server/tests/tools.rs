@@ -3,6 +3,8 @@
 //! `ROLL_COMPAT_REQUIRED=1`. Containers run one at a time, on the host network.
 
 mod common;
+#[path = "common/samlkit.rs"]
+mod samlkit;
 
 use common::*;
 use std::path::Path;
@@ -672,4 +674,81 @@ async fn aws_cli_iam() {
     assert!(std::fs::read(dir.path().join("qr.png")).unwrap().starts_with(b"\x89PNG"), "the CLI saved the QR code");
     let got = t.client.get_object().bucket("iamtool").key("up.txt").send().await.unwrap();
     assert_eq!(got.body.collect().await.unwrap().into_bytes().as_ref(), b"uploaded by an IAM user\n");
+}
+
+/// `aws iam simulate-principal-policy` (the CLI parsing roll's EvaluationResults), and SAML
+/// federation with the CLI: `aws iam create-saml-provider` and `aws sts assume-role-with-saml`
+/// with a response signed by a test IdP, then the role's credentials at work.
+#[tokio::test(flavor = "multi_thread")]
+async fn aws_cli_simulation_and_saml() {
+    if !docker_ok() {
+        return;
+    }
+    let t = start().await;
+    let account = t.store.account_id();
+    t.client.create_bucket().bucket("simtool").send().await.unwrap();
+    t.client.put_object().bucket("simtool").key("alice@example.com/hello.txt").body(aws_sdk_s3::primitives::ByteStream::from_static(b"hi")).send().await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let policy = serde_json::json!({"Version": "2012-10-17", "Statement": [
+        {"Sid": "Office", "Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::simtool/*", "Condition": {"IpAddress": {"aws:SourceIp": "10.0.0.0/8"}}},
+        {"Sid": "NoDeletes", "Effect": "Deny", "Action": "s3:DeleteObject", "Resource": "*"}
+    ]});
+    std::fs::write(dir.path().join("policy.json"), policy.to_string()).unwrap();
+    std::fs::write(dir.path().join("metadata.xml"), samlkit::idp().metadata(samlkit::ISSUER)).unwrap();
+    let provider = format!("arn:aws:iam::{account}:saml-provider/testidp");
+    let role = format!("arn:aws:iam::{account}:role/federated");
+    let trust = serde_json::json!({"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": {"Federated": provider}, "Action": ["sts:AssumeRoleWithSAML", "sts:TagSession"], "Condition": {"StringEquals": {"SAML:aud": samlkit::SIGNIN}}}]});
+    std::fs::write(dir.path().join("trust.json"), trust.to_string()).unwrap();
+    let read = serde_json::json!({"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["s3:GetObject", "s3:ListBucket"], "Resource": ["arn:aws:s3:::simtool", "arn:aws:s3:::simtool/${saml:sub}/*"]}]});
+    std::fs::write(dir.path().join("read.json"), read.to_string()).unwrap();
+    let assertion = samlkit::b64(&samlkit::signed(&samlkit::A::new(now_s() * 1000, &role, &provider), samlkit::idp()));
+    let endpoint = t.endpoint.clone();
+    let path = dir.path().to_path_buf();
+    blocking(move || {
+        let aws = |env: &[(&str, String)], args: &[&str]| {
+            let mut all = vec!["--endpoint-url", endpoint.as_str(), "--output", "json"];
+            all.extend_from_slice(args);
+            run("amazon/aws-cli", env, &path, &all)
+        };
+        let json = |out: &str| serde_json::from_str::<serde_json::Value>(out).unwrap_or_else(|e| panic!("{e}: {out}"));
+        let root = [("AWS_ACCESS_KEY_ID", ACCESS.to_string()), ("AWS_SECRET_ACCESS_KEY", SECRET.to_string()), ("AWS_DEFAULT_REGION", REGION.to_string())];
+        aws(&root, &["iam", "create-user", "--user-name", "alice"]);
+        aws(&root, &["iam", "put-user-policy", "--user-name", "alice", "--policy-name", "office", "--policy-document", "file:///data/policy.json"]);
+        let user = format!("arn:aws:iam::{account}:user/alice");
+        let sim = json(&aws(&root, &["iam", "simulate-principal-policy", "--policy-source-arn", &user, "--action-names", "s3:GetObject", "s3:DeleteObject", "--resource-arns", "arn:aws:s3:::simtool/k"]));
+        let r = sim["EvaluationResults"].as_array().unwrap();
+        assert_eq!(r[0]["EvalDecision"], "implicitDeny", "{sim}");
+        assert_eq!(r[0]["MissingContextValues"], serde_json::json!(["aws:SourceIp"]));
+        assert_eq!(r[1]["EvalDecision"], "explicitDeny");
+        assert_eq!(r[1]["MatchedStatements"][0]["SourcePolicyId"], "office");
+        assert_eq!(r[1]["MatchedStatements"][0]["StartPosition"]["Line"], 1, "the CLI reads positions as numbers");
+        let sim = json(&aws(&root, &["iam", "simulate-principal-policy", "--policy-source-arn", &user, "--action-names", "s3:GetObject", "--resource-arns", "arn:aws:s3:::simtool/k", "--context-entries", "ContextKeyName=aws:SourceIp,ContextKeyValues=10.1.2.3,ContextKeyType=ip"]));
+        assert_eq!(sim["EvaluationResults"][0]["EvalDecision"], "allowed", "{sim}");
+
+        // SAML: a provider, a role trusting it, an assertion, credentials.
+        let p = json(&aws(&root, &["iam", "create-saml-provider", "--name", "testidp", "--saml-metadata-document", "file:///data/metadata.xml"]));
+        assert_eq!(p["SAMLProviderArn"], provider.as_str());
+        assert_eq!(json(&aws(&root, &["iam", "list-saml-providers"]))["SAMLProviderList"][0]["Arn"], provider.as_str());
+        aws(&root, &["iam", "create-role", "--role-name", "federated", "--assume-role-policy-document", "file:///data/trust.json"]);
+        aws(&root, &["iam", "put-role-policy", "--role-name", "federated", "--policy-name", "read", "--policy-document", "file:///data/read.json"]);
+        let out = json(&aws(&[("AWS_DEFAULT_REGION", REGION.to_string())], &["sts", "assume-role-with-saml", "--no-sign-request", "--role-arn", &role, "--principal-arn", &provider, "--saml-assertion", &assertion]));
+        assert_eq!(out["Subject"], "alice@example.com");
+        assert_eq!(out["SubjectType"], "persistent");
+        assert_eq!(out["AssumedRoleUser"]["Arn"], format!("arn:aws:sts::{account}:assumed-role/federated/alice"));
+        let c = &out["Credentials"];
+        let session = [
+            ("AWS_ACCESS_KEY_ID", c["AccessKeyId"].as_str().unwrap().to_string()),
+            ("AWS_SECRET_ACCESS_KEY", c["SecretAccessKey"].as_str().unwrap().to_string()),
+            ("AWS_SESSION_TOKEN", c["SessionToken"].as_str().unwrap().to_string()),
+            ("AWS_DEFAULT_REGION", REGION.to_string()),
+        ];
+        assert_eq!(json(&aws(&session, &["sts", "get-caller-identity"]))["Arn"], format!("arn:aws:sts::{account}:assumed-role/federated/alice"));
+        assert!(aws(&session, &["s3", "cp", "s3://simtool/alice@example.com/hello.txt", "-"]).contains("hi"));
+        // A tampered assertion is refused.
+        let tampered = String::from_utf8(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &assertion).unwrap()).unwrap().replace("alice@example.com</saml:NameID>", "admin@example.com</saml:NameID>");
+        let tampered = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, tampered);
+        let err = run_fails("amazon/aws-cli", &[("AWS_DEFAULT_REGION", REGION.to_string())], &path, &["--endpoint-url", endpoint.as_str(), "sts", "assume-role-with-saml", "--no-sign-request", "--role-arn", &role, "--principal-arn", &provider, "--saml-assertion", &tampered]);
+        assert!(err.contains("InvalidIdentityToken"), "{err}");
+    })
+    .await;
 }

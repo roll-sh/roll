@@ -22,6 +22,9 @@ use std::collections::{BTreeMap, HashMap};
 pub mod kind {
     pub const TAGGING: &str = "tagging";
     pub const POLICY: &str = "policy";
+    /// The IAM users and roles the policy's principals named when it was put (ARN → unique
+    /// id, JSON; `s3-server`'s `principals.rs`), written with the policy.
+    pub const POLICY_PRINCIPALS: &str = "policy_principals";
     pub const PUBLIC_ACCESS_BLOCK: &str = "public_access_block";
     pub const OWNERSHIP: &str = "ownership";
     pub const ACL: &str = "acl";
@@ -161,8 +164,8 @@ pub(crate) fn drop_bucket_config(c: &Connection, bucket_id: &str) -> Result<()> 
 /// don't go to its parent's destinations unless it's configured to.
 pub(crate) fn copy_bucket_config(c: &Connection, from: &str, to: &str) -> Result<()> {
     c.execute(
-        "INSERT INTO bucket_config (bucket_id, kind, id, value) SELECT ?2, kind, id, value FROM bucket_config WHERE bucket_id = ?1 AND kind NOT IN (?3, ?4, ?5, ?6)",
-        params![from, to, kind::POLICY, kind::NOTIFICATION, kind::REPLICATION, kind::WEBHOOK_SECRET],
+        "INSERT INTO bucket_config (bucket_id, kind, id, value) SELECT ?2, kind, id, value FROM bucket_config WHERE bucket_id = ?1 AND kind NOT IN (?3, ?4, ?5, ?6, ?7)",
+        params![from, to, kind::POLICY, kind::NOTIFICATION, kind::REPLICATION, kind::WEBHOOK_SECRET, kind::POLICY_PRINCIPALS],
     )?;
     Ok(())
 }
@@ -256,6 +259,24 @@ impl Store {
                 }
                 None => {
                     c.execute("DELETE FROM bucket_config WHERE bucket_id = ?1 AND kind = ?2 AND id = ?3", params![b.id, kind, id])?;
+                }
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Set (`Some((policy, principals))`) or remove (`None`) a bucket's policy, with the IAM
+    /// principals it named ([`kind::POLICY_PRINCIPALS`]), in one transaction.
+    pub async fn set_bucket_policy(&self, bucket: &str, policy: Option<(&str, &str)>) -> Result<()> {
+        self.write(|c| {
+            let b = find_bucket(c, bucket)?;
+            c.execute("DELETE FROM bucket_config WHERE bucket_id = ?1 AND kind IN (?2, ?3) AND id = ''", params![b.id, kind::POLICY, kind::POLICY_PRINCIPALS])?;
+            if let Some((doc, principals)) = policy {
+                let put = "INSERT INTO bucket_config (bucket_id, kind, id, value) VALUES (?1, ?2, '', ?3)";
+                c.execute(put, params![b.id, kind::POLICY, doc])?;
+                if principals != "{}" && !principals.is_empty() {
+                    c.execute(put, params![b.id, kind::POLICY_PRINCIPALS, principals])?;
                 }
             }
             Ok(())

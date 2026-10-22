@@ -255,6 +255,14 @@ CREATE TABLE usage_payer (
   PRIMARY KEY (account_id, bucket_id, day)
 ) WITHOUT ROWID;
 "#,
+// More of IAM (`iam.rs`, `throttle.rs`): account aliases are unique across the deployment and
+// dashboard sign-in finds an account by its alias, so `iam` is indexed by (kind, name) too.
+// Login profiles and SSH keys (in a user's document), signing and server certificates, SAML
+// providers, password policies, credential reports and the durable MFA and sign-in throttles
+// are rows of `iam`: no new tables.
+r#"
+CREATE INDEX iam_by_kind ON iam (kind, name);
+"#,
 ];
 
 pub(crate) const LATEST: u32 = MIGRATIONS.len() as u32;
@@ -278,9 +286,9 @@ mod tests {
     fn the_deployment_becomes_the_default_account() {
         for owner in ["0f".repeat(32), "ff".repeat(32), "00".repeat(32), format!("{}{}", "a1b2c3d4e5f6a7b", "0".repeat(49))] {
             let c = Connection::open_in_memory().unwrap();
-            // Everything before the accounts migration (the last one when it was added: if
-            // migrations are appended after it, use its index here instead of LATEST - 1).
-            migrate(&c, LATEST - 1).unwrap();
+            // Everything before the accounts migration.
+            let accounts = MIGRATIONS.iter().position(|m| m.contains("CREATE TABLE accounts")).unwrap() as u32;
+            migrate(&c, accounts).unwrap();
             c.execute("INSERT INTO state (k, v) VALUES ('canonical_owner', ?1)", [&owner]).unwrap();
             c.execute_batch(
                 "INSERT INTO buckets (id, name, region, created_at, public, recover_days, objects, bytes, trash_bytes) VALUES ('b', 'b', 'r', 5, 0, 7, 0, 0, 0);

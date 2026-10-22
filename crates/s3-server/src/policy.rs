@@ -52,6 +52,8 @@ enum Mode {
     Identity,
     /// A trust policy (principals, any service's actions, no resources).
     Trust,
+    /// Any service's resource policy (the policy simulator's `ResourcePolicy`).
+    AnyResource,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,6 +213,8 @@ struct Condition {
     if_exists: bool,
     /// Lowercase (condition keys are case-insensitive).
     key: String,
+    /// As the policy spells it (what the policy simulator reports).
+    name: String,
     values: Vec<String>,
     /// Policy variables (`${aws:username}`) are substituted (`Version` 2012-10-17).
     vars: bool,
@@ -243,6 +247,22 @@ fn expand(s: &str, ctx: &dyn Context) -> Option<String> {
     }
     out.push_str(rest);
     Some(out)
+}
+
+/// The condition keys `${…}` policy variables in `s` name (not `${*}`, `${?}`, `${$}`).
+fn variables(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(i) = rest.find("${") {
+        let after = &rest[i + 2..];
+        let Some(j) = after.find('}') else { break };
+        let key = after[..j].split(',').next().unwrap_or_default().trim();
+        if !matches!(key, "*" | "?" | "$") && !key.is_empty() {
+            out.push(key.to_string());
+        }
+        rest = &after[j + 1..];
+    }
+    out
 }
 
 impl Condition {
@@ -541,6 +561,12 @@ impl Policy {
         Self::parse_as(doc, None, Mode::Trust, max)
     }
 
+    /// Parse any service's resource policy (principals, any actions and resources): what the
+    /// policy simulator takes as `ResourcePolicy`.
+    pub(crate) fn parse_resource_any(doc: &[u8], max: usize) -> Result<Self, S3Error> {
+        Self::parse_as(doc, None, Mode::AnyResource, max)
+    }
+
     fn parse_for(doc: &[u8], bucket: Option<&str>) -> Result<Self, S3Error> {
         Self::parse_as(doc, bucket, Mode::Resource, MAX_POLICY_BYTES)
     }
@@ -668,7 +694,7 @@ impl Policy {
                         if matches!(op, Op::Bool | Op::Null) && values.iter().any(|v| !v.eq_ignore_ascii_case("true") && !v.eq_ignore_ascii_case("false")) {
                             return Err(malformed(format!("{op_name} takes true or false")));
                         }
-                        conditions.push(Condition { op, set, if_exists, key: key.to_ascii_lowercase(), values, vars });
+                        conditions.push(Condition { op, set, if_exists, key: key.to_ascii_lowercase(), name: key.clone(), values, vars });
                     }
                 }
             }
@@ -696,6 +722,49 @@ impl Policy {
     /// An identity policy's say (no principals): Deny, Allow or nothing.
     pub(crate) fn decide(&self, action: &str, resource: &str, ctx: &dyn Context) -> Decision {
         self.evaluate(&Principal::Anonymous, action, resource, ctx).decision()
+    }
+
+    /// The statements (by index, in document order) that apply to `who` doing `action` on
+    /// `resource`, and whether each is a `Deny`: what [`Policy::evaluate`] decided from (the
+    /// policy simulator's `MatchedStatements`).
+    pub(crate) fn matching(&self, who: &Principal, action: &str, resource: &str, ctx: &dyn Context) -> Vec<(usize, bool)> {
+        self.statements.iter().enumerate().filter(|(_, s)| s.applies(who, action, resource, ctx).is_some()).map(|(i, s)| (i, s.effect == Effect::Deny)).collect()
+    }
+
+    /// The condition keys (as spelled) of the statements about `action` on `resource`, and the
+    /// keys their policy variables use: what a request must supply for them to be decided (the
+    /// policy simulator's `MissingContextValues`). Without an action, every statement's.
+    pub(crate) fn condition_keys(&self, action: Option<&str>, resource: &str, ctx: &dyn Context) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for s in &self.statements {
+            if let Some(a) = action {
+                let action_ok = match (&s.action, &s.not_action) {
+                    (Some(x), _) => x.iter().any(|p| wildcard(p, a, true)),
+                    (None, Some(nx)) => !nx.iter().any(|p| wildcard(p, a, true)),
+                    _ => false,
+                };
+                let resource_ok = match (&s.resource, &s.not_resource) {
+                    (Some(r), _) => r.iter().any(|p| p.contains("${") || s.resource_matches(p, resource, ctx)),
+                    (None, Some(nr)) => !nr.iter().any(|p| !p.contains("${") && s.resource_matches(p, resource, ctx)),
+                    _ => false,
+                };
+                if !action_ok || !resource_ok {
+                    continue;
+                }
+            }
+            let mut keys: Vec<String> = s.conditions.iter().map(|c| c.name.clone()).collect();
+            if s.vars {
+                for text in s.resource.iter().chain(s.not_resource.iter()).flatten().chain(s.conditions.iter().flat_map(|c| c.values.iter())) {
+                    keys.extend(variables(text));
+                }
+            }
+            for k in keys {
+                if !out.iter().any(|o| o.eq_ignore_ascii_case(&k)) {
+                    out.push(k);
+                }
+            }
+        }
+        out
     }
 
     /// The OIDC provider ARNs `Federated` principals name (a trust policy's web identities).

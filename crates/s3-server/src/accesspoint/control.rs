@@ -393,6 +393,10 @@ async fn put_policy(ctx: &mut Ctx, call: &Call<'_>, body: Body) -> Reply {
     let n = body_xml(ctx, body, root).await?;
     let doc = n.text_of("Policy").map(str::trim).filter(|p| !p.is_empty()).ok_or_else(|| S3Error::msg(Code::MalformedPolicy, "Policy is required"))?.to_string();
     let public = super::validate_policy(&doc, &call.arn())?;
+    crate::principals::bind(ctx.store(), &doc).map_err(|e| match e {
+        Some(_) => S3Error::msg(Code::MalformedPolicy, crate::principals::INVALID),
+        None => S3Error::new(Code::InternalError),
+    })?;
     if public && blocks_public_policy(ctx, &bucket, &ap) {
         return Err(S3Error::msg(Code::AccessDenied, "Access Denied: public access is blocked (BlockPublicPolicy)"));
     }
