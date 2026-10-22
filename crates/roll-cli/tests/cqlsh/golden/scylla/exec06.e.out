@@ -1,0 +1,15 @@
+
+ k | v
+---+-----
+ 1 | one
+
+(1 rows)
+Now Expanded output is enabled
+
+@ Row 1
+---+-----
+ k | 1
+ v | one
+
+
+(1 rows)

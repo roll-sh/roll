@@ -1,0 +1,14 @@
+
+Warnings :
+Using Replication Factor replication_factor=1 lower than the minimum_replication_factor_warn_threshold=3 is not recommended.
+
+
+Warnings :
+Creating an index in a keyspace that uses tablets requires the keyspace to remain RF-rack-valid while the index exists. Some operations will be restricted to enforce this: altering the keyspace's replication factor, adding a node in a new rack, and removing or decommissioning a node that would eliminate a rack.
+
+
+ k | v
+---+-----
+ 1 | one
+
+(1 rows)
