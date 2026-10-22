@@ -13743,6 +13743,24 @@ pub fn dump_plan(p: &Plan, depth: usize) {
         eprintln!("{}[subquery {}]", "  ".repeat(depth + 1), s.id);
         dump_plan(&s.plan, depth + 2);
     }
+    if let Plan::With { ctes, names, .. } = p {
+        for ((_, c), n) in ctes.iter().zip(names) {
+            eprintln!("{}[CTE {n}]", "  ".repeat(depth + 1));
+            dump_plan(c, depth + 2);
+        }
+    }
+    let dml_source = match p {
+        Plan::Insert(x) => Some(&x.source),
+        Plan::Update(x) => Some(&x.source),
+        Plan::Delete(x) => Some(&x.source),
+        Plan::Merge(x) => Some(&x.source),
+        _ => None,
+    };
+    if let Some(s) = dml_source
+        && !plan_inputs(p).iter().any(|c| Arc::ptr_eq(c, s))
+    {
+        dump_plan(s, depth + 1);
+    }
     for c in plan_inputs(p) {
         dump_plan(c, depth + 1);
     }

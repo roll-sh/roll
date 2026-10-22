@@ -168,7 +168,13 @@ ModifyTable (no CTE Scan on `*RULE*`) with the statement's RETURNING over its ol
 (`old.f1`, `new.f1`). Left: which relation takes the plain name (Postgres names the statement's
 own relation first: the action's target is `foo_1`), the target's restriction derived from the
 equivalence class with the statement's rows (`f1 = 4` on both sides: a Nested Loop over a
-Materialize), the non-target rows' ctids in the join's target list.
+Materialize), the non-target rows' ctids in the join's target list. The restriction is a
+general equivalence-class gap, not the rules': a restriction already pushed into a scan (a
+pulled-up subquery's `WHERE f1 = 4`) joins no class with the join clause above it, so
+`SELECT * FROM t JOIN (SELECT * FROM t WHERE f1 = 4) s ON t.f1 = s.f1` gets no `t.f1 = 4`
+(a Hash Join; Postgres a Nested Loop of two filtered scans): `binder/optimize.rs`
+`ec_constants` only sees the quals being pushed down with the join clause.
+(`ROLL_DUMP_PLAN` now prints a WITH's CTEs and a data-modifying node's source too.)
 
 ## Fixed in round 14, agent 3 (strict-NULL folding, semi joins unique-ified early, EXISTS with sublinks)
 
