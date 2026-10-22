@@ -2099,20 +2099,20 @@ fn assign_refnames_skip(
     }
     // The relations of one query level that share a name (a view read twice and pulled
     // up) take their numbers in range-table order, not in the order the joins put them.
-    let mut levels: Vec<Vec<&Plan>> = vec![Vec::new()];
+    let mut levels: Vec<Vec<(&Plan, LevelKey)>> = vec![Vec::new()];
     level_scans(root, 0, &mut levels);
     let target = target.map(addr);
     for level in levels {
-        let mut groups: Vec<(String, Vec<(crate::sql::plan::Rti, usize)>)> = Vec::new();
-        for p in level {
+        let mut groups: Vec<(String, Vec<(LevelKey, usize)>)> = Vec::new();
+        for (p, key) in level {
             let Plan::Scan(s) = p else { continue };
             if s.rti.0 == 0 || Some(addr(p)) == target || !out.contains_key(&addr(p)) {
                 continue;
             }
             let base = s.alias.clone().unwrap_or_else(|| s.table.name.clone());
             match groups.iter_mut().find(|(b, _)| *b == base) {
-                Some((_, v)) => v.push((s.rti, addr(p))),
-                None => groups.push((base, vec![(s.rti, addr(p))])),
+                Some((_, v)) => v.push((key, addr(p))),
+                None => groups.push((base, vec![(key, addr(p))])),
             }
         }
         for (base, mut v) in groups {
@@ -2167,29 +2167,84 @@ fn implicit_key_col(g: &Expr) -> Option<usize> {
 
 /// The table scans of each query level (a level's own, not inside a subquery level or an
 /// inheritance tree).
-fn level_scans<'p>(p: &'p Plan, cur: usize, levels: &mut Vec<Vec<&'p Plan>>) {
-    match p {
-        Plan::Scan(s) if s.part.is_none() => levels[cur].push(p),
-        Plan::Append { inh: Some(_), .. } => {}
-        Plan::Barrier { input, .. } => {
-            levels.push(Vec::new());
-            let n = levels.len() - 1;
-            level_scans(input, n, levels);
+/// A scan's place among its level's (`level_scans`): its range table place, a pulled-up
+/// UNION ALL's members after it in their order (the UNION ALL placed by its first
+/// relation's place, each arm's relations by their places).
+type LevelKey = (crate::sql::plan::Rti, usize, crate::sql::plan::Rti);
+
+fn level_scans<'p>(p: &'p Plan, cur: usize, levels: &mut Vec<Vec<(&'p Plan, LevelKey)>>) {
+    fn min_rti(p: &Plan) -> Option<crate::sql::plan::Rti> {
+        match p {
+            Plan::Scan(s) if s.rti.0 != 0 => Some(s.rti),
+            _ => plan_inputs(p).into_iter().filter_map(|c| min_rti(c)).min(),
         }
-        // (A set operation's arms are subqueries: levels of their own.)
-        Plan::SetOp { .. } | Plan::Append { inh: None, .. } => {
-            for c in plan_inputs(p) {
+    }
+    fn union_all(p: &Plan) -> bool {
+        matches!(
+            p,
+            Plan::SetOp {
+                kind: SetOpKind::Union,
+                all: true,
+                ..
+            } | Plan::Append { inh: None, .. }
+        )
+    }
+    // `arm`: within a UNION ALL, (its place, the arm's number); `next`: the next arm's.
+    fn walk<'p>(
+        p: &'p Plan,
+        cur: usize,
+        arm: Option<(crate::sql::plan::Rti, usize)>,
+        next: &mut usize,
+        levels: &mut Vec<Vec<(&'p Plan, LevelKey)>>,
+    ) {
+        match p {
+            Plan::Scan(s) if s.part.is_none() => {
+                let key = match arm {
+                    Some((g, a)) => (g, a, s.rti),
+                    None => (s.rti, 0, s.rti),
+                };
+                levels[cur].push((p, key));
+            }
+            Plan::Append { inh: Some(_), .. } => {}
+            Plan::Barrier { input, .. } => {
                 levels.push(Vec::new());
                 let n = levels.len() - 1;
-                level_scans(c, n, levels);
+                walk(input, n, None, &mut 0, levels);
             }
-        }
-        _ => {
-            for c in plan_inputs(p) {
-                level_scans(c, cur, levels);
+            // (A UNION ALL's arms are pulled up into the query's append relation: their
+            // range table entries come after its other ones, arm by arm.)
+            _ if union_all(p) => {
+                let (g, mut own) = match arm {
+                    Some((g, _)) => (g, None),
+                    None => (min_rti(p).unwrap_or_default(), Some(0)),
+                };
+                let counter = own.as_mut().unwrap_or(next);
+                for c in plan_inputs(p) {
+                    if union_all(c) {
+                        walk(c, cur, Some((g, 0)), counter, levels);
+                    } else {
+                        *counter += 1;
+                        let a = *counter;
+                        walk(c, cur, Some((g, a)), &mut 0, levels);
+                    }
+                }
+            }
+            // (Other set operations' arms are subqueries: levels of their own.)
+            Plan::SetOp { .. } => {
+                for c in plan_inputs(p) {
+                    levels.push(Vec::new());
+                    let n = levels.len() - 1;
+                    walk(c, n, None, &mut 0, levels);
+                }
+            }
+            _ => {
+                for c in plan_inputs(p) {
+                    walk(c, cur, arm, next, levels);
+                }
             }
         }
     }
+    walk(p, cur, None, &mut 0, levels);
 }
 
 /// The reference names of the partitioned tables whose partitions the plan scans outside
@@ -4644,7 +4699,13 @@ impl Builder<'_, '_> {
                         {
                             return format!("{} COLLATE {}", self.pick(name, Cx::Upper), quote_ident(coll)) + &sort_suffix(k);
                         }
-                        let t = self.show(&k.expr, &c.exported, Cx::Upper);
+                        // (A member's sort over a scan computing a UNION ALL arm's values:
+                        // the scan computes the key too, over its own columns.)
+                        let t = if member_sort && c.node.is_scan() && !matches!(k.expr, Expr::Col(..)) {
+                            self.show(&k.expr, &c.internal, Cx::Upper)
+                        } else {
+                            self.show(&k.expr, &c.exported, Cx::Upper)
+                        };
                         // (Or over a join, sorting it for a merge join on an expression the
                         // join's target list computes: a reference to it.)
                         let t = if !matches!(k.expr, Expr::Col(..) | Expr::Const(..))
@@ -4674,6 +4735,123 @@ impl Builder<'_, '_> {
                         t + &sort_suffix(k)
                     })
                     .collect();
+                // A projection over a UNION ALL merged in order: the sort expressions are
+                // the members' to compute (prepare_sort_from_pathkeys adds them to each
+                // member's target list), a Result above projecting the query's columns from
+                // the Merge Append's unless they are its own (bug #18652).
+                if c.node.node_type == "Result"
+                    && merge_appended(input)
+                    && let Plan::Project { input: pin, exprs } = &**input
+                    && matches!(
+                        &**pin,
+                        Plan::Append { inh: None, .. }
+                            | Plan::SetOp {
+                                kind: SetOpKind::Union,
+                                all: true,
+                                ..
+                            }
+                    )
+                    && c.node.children.len() == 1
+                    && c.node.children[0].node_type == "Append"
+                    && keys.iter().all(|k| matches!(k.expr, Expr::Col(..)))
+                {
+                    let width = super::binder::plan_width(pin);
+                    let key_exprs: Vec<Expr> = keys
+                        .iter()
+                        .filter_map(|k| match &k.expr {
+                            Expr::Col(i, _) => exprs.get(*i).cloned(),
+                            _ => None,
+                        })
+                        .collect();
+                    // (Only computed keys: a column the members already return.)
+                    let junk: Vec<Expr> = key_exprs.iter().filter(|e| !matches!(e, Expr::Col(..))).cloned().collect();
+                    let mut app = c.node.children.pop().expect("one child");
+                    let mut kids = Vec::new();
+                    fn flat(n: ExNode, out: &mut Vec<ExNode>) {
+                        if n.node_type == "Append" {
+                            n.children.into_iter().for_each(|k| flat(k, out));
+                        } else {
+                            out.push(n.child("Member"));
+                        }
+                    }
+                    for k in std::mem::take(&mut app.children) {
+                        flat(k, &mut kids);
+                    }
+                    // Each member's scan computes them over its own outputs.
+                    let mut first: Option<(Vec<String>, Vec<String>)> = None;
+                    if self.o.verbose {
+                        for m in kids.iter_mut() {
+                            let scan_out = if m.node_type == "Sort" {
+                                m.children.first().map(|k| k.output.clone()).unwrap_or_default()
+                            } else {
+                                m.output.clone()
+                            };
+                            if scan_out.len() != width {
+                                continue;
+                            }
+                            let names: Vec<Name> = scan_out.iter().map(|o| Name::same(o.clone())).collect();
+                            let texts: Vec<String> = junk.iter().map(|e| self.show(e, &names, Cx::Output)).collect();
+                            if m.node_type == "Sort" {
+                                if let Some(k) = m.children.first_mut() {
+                                    k.output.extend(texts.iter().cloned());
+                                }
+                                m.output.extend(texts.iter().map(|t| format!("({t})")));
+                            } else {
+                                m.output.extend(texts.iter().cloned());
+                            }
+                            if first.is_none() {
+                                first = Some((scan_out, texts));
+                            }
+                        }
+                    }
+                    let n = kids.len() as f64;
+                    let cmp = 2.0 * costs::CPU_OPERATOR_COST;
+                    let logn = n.log2();
+                    let mut ma = ExNode::new("Merge Append");
+                    ma.details.push(Detail::List("Sort Key", list.clone()));
+                    ma.rows = kids.iter().map(|k| k.rows).sum();
+                    ma.width = app.width;
+                    ma.cols = app.cols.clone();
+                    ma.key = app.key;
+                    ma.startup_cost = kids.iter().map(|k| k.startup_cost).sum::<f64>() + cmp * n * logn;
+                    ma.total_cost = ma.startup_cost
+                        + kids.iter().map(|k| k.total_cost - k.startup_cost).sum::<f64>()
+                        + ma.rows * cmp * logn
+                        + costs::CPU_TUPLE_COST * 0.5 * ma.rows;
+                    ma.order = list;
+                    ma.children = kids;
+                    // The Merge Append returns the members' columns, then the sort
+                    // expressions: the query's own columns when they are just those.
+                    let own: Vec<Expr> = (0..width)
+                        .map(|j| Expr::Col(j, exprs.get(j).map_or(DataType::Unknown, |e| e.ty())))
+                        .chain(junk.iter().cloned())
+                        .collect();
+                    let same = exprs.len() == own.len()
+                        && exprs.iter().zip(&own).all(|(a, b)| match (a, b) {
+                            (Expr::Col(x, _), Expr::Col(y, _)) => x == y,
+                            (a, b) => a.same_as(b),
+                        });
+                    if same {
+                        ma.output = c.node.output.clone();
+                        return Built::passthrough(ma, c.exported);
+                    }
+                    let mut r = result_over(ma, Some(Vec::new()));
+                    r.output = match &first {
+                        Some((scan_out, texts)) => {
+                            let names: Vec<Name> = scan_out.iter().map(|o| Name::same(o.clone())).collect();
+                            exprs
+                                .iter()
+                                .map(|e| match junk.iter().position(|j| j.same_as(e)) {
+                                    Some(i) => format!("({})", texts[i]),
+                                    None => self.show(e, &names, Cx::Output),
+                                })
+                                .collect()
+                        }
+                        None => Vec::new(),
+                    };
+                    r.total_cost = r.children[0].total_cost;
+                    return Built::passthrough(r, c.exported);
+                }
                 // An append relation the planner merges in order (`merge_append`): its
                 // members (nested Appends flattened) each in the order, merged.
                 if c.node.node_type == "Append" && merge_appended(input) {
@@ -4737,7 +4915,11 @@ impl Builder<'_, '_> {
                     ma.children = kids;
                     return Built::passthrough(result_over(ma, result_out), c.exported);
                 }
-                let inc_ok = !member_sort && crate::sql::paths::Gucs::read(self.ctx).incremental_sort;
+                // (A merge join's inner input sorts in full: an incremental sort can't mark and
+                // restore, initial_cost_mergejoin.)
+                let inc_ok = !member_sort
+                    && MERGE_INNER.with(|m| m.get()) != key
+                    && crate::sql::paths::Gucs::read(self.ctx).incremental_sort;
                 let key_cols: Vec<Option<usize>> = keys
                     .iter()
                     .map(|k| match &k.expr {
@@ -9395,6 +9577,16 @@ impl Builder<'_, '_> {
             }
             o
         };
+        let base_idx: Vec<usize> = presort_order.iter().map(|o| o.0).collect();
+        let mut presort_idx: Vec<usize> = base_idx.clone();
+        // (Keys by position, in the group pathkeys' directions.)
+        let sfx_of = |i: usize| presort_order.iter().find(|o| o.0 == i).map_or_else(String::new, |o| o.1.clone());
+        let keys_sfx = |b: &Self, idx: &[usize]| -> Vec<String> {
+            idx.iter()
+                .filter(|i| !redundant.get(**i).copied().unwrap_or(false))
+                .filter_map(|&i| gref.get(i).map(|g| b.pick(g, Cx::Upper) + &sfx_of(i)))
+                .collect()
+        };
         let presort: Option<Vec<String>> = if !ordered || sets.is_some() {
             None
         } else {
@@ -9405,11 +9597,7 @@ impl Builder<'_, '_> {
                 .borrow()
                 .get_raw("enable_presorted_aggregate")
                 .is_none_or(|v| v != "off" && v != "false");
-            let group_keys: Vec<String> = presort_order
-                .iter()
-                .filter(|(i, _)| !redundant.get(*i).copied().unwrap_or(false))
-                .filter_map(|(i, sfx)| gref.get(*i).map(|g| self.pick(g, Cx::Upper) + sfx))
-                .collect();
+            let group_keys: Vec<String> = keys_sfx(self, &base_idx);
             let mut best: Vec<String> = Vec::new();
             if enabled {
                 // (Each distinct aggregate's pathkeys; none for ones that can't presort.)
@@ -9499,7 +9687,73 @@ impl Builder<'_, '_> {
                     }
                 }
             }
-            Some(if best.is_empty() { group_keys } else { best })
+            let best = if best.is_empty() { group_keys.clone() } else { best };
+            // get_useful_group_keys_orderings: the group keys also in the input's order as
+            // far as it goes (the rest in their order), the aggregates' after them; the
+            // cheaper to sort.
+            let g = crate::sql::paths::Gucs::read(self.ctx);
+            let names: Vec<String> = (0..groups.len()).map(|i| keys_sfx(self, &[i]).pop().unwrap_or_default()).collect();
+            let mut pre: Vec<usize> = Vec::new();
+            for (oi, o) in c.node.order.iter().enumerate() {
+                let eqs = c.node.order_eq.get(oi).cloned().unwrap_or_default();
+                let found = base_idx
+                    .iter()
+                    .copied()
+                    .find(|&i| !names[i].is_empty() && (names[i] == *o || eqs.contains(&names[i])));
+                match found {
+                    Some(i) if !pre.contains(&i) => pre.push(i),
+                    _ => break,
+                }
+            }
+            let suffix: Vec<String> = best[group_keys.len().min(best.len())..].to_vec();
+            let keys_for = |idx: &[usize]| -> Vec<String> {
+                let mut out = keys_sfx(self, idx);
+                for k in &suffix {
+                    if !out.contains(k) {
+                        out.push(k.clone());
+                    }
+                }
+                out
+            };
+            let presorted = |keys: &[String]| -> usize {
+                keys.iter()
+                    .zip(&c.node.order)
+                    .enumerate()
+                    .take_while(|(oi, (a, b))| a == b || c.node.order_eq.get(*oi).is_some_and(|e| e.contains(a)))
+                    .count()
+            };
+            let sort_cost = |keys: &[String]| -> f64 {
+                let common = presorted(keys);
+                if common == keys.len() {
+                    0.0
+                } else if common > 0 && g.incremental_sort {
+                    costs::incremental_sort_cost(
+                        c.node.startup_cost,
+                        c.node.total_cost,
+                        c.node.rows,
+                        c.node.width,
+                        c.node.rows.clamp(1.0, costs::DEFAULT_NUM_DISTINCT),
+                        None,
+                    )
+                    .1
+                } else {
+                    costs::sort_cost(c.node.total_cost, c.node.rows, c.node.width, None).1
+                }
+            };
+            let mut chosen = best.clone();
+            if !pre.is_empty()
+                && pre[..] != base_idx[..pre.len()]
+                && (g.incremental_sort || pre.len() == groups.len())
+            {
+                let mut idx = pre.clone();
+                idx.extend(base_idx.iter().copied().filter(|i| !pre.contains(i)));
+                let alt = keys_for(&idx);
+                if sort_cost(&alt) < sort_cost(&best) {
+                    presort_idx = idx;
+                    chosen = alt;
+                }
+            }
+            Some(chosen)
         };
         if let Some(sort_keys) = presort {
             // (The input's order, as far as it goes: sorted incrementally after it.)
@@ -9518,9 +9772,9 @@ impl Builder<'_, '_> {
                         "Presorted Key",
                         sort_keys[..common].iter().map(|k| presorted_name(k)).collect(),
                     ));
-                    let pre_cols: Vec<ColInfo> = presort_order[..common.min(presort_order.len())]
+                    let pre_cols: Vec<ColInfo> = presort_idx[..common.min(presort_idx.len())]
                         .iter()
-                        .map(|(i, _)| match &groups[*i] {
+                        .map(|i| match &groups[*i] {
                             Expr::Col(j, _) => c.node.cols.get(*j).cloned().unwrap_or_default(),
                             _ => ColInfo::default(),
                         })
@@ -9545,8 +9799,8 @@ impl Builder<'_, '_> {
                     sn.details.push(Detail::SortInfo);
                     self.sort_costs(&mut sn, &c.node);
                 }
-                sn.order = sort_keys.clone();
                 sn.key = c.node.key;
+                sn.order = sort_keys.clone();
                 if self.o.verbose {
                     sn.output = c.node.output.iter().map(&sort_out).collect();
                 }
@@ -9557,14 +9811,9 @@ impl Builder<'_, '_> {
             if !groups.is_empty() {
                 n.strategy = Some("Sorted");
                 n.title = "GroupAggregate".into();
-                let all: Vec<usize> = presort_order.iter().map(|o| o.0).collect();
-                n.details.push(Detail::List("Group Key", keys_ref(self, &all)));
+                n.details.push(Detail::List("Group Key", keys_ref(self, &presort_idx)));
                 // (Its groups come out in the keys' order.)
-                n.order = presort_order
-                    .iter()
-                    .filter(|(i, _)| !redundant.get(*i).copied().unwrap_or(false))
-                    .filter_map(|(i, sfx)| gref.get(*i).map(|g| self.pick(g, Cx::Upper) + sfx))
-                    .collect();
+                n.order = keys_sfx(self, &presort_idx);
                 n.rows = (c.node.rows * 0.2).clamp(1.0, 200.0);
             }
         }
@@ -9925,8 +10174,27 @@ impl Builder<'_, '_> {
                     },
                 })
                 .collect();
-            let mut orders: Vec<Vec<(usize, String)>> =
-                vec![(0..groups.len()).map(|i| (i, coll_sfx[i].clone())).collect()];
+            // (root->group_pathkeys: the GROUP BY with the ORDER BY's keys first,
+            // preprocess_groupclause.)
+            let base: Vec<(usize, String)> = match hint.clone() {
+                Some(hint) => {
+                    let mut ord: Vec<(usize, String)> = Vec::new();
+                    for (i, sfx) in hint {
+                        if i < groups.len() && !ord.iter().any(|o| o.0 == i) {
+                            ord.push((i, sfx));
+                        }
+                    }
+                    ord.extend(
+                        (0..groups.len())
+                            .filter(|i| !ord.iter().any(|o| o.0 == *i))
+                            .map(|i| (i, coll_sfx[i].clone()))
+                            .collect::<Vec<_>>(),
+                    );
+                    ord
+                }
+                None => (0..groups.len()).map(|i| (i, coll_sfx[i].clone())).collect(),
+            };
+            let mut orders: Vec<Vec<(usize, String)>> = vec![base.clone()];
             // The input's order, as far as group keys go.
             let mut pre: Vec<(usize, String)> = Vec::new();
             for (oi, o) in c.node.order.iter().enumerate() {
@@ -9942,38 +10210,44 @@ impl Builder<'_, '_> {
                     _ => break,
                 }
             }
-            if !pre.is_empty() {
+            // (group_keys_reorder_by_pathkeys: the rest in the group pathkeys' order; with
+            // incremental sort off only when the input's order covers them all.)
+            if !pre.is_empty() && (g.incremental_sort || pre.len() == groups.len()) {
                 let mut ord = pre.clone();
-                ord.extend((0..groups.len()).filter(|i| !pre.iter().any(|p| p.0 == *i)).map(|i| (i, coll_sfx[i].clone())));
+                ord.extend(base.iter().filter(|b| !pre.iter().any(|p| p.0 == b.0)).cloned());
                 if !orders.contains(&ord) {
                     orders.push(ord);
                 }
             }
-            if let Some(hint) = hint.clone() {
-                let mut ord: Vec<(usize, String)> = Vec::new();
-                for (i, sfx) in hint {
-                    if i < groups.len() && !ord.iter().any(|o| o.0 == i) {
-                        ord.push((i, sfx));
-                    }
+            // (An ORDER BY of just the group keys: an ordering other than its own needs the
+            // grouping's output sorted again, create_ordered_paths.)
+            let final_sort = |ga: &ExNode, ord: &[(usize, String)]| -> f64 {
+                if !hint_full || ord == &base[..] {
+                    return 0.0;
                 }
-                let rest: Vec<(usize, String)> = (0..groups.len())
-                    .filter(|i| !ord.iter().any(|o| o.0 == *i))
-                    .map(|i| (i, coll_sfx[i].clone()))
-                    .collect();
-                ord.extend(rest);
-                // (First: at equal cost, the order the ORDER BY wants.)
-                if ord.len() == groups.len() {
-                    orders.retain(|o| *o != ord);
-                    orders.insert(0, ord);
+                let common = ord.iter().zip(&base).take_while(|(a, b)| a == b).count();
+                if common > 0 && g.incremental_sort {
+                    costs::incremental_sort_cost(
+                        ga.startup_cost,
+                        ga.total_cost,
+                        ga.rows,
+                        ga.width,
+                        ga.rows.clamp(1.0, costs::DEFAULT_NUM_DISTINCT),
+                        None,
+                    )
+                    .1 - ga.total_cost
+                } else {
+                    costs::sort_cost(ga.total_cost, ga.rows, ga.width, None).1 - ga.total_cost
                 }
-            }
-            let mut best: Option<ExNode> = None;
+            };
+            let mut best: Option<(ExNode, f64)> = None;
             let mut best_start: Option<ExNode> = None;
             // The input paths: the cheapest (sorted as needed), and the relation's partial
             // plans gathered in the query's group order (generate_useful_gather_paths;
             // sorted further only incrementally, make_ordered_path).
             let mut gathered: Vec<ExNode> = Vec::new();
             for (oi, ord) in orders.into_iter().enumerate() {
+                let full_ord = ord.clone();
                 let ord: Vec<(usize, String)> =
                     ord.into_iter().filter(|(i, _)| !redundant.get(*i).copied().unwrap_or(false)).collect();
                 let group_names: Vec<String> = ord.iter().map(|(i, _)| names_all[*i].clone()).collect();
@@ -10085,12 +10359,29 @@ impl Builder<'_, '_> {
                 {
                     best_start = Some(ga.clone());
                 }
-                if best.as_ref().is_none_or(|b| parallel::cheaper(&ga, b)) {
-                    best = Some(ga);
+                let extra = final_sort(&ga, &full_ord);
+                let better = match &best {
+                    None => true,
+                    Some((b, bx)) => {
+                        let (da, db) = (parallel::disabled_nodes(&ga), parallel::disabled_nodes(b));
+                        if da != db {
+                            da < db
+                        } else {
+                            let mut x = ga.clone();
+                            x.total_cost += extra;
+                            let mut y = b.clone();
+                            y.total_cost += bx;
+                            parallel::cheaper(&x, &y)
+                        }
+                    }
+                };
+                if better {
+                    best = Some((ga, extra));
                 }
                 }
             }
             n.disabled = !g.hashagg;
+            let mut best = best.map(|b| b.0);
             // (add_path keeps the one cheapest to start beside it: a LIMIT may take that.)
             if let (Some(b), Some(s)) = (&mut best, best_start)
                 && s.startup_cost < b.startup_cost
@@ -10102,9 +10393,54 @@ impl Builder<'_, '_> {
         } else {
             None
         };
+        // (An index-only scan the aggregation reads as it comes returns its physical
+        // target list, the index's columns in its order: use_physical_tlist under
+        // CP_LABEL_TLIST, the group keys being plain columns.)
+        let ios_out: Option<Vec<String>> = match &**input {
+            Plan::Scan(sc) if self.o.verbose => sc.index.as_ref().and_then(|(ix, _)| {
+                ix.columns
+                    .iter()
+                    .map(|col| match col.key {
+                        crate::catalog::IndexKey::Column(k) => Some(k),
+                        _ => None,
+                    })
+                    .chain(ix.include.iter().map(|&k| Some(k)))
+                    .map(|k| k.and_then(|k| c.exported.get(k)).map(|nm| self.pick(nm, Cx::Output)))
+                    .collect()
+            }),
+            _ => None,
+        };
+        let physical_ios = |n: &mut ExNode| {
+            if let (Some(out), Some(k)) = (&ios_out, n.children.first_mut())
+                && k.node_type == "Index Only Scan"
+            {
+                k.output = out.clone();
+            }
+        };
         n.children.push(c.node.child("Outer"));
+        physical_ios(&mut n);
+        let mut sorted_alt = sorted_alt;
+        if let Some(ga) = &mut sorted_alt {
+            physical_ios(ga);
+        }
         if let Some(ga) = sorted_alt {
-            if parallel::fuzzy_better(&ga, &n) {
+            // (add_path: the sorted grouping, its pathkeys better, removes the hashed one
+            // unless that is fuzzily cheaper in total, or as cheap but cheaper to start;
+            // both kept, the cheaper in total is the relation's cheapest path.)
+            let removes = {
+                const FUZZ: f64 = 1.01;
+                let (ds, dh) = (parallel::disabled_nodes(&ga), parallel::disabled_nodes(&n));
+                if ds != dh {
+                    ds < dh
+                } else if ga.total_cost > n.total_cost * FUZZ {
+                    false
+                } else if n.total_cost > ga.total_cost * FUZZ {
+                    true
+                } else {
+                    ga.startup_cost <= n.startup_cost * FUZZ
+                }
+            };
+            if removes || parallel::cheaper(&ga, &n) {
                 let mut hashed = std::mem::replace(&mut n, ga);
                 hashed.alt = n.alt.take();
                 n.alt = Some(Box::new(hashed));
@@ -10872,7 +11208,11 @@ impl Builder<'_, '_> {
             self.outer.insert(0, names);
             self.outer_depth.insert(0, self.depth);
         }
+        let saved_inner = MERGE_INNER.with(|m| {
+            m.replace(if meta.method == Some(crate::sql::plan::JoinMethod::Merge) { addr(right) } else { 0 })
+        });
         let r = self.node(right);
+        MERGE_INNER.with(|m| m.set(saved_inner));
         if lateral {
             self.outer.remove(0);
             self.outer_depth.remove(0);
@@ -11483,6 +11823,13 @@ impl Builder<'_, '_> {
         }
         n.startup_cost = cost.startup;
         n.total_cost = cost.total;
+        // (initial_cost_nestloop / _mergejoin / _hashjoin count a disabled method itself,
+        // FULL JOIN or not.)
+        n.disabled = match method {
+            JoinMethod::NestLoop => !g.nestloop,
+            JoinMethod::Merge => !g.mergejoin,
+            JoinMethod::Hash => !g.hashjoin,
+        };
         let jname = if right_variant {
             format!("Right {}", join_type(kind))
         } else {
@@ -11664,7 +12011,13 @@ impl Builder<'_, '_> {
             n.add_qual("Join Filter", "Rows Removed by Join Filter", t, removed);
         }
         if material {
-            let m = joins::material(&input(&r.node), &g);
+            let mut m = joins::material(&input(&r.node), &g);
+            // (A merge join's own Materialize is labelled as its input plus
+            // cpu_operator_cost a row, create_mergejoin_plan.)
+            if method == JoinMethod::Merge {
+                m.startup = r.node.startup_cost;
+                m.total = r.node.total_cost + costs::CPU_OPERATOR_COST * r.node.rows;
+            }
             let mut mn = ExNode {
                 key: r.node.key,
                 rows: r.node.rows,
@@ -12342,6 +12695,9 @@ thread_local! {
     static FILTER_OVER_WINDOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Converting the members of a Merge Append (`merge_appended`).
     static MERGE_MEMBERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A merge join's inner input (its address): sorted in full, an incremental sort can't
+    /// mark and restore (initial_cost_mergejoin).
+    static MERGE_INNER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The scans that are an inheritance Append's members as they are (the parent's own
     /// rows): an appendrel member's target list is what is needed above, no physical one.
     static INH_SCANS: std::cell::RefCell<std::collections::HashSet<usize>> =

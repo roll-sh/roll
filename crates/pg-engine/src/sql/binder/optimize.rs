@@ -122,6 +122,10 @@ thread_local! {
     /// Quals over a reduced outer join's formerly nullable side are being placed: its
     /// subqueries' computed outputs are PlaceHolderVars, not substituted into scans.
     static PHV_OUTPUTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A join's `column = constant` clauses of broken equivalence classes, pushed into its
+    /// sides again (generate_base_implied_equalities_broken) while they are placed: a
+    /// scan keeps both copies.
+    static BROKEN_DUPS: std::cell::RefCell<Vec<Expr>> = const { std::cell::RefCell::new(Vec::new()) };
     /// The PlaceHolderVars (column-free computed outputs) the quals being pushed down read.
     static PHV_PENDING: std::cell::RefCell<Vec<Expr>> = const { std::cell::RefCell::new(Vec::new()) };
     /// The statement's row-level security quals as placed in their scans (security level
@@ -565,7 +569,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             // (What the join was written as, and the PlaceHolderVars a projection over it
             // computes, stay with it.)
             let (old_wk, old_phv) = (meta.written_kind, (meta.phv_eval, meta.phv_join));
-            ec_constants(
+            let broken = ec_constants(
                 cat,
                 &mut lpush,
                 &mut rpush,
@@ -576,6 +580,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 &mut kept,
                 (&lhave, &rhave),
             );
+            let saved = BROKEN_DUPS.with(|b| b.replace(broken));
             let mut l = Arc::try_unwrap(left).unwrap_or_else(|a| (*a).clone());
             let mut r = Arc::try_unwrap(right).unwrap_or_else(|a| (*a).clone());
             if !lpush.is_empty() {
@@ -584,6 +589,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             if !rpush.is_empty() {
                 r = push_lateral(cat, r, rpush, &params);
             }
+            BROKEN_DUPS.with(|b| *b.borrow_mut() = saved);
             let mut j = join(cat, kind, l, r, and_all(cond_parts), params, nleft, nright);
             if let Plan::Join { meta, .. } = &mut j {
                 meta.kept = kept;
@@ -1565,7 +1571,7 @@ fn ec_constants(
     (to_right, to_left): (bool, bool),
     kept: &mut Vec<usize>,
     (lhave, rhave): (&[Expr], &[Expr]),
-) {
+) -> Vec<Expr> {
     // `x = k`: (x, k, the clause).
     let const_eq = |e: &Expr| -> Option<(Expr, Expr)> {
         let Expr::Call(def, args, _) = e else {
@@ -1665,40 +1671,103 @@ fn ec_constants(
             .values()
             .any(|m| !m.func && m.number == 3 && m.left == to && m.right == ko)
     };
+    // (Columns of one side the side's own equalities put in one class with a join
+    // column: `ec1.ff = ec1.f1` with `ss1.x = ec1.f1` and `ec1.ff = 42` gives `ss1.x = 42`.)
+    let side_class = |push: &[Expr], a: &Expr| -> Vec<Expr> {
+        let mut class = vec![a.clone()];
+        loop {
+            let before = class.len();
+            for e in push {
+                let Expr::Call(_, args, _) = e else { continue };
+                if !ec_clause(e) || !matches!((&args[0], &args[1]), (Expr::Col(..), Expr::Col(..))) {
+                    continue;
+                }
+                for (p, q) in [(&args[0], &args[1]), (&args[1], &args[0])] {
+                    if class.iter().any(|m| m.same_as(p)) && !class.iter().any(|m| m.same_as(q)) {
+                        class.push(q.clone());
+                    }
+                }
+            }
+            if class.len() == before {
+                return class;
+            }
+        }
+    };
+    let mut broken_dups: Vec<Expr> = Vec::new();
     let mut used_pairs: Vec<(Expr, Expr)> = Vec::new();
     for (n, (a, b, hi)) in pairs.iter().enumerate() {
         let mut used = false;
+        let (lclass, rclass) = (side_class(lpush, a), side_class(rpush, b));
         // (The join clause goes when both columns compare with the constant.)
         for (x, k, clause, old) in &lconst {
-            if x.same_as(a) && derivable(b, k) {
-                let d = derive(clause, a, b);
+            let direct = x.same_as(a);
+            if !direct && !lclass.iter().any(|m| m.same_as(x)) {
+                continue;
+            }
+            if derivable(b, k) {
+                let d = derive(clause, x, b);
                 if !rpush.iter().chain(rhave).any(|e| e.same_as(&d)) {
                     rpush.push(d);
                 }
                 used |= derivable(a, k);
-            } else if x.same_as(a)
-                && derivable(a, k)
+            }
+            // (The class's members in the order its clauses merged them: the constant's
+            // column first, and so its clause derived before the break, when the clause
+            // equating it with the join column names it first.)
+            let x_first = |push: &[Expr], class: &[Expr]| {
+                push.iter().any(|e| match e {
+                    Expr::Call(_, args, _) if ec_clause(e) && args.len() == 2 => {
+                        args[0].same_as(x) && class.iter().any(|m| m.same_as(&args[1]))
+                    }
+                    _ => false,
+                })
+            };
+            if (!derivable(b, k) || !derivable(a, k))
+                && derivable(x, k)
                 && !old
-                && !right_first.iter().any(|&(p, r)| p == n && r)
+                && if direct {
+                    !right_first.iter().any(|&(p, r)| p == n && r)
+                } else {
+                    x_first(lpush, &lclass)
+                }
             {
                 // A broken class: the constant's own clause comes back besides the one
                 // derived for its column (generate_base_implied_equalities_broken).
                 lpush.push(clause.clone());
+                broken_dups.push(clause.clone());
             }
         }
         for (x, k, clause, old) in &rconst {
-            if x.same_as(b) && derivable(a, k) {
-                let d = derive(clause, b, a);
+            let direct = x.same_as(b);
+            if !direct && !rclass.iter().any(|m| m.same_as(x)) {
+                continue;
+            }
+            if derivable(a, k) {
+                let d = derive(clause, x, a);
                 if !lpush.iter().chain(lhave).any(|e| e.same_as(&d)) {
                     lpush.push(d);
                 }
                 used |= derivable(b, k);
-            } else if x.same_as(b)
-                && derivable(b, k)
+            }
+            let x_first = |push: &[Expr], class: &[Expr]| {
+                push.iter().any(|e| match e {
+                    Expr::Call(_, args, _) if ec_clause(e) && args.len() == 2 => {
+                        args[0].same_as(x) && class.iter().any(|m| m.same_as(&args[1]))
+                    }
+                    _ => false,
+                })
+            };
+            if (!derivable(a, k) || !derivable(b, k))
+                && derivable(x, k)
                 && !old
-                && right_first.iter().any(|&(p, r)| p == n && r)
+                && if direct {
+                    right_first.iter().any(|&(p, r)| p == n && r)
+                } else {
+                    x_first(rpush, &rclass)
+                }
             {
                 rpush.push(clause.clone());
+                broken_dups.push(clause.clone());
             }
         }
         if used {
@@ -1748,6 +1817,7 @@ fn ec_constants(
             keep
         });
     }
+    broken_dups
 }
 
 /// A WHERE's equalities above a left join, read in its nullable side: an equivalence class
@@ -2051,6 +2121,18 @@ fn ec_scan_constants(all: &mut Vec<Expr>) {
         let Some((k, _)) = konst.filter(|_| single && (members.len() > 1 || sources > 1)) else {
             continue;
         };
+        // (A class a join found broken: its clauses stay as they came, both copies.)
+        let broken = BROKEN_DUPS.with(|b| {
+            let b = b.borrow();
+            !b.is_empty()
+                && found
+                    .iter()
+                    .zip(all.iter())
+                    .any(|(f, e)| f.as_ref().is_some_and(|(a, _, _)| in_class(*a)) && b.iter().any(|x| x.same_as(e)))
+        });
+        if broken {
+            continue;
+        }
         // Each member's `=` with the constant's type, as some clause here has it.
         let kt = k.ty().without_typmod();
         let types: Vec<DataType> = members
@@ -2473,11 +2555,13 @@ pub fn join(
     // An inner join's ON conditions are WHERE clauses all the same: equivalence classes
     // give each side the constants the other side's are equated with.
     let mut kept: Vec<usize> = Vec::new();
+    let mut broken = Vec::new();
     if kind == JoinKind::Inner && params.is_empty() {
         let mut no_hash = None;
         let (lhave, rhave) = (input_restrictions(&left), input_restrictions(&right));
-        ec_constants(cat, &mut lpush, &mut rpush, &mut no_hash, &mut rest, nleft, (true, true), &mut kept, (&lhave, &rhave));
+        broken = ec_constants(cat, &mut lpush, &mut rpush, &mut no_hash, &mut rest, nleft, (true, true), &mut kept, (&lhave, &rhave));
     }
+    let saved_broken = BROKEN_DUPS.with(|b| b.replace(broken));
     // (An outer join's ON conditions pushed into its nullable side: their columns.)
     let mut pushed: Vec<usize> = Vec::new();
     if kind == JoinKind::Right {
@@ -2493,6 +2577,7 @@ pub fn join(
     if !rpush.is_empty() {
         right = push_lateral(cat, right, rpush, &params);
     }
+    BROKEN_DUPS.with(|b| *b.borrow_mut() = saved_broken);
     // Hash keys: `l = r` with each side reading only one input, same type.
     let mut hash: Option<(Vec<Expr>, Vec<Expr>)> = None;
     let mut residual = Vec::new();

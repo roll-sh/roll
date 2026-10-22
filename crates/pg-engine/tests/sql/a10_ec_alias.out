@@ -1,0 +1,398 @@
+> create type a10_int8alias1
+-- CREATE TYPE
+
+> create function a10_int8alias1in(cstring) returns a10_int8alias1
+>   strict immutable language internal as 'int8in'
+NOTICE 42809: return type a10_int8alias1 is only a shell
+-- CREATE FUNCTION
+
+> create function a10_int8alias1out(a10_int8alias1) returns cstring
+>   strict immutable language internal as 'int8out'
+NOTICE 42809: argument type a10_int8alias1 is only a shell (at 35)
+-- CREATE FUNCTION
+
+> create type a10_int8alias1 (
+>     input = a10_int8alias1in,
+>     output = a10_int8alias1out,
+>     like = int8
+> )
+-- CREATE TYPE
+
+> create cast (int8 as a10_int8alias1) without function
+-- CREATE CAST
+
+> create cast (a10_int8alias1 as int8) without function
+-- CREATE CAST
+
+> create function a10_int8alias1eq(a10_int8alias1, a10_int8alias1) returns bool
+>   strict immutable language internal as 'int8eq'
+-- CREATE FUNCTION
+
+> create operator = (
+>     procedure = a10_int8alias1eq,
+>     leftarg = a10_int8alias1, rightarg = a10_int8alias1,
+>     commutator = =,
+>     restrict = eqsel, join = eqjoinsel,
+>     merges
+> )
+-- CREATE OPERATOR
+
+> alter operator family integer_ops using btree add
+>   operator 3 = (a10_int8alias1, a10_int8alias1)
+-- ALTER OPERATOR FAMILY
+
+> create function a10_int8alias1eq(int8, a10_int8alias1) returns bool
+>   strict immutable language internal as 'int8eq'
+-- CREATE FUNCTION
+
+> create operator = (
+>     procedure = a10_int8alias1eq,
+>     leftarg = int8, rightarg = a10_int8alias1,
+>     restrict = eqsel, join = eqjoinsel,
+>     merges
+> )
+-- CREATE OPERATOR
+
+> alter operator family integer_ops using btree add
+>   operator 3 = (int8, a10_int8alias1)
+-- ALTER OPERATOR FAMILY
+
+> create function a10_int8alias1lt(a10_int8alias1, a10_int8alias1) returns bool
+>   strict immutable language internal as 'int8lt'
+-- CREATE FUNCTION
+
+> create operator < (
+>     procedure = a10_int8alias1lt,
+>     leftarg = a10_int8alias1, rightarg = a10_int8alias1
+> )
+-- CREATE OPERATOR
+
+> alter operator family integer_ops using btree add
+>   operator 1 < (a10_int8alias1, a10_int8alias1)
+-- ALTER OPERATOR FAMILY
+
+> create function a10_int8alias1cmp(int8, a10_int8alias1) returns int
+>   strict immutable language internal as 'btint8cmp'
+-- CREATE FUNCTION
+
+> alter operator family integer_ops using btree add
+>   function 1 a10_int8alias1cmp (int8, a10_int8alias1)
+-- ALTER OPERATOR FAMILY
+
+> create table a10_ec1 (ff int8 primary key, f1 a10_int8alias1, f2 int8)
+-- CREATE TABLE
+
+> create table a10_ec2 (xf int8 primary key, x1 a10_int8alias1, x2 int8)
+-- CREATE TABLE
+
+> set enable_hashjoin = off
+-- SET
+
+> set enable_mergejoin = off
+-- SET
+
+> explain (costs off)
+>   select * from a10_ec1, a10_ec2 where ff = x1 and ff = '42'::int8
+QUERY PLAN:text
+Nested Loop
+  Join Filter: (a10_ec1.ff = a10_ec2.x1)
+  ->  Index Scan using a10_ec1_pkey on a10_ec1
+        Index Cond: ((ff = '42'::bigint) AND (ff = '42'::bigint))
+  ->  Seq Scan on a10_ec2
+-- EXPLAIN
+
+> create unique index a10_ec1_expr2 on a10_ec1((ff + 2 + 1))
+-- CREATE INDEX
+
+> create unique index a10_ec1_expr3 on a10_ec1((ff + 3 + 1))
+-- CREATE INDEX
+
+> create unique index a10_ec1_expr4 on a10_ec1((ff + 4))
+-- CREATE INDEX
+
+> explain (costs off)
+>   select * from a10_ec1,
+>     (select ff + 1 as x from
+>        (select ff + 2 as ff from a10_ec1
+>         union all
+>         select ff + 3 as ff from a10_ec1) ss0
+>      union all
+>      select ff + 4 as x from a10_ec1) as ss1
+>   where ss1.x = a10_ec1.f1 and a10_ec1.ff = 42::int8 and a10_ec1.ff = a10_ec1.f1
+QUERY PLAN:text
+Nested Loop
+  Join Filter: ((((a10_ec1_1.ff + 2) + 1)) = a10_ec1.f1)
+  ->  Index Scan using a10_ec1_pkey on a10_ec1
+        Index Cond: ((ff = '42'::bigint) AND (ff = '42'::bigint))
+        Filter: (ff = f1)
+  ->  Append
+        ->  Index Scan using a10_ec1_expr2 on a10_ec1 a10_ec1_1
+              Index Cond: (((ff + 2) + 1) = '42'::bigint)
+        ->  Index Scan using a10_ec1_expr3 on a10_ec1 a10_ec1_2
+              Index Cond: (((ff + 3) + 1) = '42'::bigint)
+        ->  Index Scan using a10_ec1_expr4 on a10_ec1 a10_ec1_3
+              Index Cond: ((ff + 4) = '42'::bigint)
+-- EXPLAIN
+
+> set enable_mergejoin = on
+-- SET
+
+> set enable_nestloop = off
+-- SET
+
+> explain (costs off)
+>   select * from a10_ec1,
+>     (select ff + 1 as x from
+>        (select ff + 2 as ff from a10_ec1
+>         union all
+>         select ff + 3 as ff from a10_ec1) ss0
+>      union all
+>      select ff + 4 as x from a10_ec1) as ss1,
+>     (select ff + 1 as x from
+>        (select ff + 2 as ff from a10_ec1
+>         union all
+>         select ff + 3 as ff from a10_ec1) ss0
+>      union all
+>      select ff + 4 as x from a10_ec1) as ss2
+>   where ss1.x = a10_ec1.f1 and ss1.x = ss2.x and a10_ec1.ff = 42::int8
+QUERY PLAN:text
+Merge Join
+  Merge Cond: ((((a10_ec1_4.ff + 2) + 1)) = (((a10_ec1_1.ff + 2) + 1)))
+  ->  Merge Append
+        Sort Key: (((a10_ec1_4.ff + 2) + 1))
+        ->  Index Scan using a10_ec1_expr2 on a10_ec1 a10_ec1_4
+        ->  Index Scan using a10_ec1_expr3 on a10_ec1 a10_ec1_5
+        ->  Index Scan using a10_ec1_expr4 on a10_ec1 a10_ec1_6
+  ->  Materialize
+        ->  Merge Join
+              Merge Cond: ((((a10_ec1_1.ff + 2) + 1)) = a10_ec1.f1)
+              ->  Merge Append
+                    Sort Key: (((a10_ec1_1.ff + 2) + 1))
+                    ->  Index Scan using a10_ec1_expr2 on a10_ec1 a10_ec1_1
+                    ->  Index Scan using a10_ec1_expr3 on a10_ec1 a10_ec1_2
+                    ->  Index Scan using a10_ec1_expr4 on a10_ec1 a10_ec1_3
+              ->  Sort
+                    Sort Key: a10_ec1.f1 USING <
+                    ->  Index Scan using a10_ec1_pkey on a10_ec1
+                          Index Cond: (ff = '42'::bigint)
+-- EXPLAIN
+
+> drop index a10_ec1_expr3
+-- DROP INDEX
+
+> explain (costs off)
+>   select * from a10_ec1,
+>     (select ff + 1 as x from
+>        (select ff + 2 as ff from a10_ec1
+>         union all
+>         select ff + 3 as ff from a10_ec1) ss0
+>      union all
+>      select ff + 4 as x from a10_ec1) as ss1
+>   where ss1.x = a10_ec1.f1 and a10_ec1.ff = 42::int8
+QUERY PLAN:text
+Merge Join
+  Merge Cond: ((((a10_ec1_1.ff + 2) + 1)) = a10_ec1.f1)
+  ->  Merge Append
+        Sort Key: (((a10_ec1_1.ff + 2) + 1))
+        ->  Index Scan using a10_ec1_expr2 on a10_ec1 a10_ec1_1
+        ->  Sort
+              Sort Key: (((a10_ec1_2.ff + 3) + 1))
+              ->  Seq Scan on a10_ec1 a10_ec1_2
+        ->  Index Scan using a10_ec1_expr4 on a10_ec1 a10_ec1_3
+  ->  Sort
+        Sort Key: a10_ec1.f1 USING <
+        ->  Index Scan using a10_ec1_pkey on a10_ec1
+              Index Cond: (ff = '42'::bigint)
+-- EXPLAIN
+
+> insert into a10_ec1 select i, (i % 10)::int8::a10_int8alias1, i from generate_series(1, 30) i
+-- INSERT 0 30
+
+> select a10_ec1.ff, ss1.x from a10_ec1,
+>     (select ff + 1 as x from
+>        (select ff + 2 as ff from a10_ec1
+>         union all
+>         select ff + 3 as ff from a10_ec1) ss0
+>      union all
+>      select ff + 4 as x from a10_ec1) as ss1
+>   where ss1.x = a10_ec1.f1::int8 and a10_ec1.ff < 12::int8
+>   order by 1, 2
+ff:int8 | x:int8
+4 | 4
+5 | 5
+5 | 5
+5 | 5
+6 | 6
+6 | 6
+6 | 6
+7 | 7
+7 | 7
+7 | 7
+8 | 8
+8 | 8
+8 | 8
+9 | 9
+9 | 9
+9 | 9
+-- SELECT 16
+
+> reset enable_nestloop
+-- RESET
+
+> reset enable_mergejoin
+-- RESET
+
+> reset enable_hashjoin
+-- RESET
+
+> create table a10_nocom (a int8, b a10_int8alias1)
+-- CREATE TABLE
+
+> insert into a10_nocom select i, (i % 7)::int8::a10_int8alias1 from generate_series(1, 20) i
+-- INSERT 0 20
+
+> insert into a10_nocom values (null, null), (100, null), (null, '3')
+-- INSERT 0 3
+
+> set enable_hashjoin to off
+-- SET
+
+> set enable_mergejoin to on
+-- SET
+
+> explain (costs off)
+> select * from a10_nocom t1 full join a10_nocom t2 on t2.a = t1.b
+QUERY PLAN:text
+Merge Full Join
+  Merge Cond: (t2.a = t1.b)
+  ->  Sort
+        Sort Key: t2.a
+        ->  Seq Scan on a10_nocom t2
+  ->  Sort
+        Sort Key: t1.b USING <
+        ->  Seq Scan on a10_nocom t1
+-- EXPLAIN
+
+> alter operator = (int8, a10_int8alias1) set (hashes)
+-- ALTER OPERATOR
+
+> alter operator family integer_ops using hash add
+>   operator 1 = (int8, a10_int8alias1)
+-- ALTER OPERATOR FAMILY
+
+> create function a10_hashint8alias1(a10_int8alias1) returns int
+>   strict immutable language internal as 'hashint8'
+-- CREATE FUNCTION
+
+> alter operator family integer_ops using hash add
+>   function 1 a10_hashint8alias1(a10_int8alias1)
+-- ALTER OPERATOR FAMILY
+
+> set enable_hashjoin to on
+-- SET
+
+> set enable_mergejoin to off
+-- SET
+
+> explain (costs off)
+> select * from a10_nocom t1 full join a10_nocom t2 on t2.a = t1.b
+QUERY PLAN:text
+Hash Full Join
+  Hash Cond: (t2.a = t1.b)
+  ->  Seq Scan on a10_nocom t2
+  ->  Hash
+        ->  Seq Scan on a10_nocom t1
+-- EXPLAIN
+
+> select t1.a, t1.b::int8, t2.a, t2.b::int8 from a10_nocom t1 full join a10_nocom t2 on t2.a = t1.b
+>   order by 1, 2, 3, 4
+a:int8 | b:int8 | a:int8 | b:int8
+1 | 1 | 1 | 1
+2 | 2 | 2 | 2
+3 | 3 | 3 | 3
+4 | 4 | 4 | 4
+5 | 5 | 5 | 5
+6 | 6 | 6 | 6
+7 | 0 | NULL | NULL
+8 | 1 | 1 | 1
+9 | 2 | 2 | 2
+10 | 3 | 3 | 3
+11 | 4 | 4 | 4
+12 | 5 | 5 | 5
+13 | 6 | 6 | 6
+14 | 0 | NULL | NULL
+15 | 1 | 1 | 1
+16 | 2 | 2 | 2
+17 | 3 | 3 | 3
+18 | 4 | 4 | 4
+19 | 5 | 5 | 5
+20 | 6 | 6 | 6
+100 | NULL | NULL | NULL
+NULL | 3 | 3 | 3
+NULL | NULL | 7 | 0
+NULL | NULL | 8 | 1
+NULL | NULL | 9 | 2
+NULL | NULL | 10 | 3
+NULL | NULL | 11 | 4
+NULL | NULL | 12 | 5
+NULL | NULL | 13 | 6
+NULL | NULL | 14 | 0
+NULL | NULL | 15 | 1
+NULL | NULL | 16 | 2
+NULL | NULL | 17 | 3
+NULL | NULL | 18 | 4
+NULL | NULL | 19 | 5
+NULL | NULL | 20 | 6
+NULL | NULL | 100 | NULL
+NULL | NULL | NULL | 3
+NULL | NULL | NULL | NULL
+NULL | NULL | NULL | NULL
+-- SELECT 40
+
+> explain (costs off)
+> select * from a10_nocom t1 join a10_nocom t2 on t2.a = t1.b
+QUERY PLAN:text
+Nested Loop
+  Join Filter: (t2.a = t1.b)
+  ->  Seq Scan on a10_nocom t1
+  ->  Materialize
+        ->  Seq Scan on a10_nocom t2
+-- EXPLAIN
+
+> set enable_nestloop to off
+-- SET
+
+> explain (costs off)
+> select * from a10_nocom t1 join a10_nocom t2 on t2.a = t1.b
+QUERY PLAN:text
+Nested Loop
+  Disabled: true
+  Join Filter: (t2.a = t1.b)
+  ->  Seq Scan on a10_nocom t1
+  ->  Materialize
+        ->  Seq Scan on a10_nocom t2
+-- EXPLAIN
+
+> select count(*) from a10_nocom t1 join a10_nocom t2 on t2.a = t1.b
+count:int8
+19
+-- SELECT 1
+
+> reset enable_nestloop
+-- RESET
+
+> reset enable_hashjoin
+-- RESET
+
+> reset enable_mergejoin
+-- RESET
+
+> drop table a10_nocom
+-- DROP TABLE
+
+> drop table a10_ec1
+-- DROP TABLE
+
+> drop table a10_ec2
+-- DROP TABLE
+

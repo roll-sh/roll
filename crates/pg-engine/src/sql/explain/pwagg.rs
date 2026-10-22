@@ -450,13 +450,32 @@ impl Builder<'_, '_> {
         }
         // Full when the GROUP BY holds every partition key column (group_by_has_partkey).
         let grouped: Vec<Expr> = groups.iter().map(|g| down_to_append(g, input)).collect();
+        // (A key's collation: its partition key's declared one, or its column's.)
+        let norm = |c: Option<String>| c.filter(|n| n != "default");
+        let key_coll = |lv: &crate::sql::plan::PartLevel, ki: usize| {
+            norm(lv.parent.partkey.as_ref().and_then(|pk| pk.cols.get(ki)).and_then(|c| {
+                c.collation
+                    .clone()
+                    .or_else(|| c.col.and_then(|i| lv.parent.columns.get(i)).and_then(|col| col.collation.clone()))
+            }))
+        };
         let full = if is_join(members[0]) {
-            // (A partitionwise join's key: a non-nullable side's.)
-            let origins: Vec<(&ScanPlan, usize)> = grouped
+            // (A partitionwise join's key: a non-nullable side's; grouped under the key's
+            // collation, group_by_has_partkey.)
+            let origins: Vec<(&ScanPlan, usize, Option<String>)> = grouped
                 .iter()
-                .filter_map(|g| match strip(g) {
-                    Expr::Col(k, _) => origin(members[0], *k).filter(|o| !o.2).map(|o| (o.0, o.1)),
-                    _ => None,
+                .filter_map(|g| {
+                    let (inner, coll) = match strip(g) {
+                        Expr::Collate(x, n, _) => (strip(x), Some(Some(n.clone()))),
+                        x => (x, None),
+                    };
+                    match inner {
+                        Expr::Col(k, _) => origin(members[0], *k).filter(|o| !o.2).map(|o| {
+                            let own = o.0.table.columns.get(o.1).and_then(|c| c.collation.clone());
+                            (o.0, o.1, norm(coll.unwrap_or(own)))
+                        }),
+                        _ => None,
+                    }
                 })
                 .collect();
             let mut scans = Vec::new();
@@ -464,10 +483,10 @@ impl Builder<'_, '_> {
             scans.iter().any(|s| {
                 s.part.as_ref().and_then(|l| l.last()).is_some_and(|lv| {
                     !lv.key.is_empty()
-                        && lv.key.iter().all(|k| match strip(k) {
-                            Expr::Col(j, _) => origins
-                                .iter()
-                                .any(|(os, oc)| std::ptr::eq(*os, *s) && oc == j),
+                        && lv.key.iter().enumerate().all(|(ki, k)| match strip(k) {
+                            Expr::Col(j, _) => origins.iter().any(|(os, oc, gc)| {
+                                std::ptr::eq(*os, *s) && oc == j && *gc == key_coll(lv, ki)
+                            }),
                             _ => false,
                         })
                 })
@@ -482,7 +501,12 @@ impl Builder<'_, '_> {
                 _ => None,
             };
             !level.key.is_empty()
-                && level.key.iter().all(|k| {
+                && level.key.iter().enumerate().all(|(ki, k)| {
+                    let pcoll = key_coll(level, ki);
+                    let kcol = match k {
+                        Expr::Col(j, _) => scan.table.columns.get(*j).and_then(|c| c.collation.clone()),
+                        _ => None,
+                    };
                     let k = k
                         .clone()
                         .transform(&mut |x| {
@@ -498,7 +522,15 @@ impl Builder<'_, '_> {
                             })
                         })
                         .unwrap();
-                    grouped.iter().any(|g| strip(g).same_as(strip(&k)))
+                    // (group_by_has_partkey: a grouping collation other than the key's is
+                    // no match.)
+                    grouped.iter().any(|g| {
+                        let (inner, gcoll) = match strip(g) {
+                            Expr::Collate(x, n, _) => (strip(x), Some(n.clone())),
+                            x => (x, kcol.clone()),
+                        };
+                        inner.same_as(strip(&k)) && norm(gcoll) == pcoll
+                    })
                 })
         };
         let partial_ok = aggs.iter().all(|a| {

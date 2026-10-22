@@ -269,8 +269,13 @@ impl VarRef {
 
     /// A unique index on just this column (no predicate).
     fn unique(&self, cat: &Catalog) -> bool {
-        if self.expr.is_some() {
-            return false;
+        // (An index expression: unique when the index is, on that one expression
+        // (examine_variable's isunique).)
+        if let Some((ix, k, _)) = &self.expr {
+            return *k == 0
+                && cat.indexes.get(ix).is_some_and(|ix| {
+                    ix.unique && ix.predicate.is_none() && ix.columns.len() == 1
+                });
         }
         if crate::sql::paths::sys_unique_col(&self.table, self.col) {
             return true;
@@ -387,7 +392,7 @@ fn nullfrac_of(s: Option<&ColStats>) -> f64 {
 }
 
 /// The user-defined operator (pg_operator) a binary call shows as, with a function.
-fn user_operator<'c>(
+pub(crate) fn user_operator<'c>(
     cat: &'c Catalog,
     d: &crate::sql::func::FuncDef,
 ) -> Option<&'c crate::catalog::Operator> {

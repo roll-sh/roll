@@ -344,12 +344,23 @@ impl Search<'_, '_, '_> {
                 }
             }
             if self.kind == JoinKind::Inner {
+                // (A class under a nondeterministic collation matches a partition key of that
+                // collation only, and the other way round: have_partkey_equi_join's
+                // collation check.)
+                let knondet = parted[0]
+                    .colls
+                    .get(j)
+                    .cloned()
+                    .flatten()
+                    .filter(|c| !c.deterministic)
+                    .map(|c| c.name.clone());
                 for a in 0..n {
                     for b in 0..n {
                         for ka in keys[a] {
                             for kb in keys[b] {
                                 if let (Some(x), Some(y)) = (key_col(ka), key_col(kb))
                                     && self.ec[x] == self.ec[y]
+                                    && self.ec_nondet_collation(self.ec[x]) == knondet
                                 {
                                     joined[a][b] = true;
                                 }

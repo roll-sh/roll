@@ -89,6 +89,12 @@ struct Clause {
     eq: Option<(Expr, Expr, u32, u32)>,
     hashable: bool,
     mergeable: bool,
+    /// An equivalence class's equality (a btree family's `=`): mergeable, or under a
+    /// nondeterministic collation (whose classes are kept apart from other collations').
+    ecable: bool,
+    /// Its operator has a commutator: a merge or hash clause with its outer side on the
+    /// right is usable (select_mergejoin_clauses / hash_inner_and_outer).
+    commutes: bool,
     cost: f64,
     /// An outer join's own clause (ON), not one pushed down to it.
     on: bool,
@@ -131,6 +137,10 @@ enum JNode {
         kind: InKind,
         /// A LATERAL item's values from the outer side (over the group row).
         params: Vec<Expr>,
+        /// An append relation's members merged in this order (over the leaf's row): a
+        /// Merge Append path (generate_orderedappend_paths), whether its members were
+        /// picked for a fast start.
+        merged: Option<Rc<(Vec<SortKey>, bool)>>,
     },
     /// An inheritance Append leaf as parameterized scans of its members (in `members`
     /// order).
@@ -475,6 +485,40 @@ fn merge_expr(e: &Expr) -> bool {
     ok
 }
 
+/// A made base type in a built-in btree family it has no default operator class of: the
+/// family's `<` sorts it, shown as `USING <` (the sort operator isn't the type's default).
+pub(super) fn made_type_order(cat: &crate::catalog::Catalog, t: &DataType) -> Option<Arc<FuncDef>> {
+    let fam = crate::sql::binder::optimize::alias_family(t)?;
+    if cat.opclasses.values().any(|c| c.default && c.method == 403 && c.intype == t.oid()) {
+        return None;
+    }
+    crate::sql::func::resolve_binop("<", &fam, &fam).ok().map(|r| r.def)
+}
+
+/// A made `=` (CREATE OPERATOR): whether it merges (MERGES, and an equality of a btree
+/// family), hashes (HASHES, and an equality of a hash family), and has a commutator
+/// (get_switched_clauses needs one to put a clause's outer side on the left).
+pub(super) fn user_eq_props(cat: &crate::catalog::Catalog, d: &FuncDef) -> Option<(bool, bool, bool)> {
+    let op = crate::sql::costs::user_operator(cat, d)?;
+    let (l, r) = (op.left.as_ref()?.oid(), op.right.oid());
+    let method = |fam: u32| {
+        cat.opfamilies.get(&fam).map(|f| f.method).or_else(|| {
+            crate::catalog::system::OPFAMILIES.iter().find(|x| x.0 == fam).map(|x| x.1)
+        })
+    };
+    let member = |am: u32, strategy: i16| {
+        cat.opmembers.values().any(|m| {
+            !m.func
+                && m.number == strategy
+                && m.object == op.oid
+                && m.left == l
+                && m.right == r
+                && method(m.family) == Some(am)
+        })
+    };
+    Some((op.merges && member(403, 3), op.hashes && member(405, 1), op.commutator != 0))
+}
+
 fn key_col(e: &Expr) -> Option<usize> {
     match key_operand(e) {
         Expr::Col(i, _) => Some(*i),
@@ -768,7 +812,7 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
     /// the order its clauses brought them in (None: not such a clause).
     fn clause_ec(&self, c: &Clause) -> Option<usize> {
         // (A semi join's own clause equates its sides as an inner join's does.)
-        if !c.mergeable || (c.on && !(self.kind == JoinKind::Semi && !self.general)) {
+        if !c.ecable || (c.on && !(self.kind == JoinKind::Semi && !self.general)) {
             return None;
         }
         let (a, b, _, _) = c.eq.as_ref()?;
@@ -836,7 +880,9 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
                     leaves: lx | ly,
                     eq: Some((ex, ey, lx, ly)),
                     hashable: template.hashable,
-                    mergeable: true,
+                    mergeable: template.mergeable,
+                    ecable: true,
+                    commutes: template.commutes,
                     on: false,
                     derived: true,
                     sj: None,
@@ -915,7 +961,7 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
             }
         }
         for c in self.clauses.iter_mut() {
-            if !c.mergeable || c.on {
+            if !c.ecable || c.on {
                 continue;
             }
             let Some((a, b, _, _)) = c.eq.clone() else { continue };
@@ -1176,6 +1222,7 @@ impl Search<'_, '_, '_> {
                         leaf: l,
                         kind: leaf.kind,
                         params,
+                        merged: None,
                     },
                     rows: leaf.rows,
                     startup: leaf.startup,
@@ -1191,6 +1238,9 @@ impl Search<'_, '_, '_> {
                     rel.param.push(jp);
                 } else {
                     rel.paths.push(jp);
+                    for mp in self.merged_paths(l, width) {
+                        add_jpath(&mut rel.paths, mp, self.startup);
+                    }
                     rel.param = self.append_param_paths(l, width);
                 }
             }
@@ -1203,6 +1253,7 @@ impl Search<'_, '_, '_> {
                         leaf: l,
                         kind: leaf.kind,
                         params: Vec::new(),
+                        merged: None,
                     },
                     rows: leaf.rows,
                     startup: leaf.startup,
@@ -1276,6 +1327,121 @@ impl Search<'_, '_, '_> {
             limit: None,
             merge,
         }
+    }
+
+    /// Merge Append paths of an append relation leaf (generate_orderedappend_paths): its
+    /// members merged in an order useful above, for the query's ORDER BY (a prefix of it
+    /// over the leaf's columns) or a merge join (a column equated to another leaf's).
+    fn merged_paths(&self, l: usize, width: u32) -> Vec<JP> {
+        let leaf = &self.leaves[l];
+        if leaf.lateral.is_some() || !matches!(leaf.plan, Plan::Append { .. } | Plan::SetOp { .. } | Plan::Project { .. }) {
+            return Vec::new();
+        }
+        let set = 1u32 << l;
+        let col_of = |ec: usize| (0..leaf.ncols).find(|k| self.ec[leaf.off + k] == ec);
+        let mut cands: Vec<Vec<GKey>> = Vec::new();
+        let mut q = Vec::new();
+        for k in self.query_keys() {
+            if col_of(k.ec).is_none() {
+                break;
+            }
+            q.push(k);
+        }
+        if !q.is_empty() {
+            cands.push(q);
+        }
+        for k in 0..leaf.ncols {
+            let g = leaf.off + k;
+            if self.ec_has_other(g, set) {
+                let key = vec![GKey { ec: self.ec[g], desc: false, nulls_first: false }];
+                if !cands.iter().any(|c| c[0].ec == key[0].ec) {
+                    cands.push(key);
+                }
+            }
+        }
+        let needed: Vec<bool> = (0..leaf.ncols).map(|k| self.needed_above(leaf.off + k, set)).collect();
+        let mut out = Vec::new();
+        for gk in cands {
+            let keys: Vec<SortKey> = gk
+                .iter()
+                .filter_map(|k| {
+                    let c = col_of(k.ec)?;
+                    Some(SortKey {
+                        expr: Expr::Col(c, self.col_type(leaf.off + c)),
+                        desc: k.desc,
+                        nulls_first: k.nulls_first,
+                        using: None,
+                    })
+                })
+                .collect();
+            for fast in [false, true] {
+                if fast && !self.startup {
+                    continue;
+                }
+                let Some((st, total, rows, disabled)) = self.pl.merged_cost(&leaf.plan, &keys, &needed, fast) else {
+                    continue;
+                };
+                let _ = rows;
+                out.push(JP {
+                    node: JNode::Opaque {
+                        leaf: l,
+                        kind: InKind::NoMark,
+                        params: Vec::new(),
+                        merged: Some(Rc::new((keys.clone(), fast))),
+                    },
+                    rows: leaf.rows,
+                    startup: st,
+                    total,
+                    width,
+                    disabled,
+                    keys: gk.clone(),
+                    req: 0,
+                    set,
+                });
+            }
+        }
+        out
+    }
+
+    /// estimate_num_groups over pathkeys of a relation `set` (their classes' first
+    /// members there): one table's columns by its statistics; else the product of the
+    /// columns' distinct counts, clamped to the rows; the default without statistics.
+    fn key_groups(&self, keys: &[GKey], set: u32, rows: f64) -> f64 {
+        let fallback = costs::clamp_rows(rows.min(costs::DEFAULT_NUM_DISTINCT));
+        let mut cols: Vec<usize> = Vec::new();
+        for k in keys {
+            let Some(g) = (0..self.ec.len()).find(|&g| self.ec[g] == k.ec && (1u32 << self.leaf_of[g]) & set != 0) else {
+                return fallback;
+            };
+            cols.push(g);
+        }
+        let l = self.leaf_of[cols[0]];
+        if cols.iter().all(|&g| self.leaf_of[g] == l)
+            && let Some((_, lr)) = &self.leaves[l].scan
+        {
+            let off = self.leaves[l].off;
+            let exprs: Vec<Expr> = cols.iter().map(|&g| Expr::Col(g - off, DataType::Unknown)).collect();
+            let refs: Vec<&Expr> = exprs.iter().collect();
+            return self.pl.num_groups(lr, &refs, rows);
+        }
+        let mut prod = 1.0;
+        for &g in &cols {
+            let (var, distinct, _) = self.var_of(g);
+            match distinct.or_else(|| var.map(|v| v.ndistinct(&self.pl.cat)).filter(|d| !d.1).map(|d| d.0)) {
+                Some(d) => prod *= d,
+                None => return fallback,
+            }
+        }
+        costs::clamp_rows(prod.min(rows))
+    }
+
+    /// The nondeterministic collation an equivalence class's clauses compare under (None:
+    /// a deterministic one).
+    fn ec_nondet_collation(&self, ec: usize) -> Option<String> {
+        self.clauses.iter().filter(|c| self.clause_ec(c) == Some(ec)).find_map(|c| match &c.expr {
+            Expr::Call(d, ..) => d.coll.as_ref().filter(|k| !k.deterministic).map(|k| k.name.clone()),
+            _ => None,
+        })
     }
 
     /// A column's equivalence class has a member in another leaf than `set`'s.
@@ -2171,6 +2337,15 @@ impl Search<'_, '_, '_> {
                         };
                     }
                 }
+                // (The member's target list computes the leaf's values: a UNION ALL arm's
+                // expressions, per row (cost_index's pathtarget cost).)
+                let tl: f64 = (0..leaf.ncols)
+                    .filter(|&k| self.needed_above(leaf.off + k, set))
+                    .filter_map(|k| m.exprs.get(k).cloned().flatten())
+                    .filter(|e| !matches!(e, Expr::Col(..)))
+                    .map(|e| costs::qual_cost(&e))
+                    .sum();
+                best.total += tl * best.rows;
                 any_index |= indexed;
                 scans.push((best, prel));
             }
@@ -2773,6 +2948,15 @@ impl Search<'_, '_, '_> {
                 }
             }
         }
+        // (relation_has_unique_index_for: the relation's own `col = constant` restrictions
+        // count too.)
+        if let Some((_, rel)) = leaf.scan.as_ref().filter(|_| !restrict.is_empty()) {
+            for k in 0..t.columns.len() {
+                if !cols.contains(&k) && rel.quals.iter().any(|q| const_equality(q, k)) {
+                    cols.push(k);
+                }
+            }
+        }
         let cat = &self.pl.cat;
         let partitioned = t.partkey.is_some();
         cat.table_indexes(t)
@@ -2890,9 +3074,10 @@ impl Search<'_, '_, '_> {
         let merge: Vec<(usize, bool)> = sides
             .iter()
             .copied()
-            .filter(|(c, _)| {
-                let cl = &self.clauses[*c];
+            .filter(|&(c, oa)| {
+                let cl = &self.clauses[c];
                 cl.mergeable
+                    && (oa || cl.commutes)
                     && (!semi_like
                         || cl.eq.as_ref().is_some_and(|(a, b, _, _)| key_col(a).is_some() && key_col(b).is_some()))
             })
@@ -2900,7 +3085,7 @@ impl Search<'_, '_, '_> {
         let hash: Vec<(usize, bool)> = sides
             .iter()
             .copied()
-            .filter(|(c, _)| self.clauses[*c].hashable)
+            .filter(|&(c, oa)| self.clauses[c].hashable && (oa || self.clauses[c].commutes))
             .collect();
         // (Right semi joins hash only; right and full joins merge on every clause.)
         // (select_mergejoin_clauses: constant clauses the executor checks itself, as for
@@ -3886,7 +4071,7 @@ impl Search<'_, '_, '_> {
         };
         let groups = if presorted > 0 {
             // (the presorted keys' distinct count, as estimate_num_groups would)
-            costs::clamp_rows(op.rows.min(costs::DEFAULT_NUM_DISTINCT))
+            self.key_groups(&op.keys[..presorted], op.set, op.rows)
         } else {
             1.0
         };
@@ -4314,9 +4499,23 @@ impl Search<'_, '_, '_> {
 
     fn build_node(&self, p: &JP) -> (Plan, Vec<usize>) {
         match &p.node {
-            JNode::Opaque { leaf, .. } => {
+            JNode::Opaque { leaf, merged, .. } => {
                 let l = &self.leaves[*leaf];
-                (l.plan.clone(), (l.off..l.off + l.ncols).collect())
+                let mut plan = l.plan.clone();
+                if let Some(m) = merged {
+                    // The members each in the order, under the Sort EXPLAIN shows as their
+                    // Merge Append.
+                    let set = 1u32 << leaf;
+                    let needed: Vec<bool> =
+                        (0..l.ncols).map(|k| self.needed_above(l.off + k, set)).collect();
+                    let mut input = plan;
+                    self.pl.order_members(&mut input, &m.0, &needed, m.1, None);
+                    plan = Plan::Sort {
+                        input: Arc::new(input),
+                        keys: m.0.clone(),
+                    };
+                }
+                (plan, (l.off..l.off + l.ncols).collect())
             }
             JNode::Scan {
                 leaf,
@@ -4545,10 +4744,10 @@ impl Search<'_, '_, '_> {
                             };
                             let ty = self.col_type(g);
                             Some(SortKey {
+                                using: made_type_order(&self.pl.cat, &ty),
                                 expr: Expr::Col(pos(layout, g)?, ty),
                                 desc: k.desc,
                                 nulls_first: k.nulls_first,
-                                using: None,
                             })
                         })
                         .collect();
@@ -6154,26 +6353,44 @@ impl Planner<'_, '_> {
             // (Under a nondeterministic collation equal strings needn't be equal bytes.)
             let nondet = matches!(&e, Expr::Call(d, ..)
                 if d.coll.as_ref().is_some_and(|c| !c.deterministic));
+            // (An equality of a btree family under a nondeterministic collation still
+            // makes an equivalence class, of that collation: the engine merges no rows by
+            // it.)
+            let mut ecable = None;
+            let mut commutes = true;
             let (hashable, mergeable_) = match &eq {
                 Some((a, b, _, _)) if nondet => {
                     let (ta, tb) = (a.ty(), b.ty());
-                    (ta.without_typmod() == tb.without_typmod() && crate::sql::binder::optimize::hashable_type(&ta), false)
+                    let same = ta.without_typmod() == tb.without_typmod();
+                    ecable = Some(same && mergeable(&ta) && key_col(a).is_some() && key_col(b).is_some());
+                    (same && crate::sql::binder::optimize::hashable_type(&ta), false)
                 }
                 Some((a, b, _, _)) => {
                     let (ta, tb) = (a.ty(), b.ty());
                     // (integer_ops: int2, int4 and int8 hash and sort alike.)
                     let int = |t: &DataType| matches!(t, DataType::Int2 | DataType::Int4 | DataType::Int8);
                     let same = ta.without_typmod() == tb.without_typmod() || (int(&ta) && int(&tb));
+                    // (A made operator across types: MERGES / HASHES and in a family.)
+                    let user = match (&e, same) {
+                        (Expr::Call(d, ..), false) => user_eq_props(&self.cat, d),
+                        _ => None,
+                    };
                     // (Merging needs the sides' orders: plain columns here, or a column and
                     // an expression of the other side's columns, sorted by it: a pathkey of
                     // the column's class.)
-                    (
-                        same && crate::sql::binder::optimize::hashable_type(&ta),
-                        same && mergeable(&ta)
-                            && ((key_col(a).is_some() && key_col(b).is_some())
-                                || (key_col(a).is_some() && merge_expr(b))
-                                || (key_col(b).is_some() && merge_expr(a))),
-                    )
+                    let cols = (key_col(a).is_some() && key_col(b).is_some())
+                        || (key_col(a).is_some() && merge_expr(b))
+                        || (key_col(b).is_some() && merge_expr(a));
+                    match user {
+                        Some((merges, hashes, comm)) => {
+                            commutes = comm;
+                            (hashes, merges && cols)
+                        }
+                        None => (
+                            same && crate::sql::binder::optimize::hashable_type(&ta),
+                            same && mergeable(&ta) && cols,
+                        ),
+                    }
                 }
                 None => (false, false),
             };
@@ -6186,6 +6403,8 @@ impl Planner<'_, '_> {
                 eq,
                 hashable,
                 mergeable: mergeable_,
+                ecable: ecable.unwrap_or(mergeable_),
+                commutes,
                 cost,
                 on,
                 derived: false,
@@ -6205,8 +6424,27 @@ impl Planner<'_, '_> {
         // joins' clauses only; an outer join's own clause equates nothing: each side is
         // a class of its own).
         let outer_join = !matches!(s.kind, JoinKind::Inner | JoinKind::Semi);
+        // (Each class's collation, when nondeterministic: its clauses' (process_equivalence
+        // keeps classes of other collations apart; deterministic ones all compare bytes).)
+        let mut ec_coll: std::collections::HashMap<usize, Option<String>> = Default::default();
+        // (An inner join's equality without a commutator goes into its class, which joins
+        // the two relations by an `=` of the first one's member's type and the second's: the
+        // operator written the other way round doesn't exist, the class is broken and the
+        // clause comes back as it was, never checked as hashable (only clauses
+        // distribute_restrictinfo_to_rels places are).)
+        for c in s.clauses.iter_mut() {
+            if c.ecable
+                && !c.commutes
+                && !(s.general && (c.sj.is_some() || c.req != c.leaves))
+                && !(!s.general && outer_join && c.on)
+                && let Some((_, _, al, bl)) = &c.eq
+                && al.trailing_zeros() > bl.trailing_zeros()
+            {
+                c.hashable = false;
+            }
+        }
         for c in &s.clauses {
-            if !c.mergeable
+            if !c.ecable
                 || (s.general && (c.sj.is_some() || c.req != c.leaves))
                 || (!s.general && outer_join && c.on)
             {
@@ -6215,6 +6453,15 @@ impl Planner<'_, '_> {
             let Some((a, b, _, _)) = &c.eq else { continue };
             if let (Some(x), Some(y)) = (key_col(a), key_col(b)) {
                 let (ex, ey) = (s.ec[x], s.ec[y]);
+                let coll = match &c.expr {
+                    Expr::Call(d, ..) => d.coll.as_ref().filter(|k| !k.deterministic).map(|k| k.name.clone()),
+                    _ => None,
+                };
+                if [ex, ey].iter().any(|e| ec_coll.get(e).is_some_and(|k| *k != coll)) {
+                    continue;
+                }
+                ec_coll.insert(ex, coll.clone());
+                ec_coll.insert(ey, coll);
                 if ex != ey {
                     for e in s.ec.iter_mut() {
                         if *e == ey {

@@ -35,26 +35,26 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50998 (**99.70%**) |
-| units differing | 152 |
-| files fully matching | 211 |
-| engine output == expected/*.out (pg_regress "ok") | 175 files |
+| units matching | 51013 (**99.73%**) |
+| units differing | 137 |
+| files fully matching | 213 |
+| engine output == expected/*.out (pg_regress "ok") | 177 files |
 | engine crashes / panics | none |
 
 ## Remaining differences, classified
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 148 | 97.4% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.0% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 133 | 97.1% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.2% |
 | by design (a parallel plan's combine function) | 1 | 0.7% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 148 units
-join (68), partition_join (21), partition_prune (7), subselect (3), collate.icu.utf8 (8), incremental_sort (6), select_parallel (1), updatable_views (3), groupingsets (7), with (5), equivclass (6), aggregates (4), join_hash (3), returning (2), merge (1), inherit (2), select_distinct (1), foreign_key (1)
+### EXPLAIN (group C1) — 133 units
+join (67), partition_join (21), partition_prune (7), subselect (3), collate.icu.utf8 (5), incremental_sort (6), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -111,6 +111,94 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Fixed in round 15, agent 10 (equivalence classes: broken classes, made operators, nondeterministic collations, Merge Appends as join inputs, GROUP BY reordering)
+
+Measured in subset runs (the 46 files of `test_setup`, insert_conflict, create_misc,
+create_table, create_index, create_view, create_function_sql, select, inherit,
+updatable_views, select_distinct, select_distinct_on, subselect, union, join, aggregates,
+hash_index, gist, privileges, collate, rowsecurity, groupingsets, join_hash, merge, tsrf,
+incremental_sort, generated_virtual, rules, stats_ext, select_parallel, foreign_key, window,
+equivclass, sqljson_jsontable, limit, rangefuncs, rowtypes, returning, with, partition_join,
+partition_prune, partition_aggregate, partition_info, tuplesort, explain, memoize, plus
+collate.icu.utf8), compared unit by unit with the same subset run on the engine before:
+15 units fixed, none broken.
+
+| file | fixed units |
+|---|---|
+| equivclass | 38, 48, 52, 59, 87, 94 (all) |
+| inherit | 445, 453 |
+| aggregates | 455, 458, 461 |
+| collate.icu.utf8 | 328, 630, 647 |
+| join | 817 |
+
+What changed:
+
+- Made operators (CREATE OPERATOR) between different types are merge / hash join clauses when
+  they say MERGES / HASHES and are an equality of a btree / hash family (`user_eq_props`); one
+  without a commutator is usable only with its outer side on the left
+  (select_mergejoin_clauses / hash_inner_and_outer), so a FULL JOIN takes the other side as
+  its outer one (87/94). An inner join's such equality goes into its class, which joins the
+  first relation's member with the second's: the operator the other way round doesn't
+  exist, the class is broken and its clause comes back unchecked for hashing (no hash join;
+  Postgres only marks clauses distribute_restrictinfo_to_rels places). A made type without a
+  default btree class sorts by its family's `<`, shown `USING <`. A disabled join method
+  shows `Disabled: true` (initial_cost_* count the join itself).
+- Broken classes (an `=` missing across the made types): the constant's clause stays twice
+  (derived and as written, generate_base_implied_equalities_broken; `BROKEN_DUPS` keeps the
+  scan's class from merging them), and a scan's own equalities bring a join column into the
+  constant's class (`ec1.ff = ec1.f1` with `ss1.x = ec1.f1` and `ec1.ff = 42` gives
+  `ss1.x = 42` in each UNION ALL arm, 48). A relation's `col = constant` restrictions count
+  for Inner Unique (relation_has_unique_index_for), and a unique index's expression is
+  unique to examine_variable (`expr = constant` estimates one row). A parameterized
+  appendrel member costs its target list's expressions (cost_index's pathtarget cost).
+- Merge Append paths of append relation leaves (UNION ALL subqueries, inheritance trees) in
+  the join search (generate_orderedappend_paths): for the ORDER BY's keys and for columns
+  equated with another leaf's, when some member reads the order from an index; built as the
+  Sort over the Append EXPLAIN shows as a Merge Append (`merged_cost`, `order_members`). A
+  Merge Append can't mark and restore (a Materialize as a merge join's inner side), a merge
+  join's own Materialize is labelled as its input plus cpu_operator_cost a row, and a merge
+  join's inner sort is never incremental (52, 59, inherit 453).
+- EXPLAIN names: a pulled-up UNION ALL's arms (Append / UNION ALL SetOp) are of their level,
+  numbered after its own relations, arm by arm, the UNION ALL placed by its first relation
+  (`level_scans`).
+- A projection over a UNION ALL merged in order: the members compute the sort expressions
+  (prepare_sort_from_pathkeys), a Result above projects the query's columns unless they are
+  the Merge Append's own (inherit 445, bug #18652).
+- Equivalence classes under nondeterministic collations (`Clause::ecable`): a class of the
+  clauses' collation, kept apart from other collations' (deterministic ones all compare
+  bytes); a scan's members equated there (`c = b`), one join clause per class (630, 647).
+  Partition keys matched through a class only under the key's collation (have_partkey_
+  equi_join's check; this first gave wrong counts in 631, fixed before the batch); full
+  partitionwise aggregation needs the grouping collation to be the partition key's (611's
+  plan shape; its keys still show without `(c)::text`).
+- GROUP BY orderings (get_useful_group_keys_orderings): the group pathkeys with the ORDER BY's
+  keys first (preprocess_groupclause), and reordered to the input's order with the rest in
+  that order, only with incremental sort or when the input covers them all; an ordering other
+  than the ORDER BY's own is charged the sort above it (458). Presorted aggregates (DISTINCT
+  / ORDER BY in the aggregate) take the reordering too, no sort when the input is in order
+  (461), and an index-only scan the aggregation reads as it comes returns the index's
+  columns (use_physical_tlist under CP_LABEL_TLIST). A merge join's outer incremental sort
+  estimates its presorted keys' groups (455).
+- A hashed grouping and a sorted one only fuzzily as cheap: both kept, the cheaper in total is
+  the relation's cheapest path (add_path / set_cheapest), not the ordered one (328).
+
+Goldens added: `tests/sql/a10_ec_alias.sql`, `a10_group_reorder.sql`, `a10_nondet_ec.sql`.
+
+Still open in these files, and why:
+
+- collate.icu.utf8 611, 619, 622: a `COLLATE "C"` over a column of another collation is a
+  RelabelType in Postgres's plan, shown `(c)::text` in Group Key, Hash Cond and (as a
+  reference) Sort Key `((c)::text) COLLATE "C"`; the engine shows the column (`c COLLATE "C"`
+  is a byte-order collation it doesn't tell from the database default there). 619 also
+  needs the partitionwise join chosen under it. 644: a scan's `c = b` (two columns of one
+  relation) is estimated as 1/ndistinct, where eqsel's get_restriction_variable gives
+  DEFAULT_EQ_SEL (0.005), so the per-partition nested loops cost more here. 334: an EXISTS
+  over a DISTINCT subquery isn't pulled up into a semi join (the correlated clause is pushed
+  into the subquery level).
+- updatable_views 173 / 174 match since agent 9's `ec_constants` change (an input's own
+  restrictions are class members: the rule action's join takes the subquery's `a = 2`;
+  counted in agent 11's round 16).
 
 ## Round 16, agent 11 (search-path operator / function resolution; the long tail: RETURNING row types, whole-row Vars, group orders, dummy subqueries)
 
@@ -1937,7 +2025,7 @@ produces no units on Linux (skipped by the file itself).
 | constraints | 607 | 607 | 100% | yes | yes |  |
 | triggers | 1041 | 1041 | 100% | no | no |  |
 | select | 87 | 87 | 100% | yes | yes |  |
-| inherit | 934 | 932 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
+| inherit | 934 | 934 | 100% | yes | yes |  |
 | typed_table | 36 | 36 | 100% | yes | yes |  |
 | vacuum | 328 | 328 | 100% | yes | yes |  |
 | drop_if_exists | 161 | 161 | 100% | yes | yes |  |
@@ -1956,8 +2044,8 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 353 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 857 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (66) |
-| aggregates | 556 | 551 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (4) |
+| join | 925 | 858 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (65) |
+| aggregates | 556 | 554 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
 | portals | 354 | 354 | 100% | yes | yes |  |
@@ -2004,7 +2092,7 @@ produces no units on Linux (skipped by the file itself).
 | tidscan | 49 | 49 | 100% | yes | yes |  |
 | tidrangescan | 45 | 45 | 100% | yes | yes |  |
 | collate.utf8 | 61 | 61 | 100% | yes | yes |  |
-| collate.icu.utf8 | 681 | 673 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (8) |
+| collate.icu.utf8 | 681 | 676 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (5) |
 | incremental_sort | 120 | 114 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (6) |
 | create_role | 144 | 144 | 100% | yes | yes |  |
 | without_overlaps | 674 | 674 | 100% | yes | yes |  |
@@ -2038,7 +2126,7 @@ produces no units on Linux (skipped by the file itself).
 | functional_deps | 40 | 40 | 100% | yes | yes |  |
 | advisory_lock | 38 | 38 | 100% | yes | yes |  |
 | indirect_toast | 31 | 31 | 100% | no | no |  |
-| equivclass | 96 | 90 | 94% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (6) |
+| equivclass | 96 | 96 | 100% | yes | yes |  |
 | json | 469 | 469 | 100% | yes | yes |  |
 | jsonb | 1090 | 1090 | 100% | yes | yes |  |
 | json_encoding | 47 | 47 | 100% | yes | yes |  |

@@ -272,9 +272,54 @@ impl Planner<'_, '_> {
         true
     }
 
+    /// generate_orderedappend_paths for an append relation in a join group: its members
+    /// (under `p`, `keys` over `p`'s row) merged in that order, each its cheapest path in
+    /// it or sorted (cost_merge_append): (startup, total, rows, disabled). None unless
+    /// some member reads the order from an index (all_child_pathkeys come from the
+    /// members' own ordered paths).
+    pub(super) fn merged_cost(
+        &self,
+        p: &Plan,
+        keys: &[SortKey],
+        needed: &[bool],
+        startup: bool,
+    ) -> Option<(f64, f64, f64, u32)> {
+        if keys.is_empty() || keys.iter().any(|k| k.using.is_some()) {
+            return None;
+        }
+        let key_exprs: Vec<Expr> = keys.iter().map(|k| k.expr.clone()).collect();
+        let dirs: Vec<(bool, bool)> = keys.iter().map(|k| (k.desc, k.nulls_first)).collect();
+        let mut appends = 0;
+        let mut found = Vec::new();
+        leaves(&self.cat, p, None, key_exprs, needed.to_vec(), &mut appends, &mut found)?;
+        if appends == 0 || found.len() < 2 {
+            return None;
+        }
+        let n = found.len() as f64;
+        let cmp = 2.0 * CPU_OPERATOR_COST;
+        let logn = n.log2();
+        let (mut m_startup, mut m_run, mut rows, mut disabled) = (0.0, 0.0, 0.0, 0u32);
+        let mut indexed = false;
+        for l in &found {
+            let rel = self.rel(l.scan, &l.needed)?;
+            let o = self.member_path(&rel, &l.keys, &dirs, l.width, startup, None)?;
+            indexed |= !matches!(o.kind, PathKind::Sort(_));
+            m_startup += o.startup;
+            m_run += o.total - o.startup;
+            disabled += o.disabled;
+            rows += o.rows;
+        }
+        if !indexed {
+            return None;
+        }
+        let st = m_startup + cmp * n * logn;
+        let total = st + m_run + rows * cmp * logn + CPU_TUPLE_COST * 0.5 * rows;
+        Some((st, total, rows, disabled))
+    }
+
     /// Each member under `p` in the order of `keys` (over `p`'s row): read in that order,
     /// or sorted.
-    fn order_members(&self, p: &mut Plan, keys: &[SortKey], needed: &[bool], startup: bool, limit: Option<f64>) {
+    pub(super) fn order_members(&self, p: &mut Plan, keys: &[SortKey], needed: &[bool], startup: bool, limit: Option<f64>) {
         match p {
             Plan::Project { .. } => {
                 let n = child_needs(p, needed).pop().unwrap_or_default();
