@@ -203,8 +203,9 @@ fn advertise_v0(b: &mut BytesMut, refs: &RefList, caps: &str, upload: bool) {
     pktline::flush(b);
 }
 
-async fn read_body(headers: &HeaderMap, body: Body, max: u64) -> Result<Bytes, Response> {
-    let too_large = || (StatusCode::PAYLOAD_TOO_LARGE, format!("request larger than {max} bytes\n")).into_response();
+/// The request body, gunzipped if it says so; the error is the response to send.
+async fn read_body(headers: &HeaderMap, body: Body, max: u64) -> Result<Bytes, Box<Response>> {
+    let too_large = || Box::new((StatusCode::PAYLOAD_TOO_LARGE, format!("request larger than {max} bytes\n")).into_response());
     let raw = axum::body::to_bytes(body, usize::try_from(max).unwrap_or(usize::MAX)).await.map_err(|_| too_large())?;
     let gzip = headers.get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("gzip") || v.eq_ignore_ascii_case("x-gzip"));
     if !gzip {
@@ -214,7 +215,7 @@ async fn read_body(headers: &HeaderMap, body: Body, max: u64) -> Result<Bytes, R
     flate2::read::GzDecoder::new(&raw[..])
         .take(max + 1)
         .read_to_end(&mut out)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "bad gzip body\n").into_response())?;
+        .map_err(|_| Box::new((StatusCode::BAD_REQUEST, "bad gzip body\n").into_response()))?;
     if out.len() as u64 > max {
         return Err(too_large());
     }
@@ -234,7 +235,7 @@ async fn post_handler(State(s): State<Arc<Server>>, Path(path): Path<String>, he
             }
             let body = match read_body(&headers, body, s.config.max_request_bytes).await {
                 Ok(b) => b,
-                Err(r) => return r,
+                Err(r) => return *r,
             };
             let result = if wants_v2(&headers) { upload_v2(&s, repo, &body).await } else { upload_v0(&s, repo, &body).await };
             match result {
@@ -254,7 +255,7 @@ async fn post_handler(State(s): State<Arc<Server>>, Path(path): Path<String>, he
             };
             let body = match read_body(&headers, body, s.config.limits.max_pack_bytes + (1 << 20)).await {
                 Ok(b) => b,
-                Err(r) => return r,
+                Err(r) => return *r,
             };
             match receive_pack(&s, &repo, body, pusher).await {
                 Ok(b) => git_response("application/x-git-receive-pack-result", Body::from(b)),

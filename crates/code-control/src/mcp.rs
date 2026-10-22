@@ -173,7 +173,7 @@ async fn handle(State(m): State<Mcp>, ext: axum::http::Extensions, headers: Head
         let key = crate::streams::key(&caller, bearer(&headers).as_deref(), &headers, peer, m.code.config.trust_forwarded_for);
         let permit = match m.code.stream_permit(key) {
             Ok(p) => p,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
         let stream = futures::stream::once(async move {
             let out = process(&m, &headers, messages).await.0;

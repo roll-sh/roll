@@ -452,8 +452,8 @@ fn remove_file(tx: &rusqlite::Transaction, path: &str) -> Result<()> {
     let Some((id, blob)) = row else { return Ok(()) };
     {
         let mut st = tx.prepare_cached("DELETE FROM tri WHERE t = ? AND file = ?")?;
-        for c in blob.chunks_exact(4) {
-            let t = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+        for c in blob.as_chunks::<4>().0 {
+            let t = u32::from_le_bytes(*c);
             st.execute(params![t as i64, id])?;
         }
     }
