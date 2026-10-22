@@ -326,7 +326,7 @@ async fn update_settings() {
 
     // Nothing to change: refused before calling the API.
     let e = t.fail(&["update", "site"]).await;
-    assert!(e.contains("nothing to change: pass --public, --private, --recover-days, --cors-origin, --no-cors, --tag or --no-tags"), "{e}");
+    assert!(e.contains("nothing to change: pass --public, --private, --recover-days, --cors-origin, --no-cors, --tag, --no-tags or --versioning"), "{e}");
 
     // Bucket tags: replaced whole, shown, removed.
     let v = t.json(&["update", "site", "--tag", "team=web", "--tag", "env=prod"]).await;
@@ -658,6 +658,194 @@ async fn ls_rm_and_stat() {
     assert_eq!(t.json(&["rm", "-r", "s3://files"]).await, json!({ "deleted": 3 }));
     assert_eq!(t.json(&["ls", "-r", "files"]).await, json!({ "objects": [], "prefixes": [] }));
     assert!(t.fail(&["rm", "-r", "nope/"]).await.contains("no bucket named nope"));
+}
+
+/// The (key, version id, latest, delete marker) of every entry of `ls --versions --json`.
+fn versions_of(v: &Value) -> Vec<(String, String, bool, bool)> {
+    v["versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["key"].as_str().unwrap().to_string(), e["version_id"].as_str().unwrap().to_string(), e["is_latest"].as_bool().unwrap(), e["delete_marker"].as_bool().unwrap()))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn versioning_and_versions() {
+    let t = start().await;
+    t.ok(&["create", "ver"]).await;
+    let text = t.ok(&["show", "ver"]).await;
+    assert!(text.contains("  versioning off (never enabled)"), "{text}");
+    assert!(!text.contains("versions   ") && !text.contains("lock "), "{text}");
+    assert_eq!(t.json(&["show", "ver"]).await["versioning"], Value::Null);
+    t.put("ver", "before.txt", b"from before").await;
+
+    // On.
+    let v = t.json(&["update", "ver", "--versioning", "on"]).await;
+    assert_eq!(v["versioning"], "Enabled");
+    let text = t.ok(&["show", "ver"]).await;
+    assert!(text.contains("  versioning enabled") && text.contains("  versions   0 noncurrent  (0 B)"), "{text}");
+
+    t.put("ver", "k", b"one").await;
+    t.put("ver", "k", b"two!").await;
+    t.put("ver", "dir/x", b"x").await;
+    let v = t.json(&["ls", "--versions", "ver"]).await;
+    let all = versions_of(&v);
+    assert_eq!(all.iter().map(|e| (e.0.as_str(), e.2, e.3)).collect::<Vec<_>>(), [("before.txt", true, false), ("dir/x", true, false), ("k", true, false), ("k", false, false)]);
+    assert_eq!(all[0].1, "null", "objects from before versioning are the null version");
+    let (v2, v1) = (all[2].1.clone(), all[3].1.clone());
+    assert_ne!(v1, v2);
+    let e = &v["versions"][3];
+    assert_eq!((e["size"].as_u64(), e["etag"].is_string(), e["last_modified"].is_i64()), (Some(3), true, true));
+    // A prefix.
+    assert_eq!(versions_of(&t.json(&["ls", "--versions", "ver/k"]).await).len(), 2);
+    assert_eq!(versions_of(&t.json(&["ls", "--versions", "s3://ver/dir/"]).await).len(), 1);
+    let text = t.ok(&["ls", "--versions", "ver/k"]).await;
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "a header and two versions: {text}");
+    assert!(lines[0].contains("version id") && lines[0].ends_with("key"), "{text}");
+    assert!(lines[1].contains("latest") && lines[1].contains(&v2) && lines[1].contains("4 B"), "{text}");
+    assert!(!lines[2].contains("latest") && lines[2].contains(&v1) && lines[2].ends_with(" k"), "{text}");
+    assert_eq!(t.ok(&["ls", "--versions", "ver/none/"]).await, "no versions under ver/none/\n");
+    let text = t.ok(&["show", "ver"]).await;
+    assert!(text.contains("  versions   1 noncurrent  (3 B)"), "{text}");
+    let b = t.json(&["show", "ver"]).await;
+    assert_eq!((b["versions"].as_u64(), b["version_bytes"].as_u64()), (Some(1), Some(3)));
+
+    // stat and cp of a version.
+    let text = t.ok(&["stat", "ver/k"]).await;
+    assert!(text.contains(&format!("  version        {v2}\n")) && text.contains("  size           4 B"), "{text}");
+    assert!(!text.contains("lock"), "{text}");
+    let s1 = t.json(&["stat", "ver/k", "--version-id", &v1]).await;
+    assert_eq!((s1["version_id"].as_str(), s1["size"].as_u64(), &s1["lock"]), (Some(v1.as_str()), Some(3), &Value::Null));
+    assert_eq!(t.json(&["stat", "ver/before.txt"]).await["version_id"], "null");
+    let text = t.ok(&["cp", "s3://ver/k", "old.txt", "--version-id", &v1]).await;
+    assert_eq!(text, format!("ver/k (version {v1}) → old.txt  3 B\n"));
+    assert_eq!(t.read("old.txt"), b"one");
+    let o = t.run(&["cp", "s3://ver/k", "-", "--version-id", &v1]).await;
+    assert_eq!((o.code, o.stdout.as_slice()), (Some(0), &b"one"[..]));
+    let v = t.json(&["cp", "s3://ver/k", "out/", "--version-id", &v2]).await;
+    assert_eq!((v["bytes"].as_u64(), v["version_id"].as_str()), (Some(4), Some(v2.as_str())));
+    assert_eq!(t.read("out/k"), b"two!");
+    assert!(t.fail(&["cp", "s3://ver/k", "x", "--version-id", &"0".repeat(32)]).await.contains("0000"));
+    assert!(t.fail(&["cp", "s3://ver/k", "x", "--version-id", "bad!"]).await.contains("invalid version id"));
+    t.write("up.txt", b"up");
+    assert!(t.fail(&["cp", "up.txt", "ver/up.txt", "--version-id", &v1]).await.contains("--version-id is for downloads"));
+    assert_eq!(t.run(&["cp", "-r", "s3://ver/", "dir", "--version-id", &v1]).await.code, Some(2));
+
+    // rm without a version id adds a delete marker; the versions stay.
+    let text = t.ok(&["rm", "ver/k"]).await;
+    assert!(text.starts_with("deleted ver/k (delete marker ") && text.ends_with("; older versions are kept)\n"), "{text}");
+    let all = versions_of(&t.json(&["ls", "--versions", "ver/k"]).await);
+    assert_eq!(all.iter().map(|e| (e.2, e.3)).collect::<Vec<_>>(), [(true, true), (false, false), (false, false)]);
+    let marker = all[0].1.clone();
+    assert!(t.ok(&["ls", "--versions", "ver/k"]).await.lines().nth(1).unwrap().contains("latest, delete marker"));
+    assert!(t.get("ver", "k").await.is_none());
+    assert!(t.fail(&["stat", "ver/k"]).await.contains("delete marker"));
+    // Removing the marker brings the object back.
+    let v = t.json(&["rm", "ver/k", "--version-id", &marker]).await;
+    assert_eq!(v, json!({ "deleted": "k", "version_id": marker, "delete_marker": true }));
+    assert_eq!(t.get("ver", "k").await.unwrap(), b"two!");
+    // A version deleted for good goes to the trash.
+    let text = t.ok(&["rm", "s3://ver/k", "--version-id", &v1]).await;
+    assert_eq!(text, format!("deleted version {v1} of ver/k for good (recoverable from the trash)\n"));
+    assert_eq!(versions_of(&t.json(&["ls", "--versions", "ver/k"]).await).len(), 1);
+    let trash = t.json(&["trash", "ver"]).await;
+    assert_eq!((trash[0]["key"].as_str(), trash[0]["version_id"].as_str()), (Some("k"), Some(v1.as_str())));
+    assert!(t.fail(&["rm", "ver/k", "--version-id", &v1]).await.contains(&v1), "already gone");
+    assert!(t.fail(&["rm", "ver/k", "--version-id", "nope!"]).await.contains("invalid version id"));
+    assert_eq!(t.run(&["rm", "-r", "ver/", "--version-id", &v2]).await.code, Some(2));
+    assert!(t.fail(&["ls", "--versions"]).await.contains("--versions lists a bucket"));
+
+    // Off is Suspended: it can't go back to never versioned.
+    let v = t.json(&["update", "ver", "--versioning", "off"]).await;
+    assert_eq!(v["versioning"], "Suspended");
+    assert!(t.ok(&["show", "ver"]).await.contains("  versioning suspended"));
+    assert_eq!(t.run(&["update", "ver", "--versioning", "maybe"]).await.code, Some(2));
+
+    // An unversioned bucket's objects are all `null`.
+    t.ok(&["create", "plain"]).await;
+    t.put("plain", "p", b"p").await;
+    let all = versions_of(&t.json(&["ls", "--versions", "plain"]).await);
+    assert_eq!(all, [("p".to_string(), "null".to_string(), true, false)]);
+    assert_eq!(t.json(&["rm", "plain/p"]).await, json!({ "deleted": "p" }), "versions are only mentioned where there are any");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn object_lock_lifecycle_and_website() {
+    use aws_sdk_s3::types::{DefaultRetention, IndexDocument, ErrorDocument, ObjectLockConfiguration, ObjectLockEnabled, ObjectLockRetentionMode, ObjectLockRule, WebsiteConfiguration};
+    let t = start().await;
+    let b = t.json(&["create", "locked", "--object-lock"]).await;
+    assert_eq!((b["versioning"].as_str(), b["object_lock"]["mode"].clone()), (Some("Enabled"), Value::Null));
+    assert!(t.ok(&["show", "locked"]).await.contains("  lock       on, no default retention"));
+    let k = t.store.create_key("admin", s3_store::Permission::Admin, None).await.unwrap();
+    let s3 = t.sdk(&k.id, &k.secret);
+    let rule = ObjectLockRule::builder().default_retention(DefaultRetention::builder().mode(ObjectLockRetentionMode::Governance).days(1).build()).build();
+    s3.put_object_lock_configuration()
+        .bucket("locked")
+        .object_lock_configuration(ObjectLockConfiguration::builder().object_lock_enabled(ObjectLockEnabled::Enabled).rule(rule).build())
+        .send()
+        .await
+        .unwrap();
+    let text = t.ok(&["show", "locked"]).await;
+    assert!(text.contains("  lock       on, new versions kept 1 day (GOVERNANCE)"), "{text}");
+    assert!(text.contains("  versioning enabled"), "{text}");
+    let b = t.json(&["show", "locked"]).await;
+    assert_eq!(b["object_lock"], json!({ "mode": "GOVERNANCE", "days": 1, "years": null }));
+    t.put("locked", "doc", b"keep me").await;
+    let text = t.ok(&["stat", "locked/doc"]).await;
+    assert!(text.contains("  lock           GOVERNANCE until "), "{text}");
+    let v = t.json(&["stat", "locked/doc"]).await;
+    assert_eq!(v["lock"]["mode"], "GOVERNANCE");
+    assert!(v["lock"]["retain_until"].as_i64().unwrap() > now_ms());
+    let vid = v["version_id"].as_str().unwrap().to_string();
+    let e = t.fail(&["rm", "locked/doc", "--version-id", &vid]).await;
+    assert!(e.to_lowercase().contains("lock"), "{e}");
+    assert!(t.fail(&["update", "locked", "--versioning", "off"]).await.to_lowercase().contains("object lock"));
+
+    // Lifecycle rules with every kind of action and filter.
+    let lifecycle = json!([
+        { "id": "logs", "prefix": "logs/", "enabled": true, "expire_days": 30, "abort_multipart_days": null,
+          "tags": { "tier": "cold" }, "size_greater_than": 1024, "size_less_than": 1048576 },
+        { "id": "versions", "prefix": "", "enabled": false, "expire_days": null, "abort_multipart_days": null,
+          "noncurrent_days": 10, "newer_noncurrent_versions": 2, "expire_delete_markers": true },
+        { "id": "dated", "prefix": "tmp/", "enabled": true, "expire_days": null, "abort_multipart_days": 7,
+          "expire_at": 1798761600000i64, "transitions": [{ "days": 30, "date": null, "storage_class": "GLACIER" }],
+          "noncurrent_transitions": [{ "noncurrent_days": 5, "newer_noncurrent_versions": null, "storage_class": "STANDARD_IA" }] },
+    ]);
+    t.ok(&["create", "rules"]).await;
+    let r = t.http.patch(format!("{}/v1/storage/buckets/rules", t.api)).json(&json!({ "lifecycle": lifecycle })).send().await.unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+    let text = t.ok(&["show", "rules"]).await;
+    for want in [
+        "  lifecycle  logs: prefix \"logs/\", tag tier=cold, size > 1.0 KB, size < 1.0 MB → expire after 30d",
+        "  lifecycle  versions: prefix \"\" → remove lone delete markers, delete versions noncurrent for 10d (keep the newest 2) (disabled)",
+        "  lifecycle  dated: prefix \"tmp/\" → expire on 2027-01-01, transition to GLACIER after 30d (stored only), noncurrent to STANDARD_IA after 5d (stored only), abort uploads after 7d",
+    ] {
+        assert!(text.contains(want), "{want:?} not in\n{text}");
+    }
+    let v = t.json(&["show", "rules"]).await;
+    assert_eq!(v["lifecycle"][1]["noncurrent_days"], 10);
+    assert_eq!(v["lifecycle"][2]["transitions"][0]["storage_class"], "GLACIER");
+
+    // Website and tags.
+    s3.put_bucket_website()
+        .bucket("rules")
+        .website_configuration(
+            WebsiteConfiguration::builder()
+                .index_document(IndexDocument::builder().suffix("index.html").build().unwrap())
+                .error_document(ErrorDocument::builder().key("404.html").build().unwrap())
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    t.ok(&["update", "rules", "--tag", "team=web"]).await;
+    let text = t.ok(&["show", "rules"]).await;
+    assert!(text.contains("  website    index index.html, error 404.html"), "{text}");
+    assert!(text.contains("  tag        team = web"), "{text}");
+    let v = t.json(&["show", "rules"]).await;
+    assert_eq!((v["website"]["index_document"].as_str(), v["tags"]["team"].as_str()), (Some("index.html"), Some("web")));
 }
 
 #[tokio::test(flavor = "multi_thread")]

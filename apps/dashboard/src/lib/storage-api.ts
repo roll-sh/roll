@@ -34,11 +34,23 @@ export interface StorageInfo {
   block_public_access: boolean;
 }
 
+export interface WebsiteRoutingRule {
+  condition: { key_prefix_equals: string | null; http_error_code_returned_equals: number | null } | null;
+  redirect: {
+    host_name: string | null;
+    protocol: string | null;
+    http_redirect_code: string | number | null;
+    replace_key_prefix_with: string | null;
+    replace_key_with: string | null;
+  };
+}
+
+/** Set through the S3 API (`PutBucketWebsite`); the control plane only shows it. */
 export interface WebsiteConfig {
   index_document: string | null;
   error_document: string | null;
-  redirect_all: { host_name: string; protocol: string | null } | null;
-  routing_rules: unknown[];
+  redirect_all: { host_name: string; protocol: "http" | "https" | null } | null;
+  routing_rules: WebsiteRoutingRule[];
 }
 
 export interface CorsRule {
@@ -51,12 +63,57 @@ export interface CorsRule {
   max_age_s: number | null;
 }
 
+export interface LifecycleTransition {
+  days: number | null;
+  /** Unix ms, midnight UTC. */
+  date: number | null;
+  storage_class: string;
+}
+
+export interface LifecycleNoncurrentTransition {
+  noncurrent_days: number;
+  newer_noncurrent_versions: number | null;
+  storage_class: string;
+}
+
+/**
+ * S3's full lifecycle rule model. The optional fields may be left out when writing; the server
+ * always returns them (except `legacy_prefix`, only when set). Transitions are stored, never acted
+ * on: data is already in Intelligent-Tiering.
+ */
 export interface LifecycleRule {
   id: string;
   prefix: string;
   enabled: boolean;
+  /** Expire current versions this many days after they were written. */
   expire_days: number | null;
   abort_multipart_days: number | null;
+  /** Only versions with all of these tags. */
+  tags?: Record<string, string>;
+  size_greater_than?: number | null;
+  size_less_than?: number | null;
+  /** Expire current versions on this date (Unix ms, midnight UTC). */
+  expire_at?: number | null;
+  /** Remove delete markers that have no noncurrent versions behind them. */
+  expire_delete_markers?: boolean;
+  /** Delete versions noncurrent for this many days for good (to the trash) … */
+  noncurrent_days?: number | null;
+  /** … except the newest this many. */
+  newer_noncurrent_versions?: number | null;
+  transitions?: LifecycleTransition[];
+  noncurrent_transitions?: LifecycleNoncurrentTransition[];
+  /** Shown as S3's legacy `<Rule><Prefix>` form. */
+  legacy_prefix?: boolean;
+}
+
+/** `null`: never versioned. A versioned bucket can be suspended, never made unversioned again. */
+export type Versioning = "Enabled" | "Suspended" | null;
+
+/** Object Lock, if on, with the default retention of new versions (if any). */
+export interface ObjectLockConfig {
+  mode: "GOVERNANCE" | "COMPLIANCE" | null;
+  days: number | null;
+  years: number | null;
 }
 
 export interface Bucket {
@@ -71,6 +128,11 @@ export interface Bucket {
   objects: number;
   bytes: number;
   trash_bytes: number;
+  versioning: Versioning;
+  object_lock: ObjectLockConfig | null;
+  /** Own noncurrent versions (delete markers included) and their bytes, billed as storage. */
+  versions: number;
+  version_bytes: number;
   cors: CorsRule[];
   lifecycle: LifecycleRule[];
   endpoint: string;
@@ -88,6 +150,8 @@ export interface BucketPatch {
   lifecycle?: LifecycleRule[];
   /** Replaces every bucket tag; `{}` removes them. */
   tags?: Record<string, string>;
+  /** Turn versioning on, or suspend it. There's no way back to never versioned. */
+  versioning?: "Enabled" | "Suspended";
 }
 
 export interface ObjectSummary {
@@ -108,6 +172,40 @@ export interface ObjectInfo extends ObjectSummary {
   expires: string | null;
   checksum: { algorithm: string; type: string; value: string } | null;
   parts: number;
+  /** `"null"` outside versioned buckets (and for objects from before versioning). */
+  version_id: string;
+  lock: ObjectLock | null;
+}
+
+/** One version's Object Lock: a retention until `retain_until` (Unix ms), and/or a legal hold. */
+export interface ObjectLock {
+  mode: "GOVERNANCE" | "COMPLIANCE" | null;
+  retain_until: number | null;
+  /** `null`: never set. */
+  legal_hold: boolean | null;
+}
+
+/** An entry of a version listing: a version or a delete marker. */
+export interface ObjectVersion {
+  key: string;
+  version_id: string;
+  is_latest: boolean;
+  delete_marker: boolean;
+  size: number;
+  etag: string;
+  last_modified: number;
+}
+
+export interface VersionList {
+  versions: ObjectVersion[];
+  next_cursor: string | null;
+}
+
+/** `version_id` and `delete_marker` only when there's a version to name. */
+export interface DeletedObject {
+  deleted: string;
+  version_id?: string;
+  delete_marker?: boolean;
 }
 
 export interface ObjectList {
@@ -122,6 +220,8 @@ export interface TrashEntry {
   etag: string;
   deleted_at: number;
   expires_at: number;
+  /** The version it was (`"null"` outside versioned buckets). */
+  version_id: string;
 }
 
 export type Permission = "read" | "write" | "admin";
@@ -185,7 +285,7 @@ export const storageApi = {
 
   buckets: () => call<Bucket[]>("GET", "/v1/storage/buckets"),
   bucket: (name: string) => call<Bucket>("GET", bucket(name)),
-  createBucket: (name: string, opts: { public?: boolean; recover_days?: number } = {}) =>
+  createBucket: (name: string, opts: { public?: boolean; recover_days?: number; object_lock?: boolean } = {}) =>
     call<Bucket>("POST", "/v1/storage/buckets", { name, ...opts }),
   updateBucket: (name: string, patch: BucketPatch) => call<Bucket>("PATCH", bucket(name), patch),
   deleteBucket: (name: string, force = false) =>
@@ -197,12 +297,23 @@ export const storageApi = {
       "GET",
       `${bucket(name)}/objects${q({ prefix: opts.prefix, delimiter: opts.delimiter, cursor: opts.cursor, limit: opts.limit })}`,
     ),
-  object: (name: string, key: string) => call<ObjectInfo>("GET", `${bucket(name)}/object${q({ key })}`),
-  deleteObject: (name: string, key: string) => call<{ deleted: string }>("DELETE", `${bucket(name)}/object${q({ key })}`),
+  /** Versions (newest first within a key, delete markers included), a page at a time. */
+  versions: (name: string, opts: { prefix?: string; cursor?: string | null; limit?: number } = {}) =>
+    call<VersionList>("GET", `${bucket(name)}/versions${q({ prefix: opts.prefix, cursor: opts.cursor, limit: opts.limit })}`),
+  /** The current version, or `versionId`'s. */
+  object: (name: string, key: string, versionId?: string | null) =>
+    call<ObjectInfo>("GET", `${bucket(name)}/object${q({ key, version_id: versionId })}`),
+  /**
+   * Without `versionId`: S3's DeleteObject (to the trash, or a delete marker in a versioned bucket).
+   * With it: that version for good (to the trash for `recover_days`; never one under Object Lock).
+   */
+  deleteObject: (name: string, key: string, versionId?: string | null) =>
+    call<DeletedObject>("DELETE", `${bucket(name)}/object${q({ key, version_id: versionId })}`),
   deleteMany: (name: string, sel: { keys?: string[]; prefix?: string }) =>
     call<{ deleted: number }>("POST", `${bucket(name)}/delete`, sel),
   /** Direct link to the bytes (served with `Content-Disposition: attachment`). */
-  downloadUrl: (name: string, key: string) => `${ROLL_API}${bucket(name)}/download${q({ key })}`,
+  downloadUrl: (name: string, key: string, versionId?: string | null) =>
+    `${ROLL_API}${bucket(name)}/download${q({ key, version_id: versionId })}`,
   presign: (name: string, key: string, method: "GET" | "PUT" = "GET", expires_s = 3600) =>
     call<{ url: string; method: string; expires_at: number }>("POST", `${bucket(name)}/presign`, { key, method, expires_s }),
 
@@ -330,4 +441,94 @@ export function formatDate(ms: number) {
 /** The last path segment of a key (or of a prefix, keeping its trailing `/`). */
 export function baseName(key: string, prefix: string) {
   return key.startsWith(prefix) ? key.slice(prefix.length) : key;
+}
+
+/**
+ * S3's bucket tag rules, as the server checks them (crates/s3-store/src/config.rs
+ * `validate_bucket_tags`): at most 50, keys 1–128 characters and unique, values up to 256, no
+ * `aws:` prefix. `null` when the tags are fine.
+ */
+export function bucketTagsError(tags: [string, string][]): string | null {
+  if (tags.length > 50) return "At most 50 tags.";
+  const seen = new Set<string>();
+  for (const [k, v] of tags) {
+    const keyLen = [...k].length;
+    if (keyLen === 0) return "Every tag needs a key.";
+    if (keyLen > 128) return "Tag keys are at most 128 characters.";
+    if ([...v].length > 256) return `Tag values are at most 256 characters (${k}).`;
+    if (k.toLowerCase().startsWith("aws:")) return "Keys starting with aws: are reserved.";
+    if (seen.has(k)) return `Duplicate key ${k}.`;
+    seen.add(k);
+  }
+  return null;
+}
+
+/** A lifecycle rule with every optional field at the server's default, for comparing drafts. */
+export function normalizeLifecycleRule(r: LifecycleRule): Required<LifecycleRule> {
+  return {
+    ...r,
+    tags: r.tags ?? {},
+    size_greater_than: r.size_greater_than ?? null,
+    size_less_than: r.size_less_than ?? null,
+    expire_at: r.expire_at ?? null,
+    expire_delete_markers: r.expire_delete_markers ?? false,
+    noncurrent_days: r.noncurrent_days ?? null,
+    newer_noncurrent_versions: r.newer_noncurrent_versions ?? null,
+    transitions: r.transitions ?? [],
+    noncurrent_transitions: r.noncurrent_transitions ?? [],
+    legacy_prefix: r.legacy_prefix ?? false,
+  };
+}
+
+/** Whether a rule does anything (S3 refuses a rule without an action). */
+export function lifecycleHasAction(r: LifecycleRule) {
+  const n = normalizeLifecycleRule(r);
+  return (
+    n.expire_days != null ||
+    n.expire_at != null ||
+    n.abort_multipart_days != null ||
+    n.expire_delete_markers ||
+    n.noncurrent_days != null ||
+    n.transitions.length > 0 ||
+    n.noncurrent_transitions.length > 0
+  );
+}
+
+/**
+ * The parts of a rule the dashboard shows but doesn't edit (filters by tag and size, dates,
+ * delete markers, transitions), as short phrases. They're kept as they are on save.
+ */
+export function lifecycleExtras(r: LifecycleRule): string[] {
+  const n = normalizeLifecycleRule(r);
+  const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  const out: string[] = [];
+  for (const [k, v] of Object.entries(n.tags)) out.push(`tag ${k}=${v}`);
+  if (n.size_greater_than != null) out.push(`size > ${n.size_greater_than} B`);
+  if (n.size_less_than != null) out.push(`size < ${n.size_less_than} B`);
+  if (n.expire_at != null) out.push(`expire on ${day(n.expire_at)}`);
+  if (n.newer_noncurrent_versions != null) out.push(`keep newest ${n.newer_noncurrent_versions} noncurrent`);
+  if (n.expire_delete_markers) out.push("remove lone delete markers");
+  for (const t of n.transitions) out.push(`to ${t.storage_class} ${t.days != null ? `after ${t.days}d` : t.date != null ? `on ${day(t.date)}` : ""}`.trim());
+  for (const t of n.noncurrent_transitions) out.push(`noncurrent to ${t.storage_class} after ${t.noncurrent_days}d`);
+  return out;
+}
+
+/** How a bucket's versioning reads in the UI. */
+export function versioningLabel(v: Versioning) {
+  return v === "Enabled" ? "enabled" : v === "Suspended" ? "suspended" : "off";
+}
+
+/** A default retention, e.g. "30 days, governance"; `null` without one. */
+export function retentionLabel(lock: ObjectLockConfig | null): string | null {
+  if (!lock?.mode) return null;
+  const n = lock.days ?? lock.years;
+  if (n == null) return null;
+  const unit = lock.days != null ? "day" : "year";
+  return `${n} ${unit}${n === 1 ? "" : "s"}, ${lock.mode.toLowerCase()}`;
+}
+
+/** Whether a version can't be deleted for good now: a legal hold, or a retention still running. */
+export function isLocked(lock: ObjectLock | null, now = Date.now()) {
+  if (!lock) return false;
+  return lock.legal_hold === true || (lock.mode != null && lock.retain_until != null && lock.retain_until > now);
 }

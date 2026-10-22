@@ -6,6 +6,7 @@ import {
   File,
   Folder,
   FolderPlus,
+  History,
   Info,
   Link2,
   RefreshCw,
@@ -24,6 +25,7 @@ import {
   type Bucket,
   type ObjectInfo,
   type ObjectSummary,
+  type ObjectVersion,
 } from "@/lib/storage-api";
 import { Drawer, iconBtn, LoadMore, Section, Spinner } from "../tasks/ui";
 import { btn, danger, ErrorNote, input, panel, primary, useCopy } from "../ui";
@@ -86,6 +88,9 @@ export function ObjectBrowser({ bucket, onChanged }: { bucket: Bucket; onChanged
   const [deleting, setDeleting] = useState<{ keys?: string[]; prefix?: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [newFolder, setNewFolder] = useState<string | null>(null);
+  // Versions mode: every version and delete marker under the prefix, instead of the listing.
+  const [showVersions, setShowVersions] = useState(false);
+  const [versionsTick, setVersionsTick] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
   const nextId = useRef(0);
   const { copied, copy } = useCopy();
@@ -255,9 +260,27 @@ export function ObjectBrowser({ bucket, onChanged }: { bucket: Bucket; onChanged
             spellCheck={false}
             className={`${input} w-44 py-1 font-mono text-[12px]`}
           />
-          <button onClick={() => load(null)} className={iconBtn} title="Refresh" aria-label="Refresh">
-            {loading ? <Spinner /> : <RefreshCw className="size-3.5" />}
+          <button
+            onClick={() => (showVersions ? setVersionsTick((t) => t + 1) : load(null))}
+            className={iconBtn}
+            title="Refresh"
+            aria-label="Refresh"
+          >
+            {loading && !showVersions ? <Spinner /> : <RefreshCw className="size-3.5" />}
           </button>
+          {bucket.versioning !== null && (
+            <button
+              onClick={() => {
+                setShowVersions((v) => !v);
+                setSelected(new Set());
+              }}
+              aria-pressed={showVersions}
+              title="Show every version and delete marker"
+              className={`${btn} ${showVersions ? "border-line-2 bg-panel-2 text-fg" : ""}`}
+            >
+              <History className="size-3.5" strokeWidth={1.5} /> Versions
+            </button>
+          )}
           <button onClick={() => setNewFolder("")} className={btn}>
             <FolderPlus className="size-3.5" /> Folder
           </button>
@@ -309,7 +332,7 @@ export function ObjectBrowser({ bucket, onChanged }: { bucket: Bucket; onChanged
         )}
 
         {/* Selection bar. */}
-        {selected.size > 0 && (
+        {!showVersions && selected.size > 0 && (
           <div className="rise flex items-center gap-3 border-b border-line bg-panel-2/50 px-4 py-2 text-[12px]">
             <span className="font-mono">{selected.size} selected</span>
             <button onClick={() => setSelected(new Set())} className="text-subtle hover:text-fg">
@@ -338,9 +361,13 @@ export function ObjectBrowser({ bucket, onChanged }: { bucket: Bucket; onChanged
               ) : (
                 <>Delete {deleting.keys?.length} objects?</>
               )}{" "}
-              {bucket.recover_days > 0
-                ? `Recoverable from Recently deleted for ${bucket.recover_days} day${bucket.recover_days === 1 ? "" : "s"}.`
-                : "Recovery is off for this bucket — this is final."}
+              {bucket.versioning === "Enabled"
+                ? "A delete marker hides it; older versions are kept under Versions."
+                : bucket.versioning === "Suspended"
+                  ? "A delete marker hides it; its null version moves to Recently deleted and other versions are kept."
+                  : bucket.recover_days > 0
+                    ? `Recoverable from Recently deleted for ${bucket.recover_days} day${bucket.recover_days === 1 ? "" : "s"}.`
+                    : "Recovery is off for this bucket — this is final."}
             </span>
             <button onClick={remove} disabled={busy} className={danger}>
               {busy ? <span className="shimmer">Deleting…</span> : "Delete"}
@@ -352,7 +379,9 @@ export function ObjectBrowser({ bucket, onChanged }: { bucket: Bucket; onChanged
         )}
 
         {/* Listing. */}
-        {objects === null ? (
+        {showVersions ? (
+          <VersionsList key={`${query}:${versionsTick}`} bucket={bucket} prefix={query} onChanged={onChanged} />
+        ) : objects === null ? (
           <ListSkeleton />
         ) : empty ? (
           <div className="flex flex-col items-center gap-3 px-5 py-14 text-center">
@@ -479,7 +508,7 @@ export function ObjectBrowser({ bucket, onChanged }: { bucket: Bucket; onChanged
             </table>
           </div>
         )}
-        <LoadMore cursor={cursor} onMore={() => load(cursor)} loading={loading} />
+        {!showVersions && <LoadMore cursor={cursor} onMore={() => load(cursor)} loading={loading} />}
 
         {dragging && (
           <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-xl border border-dashed border-accent bg-bg/80 backdrop-blur-sm">
@@ -504,6 +533,177 @@ export function ObjectBrowser({ bucket, onChanged }: { bucket: Bucket; onChanged
         />
       )}
     </div>
+  );
+}
+
+/**
+ * Every version and delete marker under `prefix`, newest first within a key, with download and
+ * permanent delete per version.
+ */
+function VersionsList({ bucket, prefix, onChanged }: { bucket: Bucket; prefix: string; onChanged: () => void }) {
+  const [versions, setVersions] = useState<ObjectVersion[] | null>(null);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ObjectVersion | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(
+    async (more: string | null) => {
+      setLoading(true);
+      try {
+        const r = await storageApi.versions(bucket.name, { prefix, cursor: more, limit: PAGE });
+        setVersions((cur) => (more && cur ? [...cur, ...r.versions] : r.versions));
+        setCursor(r.next_cursor);
+        setError(null);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [bucket.name, prefix],
+  );
+
+  useEffect(() => {
+    const t = setTimeout(() => load(null), prefix ? 200 : 0);
+    return () => clearTimeout(t);
+  }, [load, prefix]);
+
+  const remove = async () => {
+    if (!confirm) return;
+    setBusy(true);
+    try {
+      await storageApi.deleteObject(bucket.name, confirm.key, confirm.version_id);
+      setConfirm(null);
+      onChanged();
+      await load(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const days = bucket.recover_days;
+  return (
+    <>
+      {error && <p className="border-b border-line px-4 py-2 text-[12px] text-danger">{error}</p>}
+      {confirm && (
+        <div className="rise flex flex-wrap items-center gap-3 border-b border-danger/40 bg-danger/5 px-4 py-3 text-[13px]">
+          <span className="min-w-0 flex-1 text-muted">
+            {confirm.delete_marker ? (
+              <>
+                Remove this delete marker from <span className="font-mono text-fg">{confirm.key}</span>?{" "}
+                {confirm.is_latest ? "The version before it becomes current again." : "Delete markers hold no data."}
+              </>
+            ) : (
+              <>
+                Delete version <span className="font-mono break-all text-fg">{confirm.version_id}</span> of{" "}
+                <span className="font-mono text-fg">{confirm.key}</span> for good?{" "}
+                {days > 0
+                  ? `It moves to Recently deleted for ${days} day${days === 1 ? "" : "s"}, where it can be restored.`
+                  : "Recovery is off for this bucket — this is final."}
+                {confirm.is_latest && " The version before it becomes current."}
+              </>
+            )}
+          </span>
+          <button onClick={remove} disabled={busy} className={danger}>
+            {busy ? <span className="shimmer">Deleting…</span> : confirm.delete_marker ? "Remove marker" : "Delete for good"}
+          </button>
+          <button onClick={() => setConfirm(null)} className={btn}>
+            Cancel
+          </button>
+        </div>
+      )}
+      {versions === null ? (
+        <ListSkeleton />
+      ) : versions.length === 0 ? (
+        <p className="px-5 py-14 text-center text-[13px] text-muted">
+          {prefix ? (
+            <>
+              No versions under <span className="font-mono text-fg">{prefix}</span>.
+            </>
+          ) : (
+            "No versions yet."
+          )}
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="border-b border-line text-left text-[11px] text-subtle">
+                <th className="py-2 pr-3 pl-4 font-normal">Key</th>
+                <th className="w-[22rem] py-2 pr-3 font-normal">Version</th>
+                <th className="hidden py-2 pr-3 text-right font-normal sm:table-cell">Size</th>
+                <th className="hidden py-2 pr-3 font-normal md:table-cell">Modified</th>
+                <th className="w-24 py-2 pr-4" />
+              </tr>
+            </thead>
+            <tbody>
+              {versions.map((v, i) => {
+                const first = i === 0 || versions[i - 1].key !== v.key;
+                return (
+                  <tr
+                    key={`${v.key}\u0000${v.version_id}`}
+                    className={`group hover:bg-panel-2/60 ${first && i > 0 ? "border-t border-line" : ""}`}
+                  >
+                    <td className="max-w-0 py-2 pr-3 pl-4">
+                      {first && (
+                        <span className="flex min-w-0 items-center gap-2">
+                          <File className="size-4 shrink-0 text-subtle" />
+                          <span className="truncate font-mono text-[12px]" title={v.key}>
+                            {baseName(v.key, prefix.endsWith("/") ? prefix : prefix.slice(0, prefix.lastIndexOf("/") + 1)) || v.key}
+                          </span>
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-2 pr-3 whitespace-nowrap">
+                      <span className="font-mono text-[11px] text-muted" title={v.version_id}>
+                        {v.version_id}
+                      </span>
+                      {v.is_latest && (
+                        <span className="ml-2 rounded-md border border-line px-1.5 py-px text-[10px] text-muted">latest</span>
+                      )}
+                      {v.delete_marker && <span className="ml-2 text-[11px] text-subtle">delete marker</span>}
+                    </td>
+                    <td className="hidden py-2 pr-3 text-right font-mono text-[12px] tabular-nums sm:table-cell">
+                      {v.delete_marker ? <span className="text-subtle">—</span> : formatBytes(v.size)}
+                    </td>
+                    <td className="hidden py-2 pr-3 text-[12px] whitespace-nowrap text-subtle md:table-cell" title={formatDate(v.last_modified)}>
+                      {agoMs(v.last_modified)}
+                    </td>
+                    <td className="py-2 pr-4">
+                      <div className="flex justify-end gap-0.5 opacity-60 transition group-hover:opacity-100">
+                        {!v.delete_marker && (
+                          <a
+                            href={storageApi.downloadUrl(bucket.name, v.key, v.version_id)}
+                            className={iconBtn}
+                            title="Download this version"
+                            aria-label={`Download version ${v.version_id} of ${v.key}`}
+                          >
+                            <Download className="size-3.5" />
+                          </a>
+                        )}
+                        <button
+                          onClick={() => setConfirm(v)}
+                          className={`${iconBtn} hover:text-danger`}
+                          title={v.delete_marker ? "Remove delete marker" : "Delete this version for good"}
+                          aria-label={`Delete version ${v.version_id} of ${v.key}`}
+                        >
+                          <Trash2 className="size-3.5" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <LoadMore cursor={cursor} onMore={() => load(cursor)} loading={loading} />
+    </>
   );
 }
 
@@ -617,6 +817,18 @@ function ObjectDrawer({
         ["Content-Type", info.content_type],
         ["ETag", info.etag],
         ["Parts", info.parts > 0 ? `${info.parts} (multipart)` : "single upload"],
+        ["Version", bucket.versioning !== null || info.version_id !== "null" ? info.version_id : null],
+        [
+          "Object Lock",
+          info.lock
+            ? [
+                info.lock.mode && info.lock.retain_until != null ? `${info.lock.mode.toLowerCase()} until ${formatDate(info.lock.retain_until)}` : null,
+                info.lock.legal_hold ? "legal hold" : null,
+              ]
+                .filter(Boolean)
+                .join(" · ") || null
+            : null,
+        ],
         ["Cache-Control", info.cache_control],
         ["Content-Disposition", info.content_disposition],
         ["Content-Encoding", info.content_encoding],

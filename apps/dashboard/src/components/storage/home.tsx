@@ -150,6 +150,7 @@ export function StorageHome() {
 
 function Overview({ info, buckets, mtd }: { info: StorageInfo; buckets: Bucket[]; mtd: StorageUsageAll | null }) {
   const trash = buckets.reduce((s, b) => s + b.trash_bytes, 0);
+  const versionBytes = buckets.reduce((s, b) => s + b.version_bytes, 0);
   const branches = buckets.filter((b) => b.parent).length;
   const scrubBad = info.scrub.missing + info.scrub.mismatched;
   return (
@@ -161,7 +162,11 @@ function Overview({ info, buckets, mtd }: { info: StorageInfo; buckets: Bucket[]
             value: buckets.length,
             hint: branches ? `${branches} branch${branches === 1 ? "" : "es"}` : `${buckets.filter((b) => b.public).length} public`,
           },
-          { label: "Objects", value: formatCount(info.objects), hint: `${formatBytes(trash)} recoverable` },
+          {
+            label: "Objects",
+            value: formatCount(info.objects),
+            hint: versionBytes ? `${formatBytes(versionBytes)} older versions · ${formatBytes(trash)} recoverable` : `${formatBytes(trash)} recoverable`,
+          },
           {
             label: "Stored",
             value: formatBytes(info.bytes),

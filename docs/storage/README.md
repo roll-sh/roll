@@ -184,6 +184,13 @@ roll storage restore assets/img/logo.png --at <deleted_at>
   it back in the key's history. Object Lock (retention and legal holds) works as on S3, and a
   locked version is never deleted by anything.
 
+```sh
+roll storage update assets --versioning on      # off = Suspended; never back to unversioned
+roll storage ls assets/img/ --versions          # version ids, latest, delete markers
+roll storage cp assets/img/logo.png old.png --version-id <id>
+roll storage rm assets/img/logo.png --version-id <id>   # for good (to the trash)
+```
+
 Below the trash, roll keeps unreferenced data for another 24 hours before it really deletes it.
 That's a safety net for roll's own bugs, not something you can use.
 

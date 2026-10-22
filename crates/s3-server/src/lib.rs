@@ -13,6 +13,7 @@
 
 mod access;
 mod acl;
+mod attributes;
 mod auth;
 mod body;
 mod bucket;

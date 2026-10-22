@@ -27,7 +27,7 @@ use std::task::{Context, Poll};
 pub(crate) const MAX_PUT: u64 = 5 << 30;
 
 /// Subresources S3 has that we don't implement.
-const UNSUPPORTED: [&str; 4] = ["torrent", "select", "attributes", "renameObject"];
+const UNSUPPORTED: [&str; 3] = ["torrent", "select", "renameObject"];
 
 pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
     if let Some(sub) = UNSUPPORTED.iter().find(|s| ctx.has(s)) {
@@ -51,6 +51,7 @@ pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
         Method::GET if ctx.has("retention") => versioning::get_retention(ctx, &bucket),
         Method::GET if ctx.has("legal-hold") => versioning::get_legal_hold(ctx, &bucket),
         Method::GET if ctx.has("acl") => crate::acl::get_object_acl(ctx, &bucket),
+        Method::GET if ctx.has("attributes") => crate::attributes::get_attributes(ctx, &bucket),
         Method::GET => get(ctx, &bucket, false).await,
         Method::HEAD => get(ctx, &bucket, true).await,
         Method::PUT if ctx.has("uploadId") || ctx.has("partNumber") => multipart::upload_part(ctx, &bucket, body).await,

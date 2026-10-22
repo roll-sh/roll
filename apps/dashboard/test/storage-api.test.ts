@@ -10,11 +10,24 @@ import {
   agoMs,
   baseName,
   bucketNameError,
+  bucketTagsError,
   formatDate,
   inMs,
+  isLocked,
+  lifecycleExtras,
+  lifecycleHasAction,
+  normalizeLifecycleRule,
+  retentionLabel,
   storageApi,
   uploadObject,
   usd,
+  versioningLabel,
+  type Bucket,
+  type DeletedObject,
+  type LifecycleRule,
+  type ObjectInfo,
+  type TrashEntry,
+  type VersionList,
 } from "../src/lib/storage-api";
 
 interface Call {
@@ -148,6 +161,14 @@ describe("storageApi requests", () => {
       "",
       { name: "logs", recover_days: 30 },
     );
+    calls = [];
+    await expectRequest(
+      () => storageApi.createBucket("vault", { object_lock: true }),
+      "POST",
+      "/v1/storage/buckets",
+      "",
+      { name: "vault", object_lock: true },
+    );
   });
 
   it("updateBucket sends exactly the patch", async () => {
@@ -171,6 +192,99 @@ describe("storageApi requests", () => {
     calls = [];
     // An empty list removes a setting, so it must be sent; omitted settings stay omitted.
     await expectRequest(() => storageApi.updateBucket("site", { cors: [] }), "PATCH", "/v1/storage/buckets/site", "", { cors: [] });
+    calls = [];
+    await expectRequest(() => storageApi.updateBucket("site", { versioning: "Enabled" }), "PATCH", "/v1/storage/buckets/site", "", {
+      versioning: "Enabled",
+    });
+    calls = [];
+    await expectRequest(
+      () => storageApi.updateBucket("site", { versioning: "Suspended", tags: { team: "web" } }),
+      "PATCH",
+      "/v1/storage/buckets/site",
+      "",
+      { versioning: "Suspended", tags: { team: "web" } },
+    );
+    calls = [];
+    // `{}` removes every tag: it must be sent as is.
+    await expectRequest(() => storageApi.updateBucket("site", { tags: {} }), "PATCH", "/v1/storage/buckets/site", "", { tags: {} });
+  });
+
+  it("updateBucket sends the full lifecycle model", async () => {
+    const lifecycle: LifecycleRule[] = [
+      { id: "old", prefix: "", enabled: true, expire_days: 30, abort_multipart_days: 7 },
+      {
+        id: "everything",
+        prefix: "logs/",
+        enabled: false,
+        expire_days: null,
+        abort_multipart_days: null,
+        tags: { tier: "cold" },
+        size_greater_than: 1024,
+        size_less_than: null,
+        expire_at: 1_798_761_600_000,
+        expire_delete_markers: true,
+        noncurrent_days: 10,
+        newer_noncurrent_versions: 2,
+        transitions: [{ days: 30, date: null, storage_class: "GLACIER" }],
+        noncurrent_transitions: [{ noncurrent_days: 5, newer_noncurrent_versions: null, storage_class: "STANDARD_IA" }],
+        legacy_prefix: false,
+      },
+    ];
+    await expectRequest(() => storageApi.updateBucket("logs", { lifecycle }), "PATCH", "/v1/storage/buckets/logs", "", { lifecycle });
+  });
+
+  it("versions: only the given parameters", async () => {
+    const page: VersionList = {
+      versions: [
+        { key: "k", version_id: "7ffffe6b2c3d4e5fabcdefghijklmnop", is_latest: true, delete_marker: true, size: 0, etag: "", last_modified: 2 },
+        { key: "k", version_id: "null", is_latest: false, delete_marker: false, size: 3, etag: "abc", last_modified: 1 },
+      ],
+      next_cursor: "WyJrIiwibnVsbCJd",
+    };
+    const { result } = await one(() => storageApi.versions("ver"), page);
+    assert.deepEqual(result, page);
+    assert.equal(calls[0].url.pathname, "/v1/storage/buckets/ver/versions");
+    assert.equal(calls[0].url.search, "");
+    calls = [];
+    await expectRequest(() => storageApi.versions("ver", { prefix: "", cursor: null }), "GET", "/v1/storage/buckets/ver/versions", "");
+    calls = [];
+    const c = await expectRequest(
+      () => storageApi.versions("ver", { prefix: "dir/a b", cursor: "WyJrIiwibnVsbCJd", limit: 200 }),
+      "GET",
+      "/v1/storage/buckets/ver/versions",
+      "?prefix=dir%2Fa+b&cursor=WyJrIiwibnVsbCJd&limit=200",
+    );
+    assert.deepEqual(Object.fromEntries(c.url.searchParams), { prefix: "dir/a b", cursor: "WyJrIiwibnVsbCJd", limit: "200" });
+  });
+
+  it("object, deleteObject and downloadUrl take a version id", async () => {
+    const vid = "7ffffe6b2c3d4e5fabcdefghijklmnop";
+    const info = await expectRequest(() => storageApi.object("ver", "a b+c", vid), "GET", "/v1/storage/buckets/ver/object", `?key=a+b%2Bc&version_id=${vid}`);
+    assert.deepEqual(Object.fromEntries(info.url.searchParams), { key: "a b+c", version_id: vid });
+    calls = [];
+    const del = await expectRequest(() => storageApi.deleteObject("ver", "k", "null"), "DELETE", "/v1/storage/buckets/ver/object", "?key=k&version_id=null");
+    assert.equal(del.url.searchParams.get("version_id"), "null");
+    calls = [];
+    // No version id (or null): the current version, and no `version_id` parameter at all.
+    for (const v of [undefined, null, ""]) {
+      await expectRequest(() => storageApi.object("ver", "k", v), "GET", "/v1/storage/buckets/ver/object", "?key=k");
+      calls = [];
+      await expectRequest(() => storageApi.deleteObject("ver", "k", v), "DELETE", "/v1/storage/buckets/ver/object", "?key=k");
+      calls = [];
+      assert.equal(storageApi.downloadUrl("ver", "k", v), `${ROLL_API}/v1/storage/buckets/ver/download?key=k`);
+    }
+    const url = new URL(storageApi.downloadUrl("ver", "dir/x #1", vid));
+    assert.equal(`${url.origin}${url.pathname}`, `${ROLL_API}/v1/storage/buckets/ver/download`);
+    assert.deepEqual(Object.fromEntries(url.searchParams), { key: "dir/x #1", version_id: vid });
+    assert.equal(url.hash, "");
+  });
+
+  it("deleteObject returns what was deleted", async () => {
+    const marker: DeletedObject = { deleted: "k", version_id: "7ffffe6b2c3d4e5fabcdefghijklmnop", delete_marker: true };
+    assert.deepEqual((await one(() => storageApi.deleteObject("ver", "k"), marker)).result, marker);
+    calls = [];
+    const plain: DeletedObject = { deleted: "k" };
+    assert.deepEqual((await one(() => storageApi.deleteObject("plain", "k"), plain)).result, plain);
   });
 
   it("deleteBucket", async () => {
@@ -357,8 +471,11 @@ describe("errors", () => {
       () => storageApi.deleteBucket("b-1", true),
       () => storageApi.branch("b-1", "b-2"),
       () => storageApi.objects("b-1"),
+      () => storageApi.versions("b-1"),
       () => storageApi.object("b-1", "k"),
+      () => storageApi.object("b-1", "k", "null"),
       () => storageApi.deleteObject("b-1", "k"),
+      () => storageApi.deleteObject("b-1", "k", "null"),
       () => storageApi.deleteMany("b-1", { prefix: "" }),
       () => storageApi.presign("b-1", "k"),
       () => storageApi.trash("b-1"),
@@ -670,5 +787,169 @@ describe("helpers", () => {
       PERMISSIONS.map((p) => p.value),
       ["read", "write", "admin"],
     );
+  });
+});
+
+describe("contract shapes (docs/storage/architecture.md)", () => {
+  it("a versioned bucket, an object version and a trash entry", () => {
+    // Shapes as the server sends them; these only need to compile and round-trip.
+    const b: Bucket = {
+      id: "bkt_000000000000",
+      name: "ver",
+      region: "us-east-1",
+      public: false,
+      recover_days: 7,
+      created_at: 1,
+      parent: null,
+      branches: [],
+      objects: 1,
+      bytes: 4,
+      trash_bytes: 0,
+      versioning: "Enabled",
+      object_lock: { mode: "GOVERNANCE", days: 30, years: null },
+      versions: 2,
+      version_bytes: 3,
+      cors: [],
+      lifecycle: [],
+      endpoint: "http://127.0.0.1:59000",
+      url: "http://127.0.0.1:59000/ver",
+      virtual_host_url: null,
+      tags: { team: "web" },
+      website: {
+        index_document: "index.html",
+        error_document: null,
+        redirect_all: null,
+        routing_rules: [
+          {
+            condition: { key_prefix_equals: "docs/", http_error_code_returned_equals: null },
+            redirect: { host_name: null, protocol: null, http_redirect_code: null, replace_key_prefix_with: "documents/", replace_key_with: null },
+          },
+        ],
+      },
+    };
+    assert.equal(JSON.parse(JSON.stringify(b)).version_bytes, 3);
+    const o: ObjectInfo = {
+      key: "k",
+      size: 4,
+      etag: "e",
+      content_type: null,
+      last_modified: 1,
+      metadata: {},
+      tags: {},
+      cache_control: null,
+      content_disposition: null,
+      content_encoding: null,
+      content_language: null,
+      expires: null,
+      checksum: null,
+      parts: 0,
+      version_id: "null",
+      lock: { mode: "COMPLIANCE", retain_until: 2, legal_hold: null },
+    };
+    assert.equal(o.lock?.mode, "COMPLIANCE");
+    const t: TrashEntry = { key: "k", size: 1, etag: "e", deleted_at: 1, expires_at: 2, version_id: "null" };
+    assert.equal(t.version_id, "null");
+  });
+});
+
+describe("versioning helpers", () => {
+  it("versioningLabel", () => {
+    assert.equal(versioningLabel("Enabled"), "enabled");
+    assert.equal(versioningLabel("Suspended"), "suspended");
+    assert.equal(versioningLabel(null), "off");
+  });
+
+  it("retentionLabel", () => {
+    assert.equal(retentionLabel(null), null);
+    assert.equal(retentionLabel({ mode: null, days: null, years: null }), null);
+    assert.equal(retentionLabel({ mode: "GOVERNANCE", days: 1, years: null }), "1 day, governance");
+    assert.equal(retentionLabel({ mode: "COMPLIANCE", days: null, years: 7 }), "7 years, compliance");
+    assert.equal(retentionLabel({ mode: "GOVERNANCE", days: null, years: null }), null);
+  });
+
+  it("isLocked", () => {
+    const now = 1_000_000;
+    assert.equal(isLocked(null, now), false);
+    assert.equal(isLocked({ mode: null, retain_until: null, legal_hold: null }, now), false);
+    assert.equal(isLocked({ mode: null, retain_until: null, legal_hold: true }, now), true);
+    assert.equal(isLocked({ mode: null, retain_until: null, legal_hold: false }, now), false);
+    assert.equal(isLocked({ mode: "GOVERNANCE", retain_until: now + 1, legal_hold: null }, now), true);
+    assert.equal(isLocked({ mode: "COMPLIANCE", retain_until: now, legal_hold: false }, now), false, "a retention that ran out");
+  });
+
+  it("lifecycle rules: defaults, actions and what isn't edited", () => {
+    const basic: LifecycleRule = { id: "a", prefix: "", enabled: true, expire_days: 3, abort_multipart_days: null };
+    // A rule written without the optional fields equals the server's echo of it.
+    const echoed = {
+      ...basic,
+      tags: {},
+      size_greater_than: null,
+      size_less_than: null,
+      expire_at: null,
+      expire_delete_markers: false,
+      noncurrent_days: null,
+      newer_noncurrent_versions: null,
+      transitions: [],
+      noncurrent_transitions: [],
+    };
+    assert.deepEqual(normalizeLifecycleRule(basic), normalizeLifecycleRule(echoed));
+    assert.equal(normalizeLifecycleRule(echoed).legacy_prefix, false);
+    assert.deepEqual(lifecycleExtras(basic), []);
+
+    const none: LifecycleRule = { ...basic, expire_days: null };
+    assert.equal(lifecycleHasAction(basic), true);
+    assert.equal(lifecycleHasAction(none), false);
+    for (const patch of [
+      { noncurrent_days: 5 },
+      { expire_delete_markers: true },
+      { expire_at: 1_798_761_600_000 },
+      { abort_multipart_days: 7 },
+      { transitions: [{ days: 1, date: null, storage_class: "GLACIER" }] },
+      { noncurrent_transitions: [{ noncurrent_days: 1, newer_noncurrent_versions: null, storage_class: "GLACIER" }] },
+    ]) {
+      assert.equal(lifecycleHasAction({ ...none, ...patch }), true, JSON.stringify(patch));
+    }
+    assert.deepEqual(
+      lifecycleExtras({
+        ...none,
+        tags: { tier: "cold" },
+        size_greater_than: 10,
+        size_less_than: 20,
+        expire_at: 1_798_761_600_000,
+        newer_noncurrent_versions: 2,
+        expire_delete_markers: true,
+        transitions: [
+          { days: 30, date: null, storage_class: "GLACIER" },
+          { days: null, date: 1_798_761_600_000, storage_class: "DEEP_ARCHIVE" },
+        ],
+        noncurrent_transitions: [{ noncurrent_days: 5, newer_noncurrent_versions: null, storage_class: "STANDARD_IA" }],
+      }),
+      [
+        "tag tier=cold",
+        "size > 10 B",
+        "size < 20 B",
+        "expire on 2027-01-01",
+        "keep newest 2 noncurrent",
+        "remove lone delete markers",
+        "to GLACIER after 30d",
+        "to DEEP_ARCHIVE on 2027-01-01",
+        "noncurrent to STANDARD_IA after 5d",
+      ],
+    );
+  });
+
+  it("bucketTagsError agrees with validate_bucket_tags", () => {
+    assert.equal(bucketTagsError([]), null);
+    assert.equal(bucketTagsError([["team", "web"], ["env", ""]]), null, "empty values are fine");
+    assert.equal(bucketTagsError([["k".repeat(128), "v".repeat(256)]]), null);
+    assert.equal(bucketTagsError([["ü".repeat(128), "😀".repeat(256)]]), null, "characters, not bytes or UTF-16 units");
+    assert.equal(bucketTagsError(Array.from({ length: 50 }, (_, i): [string, string] => [`k${i}`, "v"])), null);
+    assert.match(bucketTagsError(Array.from({ length: 51 }, (_, i): [string, string] => [`k${i}`, "v"])) ?? "", /50/);
+    assert.match(bucketTagsError([["", "v"]]) ?? "", /key/);
+    assert.match(bucketTagsError([["k".repeat(129), "v"]]) ?? "", /128/);
+    assert.match(bucketTagsError([["k", "v".repeat(257)]]) ?? "", /256/);
+    assert.match(bucketTagsError([["aws:x", "v"]]) ?? "", /aws:/);
+    assert.match(bucketTagsError([["AWS:x", "v"]]) ?? "", /aws:/);
+    assert.match(bucketTagsError([["a", "1"], ["a", "2"]]) ?? "", /Duplicate/);
   });
 });

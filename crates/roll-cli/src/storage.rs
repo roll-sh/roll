@@ -25,8 +25,11 @@ pub enum Storage {
         /// Days deleted and overwritten objects stay recoverable (0–30, default 7).
         #[arg(long)]
         recover_days: Option<i64>,
+        /// Turn on Object Lock (and versioning, which it needs). It can't be turned off.
+        #[arg(long)]
+        object_lock: bool,
     },
-    /// Show a bucket: settings, size, branches.
+    /// Show a bucket: settings, versioning, size, branches.
     Show { bucket: String },
     /// Change a bucket's settings.
     Update {
@@ -49,6 +52,10 @@ pub enum Storage {
         /// Remove every bucket tag.
         #[arg(long, conflicts_with = "tags")]
         no_tags: bool,
+        /// Keep every version of every object (`on`), or stop making new ones (`off`:
+        /// Suspended; existing versions stay). A versioned bucket can't become unversioned.
+        #[arg(long, value_enum)]
+        versioning: Option<Toggle>,
     },
     /// Delete a bucket (it must be empty unless --force).
     Delete {
@@ -65,6 +72,9 @@ pub enum Storage {
         /// Every key under the prefix, not just one level.
         #[arg(long, short)]
         recursive: bool,
+        /// Every version of every key under the prefix (noncurrent ones and delete markers too).
+        #[arg(long)]
+        versions: bool,
     },
     /// Copy a file to or from storage: `cp ./a.png assets/img/` or `cp assets/img/a.png -`.
     Cp {
@@ -76,15 +86,27 @@ pub enum Storage {
         /// Content-Type for uploads (default: from the file extension).
         #[arg(long)]
         content_type: Option<String>,
+        /// Download this version of the object (from `ls --versions`).
+        #[arg(long, conflicts_with = "recursive")]
+        version_id: Option<String>,
     },
     /// Delete an object, or every object under a prefix with -r.
     Rm {
         path: String,
         #[arg(long, short)]
         recursive: bool,
+        /// Delete this version for good (it moves to the trash for the bucket's recovery days),
+        /// instead of adding a delete marker in a versioned bucket.
+        #[arg(long, conflicts_with = "recursive")]
+        version_id: Option<String>,
     },
     /// Show an object's metadata.
-    Stat { path: String },
+    Stat {
+        path: String,
+        /// A version of the object (from `ls --versions`).
+        #[arg(long)]
+        version_id: Option<String>,
+    },
     /// A presigned URL for an object.
     Presign {
         path: String,
@@ -134,6 +156,12 @@ pub enum KeysCmd {
     },
     /// Delete an access key.
     Delete { id: String },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum Toggle {
+    On,
+    Off,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -205,6 +233,82 @@ fn when(ms: &Value) -> String {
         }
         None => "-".into(),
     }
+}
+
+/// `?key=` (and `&version_id=`) for the object endpoints.
+fn key_query(key: &str, version_id: Option<&str>) -> String {
+    match version_id {
+        Some(v) => format!("?key={}&version_id={}", enc(key), enc(v)),
+        None => format!("?key={}", enc(key)),
+    }
+}
+
+/// Days or years, from a retention's `days`/`years`.
+fn period(v: &Value) -> String {
+    match (v["days"].as_u64(), v["years"].as_u64()) {
+        (Some(d), _) => format!("{d} day{}", if d == 1 { "" } else { "s" }),
+        (_, Some(y)) => format!("{y} year{}", if y == 1 { "" } else { "s" }),
+        _ => String::new(),
+    }
+}
+
+/// What a lifecycle rule does and to what, in a line.
+fn lifecycle_line(r: &Value) -> String {
+    let mut filter = vec![format!("prefix {:?}", r["prefix"].as_str().unwrap_or(""))];
+    for (k, v) in r["tags"].as_object().into_iter().flatten() {
+        filter.push(format!("tag {k}={}", s(v)));
+    }
+    if let Some(n) = r["size_greater_than"].as_u64() {
+        filter.push(format!("size > {}", size(n as f64)));
+    }
+    if let Some(n) = r["size_less_than"].as_u64() {
+        filter.push(format!("size < {}", size(n as f64)));
+    }
+    let mut what = Vec::new();
+    if let Some(d) = r["expire_days"].as_i64() {
+        what.push(format!("expire after {d}d"));
+    }
+    if let Some(ms) = r["expire_at"].as_i64() {
+        what.push(format!("expire on {}", date(ms.div_euclid(1000))));
+    }
+    if r["expire_delete_markers"].as_bool() == Some(true) {
+        what.push("remove lone delete markers".into());
+    }
+    if let Some(d) = r["noncurrent_days"].as_i64() {
+        let keep = r["newer_noncurrent_versions"].as_i64().map(|n| format!(" (keep the newest {n})")).unwrap_or_default();
+        what.push(format!("delete versions noncurrent for {d}d{keep}"));
+    }
+    for t in r["transitions"].as_array().into_iter().flatten() {
+        let at = match (t["days"].as_i64(), t["date"].as_i64()) {
+            (Some(d), _) => format!(" after {d}d"),
+            (_, Some(ms)) => format!(" on {}", date(ms.div_euclid(1000))),
+            _ => String::new(),
+        };
+        what.push(format!("transition to {}{at} (stored only)", s(&t["storage_class"])));
+    }
+    for t in r["noncurrent_transitions"].as_array().into_iter().flatten() {
+        what.push(format!("noncurrent to {} after {}d (stored only)", s(&t["storage_class"]), s(&t["noncurrent_days"])));
+    }
+    if let Some(d) = r["abort_multipart_days"].as_i64() {
+        what.push(format!("abort uploads after {d}d"));
+    }
+    let off = if r["enabled"].as_bool() == Some(false) { " (disabled)" } else { "" };
+    let what = if what.is_empty() { "nothing".to_string() } else { what.join(", ") };
+    format!("{}: {} → {what}{off}", s(&r["id"]), filter.join(", "))
+}
+
+/// An object version's lock, in a line (`None`: not locked).
+fn lock_line(l: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(m) = l["mode"].as_str() {
+        parts.push(format!("{m} until {} UTC", when(&l["retain_until"])));
+    }
+    match l["legal_hold"].as_bool() {
+        Some(true) => parts.push("legal hold on".to_string()),
+        Some(false) => parts.push("legal hold off".to_string()),
+        None => {}
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 /// A Content-Type from the file extension.
@@ -326,9 +430,10 @@ async fn upload(api: &Api, bucket: &str, key: &str, file: Option<&Path>, content
     Ok(api.raw(req).await?.json().await?)
 }
 
-/// Stream an object into `out` (a file path, or stdout for `-`). Returns the bytes written.
-async fn download(api: &Api, bucket: &str, key: &str, out: Option<&Path>) -> anyhow::Result<u64> {
-    let url = format!("{}{}?key={}", api.base, bucket_path(bucket, "/download"), enc(key));
+/// Stream an object (or one of its versions) into `out` (a file path, or stdout for `-`).
+/// Returns the bytes written.
+async fn download(api: &Api, bucket: &str, key: &str, version_id: Option<&str>, out: Option<&Path>) -> anyhow::Result<u64> {
+    let url = format!("{}{}{}", api.base, bucket_path(bucket, "/download"), key_query(key, version_id));
     let mut res = api.raw(api.http.get(url)).await?;
     let mut w: Box<dyn tokio::io::AsyncWrite + Unpin> = match out {
         Some(p) => {
@@ -370,6 +475,24 @@ async fn list_all(api: &Api, bucket: &str, prefix: &str, delimiter: bool) -> any
     }
 }
 
+/// Every page of a bucket's versions under `prefix`.
+async fn list_versions(api: &Api, bucket: &str, prefix: &str) -> anyhow::Result<Vec<Value>> {
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut q = format!("?prefix={}&limit=1000", enc(prefix));
+        if let Some(c) = &cursor {
+            q.push_str(&format!("&cursor={}", enc(c)));
+        }
+        let page = api.get(&bucket_path(bucket, &format!("/versions{q}"))).await?;
+        out.extend(page["versions"].as_array().into_iter().flatten().cloned());
+        match page["next_cursor"].as_str() {
+            Some(c) if !c.is_empty() => cursor = Some(c.to_string()),
+            _ => return Ok(out),
+        }
+    }
+}
+
 fn print_buckets(v: &Value) {
     let mut t = Table::new(&[("name", L), ("objects", R), ("size", R), ("access", L), ("recover", R), ("branch of", L), ("created", L)]);
     for b in v.as_array().into_iter().flatten() {
@@ -390,6 +513,19 @@ fn print_bucket(b: &Value) {
     println!("{}  {}  {}", s(&b["name"]), s(&b["id"]), s(&b["region"]));
     println!("  objects    {}  ({})", count(f(&b["objects"])), size(f(&b["bytes"])));
     println!("  trash      {}  (recoverable {} days)", size(f(&b["trash_bytes"])), s(&b["recover_days"]));
+    match b["versioning"].as_str() {
+        Some(state) => {
+            println!("  versioning {}", state.to_lowercase());
+            println!("  versions   {} noncurrent  ({})", count(f(&b["versions"])), size(f(&b["version_bytes"])));
+        }
+        None => println!("  versioning off (never enabled)"),
+    }
+    if b["object_lock"].is_object() {
+        match b["object_lock"]["mode"].as_str() {
+            Some(m) => println!("  lock       on, new versions kept {} ({m})", period(&b["object_lock"])),
+            None => println!("  lock       on, no default retention"),
+        }
+    }
     println!("  access     {}", if b["public"].as_bool() == Some(true) { "public (anonymous GET)" } else { "private" });
     if let Some(p) = b["parent"]["name"].as_str() {
         println!("  branch of  {p} at {}", when(&b["parent"]["at"]));
@@ -403,23 +539,28 @@ fn print_bucket(b: &Value) {
         println!("  cors       {} → {}", list(&r["allowed_origins"]), list(&r["allowed_methods"]));
     }
     for r in b["lifecycle"].as_array().into_iter().flatten() {
-        let mut what = Vec::new();
-        if let Some(d) = r["expire_days"].as_i64() {
-            what.push(format!("expire after {d}d"));
-        }
-        if let Some(d) = r["abort_multipart_days"].as_i64() {
-            what.push(format!("abort uploads after {d}d"));
-        }
-        let off = if r["enabled"].as_bool() == Some(false) { " (disabled)" } else { "" };
-        println!("  lifecycle  {}: prefix {:?} {}{off}", s(&r["id"]), r["prefix"].as_str().unwrap_or(""), what.join(", "));
+        println!("  lifecycle  {}", lifecycle_line(r));
     }
     for (k, v) in b["tags"].as_object().into_iter().flatten() {
         println!("  tag        {k} = {}", s(v));
     }
     if let Some(w) = b["website"].as_object() {
         match w.get("redirect_all").filter(|r| !r.is_null()) {
-            Some(r) => println!("  website    redirects to {}", s(&r["host_name"])),
-            None => println!("  website    index {}", w.get("index_document").map(s).unwrap_or_default()),
+            Some(r) => {
+                let proto = r["protocol"].as_str().map(|p| format!("{p}://")).unwrap_or_default();
+                println!("  website    redirects to {proto}{}", s(&r["host_name"]));
+            }
+            None => {
+                let mut line = format!("index {}", w.get("index_document").map(s).unwrap_or_default());
+                if let Some(e) = w.get("error_document").and_then(Value::as_str) {
+                    line.push_str(&format!(", error {e}"));
+                }
+                let rules = w.get("routing_rules").and_then(Value::as_array).map_or(0, Vec::len);
+                if rules > 0 {
+                    line.push_str(&format!(", {rules} routing rule{}", if rules == 1 { "" } else { "s" }));
+                }
+                println!("  website    {line}");
+            }
         }
     }
     println!("  url        {}", s(&b["url"]));
@@ -487,6 +628,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
             }
             v
         }
+        Storage::Ls { path: None, versions: true, .. } => bail!("--versions lists a bucket: give <bucket>[/prefix]"),
         Storage::Buckets | Storage::Ls { path: None, .. } => {
             let v = api.get("/v1/storage/buckets").await?;
             if !as_json {
@@ -499,8 +641,12 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
             }
             v
         }
-        Storage::Create { name, public, recover_days } => {
-            let v = api.post("/v1/storage/buckets", json!({ "name": name, "public": public, "recover_days": recover_days })).await?;
+        Storage::Create { name, public, recover_days, object_lock } => {
+            let mut body = json!({ "name": name, "public": public, "recover_days": recover_days });
+            if object_lock {
+                body["object_lock"] = json!(true);
+            }
+            let v = api.post("/v1/storage/buckets", body).await?;
             if !as_json {
                 println!("created bucket {}\n{}", s(&v["name"]), s(&v["url"]));
                 return Ok(());
@@ -515,7 +661,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
             }
             v
         }
-        Storage::Update { bucket, public, private, recover_days, cors_origins, no_cors, tags, no_tags } => {
+        Storage::Update { bucket, public, private, recover_days, cors_origins, no_cors, tags, no_tags, versioning } => {
             let mut body = json!({});
             if public || private {
                 body["public"] = json!(public);
@@ -544,8 +690,13 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
                 }
                 body["tags"] = Value::Object(map);
             }
+            match versioning {
+                Some(Toggle::On) => body["versioning"] = json!("Enabled"),
+                Some(Toggle::Off) => body["versioning"] = json!("Suspended"),
+                None => {}
+            }
             if body.as_object().is_some_and(|o| o.is_empty()) {
-                bail!("nothing to change: pass --public, --private, --recover-days, --cors-origin, --no-cors, --tag or --no-tags");
+                bail!("nothing to change: pass --public, --private, --recover-days, --cors-origin, --no-cors, --tag, --no-tags or --versioning");
             }
             let v = api.call(Method::PATCH, &bucket_path(&bucket, ""), Some(body)).await?;
             if !as_json {
@@ -571,7 +722,33 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
             }
             v
         }
-        Storage::Ls { path: Some(path), recursive } => {
+        Storage::Ls { path: Some(path), versions: true, .. } => {
+            let (bucket, prefix) = split(&path)?;
+            let versions = list_versions(api, &bucket, &prefix).await?;
+            if as_json {
+                json!({ "versions": versions })
+            } else {
+                if versions.is_empty() {
+                    println!("no versions under {bucket}/{prefix}");
+                    return Ok(());
+                }
+                let mut t = Table::new(&[("modified", L), ("size", R), ("", L), ("version id", L), ("key", L)]);
+                for v in &versions {
+                    let marker = v["delete_marker"].as_bool() == Some(true);
+                    let flag = match (v["is_latest"].as_bool() == Some(true), marker) {
+                        (true, true) => "latest, delete marker",
+                        (true, false) => "latest",
+                        (false, true) => "delete marker",
+                        (false, false) => "",
+                    };
+                    let sz = if marker { "-".to_string() } else { size(f(&v["size"])) };
+                    t.row(vec![when(&v["last_modified"]), sz, flag.to_string(), s(&v["version_id"]), s(&v["key"])]);
+                }
+                t.print();
+                return Ok(());
+            }
+        }
+        Storage::Ls { path: Some(path), recursive, .. } => {
             let (bucket, prefix) = split(&path)?;
             let (objects, prefixes) = list_all(api, &bucket, &prefix, !recursive).await?;
             if as_json {
@@ -591,8 +768,11 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
                 return Ok(());
             }
         }
-        Storage::Cp { src, dst, recursive, content_type } => {
+        Storage::Cp { src, dst, recursive, content_type, version_id } => {
             let remote_src = src.starts_with("s3://") || (src != "-" && !Path::new(&src).exists());
+            if !remote_src && version_id.is_some() {
+                bail!("--version-id is for downloads; an upload always makes a new version");
+            }
             if !remote_src {
                 let (bucket, key) = split(&dst)?;
                 if recursive {
@@ -649,7 +829,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
                         let k = s(&o["key"]);
                         let rel = k[key.len()..].trim_start_matches('/');
                         let target = Path::new(&dst).join(rel);
-                        total += download(api, &bucket, &k, Some(&target)).await?;
+                        total += download(api, &bucket, &k, None, Some(&target)).await?;
                         if !as_json {
                             println!("{bucket}/{k} → {}", target.display());
                         }
@@ -663,21 +843,37 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
                     if key.is_empty() {
                         bail!("expected <bucket>/<key>, got {src:?} (use -r for a prefix)");
                     }
+                    let vid = version_id.as_deref();
                     if dst == "-" {
-                        download(api, &bucket, &key, None).await?;
+                        download(api, &bucket, &key, vid, None).await?;
                         return Ok(());
                     }
                     let target = download_target(&dst, &key);
-                    let n = download(api, &bucket, &key, Some(&target)).await?;
+                    let n = download(api, &bucket, &key, vid, Some(&target)).await?;
                     if !as_json {
-                        println!("{bucket}/{key} → {}  {}", target.display(), size(n as f64));
+                        let at = vid.map(|v| format!(" (version {v})")).unwrap_or_default();
+                        println!("{bucket}/{key}{at} → {}  {}", target.display(), size(n as f64));
                         return Ok(());
                     }
-                    json!({ "key": key, "path": target, "bytes": n })
+                    let mut v = json!({ "key": key, "path": target, "bytes": n });
+                    if let Some(id) = vid {
+                        v["version_id"] = json!(id);
+                    }
+                    v
                 }
             }
         }
-        Storage::Rm { path, recursive } => {
+        Storage::Rm { path, recursive: false, version_id: Some(vid) } => {
+            let (bucket, key) = split_key(&path)?;
+            let v = api.call(Method::DELETE, &format!("{}{}", bucket_path(&bucket, "/object"), key_query(&key, Some(&vid))), None).await?;
+            if !as_json {
+                let what = if v["delete_marker"].as_bool() == Some(true) { "delete marker" } else { "version" };
+                println!("deleted {what} {vid} of {bucket}/{key} for good (recoverable from the trash)");
+                return Ok(());
+            }
+            v
+        }
+        Storage::Rm { path, recursive, .. } => {
             if recursive {
                 let (bucket, prefix) = split(&path)?;
                 let v = api.post(&bucket_path(&bucket, "/delete"), json!({ "prefix": prefix })).await?;
@@ -690,17 +886,24 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
                 let (bucket, key) = split_key(&path)?;
                 let v = api.call(Method::DELETE, &format!("{}?key={}", bucket_path(&bucket, "/object"), enc(&key)), None).await?;
                 if !as_json {
-                    println!("deleted {bucket}/{key}");
+                    match v["version_id"].as_str() {
+                        Some(m) if v["delete_marker"].as_bool() == Some(true) => println!("deleted {bucket}/{key} (delete marker {m}; older versions are kept)"),
+                        _ => println!("deleted {bucket}/{key}"),
+                    }
                     return Ok(());
                 }
                 v
             }
         }
-        Storage::Stat { path } => {
+        Storage::Stat { path, version_id } => {
             let (bucket, key) = split_key(&path)?;
-            let v = api.get(&format!("{}?key={}", bucket_path(&bucket, "/object"), enc(&key))).await?;
+            let v = api.get(&format!("{}{}", bucket_path(&bucket, "/object"), key_query(&key, version_id.as_deref()))).await?;
             if !as_json {
                 println!("{bucket}/{}", s(&v["key"]));
+                println!("  version        {}", s(&v["version_id"]));
+                if let Some(l) = lock_line(&v["lock"]) {
+                    println!("  lock           {l}");
+                }
                 println!("  size           {} ({} bytes)", size(f(&v["size"])), s(&v["size"]));
                 println!("  etag           {}", s(&v["etag"]));
                 println!("  content-type   {}", s(&v["content_type"]));
