@@ -298,9 +298,9 @@ mod tests {
         assert!(validate_target_name("-x").is_err());
         assert!(validate_target_name("A").is_err());
         assert!(validate_target_name("").is_err());
-        let spec = TargetSpec { endpoint: Some("http://127.0.0.1:9000/".into()), buckets: vec!["a".into(), "a".into()], ..Default::default() };
+        let spec = TargetSpec { endpoint: Some("http://127.0.0.1:9000/".into()), buckets: vec!["abc".into(), "abc".into()], ..Default::default() };
         let (e, r, k, p, b) = spec.check().unwrap();
-        assert_eq!((e.as_deref(), r.as_str(), k, p, b), (Some("http://127.0.0.1:9000"), "us-east-1", None, true, vec!["a".to_string()]));
+        assert_eq!((e.as_deref(), r.as_str(), k, p, b), (Some("http://127.0.0.1:9000"), "us-east-1", None, true, vec!["abc".to_string()]));
         assert!(TargetSpec { endpoint: Some("ftp://x".into()), ..Default::default() }.check().is_err());
         assert!(TargetSpec { endpoint: Some("https://u:p@x".into()), ..Default::default() }.check().is_err());
         assert!(TargetSpec { buckets: vec!["Bad_Name".into()], ..Default::default() }.check().is_err());
