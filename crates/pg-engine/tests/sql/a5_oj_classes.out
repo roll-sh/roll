@@ -1,0 +1,79 @@
+> CREATE TABLE a5_oa (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> INSERT INTO a5_oa VALUES (123, 456), (123, 4567890123456789), (4567890123456789, 123),
+>   (4567890123456789, 4567890123456789), (4567890123456789, -4567890123456789), (5, 5)
+-- INSERT 0 6
+
+> CREATE TABLE a5_ob (unique2 int, thousand int, hundred int, ten int)
+-- CREATE TABLE
+
+> INSERT INTO a5_ob SELECT i, i % 1000, i % 100, i % 10 FROM generate_series(0, 9999) i
+-- INSERT 0 10000
+
+> CREATE UNIQUE INDEX a5_ob_u2 ON a5_ob (unique2)
+-- CREATE INDEX
+
+> VACUUM ANALYZE a5_oa
+-- VACUUM
+
+> VACUUM ANALYZE a5_ob
+-- VACUUM
+
+> SET enable_memoize = off
+-- SET
+
+> SELECT q1, unique2, thousand, hundred
+>   FROM a5_oa a LEFT JOIN a5_ob b ON q1 = unique2
+>   WHERE coalesce(thousand, 123) = q1 AND q1 = coalesce(hundred, 123) ORDER BY 1, 2
+q1:int8 | unique2:int4 | thousand:int4 | hundred:int4
+5 | 5 | 5 | 5
+-- SELECT 1
+
+> SELECT q1, q2, unique2 FROM a5_oa a LEFT JOIN a5_ob b ON q1 = unique2
+>   WHERE coalesce(thousand, 5) = q1 AND q2 = coalesce(hundred, 5) AND q1 = q2 ORDER BY 1, 2
+q1:int8 | q2:int8 | unique2:int4
+5 | 5 | 5
+-- SELECT 1
+
+> SELECT count(*) FROM a5_oa a LEFT JOIN a5_ob b ON q1 = unique2
+>   WHERE coalesce(thousand, 123) = coalesce(hundred, 123) AND coalesce(hundred, 123) = coalesce(ten, 123)
+count:int8
+4
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT q1, unique2, thousand, hundred
+>   FROM a5_oa a LEFT JOIN a5_ob b ON q1 = unique2
+>   WHERE coalesce(thousand, 123) = q1 AND q1 = coalesce(hundred, 123)
+QUERY PLAN:text
+Nested Loop Left Join
+  Filter: ((COALESCE(b.thousand, 123) = COALESCE(b.hundred, 123)) AND (a.q1 = COALESCE(b.hundred, 123)))
+  ->  Seq Scan on a5_oa a
+  ->  Index Scan using a5_ob_u2 on a5_ob b
+        Index Cond: (unique2 = a.q1)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a5_oa a LEFT JOIN a5_ob b ON q1 = unique2
+>   WHERE coalesce(thousand, 123) = coalesce(hundred, 123) AND coalesce(hundred, 123) = coalesce(ten, 5)
+>     AND coalesce(ten, 5) = q1
+QUERY PLAN:text
+Nested Loop Left Join
+  Filter: ((COALESCE(b.thousand, 123) = COALESCE(b.hundred, 123)) AND (COALESCE(b.hundred, 123) = COALESCE(b.ten, 5)) AND (COALESCE(b.ten, 5) = a.q1))
+  ->  Seq Scan on a5_oa a
+  ->  Index Scan using a5_ob_u2 on a5_ob b
+        Index Cond: (unique2 = a.q1)
+-- EXPLAIN
+
+> SELECT q1, unique2 FROM a5_oa a LEFT JOIN a5_ob b ON q1 = unique2
+>   WHERE coalesce(thousand, 123) = q1 AND q1 = coalesce(hundred, 123) AND b.ten = 3
+q1:int8 | unique2:int4
+-- SELECT 0
+
+> RESET enable_memoize
+-- RESET
+
+> DROP TABLE a5_oa, a5_ob
+-- DROP TABLE
+

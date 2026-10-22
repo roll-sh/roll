@@ -204,6 +204,12 @@ fn clause_nonnull(parts: &[Expr]) -> Cols {
     parts.iter().flat_map(|p| nonnull_cols(p, true)).collect()
 }
 
+/// The columns a WHERE's conjuncts are strict for (an outer join below whose nullable side
+/// has one of them is reduced).
+pub(crate) fn strict_cols(parts: &[Expr]) -> Cols {
+    clause_nonnull(parts)
+}
+
 fn range(s: &Cols, lo: usize, hi: usize) -> Cols {
     s.range(lo..hi).map(|c| c - lo).collect()
 }

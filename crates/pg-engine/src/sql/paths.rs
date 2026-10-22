@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 pub(crate) mod analyzejoins;
 mod reducejoins;
+pub(crate) use reducejoins::strict_cols;
 mod pullup;
 mod pathkeys;
 pub use pathkeys::{column_classes, constant_columns};

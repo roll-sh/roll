@@ -460,6 +460,8 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             if let Some(c) = cond {
                 conjuncts(c, &mut cond_parts);
             }
+            // (A left join's: the WHERE's conjuncts in their order, for the classes above it.)
+            let all_parts = if kind == JoinKind::Left { parts.clone() } else { Vec::new() };
             for p in parts {
                 // (A volatile clause goes to the relations it reads, as any other; one that
                 // reads none is checked above.)
@@ -560,6 +562,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                     None => *h = Some((hl, hr)),
                 }
             }
+            let above = if kind == JoinKind::Left { oj_class_clauses(above, nleft, &all_parts) } else { above };
             match and_all(above) {
                 Some(p) => Plan::Filter {
                     input: Arc::new(j),
@@ -1591,6 +1594,118 @@ fn ec_constants(
             keep
         });
     }
+}
+
+/// A WHERE's equalities above a left join, read in its nullable side: an equivalence class
+/// of their members (all the WHERE's equalities, in their order: process_equivalence),
+/// whose clauses Postgres derives at the join (generate_join_implied_equalities_normal): the
+/// members only the join computes equated in turn, the last with the first member of the
+/// outer side's (those among themselves go below), each clause reusing a written one over
+/// the same two members as it was written. Only classes of three or more members of one
+/// btree family without constants, and not when a qual is strict for the nullable side (the
+/// join is an inner one then); the derived clauses go after the other quals (the join's
+/// restrictions list them after its own clauses).
+fn oj_class_clauses(above: Vec<Expr>, nleft: usize, all: &[Expr]) -> Vec<Expr> {
+    if QUERY_RLS.with(|f| f.get()) || crate::sql::paths::strict_cols(all).iter().any(|&c| c >= nleft) {
+        return above;
+    }
+    let member = |e: &Expr| {
+        let mut ok = !e.columns().is_empty() && !e.is_volatile();
+        e.walk(&mut |x| ok &= !matches!(x, Expr::Subquery(_) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..) | Expr::Outer(..)));
+        ok
+    };
+    // (One btree family: the same type, or the integer types.)
+    let fam = |t: &DataType| match t {
+        DataType::Int2 | DataType::Int4 | DataType::Int8 => DataType::Int8,
+        t => t.without_typmod(),
+    };
+    let pair = |e: &Expr| -> Option<(Expr, Expr)> {
+        let Expr::Call(_, args, _) = e else { return None };
+        if !ec_clause(e) || fam(&args[0].ty()) != fam(&args[1].ty()) {
+            return None;
+        }
+        (member(&args[0]) && member(&args[1]) && !args[0].same_as(&args[1])).then(|| (args[0].clone(), args[1].clone()))
+    };
+    // process_equivalence: (members in order, the clauses that made the class).
+    let mut classes: Vec<(Vec<Expr>, Vec<usize>)> = Vec::new();
+    for (i, e) in all.iter().enumerate() {
+        let Some((x, y)) = pair(e) else { continue };
+        let find = |classes: &Vec<(Vec<Expr>, Vec<usize>)>, m: &Expr| classes.iter().position(|(ms, _)| ms.iter().any(|z| z.same_as(m)));
+        match (find(&classes, &x), find(&classes, &y)) {
+            (None, None) => classes.push((vec![x, y], vec![i])),
+            (Some(c), None) => {
+                classes[c].0.push(y);
+                classes[c].1.push(i);
+            }
+            (None, Some(c)) => {
+                classes[c].0.push(x);
+                classes[c].1.push(i);
+            }
+            (Some(a), Some(b)) if a == b => classes[a].1.push(i),
+            (Some(a), Some(b)) => {
+                let (ms, cs) = classes.remove(b);
+                let a = if b < a { a - 1 } else { a };
+                classes[a].0.extend(ms);
+                classes[a].1.extend(cs);
+                classes[a].1.push(i);
+            }
+        }
+    }
+    let outer = |e: &Expr| e.columns().iter().all(|&c| c < nleft);
+    let mut used = vec![false; above.len()];
+    let mut derived: Vec<Expr> = Vec::new();
+    for (ms, cs) in &classes {
+        let olds: Vec<&Expr> = ms.iter().filter(|m| outer(m)).collect();
+        let Some(f0) = ms.first().map(|m| fam(&m.ty())) else { continue };
+        if ms.len() < 3 || ms.iter().any(|m| fam(&m.ty()) != f0) {
+            continue;
+        }
+        // (Its clauses left above the join: the ones replaced.)
+        let mine: Vec<usize> = (0..above.len())
+            .filter(|&k| cs.iter().any(|&i| all[i].same_as(&above[k])))
+            .collect();
+        if mine.is_empty() {
+            continue;
+        }
+        let mut chain: Vec<&Expr> = ms.iter().filter(|m| !outer(m)).collect();
+        chain.extend(olds.first().copied());
+        let mut made = Vec::new();
+        for w in chain.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let written = cs.iter().find_map(|&i| {
+                let (x, y) = pair(&all[i])?;
+                ((x.same_as(a) && y.same_as(b)) || (x.same_as(b) && y.same_as(a))).then(|| all[i].clone())
+            });
+            let e = match written {
+                Some(e) => e,
+                None => match crate::sql::func::resolve_binop("=", &a.ty(), &b.ty()) {
+                    // (An operator taking the members as they are: no coercion.)
+                    Ok(r)
+                        if r.arg_types.len() == 2
+                            && r.arg_types[0].without_typmod() == a.ty().without_typmod()
+                            && r.arg_types[1].without_typmod() == b.ty().without_typmod() =>
+                    {
+                        Expr::Call(r.def, vec![a.clone(), b.clone()], DataType::Bool)
+                    }
+                    _ => break,
+                },
+            };
+            made.push(e);
+        }
+        if made.len() + 1 != chain.len() {
+            continue;
+        }
+        derived.extend(made);
+        for k in mine {
+            used[k] = true;
+        }
+    }
+    if derived.is_empty() {
+        return above;
+    }
+    let mut out: Vec<Expr> = above.into_iter().enumerate().filter(|(i, _)| !used[*i]).map(|(_, e)| e).collect();
+    out.extend(derived);
+    out
 }
 
 /// Every table scan reachable through filters, projections and inheritance appends.
