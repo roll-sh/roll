@@ -1,6 +1,6 @@
 //! Control-plane HTTP API for storage (`/v1/storage/...`), merged into rolld's API.
 
-use crate::control::{Control, ControlError, Usage, UsageAll, info};
+use crate::control::{Control, ControlError, Usage, info};
 use axum::body::Body;
 use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -71,10 +71,28 @@ impl<S: Send + Sync, T: serde::de::DeserializeOwned> FromRequestParts<S> for Par
     }
 }
 
+/// The account a request acts in: `x-roll-account: <account id>` or `?account=<account id>`;
+/// the default account without either. An unknown account is a 404.
+pub struct Acct(pub String);
+
+impl FromRequestParts<AppState> for Acct {
+    type Rejection = ControlError;
+
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, c: &AppState) -> Result<Self, Self::Rejection> {
+        let header = parts.headers.get("x-roll-account").and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+        let query = || parts.uri.query().and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "account").map(|(_, v)| v.trim().to_string())).filter(|s| !s.is_empty());
+        let id = header.or_else(query).unwrap_or_else(|| c.store.default_account_id());
+        c.store.require_account(&id)?;
+        Ok(Self(id))
+    }
+}
+
 pub fn router(control: Arc<Control>) -> Router {
     Router::new()
         .route("/v1/storage", get(show_info))
         .route("/v1/storage/usage", get(usage_all))
+        .route("/v1/storage/accounts", get(list_accounts).post(create_account))
+        .route("/v1/storage/accounts/{id}", get(show_account).patch(update_account).delete(delete_account))
         .route("/v1/storage/buckets", get(list_buckets).post(create_bucket))
         .route("/v1/storage/buckets/{name}", get(show_bucket).patch(update_bucket).delete(delete_bucket))
         .route("/v1/storage/buckets/{name}/branches", post(branch))
@@ -96,12 +114,60 @@ pub fn router(control: Arc<Control>) -> Router {
         .with_state(control)
 }
 
-async fn show_info(State(c): State<AppState>) -> ApiResult<Value> {
-    Ok(Json(c.info()?))
+async fn show_info(State(c): State<AppState>, Acct(a): Acct) -> ApiResult<Value> {
+    Ok(Json(c.info(&a)?))
 }
 
-async fn list_buckets(State(c): State<AppState>) -> ApiResult<Vec<Value>> {
-    Ok(Json(c.store.buckets()?.iter().map(|b| c.bucket_view(b)).collect()))
+async fn list_accounts(State(c): State<AppState>) -> ApiResult<Vec<Value>> {
+    let default = c.store.default_account_id();
+    Ok(Json(c.store.accounts()?.into_iter().map(|a| account_view(&a, &default)).collect()))
+}
+
+fn account_view(a: &s3_store::Account, default: &str) -> Value {
+    let mut v = json!(a);
+    v["default"] = json!(a.id == default);
+    v
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateAccount {
+    name: String,
+    email: Option<String>,
+    /// Create the account's root key too (default true).
+    root_key: Option<bool>,
+}
+
+/// `POST /accounts`: a new account, and its root user's key (`admin` over every bucket) unless
+/// `root_key: false`. The secret is only returned here.
+async fn create_account(State(c): State<AppState>, JsonBody(r): JsonBody<CreateAccount>) -> ApiResult<Value> {
+    let a = c.store.create_account(&r.name, r.email.as_deref()).await?;
+    let mut v = account_view(&a, &c.store.default_account_id());
+    if r.root_key.unwrap_or(true) {
+        let k = c.store.create_key_in(&a.id, "root", s3_store::Permission::Admin, None).await?;
+        let mut kv = json!(k);
+        kv["secret_access_key"] = json!(k.secret);
+        v["root_key"] = kv;
+    }
+    Ok(Json(v))
+}
+
+async fn show_account(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    Ok(Json(account_view(&c.store.require_account(&id)?, &c.store.default_account_id())))
+}
+
+async fn update_account(State(c): State<AppState>, Path(id): Path<String>, JsonBody(u): JsonBody<s3_store::AccountUpdate>) -> ApiResult<Value> {
+    Ok(Json(account_view(&c.store.update_account(&id, u).await?, &c.store.default_account_id())))
+}
+
+/// `DELETE /accounts/{id}`: an account without buckets, with its keys, roles and IAM entities.
+async fn delete_account(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    c.store.delete_account(&id).await?;
+    Ok(Json(json!({ "deleted": id })))
+}
+
+async fn list_buckets(State(c): State<AppState>, Acct(a): Acct) -> ApiResult<Vec<Value>> {
+    Ok(Json(c.store.buckets_of(&a)?.iter().map(|b| c.bucket_view(b)).collect()))
 }
 
 #[derive(Deserialize)]
@@ -111,13 +177,13 @@ struct CreateBucket {
     opts: BucketOptions,
 }
 
-async fn create_bucket(State(c): State<AppState>, JsonBody(r): JsonBody<CreateBucket>) -> ApiResult<Value> {
-    let b = c.store.create_bucket(&r.name, r.opts).await?;
+async fn create_bucket(State(c): State<AppState>, Acct(a): Acct, JsonBody(r): JsonBody<CreateBucket>) -> ApiResult<Value> {
+    let b = c.store.create_bucket_in(&a, &r.name, r.opts).await?;
     Ok(Json(c.bucket_view(&b)))
 }
 
-async fn show_bucket(State(c): State<AppState>, Path(name): Path<String>) -> ApiResult<Value> {
-    Ok(Json(c.bucket_view(&c.store.bucket(&name)?)))
+async fn show_bucket(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>) -> ApiResult<Value> {
+    Ok(Json(c.bucket_view(&c.bucket_in(&a, &name)?)))
 }
 
 /// `PATCH /buckets/{name}`: the store's settings, the bucket's tags (replaced whole; `{}`
@@ -147,8 +213,11 @@ struct NotificationsPatch {
     rotate_webhook_secret: bool,
 }
 
-async fn update_bucket(State(c): State<AppState>, Path(name): Path<String>, JsonBody(p): JsonBody<BucketPatch>) -> ApiResult<Value> {
-    let b = c.store.bucket(&name)?;
+async fn update_bucket(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, JsonBody(p): JsonBody<BucketPatch>) -> ApiResult<Value> {
+    let b = c.bucket_in(&a, &name)?;
+    if p.update.versioning.is_some() && c.mfa_delete(&name)? {
+        return Err(ControlError::Conflict(format!("bucket {name} has MFA Delete on: change its versioning through the S3 API with x-amz-mfa")));
+    }
     if let Some(t) = &p.tags {
         s3_store::config::validate_bucket_tags(t.iter().map(|(k, v)| (k.as_str(), v.as_str())))?;
     }
@@ -183,7 +252,11 @@ struct ForceQuery {
     force: bool,
 }
 
-async fn delete_bucket(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<ForceQuery>) -> ApiResult<Value> {
+async fn delete_bucket(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, Params(q): Params<ForceQuery>) -> ApiResult<Value> {
+    c.bucket_in(&a, &name)?;
+    if q.force && c.mfa_delete(&name)? {
+        return Err(ControlError::Conflict(format!("bucket {name} has MFA Delete on: its versions can only be deleted through the S3 API with x-amz-mfa")));
+    }
     c.store.delete_bucket(&name, q.force).await?;
     Ok(Json(json!({ "deleted": name })))
 }
@@ -193,7 +266,8 @@ struct BranchReq {
     name: String,
 }
 
-async fn branch(State(c): State<AppState>, Path(name): Path<String>, JsonBody(r): JsonBody<BranchReq>) -> ApiResult<Value> {
+async fn branch(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, JsonBody(r): JsonBody<BranchReq>) -> ApiResult<Value> {
+    c.bucket_in(&a, &name)?;
     let b = c.store.branch_bucket(&name, &r.name).await?;
     Ok(Json(c.bucket_view(&b)))
 }
@@ -207,11 +281,13 @@ struct ListQ {
     limit: Option<usize>,
 }
 
-async fn list_objects(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<ListQ>) -> ApiResult<Value> {
+async fn list_objects(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, Params(q): Params<ListQ>) -> ApiResult<Value> {
+    c.bucket_in(&a, &name)?;
     Ok(Json(c.list_objects(&name, &q.prefix, q.delimiter.as_deref(), q.cursor.as_deref().filter(|s| !s.is_empty()), q.limit.unwrap_or(200))?))
 }
 
-async fn list_versions(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<ListQ>) -> ApiResult<Value> {
+async fn list_versions(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, Params(q): Params<ListQ>) -> ApiResult<Value> {
+    c.bucket_in(&a, &name)?;
     Ok(Json(c.list_versions(&name, &q.prefix, q.cursor.as_deref().filter(|s| !s.is_empty()), q.limit.unwrap_or(200))?))
 }
 
@@ -235,11 +311,13 @@ impl KeyQ {
     }
 }
 
-async fn object_info(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<KeyQ>) -> ApiResult<Value> {
+async fn object_info(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, Params(q): Params<KeyQ>) -> ApiResult<Value> {
+    c.bucket_in(&a, &name)?;
     Ok(Json(info(&c.store.get_object_version(&name, &q.key()?, q.version()?)?)))
 }
 
-async fn delete_object(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<KeyQ>) -> ApiResult<Value> {
+async fn delete_object(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, Params(q): Params<KeyQ>) -> ApiResult<Value> {
+    c.bucket_in(&a, &name)?;
     let key = q.key()?;
     let o = c.delete_object(&name, &key, q.version()?).await?;
     let mut v = json!({ "deleted": key });
@@ -257,7 +335,8 @@ struct DeleteMany {
     prefix: Option<String>,
 }
 
-async fn delete_many(State(c): State<AppState>, Path(name): Path<String>, JsonBody(r): JsonBody<DeleteMany>) -> ApiResult<Value> {
+async fn delete_many(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, JsonBody(r): JsonBody<DeleteMany>) -> ApiResult<Value> {
+    c.bucket_in(&a, &name)?;
     Ok(Json(json!({ "deleted": c.delete_many(&name, r.keys, r.prefix).await? })))
 }
 
@@ -295,9 +374,9 @@ fn attachment(key: &str) -> String {
     format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{}", s3_proto::http::uri_encode(name, true))
 }
 
-async fn download(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<KeyQ>) -> Result<Response, ControlError> {
+async fn download(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, Params(q): Params<KeyQ>) -> Result<Response, ControlError> {
     let key = q.key()?;
-    let b = c.store.bucket(&name)?;
+    let b = c.bucket_in(&a, &name)?;
     let meta = c.store.get_object_version(&name, &key, q.version()?)?;
     let (len, stream) = c.store.open_blob(&meta, None).await?;
     c.store.meter.request(&b.id, s3_store::Class::B);
@@ -338,7 +417,8 @@ fn upload_headers(h: &HeaderMap) -> Result<ObjectHeaders, ControlError> {
     })
 }
 
-async fn upload(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<KeyQ>, headers: HeaderMap, body: Body) -> ApiResult<Value> {
+async fn upload(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, Params(q): Params<KeyQ>, headers: HeaderMap, body: Body) -> ApiResult<Value> {
+    c.bucket_in(&a, &name)?;
     let key = q.key()?;
     // Without a Content-Length, only a body the server knows is empty (no body at all) will do.
     let len: u64 = match headers.get(header::CONTENT_LENGTH) {
@@ -361,13 +441,20 @@ struct PresignReq {
     expires_s: Option<i64>,
 }
 
-async fn presign(State(c): State<AppState>, Path(name): Path<String>, JsonBody(r): JsonBody<PresignReq>) -> ApiResult<Value> {
+async fn presign(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, JsonBody(r): JsonBody<PresignReq>) -> ApiResult<Value> {
+    // The control plane's key is the default account's: it presigns for that account's
+    // buckets.
+    let b = c.bucket_in(&a, &name)?;
+    if b.account_id != c.store.default_account_id() {
+        return Err(ControlError::Invalid("presigned URLs are only available for the default account's buckets; presign with the account's own keys".into()));
+    }
     let method = r.method.unwrap_or_else(|| "GET".into()).to_ascii_uppercase();
     let (url, expires_at) = c.presign(&name, &r.key, &method, r.expires_s.unwrap_or(3600))?;
     Ok(Json(json!({ "url": url, "method": method, "expires_at": expires_at })))
 }
 
-async fn trash(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<ListQ>) -> ApiResult<Value> {
+async fn trash(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, Params(q): Params<ListQ>) -> ApiResult<Value> {
+    c.bucket_in(&a, &name)?;
     Ok(Json(c.list_trash(&name, &q.prefix, q.cursor.as_deref().filter(|s| !s.is_empty()), q.limit.unwrap_or(200))?))
 }
 
@@ -377,25 +464,34 @@ struct RestoreReq {
     deleted_at: i64,
 }
 
-async fn restore(State(c): State<AppState>, Path(name): Path<String>, JsonBody(r): JsonBody<RestoreReq>) -> ApiResult<Value> {
+async fn restore(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, JsonBody(r): JsonBody<RestoreReq>) -> ApiResult<Value> {
+    c.bucket_in(&a, &name)?;
     Ok(Json(info(&c.store.restore(&name, &r.key, r.deleted_at).await?)))
 }
 
 #[derive(Deserialize)]
 struct DaysQ {
     days: Option<i64>,
+    /// Every account's totals too (`GET /usage`).
+    accounts: Option<bool>,
 }
 
-async fn usage(State(c): State<AppState>, Path(name): Path<String>, Params(q): Params<DaysQ>) -> ApiResult<Usage> {
-    Ok(Json(c.usage(&name, q.days.unwrap_or(30))?))
+async fn usage(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, Params(q): Params<DaysQ>) -> ApiResult<Usage> {
+    Ok(Json(c.usage(&a, &name, q.days.unwrap_or(30))?))
 }
 
-async fn usage_all(State(c): State<AppState>, Params(q): Params<DaysQ>) -> ApiResult<UsageAll> {
-    Ok(Json(c.usage_all(q.days.unwrap_or(30))?))
+/// The account's usage; with `?accounts=true`, every account's totals too.
+async fn usage_all(State(c): State<AppState>, Acct(a): Acct, Params(q): Params<DaysQ>) -> ApiResult<Value> {
+    let days = q.days.unwrap_or(30);
+    let mut v = json!(c.usage_all(&a, days)?);
+    if q.accounts.unwrap_or(false) {
+        v["accounts"] = json!(c.usage_accounts(days)?);
+    }
+    Ok(Json(v))
 }
 
-async fn list_keys(State(c): State<AppState>) -> ApiResult<Value> {
-    Ok(Json(json!(c.keys()?)))
+async fn list_keys(State(c): State<AppState>, Acct(a): Acct) -> ApiResult<Value> {
+    Ok(Json(json!(c.keys(&a)?)))
 }
 
 #[derive(Deserialize)]
@@ -405,14 +501,14 @@ struct CreateKey {
     buckets: Option<Vec<String>>,
 }
 
-async fn create_key(State(c): State<AppState>, JsonBody(r): JsonBody<CreateKey>) -> ApiResult<Value> {
-    let k = c.create_key(&r.name, &r.permission, r.buckets).await?;
+async fn create_key(State(c): State<AppState>, Acct(a): Acct, JsonBody(r): JsonBody<CreateKey>) -> ApiResult<Value> {
+    let k = c.create_key(&a, &r.name, &r.permission, r.buckets).await?;
     let mut v = json!(k);
     v["secret_access_key"] = json!(k.secret);
     Ok(Json(v))
 }
 
-async fn delete_key(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
-    c.delete_key(&id).await?;
+async fn delete_key(State(c): State<AppState>, Acct(a): Acct, Path(id): Path<String>) -> ApiResult<Value> {
+    c.delete_key(&a, &id).await?;
     Ok(Json(json!({ "deleted": id })))
 }

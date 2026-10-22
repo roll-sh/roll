@@ -103,13 +103,13 @@ pub(crate) async fn put_config(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Re
             let target = le.text_of("TargetBucket").map(str::trim).filter(|t| !t.is_empty()).ok_or_else(malformed)?.to_string();
             let prefix = le.text_of("TargetPrefix").unwrap_or_default().to_string();
             let missing = || S3Error::new(Code::InvalidTargetBucketForLogging).with("TargetBucket", target.clone());
-            if ctx.store().bucket(&target).is_err() {
-                return Err(missing());
+            let Ok(t) = ctx.store().bucket(&target) else { return Err(missing()) };
+            // As on S3, the source and target buckets must have the same owner.
+            if t.account_id != bucket.account_id {
+                return Err(S3Error::msg(Code::InvalidTargetBucketForLogging, "The owner for the bucket to be logged and the target bucket must be the same.").with("TargetBucket", target.clone()));
             }
             // The requester must be able to write there: logs are delivered as them, in effect.
-            if let Some(a) = &ctx.auth
-                && !a.key.can_write(&target)
-            {
+            if crate::access::authorize(ctx, ctx.who(), &target, None, "s3:PutObject", crate::auth::Need::Write).is_err() {
                 return Err(S3Error::msg(Code::InvalidTargetBucketForLogging, "You must be able to write to the target bucket").with("TargetBucket", target.clone()));
             }
             let partition_date_source = match le.child("TargetObjectKeyFormat") {
@@ -209,13 +209,18 @@ pub(crate) fn record(ctx: &Ctx, resp: &Response, request_id: &str, error: Option
     let store = &server.store;
     let now = store.now();
     let dash = || "-".to_string();
-    let requester = ctx.auth.as_ref().map_or_else(dash, |a| store.canonical_user(&a.key.id));
+    // The requester as S3 logs it: an IAM user's ARN, else a canonical id (a roll key's).
+    let requester = ctx.auth.as_ref().map_or_else(dash, |a| match &a.identity.kind {
+        crate::identity::Kind::User { arn, .. } => arn.clone(),
+        _ => store.canonical_user(&a.key.id),
+    });
+    let owner = store.bucket(bucket).ok().and_then(|b| store.account(&b.account_id).ok().flatten()).map_or_else(|| store.owner_id(), |a| a.canonical);
     // Session tokens never go into logs.
     let uri = if ctx.raw_query.is_empty() { ctx.raw_path.clone() } else { format!("{}?{}", ctx.raw_path, crate::temporary::redact_query(&ctx.raw_query)) };
     let bytes_sent = resp.headers().get("content-length").and_then(|v| v.to_str().ok()).filter(|v| *v != "0").map_or_else(dash, str::to_string);
     let presigned = ctx.query.iter().any(|(k, _)| k.eq_ignore_ascii_case("X-Amz-Signature"));
     let fields = [
-        store.owner_id(),
+        owner,
         bucket.to_string(),
         log_time(now),
         ctx.peer.map_or_else(dash, |p| p.to_string()),
@@ -283,7 +288,8 @@ pub(crate) async fn flush(server: &Server) -> usize {
             Some(src) => {
                 let at = if src == "EventTime" { first } else { now };
                 let (s, (y, m, d)) = stamp(at);
-                format!("{prefix}{}/{}/{source}/{y:04}/{m:02}/{d:02}/{s}-{}", store.account_id(), server.cfg.region, unique())
+                let account = store.bucket(&source).map_or_else(|_| store.account_id(), |b| b.account_id);
+                format!("{prefix}{account}/{}/{source}/{y:04}/{m:02}/{d:02}/{s}-{}", server.cfg.region, unique())
             }
         };
         let mut body = String::new();

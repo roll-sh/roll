@@ -29,6 +29,10 @@ pub mod kind {
     pub const WEBSITE: &str = "website";
     pub const LOGGING: &str = "logging";
     pub const ACCELERATE: &str = "accelerate";
+    /// `Requester` (Requester Pays); no row: the bucket owner pays.
+    pub const REQUEST_PAYMENT: &str = "request_payment";
+    /// `Enabled` once MFA Delete was enabled, `Disabled` once it was turned off again.
+    pub const MFA_DELETE: &str = "mfa_delete";
     pub const ANALYTICS: &str = "analytics";
     pub const METRICS: &str = "metrics";
     pub const INVENTORY: &str = "inventory";

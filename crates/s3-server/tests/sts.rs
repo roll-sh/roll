@@ -117,8 +117,9 @@ async fn get_session_token_and_caller_identity() {
     let id = admin.get_caller_identity().send().await.unwrap();
     let account = t.store.account_id();
     assert_eq!(id.account(), Some(account.as_str()));
-    assert_eq!(id.arn(), Some(format!("arn:aws:iam::{account}:user/{ACCESS}").as_str()));
-    assert_eq!(id.user_id(), Some(ACCESS));
+    // An admin key over every bucket is the account's root user, as AWS shows it.
+    assert_eq!(id.arn(), Some(format!("arn:aws:iam::{account}:root").as_str()));
+    assert_eq!(id.user_id(), Some(account.as_str()));
 
     let out = admin.get_session_token().duration_seconds(900).send().await.unwrap();
     let c = out.credentials().unwrap();
@@ -131,18 +132,25 @@ async fn get_session_token_and_caller_identity() {
     assert_eq!(got.body.collect().await.unwrap().into_bytes().as_ref(), b"hi");
     assert!(s3.list_buckets().send().await.unwrap().buckets().iter().any(|b| b.name() == Some("gst")));
 
-    // The session is its key.
+    // The session is its key's (here the root user's).
     let temp = sts(&t.endpoint, c.access_key_id(), c.secret_access_key(), Some(c.session_token()));
     let id = temp.get_caller_identity().send().await.unwrap();
-    assert_eq!(id.user_id(), Some(ACCESS));
+    assert_eq!(id.user_id(), Some(account.as_str()));
     assert_eq!(sts_code(temp.get_session_token().send().await), "AccessDenied", "no sessions of sessions");
 
     // A temporary key without its token is unknown; a permanent key with a token is refused.
     assert_eq!(failed(put(&s3_raw(&t.endpoint, c.access_key_id(), c.secret_access_key(), None), "gst", "b").await), "InvalidAccessKeyId");
     assert_eq!(failed(put(&s3_raw(&t.endpoint, ACCESS, SECRET, Some(c.session_token())), "gst", "b").await), "InvalidToken");
-    // Durations are bounded.
+    // Durations are bounded: the root user's sessions to an hour, an account key's to 36 h.
     assert_eq!(sts_code(admin.get_session_token().duration_seconds(899).send().await), "ValidationError");
-    assert_eq!(sts_code(admin.get_session_token().duration_seconds(129_601).send().await), "ValidationError");
+    assert_eq!(sts_code(admin.get_session_token().duration_seconds(3601).send().await), "ValidationError");
+    let key = t.store.create_key("app", Permission::Write, None).await.unwrap();
+    let app = sts(&t.endpoint, &key.id, &key.secret, None);
+    let long = app.get_session_token().duration_seconds(129_600).send().await.unwrap();
+    assert!((long.credentials().unwrap().expiration().secs() - (now_s() + 129_600)).abs() <= 2);
+    assert_eq!(sts_code(app.get_session_token().duration_seconds(129_601).send().await), "ValidationError");
+    let id = app.get_caller_identity().send().await.unwrap();
+    assert_eq!(id.arn(), Some(format!("arn:aws:iam::{account}:user/{}", key.id).as_str()), "an account key is a user named by its id");
 }
 
 #[tokio::test]
@@ -194,7 +202,8 @@ async fn assume_role_with_a_session_policy() {
     assert_eq!(code(s3p.create_bucket().bucket("newone").send().await), "AccessDenied", "write isn't admin");
     let id = sts(&t.endpoint, plain.credentials().unwrap().access_key_id(), plain.credentials().unwrap().secret_access_key(), Some(plain.credentials().unwrap().session_token())).get_caller_identity().send().await.unwrap();
     assert_eq!(id.arn(), Some(format!("arn:aws:sts::{account}:assumed-role/uploader/plain").as_str()));
-    // Role sessions can't assume roles (no chaining).
+    // A control-plane trust names permanent keys: a role session isn't one (chaining needs an
+    // IAM trust policy naming the role; see tests/iam.rs).
     let chained = sts(&t.endpoint, plain.credentials().unwrap().access_key_id(), plain.credentials().unwrap().secret_access_key(), Some(plain.credentials().unwrap().session_token()));
     assert_eq!(sts_code(chained.assume_role().role_arn(&arn).role_session_name("again").send().await), "AccessDenied");
 
@@ -208,11 +217,16 @@ async fn assume_role_with_a_session_policy() {
     assert_eq!(sts_code(client.assume_role().role_arn(&arn).role_session_name("x1").policy("{\"Statement\": 5}").send().await), "MalformedPolicyDocument");
     let with_principal = json!({ "Statement": [{ "Effect": "Allow", "Principal": "*", "Action": "s3:*", "Resource": "*" }] });
     assert_eq!(sts_code(client.assume_role().role_arn(&arn).role_session_name("x1").policy(with_principal.to_string()).send().await), "MalformedPolicyDocument");
+    // Managed session policies (PolicyArns) narrow the session like an inline one.
     let arns = aws_sdk_sts::types::PolicyDescriptorType::builder().arn("arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess").build();
-    let e1 = client.assume_role().role_arn(&arn).role_session_name("x1").policy_arns(arns).send().await.unwrap_err();
-    assert_eq!(e1.as_service_error().and_then(|s| s.code()), Some("ValidationError"));
-    assert!(format!("{e1:?}").contains("PolicyArns"), "says why");
-    assert_eq!(sts_code(client.assume_role().role_arn(&arn).role_session_name("x1").serial_number("arn:aws:iam::1:mfa/x").token_code("123456").send().await), "ValidationError");
+    let ro = client.assume_role().role_arn(&arn).role_session_name("ro").policy_arns(arns).send().await.unwrap();
+    let s3ro = s3_with(&t.endpoint, ro.credentials().unwrap());
+    s3ro.get_object().bucket("photos").key("uploads/a.jpg").send().await.unwrap();
+    assert_eq!(put(&s3ro, "photos", "uploads/b.jpg").await.unwrap_err(), "AccessDenied", "read-only");
+    let missing = aws_sdk_sts::types::PolicyDescriptorType::builder().arn(format!("arn:aws:iam::{account}:policy/nope")).build();
+    assert_eq!(sts_code(client.assume_role().role_arn(&arn).role_session_name("x1").policy_arns(missing).send().await), "InvalidParameterValue");
+    // MFA: an account key has no MFA device (see tests/iam.rs for MFA).
+    assert_eq!(sts_code(client.assume_role().role_arn(&arn).role_session_name("x1").serial_number("arn:aws:iam::1:mfa/x").token_code("123456").send().await), "AccessDenied");
 }
 
 #[tokio::test]
@@ -261,25 +275,33 @@ async fn expiry_revocation_and_key_rotation() {
     assert_eq!(put(&s3_with(&t.endpoint, &c), "rev", "a").await.unwrap_err(), "ExpiredToken");
     e.clock.store(now_s() * 1000, Ordering::SeqCst);
 
-    // Revoking a role's sessions: the old ones stop, new ones work.
+    // Revoking a role's sessions (AWSRevokeOlderSessions): the old ones are denied, as on AWS;
+    // new ones work.
     let old = assume("s2").await;
     put(&s3_with(&t.endpoint, &old), "rev", "b").await.unwrap();
     t.store.revoke_role_sessions("app").await.unwrap();
-    assert_eq!(put(&s3_with(&t.endpoint, &old), "rev", "b").await.unwrap_err(), "InvalidToken");
+    assert_eq!(put(&s3_with(&t.endpoint, &old), "rev", "b").await.unwrap_err(), "AccessDenied");
+    assert!(t.store.role("app").unwrap().unwrap().iam.policies.contains_key("AWSRevokeOlderSessions"));
     e.advance_s(1);
     let new = assume("s3").await;
     put(&s3_with(&t.endpoint, &new), "rev", "b").await.unwrap();
 
-    // Changing the role invalidates its sessions too, and so does deleting it.
+    // Changing the role changes what its sessions may do (they act with it as it is now).
+    let mut read_only = spec(Permission::Read, &[&key.id]);
+    read_only.policy = None;
+    t.store.update_role("app", read_only).await.unwrap();
+    assert_eq!(put(&s3_with(&t.endpoint, &new), "rev", "b").await.unwrap_err(), "AccessDenied", "now read-only");
+    s3_with(&t.endpoint, &new).list_objects_v2().bucket("rev").send().await.unwrap();
     t.store.update_role("app", spec(Permission::Write, &[&key.id])).await.unwrap();
-    assert_eq!(put(&s3_with(&t.endpoint, &new), "rev", "b").await.unwrap_err(), "InvalidToken");
+    put(&s3_with(&t.endpoint, &new), "rev", "b").await.unwrap();
+    // Deleting it leaves its sessions with nothing.
     let again = assume("s4").await;
     put(&s3_with(&t.endpoint, &again), "rev", "b").await.unwrap();
     t.store.delete_role("app").await.unwrap();
-    assert_eq!(put(&s3_with(&t.endpoint, &again), "rev", "b").await.unwrap_err(), "InvalidToken");
+    assert_eq!(put(&s3_with(&t.endpoint, &again), "rev", "b").await.unwrap_err(), "AccessDenied");
     // A role of the same name is a different role.
     t.store.create_role("app", spec(Permission::Write, &[&key.id])).await.unwrap();
-    assert_eq!(put(&s3_with(&t.endpoint, &again), "rev", "b").await.unwrap_err(), "InvalidToken");
+    assert_eq!(put(&s3_with(&t.endpoint, &again), "rev", "b").await.unwrap_err(), "AccessDenied");
 
     // GetSessionToken sessions die with their key.
     let gst = client.get_session_token().send().await.unwrap().credentials().unwrap().clone();
@@ -294,8 +316,13 @@ async fn expiry_revocation_and_key_rotation() {
     assert_eq!(put(&s3_with(&t.endpoint, &before), "rev", "d").await.unwrap_err(), "InvalidToken", "retired after two rotations");
     put(&s3_with(&t.endpoint, &mid), "rev", "d").await.unwrap();
 
+    assert_eq!(put(&s3_with(&t.endpoint, &gst), "rev", "c").await.unwrap_err(), "InvalidToken", "sealed with a retired key");
+
+    // A GetSessionToken session has nothing once its key is gone.
+    let gst = client.get_session_token().send().await.unwrap().credentials().unwrap().clone();
+    put(&s3_with(&t.endpoint, &gst), "rev", "c").await.unwrap();
     t.store.delete_key(&key.id).await.unwrap();
-    assert_eq!(put(&s3_with(&t.endpoint, &gst), "rev", "c").await.unwrap_err(), "InvalidToken");
+    assert_eq!(put(&s3_with(&t.endpoint, &gst), "rev", "c").await.unwrap_err(), "AccessDenied");
 }
 
 #[tokio::test]

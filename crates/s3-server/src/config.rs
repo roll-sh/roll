@@ -225,7 +225,8 @@ pub(crate) async fn route(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
         "accelerate" if put => put_accelerate(ctx, bucket, body).await,
         "requestPayment" if get => {
             reading(ctx, bucket)?;
-            response::ok_xml(Doc::new("RequestPaymentConfiguration").el("Payer", "BucketOwner").clone_finish("RequestPaymentConfiguration"))
+            let payer = if ctx.access(&bucket.name)?.requester_pays { "Requester" } else { "BucketOwner" };
+            response::ok_xml(Doc::new("RequestPaymentConfiguration").el("Payer", payer).clone_finish("RequestPaymentConfiguration"))
         }
         "requestPayment" if put => put_request_payment(ctx, bucket, body).await,
         "replication" if get => crate::replication::get(ctx, bucket),
@@ -458,11 +459,14 @@ async fn put_accelerate(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
 async fn put_request_payment(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     writing(ctx, bucket)?;
     let n = read_xml(ctx, body, "RequestPaymentConfiguration").await?;
+    // Requester Pays: requests from other accounts pay their own request and egress charges
+    // (see `access.rs`).
     match n.text_of("Payer").map(str::trim) {
-        Some("BucketOwner") => ok(),
-        Some("Requester") => Err(S3Error::msg(Code::NotImplemented, "Requester Pays is not supported: the bucket owner pays for requests and egress.")),
-        _ => Err(malformed()),
+        Some("BucketOwner") => save(ctx, bucket, kind::REQUEST_PAYMENT, None).await?,
+        Some("Requester") => save(ctx, bucket, kind::REQUEST_PAYMENT, Some("Requester")).await?,
+        _ => return Err(malformed()),
     }
+    ok()
 }
 
 // ---- Analytics, metrics, inventory, intelligent-tiering ----

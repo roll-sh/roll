@@ -540,7 +540,7 @@ async fn presigning_key_survives_restarts_and_is_hidden() {
     let c1 = Control::new(store.clone(), ControlConfig::local("http://127.0.0.1:1")).await.unwrap();
     store.create_bucket("b-1", Default::default()).await.unwrap();
     let (u1, _) = c1.presign("b-1", "k", "GET", 60).unwrap();
-    assert!(c1.keys().unwrap().is_empty());
+    assert!(c1.keys(&store.default_account_id()).unwrap().is_empty());
     assert!(store.keys().unwrap().iter().any(|k| k.id == s3_control::control::CONTROL_KEY_ID));
     let secret = |s: &Store| s.access_key(s3_control::control::CONTROL_KEY_ID).unwrap().unwrap().secret;
     let first = secret(&store);
@@ -551,7 +551,7 @@ async fn presigning_key_survives_restarts_and_is_hidden() {
     assert_eq!(first, secret(&store2));
     let (u2, _) = c2.presign("b-1", "k", "GET", 60).unwrap();
     assert!(u1.contains(s3_control::control::CONTROL_KEY_ID) && u2.contains(s3_control::control::CONTROL_KEY_ID));
-    assert!(matches!(c2.delete_key(s3_control::control::CONTROL_KEY_ID).await, Err(s3_control::ControlError::NotFound(_))));
+    assert!(matches!(c2.delete_key(&store2.default_account_id(), s3_control::control::CONTROL_KEY_ID).await, Err(s3_control::ControlError::NotFound(_))));
 }
 
 #[tokio::test]

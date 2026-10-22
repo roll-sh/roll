@@ -5,25 +5,28 @@
 //! (`Allow`/`Deny`), `Principal` or `NotPrincipal`, `Action` or `NotAction`, `Resource` or
 //! `NotResource`, and an optional `Condition`.
 //!
-//! **Principals.** roll has no IAM: the principals are roll access keys, all in one account
-//! (the deployment). A principal matches a request when it is:
+//! **Principals.** A principal matches a request when it is:
 //!
 //! - `"*"` or `{"AWS": "*"}`: anyone, including anonymous requests;
-//! - the access key id itself (`{"AWS": "RK…"}`), or its ARN `arn:aws:iam::<account>:user/<key id>`;
-//! - the account, `<account>` or `arn:aws:iam::<account>:root`: any roll key;
-//! - `{"CanonicalUser": …}` with the deployment's owner id (any key) or a key's canonical id.
+//! - the requester itself: an IAM user's ARN (`arn:aws:iam::<account>:user/<path><name>`), a
+//!   roll account key's id (`{"AWS": "RK…"}`) or `arn:aws:iam::<account>:user/<key id>`, a role
+//!   session's `arn:aws:sts::<account>:assumed-role/<role>/<session>`, a federated user's
+//!   `arn:aws:sts::<account>:federated-user/<name>`, a key's canonical user id;
+//! - the requester's role, `arn:aws:iam::<account>:role/<path><name>` (any session of it);
+//! - the requester's account, `<account>`, `arn:aws:iam::<account>:root` or the account's
+//!   canonical user id: as on AWS this *delegates* to the account (its root user, and whoever
+//!   its own policies allow).
 //!
-//! - a role, `arn:aws:iam::<account>:role/<name>`, or one session of it,
-//!   `arn:aws:sts::<account>:assumed-role/<name>/<session>`: that role's temporary credentials
-//!   (a `GetSessionToken` session is its key).
-//!
-//! `<account>` is the deployment's 12-digit account id ([`s3_store::Store::account_id`]).
+//! [`Policy::evaluate`] says which of these matched ([`Via`]), since AWS treats them
+//! differently: an allow naming the requester itself isn't bounded by its session policies or
+//! permissions boundary, one naming its role is, and one naming its account needs the account's
+//! identity policies to allow too (unless the requester is the account's root).
 //! `Service` and `Federated` principals are accepted (log-delivery policies use them) and never
-//! match a request.
+//! match an S3 request.
 //!
-//! **Evaluation** ([`Policy::evaluate`]): a matching `Deny` wins; otherwise a matching `Allow`
-//! allows; otherwise the policy has no say. Missing condition keys make a condition false,
-//! except for the negated operators, `…IfExists` and `Null`, as in IAM.
+//! **Evaluation**: a matching `Deny` wins; otherwise a matching `Allow` allows; otherwise the
+//! policy has no say. Missing condition keys make a condition false, except for the negated
+//! operators, `…IfExists` and `Null`, as in IAM.
 
 use s3_proto::{Code, S3Error};
 use serde_json::Value;
@@ -40,6 +43,17 @@ pub(crate) enum Decision {
     Deny,
 }
 
+/// What a document is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// A bucket policy (principals, S3 actions and resources).
+    Resource,
+    /// An identity policy (no principals; any service's actions).
+    Identity,
+    /// A trust policy (principals, any service's actions, no resources).
+    Trust,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Effect {
     Allow,
@@ -50,7 +64,7 @@ enum Effect {
 enum Principals {
     /// `"*"` or `{"AWS": "*"}`.
     Anyone,
-    Some { aws: Vec<String>, canonical: Vec<String> },
+    Some { aws: Vec<String>, canonical: Vec<String>, federated: Vec<String> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,6 +212,37 @@ struct Condition {
     /// Lowercase (condition keys are case-insensitive).
     key: String,
     values: Vec<String>,
+    /// Policy variables (`${aws:username}`) are substituted (`Version` 2012-10-17).
+    vars: bool,
+}
+
+/// Substitute IAM policy variables: `${key}` with the request's value of the condition key,
+/// `${key, 'default'}` with a default, `${*}`, `${?}` and `${$}` with those characters. `None`
+/// when a variable has no value (what it's in then matches nothing, as in IAM).
+fn expand(s: &str, ctx: &dyn Context) -> Option<String> {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("${") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 2..];
+        let Some(j) = after.find('}') else {
+            out.push_str(&rest[i..]);
+            return Some(out);
+        };
+        let inner = &after[..j];
+        let (key, default) = match inner.split_once(',') {
+            Some((k, d)) => (k.trim(), Some(d.trim().trim_matches('\''))),
+            None => (inner.trim(), None),
+        };
+        let v = match key {
+            "*" | "?" | "$" => Some(key.to_string()),
+            k => ctx.values(&k.to_ascii_lowercase()).and_then(|v| v.into_iter().next()).or_else(|| default.map(str::to_string)),
+        };
+        out.push_str(&v?);
+        rest = &after[j + 1..];
+    }
+    out.push_str(rest);
+    Some(out)
 }
 
 impl Condition {
@@ -210,7 +255,15 @@ impl Condition {
         let Some(have) = have else {
             return self.if_exists || self.op.negated() || self.set == SetOp::ForAllValues;
         };
-        let matches_one = |h: &str| self.values.iter().any(|w| self.op.test(h, w));
+        // Policy variables in the values (a value whose variable is missing matches nothing).
+        let expanded: Vec<String>;
+        let values: &[String] = if self.vars && self.values.iter().any(|v| v.contains("${")) {
+            expanded = self.values.iter().filter_map(|v| expand(v, ctx)).collect();
+            &expanded
+        } else {
+            &self.values
+        };
+        let matches_one = |h: &str| values.iter().any(|w| self.op.test(h, w));
         let positive = |h: &str| if self.op.negated() { !matches_one(h) } else { matches_one(h) };
         match self.set {
             SetOp::Single => have.first().is_some_and(|h| positive(h)),
@@ -230,26 +283,76 @@ struct Statement {
     resource: Option<Vec<String>>,
     not_resource: Option<Vec<String>>,
     conditions: Vec<Condition>,
+    /// Policy variables are substituted in resources and condition values.
+    vars: bool,
 }
 
 /// Who's asking.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Principal {
     Anonymous,
-    Key {
-        id: String,
-        /// The key's canonical user id.
-        canonical: String,
-    },
-    /// A role session: its temporary key, and the role and assumed-role ARNs it answers to.
-    Session { id: String, canonical: String, arns: Vec<String> },
+    /// An authenticated requester.
+    Known(Box<Requester>),
 }
 
-/// The deployment the policy belongs to.
-#[derive(Clone, Debug)]
-pub(crate) struct Account {
-    pub id: String,
-    pub owner: String,
+/// An authenticated requester, as resource policies and ACLs see it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Requester {
+    /// Its account's 12-digit id and canonical user id.
+    pub account: String,
+    pub account_canonical: String,
+    /// The account's root user (or a session of it).
+    pub root: bool,
+    /// Ids and ARNs naming exactly this requester.
+    pub direct: Vec<String>,
+    /// Canonical user ids naming exactly this requester (a roll key's).
+    pub direct_canonical: Vec<String>,
+    /// Its role's ARN (role sessions).
+    pub role: Option<String>,
+    /// The OIDC provider ARN of a web identity (`AssumeRoleWithWebIdentity` trust policies'
+    /// `Federated` principals).
+    pub federated: Option<String>,
+}
+
+impl Principal {
+    pub fn requester(&self) -> Option<&Requester> {
+        match self {
+            Principal::Known(r) => Some(r),
+            Principal::Anonymous => None,
+        }
+    }
+}
+
+/// How an `Allow` named the requester (AWS evaluates them differently).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Via {
+    /// Its account (`<account>`, `arn:aws:iam::<account>:root`, the account's canonical id):
+    /// delegated to the account's own policies.
+    Account,
+    /// Its role (bounded by its session policies and permissions boundary).
+    Role,
+    /// Itself, or anyone (`*`).
+    Direct,
+}
+
+/// A policy's say on a request.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Verdict {
+    pub deny: bool,
+    /// The most direct way a matching `Allow` named the requester.
+    pub allow: Option<Via>,
+}
+
+impl Verdict {
+    pub fn decision(self) -> Decision {
+        if self.deny {
+            Decision::Deny
+        } else if self.allow.is_some() {
+            Decision::Allow
+        } else {
+            Decision::None
+        }
+    }
 }
 
 /// Condition values of the request.
@@ -259,16 +362,36 @@ pub(crate) trait Context {
 }
 
 impl Principals {
-    fn matches(&self, who: &Principal, account: &Account) -> bool {
-        let Principals::Some { aws, canonical } = self else { return true };
-        let (id, key_canonical, arns) = match who {
-            Principal::Key { id, canonical } => (id, canonical, &[][..]),
-            Principal::Session { id, canonical, arns } => (id, canonical, arns.as_slice()),
-            Principal::Anonymous => return aws.iter().any(|a| a == "*"),
+    fn matches(&self, who: &Principal) -> Option<Via> {
+        let Principals::Some { aws, canonical, federated } = self else { return Some(Via::Direct) };
+        let r = match who {
+            Principal::Known(r) => r,
+            Principal::Anonymous => return aws.iter().any(|a| a == "*").then_some(Via::Direct),
         };
-        let user_arn = format!("arn:aws:iam::{}:user/{id}", account.id);
-        let root_arn = format!("arn:aws:iam::{}:root", account.id);
-        aws.iter().any(|a| a == "*" || a == id || *a == user_arn || *a == root_arn || *a == account.id || arns.contains(a)) || canonical.iter().any(|c| *c == account.owner || c == key_canonical)
+        let account = if r.root { Via::Direct } else { Via::Account };
+        let root_arn = format!("arn:aws:iam::{}:root", r.account);
+        let mut best: Option<Via> = None;
+        let mut see = |v: Via| best = best.max(Some(v));
+        for a in aws {
+            if a == "*" || r.direct.iter().any(|d| d == a) {
+                see(Via::Direct);
+            } else if r.role.as_deref() == Some(a.as_str()) {
+                see(Via::Role);
+            } else if *a == r.account || *a == root_arn {
+                see(account);
+            }
+        }
+        for c in canonical {
+            if r.direct_canonical.iter().any(|d| d == c) {
+                see(Via::Direct);
+            } else if *c == r.account_canonical {
+                see(account);
+            }
+        }
+        if r.federated.as_ref().is_some_and(|f| federated.contains(f)) {
+            see(Via::Direct);
+        }
+        best
     }
 
     fn anyone(&self) -> bool {
@@ -319,6 +442,7 @@ fn principals(v: &Value) -> Result<Principals, S3Error> {
         Value::Object(m) if !m.is_empty() => {
             let mut aws = Vec::new();
             let mut canonical = Vec::new();
+            let mut federated = Vec::new();
             for (k, v) in m {
                 let vals = strings(v, "Principal")?;
                 match k.as_str() {
@@ -337,11 +461,13 @@ fn principals(v: &Value) -> Result<Principals, S3Error> {
                         canonical.extend(vals.into_iter().map(|c| c.to_ascii_lowercase()));
                     }
                     // Accepted, never matches a roll request.
-                    "Service" | "Federated" => {}
+                    "Service" => {}
+                    // OIDC providers (web identities in trust policies).
+                    "Federated" => federated.extend(vals),
                     _ => return Err(malformed("Invalid principal in policy")),
                 }
             }
-            Ok(Principals::Some { aws, canonical })
+            Ok(Principals::Some { aws, canonical, federated })
         }
         _ => Err(malformed("Invalid principal in policy")),
     }
@@ -406,14 +532,22 @@ impl Policy {
     /// any resource; other services' actions are accepted and never match). At most `max`
     /// bytes.
     pub(crate) fn parse_identity(doc: &[u8], max: usize) -> Result<Self, S3Error> {
-        Self::parse_as(doc, None, true, max)
+        Self::parse_as(doc, None, Mode::Identity, max)
+    }
+
+    /// Parse a role's trust policy (`AssumeRolePolicyDocument`): principals, `sts:` actions,
+    /// no resources.
+    pub(crate) fn parse_trust(doc: &[u8], max: usize) -> Result<Self, S3Error> {
+        Self::parse_as(doc, None, Mode::Trust, max)
     }
 
     fn parse_for(doc: &[u8], bucket: Option<&str>) -> Result<Self, S3Error> {
-        Self::parse_as(doc, bucket, false, MAX_POLICY_BYTES)
+        Self::parse_as(doc, bucket, Mode::Resource, MAX_POLICY_BYTES)
     }
 
-    fn parse_as(doc: &[u8], bucket: Option<&str>, identity: bool, max: usize) -> Result<Self, S3Error> {
+    fn parse_as(doc: &[u8], bucket: Option<&str>, mode: Mode, max: usize) -> Result<Self, S3Error> {
+        let identity = mode == Mode::Identity;
+        let any_service = mode != Mode::Resource;
         if doc.len() > max {
             return Err(malformed("Policy exceeds the maximum allowed document size."));
         }
@@ -428,11 +562,13 @@ impl Policy {
                 return Err(malformed(format!("Unknown field {k}")));
             }
         }
-        match top.get("Version") {
-            None => {}
-            Some(Value::String(s)) if s == "2012-10-17" || s == "2008-10-17" => {}
+        // Policy variables only exist in 2012-10-17 policies, as in IAM.
+        let vars = match top.get("Version") {
+            None => false,
+            Some(Value::String(s)) if s == "2012-10-17" => true,
+            Some(Value::String(s)) if s == "2008-10-17" => false,
             Some(_) => return Err(malformed("Invalid policy version")),
-        }
+        };
         let stmts: Vec<&Value> = match top.get("Statement") {
             Some(Value::Array(a)) if !a.is_empty() => a.iter().collect(),
             Some(o @ Value::Object(_)) => vec![o],
@@ -477,8 +613,8 @@ impl Policy {
             }
             for a in action.iter().chain(not_action.iter()).flatten() {
                 match a.split_once(':') {
-                    // Another service's action in an identity policy (`sts:…`, `kms:…`).
-                    Some((svc, name)) if identity && !svc.eq_ignore_ascii_case("s3") => {
+                    // Another service's action in an identity or trust policy (`sts:…`, `kms:…`).
+                    Some((svc, name)) if any_service && !svc.eq_ignore_ascii_case("s3") => {
                         if svc.is_empty() || !svc.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') || name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'*' || b == b'?') {
                             return Err(malformed("Policy has invalid action"));
                         }
@@ -486,8 +622,15 @@ impl Policy {
                     _ => validate_action(a)?,
                 }
             }
-            let resource = m.get("Resource").map(|v| strings(v, "Resource")).transpose()?;
+            let mut resource = m.get("Resource").map(|v| strings(v, "Resource")).transpose()?;
             let not_resource = m.get("NotResource").map(|v| strings(v, "NotResource")).transpose()?;
+            if mode == Mode::Trust {
+                // The role is the resource of a trust policy.
+                if resource.is_some() || not_resource.is_some() {
+                    return Err(malformed("Has prohibited field Resource"));
+                }
+                resource = Some(vec!["*".into()]);
+            }
             if resource.is_some() == not_resource.is_some() {
                 return Err(malformed("Missing required field Resource"));
             }
@@ -525,28 +668,49 @@ impl Policy {
                         if matches!(op, Op::Bool | Op::Null) && values.iter().any(|v| !v.eq_ignore_ascii_case("true") && !v.eq_ignore_ascii_case("false")) {
                             return Err(malformed(format!("{op_name} takes true or false")));
                         }
-                        conditions.push(Condition { op, set, if_exists, key: key.to_ascii_lowercase(), values });
+                        conditions.push(Condition { op, set, if_exists, key: key.to_ascii_lowercase(), values, vars });
                     }
                 }
             }
-            statements.push(Statement { effect, principal, not_principal, action, not_action, resource, not_resource, conditions });
+            statements.push(Statement { effect, principal, not_principal, action, not_action, resource, not_resource, conditions, vars });
         }
         Ok(Self { statements })
     }
 
-    /// The policy's say on `who` doing `action` on `resource` (an S3 ARN).
-    pub(crate) fn evaluate(&self, who: &Principal, account: &Account, action: &str, resource: &str, ctx: &dyn Context) -> Decision {
-        let mut allowed = false;
+    /// The policy's say on `who` doing `action` on `resource` (an ARN).
+    pub(crate) fn evaluate(&self, who: &Principal, action: &str, resource: &str, ctx: &dyn Context) -> Verdict {
+        let mut v = Verdict::default();
         for s in &self.statements {
-            if !s.applies(who, account, action, resource, ctx) {
-                continue;
-            }
+            let Some(via) = s.applies(who, action, resource, ctx) else { continue };
             match s.effect {
-                Effect::Deny => return Decision::Deny,
-                Effect::Allow => allowed = true,
+                Effect::Deny => {
+                    v.deny = true;
+                    return v;
+                }
+                Effect::Allow => v.allow = v.allow.max(Some(via)),
             }
         }
-        if allowed { Decision::Allow } else { Decision::None }
+        v
+    }
+
+    /// An identity policy's say (no principals): Deny, Allow or nothing.
+    pub(crate) fn decide(&self, action: &str, resource: &str, ctx: &dyn Context) -> Decision {
+        self.evaluate(&Principal::Anonymous, action, resource, ctx).decision()
+    }
+
+    /// The OIDC provider ARNs `Federated` principals name (a trust policy's web identities).
+    pub(crate) fn federated_principals(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for s in &self.statements {
+            if let Some(Principals::Some { federated, .. }) = &s.principal {
+                for f in federated {
+                    if !out.contains(f) {
+                        out.push(f.clone());
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// S3's rule: a policy is public if it allows anyone without pinning the request to fixed
@@ -593,23 +757,33 @@ impl Condition {
 }
 
 impl Statement {
-    fn applies(&self, who: &Principal, account: &Account, action: &str, resource: &str, ctx: &dyn Context) -> bool {
-        let principal_ok = match (&self.principal, &self.not_principal) {
-            (Some(p), _) => p.matches(who, account),
-            (None, Some(np)) => !np.matches(who, account),
-            _ => false,
-        };
+    fn applies(&self, who: &Principal, action: &str, resource: &str, ctx: &dyn Context) -> Option<Via> {
+        let via = match (&self.principal, &self.not_principal) {
+            (Some(p), _) => p.matches(who),
+            (None, Some(np)) => np.matches(who).is_none().then_some(Via::Direct),
+            _ => None,
+        }?;
         let action_ok = match (&self.action, &self.not_action) {
             (Some(a), _) => a.iter().any(|p| wildcard(p, action, true)),
             (None, Some(na)) => !na.iter().any(|p| wildcard(p, action, true)),
             _ => false,
         };
         let resource_ok = match (&self.resource, &self.not_resource) {
-            (Some(r), _) => r.iter().any(|p| resource_matches(p, resource)),
-            (None, Some(nr)) => !nr.iter().any(|p| resource_matches(p, resource)),
+            (Some(r), _) => r.iter().any(|p| self.resource_matches(p, resource, ctx)),
+            (None, Some(nr)) => !nr.iter().any(|p| self.resource_matches(p, resource, ctx)),
             _ => false,
         };
-        principal_ok && action_ok && resource_ok && self.conditions.iter().all(|c| c.holds(ctx))
+        (action_ok && resource_ok && self.conditions.iter().all(|c| c.holds(ctx))).then_some(via)
+    }
+}
+
+impl Statement {
+    /// A resource pattern, its policy variables substituted.
+    fn resource_matches(&self, pattern: &str, resource: &str, ctx: &dyn Context) -> bool {
+        if self.vars && pattern.contains("${") {
+            return expand(pattern, ctx).is_some_and(|p| resource_matches(&p, resource));
+        }
+        resource_matches(pattern, resource)
     }
 }
 
@@ -763,12 +937,85 @@ mod tests {
         Req(m)
     }
 
+    /// The account the test principals belong to.
+    struct Account;
+
     fn acct() -> Account {
-        Account { id: "123456789012".into(), owner: "a".repeat(64) }
+        Account
+    }
+
+    impl Policy {
+        /// [`Policy::evaluate`] as a decision.
+        fn eval(&self, who: &Principal, _: &Account, action: &str, resource: &str, ctx: &dyn Context) -> Decision {
+            self.evaluate(who, action, resource, ctx).decision()
+        }
+    }
+
+    const ACCOUNT: &str = "123456789012";
+
+    fn key_c(id: &str, canonical: &str) -> Principal {
+        Principal::Known(Box::new(Requester {
+            account: ACCOUNT.into(),
+            account_canonical: "a".repeat(64),
+            direct: vec![id.into(), format!("arn:aws:iam::{ACCOUNT}:user/{id}")],
+            direct_canonical: vec![canonical.into()],
+            ..Default::default()
+        }))
     }
 
     fn key(id: &str) -> Principal {
-        Principal::Key { id: id.into(), canonical: "b".repeat(64) }
+        key_c(id, &"b".repeat(64))
+    }
+
+    fn session_principal(role: &str, session: &str) -> Principal {
+        Principal::Known(Box::new(Requester { account: ACCOUNT.into(), account_canonical: "a".repeat(64), direct: vec![session.into()], role: Some(role.into()), ..Default::default() }))
+    }
+
+    #[test]
+    fn policy_variables() {
+        let p = Policy::parse_identity(
+            br#"{"Version":"2012-10-17","Statement":[
+                {"Effect":"Allow","Action":"s3:*","Resource":"arn:aws:s3:::home/${aws:username}/*"},
+                {"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::home","Condition":{"StringLike":{"s3:prefix":["${aws:username}/*", "${aws:PrincipalTag/team, 'none'}/*"]}}}]}"#,
+            4096,
+        )
+        .unwrap();
+        let alice = req(&[("aws:username", "alice"), ("s3:prefix", "alice/docs/")]);
+        assert_eq!(p.decide("s3:GetObject", "arn:aws:s3:::home/alice/a.txt", &alice), Decision::Allow);
+        assert_eq!(p.decide("s3:GetObject", "arn:aws:s3:::home/bob/a.txt", &alice), Decision::None);
+        assert_eq!(p.decide("s3:ListBucket", "arn:aws:s3:::home", &alice), Decision::Allow);
+        assert_eq!(p.decide("s3:ListBucket", "arn:aws:s3:::home", &req(&[("aws:username", "alice"), ("s3:prefix", "bob/")])), Decision::None);
+        assert_eq!(p.decide("s3:ListBucket", "arn:aws:s3:::home", &req(&[("s3:prefix", "none/x")])), Decision::Allow, "the default");
+        assert_eq!(p.decide("s3:GetObject", "arn:aws:s3:::home/x/a.txt", &req(&[])), Decision::None, "no username: no match");
+        // 2008-10-17 policies have no variables.
+        let old = Policy::parse_identity(br#"{"Version":"2008-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"arn:aws:s3:::home/${aws:username}/*"}]}"#, 4096).unwrap();
+        assert_eq!(old.decide("s3:GetObject", "arn:aws:s3:::home/alice/a.txt", &alice), Decision::None);
+    }
+
+    #[test]
+    fn how_principals_match() {
+        let r = req(&[]);
+        let allow = |p: serde_json::Value| policy(serde_json::json!({"Statement": [{"Effect": "Allow", "Principal": p, "Action": "s3:GetObject", "Resource": "arn:aws:s3:::bkt/*"}]}));
+        let via = |p: serde_json::Value, who: &Principal| allow(p).evaluate(who, "s3:GetObject", OBJ, &r).allow;
+        let user = key("RK1");
+        assert_eq!(via(serde_json::json!("*"), &user), Some(Via::Direct));
+        assert_eq!(via(serde_json::json!({"AWS": "RK1"}), &user), Some(Via::Direct));
+        assert_eq!(via(serde_json::json!({"AWS": ACCOUNT}), &user), Some(Via::Account), "the account delegates");
+        assert_eq!(via(serde_json::json!({"AWS": format!("arn:aws:iam::{ACCOUNT}:root")}), &user), Some(Via::Account));
+        assert_eq!(via(serde_json::json!({"AWS": "999999999999"}), &user), None, "another account");
+        let root = Principal::Known(Box::new(Requester { account: ACCOUNT.into(), root: true, ..Default::default() }));
+        assert_eq!(via(serde_json::json!({"AWS": ACCOUNT}), &root), Some(Via::Direct), "the root user is the account");
+        let s = session_principal("arn:aws:iam::123456789012:role/r", "arn:aws:sts::123456789012:assumed-role/r/s");
+        assert_eq!(via(serde_json::json!({"AWS": "arn:aws:iam::123456789012:role/r"}), &s), Some(Via::Role));
+        assert_eq!(via(serde_json::json!({"AWS": ["arn:aws:iam::123456789012:role/r", "arn:aws:sts::123456789012:assumed-role/r/s"]}), &s), Some(Via::Direct), "the most direct wins");
+        // Trust policies: Federated principals, no Resource.
+        let t = Policy::parse_trust(br#"{"Statement":[{"Effect":"Allow","Principal":{"Federated":"arn:aws:iam::123456789012:oidc-provider/x.example"},"Action":"sts:AssumeRoleWithWebIdentity"}]}"#, 4096).unwrap();
+        assert_eq!(t.federated_principals(), vec!["arn:aws:iam::123456789012:oidc-provider/x.example".to_string()]);
+        let web = Principal::Known(Box::new(Requester { account: ACCOUNT.into(), federated: Some("arn:aws:iam::123456789012:oidc-provider/x.example".into()), ..Default::default() }));
+        assert_eq!(t.evaluate(&web, "sts:AssumeRoleWithWebIdentity", "arn:aws:iam::123456789012:role/r", &r).allow, Some(Via::Direct));
+        assert_eq!(t.evaluate(&user, "sts:AssumeRoleWithWebIdentity", "arn:aws:iam::123456789012:role/r", &r).allow, None);
+        assert!(Policy::parse_trust(br#"{"Statement":[{"Effect":"Allow","Principal":"*","Action":"sts:AssumeRole","Resource":"*"}]}"#, 4096).is_err(), "no Resource in a trust policy");
+        assert!(Policy::parse_trust(br#"{"Statement":[{"Effect":"Allow","Action":"sts:AssumeRole"}]}"#, 4096).is_err(), "a principal is required");
     }
 
     fn policy(v: serde_json::Value) -> Policy {
@@ -804,10 +1051,10 @@ mod tests {
             "Statement": {"Sid": "PublicRead", "Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::bkt/*"}
         }));
         let r = req(&[]);
-        assert_eq!(p.evaluate(&Principal::Anonymous, &acct(), "s3:GetObject", OBJ, &r), Decision::Allow);
-        assert_eq!(p.evaluate(&key("RK1"), &acct(), "s3:GetObject", OBJ, &r), Decision::Allow);
-        assert_eq!(p.evaluate(&Principal::Anonymous, &acct(), "s3:PutObject", OBJ, &r), Decision::None);
-        assert_eq!(p.evaluate(&Principal::Anonymous, &acct(), "s3:ListBucket", "arn:aws:s3:::bkt", &r), Decision::None);
+        assert_eq!(p.eval(&Principal::Anonymous, &acct(), "s3:GetObject", OBJ, &r), Decision::Allow);
+        assert_eq!(p.eval(&key("RK1"), &acct(), "s3:GetObject", OBJ, &r), Decision::Allow);
+        assert_eq!(p.eval(&Principal::Anonymous, &acct(), "s3:PutObject", OBJ, &r), Decision::None);
+        assert_eq!(p.eval(&Principal::Anonymous, &acct(), "s3:ListBucket", "arn:aws:s3:::bkt", &r), Decision::None);
         assert!(p.is_public());
     }
 
@@ -820,19 +1067,19 @@ mod tests {
             ]
         }));
         let r = req(&[]);
-        assert_eq!(p.evaluate(&key("RKGOOD"), &acct(), "s3:PutObject", OBJ, &r), Decision::Allow);
-        assert_eq!(p.evaluate(&key("RKBAD"), &acct(), "s3:GetObject", OBJ, &r), Decision::Deny);
-        assert_eq!(p.evaluate(&key("RKWORSE"), &acct(), "s3:GetObject", OBJ, &r), Decision::Deny);
-        assert_eq!(p.evaluate(&key("RKBAD"), &acct(), "s3:ListBucket", "arn:aws:s3:::bkt", &r), Decision::Allow, "the Deny names objects only");
+        assert_eq!(p.eval(&key("RKGOOD"), &acct(), "s3:PutObject", OBJ, &r), Decision::Allow);
+        assert_eq!(p.eval(&key("RKBAD"), &acct(), "s3:GetObject", OBJ, &r), Decision::Deny);
+        assert_eq!(p.eval(&key("RKWORSE"), &acct(), "s3:GetObject", OBJ, &r), Decision::Deny);
+        assert_eq!(p.eval(&key("RKBAD"), &acct(), "s3:ListBucket", "arn:aws:s3:::bkt", &r), Decision::Allow, "the Deny names objects only");
         // Account-wide and canonical principals.
         let p = policy(serde_json::json!({"Statement": [
             {"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::123456789012:root"}, "Action": "s3:GetObject", "Resource": "arn:aws:s3:::bkt/*"},
             {"Effect": "Allow", "Principal": {"CanonicalUser": "b".repeat(64)}, "Action": "s3:PutObject", "Resource": "arn:aws:s3:::bkt/*"}
         ]}));
-        assert_eq!(p.evaluate(&key("RKANY"), &acct(), "s3:GetObject", OBJ, &r), Decision::Allow);
-        assert_eq!(p.evaluate(&Principal::Anonymous, &acct(), "s3:GetObject", OBJ, &r), Decision::None);
-        assert_eq!(p.evaluate(&key("RKANY"), &acct(), "s3:PutObject", OBJ, &r), Decision::Allow);
-        assert_eq!(p.evaluate(&Principal::Key { id: "RKX".into(), canonical: "c".repeat(64) }, &acct(), "s3:PutObject", OBJ, &r), Decision::None);
+        assert_eq!(p.eval(&key("RKANY"), &acct(), "s3:GetObject", OBJ, &r), Decision::Allow);
+        assert_eq!(p.eval(&Principal::Anonymous, &acct(), "s3:GetObject", OBJ, &r), Decision::None);
+        assert_eq!(p.eval(&key("RKANY"), &acct(), "s3:PutObject", OBJ, &r), Decision::Allow);
+        assert_eq!(p.eval(&key_c("RKX", &"c".repeat(64)), &acct(), "s3:PutObject", OBJ, &r), Decision::None);
         assert!(!p.is_public());
     }
 
@@ -843,10 +1090,10 @@ mod tests {
             {"Effect": "Allow", "Principal": "*", "Action": "s3:*", "NotResource": "arn:aws:s3:::bkt/private/*"}
         ]}));
         let r = req(&[]);
-        assert_eq!(p.evaluate(&key("RKADMIN"), &acct(), "s3:PutObject", OBJ, &r), Decision::Allow);
-        assert_eq!(p.evaluate(&key("RKOTHER"), &acct(), "s3:PutObject", OBJ, &r), Decision::Deny);
-        assert_eq!(p.evaluate(&key("RKOTHER"), &acct(), "s3:GetObject", OBJ, &r), Decision::Allow);
-        assert_eq!(p.evaluate(&key("RKOTHER"), &acct(), "s3:GetObject", "arn:aws:s3:::bkt/private/x", &r), Decision::None);
+        assert_eq!(p.eval(&key("RKADMIN"), &acct(), "s3:PutObject", OBJ, &r), Decision::Allow);
+        assert_eq!(p.eval(&key("RKOTHER"), &acct(), "s3:PutObject", OBJ, &r), Decision::Deny);
+        assert_eq!(p.eval(&key("RKOTHER"), &acct(), "s3:GetObject", OBJ, &r), Decision::Allow);
+        assert_eq!(p.eval(&key("RKOTHER"), &acct(), "s3:GetObject", "arn:aws:s3:::bkt/private/x", &r), Decision::None);
     }
 
     #[test]
@@ -864,7 +1111,7 @@ mod tests {
              "Condition": {"StringEqualsIgnoreCase": {"s3:ExistingObjectTag/class": "SECRET"}}}
         ]}));
         let anon = Principal::Anonymous;
-        let get = |pairs: &[(&'static str, &str)]| p.evaluate(&anon, &acct(), "s3:GetObject", OBJ, &req(pairs));
+        let get = |pairs: &[(&'static str, &str)]| p.eval(&anon, &acct(), "s3:GetObject", OBJ, &req(pairs));
         assert_eq!(get(&[("aws:sourceip", "10.1.2.3"), ("aws:securetransport", "true"), ("aws:currenttime", "2026-01-01T00:00:00Z")]), Decision::Allow);
         assert_eq!(get(&[("aws:sourceip", "192.168.1.7"), ("aws:securetransport", "true")]), Decision::Allow);
         assert_eq!(get(&[("aws:sourceip", "8.8.8.8"), ("aws:securetransport", "true")]), Decision::None);
@@ -872,14 +1119,14 @@ mod tests {
         assert_eq!(get(&[("aws:sourceip", "::ffff:10.1.2.3"), ("aws:securetransport", "true")]), Decision::Allow, "v4-mapped addresses");
         assert_eq!(get(&[("aws:sourceip", "10.1.2.3"), ("aws:securetransport", "true"), ("aws:currenttime", "2031-01-01T00:00:00Z")]), Decision::Deny);
         assert_eq!(get(&[("aws:sourceip", "10.1.2.3"), ("aws:securetransport", "true"), ("s3:existingobjecttag/class", "secret")]), Decision::Deny);
-        let list = |pairs: &[(&'static str, &str)]| p.evaluate(&anon, &acct(), "s3:ListBucket", "arn:aws:s3:::bkt", &req(pairs));
+        let list = |pairs: &[(&'static str, &str)]| p.eval(&anon, &acct(), "s3:ListBucket", "arn:aws:s3:::bkt", &req(pairs));
         assert_eq!(list(&[("s3:prefix", "home/x/"), ("s3:max-keys", "50")]), Decision::Allow);
         assert_eq!(list(&[("s3:prefix", "home/x/"), ("s3:max-keys", "50"), ("s3:delimiter", "/")]), Decision::Allow);
         assert_eq!(list(&[("s3:prefix", "home/x/"), ("s3:max-keys", "50"), ("s3:delimiter", "-")]), Decision::None);
         assert_eq!(list(&[("s3:prefix", "etc/"), ("s3:max-keys", "50")]), Decision::None);
         assert_eq!(list(&[("s3:prefix", "home/"), ("s3:max-keys", "500")]), Decision::None);
         assert_eq!(list(&[("s3:max-keys", "5")]), Decision::None, "a missing key fails a positive condition");
-        let put = |pairs: &[(&'static str, &str)]| p.evaluate(&anon, &acct(), "s3:PutObject", OBJ, &req(pairs));
+        let put = |pairs: &[(&'static str, &str)]| p.eval(&anon, &acct(), "s3:PutObject", OBJ, &req(pairs));
         assert_eq!(put(&[("s3:x-amz-acl", "public-read")]), Decision::Deny);
         assert_eq!(put(&[("s3:x-amz-acl", "private")]), Decision::None);
         assert_eq!(put(&[]), Decision::Deny, "negated operators hold when the key is missing");
@@ -894,12 +1141,12 @@ mod tests {
             {"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::bkt/*",
              "Condition": {"ForAnyValue:StringLike": {"aws:UserAgent": ["*curl*"]}}}
         ]}));
-        let put = |pairs: &[(&'static str, &str)]| p.evaluate(&Principal::Anonymous, &acct(), "s3:PutObject", OBJ, &req(pairs));
+        let put = |pairs: &[(&'static str, &str)]| p.eval(&Principal::Anonymous, &acct(), "s3:PutObject", OBJ, &req(pairs));
         assert_eq!(put(&[("s3:requestobjecttagkeys", "team"), ("s3:requestobjecttagkeys", "env"), ("s3:x-amz-server-side-encryption", "AES256")]), Decision::Allow);
         assert_eq!(put(&[("s3:requestobjecttagkeys", "team"), ("s3:requestobjecttagkeys", "cost"), ("s3:x-amz-server-side-encryption", "AES256")]), Decision::None);
         assert_eq!(put(&[("s3:x-amz-server-side-encryption", "AES256")]), Decision::Allow, "ForAllValues holds for no values");
         assert_eq!(put(&[("s3:requestobjecttagkeys", "team")]), Decision::None, "Null: false needs the key");
-        let get = |pairs: &[(&'static str, &str)]| p.evaluate(&Principal::Anonymous, &acct(), "s3:GetObject", OBJ, &req(pairs));
+        let get = |pairs: &[(&'static str, &str)]| p.eval(&Principal::Anonymous, &acct(), "s3:GetObject", OBJ, &req(pairs));
         assert_eq!(get(&[("aws:useragent", "curl/8.0")]), Decision::Allow);
         assert_eq!(get(&[("aws:useragent", "wget")]), Decision::None);
         assert_eq!(get(&[]), Decision::None);
@@ -970,15 +1217,15 @@ mod tests {
     fn role_and_session_principals() {
         let role = "arn:aws:iam::123456789012:role/uploader";
         let session = "arn:aws:sts::123456789012:assumed-role/uploader/web-1";
-        let who = Principal::Session { id: "RTX".into(), canonical: "d".repeat(64), arns: vec![role.into(), session.into()] };
+        let who = session_principal(role, session);
         let r = req(&[]);
         let allow = |p: serde_json::Value| policy(serde_json::json!({"Statement": [{"Effect": "Allow", "Principal": p, "Action": "s3:GetObject", "Resource": "arn:aws:s3:::bkt/*"}]}));
-        assert_eq!(allow(serde_json::json!({"AWS": role})).evaluate(&who, &acct(), "s3:GetObject", OBJ, &r), Decision::Allow);
-        assert_eq!(allow(serde_json::json!({"AWS": session})).evaluate(&who, &acct(), "s3:GetObject", OBJ, &r), Decision::Allow);
-        assert_eq!(allow(serde_json::json!({"AWS": "arn:aws:sts::123456789012:assumed-role/uploader/web-2"})).evaluate(&who, &acct(), "s3:GetObject", OBJ, &r), Decision::None);
-        assert_eq!(allow(serde_json::json!({"AWS": "arn:aws:iam::123456789012:role/other"})).evaluate(&who, &acct(), "s3:GetObject", OBJ, &r), Decision::None);
-        assert_eq!(allow(serde_json::json!({"AWS": "123456789012"})).evaluate(&who, &acct(), "s3:GetObject", OBJ, &r), Decision::Allow, "the account");
-        assert_eq!(allow(serde_json::json!({"AWS": role})).evaluate(&key("RK1"), &acct(), "s3:GetObject", OBJ, &r), Decision::None, "a key isn't the role");
+        assert_eq!(allow(serde_json::json!({"AWS": role})).eval(&who, &acct(), "s3:GetObject", OBJ, &r), Decision::Allow);
+        assert_eq!(allow(serde_json::json!({"AWS": session})).eval(&who, &acct(), "s3:GetObject", OBJ, &r), Decision::Allow);
+        assert_eq!(allow(serde_json::json!({"AWS": "arn:aws:sts::123456789012:assumed-role/uploader/web-2"})).eval(&who, &acct(), "s3:GetObject", OBJ, &r), Decision::None);
+        assert_eq!(allow(serde_json::json!({"AWS": "arn:aws:iam::123456789012:role/other"})).eval(&who, &acct(), "s3:GetObject", OBJ, &r), Decision::None);
+        assert_eq!(allow(serde_json::json!({"AWS": "123456789012"})).eval(&who, &acct(), "s3:GetObject", OBJ, &r), Decision::Allow, "the account");
+        assert_eq!(allow(serde_json::json!({"AWS": role})).eval(&key("RK1"), &acct(), "s3:GetObject", OBJ, &r), Decision::None, "a key isn't the role");
         assert!(Policy::parse(serde_json::json!({"Statement": [{"Effect": "Allow", "Principal": {"AWS": "arn:aws:sts::1:assumed-role/*"}, "Action": "s3:*", "Resource": "*"}]}).to_string().as_bytes(), "bkt").is_err(), "no wildcards in ARNs");
     }
 
@@ -992,11 +1239,11 @@ mod tests {
         .unwrap();
         let red = req(&[("aws:principaltag/team", "red")]);
         let blue = req(&[("aws:principaltag/team", "blue")]);
-        assert_eq!(p.evaluate(&Principal::Anonymous, &acct(), "s3:GetObject", "arn:aws:s3:::bkt/up/a", &red), Decision::Allow);
-        assert_eq!(p.evaluate(&Principal::Anonymous, &acct(), "s3:PutObject", "arn:aws:s3:::bkt/up/a", &red), Decision::Allow);
-        assert_eq!(p.evaluate(&Principal::Anonymous, &acct(), "s3:PutObject", "arn:aws:s3:::bkt/up/a", &blue), Decision::Deny);
-        assert_eq!(p.evaluate(&Principal::Anonymous, &acct(), "s3:GetObject", "arn:aws:s3:::bkt/other", &red), Decision::None);
-        assert_eq!(p.evaluate(&Principal::Anonymous, &acct(), "s3:GetObject", "arn:aws:s3:::other/up/a", &red), Decision::None, "any bucket can be named; only matching ones allow");
+        assert_eq!(p.eval(&Principal::Anonymous, &acct(), "s3:GetObject", "arn:aws:s3:::bkt/up/a", &red), Decision::Allow);
+        assert_eq!(p.eval(&Principal::Anonymous, &acct(), "s3:PutObject", "arn:aws:s3:::bkt/up/a", &red), Decision::Allow);
+        assert_eq!(p.eval(&Principal::Anonymous, &acct(), "s3:PutObject", "arn:aws:s3:::bkt/up/a", &blue), Decision::Deny);
+        assert_eq!(p.eval(&Principal::Anonymous, &acct(), "s3:GetObject", "arn:aws:s3:::bkt/other", &red), Decision::None);
+        assert_eq!(p.eval(&Principal::Anonymous, &acct(), "s3:GetObject", "arn:aws:s3:::other/up/a", &red), Decision::None, "any bucket can be named; only matching ones allow");
         // A principal, an unknown S3 action, a malformed action and size are refused.
         assert!(id(serde_json::json!({"Statement": [{"Effect": "Allow", "Principal": "*", "Action": "s3:*", "Resource": "*"}]})).is_err());
         assert!(id(serde_json::json!({"Statement": [{"Effect": "Allow", "NotPrincipal": {"AWS": "x"}, "Action": "s3:*", "Resource": "*"}]})).is_err());

@@ -37,7 +37,9 @@ impl From<StoreError> for ControlError {
             | StoreError::PreconditionFailed
             | StoreError::ObjectLocked(_)
             | StoreError::InvalidBucketState(_)
-            | StoreError::Conflict(_) => Self::Conflict(e.to_string()),
+            | StoreError::Conflict(_)
+            | StoreError::LimitExceeded(_)
+            | StoreError::DeleteConflict(_) => Self::Conflict(e.to_string()),
             StoreError::InvalidRequest(_) => Self::Invalid(e.to_string()),
             StoreError::InvalidPart(_)
             | StoreError::InvalidPartOrder
@@ -184,14 +186,40 @@ pub struct Usage {
     pub objects: u64,
     pub daily: Vec<DailyUsage>,
     pub cost: Cost,
+    /// Requests and egress on this bucket that requesters paid for (Requester Pays); not in
+    /// `cost`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billed_to_requesters: Option<RequesterCharges>,
+}
+
+/// Requester Pays charges: requests and egress billed to the requester's account.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct RequesterCharges {
+    pub class_a: u64,
+    pub class_b: u64,
+    pub egress_internet_bytes: u64,
+    pub egress_internal_bytes: u64,
+    pub cost: Cost,
+    /// The accounts charged (or, for what an account paid, the account itself).
+    pub accounts: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct UsageAll {
     pub days: i64,
+    /// The account this is for.
+    pub account: String,
+    /// The account's bill: its buckets less what requesters paid, plus what it paid as a
+    /// requester.
     pub cost: Cost,
     pub daily: Vec<DailyUsage>,
     pub buckets: Vec<Usage>,
+    /// What the account paid as a requester on other accounts' Requester Pays buckets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub as_requester: Option<RequesterCharges>,
+    /// What requesters paid on the account's buckets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billed_to_requesters: Option<RequesterCharges>,
 }
 
 fn round(v: f64) -> f64 {
@@ -240,8 +268,11 @@ impl Control {
         (json!({ "configurations": cfg.configurations, "event_bridge": cfg.event_bridge, "webhook_secret": secret }), !cfg.is_empty())
     }
 
-    pub fn info(&self) -> Result<Value> {
+    /// The deployment, as `account` sees it.
+    pub fn info(&self, account: &str) -> Result<Value> {
         let st = self.store.stats()?;
+        let a = self.store.require_account(account)?;
+        let mine = self.store.buckets_of(account)?;
         Ok(json!({
             "endpoint": self.cfg.endpoint,
             "region": self.cfg.region,
@@ -250,13 +281,16 @@ impl Control {
             "storage": self.store.describe(),
             "storage_class": self.cfg.storage_class.as_deref().unwrap_or("LOCAL"),
             "recover_days_default": self.store.cfg.recover_days_default,
-            "owner_id": self.store.owner_id(),
-            "account_id": self.store.account_id(),
+            "owner_id": a.canonical,
+            "account_id": a.id,
+            "account": a,
+            "default_account_id": self.store.default_account_id(),
             "block_public_access": self.store.cfg.block_public_access,
             "pricing": self.cfg.pricing,
-            "buckets": st.buckets,
-            "objects": st.objects,
-            "bytes": st.bytes,
+            "buckets": mine.len(),
+            "objects": mine.iter().map(|b| b.objects).sum::<u64>(),
+            "bytes": mine.iter().map(|b| b.bytes).sum::<u64>(),
+            "deployment": { "accounts": self.store.accounts()?.len(), "buckets": st.buckets, "objects": st.objects, "bytes": st.bytes },
             "scrub": { "last_at": st.scrub.last_at, "missing": st.scrub.missing, "mismatched": st.scrub.mismatched },
         }))
     }
@@ -322,13 +356,17 @@ impl Control {
     }
 
     /// Delete an object (to the trash, or behind a delete marker in a versioned bucket), or with
-    /// `version_id` that version for good (to the trash; never one under Object Lock).
+    /// `version_id` that version for good (to the trash; never one under Object Lock, nor in a
+    /// bucket with MFA Delete: that takes the S3 API's `x-amz-mfa`).
     pub async fn delete_object(&self, bucket: &str, key: &str, version_id: Option<&str>) -> Result<DeleteOutcome> {
         let missing = || ControlError::NotFound(format!("no object {key} in {bucket}"));
         match version_id {
             Some(v) => {
                 if !s3_proto::versioning::valid_version_id(v) {
                     return Err(ControlError::Invalid(format!("invalid version id {v}")));
+                }
+                if self.mfa_delete(bucket)? {
+                    return Err(ControlError::Conflict(format!("bucket {bucket} has MFA Delete on: delete versions through the S3 API with x-amz-mfa")));
                 }
                 let o = self.store.delete_object_version(bucket, key, Some(v), None, false).await?;
                 if !o.existed {
@@ -421,12 +459,26 @@ impl Control {
         Ok(json!({ "objects": entries, "next_cursor": next }))
     }
 
-    /// Keys as the API shows them (the control plane's own key is hidden).
-    pub fn keys(&self) -> Result<Vec<AccessKey>> {
-        Ok(self.store.keys()?.into_iter().filter(|k| k.id != CONTROL_KEY_ID).collect())
+    /// Whether a bucket has MFA Delete on.
+    pub fn mfa_delete(&self, bucket: &str) -> Result<bool> {
+        Ok(self.store.bucket_config(bucket, s3_store::config::kind::MFA_DELETE, "")?.as_deref() == Some("Enabled"))
     }
 
-    pub async fn create_key(&self, name: &str, permission: &str, buckets: Option<Vec<String>>) -> Result<AccessKey> {
+    /// A bucket of `account` (another account's is as missing as one that doesn't exist).
+    pub fn bucket_in(&self, account: &str, name: &str) -> Result<Bucket> {
+        let b = self.store.bucket(name)?;
+        if b.account_id != account {
+            return Err(StoreError::NoSuchBucket(name.to_string()).into());
+        }
+        Ok(b)
+    }
+
+    /// An account's keys as the API shows them (the control plane's own key is hidden).
+    pub fn keys(&self, account: &str) -> Result<Vec<AccessKey>> {
+        Ok(self.store.keys_of(account)?.into_iter().filter(|k| k.id != CONTROL_KEY_ID).collect())
+    }
+
+    pub async fn create_key(&self, account: &str, name: &str, permission: &str, buckets: Option<Vec<String>>) -> Result<AccessKey> {
         let p = Permission::parse(permission).ok_or_else(|| ControlError::Invalid("permission must be read, write or admin".into()))?;
         if let Some(bs) = &buckets {
             if bs.is_empty() {
@@ -436,11 +488,12 @@ impl Control {
                 s3_store::validate::bucket_name(b)?;
             }
         }
-        Ok(self.store.create_key(name, p, buckets).await?)
+        Ok(self.store.create_key_in(account, name, p, buckets).await?)
     }
 
-    pub async fn delete_key(&self, id: &str) -> Result<()> {
-        if id == CONTROL_KEY_ID {
+    pub async fn delete_key(&self, account: &str, id: &str) -> Result<()> {
+        let mine = self.store.access_key(id)?.is_some_and(|k| k.account == account);
+        if id == CONTROL_KEY_ID || !mine {
             return Err(ControlError::NotFound(format!("no access key {id}")));
         }
         Ok(self.store.delete_key(id).await?)
@@ -520,24 +573,78 @@ impl Control {
             objects: b.objects,
             daily,
             cost,
+            billed_to_requesters: None,
         }
     }
 
-    pub fn usage(&self, bucket: &str, days: i64) -> Result<Usage> {
+    pub fn usage(&self, account: &str, bucket: &str, days: i64) -> Result<Usage> {
         let days = days.clamp(1, 366);
-        let b = self.store.bucket(bucket)?;
+        let b = self.bucket_in(account, bucket)?;
         let rows = self.store.usage(Some(&b.id), &self.since_day(days))?;
-        Ok(self.bucket_usage(&b, &rows.iter().collect::<Vec<_>>(), days))
+        let mut u = self.bucket_usage(&b, &rows.iter().collect::<Vec<_>>(), days);
+        let paid = self.store.usage_paid(None, Some(&b.id), &self.since_day(days))?;
+        u.billed_to_requesters = (!paid.is_empty()).then(|| self.requester_charges(&paid, days));
+        Ok(u)
     }
 
-    /// Every bucket, and the total (which includes buckets deleted within the window).
-    pub fn usage_all(&self, days: i64) -> Result<UsageAll> {
+    /// Requests and egress billed to requesters (Requester Pays), priced.
+    fn requester_charges(&self, rows: &[s3_store::PaidUsageDay], days: i64) -> RequesterCharges {
+        let as_usage: Vec<UsageDay> = rows
+            .iter()
+            .map(|r| UsageDay { bucket_id: r.bucket_id.clone(), day: r.day.clone(), class_a: r.class_a, class_b: r.class_b, egress_internet: r.egress_internet, egress_internal: r.egress_internal, ..Default::default() })
+            .collect();
+        let (_, cost, [a, b, _, ei, en], _) = self.price(&as_usage.iter().collect::<Vec<_>>(), days, 0);
+        let mut accounts: Vec<String> = rows.iter().map(|r| r.payer.clone()).collect();
+        accounts.sort();
+        accounts.dedup();
+        RequesterCharges { class_a: a, class_b: b, egress_internet_bytes: ei, egress_internal_bytes: en, cost: Cost { projected_month_usd: 0.0, ..cost }, accounts }
+    }
+
+    /// Every bucket of `account`, and the account's total: its buckets' storage, requests and
+    /// egress (the default account's total includes buckets deleted within the window), less
+    /// what requesters paid (Requester Pays), plus what the account paid as a requester on other
+    /// accounts' buckets.
+    pub fn usage_all(&self, account: &str, days: i64) -> Result<UsageAll> {
         let days = days.clamp(1, 366);
-        let rows = self.store.usage(None, &self.since_day(days))?;
-        let buckets = self.store.buckets()?;
+        let since = self.since_day(days);
+        let rows = self.store.usage(None, &since)?;
+        let all = self.store.buckets()?;
+        let buckets: Vec<&Bucket> = all.iter().filter(|b| b.account_id == account).collect();
+        let default = account == self.store.default_account_id();
+        let mine = |r: &&UsageDay| buckets.iter().any(|b| b.id == r.bucket_id) || (default && !all.iter().any(|b| b.id == r.bucket_id));
         let per = buckets.iter().map(|b| self.bucket_usage(b, &rows.iter().filter(|r| r.bucket_id == b.id).collect::<Vec<_>>(), days)).collect();
         let stored: u64 = buckets.iter().map(|b| b.bytes + b.trash_bytes + b.version_bytes).sum();
-        let (daily, cost, _, _) = self.price(&rows.iter().collect::<Vec<_>>(), days, stored);
-        Ok(UsageAll { days, cost, daily, buckets: per })
+        // What it paid as a requester counts as its own traffic.
+        let paid = self.store.usage_paid(Some(account), None, &since)?;
+        let paid_rows: Vec<UsageDay> = paid
+            .iter()
+            .map(|r| UsageDay { bucket_id: r.bucket_id.clone(), day: r.day.clone(), class_a: r.class_a, class_b: r.class_b, egress_internet: r.egress_internet, egress_internal: r.egress_internal, ..Default::default() })
+            .collect();
+        let total: Vec<&UsageDay> = rows.iter().filter(mine).chain(paid_rows.iter()).collect();
+        let (daily, cost, _, _) = self.price(&total, days, stored);
+        let charged_by_others = {
+            let ids: Vec<&str> = buckets.iter().map(|b| b.id.as_str()).collect();
+            let rows: Vec<s3_store::PaidUsageDay> = self.store.usage_paid(None, None, &since)?.into_iter().filter(|r| ids.contains(&r.bucket_id.as_str())).collect();
+            (!rows.is_empty()).then(|| self.requester_charges(&rows, days))
+        };
+        Ok(UsageAll {
+            days,
+            account: account.to_string(),
+            cost,
+            daily,
+            buckets: per,
+            as_requester: (!paid.is_empty()).then(|| self.requester_charges(&paid, days)),
+            billed_to_requesters: charged_by_others,
+        })
+    }
+
+    /// Every account's totals.
+    pub fn usage_accounts(&self, days: i64) -> Result<Vec<Value>> {
+        let mut out = Vec::new();
+        for a in self.store.accounts()? {
+            let u = self.usage_all(&a.id, days)?;
+            out.push(json!({ "account_id": a.id, "name": a.name, "cost": u.cost, "as_requester": u.as_requester, "billed_to_requesters": u.billed_to_requesters }));
+        }
+        Ok(out)
     }
 }

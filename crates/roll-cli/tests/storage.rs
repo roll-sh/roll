@@ -1242,14 +1242,19 @@ async fn roles_and_sessions() {
     assert!(t.fail(&["roles", "create", "bad", "--policy", "{not json"]).await.contains("JSON"));
     assert!(t.fail(&["roles", "update", "web"]).await.contains("nothing to change"));
 
-    // Updating, revoking and deleting end the sessions.
-    let updated = t.ok(&["roles", "update", "web", "--all-buckets", "--max-session", "1h"]).await;
-    assert!(updated.contains("no longer work"), "{updated}");
+    // Updating a role changes what its sessions may do (as on AWS); revoking denies them.
+    let updated = t.ok(&["roles", "update", "web", "--permission", "read", "--max-session", "1h"]).await;
+    assert!(updated.contains("act with the new settings"), "{updated}");
     let err = s3.put_object().bucket("uploads").key("y").body(b"y".to_vec().into()).send().await.unwrap_err();
-    assert!(format!("{err:?}").contains("InvalidToken"), "{err:?}");
+    assert!(format!("{err:?}").contains("AccessDenied"), "now read-only: {err:?}");
+    s3.get_object().bucket("uploads").key("from-session.txt").send().await.unwrap();
+    t.ok(&["roles", "update", "web", "--permission", "write", "--all-buckets"]).await;
+    s3.put_object().bucket("uploads").key("y").body(b"y".to_vec().into()).send().await.unwrap();
     let r = t.json(&["roles", "show", "web"]).await;
-    assert_eq!((r["buckets"].clone(), r["max_session_s"].as_i64(), r["generation"].as_i64()), (Value::Null, Some(3600), Some(2)));
+    assert_eq!((r["buckets"].clone(), r["max_session_s"].as_i64(), r["generation"].as_i64()), (Value::Null, Some(3600), Some(3)));
     assert!(t.ok(&["roles", "revoke", "web"]).await.contains("revoked"));
+    let err = s3.put_object().bucket("uploads").key("z").body(b"z".to_vec().into()).send().await.unwrap_err();
+    assert!(format!("{err:?}").contains("AccessDenied"), "revoked: {err:?}");
     assert!(t.ok(&["sessions", "rotate-key"]).await.contains("sealed with key"));
     assert_eq!(t.ok(&["roles", "delete", "google"]).await.trim(), "deleted role google");
     assert!(t.fail(&["roles", "show", "google"]).await.contains("no role"));

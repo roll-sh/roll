@@ -13,18 +13,19 @@ implementations use: `test_s3.py` and `test_headers.py` without the tests AWS it
 (`fails_on_aws`) and without Ceph's extensions (append, S3 Select, IAM/STS/SNS, cloud tiering,
 lifecycle transitions between storage classes, RGW's logging journal and rollover).
 
-**426 of 647 tests pass (65.9%; one more is skipped by the suite).** Every other one is listed with its reason in
+**435 of 647 tests pass (67.3%; one more is skipped by the suite).** The suite's "alt" and
+"tenant" users are real separate accounts. Every other test is listed with its reason in
 [`tests/s3-conformance/expected.txt`](../../tests/s3-conformance/expected.txt), and the script
 fails if anything changes either way:
 
 | tests | why they don't pass |
 |---|---|
-| 78 | **S3's current defaults, which the suite predates.** New buckets are `BucketOwnerEnforced` (ACLs off), as on S3 since April 2023, so tests that set ACLs without `ObjectOwnership` get `InvalidBucketAclWithObjectOwnership`/`AccessControlListNotSupported`, as they would on S3. `GetBucketEncryption` returns the default `AES256` rule. |
+| 87 | **S3's current defaults, which the suite predates.** New buckets are `BucketOwnerEnforced` (ACLs off), as on S3 since April 2023, so tests that set ACLs without `ObjectOwnership` get `InvalidBucketAclWithObjectOwnership`/`AccessControlListNotSupported`, and objects another account writes belong to the bucket owner, as they would on S3. `GetBucketEncryption` returns the default `AES256` rule. |
 | 62 | **The test environment.** SSE-KMS needs AWS KMS behind the backing bucket (`NotImplemented` on a local directory), and SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3). On an AWS S3 backend these behave as on S3. |
-| 34 | **The suite.** Expectations specific to Ceph RGW (error codes S3 doesn't use, `x-amz-delete-marker: false`, its accelerated lifecycle clock, dropping `TargetGrants`) and tests that can't fail as written (botocore re-signs after the test changes the `Authorization` header). |
-| 22 | **Other accounts and tenants.** roll has one account per deployment; the suite's "alt" user is a roll key scoped to no bucket. Tests that need objects owned by another account, buckets the other account creates, or RGW tenants can't pass. BitTorrent isn't supported (S3 dropped it in 2024). |
+| 36 | **The suite.** Expectations specific to Ceph RGW (error codes S3 doesn't use, `x-amz-delete-marker: false`, its accelerated lifecycle clock, dropping `TargetGrants`, tenant-qualified bucket names like `tenant:bucket`, which AWS doesn't have) and tests that can't fail as written (botocore re-signs after the test changes the `Authorization` header). |
+| 1 | **BitTorrent** isn't supported (S3 dropped it in 2024). |
 | 15 | **Deliberate (reliability).** A version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted until then; S3 destroys the version at once. |
-| 9 | **roll answers as S3 does where RGW differs:** a wrong SSE-C key is `403 AccessDenied`, `GetBucketPolicyStatus` without a policy is `NoSuchBucketPolicy`. |
+| 10 | **roll answers as S3 does where RGW differs:** a wrong SSE-C key is `403 AccessDenied`, `GetBucketPolicyStatus` without a policy is `NoSuchBucketPolicy`, a policy repeating a `Sid` is `MalformedPolicy`, a logging target another account owns is `InvalidTargetBucketForLogging`. |
 
 ## Addressing and auth
 
@@ -44,10 +45,12 @@ fails if anything changes either way:
 | Presigned POST policy (browser form upload) | ✅ SigV4 and SigV2 (`AWSAccessKeyId`, `signature`) |
 | Any region in the credential scope | ✅ accepted as given, like R2's `auto` |
 | Anonymous requests | what the bucket's policy or ACLs allow, and GET/HEAD of objects in `public` buckets |
-| Bucket policies | ✅ enforced; principals are roll access keys (see [Policies](#policies-acls-and-public-access)) |
+| Bucket policies | ✅ enforced; principals are accounts, IAM users, roles, sessions and roll access keys (see [Policies](#policies-acls-and-public-access)) |
+| Multiple accounts | ✅ each with its own 12-digit id, canonical id, buckets, keys, IAM entities (see [Accounts](#accounts)) |
+| `x-amz-expected-bucket-owner`, `x-amz-source-expected-bucket-owner` | ✅ compared with the bucket owner's account id |
 | Website endpoint (`<bucket>.<website domain>`) | ✅ when `ROLL_S3_WEBSITE_DOMAIN` is set |
-| STS temporary credentials (`x-amz-security-token`, `AWS_SESSION_TOKEN`) | ✅ `GetSessionToken`, `AssumeRole`, `AssumeRoleWithWebIdentity`, `GetCallerIdentity` on the same endpoint (see [STS](#sts-temporary-credentials)) |
-| IAM users, groups, managed policies | ❌ use roll access keys (`read`, `write`, `admin`, optionally scoped to buckets), roles and bucket policies |
+| STS temporary credentials (`x-amz-security-token`, `AWS_SESSION_TOKEN`) | ✅ `GetSessionToken`, `AssumeRole`, `AssumeRoleWithWebIdentity`, `GetFederationToken`, `GetCallerIdentity` on the same endpoint (see [STS](#sts-temporary-credentials)) |
+| IAM users, groups, roles, managed policies, MFA | ✅ the IAM query API on the same endpoint (see [IAM](#iam)); roll access keys with a permission level keep working |
 
 ## Operations
 
@@ -55,12 +58,12 @@ fails if anything changes either way:
 
 | operation | status |
 |---|---|
-| ListBuckets | ✅ filtered to the key's buckets; `max-buckets` and `continuation-token` pages, `prefix`, `bucket-region` |
-| CreateBucket, DeleteBucket (must be empty), HeadBucket | ✅ need an `admin` key. Creating a bucket you already have is a no-op `200` in `us-east-1` and `BucketAlreadyOwnedByYou` in other regions, as on S3 (S3 also resets the bucket's ACL; roll changes nothing). |
+| ListBuckets | ✅ the caller's account's buckets (a key scoped to buckets sees those); `max-buckets` and `continuation-token` pages, `prefix`, `bucket-region` |
+| CreateBucket, DeleteBucket (must be empty), HeadBucket | ✅ need `s3:CreateBucket` (an `admin` key, the root user, or an IAM policy). Bucket names are unique across the deployment: another account's name is `BucketAlreadyExists`; creating a bucket you already have is a no-op `200` in `us-east-1` and `BucketAlreadyOwnedByYou` in other regions, as on S3 (S3 also resets the bucket's ACL; roll changes nothing). |
 | GetBucketLocation | ✅ |
 | Get/Put/DeleteBucketCors | ✅ |
 | Get/Put/DeleteBucketLifecycleConfiguration | ✅ the full rule model: `Filter` (`Prefix`, `Tag`, `And`, `ObjectSizeGreaterThan`/`LessThan`) or the legacy `<Rule><Prefix>`; `Expiration` (`Days`, `Date`, `ExpiredObjectDeleteMarker`); `NoncurrentVersionExpiration` (`NoncurrentDays`, `NewerNoncurrentVersions`); `AbortIncompleteMultipartUpload`; `Transition` and `NoncurrentVersionTransition` (stored, see below). Validated like S3. |
-| Get/PutBucketVersioning | ✅ `Enabled` and `Suspended`. `MfaDelete=Enabled` is `NotImplemented` (there are no MFA devices; use Object Lock). |
+| Get/PutBucketVersioning | ✅ `Enabled` and `Suspended`, and MFA Delete (see [MFA](#mfa-and-mfa-delete)) |
 | ListObjectVersions | ✅ `prefix`, `delimiter`, `key-marker`, `version-id-marker`, `max-keys`, `encoding-type=url`, delete markers |
 | Get/PutObjectLockConfiguration | ✅ enable on a versioned bucket (or at CreateBucket with `x-amz-bucket-object-lock-enabled`), default retention in `Days` or `Years` |
 | ListObjectsV2, ListObjects (v1) | ✅ `prefix`, `delimiter`, `start-after`, continuation tokens, `max-keys`, `encoding-type=url` (a space is `%20`; S3 sends `+`; SDKs decode both) |
@@ -75,7 +78,7 @@ fails if anything changes either way:
 | Get/Put/DeleteBucketWebsite | ✅ served on the website endpoint |
 | Get/PutBucketLogging | ✅ server access logs delivered to the target bucket every 5 minutes, best effort |
 | Get/PutBucketAccelerateConfiguration | ✅ stored and returned; a no-op (there's one endpoint) |
-| Get/PutBucketRequestPayment | ✅ `BucketOwner`; `Requester` is `NotImplemented` |
+| Get/PutBucketRequestPayment | ✅ `BucketOwner` and `Requester` (see [Requester Pays](#requester-pays)) |
 | Get/Put/DeleteBucketReplication | ✅ between roll buckets, metadata-only (see [Replication](#replication)); a destination outside roll is `NotImplemented` |
 | Get/PutBucketNotificationConfiguration | ✅ Topic, Queue, CloudFunction and EventBridge configurations, event wildcards, `prefix`/`suffix` filter rules, `x-amz-skip-destination-validation`, `s3:TestEvent` (see [Event notifications](#event-notifications)) |
 | Inventory configurations (Get/Put/Delete/List) | ✅ reports generated Daily/Weekly as CSV (see [Inventory](#inventory-reports)); ORC and Parquet are `NotImplemented` |
@@ -162,15 +165,148 @@ Details:
 
 | feature | notes |
 |---|---|
-| MFA Delete | No MFA devices. Object Lock protects versions instead. |
 | Replication to buckets outside roll (real AWS S3 buckets, other deployments) | `NotImplemented`, with a message saying so. The backing bucket can be replicated by the operator. |
 | Replication Time Control, replica modification sync, `SourceSelectionCriteria` (SSE-KMS objects) | stored and returned, not acted on (replication between roll buckets is immediate, and copies no data) |
-| Requester Pays | |
 | ORC and Parquet inventory reports | `NotImplemented` when the configuration is put; CSV works |
 | Storage Class Analysis, CloudWatch request metrics | The configurations are stored, nothing is produced yet. |
 | S3 Select, Object Lambda | |
 | Torrent | |
 | Directory buckets (S3 Express) | |
+
+## Accounts
+
+A deployment holds any number of **accounts**, as AWS has accounts. Each has:
+
+- a **12-digit account id**: ARNs (`arn:aws:iam::<account>:…`), `x-amz-expected-bucket-owner`,
+  `aws:PrincipalAccount`, `aws:ResourceAccount`, `s3:ResourceAccount`, `GetCallerIdentity`;
+- a **canonical user id** (64 hex characters): `Owner` elements in ListBuckets, listings, ACLs;
+  ACL grants by `id=`;
+- a **display name**, and an optional **email** address (ACL grants by `emailAddress=`).
+
+The deployment's original owner is the **default account**: its canonical id is the canonical
+owner id the deployment always had, and its account id is derived from it as before, so existing
+ARNs, policies and expected-owner headers keep their meaning. Every existing bucket, key and role
+belongs to it. Accounts are managed with `/v1/storage/accounts` (see
+[architecture](architecture.md#control-plane-api-s3-control-v1storage)); creating one makes its
+root user's key too.
+
+- **Buckets** belong to the account that created them. Names are unique across the deployment
+  (as S3's are across AWS): another account's name is `BucketAlreadyExists`, your own
+  `BucketAlreadyOwnedByYou` (a no-op `200` in `us-east-1`). ListBuckets lists the caller's
+  account's buckets.
+- **Objects** have an owner account, decided by the bucket's Object Ownership exactly as on S3:
+  `BucketOwnerEnforced` (the default) the bucket owner; `BucketOwnerPreferred` the bucket owner
+  when written with `bucket-owner-full-control`, else the writer's account; `ObjectWriter` (or no
+  ownership controls) the writer's account. With ACLs on, the object's owner decides who reads it
+  and its ACL; the bucket owner's policy can deny but not grant on objects it doesn't own, and the
+  bucket owner can always delete them, as on S3.
+- **Cross-account access** works as on AWS: the other account's own side (its root user, or its
+  user's or role's policies) *and* the bucket's policy or ACL must allow it.
+- An account's **root user** is an account key with `admin` over every bucket (what
+  `ROLL_S3_ACCESS_KEY` and the control plane's account creation make). Like AWS's root user it may
+  do anything to its account's resources and call every IAM action; unlike AWS's it signs
+  requests with access keys (roll has no console).
+
+## IAM
+
+The IAM query API answers on the S3 endpoint, like STS: point an SDK's `iam` endpoint
+(`endpoint_url`, `AWS_ENDPOINT_URL_IAM`, or `AWS_ENDPOINT_URL`) at roll. `POST /` with
+`Action=…&Version=2010-05-08`, SigV4 with service `iam` and any region; IAM's XML responses and
+`<ErrorResponse>` errors with IAM's codes (`NoSuchEntity` 404, `EntityAlreadyExists` 409,
+`MalformedPolicyDocument` 400, `LimitExceeded` 409, `DeleteConflict` 409, `ValidationError`,
+`InvalidInput`, `AccessDenied` 403). Every call acts in the caller's account and needs
+`iam:<Action>` on the entity's ARN (the root user may do everything). Federated users can't call
+IAM, and `GetSessionToken` sessions only with MFA, as on AWS.
+
+| feature | status |
+|---|---|
+| Users: `CreateUser`, `GetUser`, `ListUsers`, `UpdateUser`, `DeleteUser`, `TagUser`, `UntagUser`, `ListUserTags` | ✅ paths, tags; names unique regardless of case; `DeleteUser` needs keys, policies, groups and MFA devices gone (`DeleteConflict`) |
+| Groups: `CreateGroup`, `GetGroup`, `ListGroups`, `DeleteGroup`, `AddUserToGroup`, `RemoveUserFromGroup`, `ListGroupsForUser` | ✅ |
+| Access keys: `CreateAccessKey`, `ListAccessKeys`, `UpdateAccessKey` (`Active`/`Inactive`), `DeleteAccessKey`, `GetAccessKeyLastUsed` | ✅ roll keys owned by users (two per user); an inactive key is `InvalidAccessKeyId`; the root user's own keys without `UserName` |
+| Inline policies: `Put/Get/List/Delete` `UserPolicy`, `GroupPolicy`, `RolePolicy` | ✅ documents returned URL-encoded, as IAM does; IAM's size quotas (2 048/5 120/10 240 characters per user/group/role) |
+| Managed policies: `CreatePolicy`, `GetPolicy`, `ListPolicies`, `DeletePolicy`, `CreatePolicyVersion`, `GetPolicyVersion`, `ListPolicyVersions`, `SetDefaultPolicyVersion`, `DeletePolicyVersion`, `ListEntitiesForPolicy` | ✅ five versions; AWS's `AmazonS3FullAccess` and `AmazonS3ReadOnlyAccess` are built in |
+| `Attach`/`Detach`/`ListAttached` `UserPolicies`, `GroupPolicies`, `RolePolicies` | ✅ ten per entity |
+| Permissions boundaries: `Put/DeleteUserPermissionsBoundary`, `Put/DeleteRolePermissionsBoundary`, `PermissionsBoundary` on create | ✅ |
+| Roles: `CreateRole`, `GetRole`, `ListRoles`, `UpdateRole`, `UpdateRoleDescription`, `UpdateAssumeRolePolicy`, `DeleteRole`, `TagRole`, `UntagRole`, `ListRoleTags` | ✅ trust policies (`AssumeRolePolicyDocument`) with `AWS` (accounts, users, roles) and `Federated` (OIDC providers) principals and conditions; control-plane roles show their trust as the equivalent document |
+| OIDC providers: `CreateOpenIDConnectProvider`, `GetOpenIDConnectProvider`, `ListOpenIDConnectProviders`, `DeleteOpenIDConnectProvider` | ✅ `AssumeRoleWithWebIdentity` verifies tokens with the provider's discovery document and client ids; thumbprints are stored (the provider's TLS certificate is checked by the usual trust roots) |
+| Virtual MFA devices | ✅ see [MFA](#mfa-and-mfa-delete) |
+| `GetAccountSummary`, `ListAccountAliases` | ✅ (no aliases) |
+| Login profiles, SSH keys, signing and server certificates, SAML providers, service-linked roles, instance profiles, access advisor, policy simulation | ❌ `InvalidAction` |
+
+**Evaluation** is AWS's
+([policy evaluation logic](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html),
+[for S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/how-s3-evaluates-access-control.html)):
+
+1. An explicit `Deny` in any policy refuses: identity policies, permissions boundary, session
+   policies, the bucket policy.
+2. The requester's own side: its identity policies (a user's own and its groups', or a role's)
+   allow, *bounded* by its permissions boundary and session policies (each must allow too).
+3. Same account: its own side allows, **or** a resource grant (bucket policy, ACL) names it
+   directly (`*`, its user or session ARN: not bounded), or names its role (bounded by the
+   session's policies and boundary). A grant naming only the account delegates to the
+   account's own policies.
+4. Another account: its own side **and** a resource grant must allow.
+
+Policies support every condition operator and key listed under [Policies](#policies-acls-and-public-access),
+`aws:PrincipalTag/<key>` from users' tags, and policy variables (`${aws:username}`,
+`${aws:userid}`, `${aws:PrincipalTag/team}`, `${key, 'default'}`) in resources and condition
+values of `2012-10-17` policies. Service control policies don't exist (there are no
+organizations).
+
+**roll permission levels** (account keys created with `/v1/storage/keys` or `roll storage keys`,
+and control-plane roles) keep working as a compatibility layer, each equivalent to an attached
+identity policy on the key's buckets (all of them without a scope):
+
+| level | equivalent policy |
+|---|---|
+| `read` | `s3:Get*`, `s3:List*` (reads, listings, reading bucket configuration) |
+| `write` | `read`, plus `s3:PutObject*`, `s3:DeleteObject*`, `s3:AbortMultipartUpload`, `s3:RestoreObject`, retention and legal holds |
+| `admin` | `s3:*` (with every bucket: the account's root user, including IAM) |
+
+A level grants S3 only, never `iam:` or `sts:` actions (except the root user). A key scoped to
+buckets learns nothing about other buckets (`AccessDenied` rather than `NoSuchBucket`), as
+before.
+
+## MFA and MFA Delete
+
+- **Virtual MFA devices** (TOTP, RFC 6238: SHA-1, 30-second steps, six digits):
+  `CreateVirtualMFADevice` returns `Base32StringSeed` and a `QRCodePNG` (an
+  `otpauth://totp/roll:<user>@<account>` code for authenticator apps); `EnableMFADevice` takes two
+  consecutive codes; `ResyncMFADevice`, `DeactivateMFADevice`, `ListMFADevices`,
+  `ListVirtualMFADevices`, `DeleteVirtualMFADevice` (a device in use is `DeleteConflict`). Without
+  `UserName`, `EnableMFADevice` enables the device for the caller, so the root user can have one
+  through the API (on AWS that's the console's job).
+- **Codes work once.** A code is accepted for the current 30-second step or the one either side
+  of it, and only if its step is newer than the last one accepted for the device, so a code can't
+  be replayed; the accepted step is stored durably before the request goes on. After 10 wrong
+  codes within 5 minutes a device refuses every code for the rest of those 5 minutes, so codes
+  can't be guessed.
+- **MFA-authenticated sessions:** `GetSessionToken` and `AssumeRole` take `SerialNumber` and
+  `TokenCode` (the caller's own device); their sessions set `aws:MultiFactorAuthPresent` (`true`)
+  and `aws:MultiFactorAuthAge`. Other sessions set `aws:MultiFactorAuthPresent` to `false`;
+  long-term keys set neither, as on AWS.
+- **MFA Delete:** `PutBucketVersioning` with `MfaDelete=Enabled` (or back to `Disabled`) takes the
+  bucket owner's root user and `x-amz-mfa: <serial> <code>` of its own device, as on S3. While it's
+  on, permanently deleting a version (`DeleteObject` or `DeleteObjects` with a version id) and any
+  `PutBucketVersioning` need `x-amz-mfa` too, from the bucket owner's account; missing or wrong is
+  `403 AccessDenied`. `GetBucketVersioning` shows `MfaDelete`. The control plane refuses to delete
+  versions of such a bucket or change its versioning (that takes the S3 API with `x-amz-mfa`).
+  Lifecycle expiration isn't affected (expired versions go to the trash).
+
+## Requester Pays
+
+`PutBucketRequestPayment` with `Payer=Requester` makes requests from **other accounts** pay
+their own request and data transfer charges, as on S3:
+
+- they must send `x-amz-request-payer: requester` (a header, or the query parameter of a
+  presigned URL's signed headers), else `403 AccessDenied`; anonymous requests are refused;
+- responses to them carry `x-amz-request-charged: requester`;
+- their requests (class A and B) and egress are metered to the requester's account
+  (`usage_payer`), not to the bucket; storage stays the bucket owner's;
+- the bucket owner's own account's requests are billed to the owner, as on S3.
+
+The control plane's usage shows both sides per account (`as_requester`, `billed_to_requesters`;
+`GET /v1/storage/usage?accounts=true` for every account).
 
 ## STS (temporary credentials)
 
@@ -181,27 +317,32 @@ responses and `<ErrorResponse>` errors.
 
 | feature | status |
 |---|---|
-| `GetSessionToken` | ✅ 900 s–36 h (default 12 h); the session acts as its key, with the key's current permission |
-| `AssumeRole` | ✅ roles trust roll keys; `DurationSeconds` 900 s up to the role's maximum (≤ 12 h) |
-| `AssumeRole` `Policy` (inline session policy) | ✅ at most 2 KB; narrows the role, never widens it |
-| `AssumeRole` `Tags`, `TransitiveTagKeys` | ✅ `aws:PrincipalTag/<key>` in policy conditions; at most 50 tags, 2 KB together |
-| `AssumeRole` `ExternalId`, `SourceIdentity` | ✅ the external id is required when the role sets one |
-| `AssumeRole` `PolicyArns` (managed session policies) | ❌ `ValidationError`: pass the policy inline |
-| `AssumeRoleWithWebIdentity` | ✅ OIDC ID tokens (RS256, ES256) from providers in the role's trust: Google, Auth0, Clerk, Cognito, GitHub Actions, Kubernetes service accounts, …; tags from `https://aws.amazon.com/tags` |
-| `GetCallerIdentity` | ✅ |
+| `GetSessionToken` | ✅ users and account keys 900 s–36 h (default 12 h), the root user 900 s–1 h; `SerialNumber`/`TokenCode` for MFA; the session acts as its key |
+| `AssumeRole` | ✅ a role's trust policy (accounts, users, roles; conditions such as `sts:ExternalId`, `aws:MultiFactorAuthPresent`, `aws:PrincipalTag`), or a control-plane role's trust (roll keys, an external id); another account's role needs the caller's own `sts:AssumeRole` permission too; `DurationSeconds` 900 s up to the role's maximum (≤ 12 h) |
+| Role chaining (a role session calling `AssumeRole`) | ✅ at most an hour (longer is `ValidationError`, as on AWS); transitive session tags and the source identity carry over |
+| `AssumeRole` `Policy`, `PolicyArns` (session policies) | ✅ inline (2 KB) and managed (up to 10, AWS's or the account's): they bound the role's identity policies, never widen them |
+| `AssumeRole` `Tags`, `TransitiveTagKeys`, `ExternalId`, `SourceIdentity`, `SerialNumber`/`TokenCode` | ✅ tags need `sts:TagSession` in a trust policy |
+| `AssumeRoleWithWebIdentity` | ✅ OIDC ID tokens (RS256, ES256) from providers in the role's trust: an IAM OIDC provider named by a `Federated` principal (with conditions on `<provider>:sub`/`:aud`), or a control-plane role's issuer list; Google, Auth0, Clerk, Cognito, GitHub Actions, Kubernetes service accounts, …; tags from `https://aws.amazon.com/tags` |
+| `GetFederationToken` | ✅ `Name`, `Policy`, `PolicyArns`, `Tags`, 900 s–36 h (root: 1 h); the caller's permissions bounded by the session policies (none: no permissions of its own); `arn:aws:sts::<account>:federated-user/<name>` |
+| `GetCallerIdentity` | ✅ the root user is `arn:aws:iam::<account>:root`, an account key `arn:aws:iam::<account>:user/<key id>` |
 | `x-amz-security-token` header, `X-Amz-Security-Token` in presigned URLs and POST forms | ✅ SigV4, SigV4a and SigV2 |
-| Errors | ✅ S3: `InvalidToken`, `ExpiredToken`, `InvalidAccessKeyId` (temporary key without its token); STS: `AccessDenied`, `ExpiredToken`, `ExpiredTokenException`, `InvalidIdentityToken`, `IDPCommunicationError`, `MalformedPolicyDocument`, `PackedPolicyTooLarge`, `ValidationError`, `InvalidClientTokenId` |
-| Role chaining (a role session calling `AssumeRole`) | ❌ `AccessDenied` |
-| MFA (`SerialNumber`, `TokenCode`) | ❌ `ValidationError` |
-| `AssumeRoleWithSAML`, `GetFederationToken`, `DecodeAuthorizationMessage`, `GetAccessKeyInfo`, `AssumeRoot` | ❌ `InvalidAction` |
+| Errors | ✅ S3: `InvalidToken` (a malformed, tampered or retired token), `ExpiredToken`, `InvalidAccessKeyId` (temporary key without its token), `AccessDenied` (a revoked session, or one whose role is gone, as on AWS); STS: `AccessDenied`, `ExpiredToken`, `ExpiredTokenException`, `InvalidIdentityToken`, `IDPCommunicationError`, `MalformedPolicyDocument`, `PackedPolicyTooLarge`, `ValidationError`, `InvalidParameterValue`, `InvalidClientTokenId` |
+| `AssumeRoleWithSAML`, `DecodeAuthorizationMessage`, `GetAccessKeyInfo`, `AssumeRoot` | ❌ `InvalidAction` |
 | `RegionDisabledException` | never: every region is accepted |
 
-**Roles** are roll's, managed with `/v1/storage/roles` and `roll storage roles …`: a trust
-(roll keys for `AssumeRole`; OIDC providers with an issuer, audiences and an optional subject
-pattern for `AssumeRoleWithWebIdentity`; an optional external id), a permission and bucket
-scope like a key's, an optional inline IAM policy, and a maximum session duration. There are no
-IAM trust policy documents: the trust is that structured list. `RoleArn` is
-`arn:aws:iam::<account id>:role/<name>`.
+**Sessions act with their role as it is now**, as on AWS: changing a role's policies (through
+IAM or `PATCH /v1/storage/roles`) changes what its sessions may do from the next request on;
+deleting a role leaves them with nothing (`AccessDenied`), and a new role of the same name is a
+different role. **Revocation** is AWS's: `roll storage roles revoke` (or
+`POST /v1/storage/roles/{name}/revoke`) adds the `AWSRevokeOlderSessions` inline policy, a
+`Deny` of everything for `aws:TokenIssueTime` before now, so older sessions get `AccessDenied` and
+new ones work; a deny on `aws:TokenIssueTime` you write yourself works the same way.
+
+**Control-plane roles** (`/v1/storage/roles`, `roll storage roles …`) are IAM roles too, with
+roll's extensions: a trust listing roll keys (and OIDC issuers), a permission level and bucket
+scope (an attached policy, in effect), and a `policy` that bounds their sessions like a
+permissions boundary. Through IAM they show their trust as the equivalent trust policy
+(`UpdateAssumeRolePolicy` replaces it with a real one).
 
 **Better than S3:**
 - A backend can mint a role's credentials without any STS client:
@@ -211,59 +352,60 @@ IAM trust policy documents: the trust is that structured list. `RoleArn` is
 - Browser apps can trade their users' Auth0, Clerk or Google ID tokens for scoped credentials
   directly (`AssumeRoleWithWebIdentity` is unsigned and answers CORS), with no signing key on
   the client.
-- Revocation is per role and immediate: `roll storage roles revoke <role>`, or changing or
-  deleting the role.
 
-**Differences from AWS:**
-- A session's policies (the role's inline policy and the session policy) bound everything it
-  does, even what a bucket policy grants to its assumed-role ARN; on AWS such a grant can go
-  beyond the session policy.
-- Changing a role (`PATCH`) ends its existing sessions; on AWS they continue with the new
-  permissions.
-- Revoked sessions (and sessions of deleted roles) get `InvalidToken`; on AWS they get
-  `AccessDenied` from the revocation policy.
-- `GetSessionToken` sessions follow their key's current permission, and end when the key is
-  deleted.
+**Differences from AWS** (each on purpose):
+- A `GetSessionToken` or `GetFederationToken` session has no permissions once the key it was
+  made with is deleted or deactivated (AWS keeps such sessions until they expire): taking a key
+  away takes its sessions away.
+- The root user may assume a control-plane role whose trust lists its key (a roll extension); a
+  role with an IAM trust policy refuses the root user, as on AWS.
+- Session tokens sealed with a session-token key retired by two rotations are `InvalidToken`.
 
 ## Policies, ACLs and public access
 
-roll has no IAM: requests are signed with roll access keys, and every key belongs to the
-deployment, which is the "account" that owns every bucket and object.
-
 **Ids.**
-- The **canonical owner id** is a 64-hex-char id created once per deployment and kept in its
-  metadata. It's the `Owner` in ListBuckets, listings (`fetch-owner`) and ACLs.
-- Each access key has a **canonical user id**: `sha256("roll canonical user\0<owner id>\0<access key id>")`
-  in hex. ACLs show grantees by it; grants accept it or the access key id itself.
-- The **account id** is 12 digits derived from the owner id, for IAM-style ARNs.
-- `GET /v1/storage` shows `owner_id` and `account_id`.
+- Every account has a 12-digit **account id** and a 64-hex-char **canonical user id** (see
+  [Accounts](#accounts)); `Owner` elements show the owning account's canonical id and display
+  name.
+- Each roll account key also has a **canonical user id**:
+  `sha256("roll canonical user\0<default account's canonical id>\0<access key id>")` in hex. ACLs
+  accept it (or the access key id itself) to grant one key.
+- `GET /v1/storage` shows the account's `owner_id` (canonical id) and `account_id`.
 
 **Bucket policy principals.**
 - `"*"` and `{"AWS": "*"}` mean anyone, including anonymous requests.
-- `{"AWS": "<access key id>"}` and `{"AWS": "arn:aws:iam::<account id>:user/<access key id>"}` mean that key.
-- `{"AWS": "<account id>"}` and `{"AWS": "arn:aws:iam::<account id>:root"}` mean any roll key.
-- `{"AWS": "arn:aws:iam::<account id>:role/<name>"}` means any session of that role, and
-  `{"AWS": "arn:aws:sts::<account id>:assumed-role/<name>/<session>"}` one session. A
-  `GetSessionToken` session is its key.
-- `{"CanonicalUser": …}` takes the owner id (any key) or a key's canonical user id.
-- `Service` and `Federated` principals are accepted and never match.
+- `{"AWS": "<account id>"}`, `{"AWS": "arn:aws:iam::<account id>:root"}` and
+  `{"CanonicalUser": "<account canonical id>"}` mean that account: its root user, and its users
+  and roles whose own policies allow it (delegation, as on AWS).
+- `{"AWS": "arn:aws:iam::<account id>:user/<path><name>"}` means an IAM user;
+  `{"AWS": "<access key id>"}` and `arn:aws:iam::<account id>:user/<access key id>` a roll account
+  key; `{"CanonicalUser": …}` with a key's canonical id that key.
+- `{"AWS": "arn:aws:iam::<account id>:role/<path><name>"}` means any session of that role (bounded
+  by its session policies), `{"AWS": "arn:aws:sts::<account id>:assumed-role/<name>/<session>"}`
+  one session (not bounded), `arn:aws:sts::<account id>:federated-user/<name>` a federated user.
+  A `GetSessionToken` session is its key.
+- `Service` principals are accepted and never match; `Federated` principals match web identities
+  in trust policies.
 
 **What policies support.**
 - `Version` `2012-10-17` or `2008-10-17`; `Statement` as one object or an array; `Sid`.
 - `Effect`; `Principal`/`NotPrincipal`; `Action`/`NotAction` with `s3:` wildcards;
-  `Resource`/`NotResource` with ARN wildcards (they must name the bucket).
+  `Resource`/`NotResource` with ARN wildcards (they must name the bucket); policy variables in
+  `2012-10-17` policies.
 - Every IAM condition operator (`String*`, `Numeric*`, `Date*`, `Bool`, `IpAddress`,
   `NotIpAddress`, `Arn*`, `Null`), with `…IfExists`, `ForAnyValue:` and `ForAllValues:`.
 - Condition keys:
   - `aws:SourceIp` (the peer address), `aws:SecureTransport` (only `X-Forwarded-Proto: https`
     from an internal proxy counts; roll itself speaks HTTP), `aws:CurrentTime`, `aws:EpochTime`,
     `aws:Referer`, `aws:UserAgent`
-  - `aws:username`/`aws:userid` (the access key id), `aws:PrincipalArn`, `aws:PrincipalAccount`,
-    `aws:PrincipalType`
-  - temporary credentials: `aws:PrincipalTag/<key>`, `aws:TokenIssueTime`, `aws:SourceIdentity`,
-    `aws:MultiFactorAuthPresent` (`false`), `aws:FederatedProvider`, `<provider>:sub` and
-    `<provider>:aud`; for role sessions `aws:PrincipalArn` is the role's ARN, `aws:userid` is
-    `<role id>:<session>` and `aws:PrincipalType` is `AssumedRole`, as on AWS
+  - `aws:PrincipalArn`, `aws:PrincipalAccount`, `aws:PrincipalType` (`Account`, `User`,
+    `AssumedRole`, `FederatedUser`, `Anonymous`), `aws:userid`, `aws:username`,
+    `aws:PrincipalTag/<key>` (a user's tags, or a session's), `aws:ResourceAccount`,
+    `s3:ResourceAccount`
+  - temporary credentials: `aws:TokenIssueTime`, `aws:SourceIdentity`,
+    `aws:MultiFactorAuthPresent`, `aws:MultiFactorAuthAge`, `aws:FederatedProvider`,
+    `<provider>:sub` and `<provider>:aud`; for role sessions `aws:PrincipalArn` is the role's
+    ARN and `aws:userid` is `<role id>:<session>`, as on AWS
   - `s3:prefix`, `s3:delimiter`, `s3:max-keys`, `s3:VersionId`, `s3:signatureversion`, `s3:authType`
   - every `s3:x-amz-*` request header (`s3:x-amz-acl`, `s3:x-amz-server-side-encryption`, …)
   - `s3:ExistingObjectTag/<key>`, `s3:RequestObjectTag/<key>`, `s3:RequestObjectTagKeys`
@@ -271,23 +413,27 @@ deployment, which is the "account" that owns every bucket and object.
 - Policies over 20 KB, unknown actions, resources outside the bucket and unknown operators are
   `MalformedPolicy`.
 
-**Evaluation.** A matching `Deny` refuses the request, whoever asks. Then the key's own
-permission (`read`/`write`/`admin`) allows it. Then a matching `Allow`, which can open a bucket
-to anonymous users or give keys more than their permission. Then ACL grants. Then the bucket's
-`public` flag (anonymous `GetObject`). Admin keys covering a bucket can always read, replace and
-delete its policy, like an AWS root user, so a policy can't lock its owner out.
+**Evaluation** is AWS's (see [IAM](#iam)). The bucket owner's root user (and its `admin` keys
+covering the bucket) can always read, replace and delete the bucket policy, so a policy can't
+lock its owner out; and, as on S3, only the bucket owner's account may (another account allowed
+by a policy gets `405 MethodNotAllowed`).
 
 **ACLs.** With `ObjectOwnership` `BucketOwnerPreferred` or `ObjectWriter` (set by
 `PutBucketOwnershipControls`, or `x-amz-object-ownership` on CreateBucket), ACLs work and are
-enforced: canned ACLs, `x-amz-grant-*` and `AccessControlPolicy` bodies, with the `AllUsers`,
-`AuthenticatedUsers` and `LogDelivery` groups and canonical users. Email grantees are
-`UnresolvableGrantByEmailAddress`. Copies don't take the source's ACL, as on S3.
+enforced: canned ACLs (`bucket-owner-full-control` and `bucket-owner-read` grant the bucket
+owner), `x-amz-grant-*` and `AccessControlPolicy` bodies, with the `AllUsers`,
+`AuthenticatedUsers` and `LogDelivery` groups, accounts by canonical id or email address
+(`UnresolvableGrantByEmailAddress` for an unknown one), and roll keys. A grant to an account is a
+resource grant to it (its users need their own policies to allow too). With
+`BucketOwnerEnforced`, writes may only carry `bucket-owner-full-control` (or grants to the bucket
+owner, or `private` from its own account): anything else is `AccessControlListNotSupported`.
+Copies don't take the source's ACL, as on S3.
 
 **Public access block.** The bucket-level settings apply as on S3:
 - `BlockPublicAcls` refuses public ACLs.
 - `IgnorePublicAcls` ignores public grants.
 - `BlockPublicPolicy` refuses public policies and turning the `public` flag on.
-- `RestrictPublicBuckets` makes a public policy, and the `public` flag, apply to roll keys only.
+- `RestrictPublicBuckets` makes a public policy, and the `public` flag, apply only to the bucket owner's account (as on S3: not to anonymous requests or other accounts).
 
 The `public` flag counts as a public policy. `ROLL_S3_BLOCK_PUBLIC_ACCESS=true` turns on all
 four for every bucket of the deployment, on top of the bucket's own (like S3's account-level
@@ -310,7 +456,7 @@ target bucket every 5 minutes. Keys are `SimplePrefix` (`<prefix>YYYY-mm-DD-HH-M
 `PartitionedPrefix` (`<prefix><account>/<region>/<bucket>/YYYY/MM/DD/…`). Lines use S3's server
 access log format. Like S3's, delivery is best effort: lines in memory when the process stops are
 lost. The objects are ordinary writes, billed to the target bucket. `TargetGrants` are stored and
-returned but not applied.
+returned but not applied. The target bucket must belong to the source bucket's account (`InvalidTargetBucketForLogging` otherwise), as on S3.
 
 ## Event notifications
 
@@ -460,7 +606,7 @@ bucket (`arn:aws:s3:::<roll bucket>`):
 - **Object Lock is enforced everywhere a version could be destroyed:** the API, lifecycle,
   trash expiry (a version deleted with a GOVERNANCE bypass stays in the trash until its lock
   ends), forced bucket deletes and the control plane. A bucket holding locked versions can't be
-  deleted. A default retention in `Years` counts 365 days a year. `x-amz-bypass-governance-retention` needs an `admin` key. Branches copy a version's
+  deleted. A default retention in `Years` counts 365 days a year. `x-amz-bypass-governance-retention` needs `s3:BypassGovernanceRetention` (an `admin` key, the root user, or a policy). Branches copy a version's
   lock with the version, so a branch holding a locked version can't be deleted either. S3
   requires `Content-MD5` for uploads into a bucket with a default retention; roll only requires
   an integrity check when the request itself sets Object Lock headers, and verifies every body's

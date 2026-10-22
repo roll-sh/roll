@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 pub struct Bucket {
     pub id: String,
     pub name: String,
+    /// The account that owns it (12 digits).
+    pub account_id: String,
     pub region: String,
     /// Unix ms.
     pub created_at: i64,
@@ -446,6 +448,14 @@ pub struct AccessKey {
     pub buckets: Option<Vec<String>>,
     pub created_at: i64,
     pub last_used_at: Option<i64>,
+    /// The account it belongs to (12 digits).
+    pub account: String,
+    /// The IAM user it belongs to; `None`: an account key with a roll permission level (the
+    /// account's root when it's `admin` over every bucket). A user's key acts with the user's
+    /// IAM policies only: `permission` and `buckets` mean nothing for it.
+    pub user: Option<String>,
+    /// `false`: deactivated (IAM's `Inactive`); it doesn't authenticate.
+    pub active: bool,
     /// Temporary credentials (STS): the session they belong to. `permission` and `buckets` are
     /// then the session's (see `sts.rs`).
     #[serde(skip)]
@@ -456,6 +466,11 @@ impl AccessKey {
     /// Whether these are temporary credentials.
     pub fn is_temporary(&self) -> bool {
         self.session.is_some()
+    }
+
+    /// A permanent account key with `admin` over every bucket: the account's root user.
+    pub fn is_root(&self) -> bool {
+        self.session.is_none() && self.user.is_none() && self.permission == Permission::Admin && self.buckets.is_none()
     }
 
     /// The permanent key that acts: the key itself, or the key behind a `GetSessionToken`
@@ -500,6 +515,19 @@ pub struct UsageDay {
     /// Stored bytes (own objects plus trash) × milliseconds: / (1e9 × ms per month) = GB-months.
     /// A float: a petabyte-day overflows 64-bit integers.
     pub byte_ms: f64,
+}
+
+/// One day of requests and egress billed to a requester (Requester Pays) on one bucket.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct PaidUsageDay {
+    /// The requester's account.
+    pub payer: String,
+    pub bucket_id: String,
+    pub day: String,
+    pub class_a: u64,
+    pub class_b: u64,
+    pub egress_internet: u64,
+    pub egress_internal: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

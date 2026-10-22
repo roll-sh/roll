@@ -160,9 +160,10 @@ pub(crate) struct BucketRow {
     pub object_lock: Option<ObjectLockConfig>,
     pub versions: u64,
     pub version_bytes: u64,
+    pub account_id: String,
 }
 
-const BUCKET_COLS: &str = "id, name, region, created_at, public, recover_days, cors, lifecycle, parent_id, parent_at, objects, bytes, trash_bytes, versioning, object_lock, versions, version_bytes";
+const BUCKET_COLS: &str = "id, name, region, created_at, public, recover_days, cors, lifecycle, parent_id, parent_at, objects, bytes, trash_bytes, versioning, object_lock, versions, version_bytes, account_id";
 
 fn bucket_row(r: &rusqlite::Row) -> rusqlite::Result<BucketRow> {
     let parse = |i: usize| -> rusqlite::Result<Option<String>> { r.get(i) };
@@ -188,6 +189,7 @@ fn bucket_row(r: &rusqlite::Row) -> rusqlite::Result<BucketRow> {
         object_lock: object_lock.map(|s| serde_json::from_str(&s)).transpose().map_err(|e| bad(14, e))?,
         versions: r.get::<_, i64>(15)?.max(0) as u64,
         version_bytes: r.get::<_, i64>(16)?.max(0) as u64,
+        account_id: r.get(17)?,
     })
 }
 
@@ -236,6 +238,7 @@ fn bucket_view(c: &Connection, b: BucketRow) -> Result<Bucket> {
     Ok(Bucket {
         id: b.id,
         name: b.name,
+        account_id: b.account_id,
         region: b.region,
         created_at: b.created_at,
         public: b.public,
@@ -254,22 +257,37 @@ fn bucket_view(c: &Connection, b: BucketRow) -> Result<Bucket> {
     })
 }
 
-fn key_row(r: &rusqlite::Row) -> rusqlite::Result<AccessKey> {
+pub(crate) fn key_row(r: &rusqlite::Row) -> rusqlite::Result<AccessKey> {
     let perm: String = r.get(3)?;
     let buckets: Option<String> = r.get(4)?;
+    let user: Option<String> = r.get(8)?;
     Ok(AccessKey {
         id: r.get(0)?,
         secret: r.get(1)?,
         name: r.get(2)?,
+        // A permission that doesn't parse is the least one; a user's key has none of its own.
         permission: Permission::parse(&perm).unwrap_or(Permission::Read),
-        buckets: buckets.and_then(|s| serde_json::from_str(&s).ok()),
+        // A scope that doesn't parse covers nothing rather than everything.
+        buckets: buckets.map(|s| serde_json::from_str(&s).unwrap_or_default()),
         created_at: r.get(5)?,
         last_used_at: r.get(6)?,
+        account: r.get(7)?,
+        user,
+        active: r.get::<_, String>(9)? == "Active",
         session: None,
     })
 }
 
-const KEY_COLS: &str = "id, secret, name, permission, buckets, created_at, last_used_at";
+pub(crate) const KEY_COLS: &str = "id, secret, name, permission, buckets, created_at, last_used_at, account_id, user_name, status";
+
+pub(crate) fn insert_key(c: &Connection, k: &AccessKey) -> Result<()> {
+    let buckets = k.buckets.as_ref().map(rows::json).transpose()?;
+    c.execute(
+        &format!("INSERT INTO keys ({KEY_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9)"),
+        params![k.id, k.secret, k.name, k.permission.as_str(), buckets, k.created_at, k.account, k.user, if k.active { "Active" } else { "Inactive" }],
+    )?;
+    Ok(())
+}
 
 impl Store {
     /// Rebuild the metadata from object storage, take over writing it, and start the
@@ -306,6 +324,7 @@ impl Store {
             events: Default::default(),
         });
         store.ensure_owner().await?;
+        store.ensure_default_account().await?;
         store.load_event_state()?;
         store.start_jobs();
         Ok(store)
@@ -382,7 +401,14 @@ impl Store {
 
     // ---- Buckets ----
 
+    /// A new bucket of the default account.
     pub async fn create_bucket(&self, name: &str, opts: BucketOptions) -> Result<Bucket> {
+        self.create_bucket_in(&self.default_account_id(), name, opts).await
+    }
+
+    /// A new bucket owned by `account`. Names are unique across the deployment:
+    /// `BucketExists` whoever owns the one there is.
+    pub async fn create_bucket_in(&self, account: &str, name: &str, opts: BucketOptions) -> Result<Bucket> {
         validate::bucket_name(name)?;
         let recover_days = opts.recover_days.unwrap_or(self.cfg.recover_days_default);
         validate::recover_days(recover_days)?;
@@ -397,12 +423,15 @@ impl Store {
         let locked = opts.object_lock.unwrap_or(false);
         let (versioning, lock) = if locked { (Some("Enabled"), Some(rows::json(&ObjectLockConfig::default())?)) } else { (None, None) };
         self.write(|c| {
+            if crate::accounts::find(c, account)?.is_none() {
+                return Err(StoreError::NotFound(format!("no account {account}")));
+            }
             if c.query_row("SELECT 1 FROM buckets WHERE name = ?1", [name], |_| Ok(())).optional()?.is_some() {
                 return Err(StoreError::BucketExists(name.to_string()));
             }
             c.execute(
-                &format!("INSERT INTO buckets ({BUCKET_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, NULL, 0, 0, 0, ?7, ?8, 0, 0)"),
-                params![id, name, region, now, public as i64, recover_days as i64, versioning, lock],
+                &format!("INSERT INTO buckets ({BUCKET_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL, NULL, 0, 0, 0, ?7, ?8, 0, 0, ?9)"),
+                params![id, name, region, now, public as i64, recover_days as i64, versioning, lock, account],
             )?;
             Ok(())
         })
@@ -418,9 +447,18 @@ impl Store {
         self.read(|c| find_bucket_id(c, id)?.map(|b| bucket_view(c, b)).transpose())
     }
 
+    /// Every bucket of every account.
     pub fn buckets(&self) -> Result<Vec<Bucket>> {
         self.read(|c| {
             let rows = c.prepare(&format!("SELECT {BUCKET_COLS} FROM buckets ORDER BY name"))?.query_map([], bucket_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.into_iter().map(|b| bucket_view(c, b)).collect()
+        })
+    }
+
+    /// The buckets `account` owns, in name order.
+    pub fn buckets_of(&self, account: &str) -> Result<Vec<Bucket>> {
+        self.read(|c| {
+            let rows = c.prepare(&format!("SELECT {BUCKET_COLS} FROM buckets WHERE account_id = ?1 ORDER BY name"))?.query_map([account], bucket_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
             rows.into_iter().map(|b| bucket_view(c, b)).collect()
         })
     }
@@ -484,7 +522,7 @@ impl Store {
             }
             c.execute(
                 &format!(
-                    "INSERT INTO buckets ({BUCKET_COLS}) SELECT ?1, ?2, region, ?3, public, recover_days, cors, lifecycle, id, ?3, 0, 0, 0, versioning, object_lock, 0, 0 FROM buckets WHERE id = ?4"
+                    "INSERT INTO buckets ({BUCKET_COLS}) SELECT ?1, ?2, region, ?3, public, recover_days, cors, lifecycle, id, ?3, 0, 0, 0, versioning, object_lock, 0, 0, account_id FROM buckets WHERE id = ?4"
                 ),
                 params![id, name, now, p.id],
             )?;
@@ -600,38 +638,67 @@ impl Store {
 
     // ---- Keys ----
 
-    /// A new access key; the secret is only ever returned here.
+    /// A new access key of the default account; the secret is only ever returned here.
     pub async fn create_key(&self, name: &str, permission: Permission, buckets: Option<Vec<String>>) -> Result<AccessKey> {
+        self.create_key_in(&self.default_account_id(), name, permission, buckets).await
+    }
+
+    /// A new account key (a roll permission level, optionally scoped to buckets) of `account`.
+    pub async fn create_key_in(&self, account: &str, name: &str, permission: Permission, buckets: Option<Vec<String>>) -> Result<AccessKey> {
         if name.is_empty() || name.len() > 128 {
             return Err(StoreError::InvalidArgument("key names are 1-128 characters".into()));
         }
-        let key = AccessKey { id: ids::access_key_id(), secret: ids::secret_key(), name: name.to_string(), permission, buckets, created_at: self.now(), last_used_at: None, session: None };
+        let key = AccessKey {
+            id: ids::access_key_id(),
+            secret: ids::secret_key(),
+            name: name.to_string(),
+            permission,
+            buckets,
+            created_at: self.now(),
+            last_used_at: None,
+            account: account.to_string(),
+            user: None,
+            active: true,
+            session: None,
+        };
         let k = key.clone();
         self.write(move |c| {
-            let buckets = k.buckets.as_ref().map(rows::json).transpose()?;
-            c.execute(
-                &format!("INSERT INTO keys ({KEY_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)"),
-                params![k.id, k.secret, k.name, k.permission.as_str(), buckets, k.created_at],
-            )?;
-            Ok(())
+            if crate::accounts::find(c, &k.account)?.is_none() {
+                return Err(StoreError::NotFound(format!("no account {}", k.account)));
+            }
+            insert_key(c, &k)
         })
         .await?;
         Ok(key)
     }
 
-    /// Make sure an admin key with this id and secret exists (`ROLL_S3_ACCESS_KEY`).
+    /// Make sure an admin key with this id and secret exists in the default account
+    /// (`ROLL_S3_ACCESS_KEY`).
     pub async fn ensure_key(&self, id: &str, secret: &str, name: &str) -> Result<AccessKey> {
+        self.ensure_key_in(&self.default_account_id(), id, secret, name).await
+    }
+
+    /// Make sure `account` has an admin key (its root) with this id and secret.
+    pub async fn ensure_key_in(&self, account: &str, id: &str, secret: &str, name: &str) -> Result<AccessKey> {
         if id.len() < 3 || id.len() > 128 || secret.len() < 8 {
             return Err(StoreError::InvalidArgument("access key ids are 3-128 characters, secrets at least 8".into()));
         }
         let now = self.now();
         self.write(|c| {
+            if crate::accounts::find(c, account)?.is_none() {
+                return Err(StoreError::NotFound(format!("no account {account}")));
+            }
+            if let Some(other) = c.prepare_cached("SELECT account_id FROM keys WHERE id = ?1")?.query_row([id], |r| r.get::<_, String>(0)).optional()?
+                && other != account
+            {
+                return Err(StoreError::Conflict(format!("access key {id} belongs to another account")));
+            }
             c.execute(
                 &format!(
-                    "INSERT INTO keys ({KEY_COLS}) VALUES (?1, ?2, ?3, 'admin', NULL, ?4, NULL)
-                     ON CONFLICT (id) DO UPDATE SET secret = excluded.secret, permission = 'admin', buckets = NULL"
+                    "INSERT INTO keys ({KEY_COLS}) VALUES (?1, ?2, ?3, 'admin', NULL, ?4, NULL, ?5, NULL, 'Active')
+                     ON CONFLICT (id) DO UPDATE SET secret = excluded.secret, permission = 'admin', buckets = NULL, user_name = NULL, status = 'Active'"
                 ),
-                params![id, secret, name, now],
+                params![id, secret, name, now, account],
             )?;
             Ok(())
         })
@@ -639,13 +706,29 @@ impl Store {
         self.access_key(id)?.ok_or_else(|| StoreError::internal("key vanished"))
     }
 
+    /// Every key of every account.
     pub fn keys(&self) -> Result<Vec<AccessKey>> {
         self.read(|c| Ok(c.prepare(&format!("SELECT {KEY_COLS} FROM keys ORDER BY created_at, id"))?.query_map([], key_row)?.collect::<rusqlite::Result<Vec<_>>>()?))
+    }
+
+    /// The keys of `account` (account keys and its IAM users' keys).
+    pub fn keys_of(&self, account: &str) -> Result<Vec<AccessKey>> {
+        self.read(|c| Ok(c.prepare(&format!("SELECT {KEY_COLS} FROM keys WHERE account_id = ?1 ORDER BY created_at, id"))?.query_map([account], key_row)?.collect::<rusqlite::Result<Vec<_>>>()?))
     }
 
     /// The key (with its secret) for request signing.
     pub fn access_key(&self, id: &str) -> Result<Option<AccessKey>> {
         self.read(|c| Ok(c.prepare_cached(&format!("SELECT {KEY_COLS} FROM keys WHERE id = ?1"))?.query_row([id], key_row).optional()?))
+    }
+
+    /// Activate or deactivate a key (IAM's `UpdateAccessKey`). An inactive key doesn't
+    /// authenticate.
+    pub async fn set_key_active(&self, id: &str, active: bool) -> Result<()> {
+        let n = self.write(|c| Ok(c.execute("UPDATE keys SET status = ?2 WHERE id = ?1", params![id, if active { "Active" } else { "Inactive" }])?)).await?;
+        if n == 0 {
+            return Err(StoreError::NotFound(format!("no access key {id}")));
+        }
+        Ok(())
     }
 
     pub async fn delete_key(&self, id: &str) -> Result<()> {
@@ -678,6 +761,7 @@ impl Store {
     pub fn flush_meter(&self) -> Result<()> {
         let now = self.now();
         let taken = self.meter.take();
+        let paid = self.meter.take_paid();
         let elapsed = {
             let mut last = self.last_flush.lock().unwrap();
             let e = (now - *last).max(0);
@@ -709,13 +793,48 @@ impl Store {
                     st.execute(params![id, day, t.class_a as i64, t.class_b as i64, t.bytes_in as i64, t.egress_internet as i64, t.egress_internal as i64, 0.0])?;
                 }
             }
+            let mut st = c.prepare_cached(
+                "INSERT INTO usage_payer (account_id, bucket_id, day, class_a, class_b, egress_internet, egress_internal) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT (account_id, bucket_id, day) DO UPDATE SET class_a = class_a + excluded.class_a, class_b = class_b + excluded.class_b,
+                   egress_internet = egress_internet + excluded.egress_internet, egress_internal = egress_internal + excluded.egress_internal",
+            )?;
+            for ((payer, bucket), t) in &paid {
+                st.execute(params![payer, bucket, day, t.class_a as i64, t.class_b as i64, t.egress_internet as i64, t.egress_internal as i64])?;
+            }
             Ok(())
         });
         if let Err(e) = result {
             self.meter.restore(taken);
+            self.meter.restore_paid(paid);
             return Err(e);
         }
         Ok(())
+    }
+
+    /// Requests and egress billed to requesters (Requester Pays) from `since_day` on: what
+    /// `payer` was charged (on any account's buckets), or what was charged to others on
+    /// `bucket_id`, or everything.
+    pub fn usage_paid(&self, payer: Option<&str>, bucket_id: Option<&str>, since_day: &str) -> Result<Vec<PaidUsageDay>> {
+        self.read(|c| {
+            let rows = c
+                .prepare_cached(
+                    "SELECT account_id, bucket_id, day, class_a, class_b, egress_internet, egress_internal FROM usage_payer
+                     WHERE day >= ?1 AND (?2 IS NULL OR account_id = ?2) AND (?3 IS NULL OR bucket_id = ?3) ORDER BY day, account_id, bucket_id",
+                )?
+                .query_map(params![since_day, payer, bucket_id], |r| {
+                    Ok(PaidUsageDay {
+                        payer: r.get(0)?,
+                        bucket_id: r.get(1)?,
+                        day: r.get(2)?,
+                        class_a: r.get::<_, i64>(3)? as u64,
+                        class_b: r.get::<_, i64>(4)? as u64,
+                        egress_internet: r.get::<_, i64>(5)? as u64,
+                        egress_internal: r.get::<_, i64>(6)? as u64,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
     }
 
     /// Metered days from `since_day` (`YYYY-MM-DD`) on, of one bucket or all.

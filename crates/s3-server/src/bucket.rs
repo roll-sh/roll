@@ -16,9 +16,15 @@ use s3_proto::checksum::ChecksumType;
 use s3_proto::{Code, S3Error, xml};
 use s3_store::{Bucket, BucketOptions, BucketUpdate, Class, CorsRule, LifecycleRule, ListQuery, ObjectMeta};
 
+/// ListBuckets: the caller's account's buckets (those its key's scope covers, for a scoped
+/// account key).
 pub(crate) fn list_buckets(ctx: &mut Ctx) -> Reply {
     let Some(a) = &ctx.auth else { return Err(S3Error::new(Code::AccessDenied)) };
-    ctx.require_session("s3:ListAllMyBuckets", None, None)?;
+    // A permission level (any scope) lists its buckets; an IAM identity needs its policies.
+    let level = !a.key.buckets.as_ref().is_some_and(Vec::is_empty);
+    ctx.require_identity("s3:ListAllMyBuckets", None, level)?;
+    let account = a.identity.account.id.clone();
+    let owner = acl::account_owner(ctx.store(), &account);
     // Pages (`max-buckets`, `continuation-token`), `prefix` and `bucket-region`, as S3 has
     // since 2024. Buckets come in name order; the token is the last name of the page.
     let invalid = |name: &str, msg: &str| S3Error::msg(Code::InvalidArgument, msg.to_string()).with("ArgumentName", name.to_string());
@@ -33,14 +39,15 @@ pub(crate) fn list_buckets(ctx: &mut Ctx) -> Reply {
     let prefix = ctx.q("prefix").filter(|p| !p.is_empty()).map(str::to_string);
     let region = ctx.server.cfg.region.clone();
     if ctx.q("bucket-region").is_some_and(|r| r != region) {
-        return response::ok_xml(xml::list_buckets_page(&acl::owner(ctx.store()), &[], None, prefix.as_deref()));
+        return response::ok_xml(xml::list_buckets_page(&owner, &[], None, prefix.as_deref()));
     }
+    let scoped = a.identity.kind == crate::identity::Kind::Key;
     let mut entries: Vec<xml::BucketEntry> = ctx
         .store()
-        .buckets()
+        .buckets_of(&account)
         .s3()?
         .into_iter()
-        .filter(|b| a.key.covers(&b.name))
+        .filter(|b| !scoped || a.key.covers(&b.name))
         .filter(|b| prefix.as_ref().is_none_or(|p| b.name.starts_with(p.as_str())))
         .filter(|b| after.as_ref().is_none_or(|t| b.name.as_str() > t.as_str()))
         .map(|b| xml::BucketEntry { name: b.name, created_ms: b.created_at, region: Some(region.clone()) })
@@ -52,7 +59,7 @@ pub(crate) fn list_buckets(ctx: &mut Ctx) -> Reply {
         }
         _ => None,
     };
-    response::ok_xml(xml::list_buckets_page(&acl::owner(ctx.store()), &entries, next.as_deref(), prefix.as_deref()))
+    response::ok_xml(xml::list_buckets_page(&owner, &entries, next.as_deref(), prefix.as_deref()))
 }
 
 /// Bucket subresources S3 has and we don't.
@@ -61,9 +68,7 @@ const UNSUPPORTED: [&str; 5] = ["metadataTable", "metadataConfiguration", "sessi
 pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
     let name = ctx.bucket_name().to_string();
     if let Some(sub) = UNSUPPORTED.iter().find(|s| ctx.has(s)) {
-        if let Some(a) = &ctx.auth
-            && !a.key.covers(&name)
-        {
+        if ctx.hides(&name) {
             return Err(S3Error::new(Code::AccessDenied));
         }
         return Err(S3Error::msg(Code::NotImplemented, format!("?{sub} is not supported")));
@@ -74,12 +79,7 @@ pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
     // A key that can't see the bucket learns nothing about it (a policy may still let it in).
     let bucket = match ctx.store().bucket(&name) {
         Ok(b) => b,
-        Err(e) => {
-            return Err(match &ctx.auth {
-                Some(a) if !a.key.covers(&name) => S3Error::new(Code::AccessDenied),
-                _ => crate::error::store_error(e),
-            });
-        }
+        Err(e) => return Err(if ctx.hides(&name) { S3Error::new(Code::AccessDenied) } else { crate::error::store_error(e) }),
     };
     if crate::config::handles(ctx) {
         return crate::config::route(ctx, &bucket, body).await;
@@ -128,11 +128,12 @@ pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
 
 async fn create(ctx: &mut Ctx, body: Body) -> Reply {
     let name = ctx.bucket_name().to_string();
-    // There's no bucket (or policy) yet: only the key's own permission counts.
-    if !ctx.auth.as_ref().is_some_and(|a| a.key.is_admin() && a.key.covers(&name)) {
-        return Err(S3Error::new(Code::AccessDenied));
-    }
-    ctx.require_session("s3:CreateBucket", Some(&name), None)?;
+    // There's no bucket (or policy) yet: only the requester's own side counts (its identity
+    // policies, or an admin permission level covering the name).
+    let Some(a) = &ctx.auth else { return Err(S3Error::new(Code::AccessDenied)) };
+    let level = a.key.is_admin() && a.key.covers(&name);
+    let account = a.identity.account.id.clone();
+    ctx.require_identity("s3:CreateBucket", Some(&name), level)?;
     // Object Lock (which turns versioning on) from the start.
     let object_lock = ctx.h("x-amz-bucket-object-lock-enabled").is_some_and(|v| v.trim().eq_ignore_ascii_case("true"));
     if !s3_proto::http::valid_bucket_name(&name) {
@@ -144,7 +145,12 @@ async fn create(ctx: &mut Ctx, body: Body) -> Reply {
         Some(o) => Some(acl::Ownership::parse(o).ok_or_else(|| S3Error::new(Code::InvalidArgument).with("ArgumentName", "x-amz-object-ownership").with("ArgumentValue", o.to_string()))?),
         None => None,
     };
-    let bucket_acl = acl::from_headers(ctx, true)?.filter(|a| !a.owner_only());
+    let bucket_acl = acl::from_headers(ctx, true, &account)?
+        .map(|mut r| {
+            r.acl.normalize(&account);
+            r.acl
+        })
+        .filter(|a| !a.owner_only());
     if let Some(a) = &bucket_acl {
         if ownership.is_none_or(|o| o == acl::Ownership::BucketOwnerEnforced) {
             return Err(S3Error::new(Code::InvalidBucketAclWithObjectOwnership));
@@ -155,14 +161,29 @@ async fn create(ctx: &mut Ctx, body: Body) -> Reply {
     }
     let raw = read_small(ctx, body, xml::MAX_XML_BYTES).await?;
     xml::parse_create_bucket(&raw)?;
-    // In us-east-1, S3 answers creating a bucket you already own with a 200 and changes
-    // nothing (every other region says BucketAlreadyOwnedByYou).
-    if ctx.server.cfg.region == "us-east-1" && ctx.store().bucket(&name).is_ok() {
-        let mut r = response::empty(StatusCode::OK);
-        set(&mut r, "location", &format!("/{name}"));
-        return Ok(r);
+    // Names are unique across the deployment. Another account's bucket is BucketAlreadyExists;
+    // one of your own is a no-op 200 in us-east-1 and BucketAlreadyOwnedByYou elsewhere, as on
+    // S3.
+    let exists = |b: &Bucket| {
+        if b.account_id != account {
+            Err(S3Error::new(Code::BucketAlreadyExists).with("BucketName", name.clone()))
+        } else if ctx.server.cfg.region == "us-east-1" {
+            let mut r = response::empty(StatusCode::OK);
+            set(&mut r, "location", &format!("/{name}"));
+            Ok(r)
+        } else {
+            Err(S3Error::new(Code::BucketAlreadyOwnedByYou).with("BucketName", name.clone()))
+        }
+    };
+    if let Ok(b) = ctx.store().bucket(&name) {
+        return exists(&b);
     }
-    let b = ctx.store().create_bucket(&name, BucketOptions { object_lock: Some(object_lock), ..Default::default() }).await.s3()?;
+    let b = match ctx.store().create_bucket_in(&account, &name, BucketOptions { object_lock: Some(object_lock), ..Default::default() }).await {
+        Ok(b) => b,
+        // Created by someone else since the check above.
+        Err(s3_store::StoreError::BucketExists(_)) => return exists(&ctx.store().bucket(&name).s3()?),
+        Err(e) => return Err(crate::error::store_error(e)),
+    };
     ctx.meter(&b.id, Class::A);
     if let Some(o) = ownership.filter(|o| *o != acl::Ownership::BucketOwnerEnforced) {
         ctx.store().set_bucket_config(&name, s3_store::config::kind::OWNERSHIP, "", Some(o.as_str()), None).await.s3()?;
@@ -280,7 +301,8 @@ fn list_v2(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     // `max-keys=0` asks for nothing, and S3 says there's nothing to continue from.
     let truncated = page.truncated && max > 0;
     let fetch_owner = ctx.q("fetch-owner") == Some("true");
-    let owner = acl::owner(ctx.store());
+    let acls = ctx.access(&bucket.name)?.acls_enabled;
+    let owner = |m: &ObjectMeta| acl::object_owner(ctx.store(), bucket, acls, m.headers.acl.as_deref());
     let l = xml::ListV2 {
         name: bucket.name.clone(),
         prefix: q.prefix.clone(),
@@ -291,7 +313,7 @@ fn list_v2(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
         next_continuation_token: page.next.as_ref().filter(|_| truncated).map(|n| URL_SAFE_NO_PAD.encode(n.as_bytes())),
         start_after,
         url_encode,
-        contents: page.objects.iter().map(|m| entry(m, fetch_owner.then_some(&owner))).collect(),
+        contents: page.objects.iter().map(|m| entry(m, fetch_owner.then(|| owner(m)).as_ref())).collect(),
         common_prefixes: page.prefixes.clone(),
     };
     response::ok_xml(xml::list_objects_v2(&l))
@@ -306,7 +328,8 @@ fn list_v1(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     let q = ListQuery { prefix: ctx.q("prefix").unwrap_or_default().to_string(), delimiter: delimiter(ctx), start_after: Some(marker.clone()).filter(|m| !m.is_empty()), max_keys: max as usize };
     let page = ctx.store().list_objects(&bucket.name, &q).s3()?;
     let truncated = page.truncated && max > 0;
-    let owner = acl::owner(ctx.store());
+    let acls = ctx.access(&bucket.name)?.acls_enabled;
+    let owner = |m: &ObjectMeta| acl::object_owner(ctx.store(), bucket, acls, m.headers.acl.as_deref());
     let l = xml::ListV1 {
         name: bucket.name.clone(),
         prefix: q.prefix.clone(),
@@ -316,7 +339,7 @@ fn list_v1(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
         max_keys: max,
         is_truncated: truncated,
         url_encode,
-        contents: page.objects.iter().map(|m| entry(m, Some(&owner))).collect(),
+        contents: page.objects.iter().map(|m| entry(m, Some(&owner(m)))).collect(),
         common_prefixes: page.prefixes.clone(),
     };
     response::ok_xml(xml::list_objects_v1(&l))

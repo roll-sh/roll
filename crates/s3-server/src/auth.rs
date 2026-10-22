@@ -38,6 +38,14 @@ fn ecdsa_key(access_key: &str, secret: &str) -> VerifyingKey {
 pub(crate) struct Auth {
     pub key: AccessKey,
     pub verified: Verified,
+    /// Who the key stands for (see `identity.rs`).
+    pub identity: std::sync::Arc<crate::identity::Identity>,
+}
+
+/// The identity behind a verified key (`ServiceUnavailable`/`InternalError` if the metadata
+/// can't be read).
+pub(crate) fn identity_of(ctx: &Ctx, key: &AccessKey) -> Result<std::sync::Arc<crate::identity::Identity>, S3Error> {
+    crate::identity::resolve(ctx.store(), key).map(std::sync::Arc::new).map_err(crate::error::store_error)
 }
 
 /// Verify the request's signature (header or presigned URL). `None`: anonymous.
@@ -67,7 +75,7 @@ pub(crate) fn authenticate(ctx: &Ctx) -> Result<Option<Auth>, S3Error> {
         _ => e,
     })?;
     Ok(match (verified, found) {
-        (Some((_, verified)), Some(key)) => Some(Auth { key, verified }),
+        (Some((_, verified)), Some(key)) => Some(Auth { identity: identity_of(ctx, &key)?, key, verified }),
         _ => None,
     })
 }

@@ -1,8 +1,9 @@
 //! Temporary credentials (STS): roles, sessions and their self-contained session tokens.
 //!
-//! **Roles** are metadata rows (`roles`): a name, a trust (the roll keys and OIDC providers
-//! that may assume the role, and an optional external id), a permission and bucket scope like a
-//! key's, an optional inline IAM policy and a maximum session duration.
+//! **Roles** are metadata rows (`roles`), per account: a name, a trust (the roll keys and OIDC
+//! providers that may assume the role, and an optional external id, or an IAM trust policy
+//! document), a permission and bucket scope like a key's (control-plane roles) and/or IAM
+//! policies (inline and managed, a permissions boundary), and a maximum session duration.
 //!
 //! **Sessions are never stored.** A session token is the session's claims (temporary access
 //! key id, secret, role, permission, scope, session policy, tags, expiry) encrypted and
@@ -10,13 +11,17 @@
 //! (`sts_session_keys`, created once). Every token gets its own AES key, derived from the
 //! deployment key and a random 128-bit salt with HMAC-SHA256, so random nonces never repeat
 //! under one AES key however many tokens are minted. Checking a request takes no lookup and
-//! no write; only the role is read (a local SQLite read) to see whether the session was
-//! revoked:
+//! no write; only the role (or the key behind a `GetSessionToken` session) is read, a local
+//! SQLite read, so a session acts with its role's *current* permissions, as on AWS:
 //!
-//! - deleting a role, or changing it (`generation` goes up), invalidates its sessions;
-//! - [`Store::revoke_role_sessions`] invalidates the sessions issued until now
-//!   (`revoked_before`);
-//! - a `GetSessionToken` session acts with its key's current permission, and dies with the key.
+//! - changing a role changes what its sessions may do, from the next request on;
+//! - deleting a role leaves its sessions without any permission (`AccessDenied`), and a new
+//!   role of the same name (another `id`) doesn't give them any;
+//! - [`Store::revoke_role_sessions`] denies the sessions issued until now: AWS's
+//!   `AWSRevokeOlderSessions` inline policy (a `Deny` on `aws:TokenIssueTime`), and
+//!   `revoked_before`;
+//! - a `GetSessionToken` session acts with its key's current permission, and has none once the
+//!   key is gone.
 //!
 //! The deployment key rotates ([`Store::rotate_session_key`]): tokens sealed with the current
 //! or the previous key are accepted, so rotating once every session lifetime (36 h at most)
@@ -39,6 +44,7 @@ use hmac::{Hmac, Mac};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use zeroize::Zeroize;
 
@@ -116,34 +122,92 @@ pub struct Trust {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Role {
+    /// The account it belongs to (12 digits).
+    pub account: String,
     pub name: String,
-    /// `RR…`: what `aws:userid` starts with for its sessions.
+    /// `RR…` (`AROA…` for IAM-created roles): what `aws:userid` starts with for its sessions.
     pub id: String,
     pub description: String,
-    pub permission: Permission,
-    /// Bucket names it's limited to; `None` = all.
+    /// A roll permission level its sessions have (control-plane roles); `None`: only its IAM
+    /// policies (IAM-created roles).
+    pub permission: Option<Permission>,
+    /// Bucket names the permission is limited to; `None` = all.
     pub buckets: Option<Vec<String>>,
-    /// An inline IAM policy (JSON) that further limits what its sessions may do.
+    /// A control-plane role's inline IAM policy (JSON): an upper bound on what its sessions may
+    /// do, like a permissions boundary.
     pub policy: Option<String>,
     pub trust: Trust,
+    /// IAM's side: path, trust policy, policies, boundary, tags.
+    pub iam: RoleIam,
     pub max_session_s: i64,
-    /// Goes up on every change; sessions of an older generation are invalid.
+    /// Goes up on every change (sessions keep working: they act with the role as it is now).
     pub generation: i64,
-    /// Sessions issued at or before this (Unix ms) are revoked; 0: none.
+    /// Sessions issued at or before this (Unix ms) are denied everything; 0: none.
     pub revoked_before: i64,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
+/// An IAM role's own settings (`CreateRole`, `PutRolePolicy`, `AttachRolePolicy`, …).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RoleIam {
+    /// `/` or `/a/b/`; empty means `/`.
+    pub path: String,
+    /// The `AssumeRolePolicyDocument` (JSON). When set it decides who may assume the role,
+    /// instead of `trust`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trust_policy: Option<String>,
+    /// Inline policies by name.
+    pub policies: BTreeMap<String, String>,
+    /// Managed policy ARNs.
+    pub attached: Vec<String>,
+    /// The permissions boundary (a managed policy ARN).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<String>,
+    pub tags: Vec<(String, String)>,
+}
+
 impl Role {
-    /// `arn:aws:iam::<account>:role/<name>`.
+    /// `arn:aws:iam::<account>:role<path><name>`.
     pub fn arn(&self, account: &str) -> String {
-        role_arn(account, &self.name)
+        role_arn_with_path(account, &self.iam.path, &self.name)
+    }
+
+    /// This role's ARN in its own account.
+    pub fn own_arn(&self) -> String {
+        self.arn(&self.account)
     }
 }
 
 pub fn role_arn(account: &str, name: &str) -> String {
     format!("arn:aws:iam::{account}:role/{name}")
+}
+
+/// A role's ARN with its IAM path (`/` when empty).
+pub fn role_arn_with_path(account: &str, path: &str, name: &str) -> String {
+    let path = if path.is_empty() { "/" } else { path };
+    format!("arn:aws:iam::{account}:role{path}{name}")
+}
+
+/// The inline policy AWS's console puts on a role to revoke its sessions.
+pub const REVOKE_POLICY_NAME: &str = "AWSRevokeOlderSessions";
+
+/// Deny everything to sessions issued before `before_ms` (Unix ms).
+pub fn revoke_policy(before_ms: i64) -> String {
+    serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [{"Effect": "Deny", "Action": ["*"], "Resource": ["*"],
+                       "Condition": {"DateLessThan": {"aws:TokenIssueTime": iso_ms(before_ms)}}}]
+    })
+    .to_string()
+}
+
+/// ISO 8601 with milliseconds, UTC (what `aws:TokenIssueTime` is compared as).
+pub fn iso_ms(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let sod = secs.rem_euclid(86_400);
+    format!("{}T{:02}:{:02}:{:02}.{:03}Z", ids::day_of(ms), sod / 3600, sod / 60 % 60, sod % 60, ms.rem_euclid(1000))
 }
 
 /// What a role is made of (create, or replace on update).
@@ -310,31 +374,51 @@ impl RoleSpec {
     }
 }
 
-const ROLE_COLS: &str = "name, id, description, permission, buckets, policy, trust, max_session_s, generation, revoked_before, created_at, updated_at";
+const ROLE_COLS: &str = "name, id, description, permission, buckets, policy, trust, max_session_s, generation, revoked_before, created_at, updated_at, account_id, iam";
 
 fn role_row(r: &rusqlite::Row) -> rusqlite::Result<Role> {
-    let perm: String = r.get(3)?;
+    let perm: Option<String> = r.get(3)?;
     let buckets: Option<String> = r.get(4)?;
     let trust: String = r.get(6)?;
+    let iam: Option<String> = r.get(13)?;
     Ok(Role {
         name: r.get(0)?,
         id: r.get(1)?,
         description: r.get(2)?,
-        permission: Permission::parse(&perm).unwrap_or(Permission::Read),
-        buckets: buckets.and_then(|s| serde_json::from_str(&s).ok()),
+        // A permission that no longer parses is the least one.
+        permission: perm.map(|p| Permission::parse(&p).unwrap_or(Permission::Read)),
+        // A scope that no longer parses covers nothing.
+        buckets: buckets.map(|s| serde_json::from_str(&s).unwrap_or_default()),
         policy: r.get(5)?,
         // A trust that no longer parses trusts nobody.
         trust: serde_json::from_str(&trust).unwrap_or_default(),
+        // IAM settings that no longer parse: no policies, and a trust policy that trusts nobody.
+        iam: match iam {
+            Some(s) => serde_json::from_str(&s).unwrap_or_else(|_| RoleIam { trust_policy: Some("{}".into()), ..Default::default() }),
+            None => RoleIam::default(),
+        },
         max_session_s: r.get(7)?,
         generation: r.get(8)?,
         revoked_before: r.get(9)?,
         created_at: r.get(10)?,
         updated_at: r.get(11)?,
+        account: r.get(12)?,
     })
 }
 
-fn find_role(c: &Connection, name: &str) -> Result<Option<Role>> {
-    Ok(c.prepare_cached(&format!("SELECT {ROLE_COLS} FROM roles WHERE name = ?1"))?.query_row([name], role_row).optional()?)
+pub(crate) fn find_role(c: &Connection, account: &str, name: &str) -> Result<Option<Role>> {
+    Ok(c.prepare_cached(&format!("SELECT {ROLE_COLS} FROM roles WHERE account_id = ?1 AND name = ?2"))?.query_row([account, name], role_row).optional()?)
+}
+
+/// What an IAM `CreateRole` sets.
+#[derive(Clone, Debug, Default)]
+pub struct IamRoleSpec {
+    pub path: String,
+    pub trust_policy: String,
+    pub description: String,
+    pub max_session_s: Option<i64>,
+    pub boundary: Option<String>,
+    pub tags: Vec<(String, String)>,
 }
 
 // ---- Sessions ----
@@ -409,10 +493,31 @@ pub struct Session {
     pub source_identity: Option<String>,
     #[serde(rename = "w", default, skip_serializing_if = "Option::is_none")]
     pub web: Option<WebIdentity>,
-    /// The role's inline policy, read from the role when a request is checked (not in the
-    /// token).
+    /// The account the session acts in: its role's, or its key's. Empty in tokens from before
+    /// accounts: the default account.
+    #[serde(rename = "a", default, skip_serializing_if = "String::is_empty")]
+    pub account: String,
+    /// The IAM user behind a `GetSessionToken` or `GetFederationToken` session.
+    #[serde(rename = "u", default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// `GetFederationToken`: the federated user's name.
+    #[serde(rename = "fu", default, skip_serializing_if = "Option::is_none")]
+    pub federated: Option<String>,
+    /// When MFA was presented for the session (Unix ms): `aws:MultiFactorAuthPresent` and
+    /// `aws:MultiFactorAuthAge`.
+    #[serde(rename = "m", default, skip_serializing_if = "Option::is_none")]
+    pub mfa_at: Option<i64>,
+    /// Managed session policies (`PolicyArns`), read when a request is checked.
+    #[serde(rename = "pa", default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_arns: Vec<String>,
+    /// The role as it is now, read when a request is checked (not in the token).
     #[serde(skip)]
-    pub role_policy: Option<String>,
+    pub role_now: Option<Arc<Role>>,
+    /// The session has no permissions at all: its role was deleted (or replaced), its
+    /// sessions were revoked, or the key behind it is gone or inactive. Requests are
+    /// `AccessDenied`, as on AWS.
+    #[serde(skip)]
+    pub dead: bool,
 }
 
 // The secret stays out of logs and panics.
@@ -427,6 +532,10 @@ impl std::fmt::Debug for Session {
             .field("name", &self.name)
             .field("permission", &self.permission)
             .field("buckets", &self.buckets)
+            .field("account", &self.account)
+            .field("user", &self.user)
+            .field("federated", &self.federated)
+            .field("dead", &self.dead)
             .finish_non_exhaustive()
     }
 }
@@ -449,13 +558,28 @@ impl Session {
             transitive_tag_keys: Vec::new(),
             source_identity: None,
             web: None,
-            role_policy: None,
+            account: String::new(),
+            user: None,
+            federated: None,
+            mfa_at: None,
+            policy_arns: Vec::new(),
+            role_now: None,
+            dead: false,
         }
     }
 
-    /// `arn:aws:iam::<account>:role/<role>` for role sessions.
+    /// `arn:aws:iam::<account>:role<path>/<role>` for role sessions (the path of the role as it
+    /// is now, if it still exists).
     pub fn role_arn(&self, account: &str) -> Option<String> {
-        self.role.as_ref().map(|r| role_arn(account, &r.name))
+        self.role.as_ref().map(|r| match &self.role_now {
+            Some(now) => now.arn(account),
+            None => role_arn(account, &r.name),
+        })
+    }
+
+    /// `arn:aws:sts::<account>:federated-user/<name>` for `GetFederationToken` sessions.
+    pub fn federated_arn(&self, account: &str) -> Option<String> {
+        self.federated.as_ref().map(|n| format!("arn:aws:sts::{account}:federated-user/{n}"))
     }
 
     /// `arn:aws:sts::<account>:assumed-role/<role>/<session name>` for role sessions.
@@ -593,6 +717,26 @@ pub(crate) fn open(keys: &[(u32, [u8; 32])], token: &str) -> Option<Vec<u8>> {
     cipher.decrypt(Nonce::from_slice(&raw[21..33]), Payload { msg: &raw[HEADER..], aad: &raw[..HEADER] }).ok()
 }
 
+/// IAM role names are unique per account regardless of case.
+fn role_name_taken(c: &Connection, account: &str, name: &str) -> Result<bool> {
+    Ok(c.prepare_cached("SELECT 1 FROM roles WHERE account_id = ?1 AND lower(name) = lower(?2)")?.exists([account, name])?)
+}
+
+fn not_found_role(e: StoreError, name: &str) -> StoreError {
+    match e {
+        StoreError::NotFound(_) => StoreError::NotFound(format!("no role {name}")),
+        e => e,
+    }
+}
+
+/// The buckets both scopes cover (`None` covers all).
+fn intersect(a: Option<Vec<String>>, b: Option<Vec<String>>) -> Option<Vec<String>> {
+    match (a, b) {
+        (None, x) | (x, None) => x,
+        (Some(a), Some(b)) => Some(b.into_iter().filter(|x| a.contains(x)).collect()),
+    }
+}
+
 fn ct_eq(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
@@ -600,71 +744,157 @@ fn ct_eq(a: &str, b: &str) -> bool {
 impl Store {
     // ---- Roles ----
 
+    /// The default account's roles.
     pub fn roles(&self) -> Result<Vec<Role>> {
-        self.read(|c| Ok(c.prepare(&format!("SELECT {ROLE_COLS} FROM roles ORDER BY name"))?.query_map([], role_row)?.collect::<rusqlite::Result<Vec<_>>>()?))
+        self.roles_in(&self.default_account_id())
     }
 
+    pub fn roles_in(&self, account: &str) -> Result<Vec<Role>> {
+        self.read(|c| Ok(c.prepare(&format!("SELECT {ROLE_COLS} FROM roles WHERE account_id = ?1 ORDER BY name"))?.query_map([account], role_row)?.collect::<rusqlite::Result<Vec<_>>>()?))
+    }
+
+    /// A role of the default account.
     pub fn role(&self, name: &str) -> Result<Option<Role>> {
-        self.read(|c| find_role(c, name))
+        self.role_in(&self.default_account_id(), name)
     }
 
+    pub fn role_in(&self, account: &str, name: &str) -> Result<Option<Role>> {
+        self.read(|c| find_role(c, account, name))
+    }
+
+    /// A control-plane role in the default account.
     pub async fn create_role(&self, name: &str, spec: RoleSpec) -> Result<Role> {
+        self.create_role_in(&self.default_account_id(), name, spec).await
+    }
+
+    pub async fn create_role_in(&self, account: &str, name: &str, spec: RoleSpec) -> Result<Role> {
         validate_role_name(name).map_err(invalid)?;
         let max = spec.check(self)?;
         let now = self.now();
         let id = ids::role_id();
         self.write(|c| {
-            if find_role(c, name)?.is_some() {
+            if crate::accounts::find(c, account)?.is_none() {
+                return Err(StoreError::NotFound(format!("no account {account}")));
+            }
+            if role_name_taken(c, account, name)? {
                 return Err(StoreError::Conflict(format!("a role named {name} already exists")));
             }
             let buckets = spec.buckets.as_ref().map(rows::json).transpose()?;
             c.execute(
-                &format!("INSERT INTO roles ({ROLE_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, 0, ?9, ?9)"),
-                params![name, id, spec.description, spec.permission.as_str(), buckets, spec.policy, rows::json(&spec.trust)?, max, now],
+                &format!("INSERT INTO roles ({ROLE_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, 0, ?9, ?9, ?10, NULL)"),
+                params![name, id, spec.description, spec.permission.as_str(), buckets, spec.policy, rows::json(&spec.trust)?, max, now, account],
             )?;
             Ok(())
         })
         .await?;
-        self.role(name)?.ok_or_else(|| StoreError::internal("role vanished"))
+        self.role_in(account, name)?.ok_or_else(|| StoreError::internal("role vanished"))
     }
 
-    /// Replace a role's settings. Its existing sessions become invalid.
-    pub async fn update_role(&self, name: &str, spec: RoleSpec) -> Result<Role> {
-        let max = spec.check(self)?;
-        let now = self.now();
-        let n = self
-            .write(|c| {
-                let buckets = spec.buckets.as_ref().map(rows::json).transpose()?;
-                Ok(c.execute(
-                    "UPDATE roles SET description = ?2, permission = ?3, buckets = ?4, policy = ?5, trust = ?6, max_session_s = ?7,
-                       generation = generation + 1, updated_at = ?8 WHERE name = ?1",
-                    params![name, spec.description, spec.permission.as_str(), buckets, spec.policy, rows::json(&spec.trust)?, max, now],
-                )?)
-            })
-            .await?;
-        if n == 0 {
-            return Err(StoreError::NotFound(format!("no role {name}")));
+    /// An IAM role (`CreateRole`): no roll permission level, a trust policy document (the
+    /// caller checked it).
+    pub async fn create_iam_role(&self, account: &str, name: &str, spec: IamRoleSpec) -> Result<Role> {
+        validate_role_name(name).map_err(invalid)?;
+        let max = spec.max_session_s.unwrap_or(ROLE_DEFAULT_SESSION_S);
+        if !(MIN_SESSION_S..=ROLE_MAX_SESSION_S).contains(&max) {
+            return Err(invalid(format!("MaxSessionDuration must be between {MIN_SESSION_S} and {ROLE_MAX_SESSION_S}")));
         }
-        self.role(name)?.ok_or_else(|| StoreError::internal("role vanished"))
+        let now = self.now();
+        let id = crate::iam::entity_id("AROA");
+        let iam = RoleIam { path: spec.path, trust_policy: Some(spec.trust_policy), boundary: spec.boundary, tags: spec.tags, ..Default::default() };
+        self.write(|c| {
+            if crate::accounts::find(c, account)?.is_none() {
+                return Err(StoreError::NotFound(format!("no account {account}")));
+            }
+            if role_name_taken(c, account, name)? {
+                return Err(StoreError::Conflict(format!("Role with name {name} already exists.")));
+            }
+            let roles: i64 = c.query_row("SELECT count(*) FROM roles WHERE account_id = ?1", [account], |r| r.get(0))?;
+            if roles as usize >= crate::iam::MAX_ROLES {
+                return Err(StoreError::LimitExceeded(format!("Cannot exceed quota for RolesPerAccount: {}", crate::iam::MAX_ROLES)));
+            }
+            c.execute(
+                &format!("INSERT INTO roles ({ROLE_COLS}) VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4, ?5, 1, 0, ?6, ?6, ?7, ?8)"),
+                params![name, id, spec.description, rows::json(&Trust::default())?, max, now, account, rows::json(&iam)?],
+            )?;
+            Ok(())
+        })
+        .await?;
+        self.role_in(account, name)?.ok_or_else(|| StoreError::internal("role vanished"))
     }
 
-    /// Delete a role; its sessions stop working at once.
+    /// Change a role in one transaction (`f` edits it as it is). Its sessions keep working,
+    /// with the role as it is now.
+    pub async fn edit_role(&self, account: &str, name: &str, f: impl FnOnce(&Connection, &mut Role) -> Result<()>) -> Result<Role> {
+        let now = self.now();
+        self.write(|c| {
+            let mut r = find_role(c, account, name)?.ok_or_else(|| StoreError::NotFound(format!("The role with name {name} cannot be found.")))?;
+            f(c, &mut r)?;
+            if !(MIN_SESSION_S..=ROLE_MAX_SESSION_S).contains(&r.max_session_s) {
+                return Err(invalid(format!("MaxSessionDuration must be between {MIN_SESSION_S} and {ROLE_MAX_SESSION_S}")));
+            }
+            let buckets = r.buckets.as_ref().map(rows::json).transpose()?;
+            let iam = if r.iam == RoleIam::default() { None } else { Some(rows::json(&r.iam)?) };
+            c.execute(
+                "UPDATE roles SET description = ?3, permission = ?4, buckets = ?5, policy = ?6, trust = ?7, max_session_s = ?8, iam = ?9,
+                   revoked_before = ?10, generation = generation + 1, updated_at = ?11 WHERE account_id = ?1 AND name = ?2",
+                params![account, name, r.description, r.permission.map(Permission::as_str), buckets, r.policy, rows::json(&r.trust)?, r.max_session_s, iam, r.revoked_before, now],
+            )?;
+            Ok(())
+        })
+        .await?;
+        self.role_in(account, name)?.ok_or_else(|| StoreError::internal("role vanished"))
+    }
+
+    /// Replace a control-plane role's settings (default account). Its sessions keep working,
+    /// with the new settings, as on AWS.
+    pub async fn update_role(&self, name: &str, spec: RoleSpec) -> Result<Role> {
+        self.update_role_in(&self.default_account_id(), name, spec).await
+    }
+
+    pub async fn update_role_in(&self, account: &str, name: &str, spec: RoleSpec) -> Result<Role> {
+        let max = spec.check(self)?;
+        self.edit_role(account, name, |_, r| {
+            r.description = spec.description;
+            r.permission = Some(spec.permission);
+            r.buckets = spec.buckets;
+            r.policy = spec.policy;
+            r.trust = spec.trust;
+            r.max_session_s = max;
+            Ok(())
+        })
+        .await
+        .map_err(|e| not_found_role(e, name))
+    }
+
+    /// Delete a role (default account); its sessions have no permissions from then on.
     pub async fn delete_role(&self, name: &str) -> Result<()> {
-        let n = self.write(|c| Ok(c.execute("DELETE FROM roles WHERE name = ?1", [name])?)).await?;
+        self.delete_role_in(&self.default_account_id(), name).await
+    }
+
+    pub async fn delete_role_in(&self, account: &str, name: &str) -> Result<()> {
+        let n = self.write(|c| Ok(c.execute("DELETE FROM roles WHERE account_id = ?1 AND name = ?2", [account, name])?)).await?;
         if n == 0 {
             return Err(StoreError::NotFound(format!("no role {name}")));
         }
         Ok(())
     }
 
-    /// Revoke every session of a role issued until now (new ones still work).
+    /// Revoke every session of a role issued until now, as AWS does: an
+    /// `AWSRevokeOlderSessions` inline policy denying sessions issued before now (and
+    /// `revoked_before`). New sessions still work.
     pub async fn revoke_role_sessions(&self, name: &str) -> Result<Role> {
+        self.revoke_role_sessions_in(&self.default_account_id(), name).await
+    }
+
+    pub async fn revoke_role_sessions_in(&self, account: &str, name: &str) -> Result<Role> {
         let now = self.now();
-        let n = self.write(|c| Ok(c.execute("UPDATE roles SET revoked_before = max(revoked_before, ?2), updated_at = ?2 WHERE name = ?1", params![name, now])?)).await?;
-        if n == 0 {
-            return Err(StoreError::NotFound(format!("no role {name}")));
-        }
-        self.role(name)?.ok_or_else(|| StoreError::internal("role vanished"))
+        self.edit_role(account, name, |_, r| {
+            r.revoked_before = r.revoked_before.max(now);
+            r.iam.policies.insert(REVOKE_POLICY_NAME.into(), revoke_policy(now + 1));
+            Ok(())
+        })
+        .await
+        .map_err(|e| not_found_role(e, name))
     }
 
     // ---- Session keys ----
@@ -717,7 +947,11 @@ impl Store {
         session.secret = ids::secret_key();
         session.issued_at = now;
         session.expires_at = now + duration_s * 1000;
-        session.role_policy = None;
+        session.role_now = None;
+        session.dead = false;
+        if session.account.is_empty() {
+            session.account = self.default_account_id();
+        }
         let master = keys.current.bytes().ok_or_else(|| StoreError::internal("the session-token key doesn't parse"))?;
         let mut claims = serde_json::to_vec(&session)?;
         let token = seal(keys.current.id, &master, &claims);
@@ -730,7 +964,8 @@ impl Store {
     }
 
     /// The temporary key `access_key_id` with session token `token`, if the token is
-    /// authentic, for that key, unexpired and not revoked.
+    /// authentic, for that key and unexpired. A session whose role or key is gone, or that was
+    /// revoked, still authenticates (as on AWS) but is [`Session::dead`]: it may do nothing.
     pub fn session_key(&self, access_key_id: &str, token: &str) -> std::result::Result<AccessKey, SessionError> {
         if token.len() > MAX_TOKEN_BYTES {
             return Err(SessionError::Invalid);
@@ -746,19 +981,40 @@ impl Store {
         if self.now() >= s.expires_at {
             return Err(SessionError::Expired);
         }
+        if s.account.is_empty() {
+            s.account = self.default_account_id();
+        }
+        // What the session may do through roll permission levels: the role's (or key's) as it
+        // is now, never more than it was narrowed to when minted. An empty bucket scope covers
+        // nothing: no permission level at all.
+        let nothing = || (Permission::Read, Some(Vec::new()));
         let (permission, buckets) = match (&s.role, &s.key) {
-            (Some(r), _) => {
-                let role = self.role(&r.name)?.ok_or(SessionError::Revoked)?;
-                if role.id != r.id || role.generation != r.generation || s.issued_at <= role.revoked_before {
-                    return Err(SessionError::Revoked);
+            (Some(r), _) => match self.read(|c| find_role(c, &s.account, &r.name))? {
+                Some(role) if role.id == r.id => {
+                    if s.issued_at <= role.revoked_before {
+                        s.dead = true;
+                    }
+                    let level = match role.permission {
+                        Some(p) => (min_permission(p, s.permission), intersect(role.buckets.clone(), s.buckets.clone())),
+                        None => nothing(),
+                    };
+                    s.role_now = Some(Arc::new(role));
+                    level
                 }
-                s.role_policy = role.policy;
-                (s.permission, s.buckets.clone())
-            }
-            (None, Some(k)) => {
-                let key = self.access_key(k)?.ok_or(SessionError::Revoked)?;
-                (key.permission, key.buckets)
-            }
+                _ => {
+                    s.dead = true;
+                    nothing()
+                }
+            },
+            (None, Some(k)) => match self.access_key(k)? {
+                Some(key) if key.active && key.account == s.account && key.user == s.user => {
+                    if key.user.is_some() { nothing() } else { (key.permission, key.buckets) }
+                }
+                _ => {
+                    s.dead = true;
+                    nothing()
+                }
+            },
             (None, None) => return Err(SessionError::Invalid),
         };
         Ok(AccessKey {
@@ -769,6 +1025,9 @@ impl Store {
             buckets,
             created_at: s.issued_at,
             last_used_at: None,
+            account: s.account.clone(),
+            user: s.user.clone(),
+            active: true,
             session: Some(Arc::new(s)),
         })
     }

@@ -1,20 +1,17 @@
-//! Temporary credentials (STS sessions) on S3 requests: the session token, the principal and
-//! condition keys a session has, and the bound its policies put on everything it does.
+//! Credentials on S3 requests: which key a request names, and its session token.
 //!
 //! - A temporary key (`RT…`) needs its session token (`x-amz-security-token`, or
 //!   `X-Amz-Security-Token` in a presigned URL or POST form); without it the key is unknown
 //!   (`InvalidAccessKeyId`, as on AWS). A permanent key with a token is `InvalidToken`.
 //! - The token is checked without any lookup but the role's (see `s3_store::sts`): tampered or
-//!   foreign tokens are `InvalidToken`, expired ones `ExpiredToken`, revoked ones `InvalidToken`.
-//! - A role session's permission and scope are the role's (narrowed when it was issued). On
-//!   top, the role's inline policy and the session policy must both allow every action, be it
-//!   allowed by the permission, a bucket policy or an ACL: a session never does more than
-//!   they say.
+//!   foreign tokens are `InvalidToken`, expired ones `ExpiredToken`. A session whose role was
+//!   deleted or that was revoked authenticates, and is then denied everything
+//!   (`AccessDenied`), as on AWS (see `identity.rs`).
+//! - An inactive key (IAM's `UpdateAccessKey`) is unknown (`InvalidAccessKeyId`), as on AWS.
 
 use crate::error::store_error;
-use crate::policy::{Account, Context, Decision, Policy, Principal};
 use s3_proto::{Code, S3Error};
-use s3_store::sts::{MAX_ROLE_POLICY_BYTES, MAX_SESSION_POLICY_BYTES, SessionError};
+use s3_store::sts::SessionError;
 use s3_store::{AccessKey, Store, is_temporary_key_id};
 
 /// The session token of a request: the `x-amz-security-token` header, or the query parameter
@@ -32,8 +29,8 @@ pub(crate) fn resolve(store: &Store, access_key_id: &str, token: Option<&str>) -
         Some(t) if is_temporary_key_id(access_key_id) => store.session_key(access_key_id, t).map_err(session_error),
         Some(_) => Err(S3Error::new(Code::InvalidToken)),
         None => match store.access_key(access_key_id) {
-            Ok(Some(k)) => Ok(k),
-            Ok(None) => Err(unknown()),
+            Ok(Some(k)) if k.active => Ok(k),
+            Ok(_) => Err(unknown()),
             Err(e) => {
                 tracing::warn!(error = %e, "looking up an access key failed");
                 Err(store_error(e))
@@ -46,87 +43,11 @@ fn session_error(e: SessionError) -> S3Error {
     match e {
         SessionError::Invalid => S3Error::new(Code::InvalidToken),
         SessionError::Expired => S3Error::new(Code::ExpiredToken),
-        SessionError::Revoked => S3Error::msg(Code::InvalidToken, "The provided token has been revoked."),
+        SessionError::Revoked => S3Error::new(Code::AccessDenied),
         SessionError::Store(e) => store_error(e),
     }
 }
 
-/// Who a key is to bucket policies and ACLs: a role session answers to its role's and its own
-/// assumed-role ARN; a `GetSessionToken` session is its key.
-pub(crate) fn principal(store: &Store, k: &AccessKey) -> Principal {
-    match &k.session {
-        Some(s) if s.role.is_some() => {
-            let account = store.account_id();
-            let arns = [s.role_arn(&account), s.assumed_role_arn(&account)].into_iter().flatten().collect();
-            Principal::Session { id: k.id.clone(), canonical: store.canonical_user(&k.id), arns }
-        }
-        _ => {
-            let id = k.acting_key().unwrap_or(&k.id);
-            Principal::Key { id: id.to_string(), canonical: store.canonical_user(id) }
-        }
-    }
-}
-
-/// The condition keys a session sets (`key` is lowercase). `None`: not a session's key (or not
-/// a session); `Some(None)`: the key is absent for this session.
-pub(crate) fn condition(k: &AccessKey, account: &str, key: &str) -> Option<Option<Vec<String>>> {
-    let s = k.session.as_ref()?;
-    let one = |v: Option<String>| Some(v.map(|v| vec![v]));
-    if let Some(name) = key.strip_prefix("aws:principaltag/") {
-        return one(s.tags.iter().find(|(t, _)| t.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone()));
-    }
-    match key {
-        "aws:tokenissuetime" => return one(Some(s3_proto::time::iso8601_ms(s.issued_at))),
-        "aws:multifactorauthpresent" => return one(Some("false".into())),
-        "aws:sourceidentity" => return one(s.source_identity.clone()),
-        "aws:federatedprovider" => return one(s.web.as_ref().map(|w| format!("arn:aws:iam::{account}:oidc-provider/{}", w.provider()))),
-        _ => {}
-    }
-    if let Some(w) = &s.web {
-        let provider = w.provider().to_ascii_lowercase();
-        if let Some(claim) = key.strip_prefix(provider.as_str()).and_then(|r| r.strip_prefix(':')) {
-            return match claim {
-                "sub" => one(Some(w.subject.clone())),
-                "aud" => one(Some(w.audience.clone())),
-                _ => Some(None),
-            };
-        }
-    }
-    if s.role.is_some() {
-        return match key {
-            "aws:principalarn" => one(s.role_arn(account)),
-            "aws:userid" => one(s.user_id()),
-            "aws:username" => Some(None),
-            "aws:principaltype" => one(Some("AssumedRole".into())),
-            _ => None,
-        };
-    }
-    // A `GetSessionToken` session is its key.
-    let parent = s.key.clone();
-    match key {
-        "aws:userid" | "aws:username" => one(parent),
-        "aws:principalarn" => one(parent.map(|p| format!("arn:aws:iam::{account}:user/{p}"))),
-        _ => None,
-    }
-}
-
-/// Whether a session's policies (its role's inline policy and its session policy) allow
-/// `action` on `resource`. Permanent keys: always.
-pub(crate) fn bounded(k: &AccessKey, account: &Account, action: &str, resource: &str, cond: &dyn Context) -> bool {
-    let Some(s) = &k.session else { return true };
-    for (doc, max) in [(s.role_policy.as_deref(), MAX_ROLE_POLICY_BYTES), (s.policy.as_deref(), MAX_SESSION_POLICY_BYTES)] {
-        let Some(doc) = doc else { continue };
-        // Both were valid when they were set; if one no longer parses, deny.
-        let Ok(p) = Policy::parse_identity(doc.as_bytes(), max) else {
-            tracing::error!(access_key = k.id, "a session's policy doesn't parse");
-            return false;
-        };
-        if p.evaluate(&Principal::Anonymous, account, action, resource, cond) != Decision::Allow {
-            return false;
-        }
-    }
-    true
-}
 
 /// A query string with session tokens blanked out (for access logs).
 pub(crate) fn redact_query(raw: &str) -> String {

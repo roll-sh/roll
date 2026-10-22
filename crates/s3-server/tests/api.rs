@@ -741,7 +741,7 @@ async fn unsupported_features_fail_loudly() {
         .unwrap();
     let mfa = aws_sdk_s3::types::VersioningConfiguration::builder().status(aws_sdk_s3::types::BucketVersioningStatus::Enabled).mfa_delete(aws_sdk_s3::types::MfaDelete::Enabled).build();
     let e = t.client.put_bucket_versioning().bucket("bkt").versioning_configuration(mfa).send().await.unwrap_err();
-    assert_eq!(e.raw_response().unwrap().status().as_u16(), 501, "MFA delete: no MFA devices here");
+    assert_eq!(e.raw_response().unwrap().status().as_u16(), 403, "MFA Delete needs x-amz-mfa (see tests/iam.rs)");
     let e = t.client.get_bucket_policy().bucket("bkt").send().await.unwrap_err();
     assert_eq!(code(&e.into_service_error()), "NoSuchBucketPolicy");
 }

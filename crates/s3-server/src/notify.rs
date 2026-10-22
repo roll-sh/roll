@@ -497,7 +497,8 @@ impl Notifier {
     }
 
     async fn deliver(&self, dest: &Destination, rec: &EventRecord, bucket_id: &str, id: &str) -> Result<(), Failure> {
-        let owner = self.store.owner_id();
+        // The bucket owner's canonical id (the default account's if the bucket is gone).
+        let owner = self.store.bucket_by_id(bucket_id).ok().flatten().and_then(|b| self.store.account(&b.account_id).ok().flatten()).map_or_else(|| self.store.owner_id(), |a| a.canonical);
         let body = serde_json::to_vec(&event_json(rec, &self.region, &owner)).map_err(|e| Failure::Permanent(e.to_string()))?;
         let d = Delivery { id: id.to_string(), event_name: format!("s3:{}", rec.name), bucket: rec.bucket.clone(), key: rec.key.clone(), body: Bytes::from(body) };
         match dest {
