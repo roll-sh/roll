@@ -3,7 +3,8 @@
 -- clause gates the whole join (and `now() = now()` stays as written); a join under a
 -- gating Result returns the columns needed above; a scan under a Sort / Hash returns its
 -- reltarget (what the target list reads of it first), joins each relation's in that order;
--- a correlated EXISTS over an inheritance tree picks its hashed alternative per member.
+-- a correlated EXISTS over an inheritance tree picks its hashed alternative per member; a
+-- LATERAL subquery planned apart takes no clause reading the left side (its scan's filter).
 CREATE TABLE a3_pt (f1 int, f2 int, f3 float8);
 INSERT INTO a3_pt VALUES (1, 2, 3), (2, 3, 4), (3, 4, 5), (1, 1, 1);
 CREATE TABLE a3_px (x int, y int, z int);
@@ -42,4 +43,15 @@ ANALYZE a3_pe;
 EXPLAIN (COSTS OFF)
 SELECT * FROM a3_pe t1 WHERE (EXISTS (SELECT 1 FROM a3_pe t2 WHERE t1.c1 = t2.c2) OR c3 < 0);
 SELECT * FROM a3_pe t1 WHERE (EXISTS (SELECT 1 FROM a3_pe t2 WHERE t1.c1 = t2.c2) OR c3 < 0) ORDER BY 1;
-DROP TABLE a3_pt, a3_px, a3_py, a3_pz, a3_pe;
+CREATE TABLE a3_pl1 (unique1 int, unique2 int, two int, four int);
+CREATE TABLE a3_pl2 (unique1 int, unique2 int, two int, four int);
+INSERT INTO a3_pl1 SELECT g, g, g % 2, g % 4 FROM generate_series(1, 1000) g;
+INSERT INTO a3_pl2 SELECT g, g, g % 2, g % 4 FROM generate_series(1, 1000) g;
+ANALYZE a3_pl1;
+ANALYZE a3_pl2;
+EXPLAIN (COSTS OFF)
+SELECT * FROM a3_pl1 t1 LEFT JOIN LATERAL (SELECT t1.unique1 AS x, * FROM a3_pl2 t2 ORDER BY 1) t2 ON true
+WHERE t1.two > t2.two;
+SELECT count(*) FROM a3_pl1 t1 LEFT JOIN LATERAL (SELECT t1.unique1 AS x, * FROM a3_pl2 t2 ORDER BY 1) t2 ON true
+WHERE t1.two > t2.two AND t1.unique1 < 10;
+DROP TABLE a3_pt, a3_px, a3_py, a3_pz, a3_pe, a3_pl1, a3_pl2;

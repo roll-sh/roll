@@ -1362,7 +1362,11 @@ impl Search<'_, '_, '_> {
                     && def.name == "=";
                 // (A written clause between exactly these members is reused as written:
                 // ec_search_clause_for_ems.)
-                let mine_first = if symmetric && self.clauses[*ci].derived { index_key } else { mine_first };
+                // (A semi join's clause isn't one of its classes' sources: derived afresh.)
+                let semi = self.kind == JoinKind::Semi
+                    || self.clauses[*ci].sj.is_some_and(|i| self.sjs[i].kind == JoinKind::Semi);
+                let mine_first =
+                    if symmetric && (self.clauses[*ci].derived || semi) { index_key } else { mine_first };
                 let q = if mine_first {
                     Expr::Call(def.clone(), vec![colx, param], ty.clone())
                 } else {

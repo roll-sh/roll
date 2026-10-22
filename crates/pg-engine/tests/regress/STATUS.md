@@ -149,6 +149,13 @@ Goldens added: `tests/sql/a3_const_fold.sql`; `a3_sublink_pullup.sql` extended.
 
 Still open in subselect: 218, 221, 288, 327, 328, 332, 350.
 
+Follow-up (checked in a subset run of 20 files after rebasing onto agent 5's round): a LATERAL
+subquery planned apart (ORDER BY, ...) takes no clause reading the left side's values: it stays
+the Subquery Scan's filter (qual_is_pushdown_safe refuses lateral references), so select_parallel
+132's plan shape matches except the parallel outer side (`Gather` over `Parallel Seq Scan`, a
+parallel-costing difference). subselect 329 kept: a semi join's clause in a parameterized scan is
+derived afresh, outer member first, not reused as written.
+
 ## Fixed in round 14, agent 5 (run-time pruning, expression merge keys, EC orientation)
 
 Measured in subset runs against the engine of 7be2e83 rebased onto 4186dde (test_setup,

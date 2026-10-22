@@ -515,7 +515,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 l = add_filter(cat, l, Expr::And(lpush));
             }
             if !rpush.is_empty() {
-                r = add_filter(cat, r, Expr::And(rpush));
+                r = push_lateral(cat, r, rpush, !params.is_empty());
             }
             let mut j = join(cat, kind, l, r, and_all(cond_parts), params, nleft, nright);
             if let Plan::Join { meta, .. } = &mut j {
@@ -1934,6 +1934,21 @@ fn leaf_ranges(p: &Plan, off: usize) -> Vec<(usize, usize)> {
 
 /// Inside a LATERAL right side, Outer(1, _) means the join's params, so predicates that read
 /// the enclosing query can't move there.
+/// Clauses onto a join's right side; a LATERAL subquery planned apart takes none reading
+/// the left side's values (qual_is_pushdown_safe refuses lateral references): they stay its
+/// Subquery Scan's filter.
+fn push_lateral(cat: &Catalog, right: Plan, parts: Vec<Expr>, lateral: bool) -> Plan {
+    if lateral && matches!(right, Plan::Barrier { secure: false, .. }) {
+        let (up, down): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(Expr::has_outer_refs);
+        let right = if down.is_empty() { right } else { add_filter(cat, right, Expr::And(down)) };
+        return match and_all(up) {
+            Some(pred) => Plan::Filter { input: Arc::new(right), pred },
+            None => right,
+        };
+    }
+    add_filter(cat, right, Expr::And(parts))
+}
+
 fn right_pushable(e: &Expr, params: &[Expr]) -> bool {
     params.is_empty() || !e.has_outer_refs()
 }
@@ -2107,7 +2122,7 @@ pub fn join(
         left = add_filter(cat, left, Expr::And(lpush));
     }
     if !rpush.is_empty() {
-        right = add_filter(cat, right, Expr::And(rpush));
+        right = push_lateral(cat, right, rpush, !params.is_empty());
     }
     // Hash keys: `l = r` with each side reading only one input, same type.
     let mut hash: Option<(Vec<Expr>, Vec<Expr>)> = None;

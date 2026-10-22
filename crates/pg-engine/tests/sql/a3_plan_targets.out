@@ -255,6 +255,41 @@ c1:int4 | c2:int4 | c3:int4
 5 | 2 | 6
 -- SELECT 6
 
-> DROP TABLE a3_pt, a3_px, a3_py, a3_pz, a3_pe
+> CREATE TABLE a3_pl1 (unique1 int, unique2 int, two int, four int)
+-- CREATE TABLE
+
+> CREATE TABLE a3_pl2 (unique1 int, unique2 int, two int, four int)
+-- CREATE TABLE
+
+> INSERT INTO a3_pl1 SELECT g, g, g % 2, g % 4 FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> INSERT INTO a3_pl2 SELECT g, g, g % 2, g % 4 FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> ANALYZE a3_pl1
+-- ANALYZE
+
+> ANALYZE a3_pl2
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a3_pl1 t1 LEFT JOIN LATERAL (SELECT t1.unique1 AS x, * FROM a3_pl2 t2 ORDER BY 1) t2 ON true
+> WHERE t1.two > t2.two
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a3_pl1 t1
+  ->  Subquery Scan on t2
+        Filter: (t1.two > t2.two)
+        ->  Seq Scan on a3_pl2 t2_1
+-- EXPLAIN
+
+> SELECT count(*) FROM a3_pl1 t1 LEFT JOIN LATERAL (SELECT t1.unique1 AS x, * FROM a3_pl2 t2 ORDER BY 1) t2 ON true
+> WHERE t1.two > t2.two AND t1.unique1 < 10
+count:int8
+2500
+-- SELECT 1
+
+> DROP TABLE a3_pt, a3_px, a3_py, a3_pz, a3_pe, a3_pl1, a3_pl2
 -- DROP TABLE
 
