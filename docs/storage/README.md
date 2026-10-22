@@ -145,6 +145,9 @@ roll storage rm assets/tmp/ -r
 roll storage usage assets
 ```
 
+`-r` takes a key prefix, as `aws s3 rm --recursive` and `aws s3 cp --recursive` do: `assets/tmp`
+also matches `assets/tmp-old.txt`, `assets/tmp/` only what's under the directory.
+
 The dashboard is at `/dashboard/storage`. It has buckets, an object browser with drag-and-drop
 upload, recently deleted objects, branches, settings, access keys and usage.
 

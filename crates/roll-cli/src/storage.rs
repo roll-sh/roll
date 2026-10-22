@@ -83,7 +83,8 @@ pub enum Storage {
     Cp {
         src: String,
         dst: String,
-        /// Copy a directory (upload) or every key under a prefix (download).
+        /// Copy a directory (upload), or every key starting with the prefix (download; `dir`
+        /// also matches `dirt.txt`, `dir/` only the directory, as `aws s3 cp --recursive`).
         #[arg(long, short)]
         recursive: bool,
         /// Content-Type for uploads (default: from the file extension).
@@ -93,7 +94,8 @@ pub enum Storage {
         #[arg(long, conflicts_with = "recursive")]
         version_id: Option<String>,
     },
-    /// Delete an object, or every object under a prefix with -r.
+    /// Delete an object, or with -r every object whose key starts with the prefix, as
+    /// `aws s3 rm --recursive` does: `dir` also matches `dirt.txt`, `dir/` only the directory.
     Rm {
         path: String,
         #[arg(long, short)]
