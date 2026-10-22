@@ -62,6 +62,12 @@ pub struct NotifyConfig {
     pub aws_endpoints: std::collections::BTreeMap<String, String>,
     /// Credentials for AWS instead of the default chain (tests).
     pub aws_credentials: Option<AwsCredentials>,
+    /// Publish replication metrics to CloudWatch (`PutMetricData` on the AWS path, so it needs
+    /// [`NotifyConfig::aws`]) this often (`ROLL_S3_REPLICATION_METRICS_CLOUDWATCH`: every
+    /// minute, S3's period); `None`: the control plane only.
+    pub replication_metrics_interval: Option<Duration>,
+    /// Their namespace (`AWS/` namespaces are AWS's own: `PutMetricData` refuses them).
+    pub replication_metrics_namespace: String,
 }
 
 /// Static AWS credentials (never printed).
@@ -92,6 +98,8 @@ impl Default for NotifyConfig {
             aws_endpoint: None,
             aws_endpoints: Default::default(),
             aws_credentials: None,
+            replication_metrics_interval: None,
+            replication_metrics_namespace: "roll/S3".into(),
         }
     }
 }
@@ -252,6 +260,10 @@ pub struct Notifier {
     aws_http: reqwest::Client,
     aws: tokio::sync::OnceCell<Option<aws_sdk_s3::config::SharedCredentialsProvider>>,
     counters: Counters,
+    /// Wakes the dispatcher (a request changed something).
+    wake: Arc<tokio::sync::Notify>,
+    /// When Replication Time Control's threshold was last checked (store clock, ms).
+    rtc_checked: std::sync::atomic::AtomicI64,
     /// Replication to buckets outside roll.
     pub(crate) external: crate::replicate_ext::External,
 }
@@ -370,12 +382,16 @@ pub fn event_json(r: &EventRecord, region: &str, owner: &str) -> Value {
         rec["glacierEventData"] = json!({ "restoreEventData": { "lifecycleRestoreStorageClass": "STANDARD" } });
     }
     if r.name.starts_with("Replication:") {
-        rec["replicationEventData"] = json!({
+        let mut data = json!({
+            "replicationRuleId": r.replication_rule,
             "destinationBucket": r.replication_destination.as_ref().map(|d| format!("arn:aws:s3:::{d}")),
             "s3Operation": "OBJECT_PUT",
             "requestTime": iso8601_ms(r.time),
-            "failureReason": r.reason,
         });
+        if r.name == "Replication:OperationFailedReplication" {
+            data["failureReason"] = json!(r.reason);
+        }
+        rec["replicationEventData"] = data;
     }
     json!({ "Records": [rec] })
 }
@@ -390,6 +406,9 @@ fn bridge_detail_type(name: &str) -> &'static str {
         "ObjectTagging" => "Object Tags Added",
         "ObjectAcl" => "Object ACL Updated",
         "LifecycleExpiration" => "Object Deleted",
+        "Replication" if name.ends_with("MissedThreshold") => "Object Replication Operation Missed Threshold",
+        "Replication" if name.ends_with("ReplicatedAfterThreshold") => "Object Replication Operation Replicated After Threshold",
+        "Replication" if name.ends_with("NotTracked") => "Object Replication Operation Not Tracked",
         "Replication" => "Object Replication Operation Failed",
         _ => "Object Created",
     }
@@ -415,7 +434,7 @@ impl Notifier {
             .expect("an HTTP client");
         let aws_http = reqwest::Client::builder().timeout(cfg.webhook_timeout.max(Duration::from_secs(70))).redirect(reqwest::redirect::Policy::none()).user_agent("roll-storage/1").build().expect("an HTTP client");
         let external = crate::replicate_ext::External::new(store.clone());
-        Arc::new(Self { store, cfg, region, sink: RwLock::new(None), http, aws_http, aws: Default::default(), counters: Counters::default(), external })
+        Arc::new(Self { store, cfg, region, sink: RwLock::new(None), http, aws_http, aws: Default::default(), counters: Counters::default(), rtc_checked: Default::default(), wake: Default::default(), external })
     }
 
     /// Install the delivery into roll queues and streams (rolld does, once they're up).
@@ -427,10 +446,11 @@ impl Notifier {
         self.sink.read().unwrap().clone()
     }
 
-    /// Replication latency (Replication Time Control's `ReplicationLatency`) of a bucket's
-    /// destinations, by destination (`<bucket>` or `<bucket>@<target>`), since start.
-    pub fn replication_latency(&self, bucket_id: &str) -> std::collections::BTreeMap<String, crate::replicate_ext::Latency> {
-        self.external.latency(bucket_id)
+    /// A bucket's replication metrics by rule id since start (`ReplicationLatency`,
+    /// `OperationsFailedReplication`, operations replicated after Replication Time Control's
+    /// threshold). What's pending is `Store::replication_backlog`.
+    pub fn replication_metrics(&self, bucket_id: &str) -> std::collections::BTreeMap<String, crate::replicate_ext::RuleMetrics> {
+        self.external.metrics(bucket_id)
     }
 
     /// Replicate to buckets outside roll in parts of `part_size` bytes from `threshold` bytes
@@ -449,10 +469,15 @@ impl Notifier {
         &self.store
     }
 
+    /// Run the dispatcher now rather than at its next tick (something may have been queued).
+    pub fn wake(&self) {
+        self.wake.notify_one();
+    }
+
     /// Resolve and check a replication configuration's destinations as PutBucketReplication
     /// does (roll buckets, or buckets of replication targets with versioning enabled).
-    pub async fn check_replication(&self, cfg: &mut s3_store::ReplicationConfig) -> Result<(), String> {
-        crate::replication::resolve_destinations(self, cfg).await
+    pub async fn check_replication(&self, cfg: &mut s3_store::ReplicationConfig, object_lock: bool) -> Result<(), String> {
+        crate::replication::resolve_destinations(self, cfg, object_lock).await
     }
 
     pub fn stats(&self) -> EventStats {
@@ -462,13 +487,29 @@ impl Notifier {
     }
 
     pub(crate) fn spawn(self: &Arc<Self>) {
+        if let (Some(every), true, Ok(rt)) = (self.cfg.replication_metrics_interval, self.cfg.aws, tokio::runtime::Handle::try_current()) {
+            let weak = Arc::downgrade(self);
+            rt.spawn(async move {
+                loop {
+                    tokio::time::sleep(every).await;
+                    let Some(n) = weak.upgrade() else { return };
+                    if let Err(e) = n.publish_replication_metrics().await {
+                        tracing::warn!(error = e, "publishing replication metrics to CloudWatch failed");
+                    }
+                }
+            });
+        }
         let (Some(every), Ok(rt)) = (self.cfg.dispatch_interval, tokio::runtime::Handle::try_current()) else { return };
         let weak = Arc::downgrade(self);
+        let wake = self.wake.clone();
         rt.spawn(async move {
             loop {
-                tokio::time::sleep(every).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(every) => {}
+                    _ = wake.notified() => {}
+                }
                 let Some(n) = weak.upgrade() else { return };
-                // Drain while there's work, then wait for the next tick.
+                // Drain while there's work, then wait for the next tick (or a write).
                 loop {
                     match n.dispatch().await {
                         Ok(0) => break,
@@ -487,6 +528,18 @@ impl Notifier {
     /// One pass over the due outbox rows: deliver notifications, apply replication. Returns how
     /// many rows were looked at.
     pub async fn dispatch(&self) -> Result<usize, StoreError> {
+        // Replication Time Control: versions past the 15-minute threshold report it (checked
+        // every 30 s; the events go out through the outbox like any other).
+        let now = self.store.now();
+        if now - self.rtc_checked.load(Ordering::Relaxed) >= 30_000 {
+            self.rtc_checked.store(now, Ordering::Relaxed);
+            if let Err(e) = self.store.replication_missed_threshold().await {
+                tracing::warn!(error = %e, "checking replication's time threshold failed");
+                if matches!(e, StoreError::Unavailable(_)) {
+                    return Err(e);
+                }
+            }
+        }
         let rows = self.store.due_events(256).await?;
         let n = rows.len();
         if n == 0 {
@@ -521,6 +574,8 @@ impl Notifier {
                     tracing::error!(seq = ev.seq, dest = ev.dest, key = ev.key, attempts = ev.attempts, error = why, "storage event failed past its retention; dropped");
                     if ev.kind == REPLICATE {
                         self.store.abandon_replication(&ev, &why).await?;
+                        let rule = serde_json::from_str::<s3_store::ReplicateTask>(&ev.body).map(|t| t.rule).unwrap_or_default();
+                        self.external.record_failure(&ev.bucket_id, &rule);
                     } else {
                         done.push(ev.seq);
                     }
@@ -539,33 +594,25 @@ impl Notifier {
     /// Handle one row. `Ok(true)`: delivered, delete it; `Ok(false)`: the store already did.
     async fn handle(&self, ev: &PendingEvent) -> Result<bool, Failure> {
         match ev.kind.as_str() {
-            REPLICATE if s3_store::events::is_external(ev) => match self.external.replicate(self, ev).await {
-                Ok(Replicated::Failed(why)) => {
-                    self.counters.replication_failed.fetch_add(1, Ordering::Relaxed);
-                    tracing::warn!(bucket = ev.bucket_id, key = ev.key, why, "replication to a bucket outside roll failed");
-                    Ok(false)
+            REPLICATE => {
+                let outcome = if s3_store::events::is_external(ev) { self.external.replicate(ev).await } else { self.store.replicate(ev).await.map_err(|e| e.to_string()) };
+                let rule = serde_json::from_str::<s3_store::ReplicateTask>(&ev.body).map(|t| t.rule).unwrap_or_default();
+                match outcome {
+                    Ok(Replicated::Failed(why)) => {
+                        self.counters.replication_failed.fetch_add(1, Ordering::Relaxed);
+                        self.external.record_failure(&ev.bucket_id, &rule);
+                        tracing::warn!(bucket = ev.bucket_id, key = ev.key, dest = ev.dest, why, "replication failed");
+                        Ok(false)
+                    }
+                    Ok(Replicated::Completed) => {
+                        self.counters.replicated.fetch_add(1, Ordering::Relaxed);
+                        self.external.record(&ev.bucket_id, &rule, ev.created_at, self.store.now());
+                        Ok(false)
+                    }
+                    Ok(Replicated::Skipped) => Ok(false),
+                    Err(e) => Err(Failure::Retry(e)),
                 }
-                Ok(Replicated::Completed) => {
-                    self.counters.replicated.fetch_add(1, Ordering::Relaxed);
-                    Ok(false)
-                }
-                Ok(Replicated::Skipped) => Ok(false),
-                Err(e) => Err(Failure::Retry(e)),
-            },
-            REPLICATE => match self.store.replicate(ev).await {
-                Ok(Replicated::Failed(why)) => {
-                    self.counters.replication_failed.fetch_add(1, Ordering::Relaxed);
-                    tracing::warn!(bucket = ev.bucket_id, key = ev.key, why, "replication failed");
-                    Ok(false)
-                }
-                Ok(Replicated::Completed) => {
-                    self.counters.replicated.fetch_add(1, Ordering::Relaxed);
-                    self.external.record(&ev.bucket_id, ev.dest.strip_prefix("replicate:").unwrap_or(&ev.dest), ev.created_at, self.store.now());
-                    Ok(false)
-                }
-                Ok(Replicated::Skipped) => Ok(false),
-                Err(e) => Err(Failure::Retry(e.to_string())),
-            },
+            }
             BACKFILL => self.store.backfill(ev).await.map(|_| false).map_err(|e| Failure::Retry(e.to_string())),
             _ => {
                 let rec = ev.record().map_err(|e| Failure::Permanent(format!("unreadable event: {e}")))?;
@@ -769,6 +816,42 @@ impl Notifier {
         Ok(AwsResponse { status, headers, body: Bytes::from(body) })
     }
 
+    /// Publish every replication rule's metrics (rules with `Metrics` or Replication Time
+    /// Control enabled) to CloudWatch with `PutMetricData`, as S3 does every minute: the
+    /// metrics S3 names (`ReplicationLatency` in seconds, `BytesPendingReplication`,
+    /// `OperationsPendingReplication`, `OperationsFailedReplication`), dimensions
+    /// `SourceBucket`, `DestinationBucket` and `RuleId`, in
+    /// [`NotifyConfig::replication_metrics_namespace`] (S3's `AWS/S3` is reserved for AWS).
+    /// Latency is the period's largest, or the age of the oldest pending operation if that's
+    /// larger. Returns how many data points were sent.
+    pub async fn publish_replication_metrics(&self) -> Result<usize, String> {
+        let now = self.store.now();
+        let period = self.external.take_period();
+        let mut points: Vec<MetricPoint> = Vec::new();
+        for (bucket_id, bucket, cfg) in self.store.replication_configs().map_err(|e| e.to_string())? {
+            let pending = self.store.replication_backlog(&bucket_id).map_err(|e| e.to_string())?;
+            for r in cfg.rules.iter().filter(|r| r.enabled && r.metrics()) {
+                let p = pending.get(&r.id).cloned().unwrap_or_default();
+                let (latency, failed) = period.get(&(bucket_id.clone(), r.id.clone())).cloned().unwrap_or_default();
+                let behind = p.oldest_at.map_or(0, |at| (now - at).max(0) as u64);
+                let dims = [("SourceBucket", bucket.clone()), ("DestinationBucket", r.destination.clone()), ("RuleId", r.id.clone())];
+                points.push(("ReplicationLatency".into(), "Seconds", latency.unwrap_or(0).max(behind) as f64 / 1000.0, dims.clone()));
+                points.push(("BytesPendingReplication".into(), "Bytes", p.bytes as f64, dims.clone()));
+                points.push(("OperationsPendingReplication".into(), "Count", p.operations as f64, dims.clone()));
+                points.push(("OperationsFailedReplication".into(), "Count", failed as f64, dims));
+            }
+        }
+        let stamp = iso8601_ms(now);
+        for chunk in points.chunks(20) {
+            let body = put_metric_data(&self.cfg.replication_metrics_namespace, chunk, &stamp);
+            let region = self.region.clone();
+            self.aws_call("monitoring", &region, "/", None, "application/x-www-form-urlencoded", body, &[]).await.map_err(|e| match e {
+                Failure::Retry(w) | Failure::Permanent(w) => w,
+            })?;
+        }
+        Ok(points.len())
+    }
+
     /// Check a configuration and its destinations the way S3 does (unless `skip_validation`),
     /// sending each destination an `s3:TestEvent`, then store it. Returns it as stored.
     pub async fn put_config(&self, bucket: &Bucket, mut cfg: NotificationConfig, skip_validation: bool) -> Result<NotificationConfig, NotifyError> {
@@ -832,6 +915,23 @@ impl Notifier {
             Err(Failure::Retry(e) | Failure::Permanent(e)) => Err(e),
         }
     }
+}
+
+/// One metric data point: name, unit, value, dimensions.
+type MetricPoint = (String, &'static str, f64, [(&'static str, String); 3]);
+
+/// CloudWatch's `PutMetricData` (query protocol) of `points` at `stamp`.
+fn put_metric_data(namespace: &str, points: &[MetricPoint], stamp: &str) -> Vec<u8> {
+    let mut form = url::form_urlencoded::Serializer::new(String::new());
+    form.append_pair("Action", "PutMetricData").append_pair("Version", "2010-08-01").append_pair("Namespace", namespace);
+    for (i, (name, unit, value, dims)) in points.iter().enumerate() {
+        let m = format!("MetricData.member.{}", i + 1);
+        form.append_pair(&format!("{m}.MetricName"), name).append_pair(&format!("{m}.Unit"), unit).append_pair(&format!("{m}.Value"), &value.to_string()).append_pair(&format!("{m}.Timestamp"), stamp);
+        for (j, (k, v)) in dims.iter().enumerate() {
+            form.append_pair(&format!("{m}.Dimensions.member.{}.Name", j + 1), k).append_pair(&format!("{m}.Dimensions.member.{}.Value", j + 1), v);
+        }
+    }
+    form.finish().into_bytes()
 }
 
 /// The `detail` of an EventBridge event (S3's shape).

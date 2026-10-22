@@ -14,7 +14,7 @@ use axum::response::Response;
 use bytes::Bytes;
 use futures::Stream;
 use s3_proto::checksum::Algorithm;
-use s3_proto::http::{Conditions, Overrides, parse_copy_source_version, parse_range, parse_tagging_header, part_range, quote_etag, user_metadata, validate_key, validate_tags};
+use s3_proto::http::{Conditions, Overrides, parse_range, parse_tagging_header, part_range, quote_etag, user_metadata, validate_key, validate_tags};
 use s3_proto::time::http_date;
 use s3_proto::{Code, S3Error, xml};
 use s3_store::{Bucket, ByteStream, Checksum, Class, CopyOptions, Encryption, NewObject, ObjectHeaders, ObjectMeta, Store, WriteCondition};
@@ -142,7 +142,7 @@ pub(crate) fn set_checksum(r: &mut Response, c: &Checksum) {
 }
 
 async fn put(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
-    ctx.require(&bucket.name, Need::Write)?;
+    let replica = crate::replication::require_write(ctx, bucket)?;
     let headers = object_headers(ctx)?;
     let cond = write_condition(ctx)?;
     let lock = versioning::lock_headers(ctx, bucket)?;
@@ -158,7 +158,10 @@ async fn put(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
         return Err(S3Error::new(Code::EntityTooLarge).with("ProposedSize", len.to_string()).with("MaxSizeAllowed", MAX_PUT.to_string()));
     }
     ctx.meter(&bucket.id, Class::A);
-    precheck(ctx, &cond)?;
+    match replica {
+        Some(rw) => crate::replication::writing_replica(rw),
+        None => precheck(ctx, &cond)?,
+    }
     let store = ctx.store().clone();
     let key = ctx.key_name().to_string();
     let result = incoming.result();
@@ -380,10 +383,15 @@ pub(crate) async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
 }
 
 async fn delete(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
-    ctx.require(&bucket.name, Need::Write)?;
+    let vid = versioning::version_id(ctx)?;
+    // A delete marker replicated by another roll deployment (only without a version id).
+    let replica = if vid.is_none() { crate::replication::replica_auth(ctx, bucket, "s3:ReplicateDelete")? } else { None };
+    match replica {
+        Some(rw) => crate::replication::writing_replica(rw),
+        None => ctx.require(&bucket.name, Need::Write)?,
+    }
     ctx.meter(&bucket.id, Class::Free);
     let if_match = ctx.h("if-match").map(str::to_string);
-    let vid = versioning::version_id(ctx)?;
     let bypass = versioning::bypass(ctx)?;
     // MFA Delete: permanently deleting a version needs x-amz-mfa.
     if vid.is_some() && versioning::mfa_delete_on(ctx, bucket)? {
@@ -410,8 +418,8 @@ fn directive(ctx: &Ctx, name: &str) -> Result<bool, S3Error> {
 
 async fn copy(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
-    let (src_bucket, src_key, src_vid) = parse_copy_source_version(ctx.h("x-amz-copy-source").unwrap_or_default())?;
-    ctx.require_source(&src_bucket, &src_key)?;
+    // By bucket, access point ARN or alias, authorized for reading.
+    let (src_bucket, src_key, src_vid) = crate::accesspoint::copy_source(ctx)?;
     let src = copy_source(ctx, &src_bucket, &src_key, src_vid.as_deref())?;
     let src_enc = ctx.store().blob_encryption(&src.blob_id).s3()?;
     let src_sse = sse::key_for(ctx, src_enc.as_ref(), sse::Use::CopySource)?;
@@ -493,6 +501,7 @@ fn get_tagging(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
 
 async fn put_tagging(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
+    crate::replication::replica_sync(ctx, bucket)?;
     ctx.meter(&bucket.id, Class::A);
     let vid = versioning::version_id(ctx)?;
     let raw = read_small(ctx, body, xml::MAX_XML_BYTES).await?;
@@ -506,6 +515,7 @@ async fn put_tagging(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
 
 async fn delete_tagging(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
+    crate::replication::replica_sync(ctx, bucket)?;
     ctx.meter(&bucket.id, Class::Free);
     let vid = versioning::version_id(ctx)?;
     let m = ctx.store().put_version_tags(&bucket.name, ctx.key_name(), vid.as_deref(), BTreeMap::new()).await.s3()?;

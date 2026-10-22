@@ -184,21 +184,35 @@ impl Store {
         // being in flight; an uncommitted one is then the orphan scan's.
         let _inflight = self.inflight_guard(&blob);
         let now = row.modified_at;
+        // A replica for another deployment's replication keeps its source's version id.
+        let replica = events::replica_write();
         self.log.check_open()?;
         let attempt = self.log.db.write(|c| {
             let b = find_bucket(c, bucket)?;
             let chain = rows::chain(c, &b.id)?;
-            let cur = rows::resolve(c, &chain, &row.key)?.map(|(r, _)| r);
-            check_condition(cur.as_ref(), cond, &row.key)?;
+            if let Some(rw) = &replica {
+                if let Some(there) = events::existing_replica(c, &chain, &row.key, rw, Some((row.size, crc32c)))? {
+                    return Ok((there, false));
+                }
+            } else {
+                let cur = rows::resolve(c, &chain, &row.key)?.map(|(r, _)| r);
+                check_condition(cur.as_ref(), cond, &row.key)?;
+            }
             rows::insert_blob(c, &blob, row.size, crc32c, now)?;
             if let Some(e) = enc {
                 crate::sse::insert(c, &blob, e, now)?;
             }
-            let stored = versioning::put_key(c, &b, &chain, &row.key, row.clone(), now)?;
-            events::emit(c, &b, events::Change::version(&events::created(), &stored), now)?;
-            Ok(stored)
+            let stored = match &replica {
+                Some(rw) => events::place_replica(c, &b, &chain, row.clone(), rw, now)?,
+                None => {
+                    let stored = versioning::put_key(c, &b, &chain, &row.key, row.clone(), now)?;
+                    events::emit(c, &b, events::Change::version(&events::created(), &stored), now)?;
+                    stored
+                }
+            };
+            Ok((stored, true))
         });
-        let (stored, batch) = match attempt {
+        let ((stored, used), batch) = match attempt {
             Ok(x) => x,
             Err(e) => {
                 // Rolled back: nothing references the blob.
@@ -207,6 +221,13 @@ impl Store {
             }
         };
         self.log.wait(batch).await?;
+        if !used {
+            // The replica was there already (a retry): this upload's blob isn't needed.
+            self.discard_blob(&blob).await;
+        }
+        if replica.is_some() {
+            self.mark_replication_status();
+        }
         stored.meta()
     }
 
@@ -747,21 +768,48 @@ impl Store {
             lock: up.lock.clone(),
             ..Row::tombstone(&up.key, now)
         };
+        let replica = events::replica_write();
         self.log.check_open()?;
         let attempt = self.log.db.write(|c| {
             let b = find_bucket(c, bucket)?;
             find_upload(c, upload_id)?;
             let chain = rows::chain(c, &b.id)?;
-            let cur = rows::resolve(c, &chain, &row.key)?.map(|(r, _)| r);
-            check_condition(cur.as_ref(), cond, &row.key)?;
+            match &replica {
+                // The replica is there already (a retry with a new upload): the upload goes,
+                // and its blob once that's durable.
+                Some(rw) => {
+                    if let Some(there) = events::existing_replica(c, &chain, &row.key, rw, Some((size, crc)))? {
+                        c.execute("DELETE FROM parts WHERE upload_id = ?1", [upload_id])?;
+                        c.execute("DELETE FROM uploads WHERE id = ?1", [upload_id])?;
+                        crate::sse::forget_if_unused(c, &up.blob_id)?;
+                        return Ok((there, false));
+                    }
+                }
+                None => {
+                    let cur = rows::resolve(c, &chain, &row.key)?.map(|(r, _)| r);
+                    check_condition(cur.as_ref(), cond, &row.key)?;
+                }
+            }
             rows::insert_blob(c, &up.blob_id, size, crc, now)?;
-            let stored = versioning::put_key(c, &b, &chain, &row.key, row.clone(), now)?;
-            events::emit(c, &b, events::Change::version("ObjectCreated:CompleteMultipartUpload", &stored), now)?;
+            let stored = match &replica {
+                Some(rw) => {
+                    crate::events::set_origin(|o| o.create = Some("CompleteMultipartUpload"));
+                    events::place_replica(c, &b, &chain, row.clone(), rw, now)?
+                }
+                None => {
+                    let stored = versioning::put_key(c, &b, &chain, &row.key, row.clone(), now)?;
+                    events::emit(c, &b, events::Change::version("ObjectCreated:CompleteMultipartUpload", &stored), now)?;
+                    stored
+                }
+            };
             c.execute("DELETE FROM parts WHERE upload_id = ?1", [upload_id])?;
             c.execute("DELETE FROM uploads WHERE id = ?1", [upload_id])?;
-            Ok(stored)
+            Ok((stored, true))
         });
-        let (stored, batch) = match attempt {
+        if replica.is_some() && attempt.is_ok() {
+            self.mark_replication_status();
+        }
+        let ((stored, used), batch) = match attempt {
             Ok(x) => x,
             Err(StoreError::NoSuchUpload(_)) => return self.completed_already(bucket, up),
             Err(e) => {
@@ -789,6 +837,10 @@ impl Store {
             }
         };
         self.log.wait(batch).await?;
+        if !used && !self.blob_committed(&up.blob_id)? {
+            // The replica was there already: the upload's blob isn't needed.
+            self.discard_blob(&up.blob_id).await;
+        }
         stored.meta()
     }
 

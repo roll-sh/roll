@@ -81,7 +81,7 @@ fails if anything changes either way:
 | Get/PutBucketLogging | ✅ server access logs delivered to the target bucket every 5 minutes, best effort |
 | Get/PutBucketAccelerateConfiguration | ✅ stored and returned; a no-op (there's one endpoint) |
 | Get/PutBucketRequestPayment | ✅ `BucketOwner` and `Requester` (see [Requester Pays](#requester-pays)) |
-| Get/Put/DeleteBucketReplication | ✅ between roll buckets (metadata-only) and to buckets outside roll (AWS S3 in any account or region, any S3-compatible endpoint) through replication targets (see [Replication](#replication)) |
+| Get/Put/DeleteBucketReplication | ✅ between roll buckets (metadata-only) and to buckets outside roll (AWS S3 in any account or region, any S3-compatible endpoint, another roll deployment) through replication targets; replicas keep their source's version id (except on services that assign their own), Object Lock, metadata changes, `ReplicaModifications`, `SseKmsEncryptedObjects`, Replication Time Control and replication metrics (see [Replication](#replication)) |
 | Get/PutBucketNotificationConfiguration | ✅ Topic, Queue, CloudFunction and EventBridge configurations, event wildcards, `prefix`/`suffix` filter rules, `x-amz-skip-destination-validation`, `s3:TestEvent` (see [Event notifications](#event-notifications)) |
 | Inventory configurations (Get/Put/Delete/List) | ✅ reports generated Daily/Weekly as CSV (see [Inventory](#inventory-reports)); ORC and Parquet are `NotImplemented` |
 | Analytics, metrics and intelligent-tiering configurations (Get/Put/Delete/List) | ✅ validated and stored. Analytics aren't computed and metrics aren't published yet. Intelligent-tiering archive tiers are `NotImplemented` (nothing is ever archived). |
@@ -93,13 +93,13 @@ fails if anything changes either way:
 | PutObject | ✅ returns `x-amz-version-id` in versioned buckets (not for the `null` version a suspended bucket writes, as on S3), and `x-amz-expiration` when a lifecycle rule will expire the object |
 | GetObject, HeadObject | ✅ `versionId`, `Range`, `partNumber`, `If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`, `response-*` overrides, `x-amz-checksum-mode`; Object Lock headers; `x-amz-replication-status`; `x-amz-expiration` when a lifecycle rule will expire the object; a delete marker answers 404 (current) or 405 (by id) with `x-amz-delete-marker: true`. A missing key is a 404 for a requester who may list it (`s3:ListBucket`, with `s3:prefix` the key) and a 403 otherwise, as on S3. `x-amz-server-side-encryption` on a read is `400 InvalidArgument`. |
 | DeleteObject | ✅ unversioned: the object goes to the bucket's trash. Versioned: a delete marker; with `versionId`, that version is deleted for good (to the trash, see below) |
-| CopyObject | ✅ `x-amz-metadata-directive`, `x-amz-copy-source-if-*`, `?versionId=` in the source, `x-amz-copy-source-version-id`; no data is copied |
+| CopyObject | ✅ `x-amz-metadata-directive`, `x-amz-copy-source-if-*`, `?versionId=` in the source, `x-amz-copy-source-version-id`; the source by bucket, by access point ARN (`arn:aws:s3:<region>:<account>:accesspoint/<name>/object/<key>`, URL-encoded or not) or by access point alias (see [Access points](#access-points)); no data is copied |
 | Conditional writes: `If-None-Match: *`, `If-Match` on PutObject and CompleteMultipartUpload | ✅ `If-Match` on a missing key is `404 NoSuchKey`. `If-None-Match` also takes ETags (S3 only `*`): the write fails if the object there has one of them. |
 | Get/Put/DeleteObjectTagging, `x-amz-tagging` | ✅ with `versionId` |
 | GetObjectAttributes | ✅ `ETag`, `Checksum`, `ObjectParts` (part numbers, sizes and, when the upload had checksums, each part's checksum; `x-amz-max-parts`, `x-amz-part-number-marker`), `StorageClass`, `ObjectSize`; `versionId` and the conditional headers. Parts are numbered 1..N as for `GET ?partNumber=` |
 | Get/PutObjectRetention, Get/PutObjectLegalHold | ✅ `versionId`, `x-amz-bypass-governance-retention` (admin keys). A GOVERNANCE retention can be extended freely; shortening it, removing it or turning it into COMPLIANCE needs the bypass. |
 | `x-amz-object-lock-mode`, `-retain-until-date`, `-legal-hold` | ✅ on PutObject (with `Content-MD5` or an `x-amz-checksum-*`, as S3 requires), CopyObject, CreateMultipartUpload and POST Object |
-| CreateMultipartUpload, UploadPart, UploadPartCopy, CompleteMultipartUpload, AbortMultipartUpload, ListParts | ✅ UploadPartCopy takes a source `versionId`; Complete returns `x-amz-version-id`. Completing an upload again (an SDK retrying a completion whose answer was lost) gets the same answer, as on S3, as long as the key still holds what those parts made. |
+| CreateMultipartUpload, UploadPart, UploadPartCopy, CompleteMultipartUpload, AbortMultipartUpload, ListParts | ✅ UploadPartCopy takes a source `versionId`, and a source named like CopyObject's; Complete returns `x-amz-version-id`. Completing an upload again (an SDK retrying a completion whose answer was lost) gets the same answer, as on S3, as long as the key still holds what those parts made. |
 | POST Object (form upload) | ✅ including the `acl`, `x-amz-website-redirect-location` and Object Lock fields |
 | RestoreObject | ✅ answers `InvalidObjectState` (403), as S3 does for objects that aren't archived: nothing ever is |
 
@@ -170,7 +170,6 @@ Details:
 
 | feature | notes |
 |---|---|
-| Replication Time Control's 15-minute SLA and its `OperationMissedThreshold` events, replica modification sync | stored and returned, not acted on; RTC's metrics are in the control plane (see [Replication](#replication)) |
 | ORC and Parquet inventory reports | `NotImplemented` when the configuration is put; CSV works |
 | Storage Class Analysis, CloudWatch request metrics | The configurations are stored, nothing is produced yet. |
 | S3 Select | |
@@ -482,7 +481,8 @@ the change, so an event exists if and only if the write was acknowledged:
 | `s3:ObjectTagging:Put`, `:Delete` | Put/DeleteObjectTagging |
 | `s3:ObjectAcl:Put` | PutObjectAcl |
 | `s3:ObjectRestore:Completed` | **roll's trash restore** (`POST /v1/storage/buckets/{name}/trash/restore`): the version is readable again. There's no `s3:ObjectRestore:Post` (nothing is archived, so RestoreObject never starts a restore), and the restore never expires, so `glacierEventData` has no `lifecycleRestorationExpiryTime`. |
-| `s3:Replication:OperationFailedReplication` | a version couldn't be replicated (see [Replication](#replication)) |
+| `s3:Replication:OperationFailedReplication` | a version (or a change to its metadata) couldn't be replicated (see [Replication](#replication)). S3 only sends it for rules with `Metrics` enabled; roll sends it for every rule. |
+| `s3:Replication:OperationMissedThreshold`, `:OperationReplicatedAfterThreshold` | with Replication Time Control: a version not replicated within 15 minutes, and when it then is |
 | `s3:TestEvent` | sent to each destination when a configuration is put (unless validation is skipped) |
 
 Records are S3's JSON: `Records[]` with `eventVersion` (2.1; 2.2 for replication events; 2.3
@@ -524,10 +524,13 @@ secret); a branch can have its own.
 `PutBucketReplication` takes S3's `ReplicationConfiguration`: `Role` (accepted, returned, not
 needed), and rules with `ID`, `Priority`, `Status`, `Filter` (`Prefix`, `Tag`, or `And`) or the
 legacy rule `Prefix`, `DeleteMarkerReplication`, `Destination` (`Bucket` ARN, `StorageClass`,
-`Account`, `AccessControlTranslation`, `EncryptionConfiguration`; `ReplicationTime` and `Metrics`
-are stored and returned), `ExistingObjectReplication` and `SourceSelectionCriteria`. As on S3, the
-source and every destination need versioning `Enabled` (`InvalidRequest` otherwise), priorities
-must be unique, V2 rules need `DeleteMarkerReplication`, and the destination can't be the source.
+`Account`, `AccessControlTranslation`, `EncryptionConfiguration`, `ReplicationTime`, `Metrics`),
+`ExistingObjectReplication` and `SourceSelectionCriteria` (`SseKmsEncryptedObjects`,
+`ReplicaModifications`). As on S3, the source and every destination need versioning `Enabled`
+(`InvalidRequest` otherwise), a source with Object Lock needs destinations with Object Lock
+(`InvalidRequest`), priorities must be unique, V2 rules need `DeleteMarkerReplication`, the
+destination can't be the source, `ReplicationTime` `Time` and `Metrics` `EventThreshold` take 15
+minutes only (`InvalidArgument`), and `ReplicationTime` needs `Metrics` (`InvalidRequest`).
 
 `arn:aws:s3:::<bucket>` names, in this order:
 1. the bucket on the replication target named by roll's extension element
@@ -539,6 +542,52 @@ must be unique, V2 rules need `DeleteMarkerReplication`, and the destination can
 
 Anything else is `InvalidRequest` (*Destination bucket must exist*), as on S3.
 
+**What replicates**, wherever the destination is, as on S3:
+- new versions and (with `DeleteMarkerReplication` `Enabled`, always for legacy `Prefix` rules)
+  delete markers made by DeleteObject. Lifecycle delete markers and deletes of a version by id
+  never replicate. Replicas keep the source's version id and `Last-Modified` (see below for
+  services that assign their own ids);
+- user metadata, content headers, tags, Object Lock retention and legal hold, and between roll
+  buckets the ACL (unless `AccessControlTranslation` `Owner=Destination`);
+- **later metadata changes** to a replicated version (tags, ACL, retention, legal hold): they
+  replicate to its replicas, in order behind the version itself;
+- **`ReplicaModifications` `Enabled`** on a rule: changes made to *replicas* in that bucket (tags,
+  ACL, retention, legal hold) replicate to the rule's destination, which is how two-way
+  replication keeps metadata in sync. A change made by replication itself never replicates
+  again, so two buckets replicating to each other don't bounce;
+- **SSE-KMS versions** only with `SourceSelectionCriteria` `SseKmsEncryptedObjects` `Enabled`
+  (between roll buckets too); otherwise they're out of scope and get no status, as on S3.
+  SSE-C versions only replicate between roll buckets.
+
+Replicas aren't replicated again (no chains, no loops). GET and HEAD return
+`x-amz-replication-status`: `PENDING`, `COMPLETED`, `FAILED` on sources, `REPLICA` on replicas.
+
+**Replication Time Control** (`ReplicationTime` `Enabled`): a version not replicated within 15
+minutes reports `s3:Replication:OperationMissedThreshold` (once), and
+`s3:Replication:OperationReplicatedAfterThreshold` when it then completes, through the event
+outbox to the bucket's notification configurations (with `replicationEventData`:
+`replicationRuleId`, `destinationBucket`, `s3Operation`, `requestTime`; `failureReason` on
+`OperationFailedReplication`). Replication runs as soon as a write is acknowledged (the
+dispatcher wakes on every write, and looks every 250 ms anyway): tens of milliseconds between
+roll deployments in the test suite (`replication_latency_is_measured` in `tests/targets.rs`).
+
+**Replication metrics**, per rule, for replication inside and outside roll:
+- in the control plane, `metrics` in each of the bucket's `replication.rules`:
+  `operations_pending` (`OperationsPendingReplication`, metadata changes included),
+  `bytes_pending` (`BytesPendingReplication`), `oldest_pending_ms`, `latency_ms` /
+  `max_latency_ms` (`ReplicationLatency`, from the write to the replica), `replicated`,
+  `operations_failed` (`OperationsFailedReplication`), `replicated_after_threshold`, and whether
+  `Metrics` and Replication Time Control are `enabled`;
+- in CloudWatch, for rules with `Metrics` (or RTC) enabled, when
+  `ROLL_S3_REPLICATION_METRICS_CLOUDWATCH` is on (with `ROLL_S3_NOTIFY_AWS`; `ROLL_S3_NOTIFY_AWS_ENDPOINT`, or
+  `monitoring=<url>` in `ROLL_S3_NOTIFY_AWS_ENDPOINTS`, for another endpoint): `PutMetricData`
+  every minute with S3's metric names and units (`ReplicationLatency` in seconds: the minute's
+  largest, or the oldest pending operation's age if larger; `BytesPendingReplication` in bytes;
+  `OperationsPendingReplication` and `OperationsFailedReplication`, the minute's failures, as
+  counts) and dimensions (`SourceBucket`, `DestinationBucket`, `RuleId`), in the `roll/S3`
+  namespace: CloudWatch keeps `AWS/` namespaces for AWS's own services. `pnpm test:storage-aws`
+  publishes them to LocalStack and reads them back.
+
 ### Replication between roll buckets
 
 - **Metadata-only.** A replica shares the source version's blob (one more reference): it's
@@ -548,17 +597,14 @@ Anything else is `InvalidRequest` (*Destination bucket must exist*), as on S3.
 - **Asynchronous,** through the event outbox: the source version is `PENDING`, then `COMPLETED`
   once every destination has it (or `FAILED`, with an `s3:Replication:OperationFailedReplication`
   event, if a destination can't take it: it was deleted, its versioning was suspended, or a
-  replica would replace a locked null version). GET and HEAD return `x-amz-replication-status`;
-  replicas say `REPLICA`. Replicas aren't replicated again (no chains, no loops).
-- **Delete markers** replicate when `DeleteMarkerReplication` is `Enabled` (always, for legacy
-  `Prefix` rules), as on S3. Lifecycle delete markers and deletes of a version by id never
-  replicate.
+  replica would replace a locked null version). A metadata change that can't be applied (a
+  replica's COMPLIANCE retention can't be shortened, the replica is gone) sends the event and
+  leaves the status as it was.
 - **`ExistingObjectReplication` `Enabled`** replicates the versions already in the bucket (S3
   needs a support case or Batch Replication for that): a background walk queues every version in
   scope that has no replication status yet.
-- `AccessControlTranslation` `Owner=Destination` makes replicas private; otherwise they keep the
-  source's ACL. Object Lock retention and legal holds replicate if the destination has Object
-  Lock enabled, and are dropped otherwise. `StorageClass` is stored but has no effect.
+- `StorageClass` is stored but has no effect (roll has one storage class). A shared blob stays
+  encrypted as the source's is: `ReplicaKmsKeyID` applies to targets outside roll.
 - **Branches.** Replication *from* a branch replicates the branch's own writes (a branch doesn't
   inherit its parent's configuration). Replication *to* a branch writes the replica into the
   branch like any write: the branch's own branches keep their view (push-down), and the parent
@@ -575,38 +621,62 @@ and the `buckets` of that service that rules may name. The secret access key is 
 sealed with AES-256-GCM under a dedicated key in the metadata and never shown again.
 
 - **Checked like S3 checks a destination:** when the configuration is put, the target must
-  exist and the bucket there must have versioning enabled (asked of the target).
+  exist and the bucket there must have versioning enabled, and Object Lock when the source has
+  it (asked of the target).
 - **Through the same durable outbox** as everything else: the source version is `PENDING`, then
   `COMPLETED`, or `FAILED` with an `s3:Replication:OperationFailedReplication` event when the
   target refuses it (no such bucket, access denied). Network errors and 5xx are retried with
   backoff for up to 3 days, then the version is `FAILED`.
+- **Version ids.** Every write of a replica carries roll's replication extension (below).
+  **Another roll deployment** keeps the source's version id and `Last-Modified`, exactly as S3's
+  replication does. **AWS S3** (and any other service) assigns its own: the public S3 API has no
+  way to set a version id. Only S3's own replication, run by S3 for a source bucket in S3 (live
+  replication, or S3 Batch Replication, which replicates with the source bucket's replication
+  configuration and role), creates replicas with the source's version id, and a bucket on roll
+  isn't a source S3 can replicate from. roll records the version the target made of each source
+  version instead: `replicas` in `GET /v1/storage/buckets/{name}/object?key=…&version_id=…` lists
+  each destination bucket, its target and the version id there, and later metadata changes are
+  applied to that version.
 - **The bytes move server-side when they can:** a target on the backing bucket's own service with
   the same credentials (no access key of its own, same endpoint) gets an S3 `CopyObject`
   (`UploadPartCopy` beyond 5 GiB) from the blob. Otherwise they're streamed from the blob to the
   target, as a multipart upload from 64 MiB (16 MiB parts, each read and retried on its own), in
-  bounded memory.
+  bounded memory. A multipart source is written part for part with its own part sizes, so the
+  replica has the source's ETag.
 - **Checksums end to end:** the blob's CRC32C (verified by S3 when it was written) goes with a
   single PUT as `x-amz-checksum-crc32c`, so the target refuses anything else; multipart parts
   each carry their CRC32C, and the parts' combined CRC32C must equal the blob's before the upload
   is completed; a server-side copy's CRC32C must equal it before the version counts as
   replicated.
 - **What's applied on the target:** the data, `Content-Type`, `Cache-Control`,
-  `Content-Disposition`, `Content-Encoding`, `Content-Language`, `Expires`, user metadata, tags and
-  the website redirect; the rule's `StorageClass`; `AccessControlTranslation` as
+  `Content-Disposition`, `Content-Encoding`, `Content-Language`, `Expires`, user metadata, tags,
+  the website redirect, Object Lock retention (`x-amz-object-lock-mode`,
+  `-retain-until-date`; one that has run out isn't sent) and legal hold
+  (`x-amz-object-lock-legal-hold`); the rule's `StorageClass`; `AccessControlTranslation` as
   `x-amz-acl: bucket-owner-full-control`. Delete markers replicate as a `DeleteObject` (a delete
-  marker on the versioned target).
-- **SSE-KMS versions** replicate only with `SourceSelectionCriteria` `SseKmsEncryptedObjects`
-  `Enabled`, encrypted on the target with the destination's `EncryptionConfiguration`
-  `ReplicaKmsKeyID` (else the target's default KMS key), as on S3. Out of scope otherwise.
+  marker on the versioned target). Later changes to tags, retention and legal hold are applied
+  with PutObjectTagging/DeleteObjectTagging, PutObjectRetention and PutObjectLegalHold on the
+  replica's version. ACL changes aren't (a target's ACL grants name its own accounts).
+- **SSE-KMS versions** are encrypted on the target with the destination's
+  `EncryptionConfiguration` `ReplicaKmsKeyID` (else the target's default KMS key), as on S3.
 - **SSE-C versions** can't be replicated outside roll (roll never keeps customer keys): `FAILED`.
 - **`ExistingObjectReplication`** backfills to targets like to roll buckets.
-- **Differences from S3:** the target assigns its own version ids (S3 keeps the source's), and
-  Object Lock retention isn't copied to the target.
-- **Replication Time Control's metrics** are in the control plane, per rule (`metrics` in the
-  bucket's `replication.rules`): `operations_pending` (`OperationsPendingReplication`),
-  `bytes_pending` (`BytesPendingReplication`), `oldest_pending_ms`, and `latency_ms` /
-  `max_latency_ms` (`ReplicationLatency`, from the write to the replica) with the count
-  `replicated`. They cover replication between roll buckets too.
+
+**roll's replication extension** (what a roll deployment accepts from another one's
+replication): `x-roll-replica-version-id` (the source's version id, `null` for a null version)
+and `x-roll-replica-last-modified` (Unix milliseconds) on PutObject, CreateMultipartUpload,
+UploadPart, CompleteMultipartUpload (where the version is made) and DeleteObject (a delete
+marker); `x-roll-replica-sync: true` on Put/DeleteObjectTagging, PutObjectRetention,
+PutObjectLegalHold and PutObjectAcl (a replica kept in sync, not synced on). They're honoured
+only on a signed request whose identity may replicate into the bucket: `s3:ReplicateObject`
+(`s3:ReplicateDelete` for delete markers, `s3:ReplicateTags` for tags and metadata sync), the
+permissions an AWS replication role needs, from an identity or bucket policy or a roll `admin`
+key covering the bucket (a `write` key can't rewrite a bucket's history); such a request doesn't
+also need `s3:PutObject`, as a replication role doesn't. Only versioning-enabled buckets take
+them (`InvalidRequest`). A replica takes its place in the key's history by version id (an older
+one arriving late becomes noncurrent); a version id that's there with other content is refused
+(`InvalidRequest`), and the same content (a retry after a lost answer) is answered as the first
+write was. The replica is `REPLICA` and never replicates on.
 
 ## Access points
 
@@ -640,14 +710,21 @@ Object operations, multipart uploads, DeleteObjects, ListObjects(V2), ListObject
 ListMultipartUploads, HeadBucket and GetBucketLocation work through access points; bucket
 configuration doesn't (`InvalidRequest`), as on S3.
 
+**Copy sources** of CopyObject and UploadPartCopy can name an access point, as on S3: its object
+ARN, `x-amz-copy-source: arn:aws:s3:<region>:<account>:accesspoint/<name>/object/<key>`
+(URL-encoded as AWS documents it, or with only the key encoded, as the AWS CLI sends it;
+`?versionId=` as usual), or its alias as the bucket (`<alias>/<key>`). Reading the source is
+authorized through that access point exactly as a GetObject through it is (its network origin,
+its policy and the bucket's, below); an Object Lambda access point can't be a copy source
+(`InvalidArgument`).
+
 **Authorization** is AWS's for access points: a `Deny` in the access point policy or the bucket
 policy refuses; the key's own permission on the bucket allows (an identity allow in the same
 account); otherwise both the access point policy and the bucket policy must allow. A bucket
 policy can delegate to its access points with `s3:DataAccessPointAccount` or
 `s3:DataAccessPointArn` (and sees `s3:AccessPointNetworkOrigin`). A public grant doesn't apply
-while the access point's or the bucket's block restricts public buckets. Differences: ACL grants
-and the bucket's `public` flag don't apply through access points, and copy sources are named by
-bucket, not by access point ARN.
+while the access point's or the bucket's block restricts public buckets. Difference: ACL grants
+and the bucket's `public` flag don't apply through access points.
 
 ## Object Lambda
 

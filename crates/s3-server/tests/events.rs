@@ -466,3 +466,194 @@ async fn inventory_reports() {
     assert!(lines[1].contains(",\"false\",\"false\",\"1\","), "{}", lines[1]);
     assert!(lines[2].ends_with(",\"false\",\"CRC32\""), "{}", lines[2]);
 }
+
+/// A rule with Replication Time Control (and the metrics it needs).
+fn rtc_rule(id: &str, dest: &str) -> ReplicationRule {
+    use aws_sdk_s3::types::{Metrics, MetricsStatus, ReplicationTime, ReplicationTimeStatus, ReplicationTimeValue};
+    let d = Destination::builder()
+        .bucket(format!("arn:aws:s3:::{dest}"))
+        .replication_time(ReplicationTime::builder().status(ReplicationTimeStatus::Enabled).time(ReplicationTimeValue::builder().minutes(15).build()).build().unwrap())
+        .metrics(Metrics::builder().status(MetricsStatus::Enabled).event_threshold(ReplicationTimeValue::builder().minutes(15).build()).build().unwrap())
+        .build()
+        .unwrap();
+    ReplicationRule::builder()
+        .id(id)
+        .priority(1)
+        .status(ReplicationRuleStatus::Enabled)
+        .filter(ReplicationRuleFilter::builder().prefix("").build())
+        .delete_marker_replication(DeleteMarkerReplication::builder().status(DeleteMarkerReplicationStatus::Enabled).build())
+        .destination(d)
+        .build()
+        .unwrap()
+}
+
+/// Replication Time Control: a version not replicated within 15 minutes reports
+/// `OperationMissedThreshold` (once), and `OperationReplicatedAfterThreshold` when it gets
+/// there, through the notification outbox; metrics count it. The store's clock is moved by hand.
+#[tokio::test(flavor = "multi_thread")]
+async fn replication_time_control_thresholds() {
+    use aws_sdk_s3::types::{ReplicationTime, ReplicationTimeStatus, ReplicationTimeValue};
+    use std::sync::atomic::AtomicI64;
+    let clock = Arc::new(AtomicI64::new(now_s() * 1000));
+    let c2 = clock.clone();
+    let (t, server) = start_full(
+        move |s| s.clock = Arc::new(move || c2.load(Ordering::SeqCst)),
+        |c| {
+            c.notify.dispatch_interval = None;
+            c.notify.inventory_interval = None;
+        },
+    )
+    .await;
+    let sink = Arc::new(TestSink { known: vec![queue("orders")], ..Default::default() });
+    server.notifier.set_sink(sink.clone());
+    let c = &t.client;
+    versioned(&t, "rtc-src").await;
+    versioned(&t, "rtc-dst").await;
+    let rtc = |minutes: i32| ReplicationTime::builder().status(ReplicationTimeStatus::Enabled).time(ReplicationTimeValue::builder().minutes(minutes).build()).build().unwrap();
+    // RTC needs metrics, and S3 only takes 15 minutes.
+    let mut bad = rtc_rule("r", "rtc-dst");
+    bad.destination = Some(Destination::builder().bucket("arn:aws:s3:::rtc-dst").replication_time(rtc(15)).build().unwrap());
+    let e = c.put_bucket_replication().bucket("rtc-src").replication_configuration(ReplicationConfiguration::builder().role("r").rules(bad).build().unwrap()).send().await.unwrap_err();
+    assert_eq!(code(&e), "InvalidRequest");
+    let mut thirty = rtc_rule("r", "rtc-dst");
+    if let Some(d) = thirty.destination.as_mut() {
+        d.replication_time = Some(rtc(30));
+    }
+    let e = c.put_bucket_replication().bucket("rtc-src").replication_configuration(ReplicationConfiguration::builder().role("r").rules(thirty).build().unwrap()).send().await.unwrap_err();
+    assert_eq!(code(&e), "InvalidArgument");
+
+    c.put_bucket_replication().bucket("rtc-src").replication_configuration(ReplicationConfiguration::builder().role("r").rules(rtc_rule("rtc", "rtc-dst")).build().unwrap()).send().await.unwrap();
+    let cfg = NotificationConfiguration::builder().queue_configurations(queue_config("repl", "arn:roll:queues:/:orders", &["s3:Replication:*"], None, None)).build();
+    c.put_bucket_notification_configuration().bucket("rtc-src").notification_configuration(cfg).send().await.unwrap();
+    sink.take();
+    // In time: no threshold events.
+    put(&t, "rtc-src", "quick", b"q").await;
+    server.dispatch_events().await.unwrap();
+    assert!(sink.take().is_empty());
+    // Late: written, then 16 minutes pass before replication runs.
+    let late = put(&t, "rtc-src", "late", b"l").await;
+    put(&t, "rtc-src", "missed", b"m").await;
+    clock.fetch_add(16 * 60_000, Ordering::SeqCst);
+    // The threshold check finds both, once.
+    assert_eq!(t.store.replication_missed_threshold().await.unwrap(), 2);
+    assert_eq!(t.store.replication_missed_threshold().await.unwrap(), 0, "reported once");
+    server.dispatch_events().await.unwrap();
+    let got = sink.take();
+    let names: Vec<(String, String)> = got.iter().map(|(_, v)| (v["Records"][0]["eventName"].as_str().unwrap().to_string(), v["Records"][0]["s3"]["object"]["key"].as_str().unwrap().to_string())).collect();
+    for key in ["late", "missed"] {
+        assert_eq!(names.iter().filter(|(n, k)| n == "Replication:OperationMissedThreshold" && k == key).count(), 1, "{names:?}");
+        assert_eq!(names.iter().filter(|(n, k)| n == "Replication:OperationReplicatedAfterThreshold" && k == key).count(), 1, "{names:?}");
+    }
+    let rec = got.iter().map(|(_, v)| &v["Records"][0]).find(|r| r["eventName"] == "Replication:OperationReplicatedAfterThreshold" && r["s3"]["object"]["key"] == "late").unwrap();
+    assert_eq!(rec["eventVersion"], "2.2");
+    assert_eq!(rec["s3"]["object"]["versionId"].as_str(), late.version_id());
+    assert_eq!(rec["replicationEventData"]["replicationRuleId"], "rtc");
+    assert_eq!(rec["replicationEventData"]["destinationBucket"], "arn:aws:s3:::rtc-dst");
+    assert!(rec["replicationEventData"].get("failureReason").is_none());
+    let src = t.store.bucket("rtc-src").unwrap();
+    let m = server.notifier.replication_metrics(&src.id);
+    assert_eq!(m["rtc"].replicated, 3);
+    assert_eq!(m["rtc"].late, 2);
+    assert!(m["rtc"].max_ms >= 16 * 60_000);
+    // A version replicated late without the check having run reports both at once.
+    clock.fetch_sub(16 * 60_000, Ordering::SeqCst);
+    put(&t, "rtc-src", "unchecked", b"u").await;
+    clock.fetch_add(36 * 60_000, Ordering::SeqCst);
+    let row = t.store.pending_events(Some(&src.id), 10).unwrap().into_iter().find(|e| e.kind == "replicate").unwrap();
+    t.store.replicate(&row).await.unwrap();
+    server.dispatch_events().await.unwrap();
+    let names: Vec<String> = sink.take().iter().map(|(_, v)| v["Records"][0]["eventName"].as_str().unwrap().to_string()).collect();
+    assert_eq!(names, ["Replication:OperationMissedThreshold", "Replication:OperationReplicatedAfterThreshold"]);
+}
+
+/// Metadata changes replicate: a replicated version's tags and ACL go to its replica, and with
+/// `ReplicaModifications` a change made to a replica goes back to its source (two-way
+/// replication), without bouncing.
+#[tokio::test(flavor = "multi_thread")]
+async fn replica_modifications_two_way() {
+    use aws_sdk_s3::types::{ReplicaModifications, ReplicaModificationsStatus, SourceSelectionCriteria, Tag, Tagging};
+    let (t, server, _sink) = setup(|_| {}).await;
+    let c = &t.client;
+    versioned(&t, "east").await;
+    versioned(&t, "west").await;
+    let to = |dest: &str, modifications: bool| {
+        let mut r = replication_rule(dest, "", true);
+        if modifications {
+            r.source_selection_criteria = Some(SourceSelectionCriteria::builder().replica_modifications(ReplicaModifications::builder().status(ReplicaModificationsStatus::Enabled).build().unwrap()).build());
+        }
+        ReplicationConfiguration::builder().role("r").rules(r).build().unwrap()
+    };
+    c.put_bucket_replication().bucket("east").replication_configuration(to("west", true)).send().await.unwrap();
+    c.put_bucket_replication().bucket("west").replication_configuration(to("east", false)).send().await.unwrap();
+    let got = c.get_bucket_replication().bucket("east").send().await.unwrap();
+    let ssc = got.replication_configuration().unwrap().rules()[0].source_selection_criteria().unwrap();
+    assert_eq!(ssc.replica_modifications().unwrap().status(), &ReplicaModificationsStatus::Enabled);
+    let v = put(&t, "east", "doc", b"d").await;
+    let vid = v.version_id().unwrap().to_string();
+    server.dispatch_events().await.unwrap();
+    let tags = |k: &str, val: &str| Tagging::builder().tag_set(Tag::builder().key(k).value(val).build().unwrap()).build().unwrap();
+    let tag_of = |b: &'static str| {
+        let vid = vid.clone();
+        async move { c.get_object_tagging().bucket(b).key("doc").version_id(vid).send().await.unwrap().tag_set().iter().map(|t| format!("{}={}", t.key(), t.value())).collect::<Vec<_>>() }
+    };
+    // The source's change goes to the replica.
+    c.put_object_tagging().bucket("east").key("doc").version_id(&vid).tagging(tags("team", "a")).send().await.unwrap();
+    server.dispatch_events().await.unwrap();
+    assert_eq!(tag_of("west").await, ["team=a"]);
+    // A change to the replica only goes back with ReplicaModifications on the replica's
+    // bucket's rule (west's has none yet).
+    c.put_object_tagging().bucket("west").key("doc").version_id(&vid).tagging(tags("team", "b")).send().await.unwrap();
+    server.dispatch_events().await.unwrap();
+    assert_eq!(tag_of("east").await, ["team=a"]);
+    c.put_bucket_replication().bucket("west").replication_configuration(to("east", true)).send().await.unwrap();
+    c.put_object_tagging().bucket("west").key("doc").version_id(&vid).tagging(tags("team", "c")).send().await.unwrap();
+    server.dispatch_events().await.unwrap();
+    assert_eq!(tag_of("east").await, ["team=c"]);
+    assert_eq!(tag_of("west").await, ["team=c"]);
+    assert_eq!(t.store.events_backlog().unwrap(), 0, "no ping-pong");
+    // Statuses stay what they were.
+    assert_eq!(c.head_object().bucket("east").key("doc").send().await.unwrap().replication_status().map(|s| s.as_str()), Some("COMPLETED"));
+    assert_eq!(c.head_object().bucket("west").key("doc").send().await.unwrap().replication_status().map(|s| s.as_str()), Some("REPLICA"));
+}
+
+/// As on S3, a source with Object Lock needs destinations with Object Lock: retention and legal
+/// holds replicate, and so do later changes to them.
+#[tokio::test(flavor = "multi_thread")]
+async fn replication_with_object_lock() {
+    use aws_sdk_s3::types::{ObjectLockLegalHold, ObjectLockLegalHoldStatus, ObjectLockMode, ObjectLockRetentionMode};
+    let (t, server, _sink) = setup(|_| {}).await;
+    let c = &t.client;
+    for b in ["lock-src", "lock-dst"] {
+        c.create_bucket().bucket(b).object_lock_enabled_for_bucket(true).send().await.unwrap();
+    }
+    versioned(&t, "plain-dst").await;
+    let cfg = |dest: &str| ReplicationConfiguration::builder().role("r").rules(replication_rule(dest, "", true)).build().unwrap();
+    let e = c.put_bucket_replication().bucket("lock-src").replication_configuration(cfg("plain-dst")).send().await.unwrap_err();
+    assert_eq!(code(&e), "InvalidRequest");
+    c.put_bucket_replication().bucket("lock-src").replication_configuration(cfg("lock-dst")).send().await.unwrap();
+    let until = aws_sdk_s3::primitives::DateTime::from_secs(now_s() + 86_400);
+    let v = c
+        .put_object()
+        .bucket("lock-src")
+        .key("held")
+        .object_lock_mode(ObjectLockMode::Governance)
+        .object_lock_retain_until_date(until)
+        .object_lock_legal_hold_status(ObjectLockLegalHoldStatus::On)
+        .checksum_algorithm(aws_sdk_s3::types::ChecksumAlgorithm::Crc32)
+        .body(ByteStream::from_static(b"locked"))
+        .send()
+        .await
+        .unwrap();
+    server.dispatch_events().await.unwrap();
+    let vid = v.version_id().unwrap();
+    let r = c.get_object_retention().bucket("lock-dst").key("held").version_id(vid).send().await.unwrap();
+    assert_eq!(r.retention().unwrap().mode(), Some(&ObjectLockRetentionMode::Governance));
+    assert_eq!(r.retention().unwrap().retain_until_date().map(|d| d.secs()), Some(until.secs()));
+    let h = c.get_object_legal_hold().bucket("lock-dst").key("held").version_id(vid).send().await.unwrap();
+    assert_eq!(h.legal_hold().unwrap().status(), Some(&ObjectLockLegalHoldStatus::On));
+    // Lifting the hold on the source lifts it on the replica.
+    c.put_object_legal_hold().bucket("lock-src").key("held").version_id(vid).legal_hold(ObjectLockLegalHold::builder().status(ObjectLockLegalHoldStatus::Off).build()).send().await.unwrap();
+    server.dispatch_events().await.unwrap();
+    let h = c.get_object_legal_hold().bucket("lock-dst").key("held").version_id(vid).send().await.unwrap();
+    assert_eq!(h.legal_hold().unwrap().status(), Some(&ObjectLockLegalHoldStatus::Off));
+}

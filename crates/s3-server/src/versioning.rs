@@ -285,6 +285,7 @@ pub(crate) fn get_retention(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
 
 pub(crate) async fn put_retention(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
+    crate::replication::replica_sync(ctx, bucket)?;
     ctx.meter(&bucket.id, Class::A);
     let vid = version_id(ctx)?;
     let bypass = bypass(ctx)?;
@@ -312,6 +313,7 @@ pub(crate) fn get_legal_hold(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
 
 pub(crate) async fn put_legal_hold(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     ctx.require(&bucket.name, Need::Write)?;
+    crate::replication::replica_sync(ctx, bucket)?;
     ctx.meter(&bucket.id, Class::A);
     let vid = version_id(ctx)?;
     let raw = read_small(ctx, body, xml::MAX_XML_BYTES).await?;

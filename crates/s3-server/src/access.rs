@@ -168,7 +168,7 @@ impl Ctx {
     pub(crate) fn require_identity(&self, action: &str, bucket: Option<&str>, level: bool) -> Result<(), S3Error> {
         let Who::Key(_, id) = self.who() else { return Err(S3Error::new(Code::AccessDenied)) };
         let b = bucket.unwrap_or("*");
-        let cond = Cond { ctx: self, who: self.who(), bucket: bucket.unwrap_or_default(), key: None, resource_account: id.account.id.clone(), tags: OnceLock::new(), prefix: None };
+        let cond = Cond { ctx: self, who: self.who(), bucket: bucket.unwrap_or_default(), key: None, resource_account: id.account.id.clone(), tags: OnceLock::new(), prefix: None, ap: self.access_point.as_deref() };
         if id.verdict(action, &resource_arn(b, None), &cond, level).allowed() { Ok(()) } else { Err(S3Error::new(Code::AccessDenied)) }
     }
 }
@@ -277,7 +277,7 @@ fn authorize_as(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, action: &s
         object_acl = Some(acl);
     }
     let resource = resource_arn(bucket, key);
-    let cond = Cond { ctx, who, bucket, key, resource_account: a.owner().to_string(), tags: OnceLock::new(), prefix };
+    let cond = Cond { ctx, who, bucket, key, resource_account: a.owner().to_string(), tags: OnceLock::new(), prefix, ap: ctx.access_point.as_deref() };
     let principal = who.principal();
     let bucket_policy = a.policy.as_ref().map(|p| p.evaluate(principal, action, &resource, &cond)).unwrap_or_default();
     if bucket_policy.deny {
@@ -344,6 +344,8 @@ pub(crate) struct Cond<'a> {
     pub tags: OnceLock<Option<BTreeMap<String, String>>>,
     /// `s3:prefix` when it isn't the request's `prefix` parameter.
     pub prefix: Option<&'a str>,
+    /// The access point the resource is reached through (its condition keys), if any.
+    pub ap: Option<&'a crate::accesspoint::ApRequest>,
 }
 
 impl Cond<'_> {
@@ -360,7 +362,7 @@ impl Context for Cond<'_> {
         {
             return v;
         }
-        if let Some(v) = crate::accesspoint::condition(ctx, key) {
+        if let Some(v) = crate::accesspoint::condition(self.ap, key) {
             return v;
         }
         let one = |v: Option<String>| v.map(|v| vec![v]);

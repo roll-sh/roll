@@ -181,6 +181,9 @@ replication_targets (name TEXT PRIMARY KEY, endpoint /* NULL = AWS S3 */, region
          access_key_id /* NULL = the deployment's AWS credentials */,
          secret TEXT /* AES-256-GCM-sealed under state.replication_target_key */,
          path_style, buckets TEXT /* JSON */, created_at, updated_at)   -- migration 7
+replica_versions (bucket_id, key, version_id /* the source version */, dest /* <bucket>@<target> */,
+         target_version_id /* the version the target made of it */, replicated_at,
+         PRIMARY KEY (bucket_id, key, version_id, dest)) WITHOUT ROWID   -- migration 9
 
 accounts (id TEXT PRIMARY KEY /* 12 digits */, canonical TEXT UNIQUE /* 64 hex */,
           name TEXT /* display name */, email TEXT UNIQUE /* lowercase; NULL = none */,
@@ -221,6 +224,10 @@ owner the default account, computing its id from `state.canonical_owner` in SQL 
 `config::account_id` does, and moves every existing bucket, key and role into it; it's
 deterministic, so replaying the log over an older snapshot gives the same rows. A database
 without an owner yet gets its default account when the store first opens.
+Migration 9 added `replica_versions`: for replication outside roll, which version of the
+destination each source version became (the source's own id on another roll deployment; the
+target's on AWS S3 and other services), so a replica can be found from its source and kept in
+sync. Nothing existing changes.
 
 A blob's encryption is fixed when it's written, so `blob_sse` is keyed by blob: every row that
 shares the blob (copies, branches, the trash) shares its encryption, and no row of `objects`,
@@ -455,9 +462,11 @@ rules:
   replication target (`s3-store/src/targets.rs`) queues rows for `replicate:<bucket>@<target>`.
   They can't be applied in one metadata transaction (bytes have to move), so the dispatcher reads
   the source version (`Store::replica_source`), copies it, then ends the row in one durable
-  write (`Store::finish_external_replication`: delete the row, `COMPLETED` once no other
-  destination waits, or `FAILED` with its event). A crash in between copies the version again:
-  rewriting the same bytes to the same key is harmless, and nothing is lost. The copy is S3
+  write (`Store::finish_external_replication`: delete the row, record the version the target
+  made of it in `replica_versions`, `COMPLETED` once no other destination waits, or `FAILED` with
+  its event). A crash in between copies the version again: another roll deployment recognises
+  the replica (same version id and content, below) and answers as before; elsewhere rewriting the
+  same bytes to the same key is harmless, and nothing is lost. The copy is S3
   `CopyObject`/`UploadPartCopy` when the target is the backing bucket's own service with the
   same credentials (`Backend::s3_location`), and otherwise streamed from the blob (multipart
   from 64 MiB, each part a ranged read retried on its own, bounded memory). The blob's CRC32C
@@ -465,13 +474,48 @@ rules:
   the parts' (each sent with its own) before a multipart upload is completed, or compared with a
   copy's. 4xx answers other than 408/409/429 fail the version at once; anything else is retried
   with the outbox's backoff.
-- **Replication Time Control's metrics** come from the outbox (`Store::replication_backlog`:
-  pending operations and bytes, the oldest pending row, per destination) and from the
-  dispatcher (`Notifier::replication_latency`: the last and largest latency from a write to its
-  replica, in memory since start).
+  Multipart sources go part for part with their own part sizes (the replica's ETag is the
+  source's), and the version's Object Lock retention and legal hold go with it.
+- **Replicas that keep their version ids.** Every write of a replica to a target carries roll's
+  replication extension (`x-roll-replica-version-id`, `x-roll-replica-last-modified`). A roll
+  deployment receiving it (`replication.rs::replica_auth`: the identity needs
+  `s3:ReplicateObject`/`ReplicateDelete`/`ReplicateTags` from a policy or an `admin` key) sets
+  `Origin::replica` for the request, and the commit (`commit_row`, `complete_locked`,
+  `delete_object_version`) places the row with that version id and `Last-Modified` through
+  `events::place_replica` (versioning `Enabled` only; `versioning::restore`'s placement by
+  version id) with status `REPLICA`, in the same transaction. `events::existing_replica` makes a
+  retry idempotent (the same version id with the same size and CRC32C, or both delete markers:
+  the stored replica answers, the new blob is discarded once the transaction is durable) and
+  refuses a different version under that id. AWS S3 can't set version ids through its API, so
+  there `replica_versions` holds S3's.
+- **Metadata changes** (tags and ACL through `emit_update`, retention and legal hold through
+  `put_retention`/`put_legal_hold`) of a version that's replicated (`COMPLETED`/`PENDING`), or of
+  a `REPLICA` under a rule with `ReplicaModifications`, queue metadata-only `replicate` rows
+  (`events::sync_metadata`), which wait behind the version's own row for that destination
+  (per-key order). Between roll buckets the store applies them to the replica
+  (`update_version`, Object Lock's rules with the bypass a replication role has); outside roll
+  `replicate_ext.rs` sends PutObjectTagging/Retention/LegalHold to the version in
+  `replica_versions`, with `x-roll-replica-sync`. Changes made by replication (`Origin::
+  replica_sync`, or the store applying a row) never queue more rows, so two-way replication
+  doesn't bounce. A failed metadata row sends `OperationFailedReplication` and leaves the
+  version's status alone.
+- **Replication Time Control.** Rows of rules with `ReplicationTime` carry `rtc`. Every 30 s the
+  dispatcher runs `Store::replication_missed_threshold`: rows queued more than 15 minutes ago
+  that haven't reported it emit `Replication:OperationMissedThreshold` and remember it (`missed`
+  in the row, one durable write). A row that ends past the threshold emits
+  `OperationReplicatedAfterThreshold` (and the missed event too, if the scan hadn't run), in the
+  transaction that ends it. Both go through `emit`, so the bucket's notification configurations
+  get them like any event.
+- **Replication metrics** come from the outbox (`Store::replication_backlog`: pending
+  operations and bytes, the oldest pending row, per rule) and from the dispatcher
+  (`Notifier::replication_metrics`: the last and largest latency from a write to its replica,
+  operations replicated, failed and replicated after the threshold, per rule, in memory since
+  start). With `NotifyConfig::replication_metrics_interval` (and AWS delivery on) they're also
+  sent to CloudWatch every minute (`publish_replication_metrics`: `PutMetricData`, S3's metric
+  names, units and dimensions, in `roll/S3`).
 
-The dispatcher, event JSON and delivery are `s3-server`'s (`notify.rs`): every 250 ms it takes up
-to 256 due rows, handles up to 32 at once (deliveries, or `replicate`/`backfill` in the store),
+The dispatcher, event JSON and delivery are `s3-server`'s (`notify.rs`): every 250 ms, and right
+after any request that changed something (so replication is prompt), it takes up to 256 due rows, handles up to 32 at once (deliveries, or `replicate`/`backfill` in the store),
 then deletes the delivered ones and reschedules failures (1 s doubling to 10 min, with jitter).
 Roll queues and streams are reached through the `EventSink` trait, which rolld implements in
 process with mq-core (publish to the queue, confirmed) and stream-broker (produce, keyed by the
@@ -804,7 +848,11 @@ applies all four Block Public Access settings to every bucket.
   `arn:aws:s3:<region>:<account>:accesspoint/<name>[/object/<key>]`) and the bucket's must allow;
   `s3:DataAccessPointArn`, `s3:DataAccessPointAccount` and `s3:AccessPointNetworkOrigin` are
   condition keys. Only object and listing operations go through access points. `VPC` access
-  points take requests from internal peers only.
+  points take requests from internal peers only. A copy's source (`x-amz-copy-source`, for
+  CopyObject and UploadPartCopy) can name an access point by its object ARN or alias
+  (`accesspoint::copy_source`): it's read from the access point's bucket, authorized through that
+  access point (`authorize_with`, with its condition keys in `Cond::ap`) whatever the
+  destination is addressed by.
 - **Object Lambda** (`accesspoint/lambda.rs`): an Object Lambda access point's `GetObject`,
   `HeadObject` and `ListObjects(V2)` run its function (AWS Lambda through the notifier's AWS
   path, or a signed webhook) with S3's event and an `inputS3Url` presigned with the caller's
@@ -960,8 +1008,9 @@ ReplicationRule = { id, priority: number | null, enabled, prefix /* "" = every k
                     storage_class: string | null,
                     owner_override, pending /* versions waiting for this destination, at most 1000 counted */,
                     last_error: string | null, backfilling /* existing objects still being queued */,
-                    metrics: { operations_pending, bytes_pending, oldest_pending_ms: number | null,
-                               latency_ms: number | null, max_latency_ms: number | null, replicated } /* Replication Time Control's */ }
+                    metrics: { enabled /* Metrics (or RTC) on */, replication_time_control, operations_pending, bytes_pending,
+                               oldest_pending_ms: number | null, latency_ms: number | null, max_latency_ms: number | null,
+                               replicated, operations_failed, replicated_after_threshold } /* S3's replication metrics, since start */ }
 ReplicationRuleInput = { destination, target? /* default: the target listing the bucket, else a roll bucket */, id?, priority?,
                          enabled? (default true), prefix?, tags?, delete_markers?, existing_objects?, storage_class?, owner_override? }
 Target = { name, endpoint: string | null, region, access_key_id: string | null,
@@ -991,7 +1040,9 @@ ObjectInfo = ObjectSummary & { metadata: Record<string,string>, tags: Record<str
              cache_control, content_disposition, content_encoding, content_language, expires,
              checksum: { algorithm, type, value } | null, parts,
              version_id /* "null" outside versioned buckets */,
-             lock: { mode, retain_until, legal_hold } | null }
+             lock: { mode, retain_until, legal_hold } | null,
+             replication_status?: "PENDING" | "COMPLETED" | "FAILED" | "REPLICA" /* object?key= only, when it has one */,
+             replicas?: [{ bucket, target, version_id: string | null, replicated_at }] /* where it went outside roll, and its version id there */ }
 ObjectVersion = { key, version_id, is_latest, delete_marker, size, etag, last_modified }
 TrashEntry = { key, size, etag, deleted_at, expires_at, version_id }
 Account = { id /* 12 digits */, canonical /* 64 hex */, name, email: string | null, created_at, default: boolean }

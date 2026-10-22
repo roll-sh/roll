@@ -56,7 +56,7 @@ use std::sync::Arc;
 
 pub use error::store_error;
 pub use notify::{AwsCredentials, Delivery, EventSink, EventStats, Notifier, NotifyConfig, NotifyError, RollDestination};
-pub use replicate_ext::Latency;
+pub use replicate_ext::RuleMetrics;
 pub use sts::oidc::{HttpFetch, JwksFetch};
 pub use upload::put_object;
 

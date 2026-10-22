@@ -255,6 +255,18 @@ CREATE TABLE usage_payer (
   PRIMARY KEY (account_id, bucket_id, day)
 ) WITHOUT ROWID;
 "#,
+// Replication outside roll: which version of the destination each replicated source version
+// became (`dest` is `<bucket>@<target>`). A target that is another roll deployment keeps the
+// source's version id (roll's replication extension); AWS S3 and other services assign their
+// own, which is how a replica is found from its source version (and how its tags, retention
+// and legal hold are kept in sync).
+r#"
+CREATE TABLE replica_versions (
+  bucket_id TEXT NOT NULL, key TEXT NOT NULL, version_id TEXT NOT NULL, dest TEXT NOT NULL,
+  target_version_id TEXT, replicated_at INTEGER NOT NULL,
+  PRIMARY KEY (bucket_id, key, version_id, dest)
+) WITHOUT ROWID;
+"#,
 ];
 
 pub(crate) const LATEST: u32 = MIGRATIONS.len() as u32;
@@ -278,9 +290,8 @@ mod tests {
     fn the_deployment_becomes_the_default_account() {
         for owner in ["0f".repeat(32), "ff".repeat(32), "00".repeat(32), format!("{}{}", "a1b2c3d4e5f6a7b", "0".repeat(49))] {
             let c = Connection::open_in_memory().unwrap();
-            // Everything before the accounts migration (the last one when it was added: if
-            // migrations are appended after it, use its index here instead of LATEST - 1).
-            migrate(&c, LATEST - 1).unwrap();
+            // Everything before the accounts migration (migration 8).
+            migrate(&c, 7).unwrap();
             c.execute("INSERT INTO state (k, v) VALUES ('canonical_owner', ?1)", [&owner]).unwrap();
             c.execute_batch(
                 "INSERT INTO buckets (id, name, region, created_at, public, recover_days, objects, bytes, trash_bytes) VALUES ('b', 'b', 'r', 5, 0, 7, 0, 0, 0);

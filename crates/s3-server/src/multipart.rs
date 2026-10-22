@@ -10,7 +10,7 @@ use crate::sse;
 use axum::body::Body;
 use axum::http::StatusCode;
 use s3_proto::checksum::{Algorithm, ChecksumType, b64, combine_crc, composite, crc_bytes, crc_from_bytes};
-use s3_proto::http::{Conditions, parse_copy_source_range, parse_copy_source_version, quote_etag, uri_encode};
+use s3_proto::http::{Conditions, parse_copy_source_range, quote_etag, uri_encode};
 use s3_proto::{Code, S3Error, xml};
 use s3_store::{Bucket, Checksum, Class, Part, Upload, UploadsQuery};
 use std::collections::HashMap;
@@ -43,7 +43,7 @@ fn upload_checksum(up: &Upload) -> Option<(Algorithm, ChecksumType)> {
 }
 
 pub(crate) async fn create(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
-    ctx.require(&bucket.name, Need::Write)?;
+    crate::replication::require_write(ctx, bucket)?;
     let headers = object_headers(ctx)?;
     let invalid = |m: String| S3Error::msg(Code::InvalidRequest, m);
     let alg = ctx.h("x-amz-checksum-algorithm").map(|a| Algorithm::parse(a).ok_or_else(|| invalid(format!("Checksum algorithm {a} is not supported")))).transpose()?;
@@ -76,7 +76,7 @@ pub(crate) async fn create(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
 }
 
 pub(crate) async fn upload_part(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
-    ctx.require(&bucket.name, Need::Write)?;
+    crate::replication::require_write(ctx, bucket)?;
     let n = part_number(ctx)?;
     let up = find_upload(ctx, bucket)?;
     ctx.meter(&bucket.id, Class::A);
@@ -122,8 +122,8 @@ pub(crate) async fn upload_part(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> R
 }
 
 async fn copy_part(ctx: &mut Ctx, up: &Upload, n: u32, enc: Option<&s3_store::Encryption>, key: Option<&s3_store::BlobSse>) -> Reply {
-    let (src_bucket, src_key, src_vid) = parse_copy_source_version(ctx.h("x-amz-copy-source").unwrap_or_default())?;
-    ctx.require_source(&src_bucket, &src_key)?;
+    // By bucket, access point ARN or alias, authorized for reading.
+    let (src_bucket, src_key, src_vid) = crate::accesspoint::copy_source(ctx)?;
     let src = crate::object::copy_source(ctx, &src_bucket, &src_key, src_vid.as_deref())?;
     let src_enc = ctx.store().blob_encryption(&src.blob_id).s3()?;
     let src_sse = sse::key_for(ctx, src_enc.as_ref(), sse::Use::CopySource)?;
@@ -225,7 +225,7 @@ fn complete_response(ctx: &Ctx, bucket: &Bucket, meta: &s3_store::ObjectMeta, en
 }
 
 pub(crate) async fn complete(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
-    ctx.require(&bucket.name, Need::Write)?;
+    let replica = crate::replication::require_write(ctx, bucket)?;
     let up = match find_upload(ctx, bucket) {
         Ok(up) => up,
         Err(e) if e.code == Code::NoSuchUpload => return completed_already(ctx, bucket, body, e).await,
@@ -238,7 +238,10 @@ pub(crate) async fn complete(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Repl
     xml::check_part_order(&sent)?;
     let cond = write_condition(ctx)?;
     ctx.meter(&bucket.id, Class::A);
-    precheck(ctx, &cond)?;
+    match replica {
+        Some(rw) => crate::replication::writing_replica(rw),
+        None => precheck(ctx, &cond)?,
+    }
     let (stored, _) = ctx.store().list_parts(&bucket.name, &up.id, 0, 10_000).s3()?;
     let by_number: HashMap<u32, &Part> = stored.iter().map(|p| (p.part_number, p)).collect();
     let mut chosen = Vec::with_capacity(sent.len());

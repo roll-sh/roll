@@ -179,6 +179,11 @@ pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Req
         }
         Err(e) => Err(e),
     };
+    // A change may have queued events or replication (durable by now): dispatch them now
+    // rather than at the next tick, so replication is prompt.
+    if result.is_ok() && !matches!(ctx.method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        ctx.server.notifier.wake();
+    }
     let mut error_code = None;
     let mut resp = match result {
         Ok(r) => r,

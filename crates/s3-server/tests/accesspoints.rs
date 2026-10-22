@@ -347,3 +347,84 @@ async fn object_lambda_webhook() {
     ctl.delete_access_point_for_object_lambda().account_id(&account).name("upper").send().await.unwrap();
     ctl.delete_access_point().account_id(&account).name("plain").send().await.unwrap();
 }
+
+/// Percent-encodes everything but unreserved characters (`x-amz-copy-source` as AWS documents
+/// an access point ARN in it: "The value must be URL-encoded").
+fn encode_all(s: &str) -> String {
+    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+/// CopyObject and UploadPartCopy from an access point: its object ARN (URL-encoded, or with
+/// only the key encoded) or its alias as the bucket, authorized through the access point as a
+/// GetObject through it is.
+#[tokio::test]
+async fn copy_source_by_access_point() {
+    let t = start().await;
+    let account = t.store.account_id();
+    let c = &t.client;
+    c.create_bucket().bucket("cpsrc").send().await.unwrap();
+    c.put_bucket_versioning()
+        .bucket("cpsrc")
+        .versioning_configuration(aws_sdk_s3::types::VersioningConfiguration::builder().status(aws_sdk_s3::types::BucketVersioningStatus::Enabled).build())
+        .send()
+        .await
+        .unwrap();
+    c.create_bucket().bucket("cpdst").send().await.unwrap();
+    let v1 = c.put_object().bucket("cpsrc").key("a b/doc.txt").body(ByteStream::from_static(b"first")).send().await.unwrap();
+    c.put_object().bucket("cpsrc").key("a b/doc.txt").body(ByteStream::from(data(6 << 20, 3))).send().await.unwrap();
+    let ctl = control_client(t.port, ACCESS, SECRET);
+    let out = ctl.create_access_point().account_id(&account).name("cpap").bucket("cpsrc").send().await.unwrap();
+    let arn = out.access_point_arn().unwrap().to_string();
+    let alias = out.alias().unwrap().to_string();
+    let body = |o: aws_sdk_s3::operation::get_object::GetObjectOutput| async move { o.body.collect().await.unwrap().into_bytes().to_vec() };
+
+    // The whole value URL-encoded, as AWS documents it.
+    let encoded = encode_all(&format!("{arn}/object/a b/doc.txt"));
+    let r = c.copy_object().bucket("cpdst").key("one").copy_source(&encoded).send().await.unwrap();
+    assert!(r.copy_object_result().unwrap().e_tag().is_some());
+    assert_eq!(body(c.get_object().bucket("cpdst").key("one").send().await.unwrap()).await, data(6 << 20, 3));
+    // Only the key encoded (what botocore sends), with a version id.
+    let plain = format!("{arn}/object/a%20b/doc.txt?versionId={}", v1.version_id().unwrap());
+    let r = c.copy_object().bucket("cpdst").key("two").copy_source(&plain).send().await.unwrap();
+    assert_eq!(r.copy_source_version_id(), v1.version_id());
+    assert_eq!(body(c.get_object().bucket("cpdst").key("two").send().await.unwrap()).await, b"first");
+    // The alias as the bucket.
+    c.copy_object().bucket("cpdst").key("three").copy_source(format!("{alias}/a%20b/doc.txt")).send().await.unwrap();
+    assert_eq!(body(c.get_object().bucket("cpdst").key("three").send().await.unwrap()).await, data(6 << 20, 3));
+    // UploadPartCopy, with a range.
+    let up = c.create_multipart_upload().bucket("cpdst").key("parts").send().await.unwrap();
+    let id = up.upload_id().unwrap();
+    let p = c.upload_part_copy().bucket("cpdst").key("parts").upload_id(id).part_number(1).copy_source(&encoded).copy_source_range("bytes=0-5242879").send().await.unwrap();
+    let etag = p.copy_part_result().unwrap().e_tag().unwrap().to_string();
+    let parts = aws_sdk_s3::types::CompletedMultipartUpload::builder().parts(aws_sdk_s3::types::CompletedPart::builder().part_number(1).e_tag(etag).build()).build();
+    c.complete_multipart_upload().bucket("cpdst").key("parts").upload_id(id).multipart_upload(parts).send().await.unwrap();
+    assert_eq!(body(c.get_object().bucket("cpdst").key("parts").send().await.unwrap()).await, data(6 << 20, 3)[..5 << 20].to_vec());
+
+    // Bad names.
+    let code = |e: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::copy_object::CopyObjectError>| e.as_service_error().map(svc_code).unwrap_or_default();
+    let missing = encode_all(&format!("arn:aws:s3:us-east-1:{account}:accesspoint/nope/object/k"));
+    assert_eq!(code(c.copy_object().bucket("cpdst").key("x").copy_source(missing).send().await.unwrap_err()), "NoSuchAccessPoint");
+    let foreign = encode_all("arn:aws:s3:us-east-1:111111111111:accesspoint/cpap/object/k");
+    assert_eq!(code(c.copy_object().bucket("cpdst").key("x").copy_source(foreign).send().await.unwrap_err()), "AccessDenied");
+    let no_key = encode_all(&format!("{arn}/object/"));
+    assert_eq!(code(c.copy_object().bucket("cpdst").key("x").copy_source(no_key).send().await.unwrap_err()), "InvalidArgument");
+
+    // Authorized through the access point: a key that may only write cpdst reads through the
+    // access point once its policy and the bucket's delegation allow it, not around it.
+    let k = t.store.create_key("copier", Permission::Write, Some(vec!["cpdst".into()])).await.unwrap();
+    let kc = client(&t.endpoint, &k.id, &k.secret);
+    assert_eq!(code(kc.copy_object().bucket("cpdst").key("k1").copy_source(&encoded).send().await.unwrap_err()), "AccessDenied");
+    let ap_policy = format!(r#"{{"Statement":[{{"Effect":"Allow","Principal":{{"AWS":"{}"}},"Action":"s3:GetObject","Resource":"{arn}/object/*"}}]}}"#, k.id);
+    ctl.put_access_point_policy().account_id(&account).name("cpap").policy(&ap_policy).send().await.unwrap();
+    assert_eq!(code(kc.copy_object().bucket("cpdst").key("k1").copy_source(&encoded).send().await.unwrap_err()), "AccessDenied", "the bucket doesn't delegate yet");
+    let delegate = format!(r#"{{"Statement":[{{"Effect":"Allow","Principal":"*","Action":"*","Resource":["arn:aws:s3:::cpsrc","arn:aws:s3:::cpsrc/*"],"Condition":{{"StringEquals":{{"s3:DataAccessPointAccount":"{account}"}}}}}}]}}"#);
+    c.put_bucket_policy().bucket("cpsrc").policy(&delegate).send().await.unwrap();
+    kc.copy_object().bucket("cpdst").key("k1").copy_source(&encoded).send().await.unwrap();
+    kc.copy_object().bucket("cpdst").key("k2").copy_source(format!("{alias}/a%20b/doc.txt")).send().await.unwrap();
+    assert_eq!(code(kc.copy_object().bucket("cpdst").key("k3").copy_source("cpsrc/a%20b/doc.txt").send().await.unwrap_err()), "AccessDenied", "not around the access point");
+    // A Deny in the access point policy stops even the admin key.
+    let deny = format!(r#"{{"Statement":[{{"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"{arn}/object/*"}}]}}"#);
+    ctl.put_access_point_policy().account_id(&account).name("cpap").policy(&deny).send().await.unwrap();
+    assert_eq!(code(c.copy_object().bucket("cpdst").key("k4").copy_source(&encoded).send().await.unwrap_err()), "AccessDenied");
+    c.copy_object().bucket("cpdst").key("k5").copy_source("cpsrc/a%20b/doc.txt").send().await.unwrap();
+}

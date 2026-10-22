@@ -224,7 +224,7 @@ async fn update_bucket(State(c): State<AppState>, Acct(a): Acct, Path(name): Pat
     }
     let mut settings = c.prepare_settings(&b, p.update.versioning.as_deref(), p.update.public, p.settings)?;
     // Buckets outside roll are checked over the network (their versioning), before anything.
-    c.check_replication_targets(&mut settings).await?;
+    c.check_replication_targets(&b, &mut settings).await?;
     // Notifications next (their destinations are checked by sending them a test event): a
     // refused configuration leaves the rest of the PATCH unapplied.
     if let Some(n) = p.notifications {
@@ -315,8 +315,17 @@ impl KeyQ {
 }
 
 async fn object_info(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, Params(q): Params<KeyQ>) -> ApiResult<Value> {
-    c.bucket_in(&a, &name)?;
-    Ok(Json(info(&c.store.get_object_version(&name, &q.key()?, q.version()?)?)))
+    let b = c.bucket_in(&a, &name)?;
+    let key = q.key()?;
+    let m = c.store.get_object_version(&name, &key, q.version()?)?;
+    let mut v = info(&m);
+    // Replication: the version's status, and the versions it became outside roll (AWS S3 and
+    // other services assign their own ids).
+    if let Some(s) = c.store.replication_status(&b.id, &key, &m.version_id)? {
+        v["replication_status"] = json!(s);
+        v["replicas"] = json!(c.store.replica_versions(&b.id, &key, &m.version_id)?);
+    }
+    Ok(Json(v))
 }
 
 async fn delete_object(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, Params(q): Params<KeyQ>) -> ApiResult<Value> {
