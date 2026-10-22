@@ -52,6 +52,10 @@ pub enum StoreError {
     /// It already exists (a role of that name).
     #[error("{0}")]
     Conflict(String),
+    /// Refused with an S3 error code of its own (`InvalidWriteOffset`, `TooManyParts`,
+    /// `ConditionalRequestConflict`, …), which `s3-server` answers as is.
+    #[error("{message}")]
+    Refused { code: &'static str, message: String },
     /// This node can't make writes durable any more (another node took over the metadata log,
     /// object storage failed, or it was closed). Nothing more was acknowledged; restart.
     #[error("storage unavailable: {0}")]

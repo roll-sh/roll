@@ -9,11 +9,13 @@ clients fail clearly instead of silently doing the wrong thing.
 [ceph/s3-tests](https://github.com/ceph/s3-tests) is the S3 conformance suite most S3-compatible
 stores measure themselves with. `pnpm test:s3-conformance` runs it (pinned, in Docker) against a
 fresh roll server on a local directory backend, with the selection AWS-compatible
-implementations use: `test_s3.py` and `test_headers.py` without the tests AWS itself fails
-(`fails_on_aws`) and without Ceph's extensions (append, S3 Select, IAM/STS/SNS, cloud tiering,
-lifecycle transitions between storage classes, RGW's logging journal and rollover).
+implementations use: `test_s3.py`, `test_headers.py` and `test_s3select.py` without the tests
+AWS itself fails (`fails_on_aws`) and without Ceph's extensions (RGW's append API, IAM/STS/SNS,
+cloud tiering, lifecycle transitions between storage classes, RGW's logging journal and
+rollover).
 
-**426 of 647 tests pass (65.9%; one more is skipped by the suite).** Every other one is listed with its reason in
+**454 of 681 tests pass (66.8%; one more is skipped by the suite), 28 of the 34 S3 Select tests
+among them.** Every other one is listed with its reason in
 [`tests/s3-conformance/expected.txt`](../../tests/s3-conformance/expected.txt), and the script
 fails if anything changes either way:
 
@@ -21,8 +23,9 @@ fails if anything changes either way:
 |---|---|
 | 78 | **S3's current defaults, which the suite predates.** New buckets are `BucketOwnerEnforced` (ACLs off), as on S3 since April 2023, so tests that set ACLs without `ObjectOwnership` get `InvalidBucketAclWithObjectOwnership`/`AccessControlListNotSupported`, as they would on S3. `GetBucketEncryption` returns the default `AES256` rule. |
 | 62 | **The test environment.** SSE-KMS needs AWS KMS behind the backing bucket (`NotImplemented` on a local directory), and SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3). On an AWS S3 backend these behave as on S3. |
-| 34 | **The suite.** Expectations specific to Ceph RGW (error codes S3 doesn't use, `x-amz-delete-marker: false`, its accelerated lifecycle clock, dropping `TargetGrants`) and tests that can't fail as written (botocore re-signs after the test changes the `Authorization` header). |
-| 22 | **Other accounts and tenants.** roll has one account per deployment; the suite's "alt" user is a roll key scoped to no bucket. Tests that need objects owned by another account, buckets the other account creates, or RGW tenants can't pass. BitTorrent isn't supported (S3 dropped it in 2024). |
+| 36 | **The suite.** Expectations specific to Ceph RGW (error codes S3 doesn't use, `x-amz-delete-marker: false`, its accelerated lifecycle clock, dropping `TargetGrants`) and tests that can't fail as written (botocore re-signs after the test changes the `Authorization` header; the torrent test decodes a binary metainfo file as UTF-8). |
+| 21 | **Other accounts and tenants.** roll has one account per deployment; the suite's "alt" user is a roll key scoped to no bucket. Tests that need objects owned by another account, buckets the other account creates, or RGW tenants can't pass. |
+| 6 | **S3 Select: RGW's dialect where it differs from AWS's.** Bare values from JSON output (AWS writes `{"_1":…}` records), the text `null` for empty CSV fields, bracket character classes in `LIKE`, a double-quoted `"_3"` read as a string (it's column 3 in S3 Select), and RGW's own error messages. |
 | 15 | **Deliberate (reliability).** A version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted until then; S3 destroys the version at once. |
 | 9 | **roll answers as S3 does where RGW differs:** a wrong SSE-C key is `403 AccessDenied`, `GetBucketPolicyStatus` without a policy is `NoSuchBucketPolicy`. |
 
@@ -40,6 +43,7 @@ fails if anything changes either way:
 | SigV4a (`AWS4-ECDSA-P256-SHA256`) header and presigned URLs | ✅ any `x-amz-region-set` is accepted |
 | `STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD` and `-TRAILER` | ✅ ECDSA chunk signatures verified, `*`-padded ones too |
 | SigV2 (`Authorization: AWS key:signature`) | ✅ including virtual-host style; clock skew 15 minutes |
+| The `s3express` signing service, `x-amz-s3session-token` (S3 Express sessions) | ✅ see [Directory buckets](#directory-buckets-s3-express-one-zone) |
 | SigV2 presigned URLs (`AWSAccessKeyId`, `Expires`, `Signature`) | ✅ no 7-day cap, as on S3 |
 | Presigned POST policy (browser form upload) | ✅ SigV4 and SigV2 (`AWSAccessKeyId`, `signature`) |
 | Any region in the credential scope | ✅ accepted as given, like R2's `auto` |
@@ -79,6 +83,7 @@ fails if anything changes either way:
 | Get/Put/DeleteBucketReplication | ✅ between roll buckets, metadata-only (see [Replication](#replication)); a destination outside roll is `NotImplemented` |
 | Get/PutBucketNotificationConfiguration | ✅ Topic, Queue, CloudFunction and EventBridge configurations, event wildcards, `prefix`/`suffix` filter rules, `x-amz-skip-destination-validation`, `s3:TestEvent` (see [Event notifications](#event-notifications)) |
 | Inventory configurations (Get/Put/Delete/List) | ✅ reports generated Daily/Weekly as CSV (see [Inventory](#inventory-reports)); ORC and Parquet are `NotImplemented` |
+| ListDirectoryBuckets, CreateSession | ✅ see [Directory buckets](#directory-buckets-s3-express-one-zone) |
 | Analytics, metrics and intelligent-tiering configurations (Get/Put/Delete/List) | ✅ validated and stored. Analytics aren't computed and metrics aren't published yet. Intelligent-tiering archive tiers are `NotImplemented` (nothing is ever archived). |
 
 ### Objects
@@ -97,6 +102,10 @@ fails if anything changes either way:
 | CreateMultipartUpload, UploadPart, UploadPartCopy, CompleteMultipartUpload, AbortMultipartUpload, ListParts | ✅ UploadPartCopy takes a source `versionId`; Complete returns `x-amz-version-id`. Completing an upload again (an SDK retrying a completion whose answer was lost) gets the same answer, as on S3, as long as the key still holds what those parts made. |
 | POST Object (form upload) | ✅ including the `acl`, `x-amz-website-redirect-location` and Object Lock fields |
 | RestoreObject | ✅ answers `InvalidObjectState` (403), as S3 does for objects that aren't archived: nothing ever is |
+| PutObject with `x-amz-write-offset-bytes` (appends) | ✅ directory buckets, as on S3 (see [Appends](#appends)) |
+| RenameObject (`x-amz-rename-source`, `x-amz-rename-source-if-*`, destination `If-*`, `x-amz-client-token`) | ✅ directory buckets, and general purpose buckets as a roll extension (see [RenameObject](#renameobject)) |
+| SelectObjectContent | ✅ CSV and JSON, GZIP and BZIP2, `ScanRange`, S3 Select's SQL (see [S3 Select](#s3-select)); Parquet is `NotImplemented` |
+| GetObjectTorrent | ✅ BitTorrent metainfo files, as S3 made them (see [Torrents](#torrents)) |
 
 ### Headers and metadata
 
@@ -168,9 +177,129 @@ Details:
 | Requester Pays | |
 | ORC and Parquet inventory reports | `NotImplemented` when the configuration is put; CSV works |
 | Storage Class Analysis, CloudWatch request metrics | The configurations are stored, nothing is produced yet. |
-| S3 Select, Object Lambda | |
-| Torrent | |
-| Directory buckets (S3 Express) | |
+| Object Lambda | |
+| Parquet input for S3 Select | `NotImplemented`: it needs random access and whole row groups in memory; CSV and JSON work |
+
+## Directory buckets (S3 Express One Zone)
+
+A bucket named `<base>--<zone id>--x-s3` is a directory bucket, as on S3. It's created with
+`CreateBucket` and a `CreateBucketConfiguration` with `Location` (`Type` `AvailabilityZone` or
+`LocalZone`, `Name` the zone id) and `Bucket` (`Type` `Directory`, `DataRedundancy`
+`SingleAvailabilityZone` or `SingleLocalZone`). **Any zone id is accepted** (`use1-az4`,
+`usw2-lax1-az1`, …): a deployment is one region in one place, and the zone id only names the
+bucket. It must be the one in the name (`InvalidBucketName` otherwise). General purpose bucket
+names can't end in `--x-s3`, as on S3.
+
+| feature | status |
+|---|---|
+| CreateBucket, DeleteBucket, HeadBucket | ✅ |
+| ListDirectoryBuckets | ✅ `GET /?x-id=ListDirectoryBuckets` (what SDKs send) or `GET /` on `s3express-control.<domain>`; `max-directory-buckets`, `continuation-token`. ListBuckets doesn't show directory buckets, as on S3 |
+| Zonal endpoints | ✅ path style, or `<bucket>.s3express-<zone id>.<ROLL_S3_DOMAIN>` virtual-host style |
+| CreateSession (`GET /<bucket>?session`) | ✅ `x-amz-create-session-mode` `ReadWrite` or `ReadOnly` (none: `ReadWrite` if allowed, else `ReadOnly`); credentials last 5 minutes, scoped to the bucket. Requests sign with the session's secret and send its token in `x-amz-s3session-token` (or a presigned URL's `X-Amz-S3session-Token`); the token works nowhere else, and other session tokens don't work there. SDKs do all this themselves |
+| Object operations | ✅ PutObject (and appends), GetObject, HeadObject, DeleteObject(s), CopyObject, GetObjectAttributes, RenameObject, multipart uploads and UploadPartCopy, ListObjectsV2, ListMultipartUploads |
+| Bucket policies | ✅ in S3 Express's namespace: data operations are `s3express:CreateSession` with `s3express:SessionMode` (`ReadOnly` for reads, `ReadWrite` for writes, or the session's own mode); bucket administration is `s3express:CreateBucket`, `DeleteBucket`, `Get/Put/DeleteBucketPolicy`, `Get/PutEncryptionConfiguration`, `Get/PutLifecycleConfiguration` and `Get/PutInventoryConfiguration`; the resource is `arn:aws:s3express:<region>:<account>:bucket/<bucket>` |
+| Encryption, lifecycle and inventory configurations | ✅ |
+| ListObjectsV2 | ✅ `/` is the only delimiter (`InvalidArgument` otherwise). S3 returns directory buckets' keys in no particular order; roll's are in lexicographic order, which is one of them |
+| Checksums | ✅ every object gets a CRC checksum (the client's, or CRC64NVME) |
+| Multipart uploads | ✅ part numbers must be consecutive from 1 (`InvalidPartOrder`) |
+| Server-side encryption | ✅ SSE-S3 and SSE-KMS; SSE-C is `InvalidRequest` and DSSE-KMS `InvalidArgument`, as on S3 |
+| Versioning, Object Lock, ACLs, CORS, website, logging, replication, notifications, object and bucket tagging, accelerate, request payment, analytics, metrics, intelligent-tiering, ownership controls, public access block, ListObjects (v1), ListObjectVersions, S3 Select, torrents | `NotImplemented`, as S3 answers for directory buckets |
+
+**Underneath, a directory bucket is a roll bucket:** one object is one blob, overwrites and
+deletes go to the bucket's trash (and can be restored), and it can be branched. A branch of a
+directory bucket is a directory bucket (named like one); only directory buckets have directory
+branches. Prefixes act like directories: a "directory" is there while an object is under it.
+
+**Differences from AWS:**
+- A `ReadWrite` session does what the key that created it may do, on its bucket only. S3
+  limits sessions to object operations, but SDKs given a custom endpoint (`endpoint_url`) sign
+  CreateBucket, DeleteBucket and bucket policy calls with a session too. For the same reason an
+  admin key may create a session for a directory bucket that doesn't exist yet (the SDK asks for
+  one before CreateBucket). `ReadOnly` sessions only read.
+- Keys can also sign directory bucket requests themselves (plain SigV4, with the service
+  `s3express` or `s3`); the key's permission and the bucket policy decide, as for any bucket.
+  SDKs do this with `disable_s3_express_session_auth`, which ListDirectoryBuckets needs when the
+  SDK has a custom endpoint (its session auth needs a bucket).
+- CreateSession's encryption headers are checked (`AES256` or `aws:kms`), but new objects take
+  the request's or the bucket's default encryption, as in general purpose buckets.
+- ETags of single PUTs are MD5s, as in general purpose buckets (S3's are random strings for
+  directory buckets; both are opaque to clients).
+
+### Appends
+
+`PutObject` with `x-amz-write-offset-bytes`, in directory buckets: the offset must be the
+object's size (`InvalidWriteOffset` otherwise), and 0 creates an object that doesn't exist. The
+response has `x-amz-object-size`. Each append is one more part (at most 10 000,
+`TooManyParts`), so `GET ?partNumber=` reads one appended piece. The object keeps its metadata
+and encryption (`EncryptionTypeMismatch` if the request asks for another one). An object with a
+full-object CRC checksum keeps one: the old value combined with the new data's. The offset is
+checked again inside the commit, so concurrent appends at the same offset can't both succeed:
+the loser gets `InvalidWriteOffset`, or `ConditionalRequestConflict` if the object was replaced
+by another of the same size meanwhile.
+
+**How (reliability first).** Objects are immutable blobs, so an append writes a new blob holding
+the old bytes followed by the new ones, then commits it like any overwrite. The old blob is never
+changed, and it goes to the trash. Above 5 MiB the old bytes are copied inside object storage (a
+multipart upload whose first part is an `UploadPartCopy` of the old blob, checked against its
+CRC32C). Below 5 MiB they're read and sent again with the new ones in one PUT, also checked. A
+crash before the commit leaves the object as it was.
+
+**Cost.** Each append is a backend multipart upload (4 requests) above 5 MiB, or a GET and one PUT
+of at most 5 MiB more than the appended bytes below it. Overwritten versions stay in the trash
+for `recover_days`, like any overwrite, and are billed as trash: many appends to a large object
+within the recovery window keep that many old copies until they expire. Set `recover_days` to 0
+on append-heavy directory buckets to keep only the current object.
+
+### RenameObject
+
+`PUT /<bucket>/<key>?renameObject` with `x-amz-rename-source` (`/<key>` or `<bucket>/<key>`, URL
+encoded, in the same bucket). It's atomic and metadata only: the object's blob, ETag, checksum,
+metadata and `Last-Modified` move to the new key in one transaction, whatever the size. Both
+sides' conditions are checked inside that transaction:
+- the source's: `x-amz-rename-source-if-match`, `-if-none-match`, `-if-modified-since` and
+  `-if-unmodified-since`;
+- the destination's: `If-Match`, `If-None-Match: *`, `If-Modified-Since` and
+  `If-Unmodified-Since`.
+
+A failed condition is `412 PreconditionFailed`, and a missing source `NoSuchKey`. An overwritten
+destination goes to the trash. `x-amz-client-token` makes retries idempotent: tokens are
+remembered for 10 minutes, in memory, and the same token for another rename is
+`IdempotencyParameterMismatch`.
+
+**Better than S3:** RenameObject works on general purpose buckets too (S3 only has it for
+directory buckets). In a versioned bucket the destination gets a new version and the source a
+delete marker, so the source's history stays.
+
+## S3 Select
+
+`SelectObjectContent` (`POST /<bucket>/<key>?select&select-type=2`) answers in S3's event stream:
+`Records`, `Progress` when `RequestProgress` is enabled, `Cont`, `Stats` and `End`, with the
+prelude and message CRCs. Errors after the stream started are error messages in it.
+
+| feature | status |
+|---|---|
+| Input | ✅ CSV (`FileHeaderInfo` `USE`/`IGNORE`/`NONE`, `FieldDelimiter`, `RecordDelimiter`, `QuoteCharacter`, `QuoteEscapeCharacter`, `Comments`, `AllowQuotedRecordDelimiter`), JSON (`DOCUMENT`, `LINES`); `CompressionType` `NONE`, `GZIP`, `BZIP2` |
+| Parquet input | ❌ `NotImplemented` |
+| Output | ✅ CSV (`QuoteFields` `ALWAYS`/`ASNEEDED`, delimiters, quote and escape characters), JSON (`RecordDelimiter`) |
+| `ScanRange` | ✅ uncompressed CSV and JSON Lines: the records that start in the range |
+| SQL | ✅ S3 Select's dialect: `SELECT` with `*`, projections, `s._1`, `s."col"` and aliases; `FROM S3Object[*]…` paths; `WHERE` with comparisons, `AND`/`OR`/`NOT`, `LIKE … ESCAPE`, `BETWEEN`, `IN`, `IS [NOT] NULL` and arithmetic; `CASE`, `CAST`, `COALESCE`, `NULLIF`; `LOWER`, `UPPER`, `TRIM`, `SUBSTRING`, `CHAR_LENGTH`; `UTCNOW`, `DATE_ADD`, `DATE_DIFF`, `EXTRACT`, `TO_STRING`, `TO_TIMESTAMP`; `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`; `LIMIT` |
+| Errors | ✅ S3 Select's codes (`ParseUnexpectedToken`, `CastFailed`, `InvalidColumnIndex`, `OverMaxRecordSize`, …) |
+| SSE-C objects | ✅ with the key's headers |
+
+Records and results are at most 1 MiB each (`OverMaxRecordSize`), as on S3, and a request's
+memory is bounded whatever the object's size. Directory buckets don't have S3 Select, as on S3.
+Requests are metered as class B, and the results as egress.
+
+## Torrents
+
+`GET /<bucket>/<key>?torrent` returns the object's BitTorrent metainfo file
+(`application/x-bittorrent`). It's bencoded: `info` has `name` (the key's last segment),
+`length`, `piece length` 262 144 and the SHA-1 `pieces`, plus `x-amz-bucket` and `x-amz-key` as
+S3's had. `announce` is `ROLL_S3_TORRENT_ANNOUNCE` if set (none otherwise: trackerless). The
+pieces come from reading the object once, and are kept by blob: a blob never changes, so later
+requests for it (the same key, copies, branches, versions) read nothing. As on S3, objects over
+5 GB and SSE-C objects have no torrent (`InvalidRequest`). roll serves the metainfo; seeding is
+up to the clients (or a web seed).
 
 ## STS (temporary credentials)
 

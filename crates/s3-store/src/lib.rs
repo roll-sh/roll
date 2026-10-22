@@ -18,11 +18,13 @@
 //! let meta = store.commit_put(name, key, NewObject { blob_id: blob, size: up.size, crc32c: up.crc32c, etag, headers, checksum }, &cond).await?;
 //! ```
 
+mod append;
 pub mod backend;
 pub mod config;
 mod db;
 mod error;
 pub mod events;
+pub mod express;
 mod ids;
 mod jobs;
 mod lifecycle;
@@ -30,11 +32,13 @@ pub mod log;
 mod meter;
 mod model;
 mod objects;
+mod rename;
 mod rows;
 mod schema;
 pub mod sse;
 mod store;
 pub mod sts;
+pub mod torrent;
 pub mod validate;
 mod versioning;
 mod versions;
@@ -48,5 +52,7 @@ pub use ids::{blob_key, day_of, is_temporary_key_id, version_id};
 pub use log::LogStats;
 pub use meter::{Class, Counters, Meter};
 pub use model::*;
+pub use append::{AppendBase, PreparedAppend};
 pub use objects::multipart_etag_of;
+pub use rename::RenameCondition;
 pub use store::{Clock, Store, StoreConfig, StoreStats, system_clock};

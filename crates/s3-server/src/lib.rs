@@ -13,6 +13,7 @@
 
 mod access;
 mod acl;
+mod append;
 mod attributes;
 mod auth;
 mod body;
@@ -20,6 +21,7 @@ mod bucket;
 mod config;
 mod cors;
 mod ctx;
+mod directory;
 mod error;
 mod inventory;
 mod lifecycle;
@@ -31,11 +33,14 @@ mod object;
 mod owner;
 mod policy;
 mod post;
+mod rename;
 mod replication;
 mod response;
+mod select;
 mod sse;
 mod sts;
 mod temporary;
+mod torrent;
 mod upload;
 mod versioning;
 mod website;
@@ -91,6 +96,9 @@ pub struct Config {
     /// Fetch OIDC providers' keys (`AssumeRoleWithWebIdentity`) over plain HTTP too. Tests
     /// only: in production the keys must come over HTTPS.
     pub oidc_allow_http: bool,
+    /// The tracker GetObjectTorrent's files announce to (`ROLL_S3_TORRENT_ANNOUNCE`); `None`:
+    /// none (trackerless).
+    pub torrent_announce: Option<String>,
 }
 
 impl Default for Config {
@@ -104,6 +112,7 @@ impl Default for Config {
             access_log_interval: Some(std::time::Duration::from_secs(300)),
             notify: NotifyConfig::default(),
             oidc_allow_http: false,
+            torrent_announce: None,
         }
     }
 }
@@ -126,6 +135,8 @@ pub struct Server {
     pub notifier: Arc<Notifier>,
     /// Verifies web identity tokens (STS `AssumeRoleWithWebIdentity`).
     pub(crate) oidc: sts::oidc::Oidc,
+    /// RenameObject's recent client tokens (idempotent retries).
+    pub(crate) renames: rename::Tokens,
 }
 
 impl Server {
@@ -133,7 +144,7 @@ impl Server {
         let notifier = Notifier::new(store.clone(), cfg.notify.clone(), cfg.region.clone());
         notifier.spawn();
         let oidc = sts::oidc::Oidc::new(Arc::new(HttpFetch::new(cfg.oidc_allow_http)));
-        let server = Arc::new(Self { store, cfg, logs: Default::default(), notifier, oidc });
+        let server = Arc::new(Self { store, cfg, logs: Default::default(), notifier, oidc, renames: Default::default() });
         if let (Some(every), Ok(rt)) = (server.cfg.notify.inventory_interval, tokio::runtime::Handle::try_current()) {
             let weak = Arc::downgrade(&server);
             rt.spawn(async move {

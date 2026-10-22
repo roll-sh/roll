@@ -99,6 +99,13 @@ impl Payload {
     }
 }
 
+/// Whether a credential scope's `service` is right for an endpoint of `expected`. The S3
+/// endpoint also answers S3 Express (directory buckets): SDKs sign those requests, and
+/// CreateSession, with the service `s3express`.
+pub fn service_matches(scope: &str, expected: &str) -> bool {
+    scope == expected || (expected == "s3" && scope == "s3express")
+}
+
 /// `<access key>/<yyyymmdd>/<region>/<service>/aws4_request`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Credential {
@@ -126,7 +133,7 @@ impl Credential {
         if parts[1].len() != 8 || !parts[1].bytes().all(|c| c.is_ascii_digit()) {
             return Err(bad(&format!("incorrect date format \"{}\". This date in the credential must be in the format \"yyyyMMdd\".", parts[1])));
         }
-        if parts[3] != service {
+        if !service_matches(parts[3], service) {
             return Err(bad(&format!("incorrect service \"{}\". This endpoint belongs to \"{service}\".", parts[3])));
         }
         Ok(Self { access_key: parts[0].into(), date: parts[1].into(), region: parts[2].into(), service: parts[3].into() })

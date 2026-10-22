@@ -25,6 +25,7 @@ p256.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 ring.workspace = true
 s3-proto.workspace = true
+s3-select.workspace = true
 s3-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -37,6 +38,7 @@ url.workspace = true
 [dev-dependencies]
 aws-sdk-sts.workspace = true
 rand.workspace = true
+sha1.workspace = true
 aws-smithy-types.workspace = true
 rsa = { workspace = true, features = ["sha2"] }
 reqwest = { workspace = true, features = ["stream"] }

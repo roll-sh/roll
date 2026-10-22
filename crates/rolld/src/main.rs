@@ -393,6 +393,7 @@ async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &Sto
     };
     scfg.notify.aws = args.s3_notify_aws;
     scfg.notify.webhook_allow_private = args.s3_webhook_allow_private;
+    scfg.torrent_announce = std::env::var("ROLL_S3_TORRENT_ANNOUNCE").ok().filter(|a| !a.trim().is_empty());
     let mut cfg = s3_store::StoreConfig::new(home.join("storage"));
     cfg.node = args.node.clone();
     cfg.block_public_access = args.s3_block_public_access;

@@ -130,8 +130,11 @@ impl Ctx {
     pub(crate) fn require_session(&self, action: &str, bucket: Option<&str>, key: Option<&str>) -> Result<(), S3Error> {
         let Some(k) = self.auth.as_ref().map(|a| &a.key).filter(|k| k.is_temporary()) else { return Ok(()) };
         let account = Account { id: self.store().account_id(), owner: self.store().owner_id() };
-        let cond = Cond { ctx: self, who: Who::Key(k), bucket: bucket.unwrap_or_default(), key, account: &account, tags: OnceLock::new(), prefix: None };
-        let resource = resource_arn(bucket.unwrap_or("*"), key);
+        let cond = Cond { ctx: self, who: Who::Key(k), bucket: bucket.unwrap_or_default(), key, account: &account, tags: OnceLock::new(), prefix: None, mode: None };
+        let resource = match bucket {
+            Some(b) if crate::directory::is_directory(b) => crate::directory::bucket_arn(self, b),
+            _ => resource_arn(bucket.unwrap_or("*"), key),
+        };
         if crate::temporary::bounded(k, &account, action, &resource, &cond) { Ok(()) } else { Err(S3Error::new(Code::AccessDenied)) }
     }
 }
@@ -189,12 +192,19 @@ fn authorize_as(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, action: &s
         }
         Err(e) => return Err(e),
     };
+    // Directory buckets' policies speak S3 Express: data operations are `s3express:CreateSession`
+    // (with `s3express:SessionMode`), on the bucket's `s3express` ARN.
+    let (policy_action, resource, mode) = if crate::directory::is_directory(bucket) {
+        (crate::directory::express_action(action), crate::directory::bucket_arn(ctx, bucket), Some(crate::directory::session_mode(ctx, need)))
+    } else {
+        (action, resource_arn(bucket, key), None)
+    };
     if let Who::Key(k) = who
         && k.is_temporary()
     {
         let account = Account { id: ctx.store().account_id(), owner: ctx.store().owner_id() };
-        let cond = Cond { ctx, who, bucket, key, account: &account, tags: OnceLock::new(), prefix };
-        if !crate::temporary::bounded(k, &account, action, &resource_arn(bucket, key), &cond) {
+        let cond = Cond { ctx, who, bucket, key, account: &account, tags: OnceLock::new(), prefix, mode };
+        if !crate::temporary::bounded(k, &account, policy_action, &resource, &cond) {
             return Err(denied());
         }
     }
@@ -211,9 +221,8 @@ fn authorize_as(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, action: &s
         Some(policy) => {
             let p = p();
             let account = Account { id: ctx.store().account_id(), owner: ctx.store().owner_id() };
-            let resource = resource_arn(bucket, key);
-            let cond = Cond { ctx, who, bucket, key, account: &account, tags: OnceLock::new(), prefix };
-            policy.evaluate(p, &account, action, &resource, &cond)
+            let cond = Cond { ctx, who, bucket, key, account: &account, tags: OnceLock::new(), prefix, mode };
+            policy.evaluate(p, &account, policy_action, &resource, &cond)
         }
         None => Decision::None,
     };
@@ -258,6 +267,8 @@ struct Cond<'a> {
     tags: OnceLock<Option<BTreeMap<String, String>>>,
     /// `s3:prefix` when it isn't the request's `prefix` parameter.
     prefix: Option<&'a str>,
+    /// `s3express:SessionMode` (directory buckets).
+    mode: Option<&'static str>,
 }
 
 impl Cond<'_> {
@@ -281,6 +292,7 @@ impl Context for Cond<'_> {
             Who::Anonymous => None,
         };
         match key {
+            "s3express:sessionmode" => one(self.mode.map(str::to_string)),
             "aws:sourceip" => one(ctx.peer.map(|p| p.to_string())),
             "aws:securetransport" => one(Some(secure(ctx).to_string())),
             "aws:currenttime" => one(Some(s3_proto::time::iso8601_ms(ctx.store().now()))),
@@ -350,6 +362,8 @@ pub(crate) fn action_of(ctx: &Ctx) -> &'static str {
             _ if ctx.has("attributes") => if versioned { "s3:GetObjectVersionAttributes" } else { "s3:GetObjectAttributes" },
             _ if ctx.has("restore") => "s3:RestoreObject",
             _ if ctx.has("torrent") => "s3:GetObjectTorrent",
+            // SelectObjectContent reads the object (S3 authorizes it as GetObject).
+            _ if ctx.has("select") => "s3:GetObject",
             _ if ctx.has("uploadId") && read => "s3:ListMultipartUploadParts",
             _ if ctx.has("uploadId") && del => "s3:AbortMultipartUpload",
             _ if read => if versioned { "s3:GetObjectVersion" } else { "s3:GetObject" },

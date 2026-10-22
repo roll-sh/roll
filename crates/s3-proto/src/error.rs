@@ -98,6 +98,11 @@ codes! {
     ReplicationConfigurationNotFoundError 404 "The replication configuration was not found",
     TooManyConfigurations 400 "You are attempting to create a new configuration but have already reached the 1,000-configuration limit.",
     UnresolvableGrantByEmailAddress 400 "The email address you provided does not match any account on record.",
+    // Directory buckets (S3 Express One Zone): appends and RenameObject.
+    EncryptionTypeMismatch 400 "The existing object was created with a different encryption type.",
+    IdempotencyParameterMismatch 400 "Parameters on this idempotent request are inconsistent with parameters used in previous request(s).",
+    InvalidWriteOffset 400 "The write offset value that you specified does not match the current object size.",
+    TooManyParts 400 "You have attempted to add more parts than the maximum of 10000 that are allowed for this object.",
 }
 
 /// An S3 error response.

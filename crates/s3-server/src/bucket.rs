@@ -41,6 +41,8 @@ pub(crate) fn list_buckets(ctx: &mut Ctx) -> Reply {
         .s3()?
         .into_iter()
         .filter(|b| a.key.covers(&b.name))
+        // Directory buckets are ListDirectoryBuckets', as on S3.
+        .filter(|b| !crate::directory::is_directory(&b.name))
         .filter(|b| prefix.as_ref().is_none_or(|p| b.name.starts_with(p.as_str())))
         .filter(|b| after.as_ref().is_none_or(|t| b.name.as_str() > t.as_str()))
         .map(|b| xml::BucketEntry { name: b.name, created_ms: b.created_at, region: Some(region.clone()) })
@@ -56,7 +58,7 @@ pub(crate) fn list_buckets(ctx: &mut Ctx) -> Reply {
 }
 
 /// Bucket subresources S3 has and we don't.
-const UNSUPPORTED: [&str; 5] = ["metadataTable", "metadataConfiguration", "session", "abac", "torrent"];
+const UNSUPPORTED: [&str; 4] = ["metadataTable", "metadataConfiguration", "abac", "torrent"];
 
 pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
     let name = ctx.bucket_name().to_string();
@@ -67,6 +69,12 @@ pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
             return Err(S3Error::new(Code::AccessDenied));
         }
         return Err(S3Error::msg(Code::NotImplemented, format!("?{sub} is not supported")));
+    }
+    if crate::directory::is_directory(&name) {
+        crate::directory::check_bucket_request(ctx)?;
+    }
+    if ctx.method == Method::GET && ctx.has("session") {
+        return crate::directory::create_session(ctx, &name).await;
     }
     if ctx.method == Method::PUT && ctx.query.iter().all(|(k, _)| k.starts_with("X-Amz-") || k.starts_with("x-id")) {
         return create(ctx, body).await;
@@ -132,6 +140,10 @@ async fn create(ctx: &mut Ctx, body: Body) -> Reply {
     if !ctx.auth.as_ref().is_some_and(|a| a.key.is_admin() && a.key.covers(&name)) {
         return Err(S3Error::new(Code::AccessDenied));
     }
+    if crate::directory::is_directory(&name) {
+        let raw = read_small(ctx, body, xml::MAX_XML_BYTES).await?;
+        return crate::directory::create(ctx, &name, &raw).await;
+    }
     ctx.require_session("s3:CreateBucket", Some(&name), None)?;
     // Object Lock (which turns versioning on) from the start.
     let object_lock = ctx.h("x-amz-bucket-object-lock-enabled").is_some_and(|v| v.trim().eq_ignore_ascii_case("true"));
@@ -154,6 +166,9 @@ async fn create(ctx: &mut Ctx, body: Body) -> Reply {
         }
     }
     let raw = read_small(ctx, body, xml::MAX_XML_BYTES).await?;
+    if crate::directory::wanted(&name, &raw) {
+        return crate::directory::create(ctx, &name, &raw).await;
+    }
     xml::parse_create_bucket(&raw)?;
     // In us-east-1, S3 answers creating a bucket you already own with a 200 and changes
     // nothing (every other region says BucketAlreadyOwnedByYou).
@@ -180,6 +195,11 @@ fn head(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     ctx.meter(&bucket.id, Class::B);
     let mut r = response::empty(StatusCode::OK);
     set(&mut r, "x-amz-bucket-region", &ctx.server.cfg.region);
+    if let Some(zone) = s3_store::express::zone_of(&bucket.name) {
+        // Local Zone ids have a location part (`usw2-lax1-az1`), Availability Zone ids don't.
+        set(&mut r, "x-amz-bucket-location-type", if zone.matches('-').count() >= 2 { "LocalZone" } else { "AvailabilityZone" });
+        set(&mut r, "x-amz-bucket-location-name", zone);
+    }
     Ok(r)
 }
 
@@ -291,7 +311,11 @@ fn list_v2(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
         next_continuation_token: page.next.as_ref().filter(|_| truncated).map(|n| URL_SAFE_NO_PAD.encode(n.as_bytes())),
         start_after,
         url_encode,
-        contents: page.objects.iter().map(|m| entry(m, fetch_owner.then_some(&owner))).collect(),
+        contents: page
+            .objects
+            .iter()
+            .map(|m| xml::ObjectEntry { storage_class: crate::directory::storage_class(&bucket.name).into(), ..entry(m, fetch_owner.then_some(&owner)) })
+            .collect(),
         common_prefixes: page.prefixes.clone(),
     };
     response::ok_xml(xml::list_objects_v2(&l))

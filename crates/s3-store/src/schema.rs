@@ -178,6 +178,14 @@ CREATE TABLE roles (
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 "#,
+// GetObjectTorrent's cache (`torrent.rs`): a blob's BitTorrent piece hashes, kept by blob since
+// blobs never change, and removed with the blob's row.
+r#"
+CREATE TABLE blob_torrent (
+  blob_id TEXT PRIMARY KEY, piece_length INTEGER NOT NULL, pieces BLOB NOT NULL,
+  created_at INTEGER NOT NULL
+);
+"#,
 ];
 
 pub(crate) const LATEST: u32 = MIGRATIONS.len() as u32;

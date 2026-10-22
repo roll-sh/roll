@@ -102,6 +102,7 @@ impl Store {
                     for (id, _) in &deleted {
                         n += c.execute("DELETE FROM blobs WHERE id = ?1 AND refs = 0", [id])?;
                         crate::sse::forget_if_unused(c, id)?;
+                        crate::torrent::forget(c, id)?;
                     }
                     Ok(n)
                 })

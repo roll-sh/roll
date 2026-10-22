@@ -236,6 +236,9 @@ pub(crate) async fn complete(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Repl
     let raw = read_small_object_checksum(ctx, body, xml::MAX_XML_BYTES).await?;
     let sent = xml::parse_complete_multipart(&raw)?;
     xml::check_part_order(&sent)?;
+    if crate::directory::is_directory(&bucket.name) {
+        crate::directory::check_consecutive_parts(sent.iter().map(|p| p.number))?;
+    }
     let cond = write_condition(ctx)?;
     ctx.meter(&bucket.id, Class::A);
     precheck(ctx, &cond)?;

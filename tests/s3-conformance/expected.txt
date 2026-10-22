@@ -179,7 +179,7 @@ test_s3.py::test_get_nonpublicpolicy_acl_bucket_policy_status  aws: GetBucketPol
 test_s3.py::test_get_publicpolicy_acl_bucket_policy_status  aws: GetBucketPolicyStatus without a policy is NoSuchBucketPolicy, as on S3
 test_s3.py::test_post_object_upload_checksum  aws: every POST form field (x-amz-checksum-* too) must have a policy condition, as S3 documents; the test's policy has none for it
 
-# Features roll deliberately doesn't have: other accounts, tenants, BitTorrent. (22)
+# Features roll deliberately doesn't have: other accounts, tenants. (21)
 test_s3.py::test_bucket_create_exists_nonowner  gap: "alt" is a roll key scoped to no bucket, not another account: creating any bucket outside its scope is AccessDenied, not BucketAlreadyExists
 test_s3.py::test_bucket_policy_different_tenant  gap: RGW tenants (a second account namespace); roll has one account per deployment
 test_s3.py::test_bucket_policy_put_obj_copy_source  gap: expects the object writer ("alt", another account) to own and read what it copied in; with one account and BucketOwnerEnforced the bucket owner does, as on S3 today
@@ -195,7 +195,6 @@ test_s3.py::test_cors_presigned_put_object_tenant_with_acl  gap: RGW tenants (a 
 test_s3.py::test_create_bucket_bucket_owner_enforced  gap: needs a second account; "alt" is a roll key in the same account, so it isn't refused as another account's writer
 test_s3.py::test_create_bucket_bucket_owner_preferred  gap: needs a second account; every roll key belongs to the one account, so objects alt writes have the same owner
 test_s3.py::test_create_bucket_object_writer  gap: needs a second account; every roll key belongs to the one account, so objects alt writes have the same owner
-test_s3.py::test_get_object_torrent  gap: no BitTorrent (S3 dropped it in 2024): NotImplemented
 test_s3.py::test_object_copy_not_owned_bucket  gap: "alt" stands in for another account as a key scoped to no bucket, so it can't create buckets of its own
 test_s3.py::test_object_presigned_put_object_with_acl_tenant  gap: RGW tenants (a second account namespace); roll has one account per deployment
 test_s3.py::test_object_raw_get_x_amz_expires_not_expired_tenant  gap: RGW tenants (a second account namespace); roll has one account per deployment
@@ -203,7 +202,7 @@ test_s3.py::test_put_bucket_logging_policy_wildcard  gap: "alt" stands in for an
 test_s3.py::test_put_bucket_ownership_bucket_owner_preferred  gap: needs a second account; every roll key belongs to the one account, so objects alt writes have the same owner
 test_s3.py::test_put_bucket_ownership_object_writer  gap: needs a second account; every roll key belongs to the one account, so objects alt writes have the same owner
 
-# The suite itself: RGW-specific expectations or tests that can't fail as written. (35)
+# The suite itself: RGW-specific expectations or tests that can't fail as written. (36)
 test_headers.py::test_bucket_create_bad_authorization_empty  suite: botocore signs after the test's header hook, replacing the bad Authorization (fails_on_rgw too)
 test_headers.py::test_bucket_create_bad_authorization_invalid_aws2  suite: botocore signs after the test's header hook, replacing the bad Authorization (fails_on_rgw too)
 test_headers.py::test_bucket_create_bad_authorization_none  suite: botocore signs after the test's header hook, so the request is valid (fails_on_rgw too)
@@ -238,3 +237,12 @@ test_s3.py::test_object_write_with_chunked_transfer_encoding  suite: a PUT with 
 test_s3.py::test_put_bucket_logging  suite: RGW drops TargetGrants; roll stores and returns them, as S3 does
 test_s3.py::test_put_bucket_logging_errors  suite: RGW answers NoSuchKey for a missing target bucket; S3 (and roll) answer InvalidTargetBucketForLogging
 test_s3.py::test_put_bucket_logging_permissions  suite: RGW checks the target bucket's policy at PutBucketLogging; roll writes logs as the deployment (no logging service principal to grant)
+test_s3.py::test_get_object_torrent  suite: decodes the torrent as UTF-8 text; a metainfo file's SHA-1 pieces are binary (S3's too), so a real torrent fails the test's own decode
+
+# S3 Select: the suite's Ceph-RGW dialect where it disagrees with AWS S3 Select. (6)
+test_s3select.py::test_count_json_operation  suite: expects RGW's bare value (`1`) from a JSON-output query; AWS S3 Select writes JSON records ({"_1":1})
+test_s3select.py::test_json_column_sum_min_max  suite: expects RGW's bare values from JSON-output aggregates; AWS S3 Select writes JSON records ({"_1":…})
+test_s3select.py::test_csv_parser  suite: expects RGW's text `null` for empty CSV fields; AWS S3 Select writes an empty field
+test_s3select.py::test_in_expressions  suite: compares with `_1 like "_3"`, where a double-quoted "_3" is column 3 in S3 Select (RGW reads it as a string)
+test_s3select.py::test_like_expressions  suite: LIKE '%y[y-z]' uses RGW's bracket character classes; SQL and S3 Select LIKE have only % and _
+test_s3select.py::test_schema_definition  suite: expects RGW's own error messages ("alias {c11} or column not exist in schema", ProcessingTimeError); S3 Select answers with its codes (MissingHeaders)

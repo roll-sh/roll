@@ -409,6 +409,10 @@ pub struct Session {
     pub source_identity: Option<String>,
     #[serde(rename = "w", default, skip_serializing_if = "Option::is_none")]
     pub web: Option<WebIdentity>,
+    /// S3 Express `CreateSession`: the session only reaches this directory bucket, read-only or
+    /// read-write, on top of whatever bounds the session it was made from had.
+    #[serde(rename = "x", default, skip_serializing_if = "Option::is_none")]
+    pub express: Option<crate::express::ExpressScope>,
     /// The role's inline policy, read from the role when a request is checked (not in the
     /// token).
     #[serde(skip)]
@@ -449,6 +453,7 @@ impl Session {
             transitive_tag_keys: Vec::new(),
             source_identity: None,
             web: None,
+            express: None,
             role_policy: None,
         }
     }
@@ -760,6 +765,10 @@ impl Store {
                 (key.permission, key.buckets)
             }
             (None, None) => return Err(SessionError::Invalid),
+        };
+        let (permission, buckets) = match &s.express {
+            Some(x) => x.narrow(permission, buckets),
+            None => (permission, buckets),
         };
         Ok(AccessKey {
             id: s.access_key_id.clone(),

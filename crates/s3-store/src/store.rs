@@ -383,7 +383,16 @@ impl Store {
     // ---- Buckets ----
 
     pub async fn create_bucket(&self, name: &str, opts: BucketOptions) -> Result<Bucket> {
-        validate::bucket_name(name)?;
+        // A directory bucket (S3 Express) by its name: no versioning, so no Object Lock.
+        let directory = crate::express::is_directory_bucket(name);
+        if directory {
+            crate::express::validate_name(name)?;
+            if opts.object_lock == Some(true) {
+                return Err(StoreError::InvalidArgument("directory buckets don't support Object Lock".into()));
+            }
+        } else {
+            validate::bucket_name(name)?;
+        }
         let recover_days = opts.recover_days.unwrap_or(self.cfg.recover_days_default);
         validate::recover_days(recover_days)?;
         let now = self.now();
@@ -441,6 +450,9 @@ impl Store {
         {
             return Err(StoreError::InvalidArgument("versioning is Enabled or Suspended".into()));
         }
+        if u.versioning.is_some() && crate::express::is_directory_bucket(name) {
+            return Err(StoreError::InvalidRequest("directory buckets don't support versioning".into()));
+        }
         self.write(|c| {
             let b = find_bucket(c, name)?;
             if let Some(v) = &u.versioning {
@@ -474,7 +486,13 @@ impl Store {
 
     /// A new bucket that sees `parent`'s objects as of now (copy-on-write; nothing is copied).
     pub async fn branch_bucket(&self, parent: &str, name: &str) -> Result<Bucket> {
-        validate::bucket_name(name)?;
+        // A branch of a directory bucket is a directory bucket, and only theirs are.
+        match (crate::express::is_directory_bucket(parent), crate::express::is_directory_bucket(name)) {
+            (true, true) => crate::express::validate_name(name)?,
+            (false, false) => validate::bucket_name(name)?,
+            (true, false) => return Err(StoreError::InvalidBucketName(format!("{name:?}: a branch of a directory bucket is named like one (<base>--<zone id>--x-s3)"))),
+            (false, true) => return Err(StoreError::InvalidBucketName(format!("{name:?}: only a directory bucket's branches have directory bucket names"))),
+        }
         let now = self.now();
         let id = ids::bucket_id();
         self.write(|c| {

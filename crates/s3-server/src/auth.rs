@@ -49,9 +49,13 @@ pub(crate) fn authenticate(ctx: &Ctx) -> Result<Option<Auth>, S3Error> {
     // Why the key didn't resolve (an unknown key, or a bad session token), to report instead
     // of the generic `InvalidAccessKeyId`.
     let mut failure: Option<S3Error> = None;
-    let token = crate::temporary::request_token(&ctx.headers, &ctx.query);
+    // S3 Express sessions (directory buckets) bring theirs in `x-amz-s3session-token`.
+    let (token, express) = match crate::temporary::express_token(&ctx.headers, &ctx.query) {
+        Some(t) => (Some(t), true),
+        None => (crate::temporary::request_token(&ctx.headers, &ctx.query), false),
+    };
     let cx = Context { now: ctx.now_s(), vhost_bucket: ctx.vhost.then(|| ctx.bucket_name()) };
-    let verified = s3_proto::auth::authenticate(&req, &cx, |id| match crate::temporary::resolve(ctx.store(), id, token) {
+    let verified = s3_proto::auth::authenticate(&req, &cx, |id| match crate::temporary::resolve_as(ctx.store(), id, token, express) {
         Ok(k) => {
             let secret = k.secret.clone();
             found = Some(k);

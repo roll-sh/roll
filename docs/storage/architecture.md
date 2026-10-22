@@ -42,6 +42,7 @@ Design goal, in order:
 | `s3-proto` | Wire protocol, no I/O: SigV4, SigV4a and SigV2 (header, presigned, chunked/streaming payloads with trailers, POST policies), SSE request headers, XML bodies, S3 error codes, checksums, ETags, ranges and conditional headers. |
 | `s3-store` | Metadata (SQLite + durable log in object storage), branching, refcounts, trash, lifecycle, keys, metering, the blob backend (S3 via `aws-sdk-s3`, or a local directory), the GC/scrub jobs. No HTTP. |
 | `s3-server` | The S3 HTTP API: routing (path and virtual-host style), auth, handlers, streaming to and from the backend, CORS and public buckets. |
+| `s3-select` | S3 Select, no I/O: the request XML, the SQL dialect (parser and evaluator), CSV and JSON input (GZIP, BZIP2) and output, fed the object's bytes as they stream, with bounded memory. |
 | `s3-control` | Control-plane API `/v1/storage/...` (merged into rolld's API): buckets, branches, keys, browsing/upload/download for the dashboard, presigning, trash, usage and pricing. |
 
 `rolld` runs all of it in one process (`--s3`, default `127.0.0.1:59000`), the CLI has
@@ -162,6 +163,8 @@ roles   (name TEXT PRIMARY KEY /* IAM role name rules */, id TEXT /* RR + 18 upp
          trust TEXT /* JSON { keys, oidc, external_id } */, max_session_s,
          generation INTEGER /* +1 on every change */, revoked_before INTEGER /* ms; 0 = none */,
          created_at, updated_at)                               -- migration 6
+blob_torrent (blob_id TEXT PRIMARY KEY, piece_length INTEGER, pieces BLOB /* 20-byte SHA-1s */,
+         created_at)                                   -- GetObjectTorrent's cache, migration 7
 ```
 
 Object ACLs and website redirects live in the row, so every row copy carries them: branch
@@ -181,7 +184,18 @@ added bucket configuration and object ACLs; migration 3 added versioning and Obj
 from before it became null versions, with a `vid` made from their `modified_at` the same way
 new ids are); migration 4 added `blob_sse`; migration 5 added the event outbox
 and replication statuses; migration 6 added `roles` (temporary credentials; sessions themselves
-are never stored, see [Temporary credentials](#temporary-credentials-sts)).
+are never stored, see [Temporary credentials](#temporary-credentials-sts)); migration 7 added
+`blob_torrent`.
+
+`blob_torrent` is a cache keyed by blob, like `blob_sse`: a blob's bytes never change, so its
+BitTorrent pieces are computed once (by reading it) and serve every key, copy, branch and
+version that shares it. It's written relaxed (a lost row is computed again), only while the
+blob's row exists, and removed with the blob's row by the sweeper.
+
+Directory buckets (S3 Express) need no schema of their own: a bucket is one exactly when its name
+has the form `<base>--<zone id>--x-s3`, which general purpose names never have
+(`s3-store/src/express.rs`). The store refuses versioning and Object Lock for them, and keeps
+branches of directory buckets directory buckets.
 
 A blob's encryption is fixed when it's written, so `blob_sse` is keyed by blob: every row that
 shares the blob (copies, branches, the trash) shares its encryption, and no row of `objects`,
@@ -461,6 +475,26 @@ recorded as done only once its manifest is written.
   share the blob: the backend copies it into a new blob (S3 `CopyObject`, or a multipart
   `UploadPartCopy` beyond 5 GiB), the new blob's CRC32C must equal the source's, and then it's
   committed like a PUT.
+- **Append** (`x-amz-write-offset-bytes`, directory buckets; `s3-store/src/append.rs`). A blob
+  is never changed, so an append writes a **new blob** with the old bytes and then the new ones:
+  - the old object at least 5 MiB: a backend multipart upload of the new blob, part 1 an
+    `UploadPartCopy` of the old blob (inside object storage; its CRC32C must equal the old
+    blob's), part 2 the new data;
+  - smaller: one backend PUT streaming the old blob's bytes (checked against its CRC32C as they
+    go, or the PUT fails) and then the new data.
+
+  Then one transaction checks that the key's current version is still the blob that was copied
+  (`InvalidWriteOffset` if its size changed, `ConditionalRequestConflict` if it's another blob of
+  the same size), inserts the new blob (its CRC32C combined from the two parts') and writes the
+  version like any overwrite: the old one goes to the trash. Until then the new blob is in
+  flight, then the orphan scan's: a crash anywhere before the commit leaves the old object and
+  the refcounts exactly as they were. Cost: 4 backend requests above 5 MiB, a GET and a PUT of
+  at most 5 MiB extra below; the old versions are billed as trash for `recover_days`.
+- **Rename** (RenameObject; `s3-store/src/rename.rs`). One transaction: check both sides'
+  conditions, `refs + 1` on the source's blob for the destination's new row (written like any
+  write: the old destination to the trash, push-down to branches), then remove the source's
+  row (`refs - 1`, not to the trash: its bytes moved) or, in a versioned bucket, put a delete
+  marker over it. The blob never reaches zero references on the way, and no bytes move.
 
 ### Metering
 
@@ -502,7 +536,16 @@ Usage writes are relaxed: they ride the next group commit without waiting.
   `STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD(-TRAILER)` and `STREAMING-UNSIGNED-PAYLOAD-TRAILER`
   (current SDKs send CRC trailers by default).
 - The credential scope's region is accepted as given (any region; R2 does the same). The
-  service must be `s3` (`sts` for the STS query API on the same listener).
+  service must be `s3` or `s3express` (S3 Express: SDKs sign directory bucket requests and
+  CreateSession with it), or `sts` for the STS query API on the same listener.
+- S3 Express sessions (CreateSession) are a kind of session token: the claims name one
+  directory bucket and the mode (`ReadOnly` or `ReadWrite`), and narrow whatever identity
+  created them (a key, or another session's role and policies) to that bucket and, for
+  `ReadOnly`, to reading. They last 5 minutes, come only in `x-amz-s3session-token`, and no other
+  token is accepted there. A directory bucket's policy is evaluated with S3 Express's actions:
+  data operations as `s3express:CreateSession` with `s3express:SessionMode`, administration as
+  `s3express:<operation>`, on `arn:aws:s3express:<region>:<account>:bucket/<bucket>`
+  (`s3-server/src/directory.rs`).
 - Temporary credentials (`RT…` keys) carry their session token in `x-amz-security-token`
   (`X-Amz-Security-Token` in presigned URLs, a form field in POST uploads). See below.
 - Clock skew is limited to 15 minutes (header-signed SigV2 too); presigned URLs until they
@@ -680,6 +723,14 @@ condition keys and the canonical ids. `ROLL_S3_BLOCK_PUBLIC_ACCESS` (store confi
   - Get/PutObjectRetention, Get/PutObjectLegalHold
   - GetObjectAttributes (`versionId`, conditional headers, paging over parts with per-part
     checksums and sizes)
+  - RenameObject (all buckets; see [Write paths](#write-paths)), appends (directory buckets)
+  - GetObjectTorrent (`torrent.rs`): bencoded metainfo, pieces cached by blob
+  - SelectObjectContent (`select.rs` over `s3-select`): the request and SQL are checked before
+    the response starts, then the object (its `ScanRange`) streams through the query and the
+    results go out as AWS event-stream messages (`s3_proto::eventstream`), at most 256 KiB each
+    and 8 queued, so a slow client slows the read instead of filling memory
+- **Directory buckets** (`directory.rs`): CreateBucket with a directory configuration,
+  ListDirectoryBuckets, CreateSession; what S3 Express doesn't have answers `NotImplemented`.
 - **Multipart:** CreateMultipartUpload, UploadPart, UploadPartCopy,
   CompleteMultipartUpload, AbortMultipartUpload, ListParts.
 - **Browser uploads:** POST Object (presigned POST policy).

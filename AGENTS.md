@@ -106,7 +106,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
 - **Storage (S3-compatible):**
   - `crates/s3-proto` is the wire protocol with no I/O: SigV4, SigV4a and SigV2 (headers, presigned, aws-chunked with trailers, POST policies), SSE headers, XML, checksums, ranges and conditionals, S3 error codes.
   - `crates/s3-store` is the metadata (SQLite plus a durable log in object storage), branching, refcounts, trash, lifecycle, keys, metering, the blob backend (`aws-sdk-s3` or a local directory) and the GC/scrub jobs. It has no HTTP.
-  - `crates/s3-server` is the S3 HTTP API. `crates/s3-control` is `/v1/storage`, used by `roll storage …` and `/dashboard/storage`.
+  - `crates/s3-server` is the S3 HTTP API. `crates/s3-control` is `/v1/storage`, used by `roll storage …` and `/dashboard/storage`. `crates/s3-select` is S3 Select's SQL and CSV/JSON engine (no I/O, bounded memory).
+  - Directory buckets (S3 Express) are ordinary roll buckets named `<base>--<zone>--x-s3`; appends write a new blob (old bytes copied server-side, then the new ones) and commit it only if the object didn't move. Renames move a blob's reference in one transaction.
   - The design is in `docs/storage/architecture.md`. Reliability comes first; keep these invariants:
     - One customer object is one backend blob. Never pack objects together, and never compact or rewrite a blob.
     - Blobs are immutable. Every upload gets a fresh blob id; never reuse one.
