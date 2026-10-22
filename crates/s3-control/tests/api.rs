@@ -1113,7 +1113,7 @@ async fn bucket_notifications() {
     let t = start().await;
     t.bucket("notified").await;
     let b = t.ok("GET", "/v1/storage/buckets/notified", None).await;
-    assert_eq!(b["notifications"], json!({ "configurations": [], "event_bridge": false, "webhook_secret": null }));
+    assert_eq!(b["notifications"], json!({ "configurations": [], "event_bridge": false, "webhook_secret": null, "backlog": {} }));
     // Destinations are validated as through the S3 API: no roll queue answers here.
     let queue = json!({ "destination": "arn:roll:queues:/:orders", "events": ["s3:ObjectCreated:*"], "prefix": "img/" });
     assert_eq!(t.err("PATCH", "/v1/storage/buckets/notified", Some(json!({ "notifications": { "configurations": [queue] } }))).await, StatusCode::BAD_REQUEST);
@@ -1135,7 +1135,144 @@ async fn bucket_notifications() {
     assert_eq!(t.store.notifications("notified").unwrap().unwrap().configurations.len(), 2);
     let b = t.ok("PATCH", "/v1/storage/buckets/notified", Some(json!({ "notifications": { "configurations": [hook], "skip_destination_validation": true, "rotate_webhook_secret": true } }))).await;
     assert_ne!(b["notifications"]["webhook_secret"].as_str().unwrap(), secret, "rotated");
+    // Rotating alone keeps the configurations (omitted: unchanged).
+    let before = t.ok("GET", "/v1/storage/buckets/notified", None).await["notifications"].clone();
+    let b = t.ok("PATCH", "/v1/storage/buckets/notified", Some(json!({ "notifications": { "rotate_webhook_secret": true } }))).await;
+    assert_eq!(b["notifications"]["configurations"], before["configurations"]);
+    assert_ne!(b["notifications"]["webhook_secret"], before["webhook_secret"]);
     let b = t.ok("PATCH", "/v1/storage/buckets/notified", Some(json!({ "notifications": { "configurations": [] } }))).await;
     assert_eq!(b["notifications"]["configurations"], json!([]));
     assert!(t.store.notifications("notified").unwrap().is_none());
+}
+
+/// Wait (up to 10 s) for `f` to hold.
+async fn eventually<F: std::future::Future<Output = bool>>(what: &str, mut f: impl FnMut() -> F) {
+    for _ in 0..200 {
+        if f().await {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[tokio::test]
+async fn bucket_replication() {
+    let t = start().await;
+    t.bucket("src").await;
+    t.bucket("dst").await;
+    let rule = json!({ "destination": "dst", "prefix": "img/", "delete_markers": true });
+    // As PutBucketReplication: the source must be versioned …
+    assert_eq!(t.err("PATCH", "/v1/storage/buckets/src", Some(json!({ "replication": { "rules": [rule] } }))).await, StatusCode::BAD_REQUEST);
+    // … and every destination too; nothing in a refused PATCH is applied (not even versioning).
+    let both = json!({ "versioning": "Enabled", "replication": { "rules": [rule] } });
+    assert_eq!(t.err("PATCH", "/v1/storage/buckets/src", Some(both.clone())).await, StatusCode::BAD_REQUEST);
+    assert_eq!(t.ok("GET", "/v1/storage/buckets/src", None).await["versioning"], Value::Null);
+    t.ok("PATCH", "/v1/storage/buckets/dst", Some(json!({ "versioning": "Enabled" }))).await;
+    for bad in [
+        json!({ "rules": [{ "destination": "nowhere" }] }),
+        json!({ "rules": [{ "destination": "src" }] }),
+        json!({ "rules": [{ "destination": "dst", "id": "a" }, { "destination": "dst", "id": "a", "prefix": "x/" }] }),
+        json!({ "rules": [{ "prefix": "x/" }] }),
+    ] {
+        let body = json!({ "versioning": "Enabled", "replication": bad });
+        assert_eq!(t.err("PATCH", "/v1/storage/buckets/src", Some(body.clone())).await, StatusCode::BAD_REQUEST, "{body}");
+    }
+    let b = t.ok("PATCH", "/v1/storage/buckets/src", Some(both)).await;
+    assert_eq!(b["versioning"], "Enabled");
+    let r = &b["replication"]["rules"][0];
+    assert!(!r["id"].as_str().unwrap().is_empty(), "ids are generated");
+    assert_eq!((r["destination"].as_str(), r["prefix"].as_str(), r["enabled"].as_bool()), (Some("dst"), Some("img/"), Some(true)));
+    assert_eq!((r["delete_markers"].as_bool(), r["existing_objects"].as_bool(), r["tags"].clone()), (Some(true), Some(false), json!({})));
+    assert_eq!(r["backfilling"], false);
+    // The S3 API sees the same rule, in the V2 form.
+    let k = t.ok("POST", "/v1/storage/keys", Some(json!({ "name": "admin", "permission": "admin" }))).await;
+    let s3 = t.sdk(k["id"].as_str().unwrap(), k["secret_access_key"].as_str().unwrap());
+    let got = s3.get_bucket_replication().bucket("src").send().await.unwrap();
+    let rules = got.replication_configuration().unwrap().rules();
+    assert_eq!(rules[0].destination().unwrap().bucket(), "arn:aws:s3:::dst");
+    assert_eq!(rules[0].filter().and_then(|f| f.prefix()), Some("img/"));
+
+    // A version written under the prefix shows up in the destination with the same version id.
+    let v = t.upload("src", "img/a.png", b"pixels", &[]).await["version_id"].as_str().unwrap().to_string();
+    t.upload("src", "doc/b.txt", b"words", &[]).await;
+    eventually("the replica", || async { t.call("GET", "/v1/storage/buckets/dst/object?key=img/a.png", None).await.0 == StatusCode::OK }).await;
+    let replica = t.ok("GET", "/v1/storage/buckets/dst/object?key=img/a.png", None).await;
+    assert_eq!(replica["version_id"], v.as_str());
+    assert_eq!(t.download("dst", "img/a.png").await.bytes().await.unwrap().as_ref(), b"pixels");
+    assert_eq!(t.call("GET", "/v1/storage/buckets/dst/object?key=doc/b.txt", None).await.0, StatusCode::NOT_FOUND, "outside the prefix");
+    eventually("an empty backlog", || async { t.ok("GET", "/v1/storage/buckets/src", None).await["replication"]["rules"][0]["pending"] == 0 }).await;
+
+    // A view's rules can be sent back as they are (extra fields are ignored); ids are kept.
+    let view = t.ok("GET", "/v1/storage/buckets/src", None).await;
+    let mut rules = view["replication"]["rules"].clone();
+    rules[0]["enabled"] = json!(false);
+    rules[0]["tags"] = json!({ "team": "web" });
+    let b = t.ok("PATCH", "/v1/storage/buckets/src", Some(json!({ "replication": { "rules": rules } }))).await;
+    let r = &b["replication"]["rules"][0];
+    assert_eq!((r["id"].clone(), r["enabled"].clone(), r["tags"].clone()), (view["replication"]["rules"][0]["id"].clone(), json!(false), json!({ "team": "web" })));
+    // `null` removes it.
+    assert_eq!(t.ok("PATCH", "/v1/storage/buckets/src", Some(json!({ "replication": null }))).await["replication"], Value::Null);
+    assert!(t.store.replication("src").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn bucket_website_policy_and_public_access_block() {
+    let t = start_with(|_| {}, |c| c.website_domain = Some("web.localtest".into())).await;
+    assert_eq!(t.ok("GET", "/v1/storage", None).await["website_domain"], "web.localtest");
+    let b = t.bucket("site").await;
+    assert_eq!((b["website_url"].clone(), b["policy"].clone(), b["policy_public"].clone(), b["public_access_block"].clone()), (Value::Null, Value::Null, json!(false), Value::Null));
+    assert_eq!((b["replication"].clone(), b["notifications"]["backlog"].clone()), (Value::Null, json!({})));
+
+    // Website: index and error documents, checked as PutBucketWebsite checks them.
+    let b = t.ok("PATCH", "/v1/storage/buckets/site", Some(json!({ "website": { "index_document": "index.html", "error_document": "404.html" } }))).await;
+    assert_eq!((b["website"]["index_document"].as_str(), b["website"]["error_document"].as_str()), (Some("index.html"), Some("404.html")));
+    let port = t.s3.rsplit(':').next().unwrap();
+    assert_eq!(b["website_url"], format!("http://site.web.localtest:{port}"));
+    for bad in [json!({ "index_document": "" }), json!({ "index_document": "a/index.html" }), json!({ "error_document": "x" })] {
+        assert_eq!(t.err("PATCH", "/v1/storage/buckets/site", Some(json!({ "website": bad }))).await, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let b = t.ok("PATCH", "/v1/storage/buckets/site", Some(json!({ "website": { "index_document": "home.html", "error_document": null } }))).await;
+    assert_eq!((b["website"]["index_document"].as_str(), b["website"]["error_document"].clone()), (Some("home.html"), Value::Null));
+    let b = t.ok("PATCH", "/v1/storage/buckets/site", Some(json!({ "website": null }))).await;
+    assert_eq!((b["website"].clone(), b["website_url"].clone()), (Value::Null, Value::Null));
+
+    // A bucket policy, checked as PutBucketPolicy checks it; anonymous reads follow it.
+    t.upload("site", "index.html", b"<h1>hi</h1>", &[]).await;
+    let anon = format!("{}/site/index.html", t.s3);
+    assert_eq!(t.http.get(&anon).send().await.unwrap().status(), StatusCode::FORBIDDEN);
+    let policy = json!({ "Version": "2012-10-17", "Statement": [{ "Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::site/*" }] });
+    let b = t.ok("PATCH", "/v1/storage/buckets/site", Some(json!({ "policy": policy }))).await;
+    assert_eq!((b["policy"].clone(), b["policy_public"].clone()), (policy.clone(), json!(true)));
+    assert_eq!(t.http.get(&anon).send().await.unwrap().status(), StatusCode::OK);
+    for bad in [
+        json!({ "Statement": [{ "Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::other/*" }] }),
+        json!({ "Statement": [{ "Effect": "Maybe", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::site/*" }] }),
+        json!("{not json"),
+        json!([1]),
+    ] {
+        let (s, v) = t.call("PATCH", "/v1/storage/buckets/site", Some(json!({ "tags": { "a": "b" }, "policy": bad }))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}: {v}");
+    }
+    assert_eq!(t.ok("GET", "/v1/storage/buckets/site", None).await["tags"], json!({}), "a refused PATCH changes nothing");
+    // Text works too, and the S3 API sees what was set.
+    let text = json!({ "Statement": [{ "Effect": "Allow", "Principal": { "AWS": "*" }, "Action": ["s3:ListBucket"], "Resource": "arn:aws:s3:::site", "Condition": { "IpAddress": { "aws:SourceIp": "203.0.113.0/24" } } }] }).to_string();
+    let b = t.ok("PATCH", "/v1/storage/buckets/site", Some(json!({ "policy": text }))).await;
+    assert_eq!(b["policy_public"], false, "pinned to a source range");
+    let k = t.ok("POST", "/v1/storage/keys", Some(json!({ "name": "admin", "permission": "admin" }))).await;
+    let s3 = t.sdk(k["id"].as_str().unwrap(), k["secret_access_key"].as_str().unwrap());
+    let got: Value = serde_json::from_str(s3.get_bucket_policy().bucket("site").send().await.unwrap().policy().unwrap()).unwrap();
+    assert_eq!(got["Statement"][0]["Action"], json!(["s3:ListBucket"]));
+
+    // The public access block: public policies and the public flag are refused while it's on.
+    let b = t.ok("PATCH", "/v1/storage/buckets/site", Some(json!({ "public_access_block": { "block_public_policy": true } }))).await;
+    assert_eq!(b["public_access_block"], json!({ "block_public_acls": false, "ignore_public_acls": false, "block_public_policy": true, "restrict_public_buckets": false }));
+    assert_eq!(s3.get_public_access_block().bucket("site").send().await.unwrap().public_access_block_configuration().unwrap().block_public_policy(), Some(true));
+    assert_eq!(t.err("PATCH", "/v1/storage/buckets/site", Some(json!({ "policy": policy }))).await, StatusCode::BAD_REQUEST);
+    assert_eq!(t.err("PATCH", "/v1/storage/buckets/site", Some(json!({ "public": true }))).await, StatusCode::BAD_REQUEST);
+    // Lifting it in the same PATCH lets both through.
+    let b = t.ok("PATCH", "/v1/storage/buckets/site", Some(json!({ "public_access_block": null, "public": true, "policy": policy }))).await;
+    assert_eq!((b["public_access_block"].clone(), b["public"].clone(), b["policy_public"].clone()), (Value::Null, json!(true), json!(true)));
+    let b = t.ok("PATCH", "/v1/storage/buckets/site", Some(json!({ "policy": null }))).await;
+    assert_eq!((b["policy"].clone(), b["policy_public"].clone()), (Value::Null, json!(false)));
 }

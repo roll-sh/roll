@@ -12,13 +12,19 @@ import {
   RECOVER_OPTIONS,
   retentionLabel,
   storageApi,
+  effectiveBlock,
   type Bucket,
   type CorsRule,
   type LifecycleRule,
+  type StorageInfo,
 } from "@/lib/storage-api";
 import { iconBtn } from "../tasks/ui";
-import { btn, Confirm, input, Panel, primary } from "../ui";
-import { Field, Segmented, type Run } from "./shared";
+import { btn, Confirm, input, Panel } from "../ui";
+import { PolicyPanel, PublicAccessBlockPanel } from "./access";
+import { EventsPanel } from "./events";
+import { ReplicationPanel } from "./replication";
+import { Field, SaveBar, Segmented, type Run } from "./shared";
+import { WebsitePanel } from "./website";
 
 const METHODS = ["GET", "PUT", "POST", "DELETE", "HEAD"];
 
@@ -31,39 +37,33 @@ const parseCsv = (v: string) =>
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
-function SaveBar({ dirty, busy, onReset, label = "Save" }: { dirty: boolean; busy: boolean; onReset: () => void; label?: string }) {
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4">
-      <span className="text-[12px] text-subtle">{dirty ? "Unsaved changes" : "Up to date"}</span>
-      <div className="flex gap-2">
-        {dirty && (
-          <button type="button" onClick={onReset} className={btn}>
-            Reset
-          </button>
-        )}
-        <button type="submit" disabled={busy || !dirty} className={primary}>
-          {busy ? <span className="shimmer">Saving…</span> : label}
-        </button>
-      </div>
-    </div>
-  );
-}
-
 export function SettingsTab({
   bucket,
+  info,
+  buckets,
   busy,
   run,
+  onChanged,
   onDeleted,
 }: {
   bucket: Bucket;
+  info: StorageInfo;
+  buckets: Bucket[];
   busy: string | null;
   run: Run;
+  /** Reload the buckets after a panel saved on its own. */
+  onChanged: () => Promise<unknown>;
   onDeleted: () => void;
 }) {
   return (
     <div className="space-y-4">
-      <AccessPanel bucket={bucket} busy={busy} run={run} />
+      <AccessPanel bucket={bucket} info={info} busy={busy} run={run} />
+      <PublicAccessBlockPanel bucket={bucket} info={info} onChanged={onChanged} />
+      <PolicyPanel bucket={bucket} info={info} onChanged={onChanged} />
       <VersioningPanel bucket={bucket} busy={busy} run={run} />
+      <EventsPanel bucket={bucket} onChanged={onChanged} />
+      <ReplicationPanel bucket={bucket} buckets={buckets} onChanged={onChanged} />
+      <WebsitePanel bucket={bucket} info={info} onChanged={onChanged} />
       <CorsPanel bucket={bucket} busy={busy} run={run} />
       <LifecyclePanel bucket={bucket} busy={busy} run={run} />
       <TagsPanel bucket={bucket} busy={busy} run={run} />
@@ -72,10 +72,12 @@ export function SettingsTab({
   );
 }
 
-function AccessPanel({ bucket, busy, run }: { bucket: Bucket; busy: string | null; run: Run }) {
+function AccessPanel({ bucket, info, busy, run }: { bucket: Bucket; info: StorageInfo; busy: string | null; run: Run }) {
   const [isPublic, setPublic] = useState(bucket.public);
   const [recover, setRecover] = useState(bucket.recover_days);
   const dirty = isPublic !== bucket.public || recover !== bucket.recover_days;
+  // Making a bucket public counts as a public policy: BlockPublicPolicy refuses it.
+  const blocked = effectiveBlock(bucket.public_access_block, info.block_public_access).block_public_policy;
   const options = RECOVER_OPTIONS.includes(recover) ? RECOVER_OPTIONS : [...RECOVER_OPTIONS, recover].sort((a, b) => a - b);
   return (
     <Panel title="Access and recovery">
@@ -89,16 +91,26 @@ function AccessPanel({ bucket, busy, run }: { bucket: Bucket; busy: string | nul
         <div className="grid gap-x-3 gap-y-4 sm:grid-cols-2">
           <Field
             label="Access"
-            hint={isPublic ? "anyone with a URL can GET and HEAD objects; listing still needs a key" : "every request needs an access key"}
+            hint={
+              isPublic
+                ? "anyone with a URL can GET and HEAD objects; listing still needs a key"
+                : blocked
+                  ? "public access is blocked (below)"
+                  : "every request needs an access key"
+            }
           >
-            <Segmented
-              value={isPublic ? "public" : "private"}
-              options={[
-                { label: "private", value: "private" },
-                { label: "public read", value: "public" },
-              ]}
-              onChange={(v) => setPublic(v === "public")}
-            />
+            {blocked && !bucket.public ? (
+              <p className="py-1 font-mono text-[12px] text-muted">private</p>
+            ) : (
+              <Segmented
+                value={isPublic ? "public" : "private"}
+                options={[
+                  { label: "private", value: "private" },
+                  { label: "public read", value: "public" },
+                ]}
+                onChange={(v) => setPublic(v === "public")}
+              />
+            )}
           </Field>
           <Field
             label="Recover deleted objects for"

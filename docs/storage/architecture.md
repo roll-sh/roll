@@ -705,7 +705,7 @@ All JSON. Errors are `{"error": "..."}` with 400/404/409/500. Times are Unix mil
 
 ```text
 GET    /v1/storage
-  → { endpoint, region, virtual_host_domain|null, storage, storage_class, recover_days_default,
+  → { endpoint, region, virtual_host_domain|null, website_domain|null, storage, storage_class, recover_days_default,
       owner_id /* canonical owner id */, account_id /* for policy ARNs */, block_public_access,
       pricing: Pricing, buckets, objects, bytes, scrub: { last_at|null, missing, mismatched } }
 
@@ -715,9 +715,14 @@ GET    /v1/storage/buckets/{name}                → Bucket
 PATCH  /v1/storage/buckets/{name}  { public?, recover_days?, cors?: [CorsRule], lifecycle?: [LifecycleRule],
                                      tags?: Record<string,string> /* replaces them; {} removes */,
                                      versioning?: "Enabled" | "Suspended",
-                                     notifications?: { configurations: [NotificationConfig] /* replaces them; [] removes */,
+                                     notifications?: { configurations?: [NotificationConfig] /* replaces them; [] removes;
+                                                                                                 omitted: unchanged */,
                                                        event_bridge?: boolean, skip_destination_validation?: boolean,
-                                                       rotate_webhook_secret?: boolean } } → Bucket
+                                                       rotate_webhook_secret?: boolean },
+                                     replication?: { rules: [ReplicationRuleInput] } | null /* replaces them; null or [] removes */,
+                                     website?: { index_document, error_document?: string | null } | null /* null removes */,
+                                     policy?: IamPolicy (with Principal) | string | null /* the bucket policy; null removes */,
+                                     public_access_block?: PublicAccessBlock | null /* the bucket's own; null removes */ } → Bucket
 DELETE /v1/storage/buckets/{name}?force=true     → { deleted }   (force: delete all objects first)
 POST   /v1/storage/buckets/{name}/branches  { name }  → Bucket
 
@@ -769,8 +774,20 @@ Bucket = { id, name, region, public, recover_days, created_at,
            object_lock: { mode: "GOVERNANCE" | "COMPLIANCE" | null, days: number | null, years: number | null } | null,
            versions /* own noncurrent versions, delete markers included */, version_bytes,
            notifications: { configurations: [NotificationConfig], event_bridge: boolean,
-                            webhook_secret: string | null /* signs arn:roll:webhook deliveries */ },
-           endpoint, url /* path-style */, virtual_host_url: string | null }
+                            webhook_secret: string | null /* signs arn:roll:webhook deliveries */,
+                            backlog: Record<destination, { pending, last_error: string | null }> /* undelivered only */ },
+           replication: { rules: [ReplicationRule] } | null,
+           policy: IamPolicy | null, policy_public: boolean,
+           public_access_block: PublicAccessBlock | null /* the bucket's own; the deployment's block applies on top */,
+           endpoint, url /* path-style */, virtual_host_url: string | null,
+           website_url: string | null /* with a website domain and a website configuration */ }
+ReplicationRule = { id, priority: number | null, enabled, prefix /* "" = every key */, tags: Record<string,string>,
+                    delete_markers, existing_objects, destination /* a roll bucket */, storage_class: string | null,
+                    owner_override, pending /* versions waiting for this destination, at most 1000 counted */,
+                    last_error: string | null, backfilling /* existing objects still being queued */ }
+ReplicationRuleInput = { destination, id?, priority?, enabled? (default true), prefix?, tags?, delete_markers?,
+                         existing_objects?, storage_class?, owner_override? }
+PublicAccessBlock = { block_public_acls, ignore_public_acls, block_public_policy, restrict_public_buckets }
 NotificationConfig = { id /* generated when empty */, type: "queue" | "topic" | "function" /* from the ARN when omitted */,
                        destination /* arn:roll:queues:<vhost>:<queue> | arn:roll:streams:<stream>:<topic> |
                                       arn:roll:webhook:<url> | arn:aws:sqs|sns|lambda:… */,
@@ -856,7 +873,24 @@ Details:
   no `aws:` prefix); invalid tags are a 400 and nothing in the PATCH is applied. `public: true`
   is a 400 when the bucket's public access block (or `ROLL_S3_BLOCK_PUBLIC_ACCESS`) blocks
   public policies.
-- `website` is set through the S3 API (`PutBucketWebsite`); the control plane shows it.
+- `website` is set through the S3 API (`PutBucketWebsite`) or the PATCH's `website`, which sets the
+  index and error documents (validated as `PutBucketWebsite` does) and keeps routing rules set
+  through the S3 API. `website_url` is `<scheme>://<bucket>.<website domain>[:port]`
+  (`ROLL_S3_WEBSITE_DOMAIN`), only when the bucket has a website configuration; it serves what
+  anonymous users may read.
+- `replication` is validated exactly as `PutBucketReplication` is: unique ids and priorities,
+  destinations that are other roll buckets, and versioning `Enabled` on the bucket and every
+  destination (a `versioning` in the same PATCH counts). Rules are always written in S3's V2
+  (`Filter`) form; what a rule set through the S3 API stores but the control plane doesn't show
+  (`SourceSelectionCriteria`, the destination's encryption, RTC and metrics, `Account`) is kept for
+  rules whose id is unchanged. Replication inside roll is metadata-only: the replica shares the
+  source version's blob, so it's instant and its bytes cost nothing to move.
+- `policy` is validated as `PutBucketPolicy` validates it (20 KB, resources in this bucket,
+  `MalformedPolicy` messages as 400s); a public policy is refused while `BlockPublicPolicy` is in
+  force (the bucket's own block, a `public_access_block` in the same PATCH, or the deployment's).
+  `policy_public` says whether the policy grants anonymous access.
+- Everything in a PATCH is validated before anything is applied: a refused field leaves the
+  bucket unchanged.
 - `notifications` are validated exactly as `PutBucketNotificationConfiguration` validates them:
   each destination must exist and take an `s3:TestEvent` unless `skip_destination_validation`.
   A refused configuration is a 400 and nothing in the PATCH is applied. The webhook secret is

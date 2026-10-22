@@ -213,6 +213,22 @@ That's a safety net for roll's own bugs, not something you can use.
     `Content-Type`.
   - Browser form uploads with a presigned POST policy (`createPresignedPost`) work too.
 
+## Events and replication
+
+- **Event notifications** go to roll queues, roll streams, webhooks (signed with the bucket's
+  secret, `X-Roll-Signature`) or AWS. `PutBucketNotificationConfiguration`, the dashboard's
+  Events panel and the CLI all set them.
+- **Replication** to another roll bucket is instant and free: a replica shares the source
+  version's data, so no bytes are copied or transferred. Both buckets must be versioned.
+
+```sh
+roll storage notify add assets --to queue:uploads --prefix img/       # or stream:<s>/<topic>, https://…, an ARN
+roll storage notify assets                                            # list, with what's still pending
+roll storage notify secret assets [--rotate]
+roll storage replicate assets --to assets-mirror --delete-markers [--existing]
+roll storage replicate rm assets [<rule id>]
+```
+
 ## Lifecycle
 
 `PutBucketLifecycleConfiguration`, or the bucket settings in the dashboard, supports S3's rules,

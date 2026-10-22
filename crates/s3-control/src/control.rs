@@ -79,6 +79,8 @@ pub struct ControlConfig {
     /// The region to sign with (any is accepted).
     pub region: String,
     pub virtual_host_domain: Option<String>,
+    /// `<bucket>.<domain>` is a bucket's static website (`ROLL_S3_WEBSITE_DOMAIN`).
+    pub website_domain: Option<String>,
     /// Storage class of blobs (`None`: a local directory).
     pub storage_class: Option<String>,
     pub pricing: Pricing,
@@ -86,7 +88,7 @@ pub struct ControlConfig {
 
 impl ControlConfig {
     pub fn local(endpoint: impl Into<String>) -> Self {
-        Self { endpoint: endpoint.into(), region: "us-east-1".into(), virtual_host_domain: None, storage_class: None, pricing: Pricing::default() }
+        Self { endpoint: endpoint.into(), region: "us-east-1".into(), virtual_host_domain: None, website_domain: None, storage_class: None, pricing: Pricing::default() }
     }
 }
 
@@ -230,11 +232,12 @@ impl Control {
         Ok(())
     }
 
-    /// The `notifications` of a bucket view.
-    fn notifications_view(&self, b: &Bucket) -> Value {
+    /// The `notifications` of a bucket view (its `backlog` comes with the other settings), and
+    /// whether there are any.
+    fn notifications_view(&self, b: &Bucket) -> (Value, bool) {
         let cfg = self.store.notifications(&b.name).ok().flatten().unwrap_or_default();
         let secret = self.store.bucket_config(&b.name, s3_store::config::kind::WEBHOOK_SECRET, "").ok().flatten();
-        json!({ "configurations": cfg.configurations, "event_bridge": cfg.event_bridge, "webhook_secret": secret })
+        (json!({ "configurations": cfg.configurations, "event_bridge": cfg.event_bridge, "webhook_secret": secret }), !cfg.is_empty())
     }
 
     pub fn info(&self) -> Result<Value> {
@@ -243,6 +246,7 @@ impl Control {
             "endpoint": self.cfg.endpoint,
             "region": self.cfg.region,
             "virtual_host_domain": self.cfg.virtual_host_domain,
+            "website_domain": self.cfg.website_domain,
             "storage": self.store.describe(),
             "storage_class": self.cfg.storage_class.as_deref().unwrap_or("LOCAL"),
             "recover_days_default": self.store.cfg.recover_days_default,
@@ -269,8 +273,12 @@ impl Control {
         let mut v = serde_json::to_value(b).unwrap_or_default();
         let endpoint = self.cfg.endpoint.trim_end_matches('/');
         v["tags"] = json!(self.store.bucket_tags(&b.name).unwrap_or_default());
-        v["website"] = json!(self.store.bucket_website(&b.name).ok().flatten());
-        v["notifications"] = self.notifications_view(b);
+        let website = self.store.bucket_website(&b.name).ok().flatten();
+        let has_website = website.is_some();
+        v["website"] = json!(website);
+        let (notifications, has_notifications) = self.notifications_view(b);
+        v["notifications"] = notifications;
+        self.settings_view(b, &mut v, has_notifications, has_website);
         v["endpoint"] = json!(endpoint);
         v["url"] = json!(format!("{endpoint}/{}", b.name));
         v["virtual_host_url"] = json!(self.virtual_host_url(&b.name));

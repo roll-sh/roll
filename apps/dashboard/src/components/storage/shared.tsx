@@ -1,9 +1,10 @@
 "use client";
 
 import { Globe } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { storageApi, type Bucket, type StorageInfo } from "@/lib/storage-api";
 import { POLL_MS } from "../redis/shared";
+import { btn, primary } from "../ui";
 
 export { Field, Segmented, useAction, type Run } from "../redis/shared";
 
@@ -94,6 +95,108 @@ export function PublicBadge() {
       title="Objects can be read without credentials"
     >
       <Globe className="size-3" /> public
+    </span>
+  );
+}
+
+/** The footer of a settings form: whether there are unsaved changes, reset and save. */
+export function SaveBar({ dirty, busy, onReset, label = "Save" }: { dirty: boolean; busy: boolean; onReset: () => void; label?: string }) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4">
+      <span className="text-[12px] text-subtle">{dirty ? "Unsaved changes" : "Up to date"}</span>
+      <div className="flex gap-2">
+        {dirty && (
+          <button type="button" onClick={onReset} className={btn}>
+            Reset
+          </button>
+        )}
+        <button type="submit" disabled={busy || !dirty} className={primary}>
+          {busy ? <span className="shimmer">Saving…</span> : label}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** A labelled checkbox with a one-line explanation. */
+export function Check({
+  checked,
+  onChange,
+  label,
+  hint,
+  disabled,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+  hint?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <label className={`flex items-start gap-2 text-[13px] ${disabled ? "opacity-60" : "cursor-pointer"}`}>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+        className="mt-0.5 accent-accent"
+      />
+      <span className="min-w-0">
+        <span className="block">{label}</span>
+        {hint && <span className="block text-[12px] text-subtle">{hint}</span>}
+      </span>
+    </label>
+  );
+}
+
+/** A small toggle chip (event types, methods). */
+export function Chip({ on, onClick, children, title }: { on: boolean; onClick: () => void; children: ReactNode; title?: string }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      title={title}
+      onClick={onClick}
+      className={`rounded-md border px-2 py-1 font-mono text-[11px] transition ${
+        on ? "border-line-2 bg-panel-2 text-fg" : "border-line text-subtle hover:text-fg"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Two-step confirmation for a small, reversible-ish action inside a row. */
+export function InlineConfirm({
+  label,
+  busy,
+  onConfirm,
+  onCancel,
+  danger = true,
+}: {
+  label: string;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+  danger?: boolean;
+}) {
+  return (
+    <span className="flex shrink-0 gap-1.5">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onConfirm}
+        className={
+          danger
+            ? "inline-flex items-center gap-1.5 rounded-lg bg-danger px-2.5 py-1.5 text-[12px] font-medium text-white transition hover:opacity-85 disabled:opacity-40"
+            : primary
+        }
+      >
+        {busy ? <span className="shimmer">Working…</span> : label}
+      </button>
+      <button type="button" onClick={onCancel} className={btn}>
+        Cancel
+      </button>
     </span>
   );
 }

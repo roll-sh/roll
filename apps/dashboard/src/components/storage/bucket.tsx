@@ -160,7 +160,16 @@ export function StorageBucket({ name: rawName }: { name: string }) {
         {tab === "connect" && <ConnectTab bucket={bucket} info={info} />}
         {tab === "usage" && <BucketUsage info={info} bucket={bucket.name} />}
         {tab === "settings" && (
-          <SettingsTab key={bucket.id} bucket={bucket} busy={busy} run={run} onDeleted={() => router.push("/dashboard/storage")} />
+          <SettingsTab
+            key={bucket.id}
+            bucket={bucket}
+            info={info}
+            buckets={buckets}
+            busy={busy}
+            run={run}
+            onChanged={refresh}
+            onDeleted={() => router.push("/dashboard/storage")}
+          />
         )}
       </div>
     </AppShell>
