@@ -1630,6 +1630,7 @@ impl<'b, 'a> Binder<'b, 'a> {
                 s.kind,
                 crate::sql::expr::SubqueryKind::Any
                     | crate::sql::expr::SubqueryKind::All
+                    | crate::sql::expr::SubqueryKind::RowCompare
                     | crate::sql::expr::SubqueryKind::Exists
             )
         {

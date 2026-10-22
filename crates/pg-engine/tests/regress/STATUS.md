@@ -34,8 +34,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50804 (**99.32%**) |
-| units differing | 346 |
+| units matching | 50820 (**99.35%**) |
+| units differing | 330 |
 | files fully matching | 189 |
 | engine output == expected/*.out (pg_regress "ok") | 164 files |
 | engine crashes / panics | none |
@@ -44,16 +44,16 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 334 | 96.5% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 11 | 3.2% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 318 | 96.4% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 11 | 3.3% |
 | by design (a parallel plan's combine function) | 1 | 0.3% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 334 units
-join (87), partition_join (35), partition_prune (38), subselect (30), collate.icu.utf8 (8), incremental_sort (15), select_parallel (14), updatable_views (6), groupingsets (10), with (8), memoize (8), equivclass (8), aggregates (7), rowtypes (7), rowsecurity (6), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (3), merge (3), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
+### EXPLAIN (group C1) — 318 units
+join (87), partition_join (35), partition_prune (38), subselect (18), collate.icu.utf8 (8), incremental_sort (15), select_parallel (13), updatable_views (6), groupingsets (10), with (8), memoize (8), equivclass (8), aggregates (7), rowtypes (6), rowsecurity (6), generated_virtual (6), partition_aggregate (5), join_hash (4), collate (4), window (3), returning (2), merge (2), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -221,6 +221,72 @@ Still open from this round's list, and why:
   order differs, so that isn't emulated). Equivalence-class members are ordered by the clauses'
   order here; Postgres's follows how distribute_qual met them, which can pick another outer
   member for a parameterized path.
+
+## Fixed in round 13, agent 3 (row comparisons with sub-selects, IN pull-up, DML row marks)
+
+Measured in subset runs against the engine of f30b5fe (test_setup, create_misc, create_index,
+create_view, subselect, join, aggregates, union, select_distinct, inherit, groupingsets,
+partition_join, partition_prune, rowsecurity, updatable_views, with, equivclass, memoize,
+rowtypes, select_parallel, rules, privileges, update, merge, returning, triggers,
+insert_conflict, generated_virtual, generated_stored, foreign_key): 16 units fixed, none broken.
+
+| file | fixed units |
+|---|---|
+| subselect | 31, 33, 161, 321, 325, 345, 347, 348, 349, 351, 352, 355 |
+| rowtypes | 226 |
+| select_parallel | 192 |
+| merge | 458 |
+| returning | 112 |
+
+What changed:
+
+- `ROW(...) op (SELECT ...)` is a ROWCOMPARE_SUBLINK (it was a scalar sub-select of one
+  `ROW()`): correlated, a SubPlan testing the comparison per row (`SubqueryKind::RowCompare`,
+  shown `(((1 = (SubPlan 1).col1) AND (2 = (SubPlan 1).col2)))`, ordering operators as
+  `(ROW(..) < ROW((SubPlan 1).col1, ..))`); uncorrelated, an InitPlan of several columns the
+  comparisons read as values (`(InitPlan 1).colk`), so they are separate quals (a One-Time
+  Filter and a scan filter). Column-count errors, "more than one row", set operations,
+  `SELECT *`, one-column rows and the view deparse (`((1, 2) = ( SELECT ...))`) are
+  Postgres's now (some of these failed before).
+- convert_VALUES_to_ANY only when the sub-select is a VALUES query (not a FROM subquery's
+  VALUES under a computed select list) whose items fold to constants (no parameters, nothing
+  stable or volatile); a test over a constant folds as a whole (`1 IN (VALUES (1), (3))` is
+  gone). Other uncorrelated IN sub-selects that aren't one table join as semi joins too: a
+  VALUES list pulled up (its uncorrelated sub-selects allowed), anything else as a subquery
+  level (`ANY_subquery`, its ORDER BY's order not offered above). A correlated IN's own WHERE
+  clauses come before its comparisons (hash keys, the unique-ified side's group keys). An
+  inner join's ON-clause sublinks are pulled up over the join when all of them can be.
+- EXPLAIN: a `ROW()` of constants is a record constant (`'("(1)",2)'::record`); a constant
+  in a node's reference to its input stays bare (`'..'::record`, not parenthesized); a scan
+  under a gating Result (One-Time Filter) returns its physical target list.
+- UPDATE / DELETE / MERGE over a join (non-inherited targets; MERGE also over partitions): the
+  join returns the processed target list (new values in column order, the target's ctid, or
+  a view's whole row for its INSTEAD OF triggers; MERGE: the target's identity first, or last
+  for an inheritance tree, then the source columns the actions read), then each other
+  relation's row mark (its ctid in range table order, an inheritance parent's tableoid after
+  all of them, relhassubclass counting); every scan below returns what that list reads of it
+  first, then what its join clauses read; joins their outer side's columns, then their inner
+  side's. A partitioned table's unique index makes a join with its members Inner Unique, and
+  a Hash over an inheritance Append shows the parent's column names.
+
+Goldens added: `tests/sql/a3_rowcompare_sublink.sql`, `a3_sublink_pullup.sql`,
+`a3_dml_rowmarks.sql`.
+
+Still open in these files, and why:
+
+- subselect 189/191 (a pulled-up subquery output read twice is one SubPlan, two copies in
+  Postgres), 186, 218 (IN over a set-returning select list), 221, 288, 298, 310 (LockRows at the
+  top of a FROM subquery's level: the engine locks at the scans), 312, 322 (an EXISTS whose WHERE
+  has a correlated IN: kept as a SubPlan inside the semi join's clause), 326 / 327 (the semi
+  join's unique-ified side joined with one relation first; a correlated aggregate IN as a
+  LATERAL subquery), 328 (an equivalence class member relabeled to the class's collation:
+  `("*VALUES*".column1)::text`), 329 (the clause from the equivalence class written outer
+  side first), 332 (unique-ifying on a computed expression), 342 (a strict operator over a NULL
+  constant folds to NULL), 350 / 353 / 354 (IN over a VALUES list reading the outer row: a
+  LATERAL semi join).
+- merge 348 (the source subquery's sub-select copied into each action), 462 (an empty
+  partitioned target: its dummy Result's names and Inner Unique); returning 103 / 105
+  (rule-rewritten statements run as a CTE of the rule's actions).
 
 ## Fixed in round 13, agent 2, fifth batch (collated sort keys, WITH CHECK OPTION SubPlans)
 
@@ -913,7 +979,7 @@ produces no units on Linux (skipped by the file itself).
 | select_distinct_on | 23 | 23 | 100% | yes | yes |  |
 | select_implicit | 44 | 44 | 100% | yes | yes |  |
 | select_having | 23 | 23 | 100% | yes | yes |  |
-| subselect | 356 | 325 | 91% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (31) |
+| subselect | 356 | 337 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (19) |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
 | join | 925 | 835 | 90% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (86) |
@@ -956,7 +1022,7 @@ produces no units on Linux (skipped by the file itself).
 | misc | 68 | 68 | 100% | no | no |  |
 | async | 11 | 11 | 100% | yes | yes |  |
 | dbsize | 25 | 25 | 100% | yes | yes |  |
-| merge | 572 | 569 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
+| merge | 572 | 570 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | misc_functions | 148 | 148 | 100% | no | no |  |
 | sysviews | 29 | 29 | 100% | yes | yes |  |
 | tsrf | 74 | 73 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
@@ -976,7 +1042,7 @@ produces no units on Linux (skipped by the file itself).
 | amutils | 10 | 10 | 100% | yes | yes |  |
 | stats_ext | 878 | 877 | 100% | yes | no | wrong result `SELECT: values differ` (1) |
 | collate.linux.utf8 | 2 | 2 | 100% | yes | yes |  |
-| select_parallel | 250 | 236 | 94% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (13) |
+| select_parallel | 250 | 237 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (12) |
 | write_parallel | 22 | 22 | 100% | yes | yes |  |
 | vacuum_parallel | 14 | 14 | 100% | yes | yes |  |
 | maintain_every | 16 | 16 | 100% | yes | yes |  |
@@ -1021,8 +1087,8 @@ produces no units on Linux (skipped by the file itself).
 | alter_table | 1749 | 1749 | 100% | yes | yes |  |
 | sequence | 265 | 265 | 100% | no | no |  |
 | polymorphism | 426 | 426 | 100% | yes | yes |  |
-| rowtypes | 237 | 230 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
-| returning | 145 | 142 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
+| rowtypes | 237 | 231 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (6) |
+| returning | 145 | 143 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 299 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (8) |
 | xml | 281 | 281 | 100% | yes | yes |  |

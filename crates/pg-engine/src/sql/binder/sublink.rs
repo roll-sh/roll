@@ -21,10 +21,21 @@ fn and_all(mut items: Vec<Expr>) -> Option<Expr> {
 
 /// `pred` (the WHERE clause over `plan`'s rows) with its top-level EXISTS / NOT EXISTS / ANY
 /// conjuncts turned into semi / anti joins over `plan`, in order; the rest of the clause.
-pub(super) fn pull_up(cat: &Catalog, plan: Plan, pred: Expr) -> (Plan, Option<Expr>) {
+pub(super) fn pull_up(
+    cat: &Catalog,
+    ctx: &crate::exec::ExecCtx,
+    plan: Plan,
+    pred: Expr,
+) -> (Plan, Option<Expr>) {
     let mut parts = Vec::new();
     conjuncts(pred, &mut parts);
-    let parts: Vec<Expr> = parts.into_iter().map(values_to_any).map(one_row_to_ops).collect();
+    let parts: Vec<Expr> = parts
+        .into_iter()
+        .map(|e| values_to_any(e, ctx))
+        .map(one_row_to_ops)
+        // (A test that became constant true goes.)
+        .filter(|e| !matches!(e, Expr::Const(Value::Bool(true), _)))
+        .collect();
     // The clauses that stay restrictions of the FROM items go down to them first (the join
     // planner distributes them there), below the semi / anti joins.
     let pulls = |e: &Expr, plan: &Plan| -> bool {
@@ -452,6 +463,21 @@ fn plan_clean(p: &Plan) -> bool {
     clean && crate::sql::explain::plan_inputs(p).iter().all(|c| plan_clean(c))
 }
 
+/// A VALUES list reading nothing of an outer query: its sub-selects (SubPlans of its
+/// own) uncorrelated too.
+fn values_clean(p: &Plan) -> bool {
+    let Plan::Values { rows, .. } = p else { return false };
+    rows.iter().flatten().all(|e| {
+        let mut ok = true;
+        e.walk(&mut |x| match x {
+            Expr::Outer(..) | Expr::Srf(..) => ok = false,
+            Expr::Subquery(s) if !s.params.is_empty() => ok = false,
+            _ => {}
+        });
+        ok
+    })
+}
+
 /// convert_EXISTS_sublink_to_join.
 fn exists_join(cat: &Catalog, plan: &Plan, sub: &Subquery, anti: bool) -> Option<Plan> {
     // simplify_EXISTS_query: the select list and a positive constant LIMIT don't matter.
@@ -644,7 +670,41 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
         });
         p = input;
     }
-    let (corr, rhs, types, scan_limited) = sub_rel(p)?;
+    let (corr, rhs, types, scan_limited) = match sub_rel(p) {
+        Some(x) => x,
+        // Any other uncorrelated subquery joins as it is: a VALUES list pulled up
+        // (pull_up_simple_values), else a subquery of its own ("ANY_subquery").
+        None if sub.params.is_empty()
+            && (plan_clean(p) || values_clean(p))
+            && !matches!(p, Plan::Empty { .. } | Plan::One) =>
+        {
+            let n = width(p);
+            let types = (0..n)
+                .map(|i| match p {
+                    Plan::Values { rows, .. } => rows[0][i].ty(),
+                    _ => sub
+                        .ops
+                        .get(i)
+                        .and_then(|o| o.args.get(1).cloned())
+                        .unwrap_or(crate::types::DataType::Unknown),
+                })
+                .collect();
+            let rhs = match p {
+                Plan::Values { .. } => p.clone(),
+                _ => Plan::Barrier {
+                    input: Arc::new(p.clone()),
+                    alias: "ANY_subquery".into(),
+                    cols: (1..=n).map(|i| format!("column{i}")).collect(),
+                    secure: false,
+                    // (Its ORDER BY's order is of no use to the semi join above:
+                    // truncate_useless_pathkeys.)
+                    sorted: matches!(p, Plan::Sort { .. }).then_some(0),
+                },
+            };
+            (Vec::new(), rhs, types, false)
+        }
+        None => return None,
+    };
     if scan_limited {
         return None;
     }
@@ -712,19 +772,17 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
     if exprs.len() != sub.left.len() {
         return None;
     }
-    let cond: Vec<Expr> = sub
-        .left
-        .iter()
-        .zip(&exprs)
-        .zip(&sub.ops)
-        .map(|((l, r), op)| {
+    // (The pulled-up subquery's own WHERE clauses come first: deconstruct_jointree
+    // distributes the semi join's right side before its qual.)
+    let cond: Vec<Expr> = corr
+        .into_iter()
+        .chain(sub.left.iter().zip(&exprs).zip(&sub.ops).map(|((l, r), op)| {
             Expr::Call(
                 op.clone(),
                 vec![l.clone(), r.clone().shift_cols(nleft as isize)],
                 crate::types::DataType::Bool,
             )
-        })
-        .chain(corr)
+        }))
         .collect();
     Some(super::optimize::join(
         cat,
@@ -878,7 +936,7 @@ fn one_row_to_ops(e: Expr) -> Expr {
     if cmps.len() == 1 { cmps.pop().unwrap() } else { Expr::And(cmps) }
 }
 
-fn values_to_any(e: Expr) -> Expr {
+fn values_to_any(e: Expr, ctx: &crate::exec::ExecCtx) -> Expr {
     let Expr::Subquery(sub) = &e else { return e };
     if sub.kind != SubqueryKind::Any || sub.left.len() != 1 || sub.ops.len() != 1 || !sub.params.is_empty() {
         return e;
@@ -888,6 +946,19 @@ fn values_to_any(e: Expr) -> Expr {
     let mut maps: Vec<&Vec<Expr>> = Vec::new();
     while let Plan::Project { input, exprs } = p {
         if exprs.len() != 1 {
+            return e;
+        }
+        // (Only coercions: a select list computing something over the VALUES is a FROM
+        // subquery's, not a VALUES query.)
+        let mut x = &exprs[0];
+        while let Expr::Cast(inner, ..)
+        | Expr::Relabel(inner, _)
+        | Expr::CoerceToDomain(inner, _)
+        | Expr::Collate(inner, ..) = x
+        {
+            x = inner;
+        }
+        if !matches!(x, Expr::Col(0, _)) {
             return e;
         }
         maps.push(exprs);
@@ -912,36 +983,49 @@ fn values_to_any(e: Expr) -> Expr {
                 })
                 .unwrap();
         }
-        if !v.columns().is_empty() || v.is_volatile() || has_sublink(&v) || v.has_outer_refs() {
-            return e;
+        // (Only an array of constants: each value as eval_const_expressions leaves it.)
+        match fold_const(v, ctx) {
+            Some(c) => elems.push(c),
+            None => return e,
         }
-        elems.push(v);
     }
     let elem_ty = elems[0].ty();
     if elems.iter().any(|x| x.ty() != elem_ty) {
         return e;
     }
     let arr_ty = crate::types::DataType::array_of(elem_ty.clone());
-    // (Of constants: an array constant.)
-    let right = if elems.iter().all(|x| matches!(x, Expr::Const(..))) {
-        let items = elems
-            .into_iter()
-            .map(|x| match x {
-                Expr::Const(v, _) => v,
-                _ => unreachable!(),
-            })
-            .collect();
-        Expr::Const(
-            Value::Array(Arc::new(crate::types::array::ArrayValue::from_vec(elem_ty, items))),
-            arr_ty,
-        )
-    } else {
-        Expr::Array(elems, arr_ty)
-    };
-    Expr::ArrayOp {
+    let items = elems
+        .into_iter()
+        .map(|x| match x {
+            Expr::Const(v, _) => v,
+            _ => unreachable!(),
+        })
+        .collect();
+    let right = Expr::Const(
+        Value::Array(Arc::new(crate::types::array::ArrayValue::from_vec(elem_ty, items))),
+        arr_ty,
+    );
+    let saop = Expr::ArrayOp {
         left: Box::new(sub.left[0].clone()),
         right: Box::new(right),
         op: sub.ops[0].clone(),
         all: false,
+    };
+    // (Over a constant too, the whole test is one.)
+    fold_const(saop.clone(), ctx).unwrap_or(saop)
+}
+
+/// `v` evaluated, when it is a constant expression (no columns, parameters, outer values,
+/// sub-selects or volatile calls).
+fn fold_const(v: Expr, ctx: &crate::exec::ExecCtx) -> Option<Expr> {
+    if let Expr::Const(..) = v {
+        return Some(v);
     }
+    let mut plain = v.columns().is_empty() && v.is_immutable() && !has_sublink(&v);
+    v.walk(&mut |x| plain &= !matches!(x, Expr::Param(..) | Expr::Outer(..)));
+    if !plain {
+        return None;
+    }
+    let ty = v.ty();
+    crate::sql::expr::eval(&v, &[], ctx).ok().map(|c| Expr::Const(c, ty))
 }

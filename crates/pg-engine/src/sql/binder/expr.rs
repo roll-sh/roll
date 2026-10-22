@@ -1620,38 +1620,12 @@ impl Binder<'_, '_> {
                     return self.prefix_op(&opname, r, loc);
                 };
                 // `ROW(...) op (SELECT a, b ...)`: a row comparison with the subquery's one
-                // row (ROWCOMPARE_SUBLINK), its columns read from a ROW() of them.
+                // row (ROWCOMPARE_SUBLINK).
                 if let Some(NodeEnum::RowExpr(_)) = inner(l)
-                    && let Some(sub) = a.rexpr.as_deref().and_then(row_sublink)
+                    && let Some(NodeEnum::SubLink(sl)) = a.rexpr.as_deref().and_then(inner)
+                    && sl.sub_link_type == pb::SubLinkType::ExprSublink as i32
                 {
-                    let ls = match self.bind_expr(l)? {
-                        Expr::Row(items, _) => items,
-                        e => vec![e],
-                    };
-                    let r = self.bind_expr(&sub)?;
-                    let DataType::Row(rt) = r.ty() else {
-                        return Err(crate::error::internal("row subquery"));
-                    };
-                    if rt.fields.len() != ls.len() {
-                        return Err(with_pos(
-                            Error::new(
-                                code::SYNTAX_ERROR,
-                                if rt.fields.len() > ls.len() {
-                                    "subquery has too many columns"
-                                } else {
-                                    "subquery has too few columns"
-                                },
-                            ),
-                            loc,
-                        ));
-                    }
-                    let rs = rt
-                        .fields
-                        .iter()
-                        .enumerate()
-                        .map(|(i, (_, t))| Expr::Field(Box::new(r.clone()), i, t.clone()))
-                        .collect();
-                    return self.row_compare(&opname, ls, rs, loc);
+                    return self.bind_sublink_in(sl, Some((&opname, l, loc)));
                 }
                 let l = self.bind_expr(l)?;
                 let r = self.bind_expr(a.rexpr.as_deref().unwrap())?;
@@ -3465,7 +3439,170 @@ impl Binder<'_, '_> {
         Ok((Arc::new(plan), cols, params))
     }
 
+    /// An ANY / ALL / ROWCOMPARE sublink's comparisons, one per column: the left operands
+    /// coerced to the operators' inputs, the operators (under the collation the operands
+    /// derive together), and the subquery's plan with its columns cast to their right
+    /// inputs. `uncorrelated`: an `=` ANY the planner may hash.
+    #[allow(clippy::too_many_arguments)]
+    fn sublink_comparisons(
+        &mut self,
+        op: &str,
+        left: Vec<Expr>,
+        cols: &[OutCol],
+        plan: Arc<Plan>,
+        uncorrelated: bool,
+        all: bool,
+        loc: i32,
+    ) -> Result<(Vec<Expr>, Vec<Arc<FuncDef>>, Arc<Plan>)> {
+        let mut lefts = Vec::new();
+        let mut ops = Vec::new();
+        let mut casts = Vec::new();
+        for (l, c) in left.into_iter().zip(cols) {
+            let res = resolve_binop(op, &l.ty(), &c.ty).map_err(|e| with_pos(e, loc))?;
+            lefts.push(self.coerce_implicit(l, &res.arg_types[0])?);
+            casts.push(res.arg_types[1].clone());
+            // The comparison runs under what the left operand and the subquery's
+            // column derive together.
+            let rc = self.out_col_collation(c, &c.ty);
+            let def = match lefts.last().map(|l| self.collation_of(l)) {
+                Some(Ok(lc)) => match lc.merge(rc) {
+                    Ok(super::Coll::Implicit(n) | super::Coll::Explicit(n, _))
+                        if !self.deparse =>
+                    {
+                        crate::types::collation::apply(&res.def, &n, &self.cat, None)
+                            .unwrap_or(res.def)
+                    }
+                    // Conflicting implicit collations leave the comparison none: it
+                    // fails when it runs, hashing the subquery's rows when the
+                    // planner hashes it (uncorrelated `=`), else comparing.
+                    Ok(super::Coll::Conflict(..)) if !self.deparse => {
+                        let probe = [lefts.last().cloned().unwrap(), Expr::Col(0, c.ty.clone())];
+                        match needs_collation(&res.def, &probe) {
+                            Some(imp) => {
+                                let hashed = !all && op == "=" && uncorrelated;
+                                Arc::new(func::FuncDef {
+                                    imp: if hashed { indeterminate::<7> } else { imp },
+                                    srf: None,
+                                    ..(*res.def).clone()
+                                })
+                            }
+                            None => res.def,
+                        }
+                    }
+                    _ => res.def,
+                },
+                _ => res.def,
+            };
+            ops.push(def);
+        }
+        // Cast subquery columns to the operator's right-hand types.
+        let needs = cols.iter().zip(&casts).any(|(c, t)| {
+            !c.ty.same_base(t) && !t.is_polymorphic() && !matches!(t, DataType::Any)
+        });
+        let plan = if needs {
+            let exprs = cols
+                .iter()
+                .zip(&casts)
+                .enumerate()
+                .map(|(i, (c, t))| {
+                    let col = Expr::Col(i, c.ty.clone());
+                    if c.ty.same_base(t) || t.is_polymorphic() {
+                        Ok(col)
+                    } else {
+                        self.coerce_implicit(col, t)
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Arc::new(Plan::Project { input: plan, exprs })
+        } else {
+            plan
+        };
+        Ok((lefts, ops, plan))
+    }
+
+    /// `ROW(a, b, ...) op (SELECT x, y, ...)` (ROWCOMPARE_SUBLINK): the subquery's one row
+    /// (NULL without one) compared with the row column by column. Uncorrelated, it is an
+    /// InitPlan whose columns the comparison reads as values (`(InitPlan n).colk`, the
+    /// comparisons separate quals); else a SubPlan testing the comparison per row.
+    #[allow(clippy::too_many_arguments)]
+    fn rowcompare_sublink(
+        &mut self,
+        id: usize,
+        op: &str,
+        l: &Node,
+        loc: i32,
+        plan: Arc<Plan>,
+        cols: Vec<OutCol>,
+        params: Vec<Expr>,
+    ) -> Result<Expr> {
+        let left = match self.bind_expr(l)? {
+            Expr::Row(items, _) => items,
+            e => vec![e],
+        };
+        if left.len() != cols.len() {
+            let msg = if left.len() < cols.len() {
+                "subquery has too many columns"
+            } else {
+                "subquery has too few columns"
+            };
+            return Err(with_pos(Error::new(code::SYNTAX_ERROR, msg), loc));
+        }
+        if params.is_empty() && !self.deparse {
+            let one = cols.len() == 1;
+            let ty = |c: &OutCol| {
+                if matches!(c.ty, DataType::Unknown) {
+                    DataType::Text
+                } else {
+                    c.ty.clone()
+                }
+            };
+            let sq = Expr::Subquery(Box::new(Subquery {
+                id,
+                kind: SubqueryKind::Scalar,
+                plan,
+                params,
+                left: vec![],
+                ops: vec![],
+                ty: if one { ty(&cols[0]) } else { DataType::Record },
+                func: None,
+                call: None,
+                test_op: None,
+            }));
+            let rs = if one {
+                vec![sq]
+            } else {
+                cols.iter()
+                    .enumerate()
+                    .map(|(i, c)| Expr::Field(Box::new(sq.clone()), i, ty(c)))
+                    .collect()
+            };
+            return self.row_compare(op, left, rs, loc);
+        }
+        if !matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=") {
+            return Err(crate::error::unsupported("this row comparison with a subquery"));
+        }
+        let (left, ops, plan) = self.sublink_comparisons(op, left, &cols, plan, false, false, loc)?;
+        Ok(Expr::Subquery(Box::new(Subquery {
+            id,
+            kind: SubqueryKind::RowCompare,
+            plan,
+            params,
+            left,
+            ops,
+            ty: DataType::Bool,
+            func: None,
+            call: None,
+            test_op: None,
+        })))
+    }
+
     fn bind_sublink(&mut self, s: &pb::SubLink) -> Result<Expr> {
+        self.bind_sublink_in(s, None)
+    }
+
+    /// `row`: `ROW(...) op (SELECT ...)`, a ROWCOMPARE_SUBLINK: the operator, the ROW() and
+    /// the operator's location.
+    fn bind_sublink_in(&mut self, s: &pb::SubLink, row: Option<(&str, &Node, i32)>) -> Result<Expr> {
         use pb::SubLinkType as T;
         let kind = T::try_from(s.sub_link_type).unwrap_or(T::ExprSublink);
         let loc = s.location;
@@ -3510,6 +3647,9 @@ impl Binder<'_, '_> {
             }
             _ => plan,
         };
+        if let Some((op, l, oploc)) = row {
+            return self.rowcompare_sublink(id, op, l, oploc, plan, cols, params);
+        }
         match kind {
             T::ExistsSublink => Ok(Expr::Subquery(Box::new(Subquery {
                 id,
@@ -3649,69 +3789,8 @@ impl Binder<'_, '_> {
                         })));
                     }
                 }
-                let mut lefts = Vec::new();
-                let mut ops = Vec::new();
-                let mut casts = Vec::new();
-                for (l, c) in left.into_iter().zip(&cols) {
-                    let res = resolve_binop(&op, &l.ty(), &c.ty).map_err(|e| with_pos(e, loc))?;
-                    lefts.push(self.coerce_implicit(l, &res.arg_types[0])?);
-                    casts.push(res.arg_types[1].clone());
-                    // The comparison runs under what the left operand and the subquery's
-                    // column derive together.
-                    let rc = self.out_col_collation(c, &c.ty);
-                    let def = match lefts.last().map(|l| self.collation_of(l)) {
-                        Some(Ok(lc)) => match lc.merge(rc) {
-                            Ok(super::Coll::Implicit(n) | super::Coll::Explicit(n, _))
-                                if !self.deparse =>
-                            {
-                                crate::types::collation::apply(&res.def, &n, &self.cat, None)
-                                    .unwrap_or(res.def)
-                            }
-                            // Conflicting implicit collations leave the comparison none: it
-                            // fails when it runs, hashing the subquery's rows when the
-                            // planner hashes it (uncorrelated `=`), else comparing.
-                            Ok(super::Coll::Conflict(..)) if !self.deparse => {
-                                let probe = [lefts.last().cloned().unwrap(), Expr::Col(0, c.ty.clone())];
-                                match needs_collation(&res.def, &probe) {
-                                    Some(imp) => {
-                                        let hashed = !all && op == "=" && params.is_empty();
-                                        Arc::new(func::FuncDef {
-                                            imp: if hashed { indeterminate::<7> } else { imp },
-                                            srf: None,
-                                            ..(*res.def).clone()
-                                        })
-                                    }
-                                    None => res.def,
-                                }
-                            }
-                            _ => res.def,
-                        },
-                        _ => res.def,
-                    };
-                    ops.push(def);
-                }
-                // Cast subquery columns to the operator's right-hand types.
-                let needs = cols.iter().zip(&casts).any(|(c, t)| {
-                    !c.ty.same_base(t) && !t.is_polymorphic() && !matches!(t, DataType::Any)
-                });
-                let plan = if needs {
-                    let exprs = cols
-                        .iter()
-                        .zip(&casts)
-                        .enumerate()
-                        .map(|(i, (c, t))| {
-                            let col = Expr::Col(i, c.ty.clone());
-                            if c.ty.same_base(t) || t.is_polymorphic() {
-                                Ok(col)
-                            } else {
-                                self.coerce_implicit(col, t)
-                            }
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    Arc::new(Plan::Project { input: plan, exprs })
-                } else {
-                    plan
-                };
+                let (lefts, ops, plan) =
+                    self.sublink_comparisons(&op, left, &cols, plan, params.is_empty(), all, loc)?;
                 Ok(Expr::Subquery(Box::new(Subquery {
                     id,
                     kind: if all {
@@ -8364,48 +8443,4 @@ pub fn check_folds(e: &Expr, ctx: &crate::exec::ExecCtx) -> Result<()> {
         Some(e) => Err(e),
         None => Ok(()),
     }
-}
-
-/// An EXPR sublink whose simple SELECT returns several columns, made to return them as one
-/// ROW() (for a row comparison with it).
-fn row_sublink(n: &Node) -> Option<Node> {
-    let Some(NodeEnum::SubLink(sl)) = inner(n) else {
-        return None;
-    };
-    if sl.sub_link_type != pb::SubLinkType::ExprSublink as i32 {
-        return None;
-    }
-    let Some(NodeEnum::SelectStmt(sel)) = sl.subselect.as_deref().and_then(inner) else {
-        return None;
-    };
-    if sel.target_list.len() < 2 || sel.larg.is_some() || !sel.values_lists.is_empty() {
-        return None;
-    }
-    let mut args = Vec::new();
-    for t in &sel.target_list {
-        match inner(t) {
-            Some(NodeEnum::ResTarget(rt)) => match rt.val.as_deref() {
-                Some(v) if !matches!(inner(v), Some(NodeEnum::ColumnRef(c)) if matches!(c.fields.last().and_then(inner), Some(NodeEnum::AStar(_)))) => {
-                    args.push(v.clone())
-                }
-                _ => return None,
-            },
-            _ => return None,
-        }
-    }
-    let row = pb::RowExpr {
-        args,
-        row_format: pb::CoercionForm::CoerceImplicitCast as i32,
-        location: -1,
-        ..Default::default()
-    };
-    let mut sel = (**sel).clone();
-    sel.target_list = vec![ast::mk(NodeEnum::ResTarget(Box::new(pb::ResTarget {
-        val: Some(Box::new(ast::mk(NodeEnum::RowExpr(Box::new(row))))),
-        location: -1,
-        ..Default::default()
-    })))];
-    let mut sl = (**sl).clone();
-    sl.subselect = Some(Box::new(ast::mk(NodeEnum::SelectStmt(Box::new(sel)))));
-    Some(ast::mk(NodeEnum::SubLink(Box::new(sl))))
 }

@@ -1,0 +1,218 @@
+> CREATE TABLE a3_rc (f1 int, f2 int, f3 float8)
+-- CREATE TABLE
+
+> INSERT INTO a3_rc VALUES (1, 2, 3), (2, 3, 4), (3, 4, 5), (1, 1, 1), (2, 2, 2), (6, 7, 8), (8, 9, NULL)
+-- INSERT 0 7
+
+> SELECT f1, f2, ROW(1, 2) = (SELECT f1, f2) AS eq, ROW(1, 2) <> (SELECT f1, f2) AS ne,
+>        ROW(1, 2) < (SELECT f1, f2) AS lt, ROW(2, 2) >= (SELECT f1, f2) AS ge
+> FROM a3_rc ORDER BY 1, 2
+f1:int4 | f2:int4 | eq:bool | ne:bool | lt:bool | ge:bool
+1 | 1 | f | t | f | t
+1 | 2 | t | f | f | t
+2 | 2 | f | t | t | t
+2 | 3 | f | t | t | f
+3 | 4 | f | t | t | f
+6 | 7 | f | t | t | f
+8 | 9 | f | t | t | f
+-- SELECT 7
+
+> SELECT ROW(1, 2) = (SELECT f1, f2 FROM a3_rc)
+ERROR 21000: more than one row returned by a subquery used as an expression
+
+> SELECT ROW(1, 2) = (SELECT f1, f2 FROM a3_rc WHERE false)
+?column?:bool
+NULL
+-- SELECT 1
+
+> SELECT ROW(1, 2) = (SELECT f1 FROM a3_rc WHERE false)
+ERROR 42601: subquery has too few columns (at 18)
+
+> SELECT ROW(1, 2) = (SELECT f1, f2, f3 FROM a3_rc WHERE false)
+ERROR 42601: subquery has too many columns (at 18)
+
+> SELECT ROW(1, 2) = (SELECT 1, 2 UNION ALL SELECT 1, 3)
+ERROR 21000: more than one row returned by a subquery used as an expression
+
+> SELECT ROW(1, 2) <> (SELECT * FROM (VALUES (1, 3)) v)
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT ROW(1, 2) <= (SELECT f1, f2 FROM a3_rc ORDER BY 1, 2 LIMIT 1)
+?column?:bool
+f
+-- SELECT 1
+
+> SELECT ROW(1) = (SELECT 1)
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT count(*) FROM a3_rc s WHERE ROW(s.f1, s.f2) = (SELECT t.f1, t.f2 FROM a3_rc t WHERE t.f1 = s.f1 AND t.f2 = s.f2)
+count:int8
+7
+-- SELECT 1
+
+> SELECT f1 FROM a3_rc s WHERE ROW(1, 1) = (SELECT t.f1, t.f2 FROM a3_rc t WHERE t.f1 = s.f1 ORDER BY t.f2 LIMIT 1) ORDER BY 1
+f1:int4
+1
+1
+-- SELECT 2
+
+> CREATE VIEW a3_rc_v AS SELECT ROW(1, 2) = (SELECT f1, f2) AS eq, ROW(1, 2) < (SELECT f1, f2) AS lt FROM a3_rc
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('a3_rc_v')
+pg_get_viewdef:text
+ SELECT ((1, 2) = ( SELECT a3_rc.f1,
+            a3_rc.f2)) AS eq,
+    ((1, 2) < ( SELECT a3_rc.f1,
+            a3_rc.f2)) AS lt
+   FROM a3_rc;
+-- SELECT 1
+
+> SELECT * FROM a3_rc_v
+eq:bool | lt:bool
+f | f
+f | t
+f | t
+f | t
+f | t
+f | t
+t | f
+-- SELECT 7
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT ROW(1, 2) = (SELECT f1, f2) AS eq FROM a3_rc
+QUERY PLAN:text
+Seq Scan on public.a3_rc
+  Output: (((1 = (SubPlan 1).col1) AND (2 = (SubPlan 1).col2)))
+  SubPlan 1
+    ->  Result
+          Output: a3_rc.f1, a3_rc.f2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT ROW(1, 2) = (SELECT 3, 4) AS eq FROM a3_rc
+QUERY PLAN:text
+Seq Scan on public.a3_rc
+  Output: ((1 = (InitPlan 1).col1) AND (2 = (InitPlan 1).col2))
+  InitPlan 1
+    ->  Result
+          Output: 3, 4
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT ROW(1, 2) < (SELECT f1, f2) AS lt FROM a3_rc
+QUERY PLAN:text
+Seq Scan on public.a3_rc
+  Output: ((ROW(1, 2) < ROW((SubPlan 1).col1, (SubPlan 1).col2)))
+  SubPlan 1
+    ->  Result
+          Output: a3_rc.f1, a3_rc.f2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT ROW(1, 2) <> (SELECT f1, f2) AS ne FROM a3_rc
+QUERY PLAN:text
+Seq Scan on public.a3_rc
+  Output: (((1 <> (SubPlan 1).col1) OR (2 <> (SubPlan 1).col2)))
+  SubPlan 1
+    ->  Result
+          Output: a3_rc.f1, a3_rc.f2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a3_rc WHERE ROW(f1, 2) = (SELECT 3, 4)
+QUERY PLAN:text
+Result
+  Output: a3_rc.f1, a3_rc.f2, a3_rc.f3
+  One-Time Filter: (2 = (InitPlan 1).col2)
+  InitPlan 1
+    ->  Result
+          Output: 3, 4
+  ->  Seq Scan on public.a3_rc
+        Output: a3_rc.f1, a3_rc.f2, a3_rc.f3
+        Filter: (a3_rc.f1 = (InitPlan 1).col1)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a3_rc WHERE ROW(f1, 2) = (SELECT f2, 4) AND f3 > 0
+QUERY PLAN:text
+Seq Scan on public.a3_rc
+  Output: a3_rc.f1, a3_rc.f2, a3_rc.f3
+  Filter: ((a3_rc.f3 > '0'::double precision) AND (((a3_rc.f1 = (SubPlan 1).col1) AND (2 = (SubPlan 1).col2))))
+  SubPlan 1
+    ->  Result
+          Output: a3_rc.f2, 4
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT ROW(1, 2) = (SELECT f1, f2 FROM a3_rc s2 WHERE s2.f1 = s.f2 LIMIT 1) AS eq FROM a3_rc s
+QUERY PLAN:text
+Seq Scan on public.a3_rc s
+  Output: (((1 = (SubPlan 1).col1) AND (2 = (SubPlan 1).col2)))
+  SubPlan 1
+    ->  Limit
+          Output: s2.f1, s2.f2
+          ->  Seq Scan on public.a3_rc s2
+                Output: s2.f1, s2.f2
+                Filter: (s2.f1 = s.f2)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a3_rc WHERE f1 = (SELECT 1) AND 2 = (SELECT 3)
+QUERY PLAN:text
+Result
+  Output: a3_rc.f1, a3_rc.f2, a3_rc.f3
+  One-Time Filter: (2 = (InitPlan 2).col1)
+  InitPlan 1
+    ->  Result
+          Output: 1
+  InitPlan 2
+    ->  Result
+          Output: 3
+  ->  Seq Scan on public.a3_rc
+        Output: a3_rc.f1, a3_rc.f2, a3_rc.f3
+        Filter: (a3_rc.f1 = (InitPlan 1).col1)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT f1 FROM a3_rc WHERE 2 = (SELECT 3)
+QUERY PLAN:text
+Result
+  Output: a3_rc.f1
+  One-Time Filter: (2 = (InitPlan 1).col1)
+  InitPlan 1
+    ->  Result
+          Output: 3
+  ->  Seq Scan on public.a3_rc
+        Output: a3_rc.f1, a3_rc.f2, a3_rc.f3
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT row(row(row(1))) = any (SELECT row(row(1)))
+QUERY PLAN:text
+Result
+  Output: (ANY ('("(1)")'::record = (SubPlan 1).col1))
+  SubPlan 1
+    ->  Materialize
+          Output: '("(1)")'::record
+          ->  Result
+                Output: '("(1)")'::record
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT row(row(1)), row(1, 'a'), row(row(1), 2)
+QUERY PLAN:text
+Result
+  Output: '("(1)")'::record, '(1,a)'::record, '("(1)",2)'::record
+-- EXPLAIN
+
+> DROP VIEW a3_rc_v
+-- DROP VIEW
+
+> DROP TABLE a3_rc
+-- DROP TABLE
+

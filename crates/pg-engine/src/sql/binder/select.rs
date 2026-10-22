@@ -1662,7 +1662,7 @@ impl Binder<'_, '_> {
             let pred = if self.deparse || locking.is_some() {
                 Some(pred)
             } else {
-                let (p, rest) = super::sublink::pull_up(&self.cat, plan, pred);
+                let (p, rest) = super::sublink::pull_up(&self.cat, self.ctx, plan, pred);
                 plan = p;
                 rest
             };
@@ -5853,6 +5853,37 @@ impl Binder<'_, '_> {
                         let (lp, rp, rparams) = *b;
                         optimize::join(&self.cat, kind, lp, rp, cond, rparams, nleft, nright)
                     }
+                }
+            } else if kind == JoinKind::Inner
+                && !self.deparse
+                && locking.is_none()
+                && rparams.is_empty()
+                && let Some(c) = cond.clone()
+            {
+                // pull_up_sublinks in an inner join's ON clause: its EXISTS / IN sublinks
+                // join the join (when all of them can).
+                let mut parts = Vec::new();
+                optimize::conjuncts(c, &mut parts);
+                let (subs, stay): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(|e| match e {
+                    Expr::Subquery(_) => true,
+                    Expr::Not(x) => matches!(&**x, Expr::Subquery(_)),
+                    _ => false,
+                });
+                let stay_cond = match stay.len() {
+                    0 => None,
+                    1 => stay.into_iter().next(),
+                    _ => Some(Expr::And(stay)),
+                };
+                let pulled = (!subs.is_empty())
+                    .then(|| {
+                        let j = optimize::join(&self.cat, kind, lp.clone(), rp.clone(), stay_cond, Vec::new(), nleft, nright);
+                        let (p, rest) = super::sublink::pull_up(&self.cat, self.ctx, j, Expr::And(subs));
+                        rest.is_none().then_some(p)
+                    })
+                    .flatten();
+                match pulled {
+                    Some(p) => p,
+                    None => optimize::join(&self.cat, kind, lp, rp, cond, rparams, nleft, nright),
                 }
             } else {
                 optimize::join(&self.cat, kind, lp, rp, cond, rparams, nleft, nright)

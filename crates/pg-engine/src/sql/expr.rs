@@ -32,6 +32,9 @@ pub enum SubqueryKind {
     All,
     /// `ARRAY(SELECT …)`
     Array,
+    /// `ROW(a, …) op (SELECT x, …)`, correlated: the subquery's one row (NULL without
+    /// one) compared with `left` by `ops` (ROWCOMPARE_SUBLINK).
+    RowCompare,
 }
 
 #[derive(Clone)]

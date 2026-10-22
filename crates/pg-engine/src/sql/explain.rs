@@ -571,6 +571,8 @@ struct Builder<'c, 'a> {
     needed: HashMap<usize, Vec<bool>>,
     /// Scans of the other tables an UPDATE / DELETE reads: their ctid is a row mark.
     rowmarks: std::collections::HashSet<usize>,
+    /// Those scans' row mark columns as their target lists show them (`ref.ctid`).
+    rowmark_junk: HashMap<usize, Vec<((u8, super::plan::Rti), String)>>,
     /// How often the expressions being shown run (setrefs' NUM_EXEC_QUAL /
     /// NUM_EXEC_TLIST): an EXISTS that can be hashed picks its plan by it.
     num_exec: Option<f64>,
@@ -785,7 +787,7 @@ fn rowmark_scans(root: &Arc<Plan>) -> std::collections::HashSet<usize> {
         match p {
             Plan::Update(u) if !matches!(&*u.source, Plan::Scan(_)) => marks(&u.source, out),
             Plan::Delete(d) if !matches!(&*d.source, Plan::Scan(_)) => marks(&d.source, out),
-            Plan::Merge(m) if !m.members.is_empty() => marks(&m.source, out),
+            Plan::Merge(m) => marks(&m.source, out),
             _ => {}
         }
         for c in plan_inputs(p) {
@@ -816,7 +818,7 @@ fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
         let needs = match p {
             // (A MERGE's source as its target list shows it: what the actions read, the
             // target row's ctid, and its tableoid for an inheritance tree.)
-            Plan::Merge(m) if !m.members.is_empty() => vec![merge_needs(m)],
+            Plan::Merge(m) => vec![merge_needs(m)],
             // (A FROM subquery planned apart computes its sort, group and DISTINCT keys
             // whether read or not: remove_unused_subquery_outputs keeps them; its plan
             // returns those its select list doesn't have as resjunk columns.)
@@ -1168,6 +1170,83 @@ fn merge_needs(m: &super::plan::MergePlan) -> Vec<bool> {
         *x = true;
     }
     n
+}
+
+/// The target lists under an UPDATE / DELETE / MERGE's top node (whose list is `top`, the
+/// processed target list) as Postgres builds them: each row-marked relation's ctid goes up
+/// from its scan; a scan returns what the top list reads of it first, in that order, then
+/// what its join clauses read (its reltarget); a join returns its outer side's columns,
+/// then its inner side's (build_joinrel_tlist); a node over one input keeps its order.
+/// `last`: an inheritance target's row identity columns, which its scans return last.
+/// Returns the row mark columns at or under `n`.
+fn junk_layout(
+    n: &mut ExNode,
+    top: &[String],
+    last: &[String],
+    junk_of: &HashMap<usize, Vec<((u8, super::plan::Rti), String)>>,
+) -> Vec<String> {
+    let mut junk = Vec::new();
+    for c in &mut n.children {
+        junk.extend(junk_layout(c, top, last, junk_of));
+    }
+    if n.is_scan()
+        && let Some(js) = n.key.and_then(|k| junk_of.get(&k))
+    {
+        junk.extend(js.iter().map(|j| j.1.clone()));
+    }
+    if n.output.is_empty() {
+        return junk;
+    }
+    for j in &junk {
+        if !n.output.contains(j) {
+            n.output.push(j.clone());
+        }
+    }
+    let rank: Box<dyn Fn(&String) -> usize> = if n.children.is_empty() {
+        // (An inheritance member's row identity comes after its reltarget's columns.)
+        Box::new(|o: &String| {
+            if last.contains(o) {
+                usize::MAX
+            } else {
+                top.iter().position(|t| mentions(t, o)).unwrap_or(usize::MAX - 1)
+            }
+        })
+    } else {
+        let below: Vec<String> = n.children.iter().flat_map(|c| c.output.iter().cloned()).collect();
+        Box::new(move |o: &String| below.iter().position(|t| t == o).unwrap_or(usize::MAX))
+    };
+    n.output.sort_by_key(|o| rank(o));
+    junk
+}
+
+/// Whether the expression text `t` reads the column `o` (`ref.col`).
+fn mentions(t: &str, o: &str) -> bool {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '.' || c == '"';
+    t.match_indices(o).any(|(i, _)| {
+        !t[..i].chars().next_back().is_some_and(ident) && !t[i + o.len()..].chars().next().is_some_and(ident)
+    })
+}
+
+/// The row mark columns of the scans at or under `n`, in range table order.
+fn junk_in(n: &ExNode, junk_of: &HashMap<usize, Vec<((u8, super::plan::Rti), String)>>) -> Vec<String> {
+    fn go(
+        n: &ExNode,
+        junk_of: &HashMap<usize, Vec<((u8, super::plan::Rti), String)>>,
+        out: &mut Vec<((u8, super::plan::Rti), String)>,
+    ) {
+        for c in &n.children {
+            go(c, junk_of, out);
+        }
+        if n.is_scan()
+            && let Some(js) = n.key.and_then(|k| junk_of.get(&k))
+        {
+            out.extend(js.iter().cloned());
+        }
+    }
+    let mut out = Vec::new();
+    go(n, junk_of, &mut out);
+    out.sort_by_key(|j| j.0);
+    out.into_iter().map(|j| j.1).collect()
 }
 
 /// A MERGE's source target lists: a relation's tableoid before its ctid (the junk
@@ -2584,7 +2663,9 @@ impl Builder<'_, '_> {
             // (A ProjectSet under an aggregation returns the group input target: what the
             // aggregation reads, and its calls.)
             let srf_target = b.node.node_type == "ProjectSet" && self.agg_input == Some(addr(p));
-            let mut mask = (b.node.is_join() || b.node.node_type == "Index Only Scan" || dummy || member || sorted_join || srf_target)
+            // (A row-marked scan returns its ctid: no physical target list either.)
+            let marked = b.node.is_scan() && self.rowmarks.contains(&addr(p));
+            let mut mask = (b.node.is_join() || b.node.node_type == "Index Only Scan" || dummy || member || sorted_join || srf_target || marked)
                 .then(|| self.needed.get(&addr(p)).cloned())
                 .flatten();
             if srf_target
@@ -5063,6 +5144,35 @@ impl Builder<'_, '_> {
                     c.node.output = out;
                     c.node.children[0].output = below;
                     c.node.subplans.append(&mut self.pending);
+                } else if self.o.verbose
+                    && up.route.is_none()
+                    && !up.inh
+                    && self.ctx.catalog().children(t.oid).is_empty()
+                    && c.node.is_join()
+                    && let Some(k) = c.exported.get(t.columns.len())
+                {
+                    // A join computes them: the new values (in column order), the target
+                    // row's ctid, then the other relations' row marks.
+                    let mut sets: Vec<&(usize, Expr)> = up.sets.iter().collect();
+                    sets.sort_by_key(|x| x.0);
+                    let mut top: Vec<String> =
+                        sets.iter().map(|(_, e)| self.set_value(e, &c.exported)).collect();
+                    top.extend(self.rescans(&sets));
+                    // (A view's row identity, for its INSTEAD OF triggers: the whole row.)
+                    top.push(if up.rules.view {
+                        let cols: Vec<String> = c.exported[..t.columns.len()]
+                            .iter()
+                            .map(|n| self.pick(n, Cx::Output))
+                            .collect();
+                        format!("ROW({})", cols.join(", "))
+                    } else {
+                        self.pick(k, Cx::Output)
+                    });
+                    top.extend(junk_in(&c.node, &self.rowmark_junk));
+                    for ch in &mut c.node.children {
+                        junk_layout(ch, &top, &[], &self.rowmark_junk);
+                    }
+                    c.node.output = top;
                 }
                 // The subqueries the new values run show under the node computing them.
                 for (_, e) in &up.sets {
@@ -5125,6 +5235,20 @@ impl Builder<'_, '_> {
                     && let Some(k) = c.exported.get(t.columns.len())
                 {
                     c.node.output = vec![self.pick(k, Cx::Output)];
+                } else if self.o.verbose
+                    && !dp.inh
+                    && self.ctx.catalog().children(t.oid).is_empty()
+                    && c.node.is_join()
+                    && let Some(k) = c.exported.get(t.columns.len())
+                {
+                    // A join returns the target row's ctid, then the other relations' row
+                    // marks.
+                    let mut top = vec![self.pick(k, Cx::Output)];
+                    top.extend(junk_in(&c.node, &self.rowmark_junk));
+                    for ch in &mut c.node.children {
+                        junk_layout(ch, &top, &[], &self.rowmark_junk);
+                    }
+                    c.node.output = top;
                 }
                 // An inheritance tree none of whose members is read: no tableoid or ctid,
                 // RETURNING over the table's row.
@@ -5168,6 +5292,37 @@ impl Builder<'_, '_> {
                 let mut c = self.node(&mp.source);
                 if self.o.verbose && !mp.members.is_empty() {
                     tableoid_first(&mut c.node);
+                }
+                if self.o.verbose && c.node.is_join() {
+                    // The processed target list: the target row's identity (first for a
+                    // plain table, last for an inheritance tree's members), the source
+                    // columns the actions read, the other relations' row marks.
+                    let targets: Vec<String> = std::iter::once(mp.rules.table.oid)
+                        .chain(mp.members.iter().map(|m| m.rules.table.oid))
+                        .filter_map(|o| target_scan(&mp.source, o))
+                        .map(|s| format!("{}.", quote_ident(&self.refname(s))))
+                        .collect();
+                    let (mut ident, mut top) = (Vec::new(), Vec::new());
+                    for o in &c.node.output {
+                        if !targets.iter().any(|t| o.starts_with(t.as_str())) {
+                            top.push(o.clone());
+                        } else if o.ends_with(".ctid") || o.ends_with(".tableoid") {
+                            ident.push(o.clone());
+                        }
+                    }
+                    top.extend(junk_in(&c.node, &self.rowmark_junk));
+                    let last = if mp.members.is_empty() {
+                        ident.append(&mut top);
+                        top = ident;
+                        Vec::new()
+                    } else {
+                        top.extend(ident.iter().cloned());
+                        ident
+                    };
+                    for ch in &mut c.node.children {
+                        junk_layout(ch, &top, &last, &self.rowmark_junk);
+                    }
+                    c.node.output = top;
                 }
                 let t = &mp.rules.table;
                 let refname = target_scan(&mp.source, t.oid)
@@ -6215,6 +6370,13 @@ impl Builder<'_, '_> {
         }
         if self.rowmarks.contains(&addr(p)) {
             width += 6;
+            // (Its ctid; an inheritance parent's (relhassubclass) tableoid too, after every
+            // relation's ctid: expand_inherited_rtentry adds it.)
+            let mut junk = vec![((0, s.rti), format!("{}.ctid", quote_ident(&refname)))];
+            if cat.class_has_subclass.contains(&t.oid) {
+                junk.push(((1, s.rti), format!("{}.tableoid", quote_ident(&refname))));
+            }
+            self.rowmark_junk.insert(addr(p), junk);
         }
         let mut parts = Vec::new();
         if let Some(f) = &s.filter {
@@ -6694,8 +6856,16 @@ impl Builder<'_, '_> {
     }
 
     /// A Result node that runs `child` only when the variable-free quals hold.
-    fn gate(&mut self, child: ExNode, quals: &[Expr], names: &[Name]) -> ExNode {
+    fn gate(&mut self, mut child: ExNode, quals: &[Expr], names: &[Name]) -> ExNode {
         use crate::types::Value;
+        // (A scan under it returns its physical target list: the Result projects.)
+        if self.o.verbose
+            && child.output.is_empty()
+            && child.is_scan()
+            && child.node_type != "Index Only Scan"
+        {
+            child.output = names.iter().map(|n| self.pick(n, Cx::Output)).collect();
+        }
         if quals
             .iter()
             .any(|q| matches!(q, Expr::Const(Value::Bool(false) | Value::Null, _)))
@@ -9583,7 +9753,10 @@ impl Builder<'_, '_> {
             h.total_cost = r.node.total_cost;
             if self.o.verbose {
                 // (A Hash returns its input's values: a computed one by reference.)
-                let src = if r.exported.len() == r.internal.len() && r.node.is_scan() {
+                // (An inheritance tree's Append returns the parent's columns.)
+                let src = if r.exported.len() == r.internal.len()
+                    && (r.node.is_scan() || r.node.node_type == "Append" && r.node.children.iter().all(ExNode::is_scan))
+                {
                     &r.exported
                 } else {
                     &r.internal
@@ -9837,6 +10010,41 @@ fn unique_for(cat: &crate::catalog::Catalog, p: &Plan, keys: &[&Expr]) -> bool {
             unique_for(cat, input, &refs)
         }
         Plan::Filter { input, .. } | Plan::Barrier { input, .. } | Plan::Context { input, .. } => unique_for(cat, input, keys),
+        // A partitioned table's members: its own unique indexes (which hold the partition
+        // key, so they are unique across the partitions too), over its columns.
+        Plan::Append { inputs, inh: Some(_) } => {
+            let mut m: &Plan = match inputs.first() {
+                Some(m) => m,
+                None => return false,
+            };
+            while let Plan::Project { input, .. } | Plan::Filter { input, .. } = m {
+                m = input;
+            }
+            let Plan::Scan(ms) = m else { return false };
+            let Some(parent) = ms.table.inherits.first().and_then(|o| cat.table(*o)) else {
+                return false;
+            };
+            if parent.partkey.is_none() {
+                return false;
+            }
+            let cols: Vec<usize> = keys
+                .iter()
+                .filter_map(|k| match strip_widening(k) {
+                    Expr::Col(i, _) => Some(*i),
+                    _ => None,
+                })
+                .collect();
+            cat.table_indexes(parent)
+                .iter()
+                .chain(parent.pkey_index.and_then(|o| cat.index(o)))
+                .any(|ix| {
+                    (ix.unique || ix.primary)
+                        && ix.predicate.is_none()
+                        && ix.columns.iter().all(|c| {
+                            matches!(c.key, crate::catalog::IndexKey::Column(k) if cols.contains(&k))
+                        })
+                })
+        }
         Plan::Scan(s) => {
             let cols: Vec<usize> = keys
                 .iter()
@@ -11667,6 +11875,7 @@ pub fn setop_shape(left: &Arc<Plan>, right: &Arc<Plan>, intersect: bool, ctx: &E
         plain_distinct: None,
         shown: shown_subqueries(p, &needed_masks(p)),
             rowmarks: Default::default(),
+            rowmark_junk: Default::default(),
         };
         let n = b.level(p);
         b.num_groups(&n.cols, n.rows)
@@ -11739,6 +11948,7 @@ pub fn set_group_estimates(
         plain_distinct: None,
         shown: shown_subqueries(input, &needed_masks(input)),
         rowmarks: Default::default(),
+        rowmark_junk: Default::default(),
     };
     let n = b.level(input);
     let gcols: Vec<ColInfo> = groups
@@ -11820,6 +12030,7 @@ pub fn agg_redundant_keys(
         plain_distinct: None,
         shown: shown_subqueries(input, &needed_masks(input)),
         rowmarks: Default::default(),
+        rowmark_junk: Default::default(),
     };
     let n = b.level(input);
     b.redundant_keys(input, groups, sets, &n.cols)
@@ -11881,6 +12092,7 @@ pub fn sets_sorted(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
         plain_distinct: None,
         shown: shown_subqueries(plan, &needed_masks(plan)),
         rowmarks: Default::default(),
+        rowmark_junk: Default::default(),
     };
     let n = b.level(plan);
     fn find(n: &ExNode) -> Option<bool> {
@@ -11947,6 +12159,7 @@ pub fn distinct_order(plan: &Arc<Plan>, ctx: &ExecCtx) -> Option<Vec<usize>> {
         plain_distinct: None,
         shown: shown_subqueries(plan, &needed_masks(plan)),
         rowmarks: Default::default(),
+        rowmark_junk: Default::default(),
     };
     let n = b.level(plan);
     n.unique_keys
@@ -12005,6 +12218,7 @@ pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
         plain_distinct: None,
         shown: shown_subqueries(plan, &needed_masks(plan)),
         rowmarks: Default::default(),
+        rowmark_junk: Default::default(),
     };
     let n = b.level(plan);
     let width_of = super::binder::plan_width(plan);
@@ -12103,6 +12317,7 @@ pub fn explain(
         plain_distinct: None,
         shown: shown_subqueries(plan, &needed_masks(plan)),
         rowmarks: rowmark_scans(plan),
+        rowmark_junk: Default::default(),
     };
     b.top = addr(plan);
     let root = b.level(plan);
@@ -12400,11 +12615,34 @@ fn refer_to(o: &str) -> String {
                     || p.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$'))
                 && !p.chars().next().is_some_and(|c| c.is_ascii_digit())
         });
-    if column || (o.starts_with('(') && o.ends_with(')')) {
+    if column || (o.starts_with('(') && o.ends_with(')')) || quoted_constant(o) {
         o.to_string()
     } else {
         format!("({o})")
     }
+}
+
+/// `'text'::type`: a constant, which setrefs matches to no subplan output (it stays).
+fn quoted_constant(o: &str) -> bool {
+    let Some(body) = o.strip_prefix('\'') else {
+        return false;
+    };
+    let mut chars = body.char_indices().peekable();
+    let mut end = None;
+    while let Some((i, c)) = chars.next() {
+        if c == '\'' {
+            if chars.peek().is_some_and(|(_, n)| *n == '\'') {
+                chars.next();
+                continue;
+            }
+            end = Some(i + 1);
+            break;
+        }
+    }
+    let Some(end) = end else { return false };
+    body[end..].strip_prefix("::").is_some_and(|t| {
+        !t.is_empty() && t.chars().all(|c| c.is_alphanumeric() || " _.\"[](),".contains(c))
+    })
 }
 
 /// ExecSupportsBackwardScan over the explained plan.

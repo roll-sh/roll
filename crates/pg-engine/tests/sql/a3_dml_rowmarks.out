@@ -1,0 +1,238 @@
+> CREATE TABLE a3_rm_t (a int, b int, c int)
+-- CREATE TABLE
+
+> CREATE TABLE a3_rm_s (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO a3_rm_t SELECT g, g, g FROM generate_series(1, 5) g
+-- INSERT 0 5
+
+> INSERT INTO a3_rm_s SELECT g, g * 10 FROM generate_series(3, 7) g
+-- INSERT 0 5
+
+> EXPLAIN (VERBOSE, COSTS OFF) UPDATE a3_rm_t SET b = a3_rm_s.b FROM a3_rm_s WHERE a3_rm_t.a = a3_rm_s.a
+QUERY PLAN:text
+Update on public.a3_rm_t
+  ->  Merge Join
+        Output: a3_rm_s.b, a3_rm_t.ctid, a3_rm_s.ctid
+        Merge Cond: (a3_rm_t.a = a3_rm_s.a)
+        ->  Sort
+              Output: a3_rm_t.ctid, a3_rm_t.a
+              Sort Key: a3_rm_t.a
+              ->  Seq Scan on public.a3_rm_t
+                    Output: a3_rm_t.ctid, a3_rm_t.a
+        ->  Sort
+              Output: a3_rm_s.b, a3_rm_s.ctid, a3_rm_s.a
+              Sort Key: a3_rm_s.a
+              ->  Seq Scan on public.a3_rm_s
+                    Output: a3_rm_s.b, a3_rm_s.ctid, a3_rm_s.a
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) UPDATE a3_rm_t SET c = a3_rm_s.b + 1, b = 0 FROM a3_rm_s WHERE a3_rm_t.a = a3_rm_s.a
+QUERY PLAN:text
+Update on public.a3_rm_t
+  ->  Merge Join
+        Output: 0, (a3_rm_s.b + 1), a3_rm_t.ctid, a3_rm_s.ctid
+        Merge Cond: (a3_rm_t.a = a3_rm_s.a)
+        ->  Sort
+              Output: a3_rm_t.ctid, a3_rm_t.a
+              Sort Key: a3_rm_t.a
+              ->  Seq Scan on public.a3_rm_t
+                    Output: a3_rm_t.ctid, a3_rm_t.a
+        ->  Sort
+              Output: a3_rm_s.b, a3_rm_s.ctid, a3_rm_s.a
+              Sort Key: a3_rm_s.a
+              ->  Seq Scan on public.a3_rm_s
+                    Output: a3_rm_s.b, a3_rm_s.ctid, a3_rm_s.a
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) DELETE FROM a3_rm_t USING a3_rm_s WHERE a3_rm_t.a = a3_rm_s.a
+QUERY PLAN:text
+Delete on public.a3_rm_t
+  ->  Merge Join
+        Output: a3_rm_t.ctid, a3_rm_s.ctid
+        Merge Cond: (a3_rm_t.a = a3_rm_s.a)
+        ->  Sort
+              Output: a3_rm_t.ctid, a3_rm_t.a
+              Sort Key: a3_rm_t.a
+              ->  Seq Scan on public.a3_rm_t
+                    Output: a3_rm_t.ctid, a3_rm_t.a
+        ->  Sort
+              Output: a3_rm_s.ctid, a3_rm_s.a
+              Sort Key: a3_rm_s.a
+              ->  Seq Scan on public.a3_rm_s
+                    Output: a3_rm_s.ctid, a3_rm_s.a
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> MERGE INTO a3_rm_t t USING a3_rm_s s ON t.a = s.a WHEN MATCHED THEN UPDATE SET b = s.b
+QUERY PLAN:text
+Merge on public.a3_rm_t t
+  ->  Merge Join
+        Output: t.ctid, s.b, s.ctid
+        Merge Cond: (t.a = s.a)
+        ->  Sort
+              Output: t.ctid, t.a
+              Sort Key: t.a
+              ->  Seq Scan on public.a3_rm_t t
+                    Output: t.ctid, t.a
+        ->  Sort
+              Output: s.b, s.ctid, s.a
+              Sort Key: s.a
+              ->  Seq Scan on public.a3_rm_s s
+                    Output: s.b, s.ctid, s.a
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> MERGE INTO a3_rm_t t USING a3_rm_s s ON t.a = s.a WHEN NOT MATCHED THEN INSERT VALUES (s.a)
+QUERY PLAN:text
+Merge on public.a3_rm_t t
+  ->  Merge Right Join
+        Output: t.ctid, s.a, s.ctid
+        Merge Cond: (t.a = s.a)
+        ->  Sort
+              Output: t.ctid, t.a
+              Sort Key: t.a
+              ->  Seq Scan on public.a3_rm_t t
+                    Output: t.ctid, t.a
+        ->  Sort
+              Output: s.a, s.ctid
+              Sort Key: s.a
+              ->  Seq Scan on public.a3_rm_s s
+                    Output: s.a, s.ctid
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> MERGE INTO a3_rm_t t USING (SELECT * FROM a3_rm_s) s ON t.a = s.a WHEN MATCHED THEN DELETE
+QUERY PLAN:text
+Merge on public.a3_rm_t t
+  ->  Merge Join
+        Output: t.ctid, a3_rm_s.ctid
+        Merge Cond: (t.a = a3_rm_s.a)
+        ->  Sort
+              Output: t.ctid, t.a
+              Sort Key: t.a
+              ->  Seq Scan on public.a3_rm_t t
+                    Output: t.ctid, t.a
+        ->  Sort
+              Output: a3_rm_s.ctid, a3_rm_s.a
+              Sort Key: a3_rm_s.a
+              ->  Seq Scan on public.a3_rm_s
+                    Output: a3_rm_s.ctid, a3_rm_s.a
+-- EXPLAIN
+
+> UPDATE a3_rm_t SET b = a3_rm_s.b FROM a3_rm_s WHERE a3_rm_t.a = a3_rm_s.a
+-- UPDATE 3
+
+> DELETE FROM a3_rm_t USING a3_rm_s WHERE a3_rm_t.a = a3_rm_s.a AND a3_rm_s.b > 40
+-- DELETE 1
+
+> MERGE INTO a3_rm_t t USING a3_rm_s s ON t.a = s.a WHEN NOT MATCHED THEN INSERT VALUES (s.a)
+-- MERGE 3
+
+> SELECT * FROM a3_rm_t ORDER BY a
+a:int4 | b:int4 | c:int4
+1 | 1 | 1
+2 | 2 | 2
+3 | 30 | 3
+4 | 40 | 4
+5 | NULL | NULL
+6 | NULL | NULL
+7 | NULL | NULL
+-- SELECT 7
+
+> CREATE TABLE a3_rm_p (tid integer PRIMARY KEY) PARTITION BY LIST (tid)
+-- CREATE TABLE
+
+> CREATE TABLE a3_rm_pp PARTITION OF a3_rm_p DEFAULT
+-- CREATE TABLE
+
+> CREATE TABLE a3_rm_p2 (tid integer PRIMARY KEY) PARTITION BY LIST (tid)
+-- CREATE TABLE
+
+> CREATE TABLE a3_rm_p2a PARTITION OF a3_rm_p2 FOR VALUES IN (1)
+-- CREATE TABLE
+
+> CREATE TABLE a3_rm_p2b PARTITION OF a3_rm_p2 FOR VALUES IN (2)
+-- CREATE TABLE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> MERGE INTO a3_rm_p t USING a3_rm_s s ON t.tid = s.a WHEN NOT MATCHED THEN INSERT VALUES (s.a)
+QUERY PLAN:text
+Merge on public.a3_rm_p t
+  Merge on public.a3_rm_pp t_1
+  ->  Hash Left Join
+        Output: s.a, s.ctid, t_1.tableoid, t_1.ctid
+        Inner Unique: true
+        Hash Cond: (s.a = t_1.tid)
+        ->  Seq Scan on public.a3_rm_s s
+              Output: s.a, s.ctid
+        ->  Hash
+              Output: t_1.tid, t_1.tableoid, t_1.ctid
+              ->  Seq Scan on public.a3_rm_pp t_1
+                    Output: t_1.tid, t_1.tableoid, t_1.ctid
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> MERGE INTO a3_rm_p t USING a3_rm_s s ON t.tid = s.a WHEN MATCHED THEN DELETE
+QUERY PLAN:text
+Merge on public.a3_rm_p t
+  Merge on public.a3_rm_pp t_1
+  ->  Hash Join
+        Output: s.ctid, t_1.tableoid, t_1.ctid
+        Inner Unique: true
+        Hash Cond: (s.a = t_1.tid)
+        ->  Seq Scan on public.a3_rm_s s
+              Output: s.ctid, s.a
+        ->  Hash
+              Output: t_1.tid, t_1.tableoid, t_1.ctid
+              ->  Seq Scan on public.a3_rm_pp t_1
+                    Output: t_1.tid, t_1.tableoid, t_1.ctid
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM a3_rm_s s LEFT JOIN a3_rm_p t ON t.tid = s.a
+QUERY PLAN:text
+Hash Left Join
+  Output: s.a, s.b, t.tid
+  Inner Unique: true
+  Hash Cond: (s.a = t.tid)
+  ->  Seq Scan on public.a3_rm_s s
+        Output: s.a, s.b
+  ->  Hash
+        Output: t.tid
+        ->  Seq Scan on public.a3_rm_pp t
+              Output: t.tid
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM a3_rm_s s LEFT JOIN a3_rm_p2 t ON t.tid = s.a
+QUERY PLAN:text
+Hash Left Join
+  Output: s.a, s.b, t.tid
+  Inner Unique: true
+  Hash Cond: (s.a = t.tid)
+  ->  Seq Scan on public.a3_rm_s s
+        Output: s.a, s.b
+  ->  Hash
+        Output: t.tid
+        ->  Append
+              ->  Seq Scan on public.a3_rm_p2a t_1
+                    Output: t_1.tid
+              ->  Seq Scan on public.a3_rm_p2b t_2
+                    Output: t_2.tid
+-- EXPLAIN
+
+> MERGE INTO a3_rm_p t USING a3_rm_s s ON t.tid = s.a WHEN NOT MATCHED THEN INSERT VALUES (s.a)
+-- MERGE 5
+
+> SELECT * FROM a3_rm_p ORDER BY tid
+tid:int4
+3
+4
+5
+6
+7
+-- SELECT 5
+
+> DROP TABLE a3_rm_t, a3_rm_s, a3_rm_p, a3_rm_p2
+-- DROP TABLE
+

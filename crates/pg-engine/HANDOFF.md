@@ -17,10 +17,10 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and round 13 (STATUS.md):
 
-- **Regression suite: 50,796 of 51,150 statements match (99.31%).** 354 differ. The full
+- **Regression suite: 50,820 of 51,150 statements match (99.35%).** 330 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 341 are `EXPLAIN` plan text (96%). Query results already match.
-  - 12 are plan choices that show up in results (mostly which side a hash join builds on,
+  - 318 are `EXPLAIN` plan text (96%). Query results already match.
+  - 11 are plan choices that show up in results (mostly which side a hash join builds on,
     grouping-set output order).
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
     work), so the ceiling is about 99.998%.
@@ -211,19 +211,28 @@ them all with the "Fixed in round N" sections describing what was already tried.
    LATERAL item (partition_join 41/45/46), IN over a partitioned subquery as a semi join
    (partition_join 86/88/92: the subquery is planned before the WHERE's sublinks are pulled up),
    partition_prune's parallel plans (Gather / Parallel Append) and runtime pruning details.
-3. **subselect** (30 units):
+3. **subselect** (18 units; round 13 fixed the row comparisons with sub-selects and most of
+   PostgreSQL 18's IN / VALUES pull-up, see STATUS.md):
    - 189/191: a pulled-up subquery output read twice should become two SubPlans (subquery ids
-     are cached by the executor, so renumbering needs care).
+     are cached by the executor, so renumbering needs care). merge 348 is the same.
    - 186: EXISTS over an inheritance tree as a hashed SubPlan per member.
    - 218: IN with a set-returning select list as a semi join over a Subquery Scan.
    - 221: a filter pushed into the subquery shown as the Subquery Scan's filter.
-   - 31/33/161: row comparisons shown as `(SubPlan 1).col1`, constant records folded.
    - 288: a system catalog's parameterized index path inside a join.
    - 298: a lifted LATERAL column's position in the join output.
-   - 310: FOR UPDATE inside a FROM subquery needs a real LockRows node inside `Plan::Barrier`.
-4. **Row marks in VERBOSE target lists** (merge 348/458/462, returning 103/105/112): the ctid
-   and whole-row marks of non-target tables must flow through every node's output list in
-   PostgreSQL's order. Rule-rewritten RETURNING currently runs as a CTE.
+   - 310: FOR UPDATE inside a FROM subquery: a LockRows at the top of the subquery's level
+     (the engine locks rows at the scans, so LockRows shows over each locked scan).
+   - 322, 326/327, 329, 332, 350/353/354: the IN pull-up's remaining shapes (a correlated IN
+     inside an EXISTS's WHERE, the unique-ified side joined with one relation first, a
+     correlated aggregate IN as a LATERAL subquery, an equivalence-class clause written outer
+     side first, unique-ifying on a computed expression, IN over a VALUES list that reads the
+     outer row as a LATERAL semi join); 328 (an EC member relabeled to the class's collation);
+     342 (a strict operator over a NULL constant folding to NULL).
+4. **Row marks in VERBOSE target lists**: done for UPDATE / DELETE / MERGE over joins with a
+   plain (or, for MERGE, partitioned) target. Left: merge 462 (an empty partitioned target's
+   dummy Result), returning 103/105 (rule-rewritten statements, which run as a CTE of the
+   rule's actions), whole-row marks (`s.*`) of subquery / function sources, inherited
+   UPDATE / DELETE targets, and SELECT ... FOR UPDATE's LockRows placement (see 310).
 5. **collate.icu.utf8** (23), **incremental_sort** (15), **select_parallel** (14),
    **updatable_views** (13), **groupingsets** (12, including the sorted-vs-hashed choice and
    output order), **with** (10; 52/55/58/76/77 need a materialized CTE's sort order offered to a

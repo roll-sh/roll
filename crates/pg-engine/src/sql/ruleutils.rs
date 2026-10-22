@@ -479,6 +479,51 @@ impl Deparser<'_, '_> {
             } else {
                 format!("ARRAY({})", label.name)
             }),
+            // ROWCOMPARE: its test expression, the subquery's columns `(SubPlan n).colk`
+            // (parenthesized as a SubPlan's).
+            K::RowCompare => {
+                let op = sq.ops.first()?.name;
+                let col = |i: usize| format!("({}).col{}", label.name, i + 1);
+                if !label.init {
+                    self.buf.push('(');
+                }
+                if matches!(op, "=" | "<>") || sq.left.len() == 1 {
+                    let many = sq.left.len() > 1;
+                    if many {
+                        self.buf.push('(');
+                    }
+                    for (i, (l, o)) in sq.left.iter().zip(&sq.ops).enumerate() {
+                        if i > 0 {
+                            self.buf.push_str(if op == "=" { " AND " } else { " OR " });
+                        }
+                        self.buf.push('(');
+                        self.paren(l, true, Parent::BinOp(o.name, true))?;
+                        self.buf.push_str(&format!(" {} {})", o.name, col(i)));
+                    }
+                    if many {
+                        self.buf.push(')');
+                    }
+                } else {
+                    self.buf.push_str("(ROW(");
+                    for (i, l) in sq.left.iter().enumerate() {
+                        if i > 0 {
+                            self.buf.push_str(", ");
+                        }
+                        self.expr(l, true)?;
+                    }
+                    self.buf.push_str(&format!(") {op} ROW("));
+                    for i in 0..sq.left.len() {
+                        if i > 0 {
+                            self.buf.push_str(", ");
+                        }
+                        self.buf.push_str(&col(i));
+                    }
+                    self.buf.push_str("))");
+                }
+                if !label.init {
+                    self.buf.push(')');
+                }
+            }
             K::Exists if label.init => self.buf.push_str(&reference),
             K::Exists => self.buf.push_str(&format!("EXISTS({})", label.name)),
             K::Any | K::All => {
@@ -1309,6 +1354,10 @@ impl Deparser<'_, '_> {
                     self.buf.push_str("::");
                     self.buf.push_str(&self.type_name(ty));
                 }
+            }
+            // (The planner's eval_const_expressions makes a ROW() of constants one.)
+            Expr::Row(_, ty) if self.subplans.is_some() && const_row(e).is_some() => {
+                self.constant(&const_row(e)?, ty, 0);
             }
             Expr::Row(items, _) => match self.whole_row(e) {
                 Some(name) => {
@@ -2254,4 +2303,15 @@ pub(crate) fn json_table_text(
     o.level -= 4;
     o.kw(")");
     Some(o.buf)
+}
+
+/// A ROW() of constants (nested ones too) as the record value it makes.
+fn const_row(e: &Expr) -> Option<Value> {
+    match e {
+        Expr::Const(v, _) => Some(v.clone()),
+        Expr::Row(items, _) => Some(Value::Record(std::sync::Arc::new(
+            items.iter().map(const_row).collect::<Option<Vec<_>>>()?,
+        ))),
+        _ => None,
+    }
 }

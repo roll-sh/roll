@@ -1692,6 +1692,10 @@ impl Deparser<'_, '_> {
                 self.buf.push_str(&format!(" {} ANY ", op?));
                 true
             }
+            SubqueryKind::RowCompare => {
+                self.buf.push_str(&format!(" {} ", op?));
+                true
+            }
             SubqueryKind::All => {
                 self.buf.push_str(&format!(" {} ALL ", op?));
                 true

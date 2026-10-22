@@ -919,13 +919,32 @@ impl<'a> ExecCtx<'a> {
                 }
                 Ok(Value::Array(Arc::new(ArrayValue::from_vec(elem, items))))
             }
-            SubqueryKind::Any | SubqueryKind::All => {
+            SubqueryKind::Any | SubqueryKind::All | SubqueryKind::RowCompare => {
                 let all = s.kind == SubqueryKind::All;
+                // A row comparison's one row (NULL without one), compared as by ANY.
+                let one = if s.kind == SubqueryKind::RowCompare {
+                    let rows = self.subquery_rows(s, row, Some(2))?;
+                    if rows.len() > 1 {
+                        return Err(Error::new(
+                            code::CARDINALITY_VIOLATION,
+                            "more than one row returned by a subquery used as an expression",
+                        ));
+                    }
+                    if rows.is_empty() {
+                        return Ok(Value::Null);
+                    }
+                    Some(rows)
+                } else {
+                    None
+                };
                 let mut left = Vec::with_capacity(s.left.len());
                 for l in &s.left {
                     left.push(eval(l, row, self)?);
                 }
-                let rows = self.subquery_rows(s, row, None)?;
+                let rows = match one {
+                    Some(rows) => rows,
+                    None => self.subquery_rows(s, row, None)?,
+                };
                 if s.left.len() == 1 {
                     let items: Vec<Value> = rows.iter().map(|r| r[0].clone()).collect();
                     return array_op(&left[0], &items, &s.ops[0], &s.left[0].ty(), all, self);

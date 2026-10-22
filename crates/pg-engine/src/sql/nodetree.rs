@@ -4391,6 +4391,7 @@ impl Tree<'_, '_, '_> {
             SubqueryKind::Exists => (0, None),
             SubqueryKind::All => (1, Some(())),
             SubqueryKind::Any => (2, Some(())),
+            SubqueryKind::RowCompare => (3, Some(())),
             SubqueryKind::Scalar => (4, None),
             SubqueryKind::Array => (6, None),
         };

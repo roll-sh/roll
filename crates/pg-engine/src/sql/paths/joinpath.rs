@@ -2218,12 +2218,28 @@ impl Search<'_, '_, '_> {
         let leaf = &self.leaves[l];
         // (A pulled-up subquery's scan computing its PlaceHolderVars: through the
         // projection's columns.)
-        let (s, proj): (&ScanPlan, Option<&Vec<Expr>>) = match (&leaf.scan, &leaf.plan) {
-            (Some((s, _)), _) => (s, None),
+        let (t, proj): (&std::sync::Arc<crate::catalog::Table>, Option<&Vec<Expr>>) = match (&leaf.scan, &leaf.plan) {
+            (Some((s, _)), _) => (&s.table, None),
             (None, Plan::Project { input, exprs }) => match &**input {
-                Plan::Scan(s) => (&**s, Some(exprs)),
+                Plan::Scan(s) => (&s.table, Some(exprs)),
                 _ => return false,
             },
+            // A partitioned table's members: its own unique indexes, which hold the
+            // partition key (unique across the partitions), over its columns.
+            (None, Plan::Append { inputs, inh: Some(_) }) => {
+                let mut m: &Plan = match inputs.first() {
+                    Some(m) => m,
+                    None => return false,
+                };
+                while let Plan::Project { input, .. } | Plan::Filter { input, .. } = m {
+                    m = input;
+                }
+                let Plan::Scan(ms) = m else { return false };
+                match ms.table.inherits.first().and_then(|o| self.pl.cat.table(*o)) {
+                    Some(p) if p.partkey.is_some() => (p, None),
+                    _ => return false,
+                }
+            }
             _ => return false,
         };
         let mut cols = Vec::new();
@@ -2248,7 +2264,7 @@ impl Search<'_, '_, '_> {
                             },
                         };
                         if let Some(n) = &nondet
-                            && s.table.columns.get(col).and_then(|c| c.collation.as_ref()) != Some(n)
+                            && t.columns.get(col).and_then(|c| c.collation.as_ref()) != Some(n)
                         {
                             continue;
                         }
@@ -2258,13 +2274,13 @@ impl Search<'_, '_, '_> {
             }
         }
         let cat = &self.pl.cat;
-        let t = &s.table;
+        let partitioned = t.partkey.is_some();
         cat.table_indexes(t)
             .iter()
             .chain(t.pkey_index.and_then(|o| cat.index(o)))
             .any(|ix| {
                 (ix.unique || ix.primary)
-                    && ix.valid
+                    && (ix.valid || partitioned)
                     && ix.predicate.is_none()
                     && ix.columns.iter().all(|c| {
                         matches!(c.key, crate::catalog::IndexKey::Column(k) if cols.contains(&k))
