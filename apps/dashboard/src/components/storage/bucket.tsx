@@ -110,6 +110,19 @@ export function StorageBucket({ name: rawName }: { name: string }) {
             <span className="font-mono text-[12px] tabular-nums">
               {formatCount(bucket.objects)} objects · {formatBytes(bucket.bytes)}
             </span>
+            {(bucket.versions > 0 || bucket.version_bytes > 0) && (
+              <span
+                className="font-mono text-[12px] text-subtle tabular-nums"
+                title="Noncurrent versions and delete markers, billed as storage"
+              >
+                + {formatBytes(bucket.version_bytes)} in {formatCount(bucket.versions)} older version{bucket.versions === 1 ? "" : "s"}
+              </span>
+            )}
+            {bucket.trash_bytes > 0 && (
+              <span className="font-mono text-[12px] text-subtle tabular-nums" title="Recently deleted, billed as storage">
+                + {formatBytes(bucket.trash_bytes)} recoverable
+              </span>
+            )}
             <span className="text-subtle">·</span>
             <span className="font-mono text-[12px] text-subtle">{bucket.id}</span>
             {bucket.parent && (
@@ -216,7 +229,7 @@ function TrashTab({ bucket, onRestored }: { bucket: Bucket; onRestored: () => vo
             <h2 className="text-[15px] font-medium">Recently deleted</h2>
             <p className="text-[12px] text-subtle">
               {bucket.recover_days > 0
-                ? `Deleted and overwritten objects are kept for ${bucket.recover_days} day${bucket.recover_days === 1 ? "" : "s"} · ${formatBytes(bucket.trash_bytes)}`
+                ? `${bucket.versioning ? "Versions deleted for good" : "Deleted and overwritten objects"} are kept for ${bucket.recover_days} day${bucket.recover_days === 1 ? "" : "s"} · ${formatBytes(bucket.trash_bytes)}`
                 : "Recovery is off for this bucket (Settings)."}
             </p>
           </div>
@@ -281,7 +294,9 @@ function TrashTab({ bucket, onRestored }: { bucket: Bucket; onRestored: () => vo
         <LoadMore cursor={cursor} onMore={() => load(cursor)} loading={loading} />
       </section>
       <p className="text-[12px] text-subtle">
-        Restoring puts the object back under its key; whatever is there now moves to Recently deleted.
+        {bucket.versioning
+          ? "Restoring puts the version back in its key's history: current again unless a newer version or delete marker is there."
+          : "Restoring puts the object back under its key; whatever is there now moves to Recently deleted."}
       </p>
     </div>
   );
@@ -383,7 +398,11 @@ function ConnectTab({ bucket, info }: { bucket: Bucket; info: StorageInfo }) {
     <div className="space-y-4">
       <Stats
         items={[
-          { label: "Objects", value: formatCount(bucket.objects), hint: formatBytes(bucket.bytes) },
+          {
+            label: "Objects",
+            value: formatCount(bucket.objects),
+            hint: bucket.version_bytes ? `${formatBytes(bucket.bytes)} + ${formatBytes(bucket.version_bytes)} older versions` : formatBytes(bucket.bytes),
+          },
           { label: "Access", value: bucket.public ? "public read" : "private", hint: bucket.public ? "GET without credentials" : "access key required" },
           { label: "Recovery", value: bucket.recover_days ? `${bucket.recover_days}d` : "off", hint: `${formatBytes(bucket.trash_bytes)} recoverable` },
           { label: "Storage class", value: info.storage_class.toLowerCase().replace("_", "-"), hint: "one S3 object per object" },

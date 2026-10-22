@@ -1,9 +1,21 @@
 "use client";
 
-import { Plus, Trash2, X } from "lucide-react";
+import { Lock, Plus, Trash2, X } from "lucide-react";
 import { useState } from "react";
+import { formatCount } from "@/lib/redis-api";
 import { formatBytes } from "@/lib/roll-api";
-import { RECOVER_OPTIONS, storageApi, type Bucket, type CorsRule, type LifecycleRule } from "@/lib/storage-api";
+import {
+  bucketTagsError,
+  lifecycleExtras,
+  lifecycleHasAction,
+  normalizeLifecycleRule,
+  RECOVER_OPTIONS,
+  retentionLabel,
+  storageApi,
+  type Bucket,
+  type CorsRule,
+  type LifecycleRule,
+} from "@/lib/storage-api";
 import { iconBtn } from "../tasks/ui";
 import { btn, Confirm, input, Panel, primary } from "../ui";
 import { Field, Segmented, type Run } from "./shared";
@@ -51,8 +63,10 @@ export function SettingsTab({
   return (
     <div className="space-y-4">
       <AccessPanel bucket={bucket} busy={busy} run={run} />
+      <VersioningPanel bucket={bucket} busy={busy} run={run} />
       <CorsPanel bucket={bucket} busy={busy} run={run} />
       <LifecyclePanel bucket={bucket} busy={busy} run={run} />
+      <TagsPanel bucket={bucket} busy={busy} run={run} />
       <DeletePanel bucket={bucket} busy={busy} run={run} onDeleted={onDeleted} />
     </div>
   );
@@ -111,6 +125,92 @@ function AccessPanel({ bucket, busy, run }: { bucket: Bucket; busy: string | nul
             setRecover(bucket.recover_days);
           }}
         />
+      </form>
+    </Panel>
+  );
+}
+
+type VersioningChoice = "off" | "Enabled" | "Suspended";
+
+function VersioningPanel({ bucket, busy, run }: { bucket: Bucket; busy: string | null; run: Run }) {
+  const current: VersioningChoice = bucket.versioning ?? "off";
+  const [choice, setChoice] = useState<VersioningChoice>(current);
+  const dirty = choice !== current;
+  const locked = bucket.object_lock !== null;
+  const retention = retentionLabel(bucket.object_lock);
+  // Never versioned: off or on. Once versioned: on or suspended, never back to off.
+  const options: { label: string; value: VersioningChoice }[] =
+    bucket.versioning === null
+      ? [
+          { label: "off", value: "off" },
+          { label: "enabled", value: "Enabled" },
+        ]
+      : [
+          { label: "enabled", value: "Enabled" },
+          { label: "suspended", value: "Suspended" },
+        ];
+  const hint =
+    choice === "Enabled"
+      ? "overwrites and deletes keep the old version"
+      : choice === "Suspended"
+        ? "new writes replace the null version; old ones stay"
+        : "overwrites and deletes go to Recently deleted";
+  return (
+    <Panel title="Versioning">
+      <form
+        className="space-y-5 px-5 py-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (dirty && choice !== "off") run("versioning", () => storageApi.updateBucket(bucket.name, { versioning: choice }));
+        }}
+      >
+        <div className="grid gap-x-3 gap-y-4 sm:grid-cols-2">
+          <Field label="State" hint={hint}>
+            {locked ? (
+              <p className="py-1 font-mono text-[12px] text-muted">enabled</p>
+            ) : (
+              <Segmented value={choice} options={options} onChange={setChoice} />
+            )}
+          </Field>
+          <Field
+            label="Older versions"
+            hint={bucket.versioning === null ? "none: the bucket was never versioned" : "billed as storage, like S3"}
+          >
+            <p className="py-1 font-mono text-[12px] tabular-nums">
+              {formatCount(bucket.versions)} · {formatBytes(bucket.version_bytes)}
+            </p>
+          </Field>
+        </div>
+        <div className="flex items-start gap-2 rounded-lg border border-line bg-bg px-3 py-2.5 text-[12px]">
+          <Lock className="mt-0.5 size-3.5 shrink-0 text-subtle" strokeWidth={1.5} />
+          <p className="text-muted">
+            <span className="text-fg">Object Lock {locked ? "on" : "off"}</span>
+            {locked
+              ? ` · ${retention ? `new versions are retained ${retention}` : "no default retention"}. Versioning stays on, and locked versions can't be deleted. Retention and legal holds are set through the S3 API.`
+              : " · it can only be turned on when a bucket is created."}
+          </p>
+        </div>
+        {bucket.versioning === null && choice === "Enabled" && (
+          <p className="rise text-[12px] text-muted">
+            Once enabled, versioning can be suspended but not turned off: the bucket can&apos;t go back to unversioned.
+          </p>
+        )}
+        {!locked && (
+          <SaveBar
+            dirty={dirty}
+            busy={busy === "versioning"}
+            onReset={() => setChoice(current)}
+            label={
+              !dirty
+                ? "Save"
+                : choice === "Enabled"
+                  ? bucket.versioning === null
+                    ? "Enable versioning"
+                    : "Resume versioning"
+                  : "Suspend versioning"
+            }
+          />
+        )}
       </form>
     </Panel>
   );
@@ -247,10 +347,12 @@ const emptyLifecycle = (): LifecycleRule => ({
 
 function LifecyclePanel({ bucket, busy, run }: { bucket: Bucket; busy: string | null; run: Run }) {
   const [rules, setRules] = useState<LifecycleRule[]>(bucket.lifecycle);
-  const dirty = !same(rules, bucket.lifecycle);
+  // The server fills in the optional fields: compare with them filled in on both sides.
+  const dirty = !same(rules.map(normalizeLifecycleRule), bucket.lifecycle.map(normalizeLifecycleRule));
   const set = (i: number, patch: Partial<LifecycleRule>) => setRules((r) => r.map((x, j) => (j === i ? { ...x, ...patch } : x)));
   const days = (v: string) => (v === "" ? null : Math.max(1, Math.floor(Number(v))));
-  const valid = rules.every((r) => r.id.trim() && (r.expire_days != null || r.abort_multipart_days != null));
+  const valid = rules.every((r) => r.id.trim() && lifecycleHasAction(r));
+  const versioned = bucket.versioning !== null;
   return (
     <Panel title="Lifecycle" aside={<span className="text-[12px] text-subtle">runs daily</span>}>
       <form
@@ -262,10 +364,19 @@ function LifecyclePanel({ bucket, busy, run }: { bucket: Bucket; busy: string | 
       >
         <p className="text-[13px] text-muted">
           Expire objects by age under a prefix, and abort multipart uploads that were never completed.
-          {bucket.recover_days > 0 && ` Expired objects go to Recently deleted for ${bucket.recover_days} days first.`}
+          {versioned
+            ? " In a versioned bucket, expiring adds a delete marker; older versions expire by how long they've been noncurrent."
+            : bucket.recover_days > 0 && ` Expired objects go to Recently deleted for ${bucket.recover_days} days first.`}
         </p>
         {rules.map((r, i) => (
-          <div key={r.id + i} className="rise grid items-end gap-3 rounded-lg border border-line bg-bg p-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_8rem_8rem_auto_auto]">
+          <div
+            key={r.id + i}
+            className={`rise grid items-end gap-3 rounded-lg border border-line bg-bg p-4 ${
+              versioned
+                ? "sm:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_7rem_7rem_7rem_auto_auto]"
+                : "sm:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_8rem_8rem_auto_auto]"
+            }`}
+          >
             <Field label="Rule id">
               <input value={r.id} onChange={(e) => set(i, { id: e.target.value })} spellCheck={false} className={`${input} w-full font-mono text-[12px]`} />
             </Field>
@@ -298,6 +409,18 @@ function LifecyclePanel({ bucket, busy, run }: { bucket: Bucket; busy: string | 
                 className={`${input} w-full font-mono text-[12px]`}
               />
             </Field>
+            {versioned && (
+              <Field label="Older versions (days)">
+                <input
+                  type="number"
+                  min={1}
+                  value={r.noncurrent_days ?? ""}
+                  placeholder="keep"
+                  onChange={(e) => set(i, { noncurrent_days: days(e.target.value) })}
+                  className={`${input} w-full font-mono text-[12px]`}
+                />
+              </Field>
+            )}
             <label className="flex items-center gap-2 pb-2 text-[12px] text-muted">
               <input type="checkbox" checked={r.enabled} onChange={(e) => set(i, { enabled: e.target.checked })} className="accent-accent" />
               enabled
@@ -305,13 +428,76 @@ function LifecyclePanel({ bucket, busy, run }: { bucket: Bucket; busy: string | 
             <button type="button" onClick={() => setRules((x) => x.filter((_, j) => j !== i))} className={`${iconBtn} mb-1 hover:text-danger`} aria-label={`Remove ${r.id}`}>
               <X className="size-3.5" />
             </button>
+            {lifecycleExtras(r).length > 0 && (
+              <p className="col-span-full font-mono text-[11px] text-subtle" title="Set through the S3 API; kept as is">
+                also: {lifecycleExtras(r).join(" · ")}
+              </p>
+            )}
           </div>
         ))}
         <button type="button" onClick={() => setRules((r) => [...r, emptyLifecycle()])} className={btn}>
           <Plus className="size-3.5" /> Add rule
         </button>
-        {!valid && <p className="text-[12px] text-danger">Every rule needs an id and an expiry or an upload abort.</p>}
+        {!valid && <p className="text-[12px] text-danger">Every rule needs an id and something to do: an expiry or an upload abort.</p>}
         <SaveBar dirty={dirty} busy={busy === "lifecycle"} onReset={() => setRules(bucket.lifecycle)} />
+      </form>
+    </Panel>
+  );
+}
+
+function TagsPanel({ bucket, busy, run }: { bucket: Bucket; busy: string | null; run: Run }) {
+  const initial = () => Object.entries(bucket.tags ?? {});
+  const [tags, setTags] = useState<[string, string][]>(initial);
+  const err = bucketTagsError(tags);
+  const dirty = !same(Object.fromEntries(tags), bucket.tags ?? {}) || tags.length !== Object.keys(bucket.tags ?? {}).length;
+  const set = (i: number, at: 0 | 1, v: string) => setTags((t) => t.map((x, j) => (j === i ? ((at === 0 ? [v, x[1]] : [x[0], v]) as [string, string]) : x)));
+  return (
+    <Panel title="Tags" aside={<span className="text-[12px] text-subtle">bucket tags, for cost allocation and policies</span>}>
+      <form
+        className="space-y-4 px-5 py-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!err) run("tags", () => storageApi.updateBucket(bucket.name, { tags: Object.fromEntries(tags) }));
+        }}
+      >
+        {tags.length === 0 && <p className="text-[13px] text-muted">No tags.</p>}
+        {tags.length > 0 && (
+          <div className="space-y-2">
+            {tags.map(([k, v], i) => (
+              <div key={i} className="rise grid grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_auto] items-center gap-2">
+                <input
+                  value={k}
+                  onChange={(e) => set(i, 0, e.target.value)}
+                  placeholder="key"
+                  aria-label={`Tag ${i + 1} key`}
+                  spellCheck={false}
+                  className={`${input} w-full font-mono text-[12px]`}
+                />
+                <input
+                  value={v}
+                  onChange={(e) => set(i, 1, e.target.value)}
+                  placeholder="value"
+                  aria-label={`Tag ${i + 1} value`}
+                  spellCheck={false}
+                  className={`${input} w-full font-mono text-[12px]`}
+                />
+                <button
+                  type="button"
+                  onClick={() => setTags((t) => t.filter((_, j) => j !== i))}
+                  className={`${iconBtn} hover:text-danger`}
+                  aria-label={`Remove tag ${k || i + 1}`}
+                >
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <button type="button" onClick={() => setTags((t) => [...t, ["", ""]])} disabled={tags.length >= 50} className={btn}>
+          <Plus className="size-3.5" /> Add tag
+        </button>
+        {err && tags.length > 0 && <p className="text-[12px] text-danger">{err}</p>}
+        <SaveBar dirty={dirty} busy={busy === "tags"} onReset={() => setTags(initial())} />
       </form>
     </Panel>
   );
@@ -330,7 +516,9 @@ function DeletePanel({
 }) {
   const [deleting, setDeleting] = useState(false);
   const hasBranches = bucket.branches.length > 0;
-  const nonEmpty = bucket.objects > 0;
+  // Older versions and delete markers count too: S3 won't delete a bucket that still has any.
+  const nonEmpty = bucket.objects > 0 || bucket.versions > 0;
+  const versions = bucket.versions > 0 ? ` and ${bucket.versions.toLocaleString("en-US")} older version${bucket.versions === 1 ? "" : "s"}` : "";
   return (
     <Panel title="Delete bucket">
       <div className="space-y-3 px-5 py-4">
@@ -342,7 +530,7 @@ function DeletePanel({
         ) : (
           <p className="text-[13px] text-muted">
             {nonEmpty
-              ? `Deletes the bucket and its ${bucket.objects.toLocaleString("en-US")} object${bucket.objects === 1 ? "" : "s"} (${formatBytes(bucket.bytes)}). Unlike single deletes, objects aren't kept in Recently deleted.`
+              ? `Deletes the bucket and its ${bucket.objects.toLocaleString("en-US")} object${bucket.objects === 1 ? "" : "s"}${versions} (${formatBytes(bucket.bytes + bucket.version_bytes)}). Unlike single deletes, objects aren't kept in Recently deleted.`
               : "The bucket is empty."}
           </p>
         )}
