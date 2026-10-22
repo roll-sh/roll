@@ -235,9 +235,25 @@ async fn request_limits() {
     gz.write_all(&vec![b'0'; 1 << 20]).unwrap();
     let (s, _) = post(&format!("{url}/r.git/git-upload-pack"), gz.finish().unwrap(), true).await;
     assert_eq!(s, 413);
-    // Pushes are bounded by the pack limit.
-    let r = reqwest::Client::new().post(format!("{url}/r.git/git-receive-pack")).body(vec![b'0'; 4 << 20]).send().await.unwrap();
-    assert_eq!(r.status(), 413);
+    // Pushes are bounded by the pack limit. The server answers without reading the rest of the
+    // body and closes the connection, so the client sees either the 413 or the connection closed
+    // under it while it was still sending; either way nothing was accepted.
+    match reqwest::Client::new().post(format!("{url}/r.git/git-receive-pack")).body(vec![b'0'; 4 << 20]).send().await {
+        Ok(r) => assert_eq!(r.status(), 413),
+        Err(e) => {
+            let mut cause: Option<&dyn std::error::Error> = Some(&e);
+            let mut closed = false;
+            while let Some(c) = cause {
+                let text = c.to_string().to_lowercase();
+                closed |= ["reset", "broken pipe", "closed", "canceled"].iter().any(|w| text.contains(w));
+                cause = c.source();
+            }
+            assert!(closed, "{e:?}");
+        }
+    }
+    // And the server is still there.
+    let (s, _) = post(&format!("{url}/r.git/git-upload-pack"), (pkt("command=ls-refs\n") + "0000").into_bytes(), false).await;
+    assert_eq!(s, 200);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
