@@ -10,9 +10,23 @@ use serde_json::{Value, json};
 use std::process::{Child, Command};
 use std::time::Duration;
 
+/// A port nothing listens on, never handed out twice in this process (a released ephemeral
+/// port can come straight back from the next `bind(0)`).
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    loop {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut given = GIVEN.lock().unwrap();
+        if !given.contains(&port) {
+            given.push(port);
+            return port;
+        }
+    }
 }
+
+/// Each test starts its own rolld on picked ports; running them one at a time keeps one test's
+/// daemon from taking a port another test just picked.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct Ports {
     api: u16,
@@ -93,6 +107,7 @@ async fn rows(c: &Client, q: &str) -> Vec<Vec<Option<bytes::Bytes>>> {
 
 #[tokio::test]
 async fn nosql_only_serves_and_restarts() {
+    let _serial = SERIAL.lock().await;
     let home = tempfile::tempdir().unwrap();
     let p = ports();
     let mode = ["--nosql-single".to_string(), "dev".to_string()];
@@ -220,6 +235,7 @@ async fn proxy_v1(upstream: u16, client_ip: &'static str) -> std::net::SocketAdd
 /// the API's endpoints and credentials working verbatim, and both surviving a restart.
 #[tokio::test]
 async fn tls_sni_and_proxy_protocol() {
+    let _serial = SERIAL.lock().await;
     use nosql_proto::client::TlsConfig;
     use tokio_rustls::rustls;
     let home = tempfile::tempdir().unwrap();
@@ -332,6 +348,7 @@ async fn tls_sni_and_proxy_protocol() {
 /// graceful stop keeps nosql's acknowledged writes.
 #[tokio::test]
 async fn full_mode_with_postgres() {
+    let _serial = SERIAL.lock().await;
     let home = tempfile::tempdir().unwrap();
     let p = ports();
     let (proxy, redis, redis_http, kafka) = (free_port(), free_port(), free_port(), free_port());
