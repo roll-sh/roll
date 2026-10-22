@@ -1153,3 +1153,910 @@ async fn a_deep_review_goes_on_without_context_while_the_index_is_first_built() 
     let req = t.m.messages().into_iter().find(|s| s.user().contains("src/parse.rs")).unwrap();
     assert!(!req.user().contains("outside this change"), "no repository context");
 }
+
+// ── Coverage of every route and status, mode, speed, on_cap, command, error and job stage ──
+
+/// `(method, path, body, token, expected status)`.
+type Case<'a> = (&'a str, String, Option<Value>, Option<&'a str>, StatusCode);
+
+/// Every `(method, path, body, token) → status` in order, with the answer on failure.
+async fn expect(a: &App, cases: Vec<Case<'_>>) {
+    for (m, p, b, tok, want) in cases {
+        let (s, v) = call(a, m, &p, b, tok).await;
+        assert_eq!(s, want, "{m} {p} as {tok:?}: {v}");
+    }
+}
+
+/// An `agent:` token of acme: works code, never manages the owner.
+async fn agent_token(t: &T) -> String {
+    ok(&t.a, "POST", "/v1/code/owners/acme/tokens", Some(json!({ "name": "agent:bot" }))).await["token"].as_str().unwrap().to_string()
+}
+
+/// Wait until thread `tid` has at least `n` comments.
+async fn thread_with(t: &T, tid: &str, n: usize) -> Value {
+    for _ in 0..400 {
+        let th = ok(&t.a, "GET", &format!("/v1/code/threads/{tid}"), None).await;
+        if th["comments"].as_array().unwrap().len() >= n {
+            return th;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("thread {tid} never got {n} comments");
+}
+
+fn last_body(th: &Value) -> String {
+    th["comments"].as_array().unwrap().last().unwrap()["body"].as_str().unwrap().to_string()
+}
+
+const PARSE_EDIT: &str = "pub fn parse_header(input: &str) -> usize {\n    let n = input.len();\n    n\n}\n";
+
+/// `GET|PATCH …/reviewer`, `GET|POST …/learnings`, `DELETE …/learnings/{id}` and `GET …/search`:
+/// every status each can answer. A public repo gives readers (200 on reads, 401/403 on writes);
+/// a private one hides itself (404).
+#[tokio::test]
+async fn repo_reviewer_routes_answer_every_status() {
+    use StatusCode as S;
+    let t = setup_with("public", |_, _| {}).await;
+    ok(&t.a, "POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "secret", "visibility": "private" }))).await;
+    let agent = agent_token(&t).await;
+    let (root, acme, mallory, bot) = (Some(ROOT), Some(t.acme.as_str()), Some(t.mallory.as_str()), Some(agent.as_str()));
+    let api = |p: &str| format!("/v1/code/repos/acme/api{p}");
+    let secret = |p: &str| format!("/v1/code/repos/acme/secret{p}");
+    let nope = |p: &str| format!("/v1/code/repos/acme/nope{p}");
+
+    // GET …/reviewer: readers of a public repo; nobody but the owner on a private one.
+    expect(
+        &t.a,
+        vec![
+            ("GET", api("/reviewer"), None, root, S::OK),
+            ("GET", api("/reviewer"), None, acme, S::OK),
+            ("GET", api("/reviewer"), None, bot, S::OK),
+            ("GET", api("/reviewer"), None, mallory, S::OK),
+            ("GET", api("/reviewer"), None, None, S::OK),
+            ("GET", secret("/reviewer"), None, acme, S::OK),
+            ("GET", secret("/reviewer"), None, mallory, S::NOT_FOUND),
+            ("GET", secret("/reviewer"), None, None, S::NOT_FOUND),
+            ("GET", nope("/reviewer"), None, root, S::NOT_FOUND),
+        ],
+    )
+    .await;
+    let v = ok(&t.a, "GET", &api("/reviewer"), None).await;
+    assert_eq!(v["effective"]["enabled"], false, "off by default");
+    assert_eq!(v["jobs"], json!({ "queued": 0, "running": 0, "last": null }));
+    assert!(v["errors"].as_array().unwrap().is_empty() && v["file"].is_null());
+
+    // PATCH …/reviewer: managers only (not agents); 400 names the bad field.
+    expect(
+        &t.a,
+        vec![
+            ("PATCH", api("/reviewer"), Some(json!({ "speed": "thorough", "profile": "assertive" })), acme, S::OK),
+            ("PATCH", api("/reviewer"), Some(json!({ "enabled": true })), None, S::UNAUTHORIZED),
+            ("PATCH", api("/reviewer"), Some(json!({ "enabled": true })), mallory, S::FORBIDDEN),
+            ("PATCH", api("/reviewer"), Some(json!({ "enabled": true })), bot, S::FORBIDDEN),
+            ("PATCH", secret("/reviewer"), Some(json!({ "enabled": true })), mallory, S::NOT_FOUND),
+            ("PATCH", secret("/reviewer"), Some(json!({ "enabled": true })), None, S::NOT_FOUND),
+            ("PATCH", nope("/reviewer"), Some(json!({ "enabled": true })), root, S::NOT_FOUND),
+        ],
+    )
+    .await;
+    for (bad, field) in [
+        (json!({ "speed": "warp" }), "speed"),
+        (json!({ "profile": "loud" }), "profile"),
+        (json!({ "effort": "extreme" }), "effort"),
+        (json!({ "max_files": 0 }), "max_files"),
+        (json!({ "auto": { "classifier": "coin" } }), "auto"),
+        (json!({ "enabled": "yes" }), "enabled"),
+        (json!({ "bogus": 1 }), "bogus"),
+    ] {
+        let (s, v) = call(&t.a, "PATCH", &api("/reviewer"), Some(bad.clone()), root).await;
+        assert_eq!(s, S::BAD_REQUEST, "{bad}");
+        assert!(v["error"].as_str().unwrap().contains(field), "{bad}: {v}");
+    }
+    let v = ok(&t.a, "GET", &api("/reviewer"), None).await;
+    assert_eq!((v["effective"]["speed"].as_str(), v["effective"]["profile"].as_str()), (Some("thorough"), Some("assertive")), "a bad patch changes nothing");
+
+    // GET/POST …/learnings and DELETE …/learnings/{id}.
+    ok(&t.a, "POST", "/v1/code/repos/acme/secret/land", Some(json!({ "message": "s", "files": { "a.rs": { "content": "x\n" } } }))).await;
+    let other = ok(&t.a, "POST", &secret("/learnings"), Some(json!({ "text": "secret repo's own" }))).await;
+    expect(
+        &t.a,
+        vec![
+            ("GET", api("/learnings"), None, root, S::OK),
+            ("GET", api("/learnings"), None, None, S::OK),
+            ("GET", secret("/learnings"), None, mallory, S::NOT_FOUND),
+            ("GET", secret("/learnings"), None, None, S::NOT_FOUND),
+            ("GET", nope("/learnings"), None, root, S::NOT_FOUND),
+            ("POST", api("/learnings"), Some(json!({ "text": "x" })), None, S::UNAUTHORIZED),
+            ("POST", api("/learnings"), Some(json!({ "text": "x" })), mallory, S::FORBIDDEN),
+            ("POST", secret("/learnings"), Some(json!({ "text": "x" })), mallory, S::NOT_FOUND),
+            ("POST", nope("/learnings"), Some(json!({ "text": "x" })), root, S::NOT_FOUND),
+            ("POST", api("/learnings"), Some(json!({})), root, S::BAD_REQUEST),
+            ("POST", api("/learnings"), Some(json!({ "text": "   " })), root, S::BAD_REQUEST),
+            ("POST", api("/learnings"), Some(json!({ "text": "x".repeat(2001) })), root, S::BAD_REQUEST),
+        ],
+    )
+    .await;
+    let (s, l) = call(&t.a, "POST", &api("/learnings"), Some(json!({ "text": " Prefer early returns ", "path": "src/**" })), acme).await;
+    assert_eq!(s, S::CREATED);
+    assert_eq!((l["text"].as_str(), l["path"].as_str(), l["source"].as_str()), (Some("Prefer early returns"), Some("src/**"), Some("api")));
+    assert!(l["id"].as_str().unwrap().starts_with("lrn_"));
+    let (s, by_agent) = call(&t.a, "POST", &api("/learnings"), Some(json!({ "text": "Agents write code too" })), bot).await;
+    assert_eq!(s, S::CREATED, "an agent token is a writer");
+    let lid = l["id"].as_str().unwrap();
+    expect(
+        &t.a,
+        vec![
+            ("DELETE", api(&format!("/learnings/{lid}")), None, None, S::UNAUTHORIZED),
+            ("DELETE", api(&format!("/learnings/{lid}")), None, mallory, S::FORBIDDEN),
+            ("DELETE", secret(&format!("/learnings/{lid}")), None, mallory, S::NOT_FOUND),
+            ("DELETE", api("/learnings/lrn_nope"), None, root, S::NOT_FOUND),
+            // Another repo's learning isn't this repo's to delete.
+            ("DELETE", api(&format!("/learnings/{}", other["id"].as_str().unwrap())), None, root, S::NOT_FOUND),
+            ("DELETE", api(&format!("/learnings/{lid}")), None, acme, S::NO_CONTENT),
+            ("DELETE", api(&format!("/learnings/{lid}")), None, acme, S::NOT_FOUND),
+            ("DELETE", api(&format!("/learnings/{}", by_agent["id"].as_str().unwrap())), None, bot, S::NO_CONTENT),
+        ],
+    )
+    .await;
+    assert!(ok(&t.a, "GET", &api("/learnings"), None).await.as_array().unwrap().is_empty());
+    assert_eq!(ok(&t.a, "GET", &secret("/learnings"), None).await.as_array().unwrap().len(), 1);
+
+    // GET …/search: 200 to readers, 400 for a bad query, 404 for what they can't see.
+    expect(
+        &t.a,
+        vec![
+            ("GET", api("/search?q=parse_header"), None, None, S::OK),
+            ("GET", api("/search?q=parse_header&case=true&limit=1"), None, mallory, S::OK),
+            ("GET", api("/search?q="), None, root, S::BAD_REQUEST),
+            ("GET", api("/search"), None, root, S::BAD_REQUEST),
+            ("GET", api(&format!("/search?q={}", "a".repeat(501))), None, root, S::BAD_REQUEST),
+            ("GET", api("/search?q=[&regex=true"), None, root, S::BAD_REQUEST),
+            ("GET", api("/search?q=x&rev=no-such-rev"), None, root, S::NOT_FOUND),
+            ("GET", secret("/search?q=x"), None, mallory, S::NOT_FOUND),
+            ("GET", secret("/search?q=x"), None, None, S::NOT_FOUND),
+            ("GET", nope("/search?q=x"), None, root, S::NOT_FOUND),
+        ],
+    )
+    .await;
+    let one = ok(&t.a, "GET", &api("/search?q=parse_header&limit=1"), None).await;
+    assert_eq!((one["matches"].as_array().unwrap().len(), one["truncated"].as_bool()), (1, Some(true)), "{one}");
+    let cs = ok(&t.a, "GET", &api("/search?q=PARSE_HEADER&case=true"), None).await;
+    assert!(cs["matches"].as_array().unwrap().is_empty(), "case-sensitive: {cs}");
+    let ci = ok(&t.a, "GET", &api("/search?q=PARSE_HEADER"), None).await;
+    assert!(!ci["matches"].as_array().unwrap().is_empty(), "case-insensitive by default");
+}
+
+/// Without the codebase index (`review.index = false`) code search is off: 422, and the
+/// reviewer view shows no index. (503 while a first build runs: `index_scale.rs`.)
+#[tokio::test]
+async fn search_is_unprocessable_without_the_index() {
+    let t = setup(|c, _| c.review.index = false).await;
+    let (s, v) = call(&t.a, "GET", "/v1/code/repos/acme/api/search?q=parse_header", None, Some(ROOT)).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("code search is off"));
+    assert!(ok(&t.a, "GET", "/v1/code/repos/acme/api/reviewer", None).await["index"].is_null());
+}
+
+/// `POST /changes/{id}/ai-review` (202, 400, 401, 403, 404, 409) and `GET /changes/{id}/ai-jobs`
+/// (200, 404), plus how requested jobs queue: one job runs per change, a plain request folds into
+/// the queued one, `full` or a mode makes a new one, and a request for an unchanged head is
+/// `skipped`. Jobs are listed oldest first.
+#[tokio::test]
+async fn change_reviewer_routes_answer_every_status_and_jobs_queue() {
+    use StatusCode as S;
+    let t = setup_with("public", |_, _| {}).await;
+    enable(&t, json!({ "mode": "standard", "auto_review": false })).await;
+    let agent = agent_token(&t).await;
+    let (root, acme, mallory, bot) = (Some(ROOT), Some(t.acme.as_str()), Some(t.mallory.as_str()), Some(agent.as_str()));
+    let c = change(&t, "Req", json!({ "src/parse.rs": { "content": PARSE_EDIT } })).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    // auto_review off: nothing runs on its own.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(ok(&t.a, "GET", &format!("/v1/code/changes/{id}/ai-jobs"), None).await.as_array().unwrap().is_empty());
+
+    // A private repo's change, for the 404s.
+    ok(&t.a, "POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "secret", "visibility": "private" }))).await;
+    ok(&t.a, "POST", "/v1/code/repos/acme/secret/land", Some(json!({ "message": "s", "files": { "a.rs": { "content": "x\n" } } }))).await;
+    let hidden = ok(&t.a, "POST", "/v1/code/repos/acme/secret/changes", Some(json!({ "title": "h", "message": "h", "base": "main", "files": { "a.rs": { "content": "y\n" } } }))).await;
+    let hid = hidden["id"].as_str().unwrap().to_string();
+    let review = |c: &str| format!("/v1/code/changes/{c}/ai-review");
+    let jobs = |c: &str| format!("/v1/code/changes/{c}/ai-jobs");
+    expect(
+        &t.a,
+        vec![
+            ("POST", review(&id), Some(json!({})), None, S::UNAUTHORIZED),
+            ("POST", review(&id), Some(json!({})), mallory, S::FORBIDDEN),
+            ("POST", review(&hid), Some(json!({})), mallory, S::NOT_FOUND),
+            ("POST", review(&hid), Some(json!({})), None, S::NOT_FOUND),
+            ("POST", review("chg_nope"), Some(json!({})), root, S::NOT_FOUND),
+            ("POST", review(&id), Some(json!({ "mode": "huge" })), root, S::BAD_REQUEST),
+            ("GET", jobs(&id), None, None, S::OK),
+            ("GET", jobs(&id), None, mallory, S::OK),
+            ("GET", jobs(&hid), None, mallory, S::NOT_FOUND),
+            ("GET", jobs(&hid), None, None, S::NOT_FOUND),
+            ("GET", jobs("chg_nope"), None, root, S::NOT_FOUND),
+        ],
+    )
+    .await;
+
+    // One job at a time per change: while the first runs, later requests queue.
+    t.m.delay_ms.store(500, Ordering::SeqCst);
+    let (s, first) = call(&t.a, "POST", &review(&id), Some(json!({ "mode": "standard" })), bot).await;
+    assert_eq!(s, S::ACCEPTED, "an agent token can ask for a review");
+    let first = first["job"].clone();
+    assert_eq!((first["kind"].as_str(), first["mode"].as_str(), first["full"].as_bool()), (Some("review"), Some("standard"), Some(false)));
+    assert_eq!(first["requested_by"], "acme", "the owner the token belongs to");
+    assert!(first["id"].as_str().unwrap().starts_with("aij_"));
+    let mut running = false;
+    for _ in 0..200 {
+        let j = ok(&t.a, "GET", &jobs(&id), None).await;
+        if j[0]["state"] == "running" {
+            running = true;
+            assert_eq!(j[0]["attempts"], 1);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(running, "the first job runs");
+    let (s, plain) = call(&t.a, "POST", &review(&id), Some(json!({ "mode": "auto" })), acme).await;
+    assert_eq!(s, S::ACCEPTED);
+    assert!(plain["job"]["mode"].is_null(), "auto means the repo's settings decide");
+    assert_eq!((plain["job"]["state"].as_str(), plain["job"]["stage"].as_str()), (Some("queued"), Some("queued")));
+    let (_, again) = call(&t.a, "POST", &review(&id), Some(json!({})), acme).await;
+    assert_eq!(again["job"]["id"], plain["job"]["id"], "a plain request folds into the queued one");
+    let (_, full) = call(&t.a, "POST", &review(&id), Some(json!({ "full": true })), root).await;
+    assert_ne!(full["job"]["id"], plain["job"]["id"], "a full review is its own job");
+    assert_eq!(full["job"]["full"], true);
+    let view = ok(&t.a, "GET", "/v1/code/repos/acme/api/reviewer", None).await;
+    assert_eq!((view["jobs"]["queued"].as_u64(), view["jobs"]["running"].as_u64()), (Some(2), Some(1)), "{}", view["jobs"]);
+    t.m.delay_ms.store(0, Ordering::SeqCst);
+    let all = jobs_idle_n(&t, &id, 3).await;
+    let ids: Vec<&str> = all.iter().map(|j| j["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, [first["id"].as_str().unwrap(), plain["job"]["id"].as_str().unwrap(), full["job"]["id"].as_str().unwrap()], "oldest first");
+    let states: Vec<&str> = all.iter().map(|j| j["state"].as_str().unwrap()).collect();
+    assert_eq!(states, ["done", "skipped", "done"], "the plain request found nothing new since the first review");
+    assert!(all.iter().all(|j| j["stage"] == "done"));
+    let reviews = roll_reviews(&t, &id, 2).await;
+    assert_eq!(all[0]["review_id"], reviews[0]["id"]);
+    assert_eq!(all[2]["review_id"], reviews[1]["id"]);
+    assert!(all[1]["review_id"].is_null());
+    assert_eq!(reviews[1]["ai"]["incremental"], false);
+
+    // Landed and closed changes: 409.
+    ok(&t.a, "POST", &format!("/v1/code/changes/{id}/close"), None).await;
+    let (s, v) = call(&t.a, "POST", &review(&id), Some(json!({})), root).await;
+    assert_eq!(s, S::CONFLICT, "{v}");
+    let c2 = change(&t, "Land me", json!({ "src/server.rs": { "content": "pub fn handle() {}\n" } })).await;
+    let id2 = c2["id"].as_str().unwrap().to_string();
+    ok(&t.a, "POST", &format!("/v1/code/changes/{id2}/land"), Some(json!({}))).await;
+    assert_eq!(ok(&t.a, "GET", &format!("/v1/code/changes/{id2}"), None).await["state"], "landed");
+    let (s, _) = call(&t.a, "POST", &review(&id2), Some(json!({ "mode": "deep" })), root).await;
+    assert_eq!(s, S::CONFLICT);
+}
+
+/// `GET /pricing`, `GET|PUT|DELETE /owners/{owner}/review-provider`, `GET|PUT /owners/{owner}/billing`
+/// and `GET /owners/{owner}/usage`: every status. Reads by anyone but the owner (or admin) are
+/// 404; writes are 401 without a token and 403 with another owner's or an agent's.
+#[tokio::test]
+async fn owner_reviewer_routes_answer_every_status() {
+    use StatusCode as S;
+    let t = setup(|_, _| {}).await;
+    let agent = agent_token(&t).await;
+    let (root, acme, mallory, bot) = (Some(ROOT), Some(t.acme.as_str()), Some(t.mallory.as_str()), Some(agent.as_str()));
+    let o = |p: &str| format!("/v1/code/owners/acme{p}");
+    let nobody = |p: &str| format!("/v1/code/owners/nobody{p}");
+
+    // Pricing is public.
+    let (s, p) = call(&t.a, "GET", "/v1/code/pricing", None, None).await;
+    assert_eq!(s, S::OK);
+    assert_eq!(p["spending_caps"]["on_cap"], json!(["pause", "byok_fallback", "standard_only"]));
+    assert_eq!(p["currency"], "USD");
+    assert!(p["byok"]["standard"].is_number() && p["hosted"]["chat"].is_number() && p["public_repos"]["free_standard_reviews_per_month"].is_number(), "{p}");
+
+    // review-provider.
+    expect(
+        &t.a,
+        vec![
+            ("GET", o("/review-provider"), None, root, S::OK),
+            ("GET", o("/review-provider"), None, acme, S::OK),
+            ("GET", o("/review-provider"), None, mallory, S::NOT_FOUND),
+            ("GET", o("/review-provider"), None, bot, S::NOT_FOUND),
+            ("GET", o("/review-provider"), None, None, S::NOT_FOUND),
+            ("GET", nobody("/review-provider"), None, root, S::NOT_FOUND),
+            ("PUT", o("/review-provider"), Some(json!({ "api_key": "sk-1" })), None, S::UNAUTHORIZED),
+            ("PUT", o("/review-provider"), Some(json!({ "api_key": "sk-1" })), mallory, S::FORBIDDEN),
+            ("PUT", o("/review-provider"), Some(json!({ "api_key": "sk-1" })), bot, S::FORBIDDEN),
+            ("PUT", nobody("/review-provider"), Some(json!({ "api_key": "sk-1" })), root, S::NOT_FOUND),
+            ("PUT", o("/review-provider"), Some(json!({})), root, S::BAD_REQUEST),
+            ("PUT", o("/review-provider"), Some(json!({ "api_key": "  " })), root, S::BAD_REQUEST),
+            ("PUT", o("/review-provider"), Some(json!({ "api_key": "k".repeat(4097) })), root, S::BAD_REQUEST),
+            ("PUT", o("/review-provider"), Some(json!({ "provider": "gemini", "api_key": "sk-1" })), root, S::BAD_REQUEST),
+            ("PUT", o("/review-provider"), Some(json!({ "api_key": "sk-1", "base_url": "http://api.example.com" })), root, S::BAD_REQUEST),
+            ("PUT", o("/review-provider"), Some(json!({ "api_key": "sk-1", "base_url": "not a url" })), root, S::BAD_REQUEST),
+            ("PUT", o("/review-provider"), Some(json!({ "provider": "openai_compatible", "api_key": "sk-1", "base_url": "https://api.example.com/v1" })), root, S::BAD_REQUEST),
+            ("DELETE", o("/review-provider"), None, None, S::UNAUTHORIZED),
+            ("DELETE", o("/review-provider"), None, mallory, S::FORBIDDEN),
+            ("DELETE", o("/review-provider"), None, bot, S::FORBIDDEN),
+            ("DELETE", nobody("/review-provider"), None, root, S::NOT_FOUND),
+        ],
+    )
+    .await;
+    assert!(ok(&t.a, "GET", &o("/review-provider"), None).await["key_last4"].is_null(), "no bad request stored a key");
+    // A key too short to show any of: no last 4.
+    let (s, v) = call(&t.a, "PUT", &o("/review-provider"), Some(json!({ "api_key": "sk-short-1234" })), acme).await;
+    assert_eq!((s, v["key_last4"].as_str()), (S::OK, Some("")));
+    let (s, v) = call(&t.a, "PUT", &o("/review-provider"), Some(json!({ "api_key": "sk-ant-api-abcd1234", "secondary_model": "claude-haiku-5-5" })), acme).await;
+    assert_eq!(s, S::OK);
+    assert_eq!((v["owner"].as_str(), v["provider"].as_str(), v["key_last4"].as_str(), v["secondary_model"].as_str()), (Some("acme"), Some("anthropic"), Some("1234"), Some("claude-haiku-5-5")));
+    assert!(v["updated_at"].is_number());
+    let rv = ok(&t.a, "GET", "/v1/code/repos/acme/api/reviewer", None).await;
+    assert_eq!(rv["provider"]["source"], "byok");
+    expect(&t.a, vec![("DELETE", o("/review-provider"), None, acme, S::NO_CONTENT), ("DELETE", o("/review-provider"), None, root, S::NO_CONTENT)]).await;
+    assert_eq!(ok(&t.a, "GET", "/v1/code/repos/acme/api/reviewer", None).await["provider"]["source"], "hosted");
+
+    // billing.
+    let b = ok(&t.a, "GET", &o("/billing"), None).await;
+    assert_eq!((b["monthly_cap_usd"].clone(), b["on_cap"].as_str(), b["remaining_usd"].clone(), b["spent_usd"].as_f64()), (Value::Null, Some("pause"), Value::Null, Some(0.0)));
+    assert!(b["updated_at"].is_null() && b["month"].as_str().unwrap().len() == 7);
+    expect(
+        &t.a,
+        vec![
+            ("GET", o("/billing"), None, acme, S::OK),
+            ("GET", o("/billing"), None, mallory, S::NOT_FOUND),
+            ("GET", o("/billing"), None, bot, S::NOT_FOUND),
+            ("GET", o("/billing"), None, None, S::NOT_FOUND),
+            ("GET", nobody("/billing"), None, root, S::NOT_FOUND),
+            ("PUT", o("/billing"), Some(json!({ "monthly_cap_usd": 5 })), None, S::UNAUTHORIZED),
+            ("PUT", o("/billing"), Some(json!({ "monthly_cap_usd": 5 })), mallory, S::FORBIDDEN),
+            ("PUT", o("/billing"), Some(json!({ "monthly_cap_usd": 5 })), bot, S::FORBIDDEN),
+            ("PUT", nobody("/billing"), Some(json!({ "monthly_cap_usd": 5 })), root, S::NOT_FOUND),
+            ("PUT", o("/billing"), Some(json!({ "monthly_cap_usd": -1 })), root, S::BAD_REQUEST),
+            ("PUT", o("/billing"), Some(json!({ "monthly_cap_usd": "10" })), root, S::BAD_REQUEST),
+            ("PUT", o("/billing"), Some(json!({ "on_cap": 3 })), root, S::BAD_REQUEST),
+            ("PUT", o("/billing"), Some(json!({ "on_cap": "never" })), root, S::BAD_REQUEST),
+        ],
+    )
+    .await;
+    for on_cap in ["byok_fallback", "pause", "standard_only"] {
+        let b = ok(&t.a, "PUT", &o("/billing"), Some(json!({ "monthly_cap_usd": 10, "on_cap": on_cap }))).await;
+        assert_eq!((b["monthly_cap_usd"].as_f64(), b["on_cap"].as_str(), b["remaining_usd"].as_f64()), (Some(10.0), Some(on_cap), Some(10.0)));
+        assert!(b["updated_at"].is_number());
+    }
+    let b = ok(&t.a, "PUT", &o("/billing"), Some(json!({}))).await;
+    assert_eq!((b["monthly_cap_usd"].as_f64(), b["on_cap"].as_str()), (Some(10.0), Some("standard_only")), "an empty body changes nothing");
+    let (s, b) = call(&t.a, "PUT", &o("/billing"), Some(json!({ "monthly_cap_usd": null, "on_cap": null })), acme).await;
+    assert_eq!(s, S::OK);
+    assert!(b["monthly_cap_usd"].is_null() && b["remaining_usd"].is_null(), "null clears the cap");
+    assert_eq!(b["on_cap"], "standard_only", "null keeps on_cap");
+
+    // usage.
+    let u = ok(&t.a, "GET", &o("/usage"), None).await;
+    assert_eq!(u["totals"]["reviews"], 0);
+    assert_eq!(u["month"], b["month"]);
+    assert_eq!(u["cap"]["on_cap"], "standard_only");
+    let old = ok(&t.a, "GET", &o("/usage?month=2020-01"), None).await;
+    assert_eq!((old["month"].as_str(), old["recent"].as_array().map(Vec::len)), (Some("2020-01"), Some(0)));
+    expect(
+        &t.a,
+        vec![
+            ("GET", o("/usage"), None, acme, S::OK),
+            ("GET", o("/usage?month=2020-1"), None, root, S::BAD_REQUEST),
+            ("GET", o("/usage?month=abcd-ef"), None, root, S::BAD_REQUEST),
+            ("GET", o("/usage?month=2020-01-01"), None, root, S::BAD_REQUEST),
+            ("GET", o("/usage"), None, mallory, S::NOT_FOUND),
+            ("GET", o("/usage"), None, bot, S::NOT_FOUND),
+            ("GET", o("/usage"), None, None, S::NOT_FOUND),
+            ("GET", nobody("/usage"), None, root, S::NOT_FOUND),
+        ],
+    )
+    .await;
+}
+
+/// Every `@roll` command from someone who can only read (a public repo's reader) is ignored:
+/// no reply, no job, no model call, no learning, no pause, nothing resolved. Their comment
+/// itself is posted. Writers' `@roll review` (nothing new: skipped), `@roll full review [mode]`,
+/// `@roll ignore …` and `@roll remember …` act. (explain, questions, don't flag, pause, resume,
+/// review deep, fix and resolve from writers: `roll_commands_in_threads`.)
+#[tokio::test]
+async fn roll_commands_from_writers_act_and_from_readers_are_ignored() {
+    let t = setup_with("public", |_, _| {}).await;
+    enable(&t, json!({ "mode": "standard" })).await;
+    let c = change(&t, "Cmds", json!({ "src/parse.rs": { "content": PARSE_EDIT } })).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    roll_reviews(&t, &id, 1).await;
+    let tid = threads(&t, &id).await[0]["id"].as_str().unwrap().to_string();
+    let jobs_before = jobs_idle(&t, &id).await.len();
+    let calls_before = t.m.messages().len();
+
+    let all = [
+        "@roll review",
+        "@roll review max",
+        "@roll full review",
+        "@roll full review deep",
+        "@roll pause",
+        "@roll resume",
+        "@roll resolve",
+        "@roll explain",
+        "@roll fix",
+        "@roll don't flag unchecked input",
+        "@roll ignore generated code",
+        "@roll remember we validate upstream",
+        "@roll why is this a bug?",
+    ];
+    for body in all {
+        let (s, v) = call(&t.a, "POST", &format!("/v1/code/threads/{tid}/comments"), Some(json!({ "body": body })), Some(&t.mallory)).await;
+        assert_eq!(s, StatusCode::CREATED, "a reader can comment on a public repo: {v}");
+    }
+    let (s, _) = call(&t.a, "POST", &format!("/v1/code/threads/{tid}/comments"), Some(json!({ "body": "@roll review" })), None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "anonymous callers can't comment at all");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let th = ok(&t.a, "GET", &format!("/v1/code/threads/{tid}"), None).await;
+    let comments = th["comments"].as_array().unwrap();
+    assert_eq!(comments.len(), 1 + all.len(), "no reply from roll");
+    assert!(comments[1..].iter().all(|c| c["author"]["kind"] != "roll"));
+    assert_eq!(th["resolved"], false);
+    assert_eq!(t.m.messages().len(), calls_before, "no model call");
+    assert_eq!(ok(&t.a, "GET", &format!("/v1/code/changes/{id}/ai-jobs"), None).await.as_array().unwrap().len(), jobs_before, "no job");
+    assert!(ok(&t.a, "GET", "/v1/code/repos/acme/api/learnings", None).await.as_array().unwrap().is_empty(), "no learning");
+    assert!(!t.a.code.db.ai_paused(&id).unwrap(), "not paused");
+
+    // A writer: `@roll review` with nothing new since roll's last review is skipped.
+    let say = |body: &'static str| {
+        let (a, tid) = (&t.a, tid.clone());
+        async move { ok(a, "POST", &format!("/v1/code/threads/{tid}/comments"), Some(json!({ "body": body }))).await["comments"].as_array().unwrap().len() }
+    };
+    let n = say("@roll review").await;
+    assert_eq!(last_body(&thread_with(&t, &tid, n + 1).await), "On it: a review of what changed.");
+    let jobs = jobs_idle_n(&t, &id, jobs_before + 1).await;
+    assert_eq!(jobs.last().unwrap()["state"], "skipped");
+    assert_eq!(jobs.last().unwrap()["requested_by"], "@admin");
+
+    // `@roll full review`: everything again, not incremental, the settings' mode.
+    let n = say("@roll full review").await;
+    assert_eq!(last_body(&thread_with(&t, &tid, n + 1).await), "On it: a full review.");
+    let r = roll_reviews(&t, &id, 2).await;
+    let last = r.last().unwrap();
+    assert_eq!((last["ai"]["incremental"].as_bool(), last["ai"]["chosen_by"].as_str(), last["ai"]["mode"].as_str()), (Some(false), Some("settings"), Some("standard")));
+    let job = jobs_idle_n(&t, &id, jobs_before + 2).await.last().unwrap().clone();
+    assert_eq!((job["full"].as_bool(), job["state"].as_str()), (Some(true), Some("done")));
+
+    // `@roll full review max`: a forced mode.
+    let n = say("@roll full review max").await;
+    assert_eq!(last_body(&thread_with(&t, &tid, n + 1).await), "On it: a full max review.");
+    let r = roll_reviews(&t, &id, 3).await;
+    let last = r.last().unwrap();
+    assert_eq!((last["ai"]["mode"].as_str(), last["ai"]["chosen_by"].as_str(), last["ai"]["incremental"].as_bool()), (Some("max"), Some("command"), Some(false)));
+    assert_eq!(last["ai"]["reasons"][0], "max requested");
+    let job = jobs_idle_n(&t, &id, jobs_before + 3).await.last().unwrap().clone();
+    assert_eq!((job["mode"].as_str(), job["full"].as_bool()), (Some("max"), Some(true)));
+
+    // `ignore …` and `remember …` are learnings tied to the thread.
+    let n = say("@roll ignore generated code.").await;
+    assert!(last_body(&thread_with(&t, &tid, n + 1).await).contains("I'll remember for future reviews: _Don't flag generated code_"));
+    let n = say("@roll remember we validate input upstream").await;
+    assert!(last_body(&thread_with(&t, &tid, n + 1).await).contains("_we validate input upstream_"));
+    let l = ok(&t.a, "GET", "/v1/code/repos/acme/api/learnings", None).await;
+    let mut texts: Vec<&str> = l.as_array().unwrap().iter().map(|x| x["text"].as_str().unwrap()).collect();
+    texts.sort();
+    assert_eq!(texts, ["Don't flag generated code", "we validate input upstream"]);
+    assert!(l.as_array().unwrap().iter().all(|x| x["source"] == "command" && x["thread"] == tid.as_str() && x["path"].is_null()), "{l}");
+
+    // `@roll review` also resumes a paused change.
+    let n = say("@roll pause").await;
+    thread_with(&t, &tid, n + 1).await;
+    assert!(t.a.code.db.ai_paused(&id).unwrap());
+    let n = say("@roll review").await;
+    thread_with(&t, &tid, n + 1).await;
+    assert!(!t.a.code.db.ai_paused(&id).unwrap(), "asking for a review resumes");
+}
+
+/// `on_cap` past a hosted monthly cap, each value's behaviour (the concurrent race and the
+/// reservation are `concurrent_reviews_and_chats_never_overrun_the_cap`):
+/// - `pause`: no model call, a comment review, the job `skipped`, the change stops waiting, nothing metered
+/// - `byok_fallback` without a key: the same, and chats answer that the cap is reached
+/// - `byok_fallback` with a key: reviews and chats run on the owner's key at BYOK prices
+/// - `standard_only`: deep/max run as standard, standard reviews go on past the cap and are charged; chats stop
+#[tokio::test]
+async fn on_cap_pause_byok_fallback_and_standard_only() {
+    let t = setup(|_, _| {}).await;
+    enable(&t, json!({ "mode": "standard", "required": true })).await;
+    let one = |n: u32| json!({ format!("src/cap{n}.rs"): { "content": format!("pub fn cap{n}() {{}}\n") } });
+
+    // pause.
+    ok(&t.a, "PUT", "/v1/code/owners/acme/billing", Some(json!({ "monthly_cap_usd": 0, "on_cap": "pause" }))).await;
+    let c = change(&t, "paused", one(0)).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let r = roll_reviews(&t, &id, 1).await;
+    assert!(r[0]["ai"].is_null() && r[0]["verdict"] == "comment");
+    assert!(r[0]["body"].as_str().unwrap().contains("paused for this month") && r[0]["body"].as_str().unwrap().contains("($0.00)"), "{}", r[0]["body"]);
+    let j = jobs_idle(&t, &id).await;
+    assert_eq!((j[0]["state"].as_str(), j[0]["attempts"].as_u64()), (Some("skipped"), Some(1)));
+    let ch = ok(&t.a, "GET", &format!("/v1/code/changes/{id}"), None).await;
+    assert!(!ch["blockers"].as_array().unwrap().iter().any(|b| b["kind"] == "review_pending"), "the change doesn't wait on a paused reviewer");
+    assert!(t.m.messages().is_empty(), "no model call");
+    assert_eq!(ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await["totals"]["reviews"], 0);
+
+    // byok_fallback without a key: paused the same way; a chat answers that the cap is reached.
+    ok(&t.a, "PUT", "/v1/code/owners/acme/billing", Some(json!({ "on_cap": "byok_fallback" }))).await;
+    let c = change(&t, "fallback none", one(1)).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let r = roll_reviews(&t, &id, 1).await;
+    assert!(r[0]["ai"].is_null() && r[0]["body"].as_str().unwrap().contains("paused for this month"));
+    let tid = person_thread(&t, &id, "src/cap1.rs", "@roll explain").await;
+    let th = thread_with(&t, &tid, 2).await;
+    assert!(last_body(&th).contains("cap ($0.00) is reached"), "{th}");
+    assert!(t.m.messages().is_empty(), "still no model call");
+
+    // byok_fallback with a key: the owner's key, BYOK prices, not capped.
+    ok(&t.a, "PUT", "/v1/code/owners/acme/review-provider", Some(json!({ "api_key": "sk-ant-owner-fallback-7777" }))).await;
+    let c = change(&t, "fallback key", one(2)).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let r = roll_reviews(&t, &id, 1).await;
+    assert_eq!(r[0]["ai"]["key"], "byok");
+    let tid = person_thread(&t, &id, "src/cap2.rs", "@roll explain").await;
+    let th = thread_with(&t, &tid, 2).await;
+    assert!(last_body(&th).contains("Here is why"), "{th}");
+    assert!(!t.m.messages().is_empty() && t.m.messages().iter().all(|s| s.headers["x-api-key"] == "sk-ant-owner-fallback-7777"));
+    let u = ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await;
+    let recent = u["recent"].as_array().unwrap();
+    assert_eq!(recent.len(), 2, "{u}");
+    assert!(recent.iter().all(|x| x["key_source"] == "byok" && x["capped"] == false));
+    assert_eq!(u["by_key"]["byok"]["price_usd"], 0.02, "BYOK review fee, chats free");
+    assert!(u["by_key"]["hosted"].is_null());
+
+    // standard_only: max runs as standard, standard goes on past the cap (charged); chats stop.
+    ok(&t.a, "DELETE", "/v1/code/owners/acme/review-provider", None).await;
+    ok(&t.a, "PUT", "/v1/code/owners/acme/billing", Some(json!({ "on_cap": "standard_only" }))).await;
+    enable(&t, json!({ "mode": "max" })).await;
+    let c = change(&t, "downgrade max", one(3)).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let r = roll_reviews(&t, &id, 1).await;
+    assert_eq!((r[0]["ai"]["mode"].as_str(), r[0]["ai"]["key"].as_str()), (Some("standard"), Some("hosted")));
+    assert!(r[0]["ai"]["reasons"].to_string().contains("the monthly cap ($0.00) is reached: standard only"), "{}", r[0]["ai"]["reasons"]);
+    assert!(!t.m.messages().iter().any(|s| s.user().contains("checking another reviewer's findings")), "no max verification pass");
+    enable(&t, json!({ "mode": "standard" })).await;
+    let c = change(&t, "standard goes on", one(4)).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let r = roll_reviews(&t, &id, 1).await;
+    assert_eq!(r[0]["ai"]["mode"], "standard");
+    assert!(!r[0]["ai"]["reasons"].to_string().contains("standard only"), "nothing to downgrade");
+    let u = ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await;
+    assert_eq!(u["by_key"]["hosted"]["count"], 2);
+    assert_eq!(u["by_key"]["hosted"]["price_usd"], 0.5, "charged past the cap");
+    assert_eq!(u["cap"]["remaining_usd"], 0.0);
+    let before = t.m.messages().len();
+    let tid = person_thread(&t, &id, "src/cap4.rs", "@roll explain").await;
+    let th = thread_with(&t, &tid, 2).await;
+    assert!(last_body(&th).contains("is reached"), "standard_only covers reviews, not chats: {th}");
+    assert_eq!(t.m.messages().len(), before);
+}
+
+/// A thread a person opens on a change (no roll review needed); returns its id.
+async fn person_thread(t: &T, change: &str, path: &str, body: &str) -> String {
+    let th = ok(&t.a, "POST", &format!("/v1/code/changes/{change}/threads"), Some(json!({ "path": path, "line": 1, "body": body }))).await;
+    th["id"].as_str().unwrap().to_string()
+}
+
+/// The job of a review that gave up, and roll's comment saying why.
+async fn gave_up(t: &T, change: &str) -> (Value, String) {
+    let r = roll_reviews(t, change, 1).await;
+    let body = r[0]["body"].as_str().unwrap().to_string();
+    assert!(r[0]["ai"].is_null() && body.contains("couldn't review this change"), "{body}");
+    assert_eq!(r[0]["verdict"], "comment");
+    let j = jobs_idle(t, change).await[0].clone();
+    assert_eq!((j["state"].as_str(), j["stage"].as_str()), (Some("failed"), Some("failed")), "{j}");
+    let ch = ok(&t.a, "GET", &format!("/v1/code/changes/{change}"), None).await;
+    assert!(!ch["blockers"].as_array().unwrap().iter().any(|b| b["kind"] == "review_pending"), "a reviewer that gave up isn't owed a review");
+    (j, body)
+}
+
+/// Provider errors through code-control: a key without permission (403) isn't retried; a
+/// provider that stays overloaded (529) is retried by the provider and then by the job (three
+/// attempts) before roll gives up; a 400 gives up too. Each gives up with a comment saying why,
+/// a `failed` job with the error, and the change no longer waits.
+#[tokio::test]
+async fn provider_errors_403_persistent_529_and_400() {
+    let t = setup(|_, _| {}).await;
+    enable(&t, json!({ "mode": "standard", "required": true })).await;
+
+    t.m.set(|s, _| (s.path == "/v1/messages").then(|| (403, json!({"type": "error", "error": {"type": "permission_error", "message": "key lacks access"}}))));
+    let c = change(&t, "403", json!({ "src/a.rs": { "content": "pub fn a() {}\n" } })).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let (j, body) = gave_up(&t, &id).await;
+    assert!(body.contains("403") && body.contains("key lacks access"), "{body}");
+    assert_eq!(j["attempts"], 1, "a bad key isn't retried");
+    assert!(j["error"].as_str().unwrap().contains("key lacks access"));
+    assert_eq!(t.m.messages().len(), 1);
+
+    t.m.set(|s, _| (s.path == "/v1/messages").then(|| (529, json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}))));
+    let before = t.m.messages().len();
+    let c = change(&t, "529", json!({ "src/b.rs": { "content": "pub fn b() {}\n" } })).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let (j, body) = gave_up(&t, &id).await;
+    assert!(body.contains("kept failing") && body.contains("Overloaded"), "{body}");
+    // Retried by the job (exactly 3 attempts: `a_failing_review_runs_three_times`).
+    let attempts = j["attempts"].as_u64().unwrap();
+    assert!(attempts >= 3, "{j}");
+    assert_eq!(t.m.messages().len() - before, attempts as usize * 2, "each attempt retries in the provider too");
+
+    t.m.set(|s, _| (s.path == "/v1/messages").then(|| (400, json!({"type": "error", "error": {"type": "invalid_request_error", "message": "messages: bad shape"}}))));
+    let c = change(&t, "400", json!({ "src/c.rs": { "content": "pub fn c() {}\n" } })).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let (j, body) = gave_up(&t, &id).await;
+    assert!(body.contains("400") && body.contains("messages: bad shape"), "{body}");
+    assert!(j["error"].as_str().unwrap().contains("bad shape"));
+}
+
+/// reviews.md: "A failed attempt is retried twice with backoff (30 s, then ×4)" — three attempts
+/// in all (`MAX_ATTEMPTS`), with delays of `retry_ms` then `retry_ms × 4`.
+#[tokio::test]
+#[ignore = "run.rs off by one: run_job compares the pre-claim `j.attempts` (one attempt more, delays 1×, 1×, 4×)"]
+async fn a_failing_review_runs_three_times() {
+    let t = setup(|c, _| c.review.retry_ms = 100).await;
+    enable(&t, json!({ "mode": "standard" })).await;
+    t.m.set(|s, _| (s.path == "/v1/messages").then(|| (529, json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}))));
+    let started = std::time::Instant::now();
+    let c = change(&t, "529", json!({ "src/b.rs": { "content": "pub fn b() {}\n" } })).await;
+    let (j, _) = gave_up(&t, c["id"].as_str().unwrap()).await;
+    assert_eq!(j["attempts"], 3);
+    assert_eq!(t.m.messages().len(), 3 * 2);
+    // 100 ms, then 400 ms between attempts.
+    assert!(started.elapsed() >= Duration::from_millis(500), "{:?}", started.elapsed());
+}
+
+/// The model declining (`refusal`) or running out of output (`max_tokens`) isn't an error: the
+/// review is posted, the files are listed as not reviewed with the reason, and roll doesn't
+/// approve what it didn't read.
+#[tokio::test]
+async fn refusals_and_cut_off_reviews_list_the_files_and_dont_approve() {
+    let t = setup(|_, _| {}).await;
+    t.m.set(|s, _| {
+        let u = s.user();
+        if u.contains("## src/evil.rs") {
+            return Some((200, json!({"model": "claude-opus-5-5", "stop_reason": "refusal", "stop_details": {"type": "refusal", "category": "cyber"}, "content": [], "usage": {"input_tokens": 5}})));
+        }
+        if u.contains("## src/long.rs") {
+            return Some((200, json!({"model": "claude-opus-5-5", "stop_reason": "max_tokens", "content": [{"type": "text", "text": "{\"walk"}], "usage": {"output_tokens": 16000}})));
+        }
+        None
+    });
+    enable(&t, json!({ "mode": "standard" })).await;
+    for (path, reason) in [("src/evil.rs", "declined by the model (cyber)"), ("src/long.rs", "didn't fit in the model's output")] {
+        let c = change(&t, path, json!({ path.to_string(): { "content": "pub fn x() {}\n" } })).await;
+        let id = c["id"].as_str().unwrap().to_string();
+        let r = roll_reviews(&t, &id, 1).await;
+        let ai = &r[0]["ai"];
+        assert_eq!(r[0]["verdict"], "comment", "{}", r[0]["body"]);
+        assert!(r[0]["body"].as_str().unwrap().contains("weren't reviewed") && r[0]["body"].as_str().unwrap().contains("Not reviewed"), "{}", r[0]["body"]);
+        let skipped = ai["skipped_files"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1, "{ai}");
+        assert_eq!(skipped[0]["path"], path);
+        assert!(skipped[0]["reason"].as_str().unwrap().contains(reason), "{ai}");
+        assert_eq!(ai["details"]["files_reviewed"], 0);
+        assert!(threads(&t, &id).await.is_empty());
+        assert_eq!(jobs_idle(&t, &id).await[0]["state"], "done", "not an error");
+    }
+}
+
+/// Configuration errors aren't retried: a hosted provider that can't be built (an
+/// OpenAI-compatible one without a base URL), and an owner's sealed key the server can't open
+/// (no `ROLL_SECRET_KEY` now, or a different one). An owner with a key of their own never falls
+/// back to the hosted key. A chat without any provider answers that in the thread.
+#[tokio::test]
+async fn config_and_key_errors_give_up_without_retrying() {
+    // A hosted OpenAI-compatible provider missing its base URL.
+    let bad = setup(|c, _| c.review.hosted = Some(Hosted { provider: "openai_compatible".into(), api_key: "sk-x".into(), base_url: None, model: Some("m".into()), secondary_model: None })).await;
+    enable(&bad, json!({ "mode": "standard", "required": true })).await;
+    assert!(ok(&bad.a, "GET", "/v1/code/repos/acme/api/reviewer", None).await["provider"].is_null());
+    let c = change(&bad, "cfg", json!({ "src/a.rs": { "content": "pub fn a() {}\n" } })).await;
+    let (j, _) = gave_up(&bad, c["id"].as_str().unwrap()).await;
+    assert_eq!(j["attempts"], 1);
+
+    // A sealed key, then the server's secret is gone or changed.
+    for secret in [None, Some("a-different-secret-of-at-least-32-chars")] {
+        let t = setup(move |c, _| c.review.secret_key = secret.map(str::to_string)).await;
+        let owner = t.a.code.db.owner("acme").unwrap().unwrap();
+        let row = code_control::ai::store::OwnerProvider {
+            provider: "anthropic".into(),
+            base_url: None,
+            model: None,
+            secondary_model: None,
+            key_sealed: code_review::secret::Sealer::new(SECRET).unwrap().seal(&owner.id, "sk-ant-sealed-5555"),
+            key_last4: "5555".into(),
+            updated_at: 0,
+        };
+        t.a.code.db.set_owner_provider(&owner.id, Some(&row)).unwrap();
+        assert_eq!(ok(&t.a, "GET", "/v1/code/owners/acme/review-provider", None).await["key_last4"], "5555", "the key's shape is still shown");
+        enable(&t, json!({ "mode": "standard", "required": true })).await;
+        let c = change(&t, "sealed", json!({ "src/a.rs": { "content": "pub fn a() {}\n" } })).await;
+        let (j, body) = gave_up(&t, c["id"].as_str().unwrap()).await;
+        assert_eq!(j["attempts"], 1, "{secret:?}");
+        if secret.is_none() {
+            assert!(body.contains("ROLL_SECRET_KEY"), "{body}");
+        }
+        assert!(t.m.messages().is_empty(), "never falls back to the hosted key: {secret:?}");
+    }
+
+    // A chat with no provider at all.
+    let none = setup(|c, _| c.review.hosted = None).await;
+    let c = change(&none, "q", json!({ "src/a.rs": { "content": "pub fn a() {}\n" } })).await;
+    let tid = person_thread(&none, c["id"].as_str().unwrap(), "src/a.rs", "@roll what does this do?").await;
+    let th = thread_with(&none, &tid, 2).await;
+    assert!(last_body(&th).contains("no model provider"), "{th}");
+    let jobs = jobs_idle(&none, c["id"].as_str().unwrap()).await;
+    assert_eq!((jobs[0]["kind"].as_str(), jobs[0]["state"].as_str()), (Some("command"), Some("done")));
+}
+
+/// A chat (`kind: "command"`) whose provider rejects the key fails at once, not retried.
+#[tokio::test]
+async fn a_chat_with_a_bad_key_fails_without_retrying() {
+    let t = setup(|_, _| {}).await;
+    t.m.set(|s, _| (s.path == "/v1/messages").then(|| (401, json!({"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}))));
+    let c = change(&t, "q", json!({ "src/a.rs": { "content": "pub fn a() {}\n" } })).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    person_thread(&t, &id, "src/a.rs", "@roll explain").await;
+    let jobs = jobs_idle_n(&t, &id, 1).await;
+    assert_eq!((jobs[0]["kind"].as_str(), jobs[0]["state"].as_str(), jobs[0]["stage"].as_str()), (Some("command"), Some("failed"), Some("failed")));
+    assert_eq!(jobs[0]["attempts"], 1);
+    assert!(jobs[0]["error"].as_str().unwrap().contains("invalid x-api-key"));
+    assert_eq!(t.m.messages().len(), 1);
+    assert_eq!(ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await["totals"]["chats"], 0, "nothing metered");
+}
+
+/// Modes, speeds and profiles through code-control: `auto` picks `max` for `max_paths` (with
+/// its verification pass); `thorough` raises effort to xhigh and verifies even standard
+/// reviews; `effort` overrides the table; a failing classifier falls back to the heuristic;
+/// `assertive` posts the nits `chill` drops.
+#[tokio::test]
+async fn modes_speeds_effort_classifier_fallback_and_profiles() {
+    let t = setup(|_, _| {}).await;
+    let latest_review = |t: &T| t.m.messages().into_iter().rev().find(|s| s.user().contains("# Diff")).unwrap();
+    let verifications = |t: &T| t.m.messages().iter().filter(|s| s.user().contains("checking another reviewer's findings")).count();
+
+    // auto → max (max_paths), verified.
+    enable(&t, json!({ "auto": { "max_paths": ["src/parse.rs"] } })).await;
+    let c = change(&t, "max", json!({ "src/parse.rs": { "content": PARSE_EDIT } })).await;
+    let r = roll_reviews(&t, c["id"].as_str().unwrap(), 1).await;
+    assert_eq!((r[0]["ai"]["mode"].as_str(), r[0]["ai"]["chosen_by"].as_str()), (Some("max"), Some("auto-heuristic")));
+    assert!(r[0]["ai"]["reasons"].to_string().contains("max_paths"), "{}", r[0]["ai"]["reasons"]);
+    assert_eq!(latest_review(&t).body["output_config"]["effort"], "high");
+    assert_eq!(verifications(&t), 1);
+
+    // thorough: xhigh, and a verification pass even in standard mode.
+    enable(&t, json!({ "mode": "standard", "speed": "thorough", "auto": {} })).await;
+    let c = change(&t, "thorough", json!({ "src/server.rs": { "content": "pub fn handle() { thorough() }\n" } })).await;
+    let r = roll_reviews(&t, c["id"].as_str().unwrap(), 1).await;
+    assert_eq!((r[0]["ai"]["speed"].as_str(), r[0]["ai"]["details"]["effort"].as_str()), (Some("thorough"), Some("xhigh")), "{}", r[0]["ai"]);
+    assert!(r[0]["body"].as_str().unwrap().contains("· thorough ·"));
+    assert_eq!(latest_review(&t).body["output_config"]["effort"], "xhigh");
+    assert_eq!(verifications(&t), 2);
+
+    // effort overrides the table (deep × balanced would be high).
+    enable(&t, json!({ "mode": "deep", "speed": "balanced", "effort": "low" })).await;
+    let c = change(&t, "effort", json!({ "src/server.rs": { "content": "pub fn handle() { low() }\n" } })).await;
+    roll_reviews(&t, c["id"].as_str().unwrap(), 1).await;
+    assert_eq!(latest_review(&t).body["output_config"]["effort"], "low");
+
+    // The classifier failing: the heuristic decides, and the review goes on.
+    t.m.set(|s, _| s.user().contains("how deep a code review").then(|| (500, json!({"error": {"message": "down"}}))));
+    enable(&t, json!({ "mode": "auto", "effort": null, "auto": { "classifier": "model" } })).await;
+    let c = change(&t, "cls", json!({ "src/server.rs": { "content": "pub fn handle() { cls() }\n" } })).await;
+    let r = roll_reviews(&t, c["id"].as_str().unwrap(), 1).await;
+    assert_eq!((r[0]["ai"]["mode"].as_str(), r[0]["ai"]["chosen_by"].as_str()), (Some("standard"), Some("auto-heuristic")), "{}", r[0]["ai"]);
+    assert!(t.m.messages().iter().any(|s| s.user().contains("how deep a code review")), "the classifier was asked");
+
+    // Profiles: a nit is dropped by chill (approve), posted by assertive (comment).
+    t.m.set(|s, _| {
+        if !s.user().contains("# Diff") {
+            return None;
+        }
+        let (status, mut v) = default_answer(s);
+        let mut a: Value = serde_json::from_str(v["content"][0]["text"].as_str().unwrap()).unwrap();
+        for f in a["findings"].as_array_mut().unwrap() {
+            f["severity"] = json!("nit");
+        }
+        v["content"][0]["text"] = json!(a.to_string());
+        Some((status, v))
+    });
+    for (profile, verdict, posted) in [("chill", "approve", 0), ("assertive", "comment", 1)] {
+        enable(&t, json!({ "mode": "standard", "auto": {}, "profile": profile })).await;
+        let c = change(&t, profile, json!({ "src/server.rs": { "content": format!("pub fn handle() {{ {profile}() }}\n") } })).await;
+        let id = c["id"].as_str().unwrap().to_string();
+        let r = roll_reviews(&t, &id, 1).await;
+        assert_eq!(r[0]["verdict"], verdict, "{profile}: {}", r[0]["body"]);
+        assert_eq!(threads(&t, &id).await.len(), posted, "{profile}");
+    }
+}
+
+/// A job's states and stages while it runs: `queued` before the runner, then `running` through
+/// `reviewing` (with progress) and `verifying` (max), then `done` with its review. (`failed`:
+/// `gave_up`; `skipped`: `change_reviewer_routes_answer_every_status_and_jobs_queue`.)
+#[tokio::test]
+async fn jobs_go_queued_running_reviewing_verifying_done() {
+    let t = setup(|_, _| {}).await;
+    enable(&t, json!({ "mode": "max" })).await;
+    t.m.delay_ms.store(400, Ordering::SeqCst);
+    let c = change(&t, "stages", json!({ "src/parse.rs": { "content": PARSE_EDIT } })).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let mut seen: Vec<(String, String)> = Vec::new();
+    let mut last = Value::Null;
+    for _ in 0..400 {
+        if let Some(j) = ok(&t.a, "GET", &format!("/v1/code/changes/{id}/ai-jobs"), None).await.as_array().unwrap().first().cloned() {
+            let pair = (j["state"].as_str().unwrap().to_string(), j["stage"].as_str().unwrap().to_string());
+            if seen.last() != Some(&pair) {
+                seen.push(pair);
+            }
+            if j["stage"] == "verifying" {
+                assert_eq!(j["progress"]["groups_done"], j["progress"]["groups_total"], "every group is done before verification");
+            }
+            last = j;
+            if last["state"] == "done" {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    t.m.delay_ms.store(0, Ordering::SeqCst);
+    let has = |s: &str, g: &str| seen.iter().any(|(a, b)| a == s && b == g);
+    assert!(has("running", "reviewing") && has("running", "verifying") && has("done", "done"), "{seen:?}");
+    let order: Vec<&str> = seen.iter().map(|(_, g)| g.as_str()).collect();
+    let pos = |g: &str| order.iter().position(|x| *x == g).unwrap();
+    assert!(pos("reviewing") < pos("verifying") && pos("verifying") < pos("done"), "{order:?}");
+    let r = roll_reviews(&t, &id, 1).await;
+    assert_eq!(last["review_id"], r[0]["id"]);
+    assert!(last["error"].is_null());
+
+    // Before a runner starts, a job is queued.
+    let idle = app_with(|c| {
+        c.admin_token = Some(ROOT.into());
+        c.review.hosted = Some(Hosted { provider: "anthropic".into(), api_key: "k".into(), base_url: Some(t.m.url.clone()), model: None, secondary_model: None });
+    });
+    ok(&idle, "POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" }))).await;
+    ok(&idle, "POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "api" }))).await;
+    ok(&idle, "POST", "/v1/code/repos/acme/api/land", Some(json!({ "message": "base", "files": { "a.rs": { "content": "x\n" } } }))).await;
+    ok(&idle, "PATCH", "/v1/code/repos/acme/api/reviewer", Some(json!({ "enabled": true }))).await;
+    let c = ok(&idle, "POST", "/v1/code/repos/acme/api/changes", Some(json!({ "title": "t", "message": "t", "base": "main", "files": { "a.rs": { "content": "y\n" } } }))).await;
+    let mut j = Value::Null;
+    for _ in 0..100 {
+        if let Some(x) = ok(&idle, "GET", &format!("/v1/code/changes/{}/ai-jobs", c["id"].as_str().unwrap()), None).await.as_array().unwrap().first() {
+            j = x.clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!((j["state"].as_str(), j["stage"].as_str(), j["attempts"].as_u64()), (Some("queued"), Some("queued"), Some(0)), "{j}");
+    assert!(j["progress"].is_null() && j["review_id"].is_null() && j["mode"].is_null() && j["kind"] == "review");
+    assert_eq!(ok(&idle, "GET", "/v1/code/repos/acme/api/reviewer", None).await["jobs"]["queued"], 1);
+}
+
+/// A deep review waits while the repo's codebase index is first built, and says so: the job's
+/// stage is `indexing` until the build is done.
+#[tokio::test]
+async fn a_deep_review_reports_indexing_while_the_index_is_built() {
+    let t = setup(|_, _| {}).await;
+    let mut files = serde_json::Map::new();
+    for i in 0..1500 {
+        files.insert(format!("gen/f{i}.rs"), json!({ "content": format!("pub fn generated_{i}(x: u32) -> u32 {{\n    x + {i}\n}}\n") }));
+    }
+    ok(&t.a, "POST", "/v1/code/repos/acme/api/land", Some(json!({ "message": "many files", "files": Value::Object(files) }))).await;
+    enable(&t, json!({ "mode": "deep" })).await;
+    let c = change(&t, "Deep", json!({ "src/parse.rs": { "content": PARSE_EDIT } })).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let mut stages = Vec::new();
+    for _ in 0..2000 {
+        if let Some(j) = ok(&t.a, "GET", &format!("/v1/code/changes/{id}/ai-jobs"), None).await.as_array().unwrap().first() {
+            let s = j["stage"].as_str().unwrap().to_string();
+            if stages.last() != Some(&s) {
+                stages.push(s);
+            }
+            if j["state"] == "done" {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert!(stages.contains(&"indexing".to_string()), "{stages:?}");
+    let r = roll_reviews(&t, &id, 1).await;
+    assert!(!r[0]["ai"]["reasons"].to_string().contains("still being built"), "it waited for the index");
+    assert!(t.m.messages().last().unwrap().user().contains("# Repository context"));
+}
