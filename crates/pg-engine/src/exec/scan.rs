@@ -363,6 +363,7 @@ pub fn open_scan(s: &ScanPlan, ctx: &ExecCtx) -> Result<BoxNode> {
             sorted: None,
             run: Default::default(),
             pending: None,
+            one_run: false,
             blocks: Default::default(),
             prune_next: 0,
             nblocks: None,
@@ -404,6 +405,7 @@ pub fn open_scan(s: &ScanPlan, ctx: &ExecCtx) -> Result<BoxNode> {
             sorted: None,
             run: Default::default(),
             pending: None,
+            one_run: false,
             blocks: Default::default(),
             prune_next: 0,
             nblocks: None,
@@ -547,6 +549,7 @@ fn open_scan_as(
         prune_next: 0,
         nblocks: None,
         last_block: None,
+        one_run: collation_equal_run(s),
     }))
 }
 
@@ -787,6 +790,19 @@ fn bitmap_rows(s: &ScanPlan, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8
     Ok(keys)
 }
 
+/// An index scan with an equality on its first column under that column's nondeterministic
+/// collation (an index condition the byte-ordered index can't seek).
+fn collation_equal_run(s: &ScanPlan) -> bool {
+    let Access::Index { quals, .. } = &s.access else {
+        return false;
+    };
+    quals.iter().any(|q| {
+        q.col == 0
+            && matches!(&q.expr, crate::sql::expr::Expr::Call(d, a, _)
+                if a.len() == 2 && d.name == "=" && d.coll.as_ref().is_some_and(|c| !c.deterministic))
+    })
+}
+
 /// What a scan's rows count in the cumulative statistics (`pgstat`).
 #[derive(Clone, Copy)]
 enum StatTarget {
@@ -825,6 +841,9 @@ struct ScanNode {
     run: std::collections::VecDeque<(Vec<u8>, bytes::Bytes)>,
     /// The index entry that ended the last run (it starts the next).
     pending: Option<(Vec<u8>, Vec<u8>, bytes::Bytes)>,
+    /// An equality on the index's first column under its nondeterministic collation: the
+    /// rows it keeps are one run of equal keys (their bytes differ), in heap order.
+    one_run: bool,
     /// A sequential scan: each sorted row's heap block, the next page to prune and the
     /// table's pages when the scan started.
     blocks: std::collections::VecDeque<Option<u32>>,
@@ -997,7 +1016,7 @@ impl ScanNode {
         let prefix = first.0;
         loop {
             match self.next_entry(ctx)? {
-                Some(e) if e.0 == prefix => run.push((e.1, e.2)),
+                Some(e) if self.one_run || e.0 == prefix => run.push((e.1, e.2)),
                 Some(e) => {
                     self.pending = Some(e);
                     break;

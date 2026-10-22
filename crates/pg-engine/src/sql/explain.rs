@@ -1639,6 +1639,12 @@ fn group_key_collation(input: &Plan, g: &Expr) -> Option<String> {
     }
 }
 
+/// A DISTINCT ON / grouping key that is a column (or one carrying its implicit collation)
+/// an equality with a constant fixes.
+pub(crate) fn key_col_fixed(e: &Expr, fixed: &[bool]) -> bool {
+    implicit_key_col(e).is_some_and(|j| fixed.get(j).copied().unwrap_or(false))
+}
+
 /// A grouping key that is a column, or a column carrying its nondeterministic collation
 /// (the binder's implicit COLLATE, no location).
 fn implicit_key_col(g: &Expr) -> Option<usize> {
@@ -4031,7 +4037,7 @@ impl Builder<'_, '_> {
                 let on_fixed = on.as_ref().is_some_and(|on| {
                     let fixed = super::paths::constant_columns(input);
                     !on.is_empty()
-                        && on.iter().all(|e| matches!(e, Expr::Col(j, _) if fixed.get(*j).copied().unwrap_or(false)))
+                        && on.iter().all(|e| crate::sql::explain::key_col_fixed(e, &fixed))
                 });
                 if (on.is_none() && distinct_keys_fixed(input)) || on_fixed {
                     // (Gathered: the workers stop at their first row too.)
@@ -4842,7 +4848,12 @@ impl Builder<'_, '_> {
                     .node
                     .cols
                     .iter()
-                    .map(|c| ColInfo { width: c.width, var: None, distinct: None })
+                    .map(|c| ColInfo {
+                        width: c.width,
+                        var: None,
+                        distinct: (b.node.rows * 10.0 < costs::DEFAULT_NUM_DISTINCT)
+                            .then(|| costs::clamp_rows(b.node.rows * 10.0)),
+                    })
                     .collect();
                 cte_push(format!("\u{1}{id}"), b.node.rows * 10.0, wcols, Vec::new());
                 let r = term(self, recursive);
@@ -7316,9 +7327,13 @@ impl Builder<'_, '_> {
             }
             matches!(g, Expr::Col(..) | Expr::Const(..))
         };
+        // (With grouping sets a constant key is computed below too: the sets null it.)
         let computed: Vec<bool> = groups
             .iter()
-            .map(|g| !plain_col(g) && !g.columns().is_empty() && sets.is_none())
+            .map(|g| {
+                (!plain_col(g) && !g.columns().is_empty() && sets.is_none())
+                    || (sets.is_some() && matches!(g, Expr::Const(..)))
+            })
             .collect();
         let gref: Vec<Name> = gnames
             .iter()
@@ -7706,32 +7721,6 @@ impl Builder<'_, '_> {
                     n.details.push(Detail::List("Hash Key", hash_keys(self, cols)));
                 }
             }
-            for (ci, (chain, cols)) in chains.iter().enumerate() {
-                if ci > 0 {
-                    n.details.push(Detail::List("Sort Key", keys(self, cols)));
-                }
-                for &si in chain {
-                    // (A set's keys in its rollup's order.)
-                    let k = if sets[si].is_empty() {
-                        vec!["()".to_string()]
-                    } else {
-                        let ordered: Vec<usize> = cols.iter().copied().filter(|c| sets[si].contains(c)).collect();
-                        keys(self, &ordered)
-                    };
-                    n.details
-                        .push(Detail::List(if ci > 0 { "  Group Key" } else { "Group Key" }, k));
-                }
-            }
-            // (One sorted rollup puts its groups out in its order, as far as keys of
-            // every set go: the others go null.)
-            if hash_sets.is_empty()
-                && let [(chain, cols)] = &chains[..]
-                && !plain
-            {
-                let lead: Vec<usize> =
-                    cols.iter().copied().take_while(|k| chain.iter().all(|&si| sets[si].contains(k))).collect();
-                n.order = keys(self, &lead);
-            }
             // (Keys the input fixes to constants need no sort.)
             let fixed = super::paths::constant_columns(input);
             let is_fixed = |i: &usize| matches!(groups.get(*i), Some(Expr::Col(j, _)) if fixed.get(*j).copied().unwrap_or(false));
@@ -7745,15 +7734,42 @@ impl Builder<'_, '_> {
                 }
                 !sk.is_empty() && c.node.order.len() >= sk.len() && c.node.order[..sk.len()] == sk[..]
             });
-            if let Some((_, cols)) = chains.first()
-                && !cols.is_empty()
-                && !cols.iter().all(is_fixed)
-                && !presorted
+            let sort_below = chains
+                .first()
+                .is_some_and(|(_, cols)| !cols.is_empty() && !cols.iter().all(is_fixed) && !presorted);
+            // (Over a Sort, the keys the input computes are references to its values.)
+            let skeys = |b: &Self, idx: &[usize]| if sort_below { keys_ref(b, idx) } else { keys(b, idx) };
+            for (ci, (chain, cols)) in chains.iter().enumerate() {
+                if ci > 0 {
+                    n.details.push(Detail::List("Sort Key", skeys(self, cols)));
+                }
+                for &si in chain {
+                    // (A set's keys in its rollup's order.)
+                    let k = if sets[si].is_empty() {
+                        vec!["()".to_string()]
+                    } else {
+                        let ordered: Vec<usize> = cols.iter().copied().filter(|c| sets[si].contains(c)).collect();
+                        skeys(self, &ordered)
+                    };
+                    n.details
+                        .push(Detail::List(if ci > 0 { "  Group Key" } else { "Group Key" }, k));
+                }
+            }
+            // (One sorted rollup puts its groups out in its order, as far as keys of
+            // every set go: the others go null.)
+            if hash_sets.is_empty()
+                && let [(chain, cols)] = &chains[..]
+                && !plain
             {
+                let lead: Vec<usize> =
+                    cols.iter().copied().take_while(|k| chain.iter().all(|&si| sets[si].contains(k))).collect();
+                n.order = skeys(self, &lead);
+            }
+            if sort_below && let Some((_, cols)) = chains.first() {
                 let mut sn = ExNode::new("Sort");
                 // (A key listed twice is one pathkey.)
                 let mut sk: Vec<String> = Vec::new();
-                for k in keys(self, cols) {
+                for k in keys_ref(self, cols) {
                     if !sk.contains(&k) {
                         sk.push(k);
                     }
@@ -7763,7 +7779,7 @@ impl Builder<'_, '_> {
                 self.sort_costs(&mut sn, &c.node);
                 sn.key = c.node.key;
                 if self.o.verbose {
-                    sn.output = c.node.output.clone();
+                    sn.output = c.node.output.iter().map(sort_out).collect();
                 }
                 let child = std::mem::take(&mut c.node);
                 sn.children.push(child.child("Outer"));
@@ -7913,6 +7929,11 @@ impl Builder<'_, '_> {
             }
         }
         let mut cols = gcols;
+        // (A single grouping key is unique in the output: examine_variable's isunique, as
+        // many values as groups.)
+        if sets.is_none() && groups.len() == 1 && let Some(c) = cols.first_mut() {
+            c.distinct = Some(costs::clamp_rows(n.rows));
+        }
         cols.extend(aggs.iter().map(|a| ColInfo {
             width: type_width(&a.ty),
             var: None,
@@ -9102,7 +9123,14 @@ impl Builder<'_, '_> {
                         let iv = if sw { a } else { b };
                         let (mcv, bs) =
                             joins::bucket_stats(&cat, iv.var.as_ref(), iv.rel_rows, vb);
-                        let bs = if iv.var.is_none() { 0.1_f64.max(1.0 / vb) } else { bs };
+                        let bs = match (&iv.var, iv.distinct.filter(|d| *d >= 1.0)) {
+                            // (A unique column (a single grouping key): as many values as
+                            // rows.)
+                            (Some(_), Some(d)) => if d > vb { 1.0 / vb } else { 1.0 / d },
+                            (None, _) => 0.1_f64.max(1.0 / vb),
+                            _ => bs,
+                        };
+                        let mcv = if iv.var.is_some() && iv.distinct.is_some() { 0.0 } else { mcv };
                         bucket.0 = bucket.0.min(bs);
                         bucket.1 = bucket.1.min(mcv);
                     }
@@ -9867,11 +9895,12 @@ pub(crate) fn push_work_estimate(id: usize, base: &Arc<Plan>, ctx: &ExecCtx) {
     let cols: Vec<ColInfo> = e
         .cols
         .iter()
-        // (No statistics through a self-reference: examine_variable doesn't look into it.)
+        // (No statistics through a self-reference: examine_variable doesn't look into it;
+        // get_variable_numdistinct takes a small relation's tuples.)
         .map(|(w, _, _)| ColInfo {
             width: *w,
             var: None,
-            distinct: None,
+            distinct: (e.rows * 10.0 < costs::DEFAULT_NUM_DISTINCT).then(|| costs::clamp_rows(e.rows * 10.0)),
         })
         .collect();
     cte_push(format!("\u{1}{id}"), e.rows * 10.0, cols, Vec::new());

@@ -168,6 +168,7 @@ pub(super) fn sys_index_infos(t: SysTable, tuples: f64) -> Vec<IndexInfo> {
                 tuples,
                 height,
                 order: vec![None; n],
+                colls: vec![None; n],
                 fam_ops: Vec::new(),
             }
         })

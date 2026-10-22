@@ -280,6 +280,54 @@ a:int4 | d:int4 | count:int8
 -- INSERT 0 2
 
 > EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM (SELECT 1 AS x, q1, sum(q2) FROM a2_i8 i1 GROUP BY GROUPING SETS (1, 2)) ss
+> WHERE x = 1 AND q1 = 123
+QUERY PLAN:text
+Subquery Scan on ss
+  Output: ss.x, ss.q1, ss.sum
+  Filter: ((ss.x = 1) AND (ss.q1 = 123))
+  ->  HashAggregate
+        Output: (1), i1.q1, sum(i1.q2)
+        Hash Key: 1
+        Hash Key: i1.q1
+        ->  Seq Scan on pg_temp.a2_i8 i1
+              Output: 1, i1.q1, i1.q2
+-- EXPLAIN
+
+> SET enable_hashagg = off
+-- SET
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM (SELECT 1 AS x, q1, sum(q2) FROM a2_i8 i1 GROUP BY GROUPING SETS (1, 2)) ss
+> WHERE x = 1 AND q1 = 123
+QUERY PLAN:text
+Subquery Scan on ss
+  Output: ss.x, ss.q1, ss.sum
+  Filter: ((ss.x = 1) AND (ss.q1 = 123))
+  ->  GroupAggregate
+        Output: (1), i1.q1, sum(i1.q2)
+        Group Key: (1)
+        Sort Key: i1.q1
+          Group Key: i1.q1
+        ->  Sort
+              Output: (1), i1.q1, i1.q2
+              Sort Key: (1)
+              ->  Seq Scan on pg_temp.a2_i8 i1
+                    Output: 1, i1.q1, i1.q2
+-- EXPLAIN
+
+> SELECT * FROM (SELECT 1 AS x, q1, sum(q2) FROM a2_i8 i1 GROUP BY GROUPING SETS (1, 2)) ss
+> ORDER BY 1, 2
+x:int4 | q1:int8 | sum:numeric
+1 | NULL | 6
+NULL | 1 | 2
+NULL | 3 | 4
+-- SELECT 3
+
+> RESET enable_hashagg
+-- RESET
+
+> EXPLAIN (VERBOSE, COSTS OFF)
 > SELECT q1 FROM (
 >   WITH t_cte AS (SELECT * FROM a2_i8 t)
 >   SELECT q1, (SELECT q2 FROM t_cte WHERE t_cte.q1 = i8.q1) AS t_sub FROM a2_i8 i8

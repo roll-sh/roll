@@ -1,0 +1,149 @@
+> CREATE COLLATION a2_ci (provider = icu, locale = '@colStrength=secondary', deterministic = false)
+NOTICE 00000: using standard form "und-u-ks-level2" for ICU locale "@colStrength=secondary"
+-- CREATE COLLATION
+
+> CREATE TABLE a2_t1ci (x text COLLATE a2_ci)
+-- CREATE TABLE
+
+> INSERT INTO a2_t1ci VALUES ('abc'), ('ABC'), ('def'), ('ghi')
+-- INSERT 0 4
+
+> CREATE INDEX ON a2_t1ci (x)
+-- CREATE INDEX
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_indexonlyscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a2_t1ci WHERE x = 'abc'
+QUERY PLAN:text
+Index Scan using a2_t1ci_x_idx on a2_t1ci
+  Index Cond: (x = 'abc'::text)
+-- EXPLAIN
+
+> SELECT * FROM a2_t1ci WHERE x = 'abc'
+x:text
+ABC
+abc
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a2_t1ci WHERE x ~ '^abc$' COLLATE "C"
+QUERY PLAN:text
+Index Scan using a2_t1ci_x_idx on a2_t1ci
+  Index Cond: (x = 'abc'::text)
+  Filter: (x ~ '^abc$'::text COLLATE "C")
+-- EXPLAIN
+
+> SELECT * FROM a2_t1ci WHERE x ~ '^abc$' COLLATE "C"
+x:text
+abc
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a2_t1ci WHERE x LIKE 'abc' COLLATE a2_ci
+QUERY PLAN:text
+Index Scan using a2_t1ci_x_idx on a2_t1ci
+  Index Cond: (x = 'abc'::text)
+  Filter: (x ~~ 'abc'::text COLLATE a2_ci)
+-- EXPLAIN
+
+> SELECT * FROM a2_t1ci WHERE x LIKE 'abc' COLLATE a2_ci
+x:text
+ABC
+abc
+-- SELECT 2
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET enable_indexonlyscan
+-- RESET
+
+> DROP TABLE a2_t1ci
+-- DROP TABLE
+
+> DROP COLLATION a2_ci
+-- DROP COLLATION
+
+> CREATE COLLATION a2_ci (provider = icu, locale = '@colStrength=secondary', deterministic = false)
+NOTICE 00000: using standard form "und-u-ks-level2" for ICU locale "@colStrength=secondary"
+-- CREATE COLLATION
+
+> CREATE TABLE a2_pci (id int, x text COLLATE a2_ci)
+-- CREATE TABLE
+
+> INSERT INTO a2_pci VALUES (1, 'ABC'), (2, 'abc'), (3, 'def')
+-- INSERT 0 3
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM (SELECT DISTINCT ON (x) id, x FROM a2_pci ORDER BY x, id) s
+> WHERE x = 'abc' COLLATE a2_ci
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: a2_pci.id
+        ->  Seq Scan on a2_pci
+              Filter: (x = 'abc'::text COLLATE a2_ci)
+-- EXPLAIN
+
+> SELECT * FROM (SELECT DISTINCT ON (x) id, x FROM a2_pci ORDER BY x, id) s
+> WHERE x = 'abc' COLLATE a2_ci
+id:int4 | x:text
+1 | ABC
+-- SELECT 1
+
+> DROP TABLE a2_pci
+-- DROP TABLE
+
+> DROP COLLATION a2_ci
+-- DROP COLLATION
+
+> CREATE COLLATION a2_ci2 (provider = icu, locale = '@colStrength=secondary', deterministic = false)
+NOTICE 00000: using standard form "und-u-ks-level2" for ICU locale "@colStrength=secondary"
+-- CREATE COLLATION
+
+> CREATE TABLE a2_t2ci (x text COLLATE a2_ci2, y int)
+-- CREATE TABLE
+
+> INSERT INTO a2_t2ci SELECT CASE WHEN g % 2 = 0 THEN 'abc' ELSE 'ABC' END || (g % 50), g FROM generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> CREATE INDEX ON a2_t2ci (x)
+-- CREATE INDEX
+
+> ANALYZE a2_t2ci
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a2_t2ci WHERE x = 'abc7'
+QUERY PLAN:text
+Bitmap Heap Scan on a2_t2ci
+  Recheck Cond: (x = 'abc7'::text)
+  ->  Bitmap Index Scan on a2_t2ci_x_idx
+        Index Cond: (x = 'abc7'::text)
+-- EXPLAIN
+
+> SELECT count(*), min(y), max(y) FROM a2_t2ci WHERE x = 'abc7'
+count:int8 | min:int4 | max:int4
+40 | 7 | 1957
+-- SELECT 1
+
+> SELECT y FROM a2_t2ci WHERE x = 'ABC7' ORDER BY y LIMIT 3
+y:int4
+7
+57
+107
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a2_t2ci WHERE x LIKE 'abc1%'
+QUERY PLAN:text
+Seq Scan on a2_t2ci
+  Filter: (x ~~ 'abc1%'::text)
+-- EXPLAIN
+
+> DROP TABLE a2_t2ci
+-- DROP TABLE
+
+> DROP COLLATION a2_ci2
+-- DROP COLLATION
+

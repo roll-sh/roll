@@ -451,6 +451,8 @@ pub(super) struct Order {
 fn key_col(e: &Expr) -> Option<usize> {
     match key_operand(e) {
         Expr::Col(i, _) => Some(*i),
+        // (A COLLATE is a RelabelType to Postgres: the column, as examine_variable sees it.)
+        Expr::Collate(x, ..) => key_col(x),
         _ => None,
     }
 }
@@ -3147,7 +3149,10 @@ impl Search<'_, '_, '_> {
         }
         for &(c, outer_is_a) in &others {
             let jv = inner_var(c, outer_is_a);
-            let (mcv, bs) = if jv.var.is_none() {
+            let (mcv, bs) = if let (Some(_), Some(d)) = (&jv.var, jv.distinct.filter(|d| *d >= 1.0)) {
+                // (A unique column (a single grouping key): as many values as rows.)
+                (0.0, if d > vb { 1.0 / vb } else { 1.0 / d })
+            } else if jv.var.is_none() {
                 // (A known distinct count, as of a unique ctid: estimate_hash_bucket_stats
                 // without statistics.)
                 match jv.distinct {

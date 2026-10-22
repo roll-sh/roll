@@ -433,6 +433,9 @@ pub(crate) struct CteDef {
     pub no_returning: bool,
     /// inline_cte: its query, put in place of each reference as a subquery.
     pub inline: Option<std::sync::Arc<Plan>>,
+    /// The recursive term's CYCLE check over its work table's row (`NOT is_cycle`): a
+    /// restriction of the work table's scan, as the rewritten WHERE clause is.
+    pub work_filter: Option<Expr>,
 }
 
 pub struct Binder<'b, 'a> {

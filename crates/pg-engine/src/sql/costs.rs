@@ -623,6 +623,26 @@ impl Est<'_> {
                 }
             }
             Expr::Call(d, args, _) if args.len() == 2 => {
+                // (An equality under a nondeterministic collation: the most common values
+                // compared by it, var_eq_const with the operator's collation.)
+                if matches!(d.name, "=" | "<>")
+                    && let Some(coll) = d.coll.as_ref().filter(|c| !c.deterministic)
+                    && let Some((var, Some(c))) = match (self.var(&args[0]), constant(&args[1])) {
+                        (Some(v), Some(c)) => Some((v, c)),
+                        _ => match (constant(&args[0]), self.var(&args[1])) {
+                            (Some(c), Some(v)) => Some((v, c)),
+                            _ => None,
+                        },
+                    }
+                {
+                    let sel = self.eq_const_coll(&var, &c, coll);
+                    return if d.name == "=" {
+                        sel
+                    } else {
+                        let nf = var.stats(self.cat).map_or(0.0, |s| s.nullfrac as f64);
+                        (1.0 - sel - nf).clamp(0.0, 1.0)
+                    };
+                }
                 if let Some(o) = user_operator(self.cat, d)
                     && let Some(sel) = self.user_op(self.user, o, d, &args[0], &args[1])
                 {
@@ -989,6 +1009,39 @@ impl Est<'_> {
                 None => 0.5,
             },
         }
+    }
+
+    /// var_eq_const under a nondeterministic collation: the first most common value equal
+    /// to the constant under it gives the frequency.
+    fn eq_const_coll(&self, v: &VarRef, c: &Value, coll: &crate::types::collation::Collation) -> f64 {
+        if c.is_null() {
+            return 0.0;
+        }
+        let Some(s) = v.stats(self.cat) else {
+            return self.eq_const(v, Some(c));
+        };
+        let nullfrac = s.nullfrac as f64;
+        if let Some((vals, nums)) = slot(s, 1, self.fmt) {
+            if let Some(i) = vals
+                .iter()
+                .position(|x| crate::types::collation::cmp_values(coll, x, c) == Ordering::Equal)
+            {
+                return nums.get(i).copied().unwrap_or(0.0);
+            }
+            let sumcommon: f64 = nums.iter().sum();
+            let mut sel = (1.0 - sumcommon - nullfrac).clamp(0.0, 1.0);
+            let other = v.ndistinct(self.cat).0 - nums.len() as f64;
+            if other > 1.0 {
+                sel /= other;
+            }
+            if let Some(last) = nums.last()
+                && sel > *last
+            {
+                sel = *last;
+            }
+            return sel.clamp(0.0, 1.0);
+        }
+        self.eq_const(v, Some(c))
     }
 
     /// var_eq_const / var_eq_non_const.

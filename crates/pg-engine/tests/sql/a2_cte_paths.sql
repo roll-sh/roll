@@ -38,3 +38,25 @@ WITH RECURSIVE search_graph(f, t, label, is_cycle, path) AS (
   WHERE g.f = sg.t AND NOT is_cycle
 )
 SELECT * FROM search_graph;
+-- (An earlier item's estimate for a later one's plan; CYCLE's check on the work table's scan.)
+EXPLAIN (COSTS OFF)
+WITH RECURSIVE
+graph(f, t, label) AS (
+  VALUES (1, 2, 'arc 1 -> 2'), (1, 3, 'arc 1 -> 3'), (2, 3, 'arc 2 -> 3'),
+         (1, 4, 'arc 1 -> 4'), (4, 5, 'arc 4 -> 5'), (5, 1, 'arc 5 -> 1')),
+search_graph(f, t, label) AS (
+  SELECT * FROM graph g
+  UNION ALL
+  SELECT g.* FROM graph g, search_graph sg WHERE g.f = sg.t
+) CYCLE f, t SET is_cycle TO true DEFAULT false USING path
+SELECT f, t, label FROM search_graph;
+WITH RECURSIVE
+graph(f, t, label) AS (
+  VALUES (1, 2, 'arc 1 -> 2'), (1, 3, 'arc 1 -> 3'), (2, 3, 'arc 2 -> 3'),
+         (1, 4, 'arc 1 -> 4'), (4, 5, 'arc 4 -> 5'), (5, 1, 'arc 5 -> 1')),
+search_graph(f, t, label) AS (
+  SELECT * FROM graph g
+  UNION ALL
+  SELECT g.* FROM graph g, search_graph sg WHERE g.f = sg.t
+) CYCLE f, t SET is_cycle TO true DEFAULT false USING path
+SELECT f, t, label FROM search_graph;

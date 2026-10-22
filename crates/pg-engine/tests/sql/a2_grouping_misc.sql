@@ -70,6 +70,17 @@ RESET enable_sort;
 
 CREATE TEMP TABLE a2_i8 (q1 int8, q2 int8);
 INSERT INTO a2_i8 VALUES (1, 2), (3, 4);
+-- (A constant grouping-set key is computed below the aggregation: a reference over a Sort.)
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM (SELECT 1 AS x, q1, sum(q2) FROM a2_i8 i1 GROUP BY GROUPING SETS (1, 2)) ss
+WHERE x = 1 AND q1 = 123;
+SET enable_hashagg = off;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM (SELECT 1 AS x, q1, sum(q2) FROM a2_i8 i1 GROUP BY GROUPING SETS (1, 2)) ss
+WHERE x = 1 AND q1 = 123;
+SELECT * FROM (SELECT 1 AS x, q1, sum(q2) FROM a2_i8 i1 GROUP BY GROUPING SETS (1, 2)) ss
+ORDER BY 1, 2;
+RESET enable_hashagg;
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT q1 FROM (
   WITH t_cte AS (SELECT * FROM a2_i8 t)

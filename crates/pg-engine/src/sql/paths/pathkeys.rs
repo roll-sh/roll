@@ -340,7 +340,20 @@ impl Planner<'_, '_> {
         let Plan::Sort { input, keys } = p else {
             return;
         };
-        if keys.iter().any(|k| k.using.is_some()) {
+        // (A key sorted under its column's own collation is that column's pathkey; one under
+        // another ordering operator, its own.)
+        let own_order = |k: &SortKey| match &k.using {
+            None => true,
+            Some(u) => {
+                matches!(u.name, "<" | ">")
+                    && u.coll.as_ref().is_some_and(|c| {
+                        col_of(&k.expr).is_some_and(|col| {
+                            crate::sql::binder::optimize::output_collation(input, col).as_deref() == Some(c.name.as_str())
+                        })
+                    })
+            }
+        };
+        if keys.iter().any(|k| !own_order(k)) {
             return;
         }
         let mut c = classes(input);

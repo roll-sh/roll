@@ -229,6 +229,9 @@ struct IndexInfo {
     /// Per key column of a GiST, SP-GiST, GIN or BRIN index: its operator family's
     /// operators (pg_amop: oid, purpose 's' search / 'o' ordering, sort family).
     fam_ops: Vec<Vec<(u32, char, u32)>>,
+    /// Per key column: its collation (the index's COLLATE, else its column's; None: the
+    /// default).
+    colls: Vec<Option<String>>,
 }
 
 /// A base relation as path generation sees it.
@@ -440,6 +443,17 @@ fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo>
             .iter()
             .map(|c| if am == Am::Btree { user_order(&cat, c.opclass) } else { None })
             .collect();
+        let colls = ix
+            .columns
+            .iter()
+            .zip(&b.keys)
+            .map(|(c, k)| {
+                c.collation.clone().or_else(|| match k {
+                    Expr::Col(j, _) => t.columns.get(*j).and_then(|col| col.collation.clone()),
+                    _ => None,
+                })
+            })
+            .collect();
         out.push(IndexInfo {
             ix,
             am,
@@ -451,6 +465,7 @@ fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo>
             height,
             order,
             fam_ops,
+            colls,
         });
     }
     // get_relation_info builds its list with lcons over ascending OIDs.
@@ -763,7 +778,7 @@ fn match_clause(
     };
     match q {
         Expr::Call(def, args, ty)
-            if args.len() == 2 && ops_ok(def.name) && byte_order_op(def) =>
+            if args.len() == 2 && ops_ok(def.name) && (byte_order_op(def) || own_collation_eq(ii, col, def)) =>
         {
             let (a, b) = (&args[0], &args[1]);
             if matches_key(a, key) && scan_const(b) && family(&b.ty()) == kty {
@@ -929,10 +944,23 @@ impl Planner<'_, '_> {
         {
             return Vec::new();
         }
-        let Expr::Const(Value::Text(patt), _) = &args[1] else {
+        // (A COLLATE on the pattern is its collation, which the call carries.)
+        let mut pe = &args[1];
+        while let Expr::Collate(x, ..) = pe {
+            pe = x;
+        }
+        let Expr::Const(Value::Text(patt), _) = pe else {
             return Vec::new();
         };
         let (status, prefix, _) = costs::pattern_prefix(patt, ptype);
+        // (Under a nondeterministic collation only an exact match, and only with an index
+        // of that collation: match_pattern_prefix.)
+        if let Some(c) = def.coll.as_ref().filter(|c| !c.deterministic)
+            && (status != costs::PrefixStatus::Exact
+                || ii.colls.get(col).cloned().flatten().as_deref() != Some(c.name.as_str()))
+        {
+            return Vec::new();
+        }
         let pattern_ops = ii.pattern_ops(col);
         let leftop = match &args[0] {
             // (A bpchar key is compared as bpchar.)
@@ -946,9 +974,21 @@ impl Planner<'_, '_> {
         };
         let text = |s: &str| Expr::Const(Value::Text(s.into()), cty.clone());
         let mut b = crate::sql::binder::Binder::new(self.ctx, Vec::new());
+        // (The index condition compares under the index's collation.)
+        let index_coll = ii
+            .colls
+            .get(col)
+            .cloned()
+            .flatten()
+            .and_then(|n| crate::types::collation::by_name(&self.ctx.catalog(), &n))
+            .filter(|c| !c.bytewise());
         let mut make = |op: &'static str, v: Expr| -> Option<IClause> {
             let Expr::Call(d, _, ty) = b.binop(op, leftop.clone(), v.clone(), -1).ok()? else {
                 return None;
+            };
+            let d = match &index_coll {
+                Some(c) if !pattern_ops => Arc::new(FuncDef { coll: Some(c.clone()), ..(*d).clone() }),
+                _ => d,
             };
             let e = Expr::Call(d, vec![leftop.clone(), v.clone()], ty);
             Some(IClause {
@@ -969,6 +1009,8 @@ impl Planner<'_, '_> {
         match status {
             costs::PrefixStatus::None => {}
             costs::PrefixStatus::Exact => out.extend(make("=", text(&prefix))),
+            // (A range needs an index in byte ("C") order: match_pattern_prefix.)
+            costs::PrefixStatus::Partial if !pattern_ops && index_coll.is_some() => {}
             costs::PrefixStatus::Partial => {
                 let (ge, lt) = if pattern_ops {
                     ("~>=~", "~<~")
@@ -3371,6 +3413,11 @@ fn bounds(ii: &IndexInfo, quals: &[IClause]) -> IndexBounds {
         }
         let kt = key.ty();
         let cs: Vec<&IClause> = quals.iter().filter(|c| c.col == col).collect();
+        // (An equality the index's byte order can't seek, under a nondeterministic
+        // collation: no range from here on.)
+        if cs.iter().any(|c| matches!(&c.expr, Expr::Call(d, ..) if !byte_order_op(d))) {
+            break;
+        }
         if let Some(v) = cs.iter().find_map(|c| match (&c.kind, &c.value) {
             (Kind::Op("="), Some(v)) if usable(v) && probe_ok(&kt, &v.ty()) => Some(v.clone()),
             _ => None,
@@ -4636,7 +4683,7 @@ impl Planner<'_, '_> {
                     Some(on) => {
                         let fixed = constant_columns(input);
                         !on.is_empty()
-                            && on.iter().all(|e| matches!(e, Expr::Col(j, _) if fixed.get(*j).copied().unwrap_or(false)))
+                            && on.iter().all(|e| crate::sql::explain::key_col_fixed(e, &fixed))
                     }
                     None => crate::sql::explain::distinct_keys_fixed(input),
                 };
@@ -5856,6 +5903,15 @@ pub fn index_order(ctx: &ExecCtx, s: &ScanPlan) -> Vec<SortKey> {
         });
     }
     out
+}
+
+/// An equality under the index column's own (nondeterministic) collation: an index
+/// condition as Postgres has it, though the index's byte order gives no range for it (the
+/// scan checks it on each row).
+fn own_collation_eq(ii: &IndexInfo, col: usize, def: &FuncDef) -> bool {
+    def.name == "="
+        && ii.am == Am::Btree
+        && def.coll.as_ref().is_some_and(|c| !c.deterministic && ii.colls.get(col).cloned().flatten().as_deref() == Some(c.name.as_str()))
 }
 
 /// Whether a comparison agrees with the indexes' byte order: one under a collation that

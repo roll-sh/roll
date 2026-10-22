@@ -1173,7 +1173,17 @@ pub(crate) fn distinct_on_unsafe(p: &Plan) -> Option<Vec<bool>> {
         Plan::With { body, .. } => distinct_on_unsafe(body),
         Plan::Distinct { input, on: Some(on), .. } => Some(
             (0..width(input))
-                .map(|j| !on.iter().any(|e| matches!(e, Expr::Col(k, _) if *k == j)))
+                .map(|j| {
+                    !on.iter().any(|e| {
+                        // (A key carrying its column's nondeterministic collation is the
+                        // column.)
+                        let e = match e {
+                            Expr::Collate(x, _, -1) => &**x,
+                            e => e,
+                        };
+                        matches!(e, Expr::Col(k, _) if *k == j)
+                    })
+                })
                 .collect(),
         ),
         _ => None,

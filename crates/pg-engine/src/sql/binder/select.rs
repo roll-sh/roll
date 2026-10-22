@@ -273,6 +273,8 @@ impl Binder<'_, '_> {
             (0..all.len()).collect()
         };
         let mut slots = Vec::new();
+        // (Later items are planned seeing the earlier ones' estimates.)
+        let mut pushed = 0;
         let future_mark = self.future_ctes.len();
         // (The statement's references to its items: taken before their queries' own WITHs.)
         let refs = self.cte_refs.take();
@@ -387,9 +389,18 @@ impl Binder<'_, '_> {
                 used: std::cell::Cell::new(false),
                 no_returning,
                 inline,
+                work_filter: None,
             });
+            if !self.deparse && self.ctes.last().and_then(|l| l.last()).is_some_and(|c| c.inline.is_none()) {
+                pushed += crate::sql::explain::push_cte_estimates(
+                    &[(id, Arc::new(plan.clone()))],
+                    std::slice::from_ref(&cte.ctename),
+                    self.ctx,
+                );
+            }
             slots.push((cte.ctename.clone(), id, plan));
         }
+        crate::sql::explain::pop_cte_estimates(pushed);
         self.future_ctes.truncate(future_mark);
         // (Kept in the order they were analyzed in, so each one's inputs open first.)
         let mut plans = Vec::new();
@@ -524,6 +535,14 @@ impl Binder<'_, '_> {
             &rarg_aux
         };
         let aux_cols = aux.cols.len();
+        // (CYCLE's check of the work table's mark: the recursive term's WHERE clause.)
+        let work_passed: Vec<Expr> = aux
+            .cols
+            .iter()
+            .enumerate()
+            .map(|(k, c)| Expr::Col(ncols + k, c.ty.clone()))
+            .collect();
+        let work_filter = if self.deparse { None } else { aux.not_cycle(&work_passed) };
         self.ctes.last_mut().unwrap().push(CteDef {
             name: name.to_string(),
             id,
@@ -533,6 +552,7 @@ impl Binder<'_, '_> {
             used: std::cell::Cell::new(false),
             no_returning: false,
             inline: None,
+            work_filter,
         });
         // (The recursive term is planned seeing its worktable as ten times the non-recursive
         // term.)
@@ -705,8 +725,12 @@ impl Binder<'_, '_> {
             .collect();
         let next = aux.next(&exprs, &passed);
         exprs.extend(next);
+        // (Deparsing, the CYCLE check is the recursive term's filter; planned, its work
+        // table scan's.)
         let mut rec = rec;
-        if let Some(pred) = aux.not_cycle(&passed) {
+        if self.deparse
+            && let Some(pred) = aux.not_cycle(&passed)
+        {
             rec = Plan::Filter {
                 input: Arc::new(rec),
                 pred,
@@ -3707,13 +3731,18 @@ impl Binder<'_, '_> {
                     );
                     let names = cols.iter().map(|c| c.name.clone()).collect();
                     let working = c.working;
+                    let work_filter = c.work_filter.clone();
                     let plan = if working {
-                        Plan::WorkScan {
+                        let scan = Plan::WorkScan {
                             id: c.id,
                             ncols: c.cols.len(),
                             name,
                             alias: refname,
                             cols: names,
+                        };
+                        match work_filter {
+                            Some(pred) => Plan::Filter { input: Arc::new(scan), pred },
+                            None => scan,
                         }
                     } else {
                         Plan::CteScan {
