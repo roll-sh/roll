@@ -763,7 +763,7 @@ async fn events(State(code): S, caller: Caller, parts: Parts, Path((owner, repo)
     let key = crate::streams::key(&caller, token(&parts).as_deref(), &parts.headers, peer, code.config.trust_forwarded_for);
     let permit = match code.stream_permit(key) {
         Ok(p) => p,
-        Err(resp) => return Ok(resp),
+        Err(resp) => return Ok(*resp),
     };
     let repo_id = r.id.clone();
     let landed = futures::stream::unfold((code.store.subscribe(&r.id), code.clone()), |(mut rx, code)| async move {

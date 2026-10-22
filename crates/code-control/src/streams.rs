@@ -75,7 +75,7 @@ pub fn key(caller: &Caller, token: Option<&str>, headers: &HeaderMap, peer: Opti
 
 impl Code {
     /// A slot for one more stream for `key`, or the 429 to answer with.
-    pub fn stream_permit(self: &Arc<Self>, key: String) -> Result<Permit, Response> {
+    pub fn stream_permit(self: &Arc<Self>, key: String) -> Result<Permit, Box<Response>> {
         let (per, total) = (self.config.max_streams_per_caller, self.config.max_streams);
         let mut open = self.streams.open.lock();
         let mine = open.get(&key).copied().unwrap_or(0);
@@ -93,8 +93,8 @@ impl Code {
     }
 }
 
-fn too_many(msg: &str) -> Response {
+fn too_many(msg: &str) -> Box<Response> {
     let mut r = (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "error": msg }))).into_response();
     r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
-    r
+    Box::new(r)
 }
