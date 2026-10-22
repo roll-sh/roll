@@ -397,11 +397,12 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             if all.iter().any(super::refute::always_false) {
                 let names = scan_names(&s);
                 let rels = vec![Some(scan_refname(&s)); names.len()];
+                let table = Some(s.table.oid);
                 let ncols = width(&Plan::Scan(s));
                 return Plan::Empty {
                     ncols,
                     cols: Some(Arc::new(names)),
-                    info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new() })),
+                    info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table })),
                 };
             }
             if super::partprune::const_conflict(&all)
@@ -420,11 +421,12 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 let names = scan_names(&s);
                 let rels = vec![Some(scan_refname(&s)); names.len()];
                 s.filter = and_all(all);
+                let table = Some(s.table.oid);
                 let scan = Plan::Scan(s);
                 let ec = crate::sql::paths::column_classes(&scan);
                 let ncols = width(&scan);
                 let cols = (names.len() == ncols).then(|| Arc::new(names));
-                let info = Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec }));
+                let info = Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec, table }));
                 return Plan::Empty { ncols, cols, info };
             }
             s.filter = and_all(all);
@@ -523,6 +525,9 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             } else {
                 (Vec::new(), Vec::new())
             };
+            // (What the join was written as, and the PlaceHolderVars a projection over it
+            // computes, stay with it.)
+            let (old_wk, old_phv) = (meta.written_kind, (meta.phv_eval, meta.phv_join));
             ec_constants(
                 cat,
                 &mut lpush,
@@ -540,11 +545,13 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 l = add_filter(cat, l, Expr::And(lpush));
             }
             if !rpush.is_empty() {
-                r = push_lateral(cat, r, rpush, !params.is_empty());
+                r = push_lateral(cat, r, rpush, &params);
             }
             let mut j = join(cat, kind, l, r, and_all(cond_parts), params, nleft, nright);
             if let Plan::Join { meta, .. } = &mut j {
                 meta.kept = kept;
+                meta.written_kind = old_wk;
+                (meta.phv_eval, meta.phv_join) = old_phv;
                 for c in old_pushed {
                     if !meta.pushed.contains(&c) {
                         meta.pushed.push(c);
@@ -623,7 +630,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             // A constant false filter excludes every member whatever constraint_exclusion
             // says.
             if parts.iter().any(super::refute::always_false) {
-                let info = Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new() }));
+                let info = Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table: None }));
                 return Plan::Empty { ncols, cols, info };
             }
             // (The classes the parent's quals make, should no member be left.)
@@ -647,7 +654,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 .filter(|p| !super::inherit::excluded(p))
                 .collect();
             if inputs.is_empty() {
-                let info = Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec }));
+                let info = Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec, table: None }));
                 return Plan::Empty { ncols, cols, info };
             }
             Plan::Append { inputs, inh }
@@ -870,6 +877,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             };
             let (down, up): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(|p| {
                 !fence
+                    && (secure || !reads_lateral_var(p))
                     && if secure {
                         !leaks(cat, p)
                     } else {
@@ -2137,7 +2145,8 @@ fn leaf_ranges(p: &Plan, off: usize) -> Vec<(usize, usize)> {
 /// Clauses onto a join's right side; a LATERAL subquery planned apart takes none reading
 /// the left side's values (qual_is_pushdown_safe refuses lateral references): they stay its
 /// Subquery Scan's filter.
-fn push_lateral(cat: &Catalog, right: Plan, parts: Vec<Expr>, lateral: bool) -> Plan {
+fn push_lateral(cat: &Catalog, right: Plan, parts: Vec<Expr>, params: &[Expr]) -> Plan {
+    let lateral = !params.is_empty();
     if lateral && matches!(right, Plan::Barrier { secure: false, .. }) {
         let (up, down): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(Expr::has_outer_refs);
         let right = if down.is_empty() { right } else { add_filter(cat, right, Expr::And(down)) };
@@ -2146,7 +2155,50 @@ fn push_lateral(cat: &Catalog, right: Plan, parts: Vec<Expr>, lateral: bool) -> 
             None => right,
         };
     }
-    add_filter(cat, right, Expr::And(parts))
+    if !lateral {
+        return add_filter(cat, right, Expr::And(parts));
+    }
+    // (Deeper down, a subquery planned apart (a UNION ALL arm's) refuses them too: the
+    // join's values a clause reads as `Outer(1, k)`.)
+    lateral_push(params);
+    let out = add_filter(cat, right, Expr::And(parts));
+    lateral_pop();
+    out
+}
+
+/// Entering a LATERAL join's right side (its values `params`, read as `Outer(1, k)`):
+/// clauses `add_filter` pushes there don't go into a subquery level when they read them.
+pub fn lateral_push(params: &[Expr]) {
+    LATERAL_PARAMS.with(|s| s.borrow_mut().push(params.to_vec()));
+}
+
+/// Leaving the LATERAL right side `lateral_push` entered.
+pub fn lateral_pop() {
+    LATERAL_PARAMS.with(|s| s.borrow_mut().pop());
+}
+
+thread_local! {
+    /// The LATERAL values of the joins whose right sides `add_filter` is inside (innermost
+    /// last).
+    static LATERAL_PARAMS: std::cell::RefCell<Vec<Vec<Expr>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Whether a clause reads a LATERAL value of a relation of this query (a join's value that
+/// is one of its relations' columns, not an outer query's), inside a LATERAL right side.
+fn reads_lateral_var(e: &Expr) -> bool {
+    LATERAL_PARAMS.with(|s| {
+        let s = s.borrow();
+        let Some(top) = s.last() else { return false };
+        let mut found = false;
+        e.walk(&mut |x| {
+            if let Expr::Outer(1, k, _) = x
+                && top.get(*k).is_none_or(|p| !p.columns().is_empty())
+            {
+                found = true;
+            }
+        });
+        found
+    })
 }
 
 fn right_pushable(e: &Expr, params: &[Expr]) -> bool {
@@ -2323,7 +2375,7 @@ pub fn join(
         left = add_filter(cat, left, Expr::And(lpush));
     }
     if !rpush.is_empty() {
-        right = push_lateral(cat, right, rpush, !params.is_empty());
+        right = push_lateral(cat, right, rpush, &params);
     }
     // Hash keys: `l = r` with each side reading only one input, same type.
     let mut hash: Option<(Vec<Expr>, Vec<Expr>)> = None;

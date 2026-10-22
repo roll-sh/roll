@@ -58,6 +58,9 @@ pub struct Subquery {
     /// count; EXPLAIN shows the comparison as Postgres's test expression,
     /// `x op (SubPlan n).col1`.
     pub test_op: Option<usize>,
+    /// The sub-select's output column names (an IN / ANY sublink's; empty when not
+    /// recorded): a subquery the semi join reads names them so.
+    pub names: Arc<Vec<String>>,
 }
 
 /// A call of a user-defined function run as a subquery (`Subquery::func`), as the planner

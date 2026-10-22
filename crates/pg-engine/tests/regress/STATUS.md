@@ -35,9 +35,9 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50971 (**99.65%**) |
-| units differing | 179 |
-| files fully matching | 202 |
+| units matching | 50980 (**99.67%**) |
+| units differing | 170 |
+| files fully matching | 203 |
 | engine output == expected/*.out (pg_regress "ok") | 175 files |
 | engine crashes / panics | none |
 
@@ -45,26 +45,26 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 172 | 96.1% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 6 | 3.4% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 164 | 96.5% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 5 | 2.9% |
 | by design (a parallel plan's combine function) | 1 | 0.6% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 172 units
-join (71), partition_join (21), partition_prune (7), subselect (6), collate.icu.utf8 (8), incremental_sort (6), select_parallel (1), updatable_views (5), groupingsets (9), with (5), memoize (1), equivclass (6), aggregates (4), rowtypes (4), rowsecurity (2), generated_virtual (1), join_hash (3), returning (2), merge (2), tuplesort (2), inherit (2), select_distinct (1), rangefuncs (1), insert_conflict (1), foreign_key (1), create_table (1)
+### EXPLAIN (group C1) — 164 units
+join (68), partition_join (21), partition_prune (7), subselect (3), collate.icu.utf8 (8), incremental_sort (6), select_parallel (1), updatable_views (5), groupingsets (9), with (5), equivclass (6), aggregates (4), rowtypes (4), rowsecurity (2), generated_virtual (1), join_hash (3), returning (2), merge (1), tuplesort (2), inherit (2), select_distinct (1), rangefuncs (1), insert_conflict (1), foreign_key (1), create_table (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
 
-### Plan choice visible in results (C1 area) — 6 units
-updatable_views (1), join_hash (2), stats_ext (1), subselect (1), sqljson_jsontable (1)
+### Plan choice visible in results (C1 area) — 5 units
+updatable_views (1), join_hash (2), stats_ext (1), sqljson_jsontable (1)
 
 - sqljson_jsontable, updatable_views (1): which
   side a hash join builds on. (join's FULL JOIN row order units 77, 85 and 459 match now.)
-  join_hash, subselect, stats_ext: values of EXPLAIN ANALYZE-style helpers over plans
+  join_hash, stats_ext: values of EXPLAIN ANALYZE-style helpers over plans
   that differ.
 
 ### Name resolution — 0 units
@@ -262,6 +262,93 @@ pulled-up subquery's `WHERE f1 = 4`) joins no class with the join clause above i
 (a Hash Join; Postgres a Nested Loop of two filtered scans): `binder/optimize.rs`
 `ec_constants` only sees the quals being pushed down with the join clause.
 (`ROLL_DUMP_PLAN` now prints a WITH's CTEs and a data-modifying node's source too.)
+
+## Fixed in round 14, agent 8 (PlaceHolderVars at joins, catalog index paths, sublink pull-ups)
+
+Measured in a 52-file subset (`test_setup`, create_misc, create_index, create_view, create_table,
+create_function_sql, select, subselect, join, aggregates, union, select_distinct,
+select_distinct_on, inherit, groupingsets, partition_join, partition_prune,
+partition_aggregate, partition_info, rowsecurity, updatable_views, with, equivclass, memoize,
+rowtypes, select_parallel, rules, merge, returning, insert_conflict, incremental_sort, collate,
+window, limit, tsrf, explain, stats_ext, join_hash, rangefuncs, generated_virtual, tuplesort,
+update, privileges, foreign_key, hash_index, sqljson_jsontable, psql, misc_functions, sysviews,
+alter_table, indexing, stats) against the engine of 53dd5c6 plus this batch: 9 units fixed, none
+broken (join compared unit by unit with another agent's run of that engine; alter_table 953,
+`to_json(v1)` of a view's whole row shown as `bt.*`, differs in that run too: the whole-row Var
+display, not this batch).
+
+| file | fixed units |
+|---|---|
+| join | 328, 343, 388 |
+| subselect | 218, 221, 288, 350 |
+| memoize | 11 |
+| merge | 462 |
+
+What changed:
+
+- PlaceHolderVars evaluated at joins. A subquery over a join pulled up under an outer join (as
+  written: pull-up comes before reduce_outer_joins) keeps each output that wouldn't go NULL with
+  its rows (a constant, a non-strict expression) as a PlaceHolderVar: the lifted join under a
+  projection computing them (`plan::phv_projection`, `JoinMeta::phv_join`; a single-table
+  subquery's under its scan, `ScanPlan::phv_proj`). The join group takes the projection's
+  relations in (`outerjoins::walk`, `gather`), each PlaceHolderVar a column of the group's row
+  with its ph_eval_at (the relations its expression reads, those an outer join inside nulls
+  joined first: its varnullingrels; else the subquery's), computed by the lowest relation of
+  them all (`Search::with_phvs`: the join's or the scan's target list), read as a column above
+  and nulled with the rows. Clauses over it need those relations; at the join computing it, or
+  inside a parameterized scan (passed as a parameter when the outer side computes it), its
+  expression is in place, as one clause (not split nor simplified). make_outerjoininfo's
+  min_righthand covers a right side's PlaceHolderVars, have_join_order_restriction /
+  has_join_restriction their relations, have_dangerous_phv refuses a nested loop whose outer
+  side has part of a parameter's relations. A subquery's own subqueries are pulled up into it
+  first (their PlaceHolderVars for its outer joins), its outputs in the outer join's own ON
+  clause are the expressions themselves (no varnullingrels there), and constants folded after
+  (`1 = 1` gone, `5 + 0` is `5`). join 328 (`Filter: (nt2.b1 AND (id IS NOT NULL))` in the
+  parameterized index scan), 343 (`unique2 = (11)`: the PlaceHolderVar computed at the
+  `onerow` join, a parameter), 388.
+- reduce_outer_joins: a PlaceHolderVar whose syntactic scope is one relation (a constant
+  output of a single-table, VALUES or FROM-less subquery) behaves like its Var
+  (find_nonnullable_rels); a scope with a join remove_useless_joins took out doesn't.
+- A WHERE clause over a tree whose outer joins were all reduced (a pulled-up subquery's) joins
+  the group as any clause (it was left a Join Filter above, `Index Only Scan` claiming columns
+  no index has); one over one item restricts it. add_filter keeps a join's written kind when it
+  rebuilds it. A hash key that can't be rebuilt as a clause leaves the tree out of the group
+  (`=` operators remembered through projections too) instead of dropping the clause.
+- Parameterized index scans: a comparison other than an equality parameterizes only over an
+  index's column (match_join_clauses_to_index); a column's join clauses come before its
+  restriction clauses in the Index Cond (get_join_index_paths).
+- A LATERAL scan's clause over its own PlaceHolderVar is a restriction there: before the join
+  clauses in its filter, the join clauses' values the first Memoize cache keys (memoize 11); a
+  PlaceHolderVar over LATERAL values under the scan's projection is still a parameter of its
+  own (memoize 9).
+- System catalogs in a join group: their stand-in tables' parameterized index paths (subselect
+  288: `Index Cond: ((attrelid = c.oid) AND (attnum = 1))`), the catalog's scan as before
+  otherwise.
+- `IN` over a sub-select whose select list returns a set: a semi join with it as a subquery
+  (`"ANY_subquery"`, named by its columns: `Subquery::names`), its ProjectSet costed by its
+  calls' rows (create_set_projection_path) and returning the calls' values first, then the
+  columns (split_pathtarget_at_srfs) (218). A clause reading a LATERAL value stays out of a
+  subquery level (qual_is_pushdown_safe) and is that Subquery Scan's own filter, not a One-Time
+  Filter (221). `x IN (VALUES ..., (correlated sub-select))` is a LATERAL semi join (350).
+- An empty relation that is a table (a partitioned table without partitions, or read ONLY; a
+  scan whose quals are false) keeps its unique indexes for Inner Unique (merge 462).
+
+Goldens added: `tests/sql/a8_phv_join.sql`, `a8_sublink_lateral.sql`, `a8_dummy_unique.sql`,
+`a8_catalog_lateral.sql`.
+
+Still open from this list, and why:
+
+- join 347: the VALUES version of 343: Postgres's remove_useless_result_rtes merges the empty
+  relations into `i1`, evaluating the PlaceHolderVars there; here the RESULT relations stay.
+  366: a semi join over a full join of RESULT relations, all removed by Postgres. 345 (a
+  PlaceHolderVar computed in a LATERAL subquery scan), 360 (one computed over a parameterized
+  appendrel), 362/363 (PlaceHolderVars with sub-selects, copied per place), 368 (a dummy
+  Result showing a view's expressions), 744 (a hash join parameterized by a LATERAL inner side,
+  under a nested loop: the executor runs a parameterized hash join as a nested loop).
+- partition_join 41: a partitionwise join with a LATERAL PlaceHolderVar.
+- subselect 327 (a correlated aggregate IN as a LATERAL subquery: Memoize over a Subquery
+  Scan), 328 (an equivalence class member relabeled to the class's collation), 332 (a semi
+  join's side unique-ified on a computed expression).
 
 ## Fixed in round 14, agent 3 (strict-NULL folding, semi joins unique-ified early, EXISTS with sublinks)
 
@@ -1748,10 +1835,10 @@ produces no units on Linux (skipped by the file itself).
 | select_distinct_on | 23 | 23 | 100% | yes | yes |  |
 | select_implicit | 44 | 44 | 100% | yes | yes |  |
 | select_having | 23 | 23 | 100% | yes | yes |  |
-| subselect | 356 | 349 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
+| subselect | 356 | 353 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 854 | 92% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (69) |
+| join | 925 | 857 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (66) |
 | aggregates | 556 | 551 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (4) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
@@ -1791,7 +1878,7 @@ produces no units on Linux (skipped by the file itself).
 | misc | 68 | 68 | 100% | no | no |  |
 | async | 11 | 11 | 100% | yes | yes |  |
 | dbsize | 25 | 25 | 100% | yes | yes |  |
-| merge | 572 | 570 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
+| merge | 572 | 571 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | misc_functions | 148 | 148 | 100% | no | no |  |
 | sysviews | 29 | 29 | 100% | yes | yes |  |
 | tsrf | 74 | 74 | 100% | yes | yes |  |
@@ -1870,7 +1957,7 @@ produces no units on Linux (skipped by the file itself).
 | partition_info | 73 | 73 | 100% | yes | yes |  |
 | tuplesort | 108 | 106 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | explain | 60 | 60 | 100% | yes | yes |  |
-| memoize | 73 | 72 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| memoize | 73 | 73 | 100% | yes | yes |  |
 | stats | 482 | 482 | 100% | yes | yes |  |
 | predicate | 42 | 42 | 100% | yes | yes |  |
 | numa | 3 | 3 | 100% | yes | yes |  |

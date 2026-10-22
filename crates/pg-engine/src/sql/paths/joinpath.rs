@@ -46,6 +46,9 @@ struct Leaf {
     /// A table scan under the projection computing its virtual generated columns in their
     /// own slots (a nullable side's): the projection, put back over the scan chosen.
     proj: Option<Vec<Expr>>,
+    /// A system catalog's scan planned as its stand-in table's (`syscat`): the catalog and
+    /// its FROM alias, the scan put back as one of it.
+    sys: Option<(crate::catalog::system::SysTable, Option<String>)>,
 }
 
 /// A FROM item that is a table scan computing virtual generated columns in their slots
@@ -417,6 +420,19 @@ struct Search<'s, 'c, 'a> {
     param_stack: std::cell::RefCell<Vec<Vec<Expr>>>,
     /// A partitionwise child join's parent leaves' rows (`Planner::pw_loop_rows`).
     loop_rows: Vec<f64>,
+    /// PlaceHolderVars evaluated at joins of the group (a pulled-up subquery's outputs an
+    /// outer join above nulls), innermost first.
+    phvs: Vec<Phv>,
+}
+
+/// A PlaceHolderVar of the group (`plan::phv_projection`): its column of the group's
+/// row, its expression over that row (reading lower ones' columns), and the leaves it is
+/// evaluated at (ph_eval_at): computed by the lowest join of them all, read as a column
+/// above it, nulled with the rows outer joins above null.
+struct Phv {
+    col: usize,
+    expr: Expr,
+    eval_at: u32,
 }
 
 /// The join clauses a parameterized path enforces (its scans', through its joins).
@@ -492,17 +508,68 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
     fn leaves_of(&self, e: &Expr) -> u32 {
         let mut m = 0u32;
         for c in e.columns() {
-            if let Some(&l) = self.leaf_of.get(c) {
+            if let Some(p) = self.phv(c) {
+                m |= p.eval_at;
+            } else if let Some(&l) = self.leaf_of.get(c) {
                 m |= 1 << l;
             }
         }
         m
     }
 
+    /// The PlaceHolderVar group column `g` is, if it is one.
+    fn phv(&self, g: usize) -> Option<&Phv> {
+        if self.phvs.is_empty() {
+            return None;
+        }
+        self.phvs.iter().find(|p| p.col == g)
+    }
+
+    /// `e` with the PlaceHolderVars a row of `layout` doesn't have computed in place (their
+    /// expressions: the node evaluating `e` is the one computing them, or a scan below).
+    fn inline_phvs(&self, e: &Expr, layout: &[usize]) -> Expr {
+        self.inline_phvs_by(e, &|p| layout.contains(&p.col))
+    }
+
+    /// `e` with the PlaceHolderVars `have` says aren't computed yet in place.
+    fn inline_phvs_by(&self, e: &Expr, have: &dyn Fn(&Phv) -> bool) -> Expr {
+        if self.phvs.is_empty() {
+            return e.clone();
+        }
+        let mut cur = e.clone();
+        // (Nested ones: as many rounds as the nesting is deep.)
+        for _ in 0..=self.phvs.len() {
+            let mut changed = false;
+            cur = cur
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(g, t) => match self.phv(g).filter(|p| !have(p)) {
+                            Some(p) => {
+                                changed = true;
+                                p.expr.clone()
+                            }
+                            None => Expr::Col(g, t),
+                        },
+                        x => x,
+                    })
+                })
+                .unwrap();
+            if !changed {
+                break;
+            }
+        }
+        cur
+    }
+
     /// The statistics variable behind a group column.
     fn var_of(&self, g: usize) -> (Option<VarRef>, Option<f64>, f64) {
         let l = self.leaf_of[g];
         let leaf = &self.leaves[l];
+        // (A PlaceHolderVar: no statistics; a constant one has one value.)
+        if let Some(p) = self.phv(g) {
+            let one = p.expr.columns().is_empty() && !p.expr.is_volatile();
+            return (None, one.then_some(1.0), leaf.rows);
+        }
         let (_, v, d) = leaf.cols[g - leaf.off].clone();
         let v = v.map(|mut v| {
             if v.rows <= 0.0 {
@@ -964,18 +1031,38 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
                 }
             }
         }
+        // (The PlaceHolderVars it computes that are needed above it: build_joinrel_tlist.)
+        for p in &self.phvs {
+            if p.eval_at & !set == 0 && self.needed_above(p.col, set) {
+                w += costs::type_width(&p.expr.ty());
+            }
+        }
         w
     }
 
     /// Column `g` is needed above relation `set`: by the group's consumers or a clause
-    /// reaching outside the set.
+    /// reaching outside the set (or a PlaceHolderVar evaluated above it).
     fn needed_above(&self, g: usize, set: u32) -> bool {
         if self.needed.get(g).copied().unwrap_or(false) {
             return true;
         }
-        self.clauses
+        if self
+            .clauses
             .iter()
             .any(|c| c.leaves & !set != 0 && c.expr.columns().contains(&g))
+        {
+            return true;
+        }
+        // (A PlaceHolderVar a clause checked above the relation reads (an outer join
+        // delays it there): computed here, read there.)
+        if self.phv(g).is_some()
+            && self.clauses.iter().any(|c| c.req & !set != 0 && c.expr.columns().contains(&g))
+        {
+            return true;
+        }
+        self.phvs
+            .iter()
+            .any(|p| p.eval_at & !set != 0 && p.col != g && p.expr.columns().contains(&g))
     }
 
     fn rel_index(&self, set: u32) -> Option<usize> {
@@ -1107,6 +1194,27 @@ impl Search<'_, '_, '_> {
                     rel.param = self.append_param_paths(l, width);
                 }
             }
+            // (A catalog: its scan as it is planned alone, and parameterized index scans
+            // of its stand-in table.)
+            Some((_, r)) if leaf.sys.is_some() => {
+                let r = Rc::new(r.shallow_with_quals());
+                rel.paths.push(JP {
+                    node: JNode::Opaque {
+                        leaf: l,
+                        kind: leaf.kind,
+                        params: Vec::new(),
+                    },
+                    rows: leaf.rows,
+                    startup: leaf.startup,
+                    total: leaf.total,
+                    width,
+                    disabled: 0,
+                    keys: Vec::new(),
+                    req: 0,
+                    set,
+                });
+                rel.param = self.param_paths(l, &r, width);
+            }
             Some((_, r)) => {
                 let r = Rc::new(r.shallow_with_quals());
                 let want = self.leaf_want(l, &r);
@@ -1213,17 +1321,14 @@ impl Search<'_, '_, '_> {
         // (local column or index expression, the outer expression over the group row,
         // its leaves, the `=`).
         let mut cands: Vec<(Expr, Expr, u32, usize)> = Vec::new();
-        let leaves_of = |e: &Expr| -> u32 {
-            e.columns()
-                .into_iter()
-                .fold(0u32, |m, g| m | (1u32 << self.leaf_of[g]))
-        };
+        let leaves_of = |e: &Expr| -> u32 { self.leaves_of(e) };
         for (ci, c) in self.clauses.iter().enumerate() {
             if !self.movable_to(ci, l) {
                 continue;
             }
             // An equality, or (as match_clause_to_indexcol takes them too) a btree
             // comparison of this leaf's column with the other leaves' values.
+            let c_is_cmp = c.eq.is_none();
             let sides = match (&c.eq, &c.expr) {
                 (Some((a, b, al, bl)), _) => vec![(a.clone(), b.clone(), *al, *bl)],
                 (None, Expr::Call(def, args, _))
@@ -1257,7 +1362,16 @@ impl Search<'_, '_, '_> {
                             if g < leaf.off || g >= leaf.off + r.table.columns.len() {
                                 continue;
                             }
-                            Expr::Col(g - leaf.off, r.table.columns[g - leaf.off].ty.clone())
+                            // (match_join_clauses_to_index: a comparison other than an
+                            // equality (no equivalence class's) parameterizes the scan only
+                            // over a column some index has as a key.)
+                            let c = g - leaf.off;
+                            if c_is_cmp
+                                && !r.indexes.iter().any(|ii| ii.keys.iter().any(|k| matches!(k, Expr::Col(j, _) if *j == c)))
+                            {
+                                continue;
+                            }
+                            Expr::Col(c, r.table.columns[c].ty.clone())
                         }
                         // An expression of this leaf's columns an index has as a key.
                         None => {
@@ -1415,7 +1529,9 @@ impl Search<'_, '_, '_> {
                 if !plain {
                     continue;
                 }
-                let Ok(q) = c.expr.clone().transform(&mut |e| {
+                // (A PlaceHolderVar the outer side doesn't compute: evaluated in the scan.)
+                let cexpr = self.inline_phvs_by(&c.expr, &|p| p.eval_at & !req == 0);
+                let Ok(q) = cexpr.transform(&mut |e| {
                     Ok(match e {
                         Expr::Col(g, t) if self.leaf_of.get(g) == Some(&l) => Expr::Col(g - leaf.off, t),
                         Expr::Col(g, t) => {
@@ -1500,7 +1616,7 @@ impl Search<'_, '_, '_> {
                 if !ii.pred.is_empty() && !implied_by(&ii.pred, &prel.quals) {
                     continue;
                 }
-                let cs = match_quals(ii, &prel.quals, None, prel.booleq.as_ref(), self.pl);
+                let cs = join_clauses_first(match_quals(ii, &prel.quals, None, prel.booleq.as_ref(), self.pl), nrq);
                 if !cs.iter().any(|c| c.qual >= nrq) {
                     continue;
                 }
@@ -1541,7 +1657,7 @@ impl Search<'_, '_, '_> {
                 if !ii.pred.is_empty() && !implied_by(&ii.pred, &prel.quals) {
                     continue;
                 }
-                let cs = match_quals(ii, &prel.quals, None, prel.booleq.as_ref(), self.pl);
+                let cs = join_clauses_first(match_quals(ii, &prel.quals, None, prel.booleq.as_ref(), self.pl), nrq);
                 if cs.iter().any(|c| c.qual >= nrq) {
                     let ip = self.pl.index_path(&prel, ix, cs, Vec::new(), false, false);
                     if ip.index_sel < 1.0 {
@@ -1650,6 +1766,7 @@ impl Search<'_, '_, '_> {
                 || c.leaves == set
                 || c.expr.is_volatile()
                 || !self.movable_to(ci, l)
+                || c.expr.columns().iter().any(|&g| self.phv(g).is_some())
             {
                 continue;
             }
@@ -1702,6 +1819,7 @@ impl Search<'_, '_, '_> {
                     || d.leaves & !(set | req) != 0
                     || d.expr.is_volatile()
                     || !self.movable_to(cj, l)
+                    || d.expr.columns().iter().any(|&g| self.phv(g).is_some())
                 {
                     continue;
                 }
@@ -1771,7 +1889,7 @@ impl Search<'_, '_, '_> {
                 if !ii.pred.is_empty() && !implied_by(&ii.pred, &prel.quals) {
                     continue;
                 }
-                let cs = match_quals(ii, &prel.quals, None, prel.booleq.as_ref(), self.pl);
+                let cs = join_clauses_first(match_quals(ii, &prel.quals, None, prel.booleq.as_ref(), self.pl), nrq);
                 if !cs.iter().any(|c| c.qual >= nrq) {
                     continue;
                 }
@@ -2030,7 +2148,7 @@ impl Search<'_, '_, '_> {
                     if !ii.pred.is_empty() && !implied_by(&ii.pred, &prel.quals) {
                         continue;
                     }
-                    let cs = match_quals(ii, &prel.quals, None, prel.booleq.as_ref(), self.pl);
+                    let cs = join_clauses_first(match_quals(ii, &prel.quals, None, prel.booleq.as_ref(), self.pl), nrq);
                     if !cs.iter().any(|c| c.qual >= nrq) {
                         continue;
                     }
@@ -2337,7 +2455,7 @@ impl Search<'_, '_, '_> {
             } else {
                 return None;
             };
-            let g = key_col(rhs)?;
+            let g = key_col(rhs).filter(|&g| self.phv(g).is_none())?;
             can_btree &= cl.mergeable;
             can_hash &= cl.hashable;
             // (A column equated to a constant needs no unique-ifying.)
@@ -2447,6 +2565,9 @@ impl Search<'_, '_, '_> {
         let mut removed: Vec<usize> = Vec::new();
         let semi = matches!(jt, Jt::Semi | Jt::Anti | Jt::RightSemi | Jt::RightAnti);
         let constant = |g: usize| {
+            if self.phv(g).is_some() {
+                return false;
+            }
             let l = self.leaf_of[g];
             let leaf = &self.leaves[l];
             match &leaf.scan {
@@ -2590,8 +2711,15 @@ impl Search<'_, '_, '_> {
         }
         // (A pulled-up subquery's scan computing its PlaceHolderVars: through the
         // projection's columns.)
+        let dummy_table = match &leaf.plan {
+            Plan::Empty { info: Some(i), .. } => i.table.and_then(|o| self.pl.cat.table(o)),
+            _ => None,
+        };
         let (t, proj): (&std::sync::Arc<crate::catalog::Table>, Option<&Vec<Expr>>) = match (&leaf.scan, &leaf.plan) {
             (Some((s, _)), _) => (&s.table, None),
+            // (A table found empty, its columns the table's: its unique indexes all the
+            // same.)
+            (None, Plan::Empty { .. }) if dummy_table.is_some() => (dummy_table.unwrap(), None),
             (None, Plan::Project { input, exprs }) => match &**input {
                 Plan::Scan(s) => (&s.table, Some(exprs)),
                 _ => return false,
@@ -3235,11 +3363,7 @@ impl Search<'_, '_, '_> {
         if ex.inner_unique && ex.restrict.iter().any(|c| !enforced.contains(c)) {
             return None;
         }
-        let leaves_of = |e: &Expr| -> u32 {
-            e.columns()
-                .into_iter()
-                .fold(0u32, |m, g| m | (1u32 << self.leaf_of[g]))
-        };
+        let leaves_of = |e: &Expr| -> u32 { self.leaves_of(e) };
         let mut keys: Vec<Expr> = Vec::new();
         let mut binary = false;
         for &c in enforced {
@@ -3312,7 +3436,7 @@ impl Search<'_, '_, '_> {
         // The group variables: a column, or the columns an expression reads.
         let mut vars: Vec<usize> = Vec::new();
         for k in keys {
-            match key_col(k) {
+            match key_col(k).filter(|&g| self.phv(g).is_none()) {
                 Some(g) => {
                     let l = self.leaf_of[g];
                     width += self.leaves[l].cols[g - self.leaves[l].off].0 as f64;
@@ -3353,6 +3477,16 @@ impl Search<'_, '_, '_> {
             return;
         }
         if !param_join && op.req != 0 {
+            return;
+        }
+        // have_dangerous_phv: a PlaceHolderVar the inner side reads as a parameter whose
+        // relations the outer side has some of (and so can't supply).
+        if param_join
+            && self
+                .phvs
+                .iter()
+                .any(|p| p.eval_at & !ip.req == 0 && p.eval_at & op.set != 0)
+        {
             return;
         }
         let mut enforced: Vec<usize> = enforced_of(ip.memoized());
@@ -4028,6 +4162,9 @@ impl Search<'_, '_, '_> {
     }
 
     fn col_width(&self, g: usize) -> u32 {
+        if let Some(p) = self.phv(g) {
+            return costs::type_width(&p.expr.ty());
+        }
         let l = self.leaf_of[g];
         let leaf = &self.leaves[l];
         leaf.cols.get(g - leaf.off).map_or(0, |c| c.0)
@@ -4050,7 +4187,7 @@ impl Search<'_, '_, '_> {
                     for e in params {
                         e.walk(&mut |x| {
                             if let Expr::Col(g, _) = x
-                                && s.leaf_of.get(*g).is_some_and(|&l| (1u32 << l) & set == 0)
+                                && s.leaf_of.get(*g).is_some() && s.leaves_of(x) & set == 0
                                 && !out.iter().any(|y| y.same_as(x))
                             {
                                 out.push(x.clone());
@@ -4067,7 +4204,7 @@ impl Search<'_, '_, '_> {
                         for &q in quals {
                             s.clauses[q].expr.walk(&mut |x| {
                                 if let Expr::Col(g, _) = x
-                                    && s.leaf_of.get(*g).is_some_and(|&l| (1u32 << l) & set == 0)
+                                    && s.leaf_of.get(*g).is_some() && s.leaves_of(x) & set == 0
                                     && !out.iter().any(|y| y.same_as(x))
                                 {
                                     out.push(x.clone());
@@ -4112,6 +4249,70 @@ impl Search<'_, '_, '_> {
     }
 
     fn build(&self, p: &JP) -> (Plan, Vec<usize>) {
+        let (plan, layout) = self.build_node(p);
+        self.with_phvs(plan, layout, p.set)
+    }
+
+    /// A relation's plan computing the PlaceHolderVars evaluated at it (all the leaves
+    /// they read are in it) that are needed above it: a projection adding them to its row
+    /// (the join's target list).
+    fn with_phvs(&self, plan: Plan, layout: Vec<usize>, set: u32) -> (Plan, Vec<usize>) {
+        if self.phvs.is_empty() {
+            return (plan, layout);
+        }
+        let mut added: Vec<(usize, Expr)> = Vec::new();
+        let mut have = layout.clone();
+        for ph in &self.phvs {
+            if ph.eval_at & !set != 0 || have.contains(&ph.col) || !self.needed_above(ph.col, set) {
+                continue;
+            }
+            let e = self.inline_phvs(&ph.expr, &have);
+            if !e.columns().iter().all(|g| have.contains(g)) {
+                continue;
+            }
+            added.push((ph.col, self.param_ref(&e, &have)));
+            have.push(ph.col);
+        }
+        if added.is_empty() {
+            return (plan, layout);
+        }
+        // (The relation's target list: the columns needed above it, then the
+        // PlaceHolderVars it computes.)
+        let n = layout.len();
+        let mut keep: Vec<usize> = (0..n).filter(|&i| self.needed_above(layout[i], set)).collect();
+        if keep.is_empty() && n > 0 {
+            keep.push(0);
+        }
+        // (A PlaceHolderVar reading another computed here reads it in place.)
+        let mut exprs: Vec<Expr> = keep.iter().map(|&i| Expr::Col(i, self.col_type(layout[i]))).collect();
+        let mut out_layout: Vec<usize> = keep.iter().map(|&i| layout[i]).collect();
+        let mut computed: Vec<(usize, Expr)> = Vec::new();
+        for (g, e) in added {
+            let e = e
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(i, t) if i >= n => match computed.get(i - n) {
+                            Some((_, ce)) => ce.clone(),
+                            None => Expr::Col(i, t),
+                        },
+                        x => x,
+                    })
+                })
+                .unwrap();
+            computed.push((g, e.clone()));
+            exprs.push(e);
+            out_layout.push(g);
+        }
+        (
+            Plan::Project {
+                input: Arc::new(plan),
+                exprs,
+            },
+            out_layout,
+        )
+    }
+
+    fn build_node(&self, p: &JP) -> (Plan, Vec<usize>) {
         match &p.node {
             JNode::Opaque { leaf, .. } => {
                 let l = &self.leaves[*leaf];
@@ -4132,6 +4333,15 @@ impl Search<'_, '_, '_> {
                     // own filter.
                     let extra: Vec<Expr> =
                         rel.quals[rel.quals.len() - enforced.len()..].to_vec();
+                    // (One over a PlaceHolderVar is a clause of its own, whatever its
+                    // expression: not split, nor simplified.)
+                    for (q, &ci) in extra.iter().zip(enforced.iter()) {
+                        if self.clauses[ci].expr.columns().iter().any(|&g| self.phv(g).is_some())
+                            && matches!(q, Expr::And(_))
+                        {
+                            s.phv_quals.push(q.clone());
+                        }
+                    }
                     let mut all = Vec::new();
                     if let Some(f) = s.filter.take() {
                         conjuncts(f, &mut all);
@@ -4154,6 +4364,22 @@ impl Search<'_, '_, '_> {
                         (!want.keys.is_empty() || !want.merge.is_empty())
                             .then(|| Arc::new((want.keys, want.merge))),
                     );
+                }
+                // (A catalog's: its scan by the path chosen, the filter with the
+                // parameterized clauses what the executor checks.)
+                if let Some((t, alias)) = &l.sys {
+                    let plan = if matches!(s.access, Access::Seq) && params.is_empty() {
+                        l.plan.clone()
+                    } else {
+                        let ordered = matches!(s.access, Access::Index { .. });
+                        Plan::SysScan {
+                            table: *t,
+                            filter: s.filter.clone(),
+                            path: Some(Arc::new(crate::sql::plan::SysPath { scan: s, ordered })),
+                            alias: alias.clone(),
+                        }
+                    };
+                    return (plan, (l.off..l.off + l.ncols).collect());
                 }
                 let scan = Plan::Scan(Box::new(s));
                 let plan = match &l.proj {
@@ -4300,7 +4526,8 @@ impl Search<'_, '_, '_> {
                 let pos = |layout: &[usize], g: usize| layout.iter().position(|&x| x == g);
                 // (A parameterized join's clauses read the values from outside it as the
                 // enclosing nested loop's parameters.)
-                let remap = |e: &Expr, layout: &[usize]| -> Expr { self.param_ref(e, layout) };
+                // (A PlaceHolderVar this join computes: its expression in place.)
+                let remap = |e: &Expr, layout: &[usize]| -> Expr { self.param_ref(&self.inline_phvs(e, layout), layout) };
                 let sorted = |plan: Plan, layout: &[usize], ks: &Option<Vec<GKey>>| -> Plan {
                     let Some(ks) = ks else { return plan };
                     let keys = ks
@@ -4586,6 +4813,7 @@ impl Search<'_, '_, '_> {
                         written_kind: None,
                         phv_eval: false,
                         presorted: false,
+                        phv_join: false,
                     }),
                 };
                 let layout = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
@@ -4611,6 +4839,9 @@ impl Search<'_, '_, '_> {
     }
 
     fn col_type(&self, g: usize) -> DataType {
+        if let Some(p) = self.phv(g) {
+            return p.expr.ty();
+        }
         let l = self.leaf_of[g];
         let leaf = &self.leaves[l];
         match &leaf.scan {
@@ -4680,7 +4911,41 @@ fn gather(
     leaves: &mut Vec<(Plan, usize)>,
     clauses: &mut Vec<(Expr, bool)>,
     top: bool,
+    phvs: &mut Vec<(usize, Expr, u32, u32)>,
 ) {
+    // A pulled-up subquery's inner join computing PlaceHolderVars (an outer join above
+    // nulled it as written): its relations are the group's.
+    if !top
+        && let Some((input, exprs, n)) = crate::sql::plan::phv_projection(p)
+        && match &**input {
+            Plan::Join { kind, params, .. } => *kind == JoinKind::Inner && params.is_empty(),
+            Plan::Filter { .. } | Plan::Scan(_) => true,
+            _ => false,
+        }
+        && leaves.len() < 31
+    {
+        let first = leaves.len();
+        match &**input {
+            Plan::Filter { input: j, pred } if matches!(&**j, Plan::Join { kind: JoinKind::Inner, params, .. } if params.is_empty()) => {
+                gather(j, off, leaves, clauses, false, phvs);
+                let mut parts = Vec::new();
+                conjuncts(pred.clone(), &mut parts);
+                for e in parts {
+                    clauses.push((e.shift_cols(off as isize), false));
+                }
+            }
+            Plan::Filter { .. } => {
+                leaves.push((p.clone(), off));
+                return;
+            }
+            j => gather(j, off, leaves, clauses, false, phvs),
+        }
+        let scope = (first..leaves.len()).fold(0u32, |m, i| m | (1u32 << i));
+        for (i, e) in exprs.iter().enumerate() {
+            phvs.push((off + n + i, e.clone().shift_cols(off as isize), scope, 0));
+        }
+        return;
+    }
     if let Plan::Join {
         kind,
         left,
@@ -4699,8 +4964,8 @@ fn gather(
     {
         let inner_only = *kind == JoinKind::Inner;
         if inner_only {
-            gather(left, off, leaves, clauses, false);
-            gather(right, off + nleft, leaves, clauses, false);
+            gather(left, off, leaves, clauses, false, phvs);
+            gather(right, off + nleft, leaves, clauses, false, phvs);
         } else {
             leaves.push(((**left).clone(), off));
             leaves.push(((**right).clone(), off + nleft));
@@ -4748,6 +5013,9 @@ fn gather(
                 } else {
                     equality_for(&ty).or_else(|| crate::sql::func::resolve_binop("=", &ty, &ty).ok().map(|r| r.def))
                 };
+                if eq.is_none() {
+                    GATHER_FAILED.with(|f| f.set(true));
+                }
                 if let Some(eq) = eq {
                     let e = crate::sql::binder::eq_under(Expr::Call(eq, vec![a, b], DataType::Bool), coll);
                     let e = if bad {
@@ -4762,13 +5030,14 @@ fn gather(
         return;
     }
     // A pulled-up subquery's WHERE over its inner joins (`lift`): its clauses are the
-    // tree's.
+    // tree's. (Or a clause pushed down onto one computing PlaceHolderVars.)
     if !top
         && let Plan::Filter { input, pred } = p
-        && matches!(&**input, Plan::Join { kind: JoinKind::Inner, params, meta, .. } if params.is_empty() && meta.from_call.is_none())
+        && (matches!(&**input, Plan::Join { kind: JoinKind::Inner, params, meta, .. } if params.is_empty() && meta.from_call.is_none())
+            || crate::sql::plan::phv_projection(input).is_some())
         && outerjoins::absorbable(pred)
     {
-        gather(input, off, leaves, clauses, false);
+        gather(input, off, leaves, clauses, false, phvs);
         let mut parts = Vec::new();
         conjuncts(pred.clone(), &mut parts);
         for e in parts {
@@ -4782,6 +5051,12 @@ fn gather(
 /// What the binder's `=` for a type depends on: the catalog and the search path. (A `Weak`
 /// keeps the catalog's allocation, so no later catalog can take its address.)
 type EqScope = (std::sync::Weak<crate::catalog::Catalog>, Vec<String>);
+
+thread_local! {
+    /// A join tree's hash key couldn't be rebuilt as a clause while gathering its group
+    /// (`gather`, `outerjoins::gather_group`): the tree isn't taken as one.
+    static GATHER_FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 thread_local! {
     /// `=` operators met in join clauses, by type (to rebuild hash keys as clauses), as the
@@ -5200,6 +5475,7 @@ impl Planner<'_, '_> {
             }
         }
         sink(&self.cat, &mut lp);
+        self.fold_lifted(&mut lp);
         let lw = crate::sql::binder::plan_width(&lp);
         let mut need = vec![false; lw];
         for (i, e) in map.iter().enumerate() {
@@ -5305,6 +5581,74 @@ impl Planner<'_, '_> {
             self.lifted.borrow_mut().push(p as *const Plan as usize);
         }
         Some(sorted)
+    }
+
+    /// eval_const_expressions over the clauses and PlaceHolderVars a pulled-up subquery's
+    /// values were put into (`1 = 1`, `5 + 0` folded; a clause folded to true gone).
+    fn fold_lifted(&self, p: &mut Plan) {
+        let fold = |e: &Expr| -> Expr {
+            e.clone()
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Call(def, args, ty)
+                            if def.volatility == 'i'
+                                && !def.is_srf()
+                                && !args.is_empty()
+                                && args.iter().all(|a| matches!(a, Expr::Const(..))) =>
+                        {
+                            let call = Expr::Call(def, args, ty.clone());
+                            match crate::sql::expr::eval(&call, &[], self.ctx) {
+                                Ok(v) => Expr::Const(v, ty),
+                                Err(_) => call,
+                            }
+                        }
+                        x => x,
+                    })
+                })
+                .unwrap_or_else(|_| e.clone())
+        };
+        let fold_qual = |e: &Expr| -> Option<Expr> {
+            let mut parts = Vec::new();
+            conjuncts(fold(e), &mut parts);
+            parts.retain(|q| !matches!(q, Expr::Const(Value::Bool(true), _)));
+            match parts.len() {
+                0 => None,
+                1 => parts.pop(),
+                _ => Some(Expr::And(parts)),
+            }
+        };
+        match p {
+            Plan::Join { left, right, cond, params, .. } if params.is_empty() => {
+                *cond = cond.as_ref().and_then(fold_qual);
+                self.fold_lifted(Arc::make_mut(left));
+                self.fold_lifted(Arc::make_mut(right));
+            }
+            Plan::Filter { input, pred } => {
+                self.fold_lifted(Arc::make_mut(input));
+                match fold_qual(pred) {
+                    Some(f) => *pred = f,
+                    None => *p = Arc::unwrap_or_clone(std::mem::replace(input, Arc::new(Plan::One))),
+                }
+            }
+            Plan::Project { input, exprs } => {
+                let n = crate::sql::binder::plan_width(input);
+                let is_phv = exprs.len() > n
+                    && exprs[..n].iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i))
+                    && match &**input {
+                        Plan::Join { meta, .. } => meta.phv_join,
+                        Plan::Filter { input: j, .. } => matches!(&**j, Plan::Join { meta, .. } if meta.phv_join),
+                        Plan::Scan(sp) => sp.phv_proj,
+                        _ => false,
+                    };
+                if is_phv {
+                    for e in exprs[n..].iter_mut() {
+                        *e = fold(e);
+                    }
+                    self.fold_lifted(Arc::make_mut(input));
+                }
+            }
+            _ => {}
+        }
     }
 
     /// make_group_input_target: below a grouping, the joins return the columns its
@@ -5451,24 +5795,55 @@ impl Planner<'_, '_> {
         // (`outerjoins`); one outer join of two items, or inner joins alone, the plain way.
         let extra = self.absorbed.take();
         let mut laterals: Vec<(usize, Vec<Expr>)> = Vec::new();
+        let mut group_phvs: Vec<(usize, Expr, u32, u32)> = Vec::new();
         let (mut sjs, mut clause_meta, general) = match outerjoins::gather_group(p, &extra) {
             // (Or LATERAL items among more than two inner-joined ones: the join order
             // the references allow.)
+            // (Or PlaceHolderVars to evaluate at its joins.)
             Some(g)
-                if !g.sjs.is_empty() && !(g.sjs.len() == 1 && g.leaves.len() == 2)
+                if !g.sjs.is_empty() && (!(g.sjs.len() == 1 && g.leaves.len() == 2) || !g.phvs.is_empty())
                     || g.sjs.is_empty() && !g.laterals.is_empty() && g.leaves.len() > 2 =>
             {
                 raw_leaves = g.leaves;
                 raw_clauses = g.clauses;
                 laterals = g.laterals;
+                group_phvs = g.phvs;
                 kind = JoinKind::Inner;
                 (g.sjs, g.meta, true)
             }
-            _ => {
-                if !extra.is_empty() || lateral_top {
+            g => {
+                // (WHERE clauses over a tree whose outer joins were all reduced to inner
+                // ones, a pulled-up subquery's: the group's clauses as any.)
+                let all_inner = kind == JoinKind::Inner
+                    && g.as_ref().is_some_and(|g| g.sjs.is_empty() && g.laterals.is_empty());
+                if !extra.is_empty() && !all_inner || lateral_top {
                     return None;
                 }
-                gather(p, 0, &mut raw_leaves, &mut raw_clauses, true);
+                GATHER_FAILED.with(|f| f.set(false));
+                gather(p, 0, &mut raw_leaves, &mut raw_clauses, true, &mut group_phvs);
+                if GATHER_FAILED.with(|f| f.replace(false)) {
+                    return None;
+                }
+                // (One item's: its restriction; several items': a join clause.)
+                for e in &extra {
+                    let cols = e.columns();
+                    let own = raw_leaves.iter().position(|(lp, off)| {
+                        let w = crate::sql::binder::plan_width(lp);
+                        !cols.is_empty() && cols.iter().all(|&c| c >= *off && c < off + w)
+                    });
+                    match own {
+                        Some(i) => {
+                            let off = raw_leaves[i].1;
+                            let lp = std::mem::replace(&mut raw_leaves[i].0, Plan::One);
+                            raw_leaves[i].0 = crate::sql::binder::optimize::add_filter(
+                                &self.cat,
+                                lp,
+                                e.clone().shift_cols(-(off as isize)),
+                            );
+                        }
+                        None => raw_clauses.push((e.clone(), false)),
+                    }
+                }
                 // (MERGE: the target is the first relation, the source the second; equal
                 // inner or full join paths keep the target outside.)
                 // (Its RIGHT JOIN is the LEFT JOIN the other way round: the preserved
@@ -5510,19 +5885,107 @@ impl Planner<'_, '_> {
         if raw_leaves.len() < 2 || raw_leaves.len() > COLLAPSE_LIMIT {
             return None;
         }
+        // distribute_qual_to_rels: a clause of an inner join over one item's columns (a
+        // pulled-up subquery's value put into an ON clause) restricts that item.
+        {
+            // (A PlaceHolderVar evaluated at one item: its expression in place.)
+            let lw = raw_leaves
+                .iter()
+                .map(|(lp, off)| off + crate::sql::binder::plan_width(lp))
+                .chain(group_phvs.iter().map(|(c, _, _, _)| c + 1))
+                .max()
+                .unwrap_or(0);
+            let mut lo = vec![usize::MAX; lw];
+            for (i, (lp, off)) in raw_leaves.iter().enumerate() {
+                let n = crate::sql::binder::plan_width(lp);
+                for x in lo.iter_mut().take(off + n).skip(*off) {
+                    *x = i;
+                }
+            }
+            let at = outerjoins::phv_eval_at(&group_phvs, &lo);
+            let inline_one = |e: &Expr| -> Expr {
+                let mut cur = e.clone();
+                for _ in 0..=group_phvs.len() {
+                    let mut changed = false;
+                    cur = cur
+                        .transform(&mut |x| {
+                            Ok(match x {
+                                Expr::Col(g, t) => match group_phvs.iter().position(|(c, _, _, _)| *c == g) {
+                                    Some(k) if at[k].1.count_ones() == 1 => {
+                                        changed = true;
+                                        group_phvs[k].1.clone()
+                                    }
+                                    _ => Expr::Col(g, t),
+                                },
+                                x => x,
+                            })
+                        })
+                        .unwrap();
+                    if !changed {
+                        break;
+                    }
+                }
+                cur
+            };
+            // (The items a clause needs: its columns', its PlaceHolderVars' eval_at.)
+            let mask_of = |e: &Expr| -> u32 {
+                e.columns().iter().fold(0u32, |m, &g| {
+                    m | match lo.get(g) {
+                        Some(&l) if l != usize::MAX => 1u32 << l.min(31),
+                        _ => at.iter().find(|(c, _)| *c == g).map_or(u32::MAX, |x| x.1),
+                    }
+                })
+            };
+            let mut i = 0;
+            while i < raw_clauses.len() {
+                if mask_of(&raw_clauses[i].0).count_ones() != 1 {
+                    i += 1;
+                    continue;
+                }
+                let e = inline_one(&raw_clauses[i].0);
+                let on = &raw_clauses[i].1;
+                let e = &e;
+                let (sj, req, nullable) = clause_meta.get(i).copied().unwrap_or((None, 0, 0));
+                let cols = e.columns();
+                let own = raw_leaves.iter().position(|(lp, off)| {
+                    let w = crate::sql::binder::plan_width(lp);
+                    !cols.is_empty() && cols.iter().all(|&c| c >= *off && c < off + w)
+                });
+                let movable = !*on
+                    && sj.is_none()
+                    && nullable == 0
+                    && (!general || req.count_ones() <= 1)
+                    && outerjoins::absorbable(e)
+                    && !crate::sql::explain::expr_volatile_deep(e);
+                match own {
+                    Some(l) if movable => {
+                        let off = raw_leaves[l].1;
+                        let q = e.clone().shift_cols(-(off as isize));
+                        let lp = std::mem::replace(&mut raw_leaves[l].0, Plan::One);
+                        raw_leaves[l].0 = crate::sql::binder::optimize::add_filter(&self.cat, lp, q);
+                        raw_clauses.remove(i);
+                        if i < clause_meta.len() {
+                            clause_meta.remove(i);
+                        }
+                    }
+                    _ => i += 1,
+                }
+            }
+        }
         // The group's output width, and its row's (a semi / anti join's right side
         // included).
         let width = crate::sql::binder::plan_width(p);
         let gw = raw_leaves
             .iter()
             .map(|(plan, off)| off + crate::sql::binder::plan_width(plan))
+            .chain(group_phvs.iter().map(|(c, _, _, _)| c + 1))
             .max()
             .unwrap_or(width)
             .max(width);
         // Self-join elimination: a leaf merged into another reads its columns
         // (`alias`).
         let mut alias: Vec<usize> = (0..gw).collect();
-        if laterals.is_empty() {
+        if laterals.is_empty() && group_phvs.is_empty() {
             let mut sides: Vec<(u32, u32)> = sjs.iter().map(|s| (s.syn_l, s.syn_r)).collect();
             let merges = self.self_joins(
                 &mut kind,
@@ -5588,6 +6051,31 @@ impl Planner<'_, '_> {
                 leaf_of[g] = leaf_of[alias[g]];
             }
         }
+        // PlaceHolderVars evaluated at joins: their columns stand for the leaves they are
+        // evaluated at (the first of them where one leaf is wanted).
+        let phvs: Vec<Phv> = {
+            let mut lo = vec![usize::MAX; gw];
+            for (i, (plan, off)) in raw_leaves.iter().enumerate() {
+                let n = crate::sql::binder::plan_width(plan);
+                for x in lo.iter_mut().take((*off + n).min(gw)).skip(*off) {
+                    *x = i;
+                }
+            }
+            outerjoins::phv_eval_at(&group_phvs, &lo)
+                .into_iter()
+                .zip(&group_phvs)
+                .map(|((col, eval_at), (_, expr, _, _))| Phv {
+                    col,
+                    expr: expr.clone(),
+                    eval_at,
+                })
+                .collect()
+        };
+        for p in &phvs {
+            if p.col < gw && p.eval_at != 0 {
+                leaf_of[p.col] = p.eval_at.trailing_zeros() as usize;
+            }
+        }
         let mut s = Search {
             pl: self,
             g: JoinGucs::read(self.ctx),
@@ -5613,6 +6101,7 @@ impl Planner<'_, '_> {
             cur_sj: None,
             param_stack: Default::default(),
             loop_rows: self.pw_loop_rows.take(),
+            phvs,
         };
         s.needed.resize(gw, false);
         for (ci, (e, on)) in raw_clauses.into_iter().enumerate() {
@@ -5658,6 +6147,8 @@ impl Planner<'_, '_> {
                 }
                 None => (false, false),
             };
+            // (A PlaceHolderVar is no member of an equivalence class here: no merge key.)
+            let mergeable_ = mergeable_ && !e.columns().iter().any(|&g| s.phv(g).is_some());
             let cost = costs::qual_cost(&e);
             s.clauses.push(Clause {
                 expr: e,
@@ -5823,10 +6314,27 @@ impl Planner<'_, '_> {
                 sp.reverse = false;
             }
             let mut proj = None;
+            let mut sys = None;
             let scan = match &plan {
                 Plan::Scan(sp) if plannable(sp) => {
                     let sp = (**sp).clone();
                     self.rel(&sp, &lneed).map(|r| (sp, r))
+                }
+                // (A catalog with indexes: its stand-in table's paths, parameterized ones
+                // too.)
+                Plan::SysScan { table, filter, path: None, alias }
+                    if !laterals.iter().any(|(li, _)| *li == i) =>
+                {
+                    match super::syscat::sys_leaf_scan(*table, filter.as_ref()) {
+                        Some(sp) => {
+                            let r = self.rel(&sp, &lneed).map(|r| (sp, r));
+                            if r.is_some() {
+                                sys = Some((*table, alias.clone()));
+                            }
+                            r
+                        }
+                        None => None,
+                    }
                 }
                 p => match virtual_proj(p) {
                     Some((sp, exprs)) if plannable(sp) => {
@@ -5841,14 +6349,22 @@ impl Planner<'_, '_> {
                 },
             };
             if scan.is_none() {
+                // (A LATERAL item: planned inside its values' scope.)
+                let lat = laterals.iter().find(|(li, _)| *li == i).map(|(_, ps)| ps.clone());
+                if let Some(ps) = &lat {
+                    crate::sql::binder::optimize::lateral_push(ps);
+                }
                 self.walk(&mut plan, &lneed, None);
+                if lat.is_some() {
+                    crate::sql::binder::optimize::lateral_pop();
+                }
             }
             let members = match (&scan, &plan) {
                 (None, Plan::Append { inputs, .. }) => self.members(inputs, &lneed),
                 _ => None,
             };
             let est = match &scan {
-                Some(_) => crate::sql::explain::PlanEstimate {
+                Some(_) if sys.is_none() => crate::sql::explain::PlanEstimate {
                     rows: 0.0,
                     startup: 0.0,
                     total: 0.0,
@@ -5858,10 +6374,10 @@ impl Planner<'_, '_> {
                     disabled: 0,
                     cols: Vec::new(),
                 },
-                None => crate::sql::explain::estimate(&Arc::new(plan.clone()), self.ctx),
+                _ => crate::sql::explain::estimate(&Arc::new(plan.clone()), self.ctx),
             };
             let (rows, cols) = match &scan {
-                Some((sp, r)) => {
+                Some((sp, r)) if sys.is_none() => {
                     let cols = (0..n)
                         .map(|k| {
                             if k < sp.table.columns.len() {
@@ -5899,7 +6415,7 @@ impl Planner<'_, '_> {
                         .collect();
                     (r.rows, cols)
                 }
-                None => (est.rows, est.cols.clone()),
+                _ => (est.rows, est.cols.clone()),
             };
             // A partitioned table's Append: its columns are the parent's (whose unique
             // indexes the planner knows), over the members' tuples.
@@ -5977,6 +6493,7 @@ impl Planner<'_, '_> {
                     .find(|(li, _)| *li == i)
                     .map(|(_, ps)| (ps.clone(), ps.iter().fold(0u32, |m, e| m | s.leaves_of(e)))),
                 proj,
+                sys,
             });
         }
         // generate_join_implied_equalities: in a group of inner joins, each pair of an
@@ -6022,7 +6539,7 @@ impl Planner<'_, '_> {
         let saved_lim = self.pw_limit.replace(lim);
         let ord = s.order.as_ref().filter(|o| !o.keys.is_empty() && o.complete && !o.hint).cloned();
         let saved_ord = self.pw_order.replace(ord.clone());
-        let pwj = if alias.iter().enumerate().all(|(i, &g)| i == g) {
+        let pwj = if alias.iter().enumerate().all(|(i, &g)| i == g) && s.phvs.is_empty() {
             self.partitionwise(p, &s, &needed[..width.min(needed.len())])
         } else {
             None
@@ -6153,6 +6670,7 @@ impl Planner<'_, '_> {
                 .map(|g| {
                     let g = alias[g];
                     let ty = match &s.leaves[s.leaf_of[g]].scan {
+                        _ if s.phv(g).is_some() => s.col_type(g),
                         Some((sp, _)) if g - s.leaves[s.leaf_of[g]].off < sp.table.columns.len() => {
                             sp.table.columns[g - s.leaves[s.leaf_of[g]].off].ty.clone()
                         }
@@ -6172,6 +6690,14 @@ impl Planner<'_, '_> {
         *p = out;
         Some(sorted)
     }
+}
+
+/// A parameterized index path's clauses per index column: the join clauses (the
+/// parameterized ones, past the relation's own `nrq`) before the restriction clauses, as
+/// get_join_index_paths collects them.
+fn join_clauses_first(mut cs: Vec<IClause>, nrq: usize) -> Vec<IClause> {
+    cs.sort_by_key(|c| (c.col, c.qual < nrq));
+    cs
 }
 
 /// A LATERAL item that is a join Postgres would have pulled up into the query: a join

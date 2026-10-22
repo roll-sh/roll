@@ -49,10 +49,11 @@ fn expand(
         // (A dummy relation: its columns still named.)
         let names = super::optimize::dummy_scan_names(&scan);
         let rels = vec![Some(refname.to_string()); names.len()];
+        let table = Some(parent.oid);
         return Ok(Plan::Empty {
             ncols: super::optimize::width(&Plan::Scan(Box::new(scan))),
             cols: Some(Arc::new(names)),
-            info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new() })),
+            info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table })),
         });
     }
     Ok(Plan::Append {

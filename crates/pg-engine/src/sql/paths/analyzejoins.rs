@@ -821,7 +821,7 @@ fn dummy(p: &Plan) -> Plan {
     let cols = named.map(|v| Arc::new(v.into_iter().map(|(n, _)| n).collect()));
     // (The classes its quals made stay.)
     let ec = super::column_classes(p);
-    Plan::Empty { ncols, cols, info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec })) }
+    Plan::Empty { ncols, cols, info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec, table: None })) }
 }
 
 /// A plan's outputs as expressions over the relations below its projections and joins

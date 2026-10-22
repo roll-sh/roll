@@ -44,6 +44,10 @@ pub(super) struct Group {
     /// The LATERAL items: each one's index, and the values (over the group's row) it reads
     /// from the items before it, as its `Outer(1, k)`.
     pub laterals: Vec<(usize, Vec<Expr>)>,
+    /// PlaceHolderVars evaluated at joins of the group (`plan::phv_projection`): each one's
+    /// column of the group's row, its expression (over that row) and the items under the
+    /// projection (its syntactic scope), innermost first.
+    pub phvs: Vec<(usize, Expr, u32, u32)>,
 }
 
 fn rebuild_eq(a: Expr, b: Expr, bad: bool) -> Option<Expr> {
@@ -75,7 +79,35 @@ fn walk(
     leaves: &mut Vec<(Plan, usize)>,
     joins: &mut Vec<RawJoin>,
     laterals: &mut Vec<(usize, Vec<Expr>)>,
+    phvs: &mut Vec<(usize, Expr, u32, u32)>,
 ) -> (u32, u32) {
+    // A pulled-up subquery's join computing PlaceHolderVars: its items are the group's,
+    // its PlaceHolderVars columns of the group's row.
+    if let Some((input, exprs, n)) = crate::sql::plan::phv_projection(p)
+        && leaves.len() < 32
+    {
+        let j0 = joins.len();
+        let (m, inner) = walk(input, off, virt, leaves, joins, laterals, phvs);
+        for (i, e) in exprs.iter().enumerate() {
+            let e = e.clone().shift_cols(off as isize);
+            // (A column an outer join below nulls is read above that join: the
+            // PlaceHolderVar is evaluated where the join is, its varnullingrels.)
+            let mut force = 0u32;
+            for g in e.columns() {
+                let Some(l) = leaves.iter().position(|(lp, o)| g >= *o && g < o + crate::sql::binder::plan_width(lp)) else {
+                    continue;
+                };
+                let bit = 1u32 << l.min(31);
+                for j in &joins[j0..] {
+                    if j.kind != JoinKind::Inner && j.r & bit != 0 {
+                        force |= j.l | j.r;
+                    }
+                }
+            }
+            phvs.push((off + n + i, e, m, force));
+        }
+        return (m, inner);
+    }
     if let Plan::Join {
         kind,
         left,
@@ -92,7 +124,7 @@ fn walk(
         && leaves.len() < 32
     {
         let nl = *nleft;
-        let (l, li) = walk(left, off, virt, leaves, joins, laterals);
+        let (l, li) = walk(left, off, virt, leaves, joins, laterals, phvs);
         let roff = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
             let ro = *virt;
             *virt += crate::sql::binder::plan_width(right);
@@ -102,7 +134,7 @@ fn walk(
         };
         let map = |c: usize| if c < nl { off + c } else { roff + (c - nl) };
         let (r, ri) = if params.is_empty() {
-            walk(right, roff, virt, leaves, joins, laterals)
+            walk(right, roff, virt, leaves, joins, laterals, phvs)
         } else {
             // A LATERAL item: its values from the left side, which it must be joined to
             // the inside of a nested loop of.
@@ -133,8 +165,10 @@ fn walk(
                 } else {
                     (a, b)
                 };
-                if let Some(e) = rebuild_eq(a, b, bad) {
-                    conds.push(crate::sql::binder::eq_under(e, coll));
+                match rebuild_eq(a, b, bad) {
+                    Some(e) => conds.push(crate::sql::binder::eq_under(e, coll)),
+                    // (A key not rebuilt as a clause: the tree isn't taken as a group.)
+                    None => super::GATHER_FAILED.with(|f| f.set(true)),
                 }
             }
         }
@@ -158,12 +192,14 @@ fn walk(
         return (l | r, inner);
     }
     // A WHERE clause left above a join below (its rows' filter): its conjuncts are the
-    // tree's clauses there.
+    // tree's clauses there. (Or above a pulled-up subquery's join computing
+    // PlaceHolderVars: a clause pushed down onto the subquery.)
     if let Plan::Filter { input, pred } = p
-        && matches!(&**input, Plan::Join { kind, params, .. } if *kind != JoinKind::Full && params.is_empty())
+        && (matches!(&**input, Plan::Join { kind, params, .. } if *kind != JoinKind::Full && params.is_empty())
+            || crate::sql::plan::phv_projection(input).is_some())
         && absorbable(pred)
     {
-        let (m, inner) = walk(input, off, virt, leaves, joins, laterals);
+        let (m, inner) = walk(input, off, virt, leaves, joins, laterals, phvs);
         // (A pulled-up subquery's WHERE over outer joins of its own: its items are one
         // unit to an outer join above, which can't be commuted past the clauses.)
         let has_outer = joins.iter().any(|j| j.kind != JoinKind::Inner && j.r & m != 0);
@@ -249,13 +285,16 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
     let mut leaves = Vec::new();
     let mut joins = Vec::new();
     let mut laterals = Vec::new();
-    walk(p, 0, &mut virt, &mut leaves, &mut joins, &mut laterals);
-    if leaves.len() < 2 || leaves.len() > COLLAPSE_LIMIT {
+    let mut phvs = Vec::new();
+    super::GATHER_FAILED.with(|f| f.set(false));
+    walk(p, 0, &mut virt, &mut leaves, &mut joins, &mut laterals, &mut phvs);
+    if leaves.len() < 2 || leaves.len() > COLLAPSE_LIMIT || super::GATHER_FAILED.with(|f| f.replace(false)) {
         return None;
     }
     let gw = leaves
         .iter()
         .map(|(pl, off)| off + crate::sql::binder::plan_width(pl))
+        .chain(phvs.iter().map(|(c, _, _, _)| c + 1))
         .max()
         .unwrap_or(width)
         .max(width);
@@ -269,9 +308,11 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
             *x = i;
         }
     }
+    // (A PlaceHolderVar's column stands for the items it is evaluated at.)
+    let phv_at = phv_eval_at(&phvs, &leaf_of);
     let item = |g: usize| match leaf_of.get(g) {
         Some(&l) if l != usize::MAX => 1u32 << l,
-        _ => 0,
+        _ => phv_at.iter().find(|(c, _)| *c == g).map_or(0, |x| x.1),
     };
     let items = |e: &Expr| e.columns().into_iter().fold(0u32, |m, g| m | item(g));
     // The items each LATERAL item reads values of.
@@ -324,6 +365,13 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
                 min_r |= o.syn_l | o.syn_r;
             }
         }
+        // (A PlaceHolderVar syntactically inside the right side is evaluated there: its
+        // items are all joined before this join.)
+        for (k, (_, _, scope, _)) in phvs.iter().enumerate() {
+            if *scope & !j.r == 0 {
+                min_r |= phv_at[k].1;
+            }
+        }
         if min_l == 0 {
             min_l = j.l;
         }
@@ -372,7 +420,25 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
         meta,
         sjs,
         laterals,
+        phvs,
     })
+}
+
+/// Each PlaceHolderVar's column and the items it is evaluated at (ph_eval_at): those its
+/// expression reads (another PlaceHolderVar's own), else its syntactic scope.
+pub(super) fn phv_eval_at(phvs: &[(usize, Expr, u32, u32)], leaf_of: &[usize]) -> Vec<(usize, u32)> {
+    let mut out: Vec<(usize, u32)> = Vec::new();
+    for (c, e, scope, force) in phvs {
+        let mut m = *force;
+        for g in e.columns() {
+            match leaf_of.get(g) {
+                Some(&l) if l != usize::MAX && l < 32 => m |= 1u32 << l,
+                _ => m |= out.iter().find(|(x, _)| *x == g).map_or(0, |x| x.1),
+            }
+        }
+        out.push((*c, if m == 0 { *scope } else { m }));
+    }
+    out
 }
 
 impl Search<'_, '_, '_> {
@@ -470,6 +536,10 @@ impl Search<'_, '_, '_> {
         if self.lateral_pair(a, b) {
             return true;
         }
+        // (Both needed to compute some PlaceHolderVar: tried whatever else.)
+        if self.phvs.iter().any(|p| a & !p.eval_at == 0 && b & !p.eval_at == 0) {
+            return true;
+        }
         let mut result = false;
         for s in &self.sjs {
             if (s.min_l & !a == 0 && s.min_r & !b == 0)
@@ -489,6 +559,9 @@ impl Search<'_, '_, '_> {
 
     /// has_join_restriction: some outer join constrains how `a` joins.
     pub(super) fn has_join_restriction(&self, a: u32) -> bool {
+        if self.phvs.iter().any(|p| a & !p.eval_at == 0 && a != p.eval_at) {
+            return true;
+        }
         if self.leaves.iter().enumerate().any(|(l, leaf)| {
             leaf.lateral
                 .as_ref()

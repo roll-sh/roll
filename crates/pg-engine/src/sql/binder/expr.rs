@@ -3663,6 +3663,7 @@ impl Binder<'_, '_> {
                 func: None,
                 call: None,
                 test_op: None,
+                names: Default::default(),
             }));
             let rs = if one {
                 vec![sq]
@@ -3689,6 +3690,7 @@ impl Binder<'_, '_> {
             func: None,
             call: None,
             test_op: None,
+            names: Default::default(),
         })))
     }
 
@@ -3759,6 +3761,7 @@ impl Binder<'_, '_> {
 
                 call: None,
                 test_op: None,
+                names: Default::default(),
             }))),
             T::ExprSublink => {
                 if cols.len() != 1 {
@@ -3791,6 +3794,7 @@ impl Binder<'_, '_> {
 
                     call: None,
                     test_op: None,
+                    names: Default::default(),
                 })))
             }
             T::ArraySublink => {
@@ -3822,6 +3826,7 @@ impl Binder<'_, '_> {
 
                     call: None,
                     test_op: None,
+                    names: Default::default(),
                 })))
             }
             T::AnySublink | T::AllSublink => {
@@ -3882,6 +3887,7 @@ impl Binder<'_, '_> {
 
                             call: None,
                             test_op: Some(own_params),
+                            names: Default::default(),
                         })));
                     }
                 }
@@ -3903,6 +3909,7 @@ impl Binder<'_, '_> {
 
                     call: None,
                     test_op: None,
+                    names: Arc::new(cols.iter().map(|c| c.name.clone()).collect()),
                 })))
             }
             _ => Err(crate::error::unsupported("this kind of subquery")),
@@ -7245,6 +7252,7 @@ impl Binder<'_, '_> {
                     && at.is_some_and(|c| c.fold || matches!(c.at, SqlFnAt::Inlining)),
             })),
             test_op: None,
+            names: Default::default(),
         }));
         // evaluate_function: an immutable call over constants is its value (a composite one
         // a constant of its type). (One that fails runs, and fails, when executed.)

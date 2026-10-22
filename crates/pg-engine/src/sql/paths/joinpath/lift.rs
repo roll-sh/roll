@@ -137,15 +137,32 @@ fn flatten_join_subquery(p: &Plan, nulled: u32, anulled: u32, cx: &mut Cx) -> Op
     let Plan::Project { input, exprs } = proj else {
         return None;
     };
+    // (A projection over another one, over the join: the two composed.)
+    let composed: Vec<Expr>;
+    let (input, exprs) = match &**input {
+        Plan::Project { input: i2, exprs: e2 }
+            if crate::sql::plan::phv_projection(input).is_none()
+                && virtual_proj(input).is_none()
+                && e2.iter().all(|e| matches!(e, Expr::Col(..)) || movable(e))
+                && join_subquery(i2) =>
+        {
+            composed = exprs.iter().map(|e| subst(e, e2)).collect();
+            (i2, &composed)
+        }
+        _ => (input, exprs),
+    };
+    // An output an outer join above nulls (as written: pull-up comes before
+    // reduce_outer_joins) that wouldn't go NULL with the subquery's rows: a
+    // PlaceHolderVar, evaluated at the lowest join of the relations it reads (or of all
+    // the subquery's, reading none).
+    let _ = anulled;
+    let needs_phv =
+        |e: &Expr| !matches!(e, Expr::Col(..)) && nulled != 0 && (e.columns().is_empty() || nonstrict(e));
     if !join_subquery(input)
         || virtual_proj(proj).is_some()
         || reads_outer(input)
-        || !exprs.iter().all(|e| {
-            matches!(e, Expr::Col(..))
-                || movable(e)
-                    && outer_refs(e).is_empty()
-                    && (nulled == 0 || anulled == 0 || !e.columns().is_empty() && !nonstrict(e))
-        })
+        || !exprs.iter().all(|e| matches!(e, Expr::Col(..)) || movable(e) && outer_refs(e).is_empty())
+        || exprs.iter().any(|e| needs_phv(e) && e.has_outer_refs())
     {
         return None;
     }
@@ -153,18 +170,45 @@ fn flatten_join_subquery(p: &Plan, nulled: u32, anulled: u32, cx: &mut Cx) -> Op
         Plan::Filter { input, pred } => (&**input, Some(pred)),
         j => (j, None),
     };
-    let saved = std::mem::replace(&mut cx.in_join_subquery, true);
-    let (j2, mj, nj) = lift(join, nulled, anulled, None, cx);
+    // (Its own subqueries are pulled up into it first, as pull_up_simple_subquery does:
+    // PlaceHolderVars for its own outer joins; its outputs are wrapped above for the
+    // outer joins over it.)
+    let (j2, mj, mut nj) = lift(join, 0, 0, None, cx);
+    for x in nj.iter_mut() {
+        x.0 |= nulled;
+    }
     let j2 = unplanned(j2);
-    cx.in_join_subquery = saved;
     cx.lifted = true;
-    let map: Vec<Expr> = exprs.iter().map(|e| subst(e, &mj)).collect();
+    // The outputs over the new row as computed where read (`direct`), and as the query
+    // reads them (PlaceHolderVars as columns past the join's).
+    let direct: Vec<Expr> = exprs.iter().map(|e| subst(e, &mj)).collect();
+    let w2 = crate::sql::binder::plan_width(&j2);
+    let mut phvs: Vec<Expr> = Vec::new();
+    let map: Vec<Expr> = exprs
+        .iter()
+        .zip(&direct)
+        .map(|(e, d)| {
+            if needs_phv(e) {
+                phvs.push(d.clone());
+                Expr::Col(w2 + phvs.len() - 1, e.ty())
+            } else {
+                d.clone()
+            }
+        })
+        .collect();
     let mut preds = Vec::new();
     if let Some(f) = pred {
         conjuncts(subst(f, &mj), &mut preds);
     }
+    // (A clause pushed down onto the subquery from above reads its outputs as the query
+    // does: over the PlaceHolderVars, above the projection computing them.)
+    let mut above_preds = Vec::new();
     if let Some(f) = above {
-        conjuncts(subst(f, &map), &mut preds);
+        if phvs.is_empty() {
+            conjuncts(subst(f, &map), &mut preds);
+        } else {
+            conjuncts(subst(f, &map), &mut above_preds);
+        }
     }
     let plan = match and_all(preds) {
         Some(f) => Plan::Filter {
@@ -172,6 +216,27 @@ fn flatten_join_subquery(p: &Plan, nulled: u32, anulled: u32, cx: &mut Cx) -> Op
             pred: f,
         },
         None => j2,
+    };
+    if phvs.is_empty() {
+        return Some((plan, map, nj));
+    }
+    let types = super::super::analyzejoins::col_types(&plan);
+    let mut out: Vec<Expr> = (0..w2)
+        .map(|i| Expr::Col(i, types.get(i).cloned().unwrap_or(DataType::Unknown)))
+        .collect();
+    let rels = nj.iter().fold(0u64, |m, x| m | x.1);
+    nj.extend(std::iter::repeat_n((nulled, rels), phvs.len()));
+    out.extend(phvs);
+    let plan = Plan::Project {
+        input: Arc::new(crate::sql::plan::mark_phv_join(plan)),
+        exprs: out,
+    };
+    let plan = match and_all(above_preds) {
+        Some(f) => Plan::Filter {
+            input: Arc::new(plan),
+            pred: f,
+        },
+        None => plan,
     };
     Some((plan, map, nj))
 }
@@ -265,9 +330,6 @@ struct Cx {
     nrel: u32,
     /// An empty relation was pulled up or removed.
     results: bool,
-    /// Inside a subquery over a join being pulled up: a subquery's output whose nulling
-    /// outer joins were all made inner is computed where it's read.
-    in_join_subquery: bool,
 }
 
 /// `nulled`: the outer joins above `p` (in the group) that null its rows, as written;
@@ -340,15 +402,81 @@ fn lift(
                 .collect();
             let mut map = ml.clone();
             map.extend(mr.iter().cloned());
-            let cond2 = cond.as_ref().map(|c| subst(c, &map));
+            // (A subquery right below this join: its outputs in this join's own clause are
+            // read before any join nulls them, no PlaceHolderVars there, as
+            // pullup_replace_vars has it for Vars without varnullingrels.)
+            let direct = |e: Expr, side: &Plan, off: usize| -> Expr {
+                // (A subquery over a join: its PlaceHolderVars' expressions over its row.)
+                let side = match side {
+                    Plan::Filter { input, .. } if crate::sql::plan::phv_projection(input).is_some() => &**input,
+                    s => s,
+                };
+                let inline: Vec<Option<Expr>> = match crate::sql::plan::phv_projection(side) {
+                    Some((_, pe, n)) => (0..n).map(|_| None).chain(pe.iter().cloned().map(Some)).collect(),
+                    // (A subquery over one table: an output it computes, when it reads only
+                    // columns the subquery returns.)
+                    None => match side {
+                        Plan::Project { input, exprs } if matches!(&**input, Plan::Scan(_)) => exprs
+                            .iter()
+                            .map(|x| {
+                                if matches!(x, Expr::Col(..)) {
+                                    return None;
+                                }
+                                let mut ok = true;
+                                let y = x
+                                    .clone()
+                                    .transform(&mut |z| {
+                                        Ok(match z {
+                                            Expr::Col(c, t) => match exprs.iter().position(|w| matches!(w, Expr::Col(d, _) if *d == c)) {
+                                                Some(k) => Expr::Col(k, t),
+                                                None => {
+                                                    ok = false;
+                                                    Expr::Col(c, t)
+                                                }
+                                            },
+                                            z => z,
+                                        })
+                                    })
+                                    .unwrap();
+                                ok.then_some(y)
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    },
+                };
+                if inline.iter().all(Option::is_none) {
+                    return e;
+                }
+                let e = e
+                    .transform(&mut |x| {
+                        Ok(match x {
+                            Expr::Col(j, t) if j >= off => match inline.get(j - off) {
+                                Some(Some(y)) => y.clone().shift_cols(off as isize),
+                                _ => Expr::Col(j, t),
+                            },
+                            x => x,
+                        })
+                    })
+                    .unwrap();
+                // (`c = c` of a constant: true, as eval_const_expressions folds it.)
+                let mut parts = Vec::new();
+                conjuncts(e, &mut parts);
+                parts.retain(|q| {
+                    !matches!(q, Expr::Call(d, a, _) if d.name == "=" && a.len() == 2
+                        && matches!(&a[0], Expr::Const(v, _) if !matches!(v, Value::Null))
+                        && a[0].same_as(&a[1]))
+                });
+                and_all(parts).unwrap_or(Expr::Const(Value::Bool(true), DataType::Bool))
+            };
+            let cond2 = cond.as_ref().map(|c| direct(direct(subst(c, &map), &l2, 0), &r2, nleft2));
             let hash2 = hash.as_ref().map(|(lk, rk)| {
-                let rk: Vec<Expr> = rk.iter().map(|e| subst(e, &mr)).collect();
+                let rk: Vec<Expr> = rk.iter().map(|e| direct(subst(e, &mr), &r2, nleft2)).collect();
                 // (A right key now reading the left side: not a hash key any more.)
                 if rk.iter().any(|e| e.columns().iter().any(|&c| c < nleft2)) {
                     cx.bad = true;
                 }
                 (
-                    lk.iter().map(|e| subst(e, &ml)).collect::<Vec<_>>(),
+                    lk.iter().map(|e| direct(subst(e, &ml), &l2, 0)).collect::<Vec<_>>(),
                     rk.into_iter()
                         .map(|e| if cx.bad { e } else { e.shift_cols(-(nleft2 as isize)) })
                         .collect::<Vec<_>>(),
@@ -384,7 +512,8 @@ fn lift(
             let (r2, params2) = if !params.is_empty() && !reads_outer(&r2) {
                 (r2, Vec::new())
             } else if !params.is_empty() {
-                prune_params(r2, params2)
+                let (r2, params2) = prune_params(r2, params2);
+                order_lateral_scan(r2, params2)
             } else {
                 (r2, params2)
             };
@@ -473,8 +602,43 @@ fn lift(
                         (Some((lk, rk)), cond2)
                     }
                 }
+                // (A key the lifting made a constant (an output read in its own join's
+                // clause): the keys are the join's clauses again, `c = c` of a constant
+                // folded away.)
+                Some((lk, rk))
+                    if lk.iter().zip(&rk).any(|(a, b)| a.columns().is_empty() || b.columns().is_empty())
+                        && params2.is_empty() =>
+                {
+                    let mut eqs = Vec::new();
+                    for (i, (a, b)) in lk.iter().zip(&rk).enumerate() {
+                        let (a, bad, coll) = crate::sql::binder::hash_key_operand(a);
+                        let (b, _, _) = crate::sql::binder::hash_key_operand(b);
+                        let b = b.shift_cols(nleft2 as isize);
+                        let flip = meta.key_flipped.get(i) == Some(&true) || meta.hash_swapped.get(i) == Some(&true);
+                        let (a, b) = if flip { (b, a) } else { (a, b) };
+                        if a.columns().is_empty() && a.same_as(&b) && matches!(a, Expr::Const(ref v, _) if !matches!(v, Value::Null)) {
+                            eqs.push(None);
+                            continue;
+                        }
+                        if let Ok(r) = crate::sql::func::resolve_binop("=", &a.ty(), &b.ty()) {
+                            let e = crate::sql::binder::eq_under(Expr::Call(r.def, vec![a, b], DataType::Bool), coll);
+                            eqs.push(Some(if bad { crate::sql::binder::indeterminate_eq(e) } else { e }));
+                        }
+                    }
+                    if eqs.len() == lk.len() {
+                        let mut all = Vec::new();
+                        if let Some(c) = cond2 {
+                            conjuncts(c, &mut all);
+                        }
+                        all.extend(eqs.into_iter().flatten());
+                        (None, and_all(all))
+                    } else {
+                        (Some((lk, rk)), cond2)
+                    }
+                }
                 h => (h, cond2),
             };
+            let cond2 = cond2.filter(|c| !matches!(c, Expr::Const(Value::Bool(true), _)));
             // remove_useless_result_rtes: an inner join with an empty relation (a pulled
             // up one-row VALUES) is its other side, the join's clauses checked there.
             if matches!(l2, Plan::One) && *kind == JoinKind::Inner && wk == JoinKind::Inner && hash2.is_none() && params2.is_empty() {
@@ -639,8 +803,9 @@ fn lift(
                     if !refs.is_empty() && lateral.is_none() {
                         return false;
                     }
-                    // Not nulled by an outer join of the group: computed where it's read.
-                    if nulled == 0 || cx.in_join_subquery && anulled == 0 {
+                    // Not nulled by an outer join of the group (as written): computed where
+                    // it's read.
+                    if nulled == 0 {
                         return true;
                     }
                     // The relations a LATERAL reference reads are under the same lowest
@@ -648,8 +813,10 @@ fn lift(
                     let same_level = |i: &usize| {
                         lateral.is_some_and(|(_, pn)| pn.get(*i).is_some_and(|n| nulled & !n.0 == 0))
                     };
+                    // (A bare LATERAL reference no outer join nulls any more: the
+                    // relation's Var itself, as the self-join removal sees it.)
                     if let Expr::Outer(1, i, _) = e {
-                        return same_level(i);
+                        return same_level(i) || anulled == 0;
                     }
                     let own = !e.columns().is_empty();
                     (own || refs.iter().any(same_level)) && !nonstrict(e)
@@ -665,6 +832,25 @@ fn lift(
                 && exprs[ncol..].iter().all(|e| !matches!(e, Expr::Col(..)))
                 && !up.iter().any(|u| *u);
             if (exprs.iter().all(|e| matches!(e, Expr::Col(..))) || canonical) && !lateral_where {
+                // (All the relation's columns, then its PlaceHolderVars: the scan is the join
+                // group's relation, the PlaceHolderVars evaluated at it.)
+                if canonical
+                    && lateral.is_none()
+                    && ncol == sw
+                    && exprs[..ncol].iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i))
+                {
+                    let mut sc = sp.clone();
+                    sc.phv_proj = true;
+                    sc.access = Access::Unplanned;
+                    sc.index = None;
+                    sc.reverse = false;
+                    let (_, map, nul) = identity(p, cx);
+                    let plan = Plan::Project {
+                        input: Arc::new(Plan::Scan(Box::new(sc))),
+                        exprs: exprs.clone(),
+                    };
+                    return (plan, map, nul);
+                }
                 return identity(p, cx);
             }
             cx.lifted = true;
@@ -693,6 +879,12 @@ fn lift(
             }
             base.sort_unstable();
             base.dedup();
+            // (Not a LATERAL item: the scan is the join group's relation, all its columns,
+            // its PlaceHolderVars computed over it as the group evaluates them.)
+            let phv_proj = !kept.is_empty() && lateral.is_none();
+            if phv_proj {
+                base = (0..sw).collect();
+            }
             let at = |c: usize| if kept.is_empty() { c } else { base.iter().position(|&b| b == c).unwrap_or(c) };
             let to_out = |e: &Expr| -> Expr {
                 e.clone()
@@ -728,6 +920,13 @@ fn lift(
                     _ => unreachable!(),
                 };
                 out.extend(kept);
+                let scan = match scan {
+                    Plan::Scan(mut s) if phv_proj => {
+                        s.phv_proj = true;
+                        Plan::Scan(s)
+                    }
+                    p => p,
+                };
                 Plan::Project {
                     input: Arc::new(scan),
                     exprs: out,
@@ -897,6 +1096,19 @@ fn reads_outer_below(p: &Plan) -> bool {
 /// LATERAL values (`phv_quals`): the PlaceHolderVar is a nestloop parameter of its own
 /// (computed on the outer side, a Memoize's cache key), the clauses read it as one.
 fn hoist_phv_params(r: Plan, mut params: Vec<Expr>) -> (Plan, Vec<Expr>) {
+    // (Under the projection computing its PlaceHolderVars: the scan's clauses.)
+    if let Plan::Project { input, exprs } = &r
+        && matches!(&**input, Plan::Scan(_))
+    {
+        let (scan, params) = hoist_phv_params((**input).clone(), params);
+        return (
+            Plan::Project {
+                input: Arc::new(scan),
+                exprs: exprs.clone(),
+            },
+            params,
+        );
+    }
     let Plan::Scan(sp) = &r else {
         return (r, params);
     };
@@ -946,6 +1158,73 @@ fn hoist_phv_params(r: Plan, mut params: Vec<Expr>) -> (Plan, Vec<Expr>) {
         return (r, params);
     }
     (Plan::Scan(Box::new(sp2)), params)
+}
+
+/// A LATERAL scan whose clauses over its PlaceHolderVars (`phv_quals`: restriction clauses
+/// in Postgres, the PlaceHolderVar evaluated at the scan) sit with clauses reading the
+/// LATERAL values directly (join clauses, its parameterized path's): the restrictions first,
+/// as a scan's qual list has them, and the join clauses' values the first parameters
+/// (a Memoize's cache keys: the parameterized path's clauses', then its lateral Vars).
+fn order_lateral_scan(r: Plan, params: Vec<Expr>) -> (Plan, Vec<Expr>) {
+    let sp = match &r {
+        Plan::Scan(sp) => sp,
+        Plan::Project { input, .. } => match &**input {
+            Plan::Scan(sp) => sp,
+            _ => return (r, params),
+        },
+        _ => return (r, params),
+    };
+    if sp.phv_quals.is_empty() || !matches!(sp.access, Access::Unplanned) || sp.index.is_some() {
+        return (r, params);
+    }
+    let Some(f) = &sp.filter else { return (r, params) };
+    let mut parts = Vec::new();
+    conjuncts(f.clone(), &mut parts);
+    let is_phv = |q: &Expr| sp.phv_quals.iter().any(|p| p.same_as(q));
+    let (restr, joins): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(|q| is_phv(q) || outer_refs(q).is_empty());
+    if restr.is_empty() || joins.is_empty() || !restr.iter().any(is_phv) {
+        return (r, params);
+    }
+    // (The join clauses' parameters first.)
+    let mut order: Vec<usize> = Vec::new();
+    for q in &joins {
+        for k in outer_refs(q) {
+            if k < params.len() && !order.contains(&k) {
+                order.push(k);
+            }
+        }
+    }
+    for k in 0..params.len() {
+        if !order.contains(&k) {
+            order.push(k);
+        }
+    }
+    let fix = |e: &Expr| -> Expr {
+        e.clone()
+            .transform(&mut |x| {
+                Ok(match x {
+                    Expr::Outer(1, k, t) => Expr::Outer(1, order.iter().position(|&j| j == k).unwrap_or(k), t),
+                    x => x,
+                })
+            })
+            .unwrap()
+    };
+    let mut sp2 = (**sp).clone();
+    let mut all = restr;
+    all.extend(joins);
+    sp2.filter = and_all(all.iter().map(&fix).collect());
+    sp2.written = sp2.written.iter().map(&fix).collect();
+    sp2.phv_quals = sp2.phv_quals.iter().map(&fix).collect();
+    let params: Vec<Expr> = order.iter().map(|&k| params[k].clone()).collect();
+    let r2 = match &r {
+        Plan::Scan(_) => Plan::Scan(Box::new(sp2)),
+        Plan::Project { exprs, .. } => Plan::Project {
+            input: Arc::new(Plan::Scan(Box::new(sp2))),
+            exprs: exprs.iter().map(&fix).collect(),
+        },
+        _ => unreachable!(),
+    };
+    (r2, params)
 }
 
 /// A LATERAL scan's parameters it still reads, renumbered (the left side's values the join
@@ -1100,7 +1379,6 @@ pub(super) fn lift_group(p: &Plan) -> Option<Lifted> {
         bad: false,
         nrel: 0,
         results: false,
-        in_join_subquery: false,
     };
     let (plan, map, _) = lift(p, 0, 0, None, &mut cx);
     if !cx.lifted || cx.bad {

@@ -1783,6 +1783,7 @@ impl Binder<'_, '_> {
                                     func: None,
                                     call: None,
                                     test_op: None,
+                                    names: Default::default(),
                                 }));
                                 let exprs = if one {
                                     vec![sq]
@@ -2241,6 +2242,7 @@ impl Binder<'_, '_> {
                     col_aliases: None,
                     written: Vec::new(),
                     phv_quals: Vec::new(),
+                    phv_proj: false,
                     check_as: self.check_as,
                     rti: self.next_rti(),
                     useful: Default::default(),
@@ -2600,6 +2602,7 @@ impl Binder<'_, '_> {
                     col_aliases: None,
                     written: Vec::new(),
                     phv_quals: Vec::new(),
+                    phv_proj: false,
                     check_as: self.check_as,
                     rti: self.next_rti(),
                     useful: Default::default(),

@@ -155,6 +155,10 @@ pub struct ScanPlan {
     /// Restriction clauses that read a pulled-up subquery's PlaceHolderVar (a computed
     /// output of a subquery on an outer join's nullable side): never index quals.
     pub phv_quals: Vec<Expr>,
+    /// A projection right above this scan computes a pulled-up subquery's PlaceHolderVars
+    /// (its columns first, then them): a join group takes the scan in as its relation,
+    /// the PlaceHolderVars evaluated at it (`plan::phv_projection`).
+    pub phv_proj: bool,
     /// The role privileges on the table are checked as (RTEPermissionInfo.checkAsUser: a
     /// view's owner for the tables the view reads); None: the current user.
     pub check_as: Option<u32>,
@@ -264,6 +268,11 @@ pub struct JoinMeta {
     /// relation's outputs, remove_useless_result_rtes): not a subquery's select list to
     /// pull up again.
     pub phv_eval: bool,
+    /// A projection above this join (or above its filter) computes PlaceHolderVars of a
+    /// subquery pulled up into the join group above (`paths::joinpath::lift`): the group
+    /// takes its relations in and evaluates each PlaceHolderVar at the lowest join of
+    /// the relations it reads (ph_eval_at), as the projection would.
+    pub phv_join: bool,
 }
 
 /// `p` with its join (if it is one) marked as computing PlaceHolderVars in the projection
@@ -274,6 +283,42 @@ pub fn mark_phv_eval(p: &Plan) -> Plan {
         meta.phv_eval = true;
     }
     p
+}
+
+/// `p` (a join, or a filter over one) with its join marked as computing the
+/// PlaceHolderVars of the projection above (`JoinMeta::phv_join`).
+pub fn mark_phv_join(p: Plan) -> Plan {
+    match p {
+        Plan::Join { kind, left, right, cond, hash, params, nleft, nright, mut meta } => {
+            meta.phv_join = true;
+            meta.phv_eval = true;
+            Plan::Join { kind, left, right, cond, hash, params, nleft, nright, meta }
+        }
+        Plan::Filter { input, pred } => Plan::Filter {
+            input: Arc::new(mark_phv_join(Arc::unwrap_or_clone(input))),
+            pred,
+        },
+        p => p,
+    }
+}
+
+/// A projection computing PlaceHolderVars at the join below it (`JoinMeta::phv_join`):
+/// its input, the PlaceHolderVars' expressions (over the input's row) and the input's
+/// width (its columns pass through first).
+pub fn phv_projection(p: &Plan) -> Option<(&Arc<Plan>, &[Expr], usize)> {
+    let Plan::Project { input, exprs } = p else { return None };
+    let j = match &**input {
+        Plan::Filter { input: j, .. } => &**j,
+        j => j,
+    };
+    match j {
+        Plan::Join { meta, .. } if meta.phv_join => {}
+        Plan::Scan(sp) if sp.phv_proj && !matches!(&**input, Plan::Filter { .. }) => {}
+        _ => return None,
+    }
+    let n = crate::sql::binder::plan_width(input);
+    (exprs.len() > n && exprs[..n].iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i)))
+        .then(|| (input, &exprs[n..], n))
 }
 
 /// A function called in FROM whose body runs (not inlined), as EXPLAIN shows it.
@@ -922,6 +967,10 @@ pub struct DummyInfo {
     /// class's representative column, and whether the class holds a constant), empty when
     /// unknown: group and sort keys they make redundant stay so.
     pub ec: Vec<(usize, bool)>,
+    /// The table it is when it is one (a partitioned table without partitions, or read
+    /// ONLY), its columns the table's: its unique indexes still prove a join's inner side
+    /// unique.
+    pub table: Option<u32>,
 }
 
 #[derive(Clone, Debug)]

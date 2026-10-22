@@ -340,6 +340,18 @@ impl Planner<'_, '_> {
     }
 }
 
+/// A catalog's scan as a join group's relation (its paths chosen as a table's, a
+/// parameterized index scan among them): the stand-in table's scan with the catalog scan's
+/// filter. None for a view, or a catalog without indexes.
+pub(super) fn sys_leaf_scan(t: SysTable, filter: Option<&Expr>) -> Option<ScanPlan> {
+    if t.is_view() || sys_indexes(t).is_empty() {
+        return None;
+    }
+    let mut s = stand_in_scan(sys_table(t), filter.cloned());
+    s.written = written_order(filter);
+    Some(s)
+}
+
 /// A stand-in table's scan with the catalog scan's filter.
 fn stand_in_scan(table: Arc<Table>, filter: Option<Expr>) -> ScanPlan {
     ScanPlan {
@@ -361,6 +373,7 @@ fn stand_in_scan(table: Arc<Table>, filter: Option<Expr>) -> ScanPlan {
         col_aliases: None,
         written: Vec::new(),
         phv_quals: Vec::new(),
+        phv_proj: false,
         check_as: None,
         rti: Default::default(),
         useful: Default::default(),

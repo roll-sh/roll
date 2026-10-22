@@ -1,0 +1,104 @@
+> CREATE TABLE a8_du_t (tid integer PRIMARY KEY) PARTITION BY LIST (tid)
+-- CREATE TABLE
+
+> CREATE TABLE a8_du_tp PARTITION OF a8_du_t DEFAULT
+-- CREATE TABLE
+
+> CREATE TABLE a8_du_s (sid integer)
+-- CREATE TABLE
+
+> INSERT INTO a8_du_s VALUES (1), (2)
+-- INSERT 0 2
+
+> DROP TABLE a8_du_tp
+-- DROP TABLE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> MERGE INTO a8_du_t t USING a8_du_s s ON t.tid = s.sid
+>   WHEN NOT MATCHED THEN INSERT VALUES (s.sid)
+QUERY PLAN:text
+Merge on public.a8_du_t t
+  ->  Hash Left Join
+        Output: s.sid, s.ctid, t.ctid
+        Inner Unique: true
+        Hash Cond: (s.sid = t.tid)
+        ->  Seq Scan on public.a8_du_s s
+              Output: s.sid, s.ctid
+        ->  Hash
+              Output: t.tid, t.ctid
+              ->  Result
+                    Output: t.tid, t.ctid
+                    One-Time Filter: false
+-- EXPLAIN
+
+> MERGE INTO a8_du_t t USING a8_du_s s ON t.tid = s.sid
+>   WHEN NOT MATCHED THEN INSERT VALUES (s.sid)
+ERROR 23514: no partition of relation "a8_du_t" found for row
+DETAIL: Partition key of the failing row contains (tid) = (1).
+OBJECTS: schema=public table=a8_du_t
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a8_du_s s LEFT JOIN a8_du_t t ON t.tid = s.sid
+QUERY PLAN:text
+Hash Left Join
+  Output: s.sid, tid
+  Inner Unique: true
+  Hash Cond: (s.sid = tid)
+  ->  Seq Scan on public.a8_du_s s
+        Output: s.sid
+  ->  Hash
+        Output: tid
+        ->  Result
+              Output: tid
+              One-Time Filter: false
+-- EXPLAIN
+
+> SELECT * FROM a8_du_s s LEFT JOIN a8_du_t t ON t.tid = s.sid ORDER BY 1
+sid:int4 | tid:int4
+1 | NULL
+2 | NULL
+-- SELECT 2
+
+> CREATE TABLE a8_du_p (tid integer PRIMARY KEY) PARTITION BY LIST (tid)
+-- CREATE TABLE
+
+> CREATE TABLE a8_du_p1 PARTITION OF a8_du_p FOR VALUES IN (1)
+-- CREATE TABLE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a8_du_s s LEFT JOIN ONLY a8_du_p t ON t.tid = s.sid
+QUERY PLAN:text
+Hash Left Join
+  Output: s.sid, tid
+  Inner Unique: true
+  Hash Cond: (s.sid = tid)
+  ->  Seq Scan on public.a8_du_s s
+        Output: s.sid
+  ->  Hash
+        Output: tid
+        ->  Result
+              Output: tid
+              One-Time Filter: false
+-- EXPLAIN
+
+> CREATE TABLE a8_du_k (k integer PRIMARY KEY, v int)
+-- CREATE TABLE
+
+> SELECT * FROM a8_du_s s LEFT JOIN (SELECT * FROM a8_du_k WHERE false) k ON k.k = s.sid ORDER BY 1
+sid:int4 | k:int4 | v:int4
+1 | NULL | NULL
+2 | NULL | NULL
+-- SELECT 2
+
+> DROP TABLE a8_du_k
+-- DROP TABLE
+
+> DROP TABLE a8_du_p
+-- DROP TABLE
+
+> DROP TABLE a8_du_s
+-- DROP TABLE
+
+> DROP TABLE a8_du_t
+-- DROP TABLE
+

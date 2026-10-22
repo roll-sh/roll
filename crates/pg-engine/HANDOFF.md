@@ -17,10 +17,10 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 50,971 of 51,150 statements match (99.65%).** 179 differ. The full
+- **Regression suite: 50,980 of 51,150 statements match (99.67%).** 170 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 172 are `EXPLAIN` plan text (96%). Query results already match.
-  - 6 are plan choices that show up in results (mostly which side a hash join builds on,
+  - 164 are `EXPLAIN` plan text (96%). Query results already match.
+  - 5 are plan choices that show up in results (mostly which side a hash join builds on,
     grouping-set output order).
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
     work), so the ceiling is about 99.998%.
@@ -311,16 +311,18 @@ All remaining work is planner/EXPLAIN (`src/sql/paths*`, `src/sql/binder/optimiz
 numbers refer to the regress harness's per-file unit counter; `tests/regress/STATUS.md` lists
 them all with the "Fixed in round N" sections describing what was already tried.
 
-1. **PlaceHolderVars evaluated at joins** (join 328, 343, 345, 347, 360, 362/363, 366, 368;
-   partition_join 41). Round 13 pulls subqueries over joins up into the parent's join group
-   (`lift.rs` `flatten_join_subquery`) when no output needs a PlaceHolderVar evaluated at a
-   join (or the outer joins nulling it were reduced away); join 351 now keeps the dummy
-   relation's expressions. What's left needs a plan node computing expressions at a join (a
-   PlaceHolderVar whose `ph_eval_at` is several relations), constant PlaceHolderVars through
-   remove_useless_result_rtes (343/347), qualified names in a dummy Result over catalog scans
-   (368), a full join of one-row relations removed (366). join 744 differs only in plan choice
-   (a parameterized hash join inside a nested loop).
-2. **Remaining join / partition_join / partition_prune plan shapes** (join 71, partition_join 21,
+1. **PlaceHolderVars evaluated at joins** (join 345, 347, 360, 362/363, 366, 368, 744;
+   partition_join 41). Round 14 (agent 8) evaluates them at joins: a pulled-up subquery's
+   outputs an outer join nulls (as written) are PlaceHolderVars the join group computes at the
+   lowest relation of their ph_eval_at (`lift.rs` `flatten_join_subquery`, `plan::phv_projection`,
+   `joinpath.rs` `Phv` / `with_phvs`), so 328/343/388 match. Left: remove_useless_result_rtes
+   moving PlaceHolderVars of RESULT relations onto their join partner (347, 366), one computed
+   in a LATERAL subquery scan (345) or over a parameterized appendrel (360), PlaceHolderVars
+   with sub-selects (362/363), a dummy Result showing a view's expressions (368), a hash join
+   parameterized by a LATERAL inner side (744: the executor runs a parameterized hash join as
+   a nested loop, so it needs executor work first), a partitionwise join with a LATERAL
+   PlaceHolderVar (partition_join 41).
+2. **Remaining join / partition_join / partition_prune plan shapes** (join 68, partition_join 21,
    partition_prune 7 units; round 14's agent 5 section in STATUS.md has what changed): cost-driven
    choices (join 123/410/424/450/543, partition_join 21/74), equivalence classes with scan-level
    members (join 609/610), partitionwise joins with a LATERAL item
@@ -329,20 +331,14 @@ them all with the "Fixed in round N" sections describing what was already tried.
    a pulled-up UNION ALL's alias as a range table entry
    (partition_prune 392/393/399), partition_prune's parallel plans (377–383, 652), 265 / 410 /
    746.
-3. **subselect** (6 units; rounds 13–14 fixed the row comparisons with sub-selects, most of
+3. **subselect** (3 units; rounds 13–14 fixed the row comparisons with sub-selects, most of
    PostgreSQL 18's IN / VALUES pull-up, sub-select copies, per-member EXISTS alternatives,
-   reltarget orders, strict-NULL folding and early unique-ified semi joins, see STATUS.md):
-   - 218: IN with a set-returning select list as a semi join over a Subquery Scan (its filter
-     derived from the equivalence class).
-   - 221: a pushed-down qual that reads a LATERAL reference stays the Subquery Scan's filter
-     (qual_is_pushdown_safe refuses lateral Vars; the engine can't tell them from an outer
-     query's values at that point).
-   - 288: a system catalog's parameterized index path inside a join (catalog leaves are opaque
-     to the join search).
+   reltarget orders, strict-NULL folding, early unique-ified semi joins, IN over a
+   set-returning select list, LATERAL quals in subquery levels, catalog index paths in joins and
+   LATERAL VALUES with sub-selects, see STATUS.md):
    - 327: a correlated aggregate IN as a LATERAL subquery (Memoize over a Subquery Scan).
    - 328 (an EC member relabeled to the class's collation: `("*VALUES*".column1)::text`), 332
-     (unique-ifying a semi join's side on a computed expression), 350 (a LATERAL VALUES list
-     with a correlated sub-select inside).
+     (unique-ifying a semi join's side on a computed expression).
    merge 348 needs the sub-select copies in a MERGE's action conditions and SET lists.
 4. **Row marks in VERBOSE target lists**: done for UPDATE / DELETE / MERGE over joins with a
    plain (or, for MERGE, partitioned) target, and for locked scans (a FROM subquery's FOR

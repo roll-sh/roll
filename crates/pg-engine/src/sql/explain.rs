@@ -4270,8 +4270,36 @@ impl Builder<'_, '_> {
                     self.sort_input_target(&mut c, exprs, srfs);
                 }
                 let mut n = ExNode::new("ProjectSet");
-                n.rows = c.node.rows * 10.0;
-                n.total_cost = c.node.total_cost + n.rows * 0.02;
+                // create_set_projection_path: the most rows a call gives per input row
+                // (its support function's, else prorows); cpu_tuple_cost and the target
+                // list's cost per input row, half a cpu_tuple_cost per added row.
+                let per_row = srfs
+                    .iter()
+                    .map(|s| costs::function_rows(s.func.name, &s.args, s.func.srf.is_some()))
+                    .fold(1.0f64, f64::max);
+                let calls: Vec<Expr> = exprs
+                    .iter()
+                    .map(|e| {
+                        e.clone()
+                            .transform(&mut |x| {
+                                Ok(match x {
+                                    Expr::Srf(i, t) => match srfs.get(i) {
+                                        Some(s) => Expr::Call(s.func.clone(), s.args.clone(), t),
+                                        None => Expr::Srf(i, t),
+                                    },
+                                    x => x,
+                                })
+                            })
+                            .unwrap_or_else(|_| e.clone())
+                    })
+                    .collect();
+                let per_tuple: f64 = calls.iter().map(costs::qual_cost).sum();
+                let in_rows = c.node.rows;
+                n.rows = costs::clamp_rows(in_rows * per_row);
+                n.startup_cost = c.node.startup_cost;
+                n.total_cost = c.node.total_cost
+                    + (costs::CPU_TUPLE_COST + per_tuple) * in_rows
+                    + (n.rows - in_rows) * costs::CPU_TUPLE_COST / 2.0;
                 // The expressions read the input row, then each call's value.
                 let mut row = c.exported.clone();
                 for s in srfs {
@@ -7718,9 +7746,17 @@ impl Builder<'_, '_> {
         {
             // (A volatile clause of no columns is the relation's, as distribute_qual_to_rels
             // puts it: not a gating qual.)
+            // (Nor is a part of a clause over a PlaceHolderVar: the clause is one.)
+            let in_phv = |e: &Expr| {
+                s.phv_quals.iter().any(|q| {
+                    let mut sub = Vec::new();
+                    conjuncts(q, &mut sub);
+                    sub.len() > 1 && sub.iter().any(|x| x.same_as(e))
+                })
+            };
             let gating: Vec<Expr> = parts
                 .iter()
-                .filter(|e| e.columns().is_empty() && !super::paths::expr_volatile_deep(e))
+                .filter(|e| e.columns().is_empty() && !super::paths::expr_volatile_deep(e) && !in_phv(e))
                 .cloned()
                 .collect();
             let mut n = self.planned_scan(p, s, d, &names);
@@ -8669,6 +8705,21 @@ impl Builder<'_, '_> {
         })
     }
 
+    /// Whether `e` reads a value of a LATERAL join of the current query level (a Var of
+    /// another relation, not an enclosing query's parameter).
+    fn reads_level_var(&self, e: &Expr) -> bool {
+        let mut found = false;
+        e.walk(&mut |x| {
+            if let Expr::Outer(d, ..) = x
+                && *d >= 1
+                && self.outer_depth.get(d - 1) == Some(&self.depth)
+            {
+                found = true;
+            }
+        });
+        found
+    }
+
     fn fold_filter(&mut self, mut c: Built, pred: &Expr, key: usize, setop: bool) -> Built {
         // (A qual workers can't run keeps the node out of parallel plans; a subquery's
         // Subquery Scan checking it, planned apart, may gather its own plan below it.)
@@ -8685,9 +8736,16 @@ impl Builder<'_, '_> {
         conjuncts(pred, &mut parts);
         // (An aggregation's HAVING clauses are all its quals: none gates it.)
         let having = c.node.node_type == "Aggregate" && !setop;
-        let (gating, quals): (Vec<Expr>, Vec<Expr>) = parts
-            .into_iter()
-            .partition(|e| !having && e.columns().is_empty() && !super::paths::expr_volatile_deep(e));
+        // (A clause reading a LATERAL value of this level, a Var of another relation of
+        // it, isn't pseudoconstant: the node's own qual.)
+        // (A FROM-less relation's Result (an RTE_RESULT) gates on all of them.)
+        let result_rel = c.node.node_type == "Result" && c.node.children.is_empty();
+        let (gating, quals): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(|e| {
+            !having
+                && e.columns().is_empty()
+                && !super::paths::expr_volatile_deep(e)
+                && (result_rel || !self.reads_level_var(e))
+        });
         let node = &c.node;
         let scan_like = node.is_scan() || (node.node_type == "Result" && node.children.is_empty());
         // (A subquery's scan shown already: its own quals.)

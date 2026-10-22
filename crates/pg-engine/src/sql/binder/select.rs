@@ -2330,7 +2330,11 @@ impl Binder<'_, '_> {
                         }
                     });
                 }
-                used.sort_by_key(|u| u.0);
+                // (The calls' values first, then the columns the expressions read, each in
+                // the order the select list has them: the levels' lists of
+                // split_pathtarget_at_srfs.)
+                let iw = width(&plan);
+                used.sort_by_key(|u| u.0 < iw);
                 let below: Vec<Expr> = used.iter().map(|(c, t)| Expr::Col(*c, t.clone())).collect();
                 let pos = |c: usize| used.iter().position(|u| u.0 == c).unwrap_or(c);
                 Plan::Project {
@@ -4005,6 +4009,7 @@ impl Binder<'_, '_> {
                     col_aliases: None,
                     written: Vec::new(),
                     phv_quals: Vec::new(),
+                    phv_proj: false,
                     check_as: self.check_as,
                     rti: self.next_rti(),
                     useful: Default::default(),
@@ -4026,10 +4031,11 @@ impl Binder<'_, '_> {
                         // ONLY a partitioned table: it has no rows of its own.
                         let names = optimize::dummy_scan_names(&scan);
                         let rels = vec![Some(shown.clone()); names.len()];
+                        let table = Some(t.oid);
                         Plan::Empty {
                             ncols: super::optimize::width(&Plan::Scan(Box::new(scan))),
                             cols: Some(Arc::new(names)),
-                            info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new() })),
+                            info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table })),
                         }
                     } else {
                         if self.exclusion_mode() == "on" {
@@ -4118,6 +4124,7 @@ impl Binder<'_, '_> {
                             col_aliases: None,
                             written: Vec::new(),
                             phv_quals: Vec::new(),
+                            phv_proj: false,
                             check_as: self.check_as,
                             rti: self.next_rti(),
                             useful: Default::default(),

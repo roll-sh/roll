@@ -110,8 +110,10 @@ fn var_like(p: &Plan, c: usize) -> bool {
                 let mut v = Cols::new();
                 value_cols(e, &mut v);
                 if v.is_empty() {
-                    // A PlaceHolderVar over one rel behaves like its Var.
-                    !e.columns().is_empty() && !matches!(&**input, Plan::Join { .. })
+                    // A PlaceHolderVar over one rel behaves like its Var (its syntactic
+                    // scope a singleton: a table, a pulled-up VALUES row or FROM-less
+                    // select), whatever it reads.
+                    single_rel(input)
                 } else {
                     v.iter().any(|j| var_like(input, *j))
                 }
@@ -131,6 +133,18 @@ fn var_like(p: &Plan, c: usize) -> bool {
                 var_like(right, c - nleft)
             }
         }
+        _ => true,
+    }
+}
+
+/// A plan over one relation (no join below its filters and projections).
+fn single_rel(p: &Plan) -> bool {
+    match p {
+        // (A join remove_useless_joins took out: its inner side's columns NULL constants
+        // over the outer side. Its scope had both relations.)
+        Plan::Project { exprs, .. } if exprs.iter().any(|e| matches!(e, Expr::Const(Value::Null, _))) => false,
+        Plan::Filter { input, .. } | Plan::Project { input, .. } => single_rel(input),
+        Plan::Join { .. } => false,
         _ => true,
     }
 }

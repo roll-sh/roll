@@ -532,15 +532,17 @@ fn values_clean(p: &Plan) -> bool {
 }
 
 /// A VALUES list reading the outer query's values (one level up) and nothing worse: no
-/// sub-selects, set-returning or volatile calls.
+/// set-returning or volatile calls; its sub-selects (SubPlans of the Values Scan) read
+/// nothing further out either.
 fn values_outer(p: &Plan) -> bool {
     let Plan::Values { rows, .. } = p else { return false };
     let mut outer = false;
     let ok = rows.iter().flatten().all(|e| {
-        let mut ok = !e.is_volatile();
+        let mut ok = !crate::sql::explain::expr_volatile_deep(e);
         e.walk(&mut |x| match x {
             Expr::Outer(1, ..) => outer = true,
-            Expr::Outer(..) | Expr::Srf(..) | Expr::Subquery(_) => ok = false,
+            Expr::Outer(..) | Expr::Srf(..) => ok = false,
+            Expr::Subquery(s) => ok &= s.func.is_none(),
             _ => {}
         });
         ok
@@ -644,7 +646,7 @@ fn exists_join(cat: &Catalog, plan: &Plan, sub: &Subquery, anti: bool) -> Option
                 let rels = vec![Some(super::optimize::scan_refname(s)); names.len()];
                 (
                     Some(Arc::new(names)),
-                    Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new() })),
+                    Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table: None })),
                 )
             }
             _ => (None, None),
@@ -805,6 +807,12 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
         })
     {
         return None;
+    }
+    // A select list with a set-returning function (is_simple_subquery refuses it): an
+    // uncorrelated sub-select joins as a subquery of its own, its select list computed
+    // inside it.
+    if let Some(j) = any_join_srf(cat, plan, sub) {
+        return Some(j);
     }
     // The select list (through the binder's casting projection) over one table scan.
     let mut exprs: Option<Vec<Expr>> = None;
@@ -971,6 +979,74 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
         nleft,
         nright,
     ))
+}
+
+/// `any_join` for an uncorrelated sub-select whose select list returns a set (a
+/// ProjectSet under its projections): the semi join's right side is the whole sub-select,
+/// a subquery scan ("ANY_subquery") named by its columns.
+fn any_join_srf(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
+    if !sub.params.is_empty() {
+        return None;
+    }
+    let mut p: &Plan = &sub.plan;
+    while let Plan::Project { input, exprs } = p {
+        if exprs.iter().any(|e| has_sublink(e) || e.is_volatile()) {
+            return None;
+        }
+        p = input;
+    }
+    let Plan::ProjectSet { input, exprs, srfs } = p else {
+        return None;
+    };
+    let mut ok = !exprs.iter().any(|e| e.is_volatile());
+    for e in exprs {
+        e.walk(&mut |x| ok &= !matches!(x, Expr::Outer(..) | Expr::Subquery(_)));
+    }
+    for c in srfs {
+        for a in &c.args {
+            a.walk(&mut |x| ok &= !matches!(x, Expr::Outer(..) | Expr::Subquery(_)));
+            ok &= !a.is_volatile();
+        }
+    }
+    if !ok || !plan_clean(input) {
+        return None;
+    }
+    let n = width(&sub.plan);
+    if n != sub.left.len() {
+        return None;
+    }
+    let cols = if sub.names.len() == n {
+        (*sub.names).clone()
+    } else {
+        (1..=n).map(|i| format!("column{i}")).collect()
+    };
+    let rhs = Plan::Barrier {
+        input: sub.plan.clone(),
+        alias: "ANY_subquery".into(),
+        cols,
+        secure: false,
+        sorted: None,
+    };
+    let nleft = width(plan);
+    let types: Vec<crate::types::DataType> = sub
+        .ops
+        .iter()
+        .map(|o| o.args.get(1).cloned().unwrap_or(crate::types::DataType::Unknown))
+        .collect();
+    let cond: Vec<Expr> = sub
+        .left
+        .iter()
+        .zip(&sub.ops)
+        .enumerate()
+        .map(|(i, (l, op))| {
+            Expr::Call(
+                op.clone(),
+                vec![l.clone(), Expr::Col(nleft + i, types[i].clone())],
+                crate::types::DataType::Bool,
+            )
+        })
+        .collect();
+    Some(super::optimize::join(cat, JoinKind::Semi, plan.clone(), rhs, and_all(cond), Vec::new(), nleft, n))
 }
 
 /// reduce_unique_semijoins: a semi join whose right side (one table) has a unique index

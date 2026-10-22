@@ -2279,14 +2279,19 @@ impl Planner<'_, '_> {
         only: bool,
     ) -> IPath {
         let ii = &rel.indexes[ix];
-        // (One column's conditions in baserestrictinfo order.)
+        // (One column's conditions in baserestrictinfo order; a parameterized path's join
+        // clauses before them, as get_join_index_paths collects them.)
         let mut clauses = clauses;
         if !rel.written.is_empty() {
             let rank = |c: &IClause| rel.written.iter().position(|w| w.same_as(&c.orig));
-            let ranks: Vec<(usize, usize)> = clauses
+            let ranks: Vec<(usize, usize, usize)> = clauses
                 .iter()
                 .enumerate()
-                .map(|(i, c)| (c.col, rank(c).unwrap_or(usize::MAX / 2 + i)))
+                .map(|(i, c)| match rank(c) {
+                    Some(r) => (c.col, 1, r),
+                    None if c.orig.has_outer_refs() => (c.col, 0, i),
+                    None => (c.col, 1, usize::MAX / 2 + i),
+                })
                 .collect();
             let mut idx: Vec<usize> = (0..clauses.len()).collect();
             idx.sort_by_key(|&i| ranks[i]);
@@ -3256,6 +3261,17 @@ impl Planner<'_, '_> {
         if let Some(f) = &s.filter {
             let mut parts = Vec::new();
             conjuncts(f.clone(), &mut parts);
+            // (A clause over a PlaceHolderVar whose expression is an AND: one clause.)
+            for q in s.phv_quals.iter().filter(|q| matches!(q, Expr::And(_))) {
+                let mut sub = Vec::new();
+                conjuncts(q.clone(), &mut sub);
+                if let Some(first) = parts.iter().position(|p| sub.first().is_some_and(|x| x.same_as(p)))
+                    && sub.iter().all(|x| parts.iter().any(|p| p.same_as(x)))
+                {
+                    parts.retain(|p| !sub.iter().any(|x| x.same_as(p)));
+                    parts.insert(first.min(parts.len()), q.clone());
+                }
+            }
             quals = parts
                 .into_iter()
                 .filter(|e| !e.columns().is_empty() || expr_volatile_deep(e))
@@ -4850,9 +4866,18 @@ impl Planner<'_, '_> {
                     std::mem::swap(left, right);
                 }
             }
-            Plan::Join { left, right, .. } => {
+            Plan::Join { left, right, params, .. } => {
                 visit(left, None);
+                // (A LATERAL right side: clauses reading its values stay out of its subquery
+                // levels.)
+                let lateral = !params.is_empty();
+                if lateral {
+                    crate::sql::binder::optimize::lateral_push(params);
+                }
                 visit(right, None);
+                if lateral {
+                    crate::sql::binder::optimize::lateral_pop();
+                }
                 self.lateral_memoize(p);
             }
             Plan::Append { inputs, .. } => {
@@ -5969,6 +5994,7 @@ impl Planner<'_, '_> {
                     func: None,
                     call: None,
                     test_op: None,
+                    names: Default::default(),
                 }))
             })
             .collect();
