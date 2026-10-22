@@ -1,0 +1,105 @@
+> CREATE TABLE a6_pp (unique1 int, two int, four int, ten int, hundred int, thousand int,
+>   filler text)
+-- CREATE TABLE
+
+> INSERT INTO a6_pp SELECT i, i % 2, i % 4, i % 10, i % 100, i % 1000, repeat('x', 100)
+>   FROM generate_series(0, 9999) i
+-- INSERT 0 10000
+
+> CREATE INDEX a6_pp_hundred ON a6_pp (hundred)
+-- CREATE INDEX
+
+> CREATE INDEX a6_pp_unique1 ON a6_pp (unique1)
+-- CREATE INDEX
+
+> ANALYZE a6_pp
+-- ANALYZE
+
+> CREATE FUNCTION a6_psv(a int) RETURNS int AS $$ BEGIN RETURN a; END; $$
+>   PARALLEL SAFE VOLATILE LANGUAGE plpgsql
+-- CREATE FUNCTION
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL parallel_setup_cost = 0
+-- SET
+
+> SET LOCAL parallel_tuple_cost = 0
+-- SET
+
+> SET LOCAL min_parallel_table_scan_size = 0
+-- SET
+
+> SET LOCAL max_parallel_workers_per_gather = 4
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a6_pp WHERE four = 2 ORDER BY four, hundred, a6_psv(thousand)
+QUERY PLAN:text
+Gather Merge
+  Workers Planned: 4
+  ->  Sort
+        Sort Key: hundred, (a6_psv(thousand))
+        ->  Parallel Seq Scan on a6_pp
+              Filter: (four = 2)
+-- EXPLAIN
+
+> SET LOCAL min_parallel_index_scan_size = 0
+-- SET
+
+> SET LOCAL enable_seqscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a6_pp WHERE four = 2 ORDER BY four, hundred, a6_psv(thousand)
+QUERY PLAN:text
+Gather Merge
+  Workers Planned: 3
+  ->  Incremental Sort
+        Sort Key: hundred, (a6_psv(thousand))
+        Presorted Key: hundred
+        ->  Parallel Index Scan using a6_pp_hundred on a6_pp
+              Filter: (four = 2)
+-- EXPLAIN
+
+> SET LOCAL enable_incremental_sort = off
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a6_pp WHERE four = 2 ORDER BY four, hundred, a6_psv(thousand)
+QUERY PLAN:text
+Gather Merge
+  Workers Planned: 3
+  ->  Sort
+        Sort Key: hundred, (a6_psv(thousand))
+        ->  Parallel Index Scan using a6_pp_hundred on a6_pp
+              Filter: (four = 2)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT unique1, ten FROM a6_pp ORDER BY unique1, ten
+QUERY PLAN:text
+Gather Merge
+  Workers Planned: 4
+  ->  Sort
+        Sort Key: unique1, ten
+        ->  Parallel Index Scan using a6_pp_unique1 on a6_pp
+-- EXPLAIN
+
+> SELECT unique1, ten FROM a6_pp ORDER BY unique1, ten LIMIT 3
+unique1:int4 | ten:int4
+0 | 0
+1 | 1
+2 | 2
+-- SELECT 3
+
+> ROLLBACK
+-- ROLLBACK
+
+> DROP TABLE a6_pp
+-- DROP TABLE
+
+> DROP FUNCTION a6_psv(int)
+-- DROP FUNCTION
+

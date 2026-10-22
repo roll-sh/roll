@@ -4191,15 +4191,57 @@ impl Builder<'_, '_> {
                 if let Some(pt) = part
                     && self.par.as_ref().is_some_and(|p| p.gather_merge)
                 {
-                    let mut sn = ExNode::new("Sort");
+                    // (A partial plan in a leading part of the order already: an
+                    // incremental sort of it, create_ordered_paths.)
+                    let pcommon = list
+                        .iter()
+                        .zip(&pt.order)
+                        .take_while(|(a, b)| a == b)
+                        .count();
+                    let incremental = pcommon > 0
+                        && pcommon < list.len()
+                        && !member_sort
+                        && crate::sql::paths::Gucs::read(self.ctx).incremental_sort;
+                    let mut sn = ExNode::new(if incremental { "Incremental Sort" } else { "Sort" });
                     sn.details.push(Detail::List("Sort Key", list.clone()));
-                    sn.details.push(Detail::SortInfo);
-                    self.sort_costs(&mut sn, &pt);
+                    if incremental {
+                        sn.details.push(Detail::List(
+                            "Presorted Key",
+                            list[..pcommon].iter().map(|k| presorted_name(k)).collect(),
+                        ));
+                        sn.details.push(Detail::IncSortInfo);
+                        let pre: Vec<ColInfo> = keys[..pcommon]
+                            .iter()
+                            .map(|k| match &k.expr {
+                                Expr::Col(j, _) => pt.cols.get(*j).cloned().unwrap_or_default(),
+                                _ => ColInfo::default(),
+                            })
+                            .collect();
+                        let groups = if pre.iter().any(|x| x.var.is_none()) {
+                            pt.rows.clamp(1.0, costs::DEFAULT_NUM_DISTINCT)
+                        } else {
+                            self.num_groups(&pre, pt.rows)
+                        };
+                        (sn.startup_cost, sn.total_cost) = costs::incremental_sort_cost(
+                            pt.startup_cost,
+                            pt.total_cost,
+                            pt.rows,
+                            pt.width,
+                            groups,
+                            None,
+                        );
+                        sn.rows = pt.rows;
+                        sn.width = pt.width;
+                        sn.cols = pt.cols.clone();
+                    } else {
+                        sn.details.push(Detail::SortInfo);
+                        self.sort_costs(&mut sn, &pt);
+                    }
                     sn.order = list;
                     sn.workers = pt.workers;
                     // (The sort that ran: its counters.)
                     sn.key = Some(key);
-                    sn.disabled = !crate::sql::paths::Gucs::read(self.ctx).sort;
+                    sn.disabled = !incremental && !crate::sql::paths::Gucs::read(self.ctx).sort;
                     if self.o.verbose {
                         sn.output = pt.output.clone();
                     }
@@ -7584,8 +7626,12 @@ impl Builder<'_, '_> {
     }
 
     fn fold_filter(&mut self, mut c: Built, pred: &Expr, key: usize, setop: bool) -> Built {
-        // (A qual workers can't run keeps the node out of parallel plans.)
+        // (A qual workers can't run keeps the node out of parallel plans; a subquery's
+        // Subquery Scan checking it, planned apart, may gather its own plan below it.)
         if super::paths::parallel::hazard(pred, &self.ctx.catalog()) != 's' {
+            if setop {
+                self.settle(&mut c.node);
+            }
             c.node.partial = None;
             c.node.par_safe = false;
         }

@@ -34,8 +34,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50849 (**99.41%**) |
-| units differing | 301 |
+| units matching | 50851 (**99.42%**) |
+| units differing | 299 |
 | files fully matching | 190 |
 | engine output == expected/*.out (pg_regress "ok") | 165 files |
 | engine crashes / panics | none |
@@ -44,7 +44,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 289 | 96.0% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 287 | 96.0% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 11 | 3.7% |
 | by design (a parallel plan's combine function) | 1 | 0.3% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -52,8 +52,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 289 units
-join (87), partition_join (35), partition_prune (38), subselect (10), collate.icu.utf8 (8), incremental_sort (11), select_parallel (7), updatable_views (5), groupingsets (9), with (5), memoize (8), equivclass (8), aggregates (7), rowtypes (6), rowsecurity (6), generated_virtual (6), join_hash (4), collate (4), window (3), returning (2), merge (2), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
+### EXPLAIN (group C1) — 287 units
+join (87), partition_join (35), partition_prune (38), subselect (10), collate.icu.utf8 (8), incremental_sort (11), select_parallel (5), updatable_views (5), groupingsets (9), with (5), memoize (8), equivclass (8), aggregates (7), rowtypes (6), rowsecurity (6), generated_virtual (6), join_hash (4), collate (4), window (3), returning (2), merge (2), tuplesort (2), inherit (2), gist (2), tsrf (1), select_distinct (1), select (1), rules (1), rangefuncs (1), limit (1), insert_conflict (1), hash_index (1), foreign_key (1), create_view (1), create_table (1), create_index (1), create_function_sql (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -117,12 +117,13 @@ Measured in subset runs against the engine of 7be2e83 (rebased onto 3b11900) (te
 create_index, create_view, inherit, select, union, join, aggregates, groupingsets, equivclass,
 subselect, partition_join, partition_prune, partition_aggregate, incremental_sort,
 select_parallel, select_distinct, limit, memoize, with, rowsecurity, updatable_views, rules,
-window, sqljson, tsrf, join_hash, write_parallel, stats_ext): 15 units fixed, none broken.
+window, sqljson, tsrf, join_hash, write_parallel, stats_ext): 15 units fixed, none broken; a second
+batch (on 4186dde) fixed 2 more in the same subset, none broken.
 
 | file | fixed units |
 |---|---|
 | incremental_sort | 26, 27, 44, 45 |
-| select_parallel | 35, 75, 116, 138, 170, 203 |
+| select_parallel | 35, 75, 116, 138, 170, 203; second batch: 167, 217 |
 | partition_aggregate | 19, 50, 67, 111, 120 |
 
 What changed:
@@ -162,6 +163,9 @@ What changed:
   heapsort, quicksort  Average Memory: ..`, and the JSON groups), incremental_sort 26/27/44/45.
 - A partitioned table's whole row above its partitions shows as converted to the parent's
   type (`count(((t1.*)::pagg_tab1))`, partition_aggregate 50).
+- Second batch: a partial plan already in a leading part of the ORDER BY's order is sorted
+  incrementally under the Gather Merge (select_parallel 167); a Subquery Scan whose filter
+  workers can't run gathers the subquery's own plan below it (217).
 
 Goldens added: `tests/sql/a6_dummy_rel_keys.sql`, `a6_parallel_plans.sql`,
 `a6_incremental_sort_analyze.sql`.
@@ -170,14 +174,15 @@ Still open in these files, and why:
 
 - incremental_sort 87, 89, 99–107 and select_parallel 167, 205, 207, 208: parallel paths the
   engine doesn't build yet: only one partial path per relation (the cheapest), so no Gather
-  Merge of a partial path already in order or incrementally sorted (87, 167), no Gather Merge
+  Merge of a partial path already in order for a complete grouping above it (87), no Gather Merge
   below a join keeping the outer order (99–102), no parallel nested loop / Parallel Hash Join of
   index paths (103–107, 208), a UNION ALL arm with InitPlans gathered on its own (205), a
-  ProjectSet's input sorted as the sort's input target (207).
+  ProjectSet's input sorted as the sort's input target (207), a UNION's arms as Gather Merges
+  of sorted partial plans under a Merge Append (89).
 - select_parallel 132 (a LATERAL subquery with ORDER BY pulled up: it stays a Subquery Scan in
   Postgres), 191 (the IN semi join over a WindowAgg: Postgres hashes it, the engine unique-ifies
-  it into a nested loop), 217 (a security-barrier view's scan gathered under its Subquery
-  Scan).
+  it into a nested loop). Also seen while probing: a security-barrier view read without quals
+  loses its Subquery Scan here, and its unread outputs aren't NULLs in the scan's target list.
 - Cosmetic, not failing a unit: a Gather over a relation's partial plan returns the partial
   rows times the divisor, not the relation's rows (Postgres's create_gather_path), kept because
   an Append cut down by run-time pruning is costed over its remaining members only here (all of
@@ -1208,7 +1213,7 @@ produces no units on Linux (skipped by the file itself).
 | amutils | 10 | 10 | 100% | yes | yes |  |
 | stats_ext | 878 | 877 | 100% | yes | no | wrong result `SELECT: values differ` (1) |
 | collate.linux.utf8 | 2 | 2 | 100% | yes | yes |  |
-| select_parallel | 250 | 243 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
+| select_parallel | 250 | 245 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (5) |
 | write_parallel | 22 | 22 | 100% | yes | yes |  |
 | vacuum_parallel | 14 | 14 | 100% | yes | yes |  |
 | maintain_every | 16 | 16 | 100% | yes | yes |  |
