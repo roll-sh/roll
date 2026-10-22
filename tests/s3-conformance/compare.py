@@ -1,9 +1,10 @@
 """Compare a ceph/s3-tests junit report with tests/s3-conformance/expected.txt.
 
-usage: compare.py <expected.txt> <results.txt> <junit.xml>...
+usage: compare.py [--backend local|localstack] <expected.txt> <results.txt> <junit.xml>...
 
-expected.txt lists the tests known not to pass, one per line: `<file>::<test>  <reason>`.
-Blank lines and `#` comments are ignored. Exits 1 on a regression (a test failing that isn't
+expected.txt lists the tests known not to pass, one per line: `<file>::<test>  <category>: <reason>`.
+A category ending in `@<backend>` (`env@local:`) only applies to that backend; the others apply
+to every backend. Blank lines and `#` comments are ignored. Exits 1 on a regression (a test failing that isn't
 listed) or an unexpected pass (a listed test passing), so the file always matches reality.
 Writes every test's outcome to results.txt.
 """
@@ -29,23 +30,41 @@ def outcomes(paths):
     return out
 
 
-def expected(path):
+BACKENDS = ("local", "localstack")
+
+
+def expected(path, backend):
     known = {}
+    seen = set()
     for n, line in enumerate(open(path), 1):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         test, _, reason = line.partition(" ")
-        if test in known:
+        reason = reason.strip()
+        category = reason.partition(":")[0]
+        only = category.partition("@")[2]
+        if only and only not in BACKENDS:
+            sys.exit(f"{path}:{n}: unknown backend {only!r} (one of {', '.join(BACKENDS)})")
+        key = (test, only)
+        if key in seen or (test, "") in seen or (not only and any(t == test for t, _ in seen)):
             sys.exit(f"{path}:{n}: {test} is listed twice")
-        known[test] = reason.strip()
+        seen.add(key)
+        if not only or only == backend:
+            known[test] = reason
     return known
 
 
 def main():
-    expected_path, results_path, reports = sys.argv[1], sys.argv[2], sys.argv[3:]
+    args = sys.argv[1:]
+    backend = "local"
+    if args[:1] == ["--backend"]:
+        backend, args = args[1], args[2:]
+    if backend not in BACKENDS:
+        sys.exit(f"unknown backend {backend!r}")
+    expected_path, results_path, reports = args[0], args[1], args[2:]
     got = outcomes(reports)
-    known = expected(expected_path)
+    known = expected(expected_path, backend)
     counts = {}
     with open(results_path, "w") as f:
         for name in sorted(got):
@@ -54,7 +73,7 @@ def main():
             f.write(f"{name} {status} {msg}".rstrip() + "\n")
     ran = sum(counts.values())
     passed = counts.get("passed", 0)
-    print(f"s3-tests: {ran} selected, {passed} passed, {counts.get('failed', 0)} failed, "
+    print(f"s3-tests ({backend} backend): {ran} selected, {passed} passed, {counts.get('failed', 0)} failed, "
           f"{counts.get('error', 0)} errors, {counts.get('skipped', 0)} skipped "
           f"({100 * passed / max(ran - counts.get('skipped', 0), 1):.1f}% of those that ran)")
     regressions = sorted(n for n, (s, _) in got.items() if s in ("failed", "error") and n not in known)

@@ -350,12 +350,16 @@ get the bucket's default retention unless the request sets one; copies get their
 source's.
 
 - A locked version is never deleted for good: not by `DELETE ?versionId=`, DeleteObjects,
-  lifecycle (skipped), trash expiry (a version whose GOVERNANCE retention was bypassed stays in
-  the trash until it runs out), a forced bucket delete or the control plane. Every one of these
-  checks the lock inside the transaction that would delete, before changing anything.
+  lifecycle (skipped), trash expiry (a trashed row still under a lock stays until it runs out),
+  a forced bucket delete or the control plane. Every one of these checks the lock inside the
+  transaction that would delete, before changing anything.
 - A DELETE without a version id still adds a delete marker, as on S3.
-- `x-amz-bypass-governance-retention: true` (admin keys only) lifts a GOVERNANCE retention for a
-  delete or a retention change. Nothing lifts COMPLIANCE or a legal hold.
+- `x-amz-bypass-governance-retention: true` (`s3:BypassGovernanceRetention`) lifts a GOVERNANCE
+  retention for a delete or a retention change. Nothing lifts COMPLIANCE or a legal hold. A
+  version deleted with the bypass loses its retention, as on S3: it still goes to the trash for
+  `recover_days` (restorable, now unlocked) but no longer holds its bucket, so a bucket emptied
+  that way can be deleted at once (its trash goes with it; the blobs wait out the quarantine).
+  A branch's push-down copy of that version keeps its own lock.
 - COMPLIANCE can only be extended; GOVERNANCE can be extended or made COMPLIANCE, and shortened
   or removed only with the bypass.
 - A bucket holding any locked row (current, noncurrent or trashed) can't be deleted, forced or

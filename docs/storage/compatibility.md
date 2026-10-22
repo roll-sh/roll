@@ -8,24 +8,34 @@ clients fail clearly instead of silently doing the wrong thing.
 
 [ceph/s3-tests](https://github.com/ceph/s3-tests) is the S3 conformance suite most S3-compatible
 stores measure themselves with. `pnpm test:s3-conformance` runs it (pinned, in Docker) against a
-fresh roll server on a local directory backend, with the selection AWS-compatible
-implementations use: `test_s3.py` and `test_headers.py` without the tests AWS itself fails
-(`fails_on_aws`) and without Ceph's extensions (append, S3 Select, IAM/STS/SNS, cloud tiering,
-lifecycle transitions between storage classes, RGW's logging journal and rollover).
+fresh roll server, with the selection AWS-compatible implementations use: `test_s3.py` and
+`test_headers.py` without the tests AWS itself fails (`fails_on_aws`) and without Ceph's
+extensions (append, S3 Select, IAM/STS/SNS, cloud tiering, lifecycle transitions between storage
+classes, RGW's logging journal and rollover). It runs on two backends:
 
-**435 of 647 tests pass (67.3%; one more is skipped by the suite).** The suite's "alt" and
-"tenant" users are real separate accounts. Every other test is listed with its reason in
-[`tests/s3-conformance/expected.txt`](../../tests/s3-conformance/expected.txt), and the script
-fails if anything changes either way:
+- **local** (`pnpm test:s3-conformance`): blobs in a local directory, so no SSE-KMS and no
+  encryption at rest. **451 of 647 tests pass (69.8%).**
+- **LocalStack** (`pnpm test:s3-conformance-localstack`): the backing bucket on LocalStack S3
+  with keys from LocalStack KMS (`ROLL_S3_KMS`), and `ROLL_S3_SSE_S3_AT_REST` set, since
+  LocalStack's S3 encrypts every object at rest as AWS S3 does. This is how roll runs on AWS.
+  **511 of 647 tests pass (79.1%).**
 
-| tests | why they don't pass |
-|---|---|
-| 87 | **S3's current defaults, which the suite predates.** New buckets are `BucketOwnerEnforced` (ACLs off), as on S3 since April 2023, so tests that set ACLs without `ObjectOwnership` get `InvalidBucketAclWithObjectOwnership`/`AccessControlListNotSupported`, and objects another account writes belong to the bucket owner, as they would on S3. `GetBucketEncryption` returns the default `AES256` rule. |
-| 62 | **The test environment.** SSE-KMS needs AWS KMS behind the backing bucket (`NotImplemented` on a local directory), and SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3). On an AWS S3 backend these behave as on S3. |
-| 36 | **The suite.** Expectations specific to Ceph RGW (error codes S3 doesn't use, `x-amz-delete-marker: false`, its accelerated lifecycle clock, dropping `TargetGrants`, tenant-qualified bucket names like `tenant:bucket`, which AWS doesn't have) and tests that can't fail as written (botocore re-signs after the test changes the `Authorization` header). |
-| 1 | **BitTorrent** isn't supported (S3 dropped it in 2024). |
-| 15 | **Deliberate (reliability).** A version under Object Lock deleted with a GOVERNANCE bypass stays in the trash until its lock ends, so its bucket can't be deleted until then; S3 destroys the version at once. |
-| 10 | **roll answers as S3 does where RGW differs:** a wrong SSE-C key is `403 AccessDenied`, `GetBucketPolicyStatus` without a policy is `NoSuchBucketPolicy`, a policy repeating a `Sid` is `MalformedPolicy`, a logging target another account owns is `InvalidTargetBucketForLogging`. |
+One more test is skipped by the suite in both. The suite's "alt" and "tenant" users are real
+separate accounts. Every other test is listed with its reason in
+[`tests/s3-conformance/expected.txt`](../../tests/s3-conformance/expected.txt) (a line for one
+backend only says so), and the script fails if anything changes either way:
+
+| local | LocalStack | why they don't pass |
+|---|---|---|
+| 88 | 88 | **S3's current defaults, which the suite predates.** New buckets are `BucketOwnerEnforced` (ACLs off), as on S3 since April 2023, so tests that set ACLs without `ObjectOwnership` get `InvalidBucketAclWithObjectOwnership`/`AccessControlListNotSupported` (as do ACLs that don't give the bucket owner full control, and logging `TargetGrants` for such a target), and objects another account writes belong to the bucket owner, as they would on S3. `GetBucketEncryption` returns the default `AES256` rule. |
+| 62 | 0 | **The local directory backend.** SSE-KMS needs AWS KMS behind the backing bucket (`NotImplemented` on a local directory), and SSE-S3 is reported on reads only where the backing store encrypts at rest. |
+| 34 | 34 | **The suite.** Expectations specific to Ceph RGW (error codes S3 doesn't use, `x-amz-delete-marker: false`, its accelerated lifecycle clock, tenant-qualified bucket names like `tenant:bucket`, which AWS doesn't have) and tests that can't pass on S3 as written (botocore re-signs after the test changes the `Authorization` header; a key that was invalid UTF-8 under Python 2 is valid under Python 3). |
+| 10 | 11 | **roll answers as S3 does where RGW differs:** a wrong SSE-C key is `403 AccessDenied`, `GetBucketPolicyStatus` without a policy is `NoSuchBucketPolicy`, a policy repeating a `Sid` is `MalformedPolicy`, a logging target another account owns is `InvalidTargetBucketForLogging`; with KMS, `aws:kms` without a key id uses the AWS managed key. |
+| 1 | 1 | **BitTorrent** isn't supported (S3 dropped it in 2024). |
+| 0 | 1 | **LocalStack.** Its `UploadPartCopy` ignores SSE-C, so roll refuses the part it can't confirm was encrypted (`NotImplemented`) and keeps nothing. |
+
+Nothing is listed as deliberate any more: a delete with a GOVERNANCE bypass removes the lock as
+on S3 (see [Behaviour differences](#behaviour-differences)).
 
 ## Addressing and auth
 
@@ -125,7 +135,7 @@ never stored; the metadata keeps their MD5 to tell a right key from a wrong one.
 
 | feature | status |
 |---|---|
-| SSE-S3 (`x-amz-server-side-encryption: AES256`) | ✅ on AWS S3 every object is encrypted at rest, so every write and read reports `AES256`, as S3 does since 2023. On other backends it's reported only when asked for. |
+| SSE-S3 (`x-amz-server-side-encryption: AES256`) | ✅ on AWS S3 every object is encrypted at rest, so every write and read reports `AES256`, as S3 does since 2023. On other backends it's reported only on the write that asked for it, unless the operator sets `ROLL_S3_SSE_S3_AT_REST=true` to vouch that the backing store encrypts everything at rest (roll doesn't encrypt or check it). |
 | SSE-C (`x-amz-server-side-encryption-customer-*`) on PUT, GET, HEAD, CreateMultipartUpload, UploadPart, CompleteMultipartUpload, POST Object | ✅ |
 | SSE-C copy sources (`x-amz-copy-source-server-side-encryption-customer-*`) on CopyObject and UploadPartCopy | ✅ |
 | SSE-KMS (`aws:kms`, `aws:kms:dsse`, `-aws-kms-key-id`, `-context`, `-bucket-key-enabled`) | ✅ on AWS S3 backends; `NotImplemented` elsewhere (see below) |
@@ -158,7 +168,8 @@ Details:
   directory backend. `ROLL_S3_KMS=true|false` overrides it. `pnpm test:storage-aws` runs it end
   to end with the backing bucket on LocalStack S3 and keys from LocalStack KMS: PUT, GET, HEAD,
   multipart, copies between encryptions, the bucket's default encryption with a bucket key, and
-  every blob checked on the backing bucket itself.
+  every blob checked on the backing bucket itself, and `pnpm test:s3-conformance-localstack`
+  runs the conformance suite's SSE-KMS tests that way.
 - **S3-compatible backends.** Every encrypted write checks that the backing service confirmed the
   encryption. One that ignores SSE headers (or doesn't confirm them for an operation, as
   SeaweedFS does for multipart uploads and copies with SSE-C) gets `NotImplemented` for that
@@ -393,9 +404,9 @@ permissions boundary. Through IAM they show their trust as the equivalent trust 
 
 **What policies support.**
 - `Version` `2012-10-17` or `2008-10-17`; `Statement` as one object or an array; `Sid`.
-- `Effect`; `Principal`/`NotPrincipal`; `Action`/`NotAction` with `s3:` wildcards;
-  `Resource`/`NotResource` with ARN wildcards (they must name the bucket); policy variables in
-  `2012-10-17` policies.
+- `Effect`; `Principal`/`NotPrincipal` (`NotPrincipal` only with `Deny`, as on AWS);
+  `Action`/`NotAction` with `s3:` wildcards; `Resource`/`NotResource` with ARN wildcards (they
+  must name the bucket); policy variables in `2012-10-17` policies.
 - Every IAM condition operator (`String*`, `Numeric*`, `Date*`, `Bool`, `IpAddress`,
   `NotIpAddress`, `Arn*`, `Null`), with `…IfExists`, `ForAnyValue:` and `ForAllValues:`.
 - Condition keys:
@@ -740,9 +751,11 @@ bucket (`arn:aws:s3:::<roll bucket>`):
   noncurrent), without S3's rounding to the next midnight UTC, and the job runs daily.
   `ExpiredObjectDeleteMarker` removes markers only when the rule says so.
 - **Object Lock is enforced everywhere a version could be destroyed:** the API, lifecycle,
-  trash expiry (a version deleted with a GOVERNANCE bypass stays in the trash until its lock
-  ends), forced bucket deletes and the control plane. A bucket holding locked versions can't be
-  deleted. A default retention in `Years` counts 365 days a year. `x-amz-bypass-governance-retention` needs `s3:BypassGovernanceRetention` (an `admin` key, the root user, or a policy). Branches copy a version's
+  trash expiry, forced bucket deletes and the control plane. A bucket holding locked versions
+  can't be deleted. A delete with `x-amz-bypass-governance-retention` removes a GOVERNANCE
+  retention as on S3, so the version no longer holds its bucket; unlike S3 it still goes to the
+  trash for `recover_days` (restorable, unlocked) unless the bucket is deleted first. COMPLIANCE
+  and legal holds are never bypassed. A default retention in `Years` counts 365 days a year. `x-amz-bypass-governance-retention` needs `s3:BypassGovernanceRetention` (an `admin` key, the root user, or a policy). Branches copy a version's
   lock with the version, so a branch holding a locked version can't be deleted either. S3
   requires `Content-MD5` for uploads into a bucket with a default retention; roll only requires
   an integrity check when the request itself sets Object Lock headers, and verifies every body's

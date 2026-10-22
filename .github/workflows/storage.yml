@@ -80,6 +80,24 @@ jobs:
           path: target/s3-conformance/
           if-no-files-found: ignore
 
+  conformance-localstack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: docker pull -q localstack/localstack:4.9
+      - name: ceph/s3-tests against roll storage on LocalStack S3 and KMS (SSE-KMS, SSE-S3 at rest)
+        run: scripts/test-s3-conformance.sh --force --backend localstack
+      - name: Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s3-conformance-localstack
+          path: target/s3-conformance-localstack/
+          if-no-files-found: ignore
+
   s3:
     runs-on: ubuntu-latest
     timeout-minutes: 20

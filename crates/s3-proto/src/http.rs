@@ -65,6 +65,11 @@ pub fn percent_decode_utf8(s: &str) -> Result<String, S3Error> {
     String::from_utf8(percent_decode(s)).map_err(|_| S3Error::msg(Code::InvalidArgument, "URL-decoded value is not valid UTF-8"))
 }
 
+/// A request path (bucket or key) percent-decoded; one that isn't UTF-8 is S3's `InvalidURI`.
+pub fn percent_decode_path(s: &str) -> Result<String, S3Error> {
+    String::from_utf8(percent_decode(s)).map_err(|_| S3Error::new(Code::InvalidURI))
+}
+
 /// A raw query string as decoded `(name, value)` pairs, in order. `+` is literal, like the
 /// SigV4 canonicalisation treats it.
 pub fn parse_query(raw: &str) -> Vec<(String, String)> {
@@ -631,6 +636,8 @@ mod tests {
         assert_eq!(percent_decode("%41%4a%4A"), b"AJJ");
         assert_eq!(percent_decode_utf8("%ff").unwrap_err().code, Code::InvalidArgument);
         assert_eq!(percent_decode_utf8("%C3%A9").unwrap(), "é");
+        assert_eq!(percent_decode_path("/%ae%8a-").unwrap_err().code, Code::InvalidURI);
+        assert_eq!(percent_decode_path("%C2%AE%C2%8A-").unwrap(), "\u{ae}\u{8a}-");
         assert_eq!(parse_query("%ff=%fe"), vec![("\u{fffd}".into(), "\u{fffd}".into())]);
         assert_eq!(parse_query("a=b=c"), vec![("a".into(), "b=c".into())]);
         assert_eq!(uri_encode("~-_.!*'()", true), "~-_.%21%2A%27%28%29");

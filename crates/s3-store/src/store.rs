@@ -61,6 +61,11 @@ pub struct StoreConfig {
     /// SSE-KMS on or off (`ROLL_S3_KMS`); `None`: whatever the backend can pass through (real
     /// AWS S3 without a custom endpoint).
     pub kms: Option<bool>,
+    /// The operator vouches that the backing store encrypts every object at rest
+    /// (`ROLL_S3_SSE_S3_AT_REST`), so responses report SSE-S3 (`AES256`) for objects without
+    /// SSE-C or SSE-KMS, as S3 does. roll doesn't encrypt the bytes itself and can't check this.
+    /// `None`: only real AWS S3 (no custom endpoint), which encrypts every object since 2023.
+    pub sse_s3_at_rest: Option<bool>,
     /// Copies that need a new blob (encryption changes) go in one backend copy up to this size
     /// (S3's 5 GiB CopyObject limit), part by part beyond it …
     pub max_single_copy: u64,
@@ -93,6 +98,7 @@ impl StoreConfig {
             clock: system_clock(),
             block_public_access: false,
             kms: None,
+            sse_s3_at_rest: None,
             max_single_copy: 5 << 30,
             copy_part_size: 512 << 20,
         }

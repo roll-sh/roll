@@ -606,6 +606,11 @@ impl Policy {
             if principal.is_some() == not_principal.is_some() {
                 return Err(malformed("Missing required field Principal"));
             }
+            // AWS only supports `NotPrincipal` with Deny. Refused on a new policy; a stored one
+            // (from before this check) still loads as it was.
+            if bucket.is_some() && effect == Effect::Allow && not_principal.is_some() {
+                return Err(malformed("NotPrincipal is only supported with Effect Deny"));
+            }
             let action = m.get("Action").map(|v| strings(v, "Action")).transpose()?;
             let not_action = m.get("NotAction").map(|v| strings(v, "NotAction")).transpose()?;
             if action.is_some() == not_action.is_some() {
@@ -1247,6 +1252,9 @@ mod tests {
         // A principal, an unknown S3 action, a malformed action and size are refused.
         assert!(id(serde_json::json!({"Statement": [{"Effect": "Allow", "Principal": "*", "Action": "s3:*", "Resource": "*"}]})).is_err());
         assert!(id(serde_json::json!({"Statement": [{"Effect": "Allow", "NotPrincipal": {"AWS": "x"}, "Action": "s3:*", "Resource": "*"}]})).is_err());
+        let allow_not = serde_json::json!({"Statement": [{"Effect": "Allow", "NotPrincipal": {"AWS": "123456789012"}, "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::bkt"}]}).to_string();
+        assert!(Policy::parse(allow_not.as_bytes(), "bkt").is_err(), "NotPrincipal only goes with Deny, as on AWS");
+        assert!(Policy::load(allow_not.as_bytes()).is_ok(), "a policy stored before that check still loads");
         assert!(id(serde_json::json!({"Statement": [{"Effect": "Allow", "Action": "s3:Teleport", "Resource": "*"}]})).is_err());
         assert!(id(serde_json::json!({"Statement": [{"Effect": "Allow", "Action": "not an action", "Resource": "*"}]})).is_err());
         assert!(Policy::parse_identity(&[b' '; 2049], 2048).is_err());

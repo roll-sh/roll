@@ -135,6 +135,12 @@ struct Args {
     /// custom endpoint, off otherwise; a local directory can't).
     #[arg(long, env = "ROLL_S3_KMS")]
     s3_kms: Option<bool>,
+    /// Declare that the backing store encrypts every object at rest, so objects without SSE-C or
+    /// SSE-KMS are reported as SSE-S3 (`AES256`), as S3 does (default: on for AWS S3 without a
+    /// custom endpoint, off otherwise). roll doesn't encrypt them itself: only set it when the
+    /// backing store (or the disk under a local directory) really does.
+    #[arg(long, env = "ROLL_S3_SSE_S3_AT_REST")]
+    s3_sse_s3_at_rest: Option<bool>,
     /// An admin access key to create at startup (local dev and tests), with ROLL_S3_SECRET_KEY.
     #[arg(long, env = "ROLL_S3_ACCESS_KEY", requires = "s3_secret_key")]
     s3_access_key: Option<String>,
@@ -361,6 +367,7 @@ struct StorageOpts {
     s3_storage_class: Option<String>,
     s3_internal_cidrs: Option<String>,
     s3_kms: Option<bool>,
+    s3_sse_s3_at_rest: Option<bool>,
     s3_access_key: Option<String>,
     s3_secret_key: Option<String>,
     s3_notify_aws: bool,
@@ -382,6 +389,7 @@ impl From<&Args> for StorageOpts {
             s3_storage_class: a.s3_storage_class.clone(),
             s3_internal_cidrs: a.s3_internal_cidrs.clone(),
             s3_kms: a.s3_kms,
+            s3_sse_s3_at_rest: a.s3_sse_s3_at_rest,
             s3_access_key: a.s3_access_key.clone(),
             s3_secret_key: a.s3_secret_key.clone(),
             s3_notify_aws: a.s3_notify_aws,
@@ -422,6 +430,7 @@ async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &Sto
     cfg.block_public_access = args.s3_block_public_access;
     cfg.region = scfg.region.clone();
     cfg.kms = args.s3_kms;
+    cfg.sse_s3_at_rest = args.s3_sse_s3_at_rest;
     let store = s3_store::Store::open(cfg, backend).await?;
     if let (Some(id), Some(secret)) = (&args.s3_access_key, &args.s3_secret_key) {
         store.ensure_key(id, secret, "ROLL_S3_ACCESS_KEY").await?;
