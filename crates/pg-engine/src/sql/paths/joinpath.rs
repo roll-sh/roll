@@ -1109,35 +1109,7 @@ impl Search<'_, '_, '_> {
             }
             Some((_, r)) => {
                 let r = Rc::new(r.shallow_with_quals());
-                // Merge-useful columns: those equated to another leaf's.
-                let merge: Vec<Expr> = (0..leaf.ncols)
-                    .filter(|k| {
-                        let g = leaf.off + k;
-                        self.ec_has_other(g, set)
-                    })
-                    .filter(|k| *k < r.table.columns.len())
-                    .map(|k| Expr::Col(k, r.table.columns[k].ty.clone()))
-                    .collect();
-                // The ORDER BY's keys this leaf has a column for (a prefix).
-                let mut keys = Vec::new();
-                for q in self.query_keys() {
-                    let col = (0..leaf.ncols.min(r.table.columns.len()))
-                        .find(|k| self.ec[leaf.off + k] == q.ec);
-                    match col {
-                        Some(k) => keys.push(PathKey {
-                            expr: Expr::Col(k, r.table.columns[k].ty.clone()),
-                            desc: q.desc,
-                            nulls_first: q.nulls_first,
-                            cmp: 0,
-                        }),
-                        None => break,
-                    }
-                }
-                let want = Want {
-                    keys,
-                    limit: None,
-                    merge,
-                };
+                let want = self.leaf_want(l, &r);
                 for p in self.pl.paths(&r, &want) {
                     let keys = self.gkeys(l, &p.keys);
                     rel.paths.push(JP {
@@ -1162,6 +1134,40 @@ impl Search<'_, '_, '_> {
             }
         }
         self.rels.push(rel);
+    }
+
+    /// The orderings useful for a scan leaf's paths: the ORDER BY's keys it has a column
+    /// for (a prefix), and the columns equated to another leaf's (merge-useful).
+    fn leaf_want(&self, l: usize, r: &Rel) -> Want {
+        let leaf = &self.leaves[l];
+        let set = 1u32 << l;
+        let merge: Vec<Expr> = (0..leaf.ncols)
+            .filter(|k| {
+                let g = leaf.off + k;
+                self.ec_has_other(g, set)
+            })
+            .filter(|k| *k < r.table.columns.len())
+            .map(|k| Expr::Col(k, r.table.columns[k].ty.clone()))
+            .collect();
+        let mut keys = Vec::new();
+        for q in self.query_keys() {
+            let col = (0..leaf.ncols.min(r.table.columns.len()))
+                .find(|k| self.ec[leaf.off + k] == q.ec);
+            match col {
+                Some(k) => keys.push(PathKey {
+                    expr: Expr::Col(k, r.table.columns[k].ty.clone()),
+                    desc: q.desc,
+                    nulls_first: q.nulls_first,
+                    cmp: 0,
+                }),
+                None => break,
+            }
+        }
+        Want {
+            keys,
+            limit: None,
+            merge,
+        }
     }
 
     /// A column's equivalence class has a member in another leaf than `set`'s.
@@ -2359,23 +2365,19 @@ impl Search<'_, '_, '_> {
                 self.pl.num_groups(lr, &refs, rows_in)
             }
             // (Columns with statistics of their own, as a CTE's of a table: their distinct
-            // counts; else estimate_num_groups' default.)
+            // counts; any other get_variable_numdistinct's default, the relation's rows when
+            // fewer.)
             None => {
                 let leaf = &self.leaves[l];
                 let mut prod = 1.0;
-                let mut known = true;
                 for &g in cols.iter() {
                     match leaf.cols.get(g - leaf.off) {
                         Some((_, Some(v), _)) => prod *= v.ndistinct(&self.pl.cat).0,
                         Some((_, None, Some(d))) => prod *= *d,
-                        _ => known = false,
+                        _ => prod *= rows_in.min(costs::DEFAULT_NUM_DISTINCT),
                     }
                 }
-                if known && !cols.is_empty() {
-                    costs::clamp_rows(prod.min(rows_in))
-                } else {
-                    costs::clamp_rows(rows_in.min(costs::DEFAULT_NUM_DISTINCT))
-                }
+                costs::clamp_rows(prod.min(rows_in))
             }
         };
         let n = cols.len() as f64;
@@ -4145,6 +4147,14 @@ impl Search<'_, '_, '_> {
                     });
                 }
                 apply(rel, &mut s, path);
+                // (Its partial paths are built for the same orderings.)
+                if s.useful.0.is_none() {
+                    let want = self.leaf_want(*leaf, rel);
+                    s.useful = crate::sql::plan::ScanUseful(
+                        (!want.keys.is_empty() || !want.merge.is_empty())
+                            .then(|| Arc::new((want.keys, want.merge))),
+                    );
+                }
                 let scan = Plan::Scan(Box::new(s));
                 let plan = match &l.proj {
                     Some(exprs) => Plan::Project {

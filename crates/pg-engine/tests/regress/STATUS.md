@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 50953 (**99.61%**) |
-| units differing | 197 |
+| units matching | 50968 (**99.64%**) |
+| units differing | 182 |
 | files fully matching | 202 |
 | engine output == expected/*.out (pg_regress "ok") | 175 files |
 | engine crashes / panics | none |
@@ -45,16 +45,16 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 190 | 96.4% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 6 | 3.0% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 175 | 96.2% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 6 | 3.3% |
 | by design (a parallel plan's combine function) | 1 | 0.5% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 190 units
-join (71), partition_join (21), partition_prune (12), subselect (6), collate.icu.utf8 (8), incremental_sort (11), select_parallel (5), updatable_views (5), groupingsets (9), with (5), memoize (2), equivclass (6), aggregates (7), rowtypes (4), rowsecurity (2), generated_virtual (1), join_hash (3), returning (2), merge (2), tuplesort (2), inherit (2), select_distinct (1), rangefuncs (1), insert_conflict (1), foreign_key (1), create_table (1)
+### EXPLAIN (group C1) — 175 units
+join (71), partition_join (21), partition_prune (7), subselect (6), collate.icu.utf8 (8), incremental_sort (6), select_parallel (1), updatable_views (5), groupingsets (9), with (5), memoize (1), equivclass (6), aggregates (7), rowtypes (4), rowsecurity (2), generated_virtual (1), join_hash (3), returning (2), merge (2), tuplesort (2), inherit (2), select_distinct (1), rangefuncs (1), insert_conflict (1), foreign_key (1), create_table (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -415,23 +415,97 @@ Goldens added: `tests/sql/a6_dummy_rel_keys.sql`, `a6_parallel_plans.sql`,
 
 Still open in these files, and why:
 
-- incremental_sort 87, 89, 99–107 and select_parallel 167, 205, 207, 208: parallel paths the
-  engine doesn't build yet: only one partial path per relation (the cheapest), so no Gather
-  Merge of a partial path already in order for a complete grouping above it (87), no Gather Merge
-  below a join keeping the outer order (99–102), no parallel nested loop / Parallel Hash Join of
-  index paths (103–107, 208), a UNION ALL arm with InitPlans gathered on its own (205), a
-  ProjectSet's input sorted as the sort's input target (207), a UNION's arms as Gather Merges
-  of sorted partial plans under a Merge Append (89).
+- incremental_sort 87, 89, 99–107 and select_parallel 191, 205, 207, 208: see "Fixed in round
+  14, agent 7" (all but incremental_sort 99–102, 106, 107 fixed there).
 - select_parallel 132 (a LATERAL subquery with ORDER BY pulled up: it stays a Subquery Scan in
-  Postgres), 191 (the IN semi join over a WindowAgg: Postgres hashes it, the engine unique-ifies
-  it into a nested loop). Also seen while probing: a security-barrier view read without quals
-  loses its Subquery Scan here, and its unread outputs aren't NULLs in the scan's target list.
-- Cosmetic, not failing a unit: a Gather over a relation's partial plan returns the partial
-  rows times the divisor, not the relation's rows (Postgres's create_gather_path), kept because
-  an Append cut down by run-time pruning is costed over its remaining members only here (all of
-  them in Postgres), and the two together flipped partition_prune 355; a sort's input target
-  doesn't count computed resjunk sort keys in its width; a partitionwise grouping's serial
-  members show the width before their projection.
+  Postgres). Also seen while probing: a security-barrier view read without quals loses its
+  Subquery Scan here, and its unread outputs aren't NULLs in the scan's target list.
+- Cosmetic, not failing a unit: a sort's input target doesn't count computed resjunk sort keys
+  in its width; a partitionwise grouping's serial members show the width before their
+  projection. (A Gather over a relation's partial plan returns the relation's rows now, agent
+  7, except over an Append.)
+
+## Fixed in round 14, agent 7 (several partial paths per relation)
+
+Measured in subset runs (test_setup, create_table, create_misc, create_index, create_view,
+inherit, select, union, join, aggregates, groupingsets, equivclass, subselect, partition_join,
+partition_prune, partition_aggregate, incremental_sort, select_parallel, select_distinct, limit,
+memoize, with, rowsecurity, updatable_views, rules, window, sqljson, tsrf, join_hash,
+write_parallel, stats_ext) against this batch's engine, rebased onto ce4f7ee: 15 units fixed,
+none broken (test_setup 7 differs in some runs: the shared reference cluster's tablespace).
+
+| file | fixed units |
+|---|---|
+| incremental_sort | 87, 89, 103, 104, 105 |
+| select_parallel | 191, 205, 207, 208 |
+| memoize | 67 |
+| partition_prune | 377, 378, 380, 381, 383 |
+
+What changed:
+
+- A scan keeps its relation's other partial paths beside the cheapest one (`ExNode::partials`,
+  pruned as add_partial_path does: compatible pathkeys, fewer disabled nodes, then total cost
+  with the 1% fuzz): its parallel index scans, built for the orderings the planner found useful
+  (`ScanPlan::useful`, now also set for a grouping's keys, hinted_scan, and for a join leaf's
+  ORDER BY and merge columns, `leaf_want`). They go through projections of the scan only.
+- generate_useful_gather_paths (`useful_gathers`): for an order, a Gather Merge over each partial
+  path already in it, over the cheapest one sorted, and over each other one in a leading part
+  of it sorted incrementally, returning the relation's rows. Used by an ORDER BY's sort, by a
+  complete grouping in order (incremental_sort 87: a GroupAggregate over a Gather Merge of an
+  Incremental Sort of a Parallel Index Scan) and by a UNION's arms merged in the columns' order
+  (89: a Merge Append of Gather Merges, the ORDER BY then sorting incrementally). A partial
+  grouping also groups each partial path already in its keys' order (a Partial GroupAggregate
+  straight over a Parallel Index Scan).
+- add_path keeps the path cheapest to start beside the cheapest in total: a node's `alt` is a
+  chain now (a sorted grouping's alternatives, the serial grouping in order beside a parallel
+  one), the Sort of an ORDER BY sorts a partly ordered alternative incrementally, and a LIMIT
+  weighs every one of them, plus create_ordered_paths' own Gather Merge whose workers' sort is
+  costed for the rows the LIMIT reads (kept only when that is fuzzily cheaper).
+- A scan reading an index in the order the ORDER BY wants (the planner dropped the Sort) is
+  gathered only by a Gather Merge in that order (`wanted_order`); a plain Gather would lose it.
+- A join's partial paths of every method and orientation (`join_force`): hashing (a Parallel
+  Hash too) and nested loops with either side outside for an inner join, beside the serial
+  join's own, compared as add_partial_path does (total cost only; a tie keeps the one built
+  first: the side earlier in the FROM list outside, nested loops before hashing).
+  incremental_sort 103: a Parallel Hash Join where the serial join merges. A partial nested
+  loop takes the inner side materialized when cheaper and an outer partial path in order when
+  fuzzily as cheap; a Function Scan of parallel-safe calls is parallel safe (104/105: a partial
+  nested loop of a Parallel Index Only Scan and a Function Scan under a Gather); a
+  parameterized inner side a worker can run (its quals read only the nested loop's outer row)
+  makes a partial nested loop too (memoize 67: a Memoize over a parameterized index scan;
+  partition_prune 377–383: a parameterized Append of index scans under a Gather).
+- A base relation whose Gather beats its serial path leaves the joins above only that path
+  (unless the serial join is clearly cheaper, or merges, or reads an input in the wanted
+  order); a partial nested loop never takes a gathered inner side (select_parallel 208).
+- A Gather over a relation's (non-Append) partial plan returns the relation's rows
+  (create_gather_path); its target list is its child's exact one (so is a Materialize's or a
+  Hash's over it); a scan or Function Scan of no column read is 0 wide.
+- UNION ALL arms with quals stay query levels of their own: an arm's InitPlans (those no other
+  arm reads: a qual pushed into every arm stays the parent's) go on its top node, which pays for
+  them, and the arm isn't parallel safe (select_parallel 205: a Gather per arm).
+- make_sort_input_target under a ProjectSet: the sort's input is the non-postponed columns,
+  then those the postponed ones read, a Result over the sort (under a Gather Merge) restoring the
+  ProjectSet's input order; the top projection dropping the resjunk sort columns isn't a node
+  (207).
+- Incremental sorts and groupings estimate groups with the relation's rows (estimate_num_groups'
+  rel->rows), not the input's; a semi join's side unique-ified on columns without statistics
+  counts get_variable_numdistinct's default for each (the Hash Right Semi Join wins, 191); a
+  WindowAgg returns only what's read above it.
+
+Goldens added: `tests/sql/a7_partial_paths.sql`, `a7_partial_joins.sql`.
+
+Still open in these files, and why:
+
+- incremental_sort 99–102, 106, 107: `LATERAL (SELECT tenk1.unique1 FROM generate_series(...))`
+  isn't pulled up here. Postgres pulls the subquery up and its output is a plain Var of tenk1,
+  so the join isn't LATERAL and its outer side can be a Gather Merge of a sorted partial path
+  (the sort keys showing bare, `COLLATE "C"` for the keys over `name` cast to text). The engine
+  keeps the projection on the function scan side as a LATERAL reference, so the join stays
+  parameterized (subquery pull-up, `lift.rs`).
+- select_parallel 132 (a LATERAL subquery with ORDER BY).
+- Cosmetic: a partial nested loop's Memoize keeps the serial path's rescan costs (Postgres
+  costs it for the partial outer rows: memoize 67's costs); a Gather over an Append keeps the
+  partial rows times the divisor.
 
 ## Fixed in round 14, agent 4, third batch (joins under windows, Memoize over appendrels, filters over outer joins)
 
@@ -1618,7 +1692,7 @@ produces no units on Linux (skipped by the file itself).
 | tidrangescan | 45 | 45 | 100% | yes | yes |  |
 | collate.utf8 | 61 | 61 | 100% | yes | yes |  |
 | collate.icu.utf8 | 681 | 673 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (8) |
-| incremental_sort | 120 | 109 | 91% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (11) |
+| incremental_sort | 120 | 114 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (6) |
 | create_role | 144 | 144 | 100% | yes | yes |  |
 | without_overlaps | 674 | 674 | 100% | yes | yes |  |
 | generated_virtual | 489 | 488 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
@@ -1629,7 +1703,7 @@ produces no units on Linux (skipped by the file itself).
 | amutils | 10 | 10 | 100% | yes | yes |  |
 | stats_ext | 878 | 877 | 100% | yes | no | wrong result `SELECT: values differ` (1) |
 | collate.linux.utf8 | 2 | 2 | 100% | yes | yes |  |
-| select_parallel | 250 | 245 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (5) |
+| select_parallel | 250 | 249 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | write_parallel | 22 | 22 | 100% | yes | yes |  |
 | vacuum_parallel | 14 | 14 | 100% | yes | yes |  |
 | maintain_every | 16 | 16 | 100% | yes | yes |  |
@@ -1680,7 +1754,7 @@ produces no units on Linux (skipped by the file itself).
 | with | 307 | 303 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (4) |
 | xml | 281 | 281 | 100% | yes | yes |  |
 | partition_join | 614 | 593 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (21) |
-| partition_prune | 771 | 759 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (12) |
+| partition_prune | 771 | 764 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |
 | indexing | 645 | 645 | 100% | yes | yes |  |
@@ -1688,7 +1762,7 @@ produces no units on Linux (skipped by the file itself).
 | partition_info | 73 | 73 | 100% | yes | yes |  |
 | tuplesort | 108 | 106 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | explain | 60 | 60 | 100% | yes | yes |  |
-| memoize | 73 | 71 | 97% | yes | no | wrong result `SELECT: values differ` (2) |
+| memoize | 73 | 72 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | stats | 482 | 482 | 100% | yes | yes |  |
 | predicate | 42 | 42 | 100% | yes | yes |  |
 | numa | 3 | 3 | 100% | yes | yes |  |

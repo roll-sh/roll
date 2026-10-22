@@ -17,9 +17,9 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 50,953 of 51,150 statements match (99.61%).** 197 differ. The full
+- **Regression suite: 50,968 of 51,150 statements match (99.64%).** 182 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 190 are `EXPLAIN` plan text (96%). Query results already match.
+  - 175 are `EXPLAIN` plan text (96%). Query results already match.
   - 6 are plan choices that show up in results (mostly which side a hash join builds on,
     grouping-set output order).
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
@@ -228,7 +228,7 @@ them all with the "Fixed in round N" sections describing what was already tried.
    (368), a full join of one-row relations removed (366). join 744 differs only in plan choice
    (a parameterized hash join inside a nested loop).
 2. **Remaining join / partition_join / partition_prune plan shapes** (join 71, partition_join 21,
-   partition_prune 12 units; round 14's agent 5 section in STATUS.md has what changed): cost-driven
+   partition_prune 7 units; round 14's agent 5 section in STATUS.md has what changed): cost-driven
    choices (join 123/410/424/450/543, partition_join 21/74), equivalence classes with scan-level
    members (join 609/610), partitionwise joins with a LATERAL item
    (partition_join 41/43/45/46/48/204–207), IN over a partitioned subquery as a semi join
@@ -262,8 +262,8 @@ them all with the "Fixed in round N" sections describing what was already tried.
    relation takes the plain name, the target's restriction from the equivalence class with the
    statement's rows, the non-target rows' ctids), a FROM subquery's whole-row mark under a
    locking level (`s.*`, PG keeps its Subquery Scan), inherited UPDATE / DELETE targets.
-5. **collate.icu.utf8** (23), **incremental_sort** (11), **select_parallel** (5; both mostly
-   need more than one partial path per relation, see STATUS.md),
+5. **collate.icu.utf8** (23), **incremental_sort** (6: a LATERAL subquery over a function
+   scan not pulled up, see STATUS.md's round 14 agent 7), **select_parallel** (1),
    **updatable_views** (13), **groupingsets** (12, including the sorted-vs-hashed choice and
    output order), **with** (10; 52/55/58/76/77 need a materialized CTE's sort order offered to a
    merge join), **memoize**, **equivclass**, **privileges** (8 each), then the long tail in

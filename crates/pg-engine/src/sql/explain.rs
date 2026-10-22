@@ -453,11 +453,24 @@ struct ExNode {
     /// This node's output as a partial plan (rows spread over parallel workers), when
     /// one can make it: what a Gather above would run (`parallel`).
     partial: Option<Box<ExNode>>,
+    /// The relation's other partial paths add_partial_path keeps beside `partial` for
+    /// their order (a scan's parallel index scans): what a Gather Merge above may run as
+    /// it is, or sorted incrementally (generate_useful_gather_paths).
+    partials: Vec<ExNode>,
+    /// A scan reading an index in the order the query's ORDER BY wants (the planner
+    /// took it for the Sort): per wanted key, the column it reads. A plain Gather of its
+    /// partial plan would lose that order (`settle` gathers it only in order).
+    wanted_order: Vec<Option<usize>>,
     /// A node with a Gather in it: the cheapest plan of the same rows a worker could run
     /// (get_cheapest_parallel_safe_total_inner), for a Parallel Append to share out whole.
     safe_alt: Option<Box<ExNode>>,
     /// A Sort a LIMIT above bounds (ExecSetTupleBound): the rows it keeps.
     bound: Option<f64>,
+    /// An Incremental Sort: the presorted groups its costs assume.
+    presorted_groups: Option<f64>,
+    /// Its target list is in the order built (a sort's input target): `tlist_layout`
+    /// leaves it, and the nodes below it, as they are.
+    fixed_tlist: bool,
 }
 
 impl ExNode {
@@ -472,6 +485,11 @@ impl ExNode {
     fn child(mut self, rel: &'static str) -> ExNode {
         self.relationship = Some(rel);
         self
+    }
+
+    /// The node's partial plans: the cheapest and the ordered ones (`partials`).
+    fn partials_mut(&mut self) -> impl Iterator<Item = &mut ExNode> {
+        self.partial.as_deref_mut().into_iter().chain(self.partials.iter_mut())
     }
 
     fn is_scan(&self) -> bool {
@@ -612,6 +630,9 @@ struct Builder<'c, 'a> {
     pw_aggs: Vec<usize>,
     /// Converting a partial partitionwise aggregation's partitions.
     pw_partial: bool,
+    /// The method and orientation (outer side the right input) of the join being built
+    /// for another partial path of it (`join`'s add_partial_path candidates).
+    join_force: Option<(super::plan::JoinMethod, bool)>,
     /// The aggregation node being converted's key.
     agg_key: Option<usize>,
     /// The input of the aggregation being converted.
@@ -1472,7 +1493,9 @@ fn tlist_layout_at(top: &mut ExNode, locked: bool) {
         o.rsplit_once('.').map(|(r, _)| r)
     }
     fn go(n: &mut ExNode, top: &[String], small_parent: bool, locked: bool) {
-        if matches!(n.node_type, "Append" | "Merge Append" | "Subquery Scan" | "Gather" | "Gather Merge") {
+        if n.fixed_tlist
+            || matches!(n.node_type, "Append" | "Merge Append" | "Subquery Scan" | "Gather" | "Gather Merge")
+        {
             return;
         }
         if n.node_type == "LockRows" {
@@ -1611,6 +1634,30 @@ fn inh_parents(p: &Plan) -> usize {
         _ => 0,
     };
     own + plan_inputs(p).into_iter().map(|c| inh_parents(c)).sum::<usize>()
+}
+
+/// The earliest range table place of the relations a plan scans (its FROM-list order).
+fn min_rti(p: &Plan) -> Option<super::plan::Rti> {
+    let own = match p {
+        Plan::Scan(s) if s.rti.0 > 0 => Some(s.rti),
+        _ => None,
+    };
+    plan_inputs(p).into_iter().filter_map(|c| min_rti(c)).chain(own).min()
+}
+
+/// The ids of the sub-selects a plan's expressions run (not those inside them).
+fn plan_subquery_ids(p: &Plan) -> Vec<usize> {
+    let mut exprs = Vec::new();
+    node_exprs(p, &mut exprs);
+    let mut sq = Vec::new();
+    for e in exprs {
+        subqueries_in(e, &mut sq);
+    }
+    let mut ids: Vec<usize> = sq.iter().map(|s| s.id).collect();
+    for c in plan_inputs(p) {
+        ids.extend(plan_subquery_ids(c));
+    }
+    ids
 }
 
 fn subqueries_in<'p>(e: &'p Expr, out: &mut Vec<&'p Subquery>) {
@@ -3109,15 +3156,20 @@ impl Builder<'_, '_> {
         if b.node.key.is_none() {
             b.node.key = Some(addr(p));
         }
+        // (The ordered partial paths go through projections of a scan only.)
+        if !matches!(&**p, Plan::Scan(_) | Plan::Project { .. }) || b.node.partial.is_none() {
+            b.node.partials.clear();
+        }
         // (Its partial form counts as it: the same node runs.)
         let k = b.node.key;
-        if let Some(pt) = &mut b.node.partial
-            && pt.key.is_none()
-        {
-            pt.key = k;
+        for pt in b.node.partials_mut() {
+            if pt.key.is_none() {
+                pt.key = k;
+            }
         }
-        // (A join whose columns nothing above reads is 0 wide.)
-        if b.node.width == 0 && !b.node.is_join() {
+        // (A join whose columns nothing above reads is 0 wide; so is a scan of them.)
+        let unread_scan = b.node.is_scan() && self.needed.get(&addr(p)).is_some_and(|m| m.iter().all(|x| !x));
+        if b.node.width == 0 && !b.node.is_join() && !unread_scan {
             b.node.width = b.exported.len() as u32 * 4;
         }
         if self.o.verbose && b.node.output.is_empty() && b.node.node_type != "ModifyTable" {
@@ -3141,7 +3193,7 @@ impl Builder<'_, '_> {
             let marked = b.node.is_scan()
                 && (self.rowmarks.contains(&addr(p))
                     || matches!(&**p, Plan::Scan(s) if s.with_key && UNDER_LOCK_ROWS.with(|u| u.get() > 0)));
-            let mut mask = (b.node.is_join() || b.node.node_type == "Index Only Scan" || dummy || member || sorted_join || srf_target || marked)
+            let mut mask = (b.node.is_join() || b.node.node_type == "Index Only Scan" || b.node.node_type == "WindowAgg" || dummy || member || sorted_join || srf_target || marked)
                 .then(|| self.needed.get(&addr(p)).cloned())
                 .flatten();
             if srf_target
@@ -3163,10 +3215,11 @@ impl Builder<'_, '_> {
                 .filter(|(i, _)| mask.as_ref().is_none_or(|m| m.get(*i).copied().unwrap_or(true)))
                 .map(|(_, n)| self.pick(n, Cx::Output))
                 .collect();
-            if let Some(pt) = &mut b.node.partial
-                && pt.output.is_empty()
-            {
-                pt.output = b.node.output.clone();
+            let out = b.node.output.clone();
+            for pt in b.node.partials_mut() {
+                if pt.output.is_empty() {
+                    pt.output = out.clone();
+                }
             }
         }
         // (A dummy relation's Result: its Vars, then the PlaceHolderVars it evaluates, as
@@ -3602,6 +3655,27 @@ impl Builder<'_, '_> {
                 n.startup_cost = costs::CPU_OPERATOR_COST * calls.len() as f64;
                 n.total_cost = n.startup_cost + n.rows * costs::CPU_TUPLE_COST;
                 n.width = calls.iter().map(|c| type_width(&c.ty)).sum();
+                // (Only the columns used above: its reltarget.)
+                if calls.len() == cols.len()
+                    && let Some(m) = self.needed.get(&key)
+                    && m.len() == calls.len()
+                {
+                    n.width = calls
+                        .iter()
+                        .zip(m)
+                        .filter(|(_, x)| **x)
+                        .map(|(c, _)| type_width(&c.ty))
+                        .sum();
+                }
+                // (A worker can run it when its calls are parallel safe:
+                // set_rel_consider_parallel.)
+                n.par_safe = {
+                    let cat = self.ctx.catalog();
+                    calls.iter().all(|c| {
+                        let call = Expr::Call(c.func.clone(), c.args.clone(), c.ty.clone());
+                        super::paths::parallel::hazard(&call, &cat) == 's'
+                    })
+                };
                 // get_variable_numdistinct without statistics: a relation of fewer tuples
                 // than the default has that many values.
                 if calls.len() == cols.len() {
@@ -3770,9 +3844,10 @@ impl Builder<'_, '_> {
                 }
                 // The statement's own target list keeps the sort columns it carries as
                 // resjunk entries: the projection that drops them isn't a plan node.
-                if self.o.verbose
+                // (So does a ProjectSet's: it carries them up from below.)
+                if (self.o.verbose || c.node.node_type == "ProjectSet")
                     && (addr(p) == self.top || self.level_tops.contains(&addr(p)))
-                    && (matches!(c.node.node_type, "Sort" | "Incremental Sort" | "Limit" | "LockRows")
+                    && (matches!(c.node.node_type, "Sort" | "Incremental Sort" | "Limit" | "LockRows" | "ProjectSet")
                         || c.node.node_type == "Result" && matches!(&**input, Plan::Project { .. })
                         // (A scan read in the ORDER BY's order computing its keys.)
                         || matches!(&**input, Plan::Project { input: pi, .. } if matches!(&**pi, Plan::Scan(_))))
@@ -4064,15 +4139,16 @@ impl Builder<'_, '_> {
                     .map(|(_, c)| c.width)
                     .sum::<u32>()
                     + junk_keys;
-                if let Some(pt) = &mut c.node.partial {
-                    pt.width = c.node.width;
+                let w = c.node.width;
+                for pt in c.node.partials_mut() {
+                    pt.width = w;
                     pt.cols = cols.clone();
                 }
                 c.node.cols = cols;
                 // (cost_qual_eval: a called function's procost too.)
                 let per: f64 = exprs.iter().map(costs::qual_cost).sum();
                 c.node.total_cost += c.node.rows * per;
-                if let Some(pt) = &mut c.node.partial {
+                for pt in c.node.partials_mut() {
                     pt.total_cost += pt.rows * per;
                 }
                 // Sub-selects in the target list (cost_subplan), per row.
@@ -4099,8 +4175,9 @@ impl Builder<'_, '_> {
                             ch.output.iter().filter(|o| o.ends_with("ctid") && !c.node.output.contains(o)).cloned().collect();
                         c.node.output.extend(junk);
                     }
-                    if let Some(pt) = &mut c.node.partial {
-                        pt.output = c.node.output.clone();
+                    let out = c.node.output.clone();
+                    for pt in c.node.partials_mut() {
+                        pt.output = out.clone();
                     }
                     // The statement's target list carries its windows' PARTITION BY / ORDER
                     // BY columns as resjunk entries.
@@ -4185,6 +4262,9 @@ impl Builder<'_, '_> {
                         .filter(|(_, m)| **m)
                         .map(|(x, _)| self.pick(x, Cx::Output))
                         .collect();
+                }
+                if matches!(&**input, Plan::Sort { .. }) {
+                    self.sort_input_target(&mut c, exprs, srfs);
                 }
                 let mut n = ExNode::new("ProjectSet");
                 n.rows = c.node.rows * 10.0;
@@ -4377,11 +4457,14 @@ impl Builder<'_, '_> {
                     && m.iter().any(|x| !x)
                 {
                     c.node.output = c.node.output.iter().zip(m).filter(|(_, k)| **k).map(|(o, _)| o.clone()).collect();
-                    if let Some(pt) = &mut c.node.partial {
-                        pt.output = c.node.output.clone();
+                    let out = c.node.output.clone();
+                    for pt in c.node.partials_mut() {
+                        pt.output = out.clone();
                     }
                 }
                 let part = c.node.partial.clone();
+                let others = c.node.partials.clone();
+                let rel_rows = c.node.rows;
                 self.settle(&mut c.node);
                 // (A member's sort key expressions its scan computes: references to them.)
                 let list: Vec<String> = keys
@@ -4502,23 +4585,68 @@ impl Builder<'_, '_> {
                     ma.children = kids;
                     return Built::passthrough(result_over(ma, result_out), c.exported);
                 }
-                // The input's other path, when it comes in this order and costs less than
-                // sorting this one.
-                let mut unsorted_alt = None;
-                if let Some(alt) = c.node.alt.take() {
-                    let sorted = alt.order.len() >= list.len() && alt.order[..list.len()] == list[..];
-                    if sorted {
-                        let mut sn = ExNode::new("Sort");
-                        self.sort_costs(&mut sn, &c.node);
-                        if parallel::disabled_nodes(&alt) <= parallel::disabled_nodes(&c.node)
-                            && alt.total_cost <= sn.total_cost
-                        {
-                            c.node = *alt;
-                        }
-                    } else {
-                        unsorted_alt = Some(alt);
+                let inc_ok = !member_sort && crate::sql::paths::Gucs::read(self.ctx).incremental_sort;
+                let key_cols: Vec<Option<usize>> = keys
+                    .iter()
+                    .map(|k| match &k.expr {
+                        Expr::Col(j, _) => Some(*j),
+                        _ => None,
+                    })
+                    .collect();
+                let sorted_on = |x: &ExNode| x.order.len() >= list.len() && x.order[..list.len()] == list[..];
+                // The input's other paths (its `alt` chain): one already in this order when
+                // it costs less than sorting this one; the others in it, or in a leading
+                // part of it sorted incrementally, for the node above to weigh
+                // (create_ordered_paths: a LIMIT may take one).
+                let mut alts: Vec<ExNode> = Vec::new();
+                let mut next = c.node.alt.take();
+                while let Some(mut a) = next {
+                    next = a.alt.take();
+                    alts.push(*a);
+                }
+                if let Some(i) = alts.iter().position(|a| sorted_on(a)) {
+                    let mut sn = ExNode::new("Sort");
+                    self.sort_costs(&mut sn, &c.node);
+                    let alt = &alts[i];
+                    if parallel::disabled_nodes(alt) <= parallel::disabled_nodes(&c.node)
+                        && alt.total_cost <= sn.total_cost
+                    {
+                        c.node = alts.remove(i);
                     }
                 }
+                let mut unsorted_alt: Option<ExNode> = alts.iter().find(|a| !sorted_on(a)).cloned();
+                let mut extra: Vec<ExNode> = Vec::new();
+                for a in alts {
+                    if sorted_on(&a) {
+                        extra.push(a);
+                    } else if inc_ok && list.iter().zip(&a.order).take_while(|(x, y)| x == y).count() > 0 {
+                        extra.push(self.sorted_partial(&a, &list, &key_cols, true, a.key));
+                    }
+                }
+                // (The plan chosen and those others: the cheaper in front, the rest its
+                // alternatives.)
+                let with_alts = |mut n: ExNode, extra: Vec<ExNode>| -> ExNode {
+                    let mut rest: Vec<ExNode> = Vec::new();
+                    let mut next = n.alt.take();
+                    while let Some(mut a) = next {
+                        next = a.alt.take();
+                        rest.push(*a);
+                    }
+                    for x in extra {
+                        if parallel::fuzzy_better(&x, &n) {
+                            rest.push(std::mem::replace(&mut n, x));
+                        } else {
+                            rest.push(x);
+                        }
+                    }
+                    let mut chain: Option<Box<ExNode>> = None;
+                    for mut r in rest.into_iter().rev() {
+                        r.alt = chain;
+                        chain = Some(Box::new(r));
+                    }
+                    n.alt = chain;
+                    n
+                };
                 let mut common = list
                     .iter()
                     .zip(&c.node.order)
@@ -4539,13 +4667,13 @@ impl Builder<'_, '_> {
                         d_alt < d_cur || (d_alt == d_cur && sn.total_cost * 1.01 < c.node.total_cost)
                     });
                     if !swap {
+                        c.node = with_alts(c.node, extra);
                         return c;
                     }
-                    let alt = unsorted_alt.take().unwrap();
-                    c.node = *alt;
+                    c.node = unsorted_alt.take().unwrap();
                     common = 0;
                 }
-                if common > 0 && !member_sort && crate::sql::paths::Gucs::read(self.ctx).incremental_sort {
+                if common > 0 && inc_ok {
                     let mut n = ExNode::new("Incremental Sort");
                     n.details.push(Detail::List("Sort Key", list.clone()));
                     n.details.push(Detail::List(
@@ -4578,7 +4706,7 @@ impl Builder<'_, '_> {
                     n.cols = c.node.cols.clone();
                     n.order = list;
                     n.children.push(c.node.child("Outer"));
-                    return Built::passthrough(n, c.exported);
+                    return Built::passthrough(with_alts(n, extra), c.exported);
                 }
                 let mut n = ExNode::new("Sort");
                 n.details.push(Detail::List("Sort Key", list.clone()));
@@ -4605,79 +4733,42 @@ impl Builder<'_, '_> {
                     }
                 }
                 n.children.push(c.node.child("Outer"));
-                // Or each worker sorts its share, merged by a Gather Merge.
-                if let Some(pt) = part
-                    && self.par.as_ref().is_some_and(|p| p.gather_merge)
-                {
-                    // (A partial plan in a leading part of the order already: an
-                    // incremental sort of it, create_ordered_paths.)
-                    let pcommon = list
-                        .iter()
-                        .zip(&pt.order)
-                        .take_while(|(a, b)| a == b)
-                        .count();
-                    let incremental = pcommon > 0
-                        && pcommon < list.len()
-                        && !member_sort
-                        && crate::sql::paths::Gucs::read(self.ctx).incremental_sort;
-                    let mut sn = ExNode::new(if incremental { "Incremental Sort" } else { "Sort" });
-                    sn.details.push(Detail::List("Sort Key", list.clone()));
-                    if incremental {
-                        sn.details.push(Detail::List(
-                            "Presorted Key",
-                            list[..pcommon].iter().map(|k| presorted_name(k)).collect(),
-                        ));
-                        sn.details.push(Detail::IncSortInfo);
-                        let pre: Vec<ColInfo> = keys[..pcommon]
-                            .iter()
-                            .map(|k| match &k.expr {
-                                Expr::Col(j, _) => pt.cols.get(*j).cloned().unwrap_or_default(),
-                                _ => ColInfo::default(),
-                            })
-                            .collect();
-                        let groups = if pre.iter().any(|x| x.var.is_none()) {
-                            pt.rows.clamp(1.0, costs::DEFAULT_NUM_DISTINCT)
-                        } else {
-                            self.num_groups(&pre, pt.rows)
-                        };
-                        (sn.startup_cost, sn.total_cost) = costs::incremental_sort_cost(
-                            pt.startup_cost,
-                            pt.total_cost,
-                            pt.rows,
-                            pt.width,
-                            groups,
-                            None,
-                        );
-                        sn.rows = pt.rows;
-                        sn.width = pt.width;
-                        sn.cols = pt.cols.clone();
-                    } else {
-                        sn.details.push(Detail::SortInfo);
-                        self.sort_costs(&mut sn, &pt);
-                    }
-                    sn.order = list;
-                    sn.workers = pt.workers;
-                    // (The sort that ran: its counters.)
-                    sn.key = Some(key);
-                    sn.disabled = !incremental && !crate::sql::paths::Gucs::read(self.ctx).sort;
-                    if self.o.verbose {
-                        sn.output = pt.output.clone();
-                    }
-                    sn.children.push(pt.child("Outer"));
-                    // (Over a relation's partial plan sorted for the query's order:
-                    // generate_useful_gather_paths, the relation's rows.)
-                    let mut gm = if matches!(&**input, Plan::Scan(_) | Plan::Join { .. }) {
-                        self.gather_merge_rows(&sn, n.rows)
-                    } else {
-                        self.gather_merge_of(&sn)
+                // Or each worker sorts its share (or reads it in order), merged by a Gather
+                // Merge: over a relation's partial plans sorted for the query's order
+                // (generate_useful_gather_paths, the relation's rows).
+                if let Some(pt) = part {
+                    let rel_input = |p: &Plan| matches!(p, Plan::Scan(_) | Plan::Join { .. });
+                    let rows = (rel_input(input)
+                        || matches!(&**input, Plan::Project { input: pi, .. } if rel_input(pi)))
+                    .then_some(rel_rows);
+                    let mut gms = self.useful_gathers(&pt, &others, &list, &key_cols, rows, Some(key), !member_sort);
+                    // (The cheapest in total; the cheapest to start beside it.)
+                    let pick = |v: &[ExNode], by_startup: bool| {
+                        (0..v.len()).reduce(|a, b| {
+                            let better = if by_startup {
+                                (parallel::disabled_nodes(&v[b]), v[b].startup_cost)
+                                    < (parallel::disabled_nodes(&v[a]), v[a].startup_cost)
+                            } else {
+                                parallel::cheaper(&v[b], &v[a])
+                            };
+                            if better { b } else { a }
+                        })
                     };
-                    if parallel::par_beats(&gm, &n) {
-                        gm.alt = Some(Box::new(n));
-                        return Built::passthrough(gm, c.exported);
+                    if let Some(i) = pick(&gms, false) {
+                        let mut gm = gms.remove(i);
+                        if let Some(j) = pick(&gms, true)
+                            && gms[j].startup_cost < gm.startup_cost
+                        {
+                            extra.push(gms.remove(j));
+                        }
+                        if parallel::par_beats(&gm, &n) {
+                            gm.alt = Some(Box::new(n));
+                            return Built::passthrough(with_alts(gm, extra), c.exported);
+                        }
+                        n.alt = Some(Box::new(gm));
                     }
-                    n.alt = Some(Box::new(gm));
                 }
-                Built::passthrough(n, c.exported)
+                Built::passthrough(with_alts(n, extra), c.exported)
             }
             // limit_needed: no count and a constant zero (or NULL) offset make no Limit
             // node (OFFSET 0 only keeps the subquery from being flattened).
@@ -4706,14 +4797,35 @@ impl Builder<'_, '_> {
                 let (count, off) = (est(limit), est(offset));
                 // The input's other path (a Gather Merge of sorted partial plans, say):
                 // the Limit over the cheaper of them.
-                let alt = c.node.alt.take();
-                let mut n = limit_over(c.node, count, off);
-                if let Some(a) = alt {
-                    let m = limit_over(*a, count, off);
-                    if parallel::cheaper(&m, &n) {
-                        n = m;
+                let mut next = c.node.alt.take();
+                let mut forms = vec![c.node];
+                while let Some(mut a) = next {
+                    next = a.alt.take();
+                    forms.push(*a);
+                }
+                // (A Gather Merge of sorted partial plans: also as create_ordered_paths
+                // costs it for the rows the LIMIT reads.)
+                if count > 0.0 && off >= 0.0 {
+                    // (add_path: fuzzily as costly as the unbounded one, the one returning
+                    // fewer rows stays.)
+                    let bounded: Vec<ExNode> = forms
+                        .iter()
+                        .filter_map(|f| {
+                            let b = self.bounded_gather_merge(f, count + off)?;
+                            (f.total_cost > b.total_cost * 1.01 || f.startup_cost > b.startup_cost * 1.01)
+                                .then_some(b)
+                        })
+                        .collect();
+                    forms.extend(bounded);
+                }
+                let mut n: Option<ExNode> = None;
+                for f in forms {
+                    let m = limit_over(f, count, off);
+                    if n.as_ref().is_none_or(|n| parallel::cheaper(&m, n)) {
+                        n = Some(m);
                     }
                 }
+                let n = n.expect("a plan");
                 Built::passthrough(n, c.exported)
             }
             Plan::Distinct { input, on, .. } => {
@@ -6713,7 +6825,8 @@ impl Builder<'_, '_> {
                 best = top;
             }
         }
-        // Sorted: each arm sorted, merged, made unique (when the sort covers every column).
+        // Sorted: each arm sorted, merged, made unique: in the ORDER BY's order when that
+        // covers every column, else in the columns' (then sorted for the ORDER BY).
         let order: Vec<usize> = keys
             .iter()
             .filter_map(|k| match k.expr {
@@ -6721,31 +6834,51 @@ impl Builder<'_, '_> {
                 _ => None,
             })
             .collect();
+        let covers = (0..ncols).all(|i| order.contains(&i));
         // (EXPLAIN ANALYZE shows the plan that ran.)
-        if (0..ncols).all(|i| order.contains(&i)) && built.len() > 1 && !self.o.analyze {
+        if (covers || types.iter().all(setop_sortable)) && ncols > 0 && built.len() > 1 && !self.o.analyze {
             let mut kids = Vec::new();
             let (mut startup, mut run, mut rows) = (0.0, 0.0, 0.0);
             let mut arm_list = Vec::new();
             for (i, c) in built.iter().enumerate() {
-                let alist: Vec<String> = keys
-                    .iter()
-                    .map(|k| self.show(&k.expr, &c.exported, Cx::Upper) + &sort_suffix(k))
-                    .collect();
+                let (alist, cols): (Vec<String>, Vec<Option<usize>>) = if covers {
+                    keys.iter()
+                        .map(|k| {
+                            let col = match k.expr {
+                                Expr::Col(j, _) => Some(j),
+                                _ => None,
+                            };
+                            (self.show(&k.expr, &c.exported, Cx::Upper) + &sort_suffix(k), col)
+                        })
+                        .unzip()
+                } else {
+                    c.exported.iter().enumerate().map(|(j, x)| (self.pick(x, Cx::Upper), Some(j))).unzip()
+                };
                 if i == 0 {
                     arm_list = alist.clone();
                 }
                 let mut sn = ExNode::new("Sort");
-                sn.details.push(Detail::List("Sort Key", alist));
+                sn.details.push(Detail::List("Sort Key", alist.clone()));
                 sn.details.push(Detail::SortInfo);
                 self.sort_costs(&mut sn, &c.node);
                 sn.key = c.node.key;
                 if self.o.verbose {
                     sn.output = c.node.output.clone();
                 }
+                sn.order = alist.clone();
+                sn.children.push(c.node.clone().child("Outer"));
+                // (Or the arm's partial plans sorted in the workers and merged, when that
+                // is its cheapest path in the order: generate_useful_gather_paths.)
+                if let Some(pt) = &c.node.partial {
+                    for gm in self.useful_gathers(pt, &c.node.partials, &alist, &cols, Some(c.node.rows), c.node.key, true) {
+                        if parallel::cheaper(&gm, &sn) {
+                            sn = gm;
+                        }
+                    }
+                }
                 startup += sn.startup_cost;
                 run += sn.total_cost - sn.startup_cost;
                 rows += sn.rows;
-                sn.children.push(c.node.clone().child("Outer"));
                 kids.push(sn);
             }
             // cost_merge_append, and a Unique comparing every column.
@@ -6759,9 +6892,15 @@ impl Builder<'_, '_> {
             {
                 let width = kids.iter().map(|k| k.width).max().unwrap_or(0);
                 let mut ma = ExNode::new("Merge Append");
+                let names: Vec<String> = if covers {
+                    list.clone()
+                } else {
+                    exported.iter().map(|k| self.pick(k, Cx::Upper)).collect()
+                };
                 ma.details.push(Detail::List("Sort Key", arm_list));
                 ma.rows = rows;
                 ma.width = width;
+                ma.cols = app.cols.clone();
                 ma.startup_cost = ma_startup;
                 ma.total_cost = ma_total;
                 for k in kids {
@@ -6770,11 +6909,45 @@ impl Builder<'_, '_> {
                 let mut u = ExNode::new("Unique");
                 u.rows = rows;
                 u.width = width;
+                u.cols = app.cols.clone();
                 u.startup_cost = ma_startup;
                 u.total_cost = u_total;
-                u.order = list;
+                u.order = names.clone();
                 u.unique_keys = Some((0..ncols).collect());
                 u.children.push(ma.child("Outer"));
+                let u = if covers {
+                    u
+                } else {
+                    let common = list.iter().zip(&names).take_while(|(a, b)| a == b).count();
+                    if common == list.len() {
+                        u
+                    } else if common > 0 && g.incremental_sort {
+                        let mut is = ExNode::new("Incremental Sort");
+                        is.details.push(Detail::List("Sort Key", list.clone()));
+                        is.details.push(Detail::List(
+                            "Presorted Key",
+                            list[..common].iter().map(|k| presorted_name(k)).collect(),
+                        ));
+                        is.details.push(Detail::IncSortInfo);
+                        let groups = u.rows.clamp(1.0, costs::DEFAULT_NUM_DISTINCT);
+                        (is.startup_cost, is.total_cost) =
+                            costs::incremental_sort_cost(u.startup_cost, u.total_cost, u.rows, u.width, groups, None);
+                        is.rows = u.rows;
+                        is.width = u.width;
+                        is.cols = u.cols.clone();
+                        is.order = list.clone();
+                        is.children.push(u.child("Outer"));
+                        is
+                    } else {
+                        let mut ts = ExNode::new("Sort");
+                        ts.details.push(Detail::List("Sort Key", list.clone()));
+                        ts.details.push(Detail::SortInfo);
+                        self.sort_costs(&mut ts, &u);
+                        ts.order = list.clone();
+                        ts.children.push(u.child("Outer"));
+                        ts
+                    }
+                };
                 // (In the same order: add_path keeps the one that dominates, fuzzily.)
                 if parallel::dominates(&u, &best) {
                     return Built::passthrough(u, exported);
@@ -6793,13 +6966,22 @@ impl Builder<'_, '_> {
         let cat = self.ctx.catalog();
         let mut total = 1.0;
         let mut vars = Vec::new();
+        // (The relation's rows, as its scan estimated them: what its restrictions leave of
+        // the values, not the rows of the input grouped.)
+        let mut rel_rows = None;
         for c in cols {
             match &c.var {
-                Some(v) => super::extstat::add_unique(&mut vars, super::extstat::GroupVar::of(&cat, v)),
+                Some(v) => {
+                    if rel_rows.is_none() && v.rows > 0.0 && v.expr.is_none() {
+                        rel_rows = Some(v.rows);
+                    }
+                    super::extstat::add_unique(&mut vars, super::extstat::GroupVar::of(&cat, v))
+                }
                 None => total *= c.distinct.unwrap_or(costs::DEFAULT_NUM_DISTINCT),
             }
         }
-        super::extstat::num_groups(self.ctx, vars, total, in_rows, Some(in_rows))
+        let rel_rows = rel_rows.map_or(in_rows, |r| r.max(in_rows));
+        super::extstat::num_groups(self.ctx, vars, total, in_rows, Some(rel_rows))
     }
 
     /// estimate_num_groups over GROUP BY expressions of the input's columns `cols`: a
@@ -7097,6 +7279,123 @@ impl Builder<'_, '_> {
         super::extstat::num_groups(self.ctx, vars, total, in_rows, Some(in_rows))
     }
 
+    /// make_sort_input_target for a ProjectSet over a Sort: the sort's input target is the
+    /// final target's columns that aren't postponed (no set-returning call, nothing volatile
+    /// or expensive: a sub-select), then the columns the postponed ones read; a Result over
+    /// the sort (under a Gather Merge: apply_projection_to_path) returns them in the
+    /// ProjectSet's input order (split_pathtarget_at_srfs: as its expressions read them).
+    fn sort_input_target(&self, c: &mut Built, exprs: &[Expr], srfs: &[super::plan::SrfCall]) {
+        let iw = c.internal.len();
+        let cols_of = |e: &Expr, out: &mut Vec<usize>| {
+            let add = |j: usize, out: &mut Vec<usize>| {
+                if j < iw && !out.contains(&j) {
+                    out.push(j);
+                }
+            };
+            e.walk(&mut |x| match x {
+                Expr::Col(j, _) if *j < iw => add(*j, out),
+                Expr::Col(j, _) | Expr::Srf(j, _) => {
+                    let i = if matches!(x, Expr::Srf(..)) { *j } else { j - iw };
+                    if let Some(s) = srfs.get(i) {
+                        for a in &s.args {
+                            a.walk(&mut |y| {
+                                if let Expr::Col(k, _) = y {
+                                    add(*k, out);
+                                }
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            });
+        };
+        let postponed = |e: &Expr| {
+            let mut p = e.is_volatile();
+            e.walk(&mut |x| {
+                p |= matches!(x, Expr::Srf(..))
+                    || matches!(x, Expr::Col(j, _) if *j >= iw)
+                    || matches!(x, Expr::Subquery(s) if s.call.is_none())
+            });
+            p
+        };
+        let mut level = Vec::new();
+        for e in exprs {
+            cols_of(e, &mut level);
+        }
+        let mut sort_in = Vec::new();
+        let mut any_postponed = false;
+        for e in exprs {
+            if postponed(e) {
+                any_postponed = true;
+                continue;
+            }
+            match e {
+                Expr::Col(j, _) if *j < iw => {
+                    if !sort_in.contains(j) {
+                        sort_in.push(*j);
+                    }
+                }
+                _ => return,
+            }
+        }
+        if !any_postponed {
+            return;
+        }
+        for e in exprs.iter().filter(|e| postponed(e)) {
+            cols_of(e, &mut sort_in);
+        }
+        if sort_in == level || sort_in.len() != level.len() {
+            return;
+        }
+        let names = |order: &[usize]| -> Vec<String> {
+            order.iter().map(|&j| self.pick(&c.internal[j], Cx::Output)).collect()
+        };
+        let (level_out, sort_out) = (names(&level), names(&sort_in));
+        let verbose = self.o.verbose;
+        let wrap = |sort: ExNode| -> ExNode {
+            let mut sort = sort;
+            let mut r = ExNode::new("Result");
+            r.rows = sort.rows;
+            r.width = sort.width;
+            r.cols = sort.cols.clone();
+            r.startup_cost = sort.startup_cost;
+            r.total_cost = sort.total_cost + costs::CPU_TUPLE_COST * sort.rows;
+            r.key = sort.key;
+            r.workers = sort.workers;
+            if verbose {
+                r.output = level_out.clone();
+                sort.output = sort_out.clone();
+                sort.fixed_tlist = true;
+                if let Some(k) = sort.children.first_mut()
+                    && k.is_scan()
+                {
+                    k.output = sort_out.clone();
+                }
+            }
+            r.children.push(sort.child("Outer"));
+            r
+        };
+        match c.node.node_type {
+            "Sort" | "Incremental Sort" => {
+                let sort = std::mem::take(&mut c.node);
+                c.node = wrap(sort);
+            }
+            "Gather Merge"
+                if c.node
+                    .children
+                    .first()
+                    .is_some_and(|k| matches!(k.node_type, "Sort" | "Incremental Sort")) =>
+            {
+                let sort = c.node.children.remove(0);
+                let r = wrap(sort);
+                let extra = r.total_cost - r.children[0].total_cost;
+                c.node.total_cost += extra;
+                c.node.children.insert(0, r.child("Outer"));
+            }
+            _ => {}
+        }
+    }
+
     fn sort_costs(&self, n: &mut ExNode, c: &ExNode) {
         n.rows = c.rows;
         n.width = c.width;
@@ -7124,7 +7423,54 @@ impl Builder<'_, '_> {
                 _ => false,
             };
             let saved = std::mem::replace(&mut self.member_scan, inh || one_table);
+            // (A UNION ALL arm with quals stays a subquery, is_safe_append_member: a query
+            // level of its own, its InitPlans at its top.)
+            let quals = match &***a {
+                Plan::Scan(s) => s.filter.is_some(),
+                Plan::Project { input, .. } => !matches!(&**input, Plan::Scan(s) if s.filter.is_none()),
+                _ => true,
+            };
+            let own_level = !inh && quals;
+            if own_level {
+                self.inits.push(Vec::new());
+            }
             let mut c = self.node(a);
+            if own_level {
+                let mut inits = std::mem::take(&mut c.node.initplans);
+                inits.extend(self.inits.pop().unwrap_or_default());
+                // (Only its own: one another arm reads too is the parent level's, a qual
+                // pushed down into every arm.)
+                let others: std::collections::HashSet<String> = arms
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .flat_map(|(_, x)| plan_subquery_ids(x))
+                    .filter_map(|id| self.labels.get(&id).map(|l| l.name.clone()))
+                    .collect();
+                let (shared, mut inits): (Vec<ExNode>, Vec<ExNode>) = inits
+                    .into_iter()
+                    .partition(|x| x.subplan_name.as_ref().is_some_and(|n| others.contains(n)));
+                if !shared.is_empty() {
+                    match self.inits.last_mut() {
+                        Some(level) => level.extend(shared),
+                        None => c.node.initplans.extend(shared),
+                    }
+                }
+                if !inits.is_empty() {
+                    // SS_charge_for_initplans: its plan pays for them, and none of its
+                    // paths is parallel safe any more (a Gather below them stays).
+                    self.settle(&mut c.node);
+                    let cost: f64 = inits.iter().filter(|i| !i.charged).map(|i| i.total_cost).sum();
+                    c.node.startup_cost += cost;
+                    c.node.total_cost += cost;
+                    for i in &mut inits {
+                        i.charged = true;
+                    }
+                    inits.append(&mut c.node.initplans);
+                    c.node.initplans = inits;
+                    c.node.par_safe = false;
+                }
+            }
             self.member_scan = saved;
             members.push(c.node.clone());
             c.node.partial = None;
@@ -7368,8 +7714,16 @@ impl Builder<'_, '_> {
                     Some(pn) => {
                         n.par_safe = true;
                         n.partial = Some(Box::new(pn));
+                        let others = self.ordered_partial_scans(p, s, &names, &n);
+                        let cheapest = n.partial.as_deref().map(|c| (c.title.clone(), c.order.clone()));
+                        n.partials = others
+                            .into_iter()
+                            .filter(|o| cheapest.as_ref() != Some(&(o.title.clone(), o.order.clone())))
+                            .collect();
+                        self.ordered_scan_gathers(s, &mut n);
                     }
-                    None => {}
+                    // (A parameterized scan: a worker of a partial nested loop can run it.)
+                    None => n.par_safe = self.param_scan_safe(s),
                 }
             }
             if s.mark.is_some() {
@@ -8526,6 +8880,7 @@ impl Builder<'_, '_> {
         let mut c = self.node(input);
         self.agg_input = saved_input;
         let mut part_in = c.node.partial.take();
+        let mut part_others = std::mem::take(&mut c.node.partials);
         // A scan feeding the aggregation returns only the columns it uses.
         if c.node.is_scan() && c.node.cols.len() == c.exported.len() {
             let mut used = std::collections::BTreeSet::new();
@@ -8543,6 +8898,9 @@ impl Builder<'_, '_> {
             if let Some(pi) = &mut part_in {
                 pi.width = c.node.width;
             }
+            for po in &mut part_others {
+                po.width = c.node.width;
+            }
         }
         // The group expressions, computed below the aggregation for each row (the input's
         // target list): in the workers too.
@@ -8553,10 +8911,14 @@ impl Builder<'_, '_> {
             .sum();
         if gexpr > 0.0 {
             c.node.total_cost += c.node.rows * gexpr;
-            if let Some(pi) = &mut part_in {
+            for pi in part_in.iter_mut().map(|b| &mut **b).chain(part_others.iter_mut()) {
                 pi.total_cost += pi.rows * gexpr;
             }
         }
+        // (A complete grouping may read the relation's partial plans gathered in order.)
+        let rel_rows = matches!(&**input, Plan::Scan(_) | Plan::Join { .. }).then_some(c.node.rows);
+        let gather_in: Option<(ExNode, Vec<ExNode>, Option<f64>)> =
+            part_in.as_ref().map(|pi| ((**pi).clone(), part_others, rel_rows));
         // The input run serially, or gathered from workers.
         if let Some(pi) = &part_in {
             c.node.partial = Some(pi.clone());
@@ -9270,21 +9632,45 @@ impl Builder<'_, '_> {
                 }
             }
             let mut best: Option<ExNode> = None;
-            for ord in orders {
+            let mut best_start: Option<ExNode> = None;
+            // The input paths: the cheapest (sorted as needed), and the relation's partial
+            // plans gathered in the query's group order (generate_useful_gather_paths;
+            // sorted further only incrementally, make_ordered_path).
+            let mut gathered: Vec<ExNode> = Vec::new();
+            for (oi, ord) in orders.into_iter().enumerate() {
                 let ord: Vec<(usize, String)> =
                     ord.into_iter().filter(|(i, _)| !redundant.get(*i).copied().unwrap_or(false)).collect();
                 let group_names: Vec<String> = ord.iter().map(|(i, _)| names_all[*i].clone()).collect();
                 let keys_ord: Vec<String> = ord.iter().map(|(i, sfx)| names_all[*i].clone() + sfx).collect();
                 let ord: Vec<usize> = ord.iter().map(|o| o.0).collect();
+                if oi == 0
+                    && let Some((pi, others, rel_rows)) = &gather_in
+                {
+                    let cols: Vec<Option<usize>> = ord
+                        .iter()
+                        .map(|&i| match &groups[i] {
+                            Expr::Col(j, _) => Some(*j),
+                            _ => None,
+                        })
+                        .collect();
+                    gathered = self.useful_gathers(pi, others, &keys_ord, &cols, *rel_rows, c.node.key, true);
+                }
+                let cands: Vec<(ExNode, bool)> = std::iter::once((c.node.clone(), true))
+                    .chain(gathered.iter().map(|x| (x.clone(), false)))
+                    .collect();
+                for (cand, cheapest) in cands {
                 let common = keys_ord
                     .iter()
-                    .zip(&c.node.order)
+                    .zip(&cand.order)
                     .enumerate()
                     .take_while(|(oi, (a, b))| {
-                        a == b || c.node.order_eq.get(*oi).is_some_and(|e| e.contains(a))
+                        a == b || cand.order_eq.get(*oi).is_some_and(|e| e.contains(a))
                     })
                     .count();
-                let mut input = c.node.clone();
+                if !cheapest && common < keys_ord.len() && (common == 0 || !g.incremental_sort) {
+                    continue;
+                }
+                let mut input = cand;
                 if common < keys_ord.len() {
                     let incremental = common > 0 && g.incremental_sort;
                     let mut sn = ExNode::new(if incremental { "Incremental Sort" } else { "Sort" });
@@ -9337,6 +9723,8 @@ impl Builder<'_, '_> {
                     }
                 }
                 ga.startup_cost = input.startup_cost;
+                // (Over this input path's rows: a Gather Merge returns the relation's.)
+                let in_rows = if cheapest { in_rows } else { input.rows };
                 if aggs.is_empty() {
                     // cost_group.
                     ga.title = "Group".into();
@@ -9352,13 +9740,28 @@ impl Builder<'_, '_> {
                 }
                 ga.total_cost += ngroups * gexpr;
                 ga.disabled = false;
-                ga.order = keys_ord;
+                ga.order = keys_ord.clone();
                 ga.children.push(input.child("Outer"));
+                let start = (parallel::disabled_nodes(&ga), ga.startup_cost);
+                if best_start
+                    .as_ref()
+                    .is_none_or(|b| start < (parallel::disabled_nodes(b), b.startup_cost))
+                {
+                    best_start = Some(ga.clone());
+                }
                 if best.as_ref().is_none_or(|b| parallel::cheaper(&ga, b)) {
                     best = Some(ga);
                 }
+                }
             }
             n.disabled = !g.hashagg;
+            // (add_path keeps the one cheapest to start beside it: a LIMIT may take that.)
+            if let (Some(b), Some(s)) = (&mut best, best_start)
+                && s.startup_cost < b.startup_cost
+                && parallel::disabled_nodes(&s) <= parallel::disabled_nodes(b)
+            {
+                b.alt = Some(Box::new(s));
+            }
             best
         } else {
             None
@@ -9366,7 +9769,8 @@ impl Builder<'_, '_> {
         n.children.push(c.node.child("Outer"));
         if let Some(ga) = sorted_alt {
             if parallel::fuzzy_better(&ga, &n) {
-                let hashed = std::mem::replace(&mut n, ga);
+                let mut hashed = std::mem::replace(&mut n, ga);
+                hashed.alt = n.alt.take();
                 n.alt = Some(Box::new(hashed));
             } else {
                 n.alt = Some(Box::new(ga));
@@ -9378,10 +9782,45 @@ impl Builder<'_, '_> {
         }
         if sets.is_none()
             && let Some(pi) = part_in
-            && let Some(mut f) = self.parallel_agg(&n, *pi, groups, aggs, &gnames, &anames)
+            && let Some(mut f) = self.parallel_agg(
+                &n,
+                *pi,
+                gather_in.as_ref().map_or(&[][..], |g| &g.1[..]),
+                groups,
+                aggs,
+                &gnames,
+                &anames,
+            )
         {
             let mut serial = std::mem::take(&mut n);
-            serial.alt = None;
+            // (A serial grouping in order stays beside an unordered parallel one, and the
+            // one cheapest to start beside that: the grouping relation keeps them, for the
+            // ORDER BY or LIMIT above.)
+            let mut forms: Vec<ExNode> = Vec::new();
+            let mut next = serial.alt.take();
+            while let Some(mut a) = next {
+                next = a.alt.take();
+                forms.push(*a);
+            }
+            if f.order.is_empty() {
+                let sorted: Vec<&ExNode> =
+                    std::iter::once(&serial).chain(forms.iter()).filter(|x| !x.order.is_empty()).collect();
+                let total = sorted.iter().copied().reduce(|b, x| if parallel::cheaper(x, b) { x } else { b });
+                let start = sorted.iter().copied().reduce(|b, x| {
+                    if (parallel::disabled_nodes(x), x.startup_cost) < (parallel::disabled_nodes(b), b.startup_cost) {
+                        x
+                    } else {
+                        b
+                    }
+                });
+                if let Some(t) = total {
+                    let mut t = t.clone();
+                    t.alt = start
+                        .filter(|s| s.startup_cost < t.startup_cost)
+                        .map(|s| Box::new(s.clone()));
+                    f.alt = Some(Box::new(t));
+                }
+            }
             if !parallel::has_gather(&serial) {
                 f.safe_alt = Some(Box::new(serial));
             }
@@ -10108,11 +10547,45 @@ impl Builder<'_, '_> {
             exported: b.exported.clone(),
         };
         let parts = l.node.partial.is_some() || r.node.partial.is_some();
-        let (lg, rg) = (copy(&l), copy(&r));
+        let (mut lg, mut rg) = (copy(&l), copy(&r));
+        if parts && !lateral {
+            // (A join's inputs gathered as their relations' cheapest paths: in no order.)
+            lg.node.wanted_order.clear();
+            rg.node.wanted_order.clear();
+            self.settle(&mut lg.node);
+            self.settle(&mut rg.node);
+        }
+        // (A partial nested loop takes the inner side's cheapest path, which a Gather
+        // can't run under.)
+        let lkey = l.node.key;
+        // (An input read in the order the query wants: the join keeps that order.)
+        let ordered_input = !l.node.wanted_order.is_empty() || !r.node.wanted_order.is_empty();
+        let (lgath, rgath) = (parallel::has_gather(&lg.node), parallel::has_gather(&rg.node));
+        let nl_inner_gathered = |p: &ExNode| -> bool {
+            if !p.title.ends_with("Nested Loop") && !p.title.contains("Nested Loop ") {
+                return false;
+            }
+            let inner_key = p.children.get(1).and_then(|c| {
+                if matches!(c.node_type, "Materialize" | "Memoize") {
+                    c.children.first().and_then(|x| x.key)
+                } else {
+                    c.key
+                }
+            });
+            if inner_key.is_some() && inner_key == lkey { lgath } else { rgath }
+        };
         // (A Hash Right Semi Join has no partial form: the semi join the other way round
         // may have one.)
         let unswapped = (meta.swapped && kind == JoinKind::Semi && parts && !lateral)
             .then(|| (copy(&l), copy(&r)));
+        // (The join's other partial paths: by hashing or a nested loop, either side
+        // outside for an inner join, add_paths_to_joinrel's partial candidates.)
+        let others_in = (parts
+            && !lateral
+            && self.par.is_some()
+            && meta.from_call.is_none()
+            && matches!(kind, JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti))
+        .then(|| (copy(&l), copy(&r)));
         let mut b1 = self.join_built(at, kind, left, right, l, r, cond, hash, params, meta);
         if let Some((l3, r3)) = unswapped
             && b1.node.partial.is_none()
@@ -10124,36 +10597,72 @@ impl Builder<'_, '_> {
             self.pending = saved;
             b1.node.partial = b3.node.partial;
         }
-        // Or over its inputs gathered from workers (their Gather paths, when cheaper).
-        if parts && !lateral {
-            let (mut lg, mut rg) = (lg, rg);
-            self.settle(&mut lg.node);
-            self.settle(&mut rg.node);
-            // (A partial nested loop takes the inner side's cheapest path, which a Gather
-            // can't run under.)
-            if b1.node.node_type == "Nested Loop" {
-                let inner_key = b1.node.children.get(1).and_then(|c| {
-                    if matches!(c.node_type, "Materialize" | "Memoize") {
-                        c.children.first().and_then(|x| x.key)
-                    } else {
-                        c.key
+        if let Some((la, ra)) = others_in {
+            use super::plan::JoinMethod;
+            let mut m2 = meta.clone();
+            m2.method = None;
+            m2.material = false;
+            m2.memoize = None;
+            m2.indexed = false;
+            m2.scansel = None;
+            m2.swapped = false;
+            m2.unique_outer = false;
+            m2.unique_inner = false;
+            m2.hash_buckets = None;
+            // (In the order Postgres builds them, a tie keeping the first: the side earlier in
+            // the FROM list outside first (make_join_rel's rel1), nested loops before
+            // hashing; the serial join's own partial path with its sides as they are.)
+            let first_sw = match (min_rti(left), min_rti(right)) {
+                (Some(a), Some(b)) => b < a && kind == JoinKind::Inner,
+                _ => false,
+            };
+            let own = b1.node.partial.take().filter(|p| !nl_inner_gathered(p));
+            let mut own = Some(own);
+            let mut best: Option<Box<ExNode>> = None;
+            let consider = |p: Option<Box<ExNode>>, best: &mut Option<Box<ExNode>>| {
+                if let Some(p) = p
+                    && !nl_inner_gathered(&p)
+                    && best.as_ref().is_none_or(|x| parallel::partial_better(&p, x))
+                {
+                    *best = Some(p);
+                }
+            };
+            for sw in [first_sw, !first_sw] {
+                if !sw {
+                    consider(own.take().flatten(), &mut best);
+                }
+                for m in [JoinMethod::NestLoop, JoinMethod::Hash] {
+                    if (m == JoinMethod::Hash && hash.is_none()) || (sw && kind != JoinKind::Inner) {
+                        continue;
                     }
-                });
-                let inner_gathered = if inner_key.is_some() && inner_key == lg.node.key {
-                    parallel::has_gather(&lg.node)
-                } else {
-                    parallel::has_gather(&rg.node)
-                };
-                if inner_gathered {
-                    b1.node.partial = None;
+                    self.join_force = Some((m, sw));
+                    let saved = std::mem::take(&mut self.pending);
+                    let b = self.join_built(at, kind, left, right, copy(&la), copy(&ra), cond, hash, params, &m2);
+                    self.pending = saved;
+                    self.join_force = None;
+                    consider(b.node.partial, &mut best);
                 }
             }
-            if parallel::has_gather(&lg.node) || parallel::has_gather(&rg.node) {
+            b1.node.partial = best;
+        }
+        // Or over its inputs gathered from workers (their Gather paths, when cheaper).
+        if parts && !lateral {
+            if b1.node.partial.as_deref().is_some_and(&nl_inner_gathered) {
+                b1.node.partial = None;
+            }
+            if lgath || rgath {
                 let mut b2 = self.join_built(at, kind, left, right, lg, rg, cond, hash, params, meta);
                 if b2.node.subplans.is_empty() {
                     b2.node.subplans = b1.node.subplans.clone();
                 }
-                if parallel::par_beats(&b2.node, &b1.node) {
+                // (A side whose Gather beat its serial path at its relation leaves the
+                // join only that path to read, unless the serial join is clearly cheaper:
+                // add_path dropped the serial input. A merge join's ordered inputs stay.)
+                let (d1, d2) = (parallel::disabled_nodes(&b1.node), parallel::disabled_nodes(&b2.node));
+                let b1_clearly = d1 < d2 || (d1 == d2 && b2.node.total_cost > b1.node.total_cost * 1.01);
+                if parallel::par_beats(&b2.node, &b1.node)
+                    || (b1.node.node_type != "Merge Join" && !ordered_input && !b1_clearly)
+                {
                     b2.node.partial = b1.node.partial;
                     return b2;
                 }
@@ -10199,6 +10708,9 @@ impl Builder<'_, '_> {
         } else {
             method
         };
+        // (Building another partial path of the join: its method and orientation.)
+        let force = self.join_force.take();
+        let method = force.map_or(method, |f| f.0);
         let pad = |cols: &[ColInfo], n: usize, w: u32| -> Vec<ColInfo> {
             if cols.len() == n {
                 cols.to_vec()
@@ -10385,6 +10897,7 @@ impl Builder<'_, '_> {
             unique_on(right, keys.iter().map(|k| &k.1).collect())
         };
         let mut swapped = false;
+        let mut nl_outer: Option<ExNode> = None;
         let mut inner_unique;
         let mut material = false;
         let mut cost;
@@ -10440,6 +10953,18 @@ impl Builder<'_, '_> {
                         swapped = true;
                         inner_unique = lunique;
                     }
+                }
+                // (A partial path of another orientation, `join_force`.)
+                if let Some((_, sw)) = force
+                    && kind == JoinKind::Inner
+                    && sw != swapped
+                {
+                    swapped = sw;
+                    (cost, inner_unique) = if sw {
+                        (hash_cost(&r.node, &l.node, true, lunique), lunique)
+                    } else {
+                        (hash_cost(&l.node, &r.node, false, runique), runique)
+                    };
                 }
                 let (po, inn, pin) = if swapped {
                     (&rpart, &l.node, &lpart)
@@ -10569,11 +11094,51 @@ impl Builder<'_, '_> {
                         inner_unique = lunique;
                     }
                 }
-                let (po, inn) = if swapped { (&rpart, &l.node) } else { (&lpart, &r.node) };
-                if let Some(po) = po
+                // (A partial path of another orientation, `join_force`.)
+                if let Some((_, sw)) = force
+                    && kind == JoinKind::Inner
                     && !lateral
+                    && sw != swapped
                 {
-                    pcost = Some(nl_cost(po, inn, swapped, inner_unique, material).0);
+                    swapped = sw;
+                    let ((c, m), u) = if sw {
+                        (best(&r.node, &l.node, true, lunique), lunique)
+                    } else {
+                        (best(&l.node, &r.node, false, runique), runique)
+                    };
+                    (cost, material, inner_unique) = (c, m, u);
+                }
+                let (po, inn) = if swapped { (&rpart, &l.node) } else { (&lpart, &r.node) };
+                // (A parameterized inner side too, when a worker can run it: the outer row
+                // is the worker's own, consider_parallel_nestloop.)
+                if let Some(po) = po
+                    && (!lateral || parallel::safe_tree(inn))
+                {
+                    // (try_partial_nestloop_path: the inner side as it is, or materialized.)
+                    let plain = nl_cost(po, inn, swapped, inner_unique, false).0;
+                    let mat = (force.is_some() && g.material && !input(inn).kind.materializes())
+                        .then(|| nl_cost(po, inn, swapped, inner_unique, true).0);
+                    pcost = Some(match mat {
+                        Some(m) if m.total < plain.total => {
+                            material = true;
+                            m
+                        }
+                        Some(_) => {
+                            material = false;
+                            plain
+                        }
+                        None => nl_cost(po, inn, swapped, inner_unique, material).0,
+                    });
+                    // (consider_parallel_nestloop: every partial path of the outer side;
+                    // fuzzily as cheap, one in order is kept, add_partial_path.)
+                    let others = if swapped { &r.node.partials } else { &l.node.partials };
+                    for op in others.iter().filter(|o| !o.order.is_empty()) {
+                        let c = nl_cost(op, inn, swapped, inner_unique, material).0;
+                        if pcost.as_ref().is_some_and(|p| c.total <= p.total * 1.01) {
+                            pcost = Some(c);
+                            nl_outer = Some(op.clone());
+                        }
+                    }
                 }
             }
         }
@@ -10793,6 +11358,8 @@ impl Builder<'_, '_> {
             if self.o.verbose {
                 mn.output = match &small {
                     Some(order) => order.iter().map(|&i| self.pick(&r.internal[i], Cx::Output)).collect(),
+                    // (Over a Gather: what it returns, its exact target list.)
+                    None if r.node.node_type == "Gather" => r.node.output.iter().map(|o| refer_to(o)).collect(),
                     None => r.internal.iter().map(|x| self.pick(x, Cx::Output)).collect(),
                 };
             }
@@ -10876,6 +11443,10 @@ impl Builder<'_, '_> {
                     &r.internal
                 };
                 h.output = src.iter().map(|x| self.pick(x, Cx::Output)).collect();
+                // (Over a Gather: what it returns, its exact target list.)
+                if r.node.node_type == "Gather" && !r.node.output.is_empty() {
+                    h.output = r.node.output.iter().map(|o| refer_to(o)).collect();
+                }
                 // (A Subquery Scan returns what the join reads of it.)
                 if r.node.node_type == "Subquery Scan" && !r.node.output.is_empty() {
                     h.output = r.node.output.clone();
@@ -10950,6 +11521,7 @@ impl Builder<'_, '_> {
         // The join over the outer side's partial plan, the inner side whole in each worker
         // (it must be something a worker can run).
         let (outer_part, inner_part) = if swapped { (rpart, lpart) } else { (lpart, rpart) };
+        let outer_part = nl_outer.map(Box::new).or(outer_part);
         n.par_safe = n.children.iter().all(parallel::safe_tree);
         if let (Some(c), Some(po)) = (pcost, outer_part)
             && gating.is_empty()
@@ -13135,6 +13707,7 @@ pub fn setop_shape(left: &Arc<Plan>, right: &Arc<Plan>, intersect: bool, ctx: &E
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
+        join_force: None,
         agg_key: None,
         agg_input: None,
         unique_sides: Default::default(),
@@ -13210,6 +13783,7 @@ pub fn set_group_estimates(
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
+        join_force: None,
         agg_key: None,
         agg_input: None,
         unique_sides: Default::default(),
@@ -13294,6 +13868,7 @@ pub fn agg_redundant_keys(
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
+        join_force: None,
         agg_key: None,
         agg_input: None,
         unique_sides: Default::default(),
@@ -13358,6 +13933,7 @@ pub fn sets_sorted(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
+        join_force: None,
         agg_key: None,
         agg_input: None,
         unique_sides: Default::default(),
@@ -13427,6 +14003,7 @@ pub fn distinct_order(plan: &Arc<Plan>, ctx: &ExecCtx) -> Option<Vec<usize>> {
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
+        join_force: None,
         agg_key: None,
         agg_input: None,
         unique_sides: Default::default(),
@@ -13488,6 +14065,7 @@ pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
+        join_force: None,
         agg_key: None,
         agg_input: None,
         unique_sides: Default::default(),
@@ -13854,6 +14432,7 @@ pub fn explain(
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
+        join_force: None,
         agg_key: None,
         agg_input: None,
         unique_sides: Default::default(),

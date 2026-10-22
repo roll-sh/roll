@@ -1,0 +1,321 @@
+> CREATE TABLE a7_tk (unique1 int, unique2 int, two int, hundred int, fivethous int,
+>   tenthous int, stringu1 name)
+-- CREATE TABLE
+
+> INSERT INTO a7_tk SELECT (i * 7919) % 10000, i, i % 2, i % 100, i % 5000,
+>   (i * 7) % 10000, 'AA' || i FROM generate_series(0, 9999) i
+-- INSERT 0 10000
+
+> CREATE INDEX a7_tk_unique1 ON a7_tk (unique1)
+-- CREATE INDEX
+
+> CREATE INDEX a7_tk_unique2 ON a7_tk (unique2)
+-- CREATE INDEX
+
+> CREATE INDEX a7_tk_hundred ON a7_tk (hundred)
+-- CREATE INDEX
+
+> VACUUM ANALYZE a7_tk
+-- VACUUM
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL jit = off
+-- SET
+
+> SET LOCAL enable_hashagg = off
+-- SET
+
+> SET LOCAL enable_seqscan = off
+-- SET
+
+> SET LOCAL enable_incremental_sort = off
+-- SET
+
+> SET LOCAL parallel_tuple_cost = 0
+-- SET
+
+> SET LOCAL parallel_setup_cost = 0
+-- SET
+
+> SET LOCAL min_parallel_table_scan_size = 0
+-- SET
+
+> SET LOCAL min_parallel_index_scan_size = 0
+-- SET
+
+> EXPLAIN SELECT count(*) FROM a7_tk t1
+>   JOIN a7_tk t2 ON t1.unique1 = t2.unique2
+>   JOIN a7_tk t3 ON t2.unique1 = t3.unique1
+>   ORDER BY count(*)
+QUERY PLAN:text
+Sort  (cost=962.46..962.46 rows=1 width=8)
+  Sort Key: (count(*))
+  ->  Finalize Aggregate  (cost=962.44..962.45 rows=1 width=8)
+        ->  Gather  (cost=962.42..962.43 rows=2 width=8)
+              Workers Planned: 2
+              ->  Partial Aggregate  (cost=962.42..962.43 rows=1 width=8)
+                    ->  Parallel Hash Join  (cost=674.36..952.00 rows=4167 width=0)
+                          Hash Cond: (t2.unique1 = t3.unique1)
+                          ->  Parallel Hash Join  (cost=410.32..654.98 rows=4167 width=4)
+                                Hash Cond: (t1.unique1 = t2.unique2)
+                                ->  Parallel Index Only Scan using a7_tk_unique1 on a7_tk t1  (cost=0.29..211.95 rows=4167 width=4)
+                                ->  Parallel Hash  (cost=357.95..357.95 rows=4167 width=8)
+                                      ->  Parallel Index Scan using a7_tk_unique2 on a7_tk t2  (cost=0.29..357.95 rows=4167 width=8)
+                          ->  Parallel Hash  (cost=211.95..211.95 rows=4167 width=4)
+                                ->  Parallel Index Only Scan using a7_tk_unique1 on a7_tk t3  (cost=0.29..211.95 rows=4167 width=4)
+-- EXPLAIN
+
+> SELECT count(*) FROM a7_tk t1
+>   JOIN a7_tk t2 ON t1.unique1 = t2.unique2
+>   JOIN a7_tk t3 ON t2.unique1 = t3.unique1
+count:int8
+10000
+-- SELECT 1
+
+> EXPLAIN SELECT t2.unique1 FROM a7_tk t1 JOIN a7_tk t2 ON t1.unique1 = t2.unique2
+QUERY PLAN:text
+Gather  (cost=410.32..654.98 rows=10000 width=4)
+  Workers Planned: 2
+  ->  Parallel Hash Join  (cost=410.32..654.98 rows=4167 width=4)
+        Hash Cond: (t1.unique1 = t2.unique2)
+        ->  Parallel Index Only Scan using a7_tk_unique1 on a7_tk t1  (cost=0.29..211.95 rows=4167 width=4)
+        ->  Parallel Hash  (cost=357.95..357.95 rows=4167 width=8)
+              ->  Parallel Index Scan using a7_tk_unique2 on a7_tk t2  (cost=0.29..357.95 rows=4167 width=8)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT unique1,
+>   (SELECT t.unique1 FROM a7_tk WHERE a7_tk.unique1 = t.unique1)
+>   FROM a7_tk t, generate_series(1, 1000)
+QUERY PLAN:text
+Unique
+  ->  Sort
+        Sort Key: t.unique1, ((SubPlan 1))
+        ->  Gather
+              Workers Planned: 2
+              ->  Nested Loop
+                    ->  Parallel Index Only Scan using a7_tk_unique1 on a7_tk t
+                    ->  Function Scan on generate_series
+              SubPlan 1
+                ->  Index Only Scan using a7_tk_unique1 on a7_tk
+                      Index Cond: (unique1 = t.unique1)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT unique1,
+>   (SELECT t.unique1 FROM a7_tk WHERE a7_tk.unique1 = t.unique1)
+>   FROM a7_tk t, generate_series(1, 1000) ORDER BY 1, 2
+QUERY PLAN:text
+Sort
+  Sort Key: t.unique1, ((SubPlan 1))
+  ->  Gather
+        Workers Planned: 2
+        ->  Nested Loop
+              ->  Parallel Index Only Scan using a7_tk_unique1 on a7_tk t
+              ->  Function Scan on generate_series
+        SubPlan 1
+          ->  Index Only Scan using a7_tk_unique1 on a7_tk
+                Index Cond: (unique1 = t.unique1)
+-- EXPLAIN
+
+> COMMIT
+-- COMMIT
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL jit = off
+-- SET
+
+> SET LOCAL parallel_setup_cost = 0
+-- SET
+
+> SET LOCAL parallel_tuple_cost = 0
+-- SET
+
+> SET LOCAL min_parallel_table_scan_size = 0
+-- SET
+
+> SET LOCAL max_parallel_workers_per_gather = 4
+-- SET
+
+> ALTER TABLE a7_tk SET (parallel_workers = 4)
+-- ALTER TABLE
+
+> EXPLAIN SELECT 1 FROM a7_tk t1 JOIN a7_tk t2 ON true
+QUERY PLAN:text
+Nested Loop  (cost=0.57..1250263.57 rows=100000000 width=4)
+  ->  Gather  (cost=0.29..119.28 rows=10000 width=0)
+        Workers Planned: 4
+        ->  Parallel Index Only Scan using a7_tk_hundred on a7_tk t1  (cost=0.29..119.28 rows=2500 width=0)
+  ->  Materialize  (cost=0.29..169.28 rows=10000 width=0)
+        ->  Gather  (cost=0.29..119.28 rows=10000 width=0)
+              Workers Planned: 4
+              ->  Parallel Index Only Scan using a7_tk_hundred on a7_tk t2  (cost=0.29..119.28 rows=2500 width=0)
+-- EXPLAIN
+
+> EXPLAIN SELECT t1.unique1 FROM a7_tk t1 JOIN a7_tk t2 ON true
+QUERY PLAN:text
+Nested Loop  (cost=0.29..1250312.28 rows=100000000 width=4)
+  ->  Gather  (cost=0.00..168.00 rows=10000 width=4)
+        Workers Planned: 4
+        ->  Parallel Seq Scan on a7_tk t1  (cost=0.00..168.00 rows=2500 width=4)
+  ->  Materialize  (cost=0.29..169.28 rows=10000 width=0)
+        ->  Gather  (cost=0.29..119.28 rows=10000 width=0)
+              Workers Planned: 4
+              ->  Parallel Index Only Scan using a7_tk_hundred on a7_tk t2  (cost=0.29..119.28 rows=2500 width=0)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT unnest(ARRAY[]::integer[]) + 1 AS pathkey
+>   FROM a7_tk t1 JOIN a7_tk t2 ON TRUE
+>   ORDER BY pathkey
+QUERY PLAN:text
+Sort
+  Output: (((unnest('{}'::integer[])) + 1))
+  Sort Key: (((unnest('{}'::integer[])) + 1))
+  ->  Result
+        Output: ((unnest('{}'::integer[])) + 1)
+        ->  ProjectSet
+              Output: unnest('{}'::integer[])
+              ->  Nested Loop
+                    ->  Gather
+                          Workers Planned: 4
+                          ->  Parallel Index Only Scan using a7_tk_hundred on public.a7_tk t1
+                    ->  Materialize
+                          ->  Gather
+                                Workers Planned: 4
+                                ->  Parallel Index Only Scan using a7_tk_hundred on public.a7_tk t2
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT unique1 FROM a7_tk WHERE fivethous =
+>   (SELECT unique1 FROM a7_tk WHERE fivethous = 1 LIMIT 1)
+> UNION ALL
+> SELECT unique1 FROM a7_tk WHERE fivethous =
+>   (SELECT unique2 FROM a7_tk WHERE fivethous = 1 LIMIT 1)
+> ORDER BY 1
+QUERY PLAN:text
+Sort
+  Sort Key: a7_tk.unique1
+  ->  Append
+        ->  Gather
+              Workers Planned: 4
+              InitPlan 1
+                ->  Limit
+                      ->  Gather
+                            Workers Planned: 4
+                            ->  Parallel Seq Scan on a7_tk a7_tk_2
+                                  Filter: (fivethous = 1)
+              ->  Parallel Seq Scan on a7_tk
+                    Filter: (fivethous = (InitPlan 1).col1)
+        ->  Gather
+              Workers Planned: 4
+              InitPlan 2
+                ->  Limit
+                      ->  Gather
+                            Workers Planned: 4
+                            ->  Parallel Seq Scan on a7_tk a7_tk_3
+                                  Filter: (fivethous = 1)
+              ->  Parallel Seq Scan on a7_tk a7_tk_1
+                    Filter: (fivethous = (InitPlan 2).col1)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT generate_series(1, two), array(SELECT generate_series(1, two))
+>   FROM a7_tk ORDER BY tenthous
+QUERY PLAN:text
+ProjectSet
+  Output: generate_series(1, a7_tk.two), ARRAY(SubPlan 1), a7_tk.tenthous
+  ->  Gather Merge
+        Output: a7_tk.two, a7_tk.tenthous
+        Workers Planned: 4
+        ->  Result
+              Output: a7_tk.two, a7_tk.tenthous
+              ->  Sort
+                    Output: a7_tk.tenthous, a7_tk.two
+                    Sort Key: a7_tk.tenthous
+                    ->  Parallel Seq Scan on public.a7_tk
+                          Output: a7_tk.tenthous, a7_tk.two
+  SubPlan 1
+    ->  ProjectSet
+          Output: generate_series(1, a7_tk.two)
+          ->  Result
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT generate_series(1, two), hundred FROM a7_tk ORDER BY tenthous, hundred
+QUERY PLAN:text
+ProjectSet
+  Output: generate_series(1, two), hundred, tenthous
+  ->  Gather Merge
+        Output: two, hundred, tenthous
+        Workers Planned: 4
+        ->  Result
+              Output: two, hundred, tenthous
+              ->  Sort
+                    Output: hundred, tenthous, two
+                    Sort Key: a7_tk.tenthous, a7_tk.hundred
+                    ->  Parallel Seq Scan on public.a7_tk
+                          Output: hundred, tenthous, two
+-- EXPLAIN
+
+> SELECT generate_series(1, two), hundred FROM a7_tk ORDER BY tenthous, hundred LIMIT 4
+generate_series:int4 | hundred:int4
+1 | 43
+1 | 29
+1 | 15
+1 | 1
+-- SELECT 4
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL jit = off
+-- SET
+
+> SET LOCAL max_parallel_workers_per_gather = 0
+-- SET
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT generate_series(1, two), hundred, tenthous FROM a7_tk ORDER BY tenthous
+QUERY PLAN:text
+ProjectSet
+  Output: generate_series(1, two), hundred, tenthous
+  ->  Result
+        Output: two, hundred, tenthous
+        ->  Sort
+              Output: hundred, tenthous, two
+              Sort Key: a7_tk.tenthous
+              ->  Seq Scan on public.a7_tk
+                    Output: hundred, tenthous, two
+-- EXPLAIN
+
+> EXPLAIN SELECT count(*) FROM a7_tk a WHERE (unique1, two) IN
+>   (SELECT unique1, row_number() OVER () FROM a7_tk b)
+QUERY PLAN:text
+Aggregate  (cost=849.00..849.01 rows=1 width=8)
+  ->  Hash Right Semi Join  (cost=393.00..836.50 rows=5000 width=0)
+        Hash Cond: ((b.unique1 = a.unique1) AND ((row_number() OVER w1) = a.two))
+        ->  WindowAgg  (cost=0.00..368.00 rows=10000 width=12)
+              Window: w1 AS (ROWS UNBOUNDED PRECEDING)
+              ->  Seq Scan on a7_tk b  (cost=0.00..243.00 rows=10000 width=4)
+        ->  Hash  (cost=243.00..243.00 rows=10000 width=8)
+              ->  Seq Scan on a7_tk a  (cost=0.00..243.00 rows=10000 width=8)
+-- EXPLAIN
+
+> SELECT count(*) FROM a7_tk a WHERE (unique1, two) IN
+>   (SELECT unique1, row_number() OVER () FROM a7_tk b)
+count:int8
+0
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> DROP TABLE a7_tk
+-- DROP TABLE
+

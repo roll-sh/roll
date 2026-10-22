@@ -108,6 +108,17 @@ pub(super) fn unsorted_kept(h: &ExNode, s: &ExNode) -> bool {
     s.startup_cost > h.startup_cost * FUZZ
 }
 
+/// add_partial_path between two partial paths of the same pathkeys: `new` replaces `old`
+/// with fewer disabled nodes, or when `old` costs more in total at all (startup costs
+/// don't count; a tie keeps the one built first).
+pub(super) fn partial_better(new: &ExNode, old: &ExNode) -> bool {
+    let (dn, d_old) = (disabled_nodes(new), disabled_nodes(old));
+    if dn != d_old {
+        return dn < d_old;
+    }
+    old.total_cost > new.total_cost * 1.000_000_000_1
+}
+
 pub(super) fn cheaper(a: &ExNode, b: &ExNode) -> bool {
     let (da, db) = (disabled_nodes(a), disabled_nodes(b));
     if da != db {
@@ -151,12 +162,12 @@ impl Builder<'_, '_> {
         g.total_cost = part.total_cost + cfg.setup_cost + cfg.tuple_cost * rows;
         g.workers = part.workers;
         g.details.push(Detail::Workers(part.workers));
-        if self.o.verbose {
-            g.output = part.output.iter().map(|o| refer_to(o)).collect();
-        }
         g.key = part.key;
         let mut child = part.clone();
         self.exact_tlist(&mut child);
+        if self.o.verbose {
+            g.output = child.output.iter().map(|o| refer_to(o)).collect();
+        }
         g.children.push(child.child("Outer"));
         g
     }
@@ -187,12 +198,12 @@ impl Builder<'_, '_> {
         g.total_cost = startup + run + part.total_cost;
         g.workers = part.workers;
         g.details.push(Detail::Workers(part.workers));
-        if self.o.verbose {
-            g.output = part.output.iter().map(|o| refer_to(o)).collect();
-        }
         g.key = part.key;
         let mut child = part.clone();
         self.exact_tlist(&mut child);
+        if self.o.verbose {
+            g.output = child.output.iter().map(|o| refer_to(o)).collect();
+        }
         g.children.push(child.child("Outer"));
         g
     }
@@ -217,6 +228,12 @@ impl Builder<'_, '_> {
     /// `n`, or a Gather over its partial plan when that is cheaper; the partial plan goes
     /// either way (its consumer can't use it).
     pub(super) fn settle(&self, n: &mut ExNode) {
+        if !n.wanted_order.is_empty() && n.order.len() >= n.wanted_order.len() && self.par.is_some() {
+            self.settle_ordered(n);
+            return;
+        }
+        n.wanted_order.clear();
+        n.partials.clear();
         let Some(part) = n.partial.take() else { return };
         if self.par.is_none() {
             return;
@@ -224,10 +241,240 @@ impl Builder<'_, '_> {
         // (create_gather_path takes the relation's rows here, which is the same up to the
         // partial plan's rounding, except for an Append that run-time pruning cuts down: its
         // costs here are the members left's only, where Postgres's are all of them.)
-        let g = self.gather_of(&part);
+        let mut g = self.gather_of(&part);
+        // (create_gather_path returns the relation's rows. An Append run-time pruning cuts
+        // down keeps the partial plan's: its costs here are the members left's only, where
+        // Postgres's are all of them.)
+        if n.node_type != "Append"
+            && n.rows > 0.0
+            && let Some(cfg) = self.par.as_ref()
+        {
+            g.rows = n.rows;
+            g.total_cost = part.total_cost + cfg.setup_cost + cfg.tuple_cost * g.rows;
+        }
         if parallel_wins(&g, n) {
             *n = g;
         }
+    }
+
+    /// `part` (a partial plan) sorted on `list` for a Gather Merge, fully or (when its
+    /// order already has `list`'s first keys and `incremental`) incrementally: key i
+    /// reads column `cols[i]` of its rows when a plain column. `sort_key`: the counters.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn sorted_partial(
+        &self,
+        part: &ExNode,
+        list: &[String],
+        cols: &[Option<usize>],
+        incremental: bool,
+        sort_key: Option<usize>,
+    ) -> ExNode {
+        let pcommon = list.iter().zip(&part.order).take_while(|(a, b)| a == b).count();
+        let incremental = incremental && pcommon > 0 && pcommon < list.len();
+        let mut sn = ExNode::new(if incremental { "Incremental Sort" } else { "Sort" });
+        sn.details.push(Detail::List("Sort Key", list.to_vec()));
+        if incremental {
+            sn.details.push(Detail::List(
+                "Presorted Key",
+                list[..pcommon].iter().map(|k| presorted_name(k)).collect(),
+            ));
+            sn.details.push(Detail::IncSortInfo);
+            let pre: Vec<ColInfo> = cols[..pcommon.min(cols.len())]
+                .iter()
+                .map(|c| c.and_then(|j| part.cols.get(j).cloned()).unwrap_or_default())
+                .collect();
+            let groups = if pre.len() < pcommon || pre.iter().any(|x| x.var.is_none()) {
+                part.rows.clamp(1.0, costs::DEFAULT_NUM_DISTINCT)
+            } else {
+                self.num_groups(&pre, part.rows)
+            };
+            (sn.startup_cost, sn.total_cost) = costs::incremental_sort_cost(
+                part.startup_cost,
+                part.total_cost,
+                part.rows,
+                part.width,
+                groups,
+                None,
+            );
+            sn.rows = part.rows;
+            sn.width = part.width;
+            sn.cols = part.cols.clone();
+            sn.presorted_groups = Some(groups);
+        } else {
+            sn.details.push(Detail::SortInfo);
+            self.sort_costs(&mut sn, part);
+        }
+        sn.order = list.to_vec();
+        sn.workers = part.workers;
+        sn.key = sort_key;
+        sn.disabled = !incremental && !crate::sql::paths::Gucs::read(self.ctx).sort;
+        if self.o.verbose {
+            sn.output = part.output.clone();
+        }
+        sn.children.push(part.clone().child("Outer"));
+        sn
+    }
+
+    /// create_ordered_paths' own Gather Merge under a LIMIT: the workers' sort of `gm`
+    /// (a Gather Merge over a sorted partial plan) costed for the rows the LIMIT reads, the
+    /// Gather Merge returning the partial rows times the parallel divisor.
+    pub(super) fn bounded_gather_merge(&self, gm: &ExNode, limit: f64) -> Option<ExNode> {
+        let cfg = self.par.as_ref()?;
+        if gm.node_type != "Gather Merge" || limit <= 0.0 {
+            return None;
+        }
+        let sn = gm.children.first()?;
+        let input = sn.children.first()?;
+        if input.workers == 0 {
+            return None;
+        }
+        let mut sn = sn.clone();
+        match sn.node_type {
+            "Sort" => {
+                (sn.startup_cost, sn.total_cost) =
+                    costs::sort_cost(input.total_cost, input.rows, input.width, Some(limit));
+            }
+            "Incremental Sort" => {
+                let groups = sn.presorted_groups?;
+                (sn.startup_cost, sn.total_cost) = costs::incremental_sort_cost(
+                    input.startup_cost,
+                    input.total_cost,
+                    input.rows,
+                    input.width,
+                    groups,
+                    Some(limit),
+                );
+            }
+            _ => return None,
+        }
+        sn.relationship = None;
+        let rows = costs::clamp_rows(sn.rows * cfg.divisor(sn.workers));
+        let mut g = self.gather_merge_rows(&sn, rows);
+        g.output = gm.output.clone();
+        g.children[0].output = gm.children[0].output.clone();
+        Some(g)
+    }
+
+    /// generate_useful_gather_paths for the order `list` over a relation's partial plans
+    /// (`part` the cheapest, `others` the ordered ones): a Gather Merge over each one
+    /// already in that order, over the cheapest sorted, and over each other one in a
+    /// leading part of the order sorted incrementally. `rows`: the relation's rows (None:
+    /// the partial plan's times the parallel divisor).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn useful_gathers(
+        &self,
+        part: &ExNode,
+        others: &[ExNode],
+        list: &[String],
+        cols: &[Option<usize>],
+        rows: Option<f64>,
+        sort_key: Option<usize>,
+        inc_ok: bool,
+    ) -> Vec<ExNode> {
+        let mut out = Vec::new();
+        if list.is_empty() || !self.par.as_ref().is_some_and(|p| p.gather_merge) {
+            return out;
+        }
+        let incremental = inc_ok && crate::sql::paths::Gucs::read(self.ctx).incremental_sort;
+        let gm = |sn: &ExNode| match rows {
+            Some(r) => self.gather_merge_rows(sn, r),
+            None => self.gather_merge_of(sn),
+        };
+        for (i, p) in std::iter::once(part).chain(others).enumerate() {
+            let pcommon = list.iter().zip(&p.order).take_while(|(a, b)| a == b).count();
+            if pcommon == list.len() {
+                out.push(gm(p));
+                continue;
+            }
+            if i > 0 && (pcommon == 0 || !incremental) {
+                continue;
+            }
+            out.push(gm(&self.sorted_partial(p, list, cols, incremental, sort_key)));
+        }
+        out
+    }
+
+    /// A scan reading an index in the order the query's ORDER BY wants (the planner took
+    /// it for the Sort): a plain Gather would lose that order, so its partial plans go
+    /// only under a Gather Merge in it (generate_gather_paths / generate_useful_gather_paths
+    /// at its relation), which it becomes when that is cheaper, the serial scan its
+    /// alternative (a LIMIT above weighs both).
+    pub(super) fn ordered_scan_gathers(&self, s: &ScanPlan, n: &mut ExNode) {
+        let Some(u) = &s.useful.0 else { return };
+        let want = &u.0;
+        if want.is_empty() || n.order.len() < want.len() {
+            return;
+        }
+        let ord = crate::sql::paths::index_order(self.ctx, s);
+        let covered = ord.len() >= want.len()
+            && want.iter().zip(&ord).all(|(w, k)| {
+                w.desc == k.desc && w.nulls_first == k.nulls_first && w.expr.same_as(&k.expr)
+            });
+        if covered {
+            n.wanted_order = want
+                .iter()
+                .map(|k| match &k.expr {
+                    Expr::Col(j, _) => Some(*j),
+                    _ => None,
+                })
+                .collect();
+        }
+    }
+
+    /// `settle` of a scan in the order the query wants (`ExNode::wanted_order`).
+    fn settle_ordered(&self, n: &mut ExNode) {
+        let Some(part) = n.partial.take() else { return };
+        let others = std::mem::take(&mut n.partials);
+        let cols = std::mem::take(&mut n.wanted_order);
+        let list: Vec<String> = n.order[..cols.len()].to_vec();
+        let gms = self.useful_gathers(&part, &others, &list, &cols, Some(n.rows), n.key, true);
+        let Some(mut gm) = gms.into_iter().reduce(|a, b| if cheaper(&b, &a) { b } else { a }) else {
+            return;
+        };
+        if par_beats(&gm, n) {
+            let serial = std::mem::take(n);
+            gm.alt = Some(Box::new(serial));
+            *n = gm;
+        } else if gm.startup_cost < n.startup_cost {
+            n.alt = Some(Box::new(gm));
+        }
+    }
+
+    /// A parameterized scan a worker can run: besides parallel-safe values its quals read
+    /// only the nested loop's outer row of this query level (nestloop parameters, which the
+    /// workers have), not an enclosing query's values.
+    pub(super) fn param_scan_safe(&self, s: &ScanPlan) -> bool {
+        if self.par.is_none()
+            || s.table.temporary
+            || s.sample.is_some()
+            || s.current_of.is_some()
+            || s.mark.is_some()
+            || s.table.is_foreign()
+            || self.outer_depth.first() != Some(&self.depth)
+        {
+            return false;
+        }
+        let plan = Plan::Scan(Box::new(s.clone()));
+        let mut exprs = Vec::new();
+        node_exprs(&plan, &mut exprs);
+        let mut reads_row = false;
+        let cat = self.ctx.catalog();
+        let safe = exprs.iter().all(|e| {
+            let e = (*e)
+                .clone()
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Outer(1, _, t) => {
+                            reads_row = true;
+                            Expr::Const(crate::types::Value::Null, t)
+                        }
+                        x => x,
+                    })
+                })
+                .unwrap_or_else(|_| (*e).clone());
+            crate::sql::paths::parallel::hazard(&e, &cat) == 's'
+        });
+        safe && reads_row
     }
 
     /// A scan's partial plan (the cheapest partial path of its relation), as the scan
@@ -246,6 +493,33 @@ impl Builder<'_, '_> {
         let Some(ps) = ps else {
             return Some(ExNode::default());
         };
+        Some(self.partial_scan_node(p, s, ps, names, serial))
+    }
+
+    /// The scan's other partial paths, kept for their order (`ExNode::partials`).
+    pub(super) fn ordered_partial_scans(
+        &mut self,
+        p: &Arc<Plan>,
+        s: &ScanPlan,
+        names: &[Name],
+        serial: &ExNode,
+    ) -> Vec<ExNode> {
+        if self.par.is_none() {
+            return Vec::new();
+        }
+        let needed = self.needed.get(&addr(p)).cloned().unwrap_or_default();
+        let list = crate::sql::paths::parallel::ordered_partial_scans(self.ctx, s, &needed, self.member_scan);
+        list.into_iter().map(|ps| self.partial_scan_node(p, s, ps, names, serial)).collect()
+    }
+
+    fn partial_scan_node(
+        &mut self,
+        p: &Arc<Plan>,
+        s: &ScanPlan,
+        ps: crate::sql::paths::parallel::PartialScan,
+        names: &[Name],
+        serial: &ExNode,
+    ) -> ExNode {
         let saved = std::mem::take(&mut self.pending);
         let mut n = self.planned_scan(p, &ps.scan, ps.desc, names);
         self.pending = saved;
@@ -282,7 +556,7 @@ impl Builder<'_, '_> {
         }
         n.key = serial.key;
         n.subplans = serial.subplans.clone();
-        Some(n)
+        n
     }
 
     /// The aggregation `serial` (over the serial input) as a Finalize over a Gather of a
@@ -294,6 +568,7 @@ impl Builder<'_, '_> {
         &mut self,
         serial: &ExNode,
         part: ExNode,
+        others: &[ExNode],
         groups: &[Expr],
         aggs: &[AggCall],
         gnames: &[Name],
@@ -377,6 +652,7 @@ impl Builder<'_, '_> {
         // them, and as the nodes over a computed one refer to it.
         let mut hkeys: Vec<String> = Vec::new();
         let mut keys: Vec<String> = Vec::new();
+        let mut key_cols: Vec<Option<usize>> = Vec::new();
         for (g, n) in groups.iter().zip(gnames) {
             let bare = self.pick(n, Cx::Upper);
             let computed = !matches!(g, Expr::Col(..)) && !g.columns().is_empty();
@@ -384,11 +660,16 @@ impl Builder<'_, '_> {
             if serial_keys.contains(&bare) || serial_keys.contains(&wrapped) {
                 hkeys.push(bare);
                 keys.push(wrapped);
+                key_cols.push(match g {
+                    Expr::Col(j, _) => Some(*j),
+                    _ => None,
+                });
             }
         }
         if hkeys.len() != serial_keys.len() {
             hkeys = serial_keys.clone();
             keys = serial_keys.clone();
+            key_cols = vec![None; keys.len()];
         }
         // An aggregation node like `serial`, of `kind` ("Plain", "Hashed", "Sorted") in
         // `mode` ("Partial", "Finalize"), over `input`.
@@ -523,6 +804,29 @@ impl Builder<'_, '_> {
             finals.push(fin_hashed(gathered(self, &ph, false)));
             // Sorted partial groups merged, finalized in order.
             finals.push(fin_sorted(gathered(self, &ps, true)));
+            // Or grouping the other partial plans already in (a leading part of) the keys'
+            // order (create_partial_grouping_paths' make_ordered_path).
+            for po in others {
+                let pc = keys.iter().zip(&po.order).take_while(|(a, b)| a == b).count();
+                let si = if pc == keys.len() {
+                    let mut si = po.clone();
+                    si.relationship = None;
+                    si
+                } else if pc > 0 && g.incremental_sort {
+                    self.sorted_partial(po, &keys, &key_cols, true, po.key)
+                } else {
+                    continue;
+                };
+                let mut ps2 = make("Sorted", "Partial", si);
+                let sic = &ps2.children[0];
+                ps2.rows = pgroups;
+                ps2.startup_cost = sic.startup_cost;
+                ps2.total_cost = sic.total_cost
+                    + in_rows * (trans + group_ops)
+                    + pgroups * (costs::CPU_TUPLE_COST + gexpr);
+                ps2.output = partial_out.clone();
+                finals.push(fin_sorted(gathered(self, &ps2, true)));
+            }
             // Hashed partial groups each sorted, then merged.
             let sph = sorted(self, ph.clone());
             finals.push(fin_sorted(gathered(self, &sph, true)));

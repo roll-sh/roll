@@ -268,14 +268,114 @@ fn partial_scan_safe(
         }
     }
     let (path, workers) = best?;
+    partial_of(ctx, &rel, &cfg, s, &path, workers)
+}
+
+fn partial_of(
+    ctx: &ExecCtx,
+    rel: &Rel,
+    cfg: &ParCfg,
+    s: &ScanPlan,
+    path: &Path,
+    workers: usize,
+) -> Option<PartialScan> {
     let mut scan = s.clone();
-    apply(&rel, &mut scan, &path);
+    apply(rel, &mut scan, path);
     let desc = describe_with(ctx, &scan, Some((workers, cfg.divisor(workers))))?;
     Some(PartialScan {
         scan,
         desc,
         workers,
     })
+}
+
+/// add_partial_path: keep `new` in `list` unless a path of compatible pathkeys
+/// dominates it (fewer disabled nodes, or fuzzily cheaper in total cost with keys at
+/// least as good), dropping the ones it dominates; the list stays in total-cost order.
+fn add_partial_path(list: &mut Vec<(Path, usize)>, new: (Path, usize)) {
+    let mut accept = true;
+    let mut insert_at = 0;
+    let mut i = 0;
+    while i < list.len() {
+        let old = &list[i].0;
+        let mut remove_old = false;
+        let kc = cmp_keys(&new.0.keys, &old.keys);
+        if kc != KeysCmp::Different {
+            if new.0.disabled != old.disabled {
+                if new.0.disabled > old.disabled {
+                    accept = false;
+                } else {
+                    remove_old = true;
+                }
+            } else if new.0.total > old.total * FUZZ {
+                if kc != KeysCmp::Better1 {
+                    accept = false;
+                }
+            } else if old.total > new.0.total * FUZZ {
+                if kc != KeysCmp::Better2 {
+                    remove_old = true;
+                }
+            } else if kc == KeysCmp::Better1 {
+                remove_old = true;
+            } else if kc == KeysCmp::Better2 {
+                accept = false;
+            } else if old.total > new.0.total * 1.000_000_000_1 {
+                remove_old = true;
+            } else {
+                accept = false;
+            }
+        }
+        if remove_old {
+            list.remove(i);
+        } else {
+            if new.0.total >= list[i].0.total {
+                insert_at = i + 1;
+            }
+            i += 1;
+        }
+        if !accept {
+            return;
+        }
+    }
+    list.insert(insert_at, new);
+}
+
+/// The partial paths of a scan's relation other than its cheapest one that add_partial_path
+/// keeps because they come in an order (parallel index scans), each as `partial_scan`
+/// gives the cheapest: in total-cost order.
+pub fn ordered_partial_scans(
+    ctx: &ExecCtx,
+    s: &ScanPlan,
+    needed: &[bool],
+    member: bool,
+) -> Vec<PartialScan> {
+    let cfg = ParCfg::read(ctx);
+    if cfg.max_workers == 0
+        || s.table.temporary
+        || s.sample.is_some()
+        || s.current_of.is_some()
+        || s.mark.is_some()
+        || s.table.is_foreign()
+    {
+        return Vec::new();
+    }
+    let p = Planner::new(ctx);
+    if let Some(f) = &s.filter
+        && hazard(f, &p.cat) != 's'
+    {
+        return Vec::new();
+    }
+    let Some(rel) = p.rel(s, needed) else {
+        return Vec::new();
+    };
+    let mut list: Vec<(Path, usize)> = Vec::new();
+    for path in p.partial_paths(&rel, &cfg, member, &s.useful) {
+        add_partial_path(&mut list, path);
+    }
+    list.iter()
+        .filter(|(path, _)| !path.keys.is_empty())
+        .filter_map(|(path, w)| partial_of(ctx, &rel, &cfg, s, path, *w))
+        .collect()
 }
 
 impl Planner<'_, '_> {

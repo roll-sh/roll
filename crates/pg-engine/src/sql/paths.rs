@@ -5266,6 +5266,8 @@ impl Planner<'_, '_> {
             }
         }
         apply(&rel, s, &best);
+        // (Its partial paths are built for the keys' orders too: pathkeys_useful_for_grouping.)
+        s.useful = crate::sql::plan::ScanUseful(Some(Arc::new((Vec::new(), want.merge.clone()))));
         true
     }
 
