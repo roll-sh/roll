@@ -15,10 +15,11 @@ A full run of commit 286306f (2026-10-22, the whole schedule in one database,
 `PGREGRESS_TIMEOUT=600`) measured 50792. It confirms every file's count below except three:
 join 836 (its row-order unit 433 matches in that run), test_setup 78 (the shared reference
 cluster already had `regress_tblspace` from a concurrent run, so the reference errored) and
-alter_table 1745 (`ALTER TABLE tt7 DROP q` stalled past the 600 s psql timeout in that run and
-the 4 units after it differ; the file matches in 84 s in a subset run with the files before it in
-its schedule group, so the stall needs state from earlier in the full schedule: not yet
-explained).
+alter_table 1745 (`ALTER TABLE tt7 DROP q` "stalled" past the 600 s psql timeout in that run and
+the 4 units after it differ). Explained and fixed in round 15 (agent 9, below): no statement
+hung; every ALTER TABLE copied the whole catalog once per table, so over the catalog a full run
+builds up each took seconds, and alter_table as a whole ran past the per-file timeout, which
+happened to fall on that statement.
 
 Re-run one subset (example):
 
@@ -110,6 +111,64 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 15, agent 9 (full-run ALTER TABLE "stalls", harness timeouts, row locks at the level's top)
+
+A full run of the schedule (`PGREGRESS_TIMEOUT=300`, now per statement) against 308f2d1 +
+8edc0c7 on 1983037 (plus the semi join / whole-row LockRows marks below) measured 50773: every
+file's count as the table below had it then (50938, before agent 5's third batch) except
+tablespace (101/261) and stats (477/482), whose units all failed on
+the reference: another run's cleanup had dropped the shared cluster's `regress_tblspace` midway
+(fixed in the harness, see below). No engine restart, no timeout: alter_table ran in 431 s (906 s
+and a timeout before), fast_default in 67 s (425 s), foreign_key in 150 s (543 s).
+
+The stalls (alter_table 830, fast_default 177–179) were no hang and no lock wait. Sampled with
+gdb in the full-run state: every ALTER TABLE called `column_using` (does a column or an index
+expression anywhere hold the table's row type?), which made a binder, a copy of the whole
+catalog, for every table of the database, to bind its indexes: O(tables × catalog) per
+statement. By schedule group 22 the database holds about 400 tables and 1300 relations, so
+each ALTER TABLE took 2–14 s, and alter_table's few hundred ALTERs ran past the per-file psql
+timeout, which happened to fall on `ALTER TABLE tt7 DROP q` (the same unit in both runs: the
+work is deterministic). Subset runs have a small catalog (alter_table 84 s). Fixed: one binder,
+only for tables with an expression index. Also: a stored text mentions a renamed or altered
+relation only as a whole word (`ALTER TABLE t` rebound every view, rule, policy and function
+body containing the letter t), and DROP's dependency graph looks user types up in a set
+(`user_type_name` searched every type and relation for each column). Still linear per DDL
+statement, not quadratic: `Ddl::save` serializes the whole catalog, DROP rebuilds the
+dependency graph. Test: `tests/ddl_scaling.rs` counts the catalog copies DDL statements make
+(`catalog::catalog_copies`, a thread-local tally in `Catalog`'s Clone) with 3 and with 60 other
+tables; ALTER TABLE went from 12 copies to 126 before the fix.
+
+Harness (`tests/pg_regress.rs`, HANDOFF.md "How to test"):
+
+- `PGREGRESS_TIMEOUT` (default 300 s) is how long one statement may run with psql printing
+  nothing; `PGREGRESS_FILE_TIMEOUT` (default 3600 s) caps a whole file. A loaded machine's 400 s
+  `join` no longer loses its last units.
+- test_setup 7: a reference `CREATE TABLESPACE regress_tblspace` failing because another run
+  made it is compared as on a fresh cluster; and a run ending while another run's database is
+  on the reference leaves the tablespaces and roles that appeared during it.
+
+SELECT ... FOR UPDATE / SHARE (`sql/paths/rowmarks.rs`, `exec/nodes.rs` LockRowsNode): the
+level's scans used to lock the rows they read, so a join or a later qual's rejects were locked
+too, and `ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED` locked every row the sort read (a queue's
+second worker got nothing). Now every scan of a locking level returns its row's key, one
+LockRows under the LIMIT (over the sort) locks the level's rows (the named tables; the others
+are reference marks), and a row a concurrent update changed is rechecked against the whole
+level (EvalPlanQual: the level's plan run again, each scan returning its test row). IN / EXISTS
+under FOR UPDATE are pulled up into semi / anti joins as Postgres does. EXPLAIN: one LockRows,
+the marks' ctids after the target list (locked relations first, then by range table), the scans'
+reltargets, a semi join's inner ctid, functions' and VALUES' whole rows (`g.*`), an inheritance
+tree's tableoid. Not done: a FROM subquery's whole-row mark under a locking level (`s.*`, PG
+keeps its Subquery Scan). No regress unit changed (the suite's FOR UPDATE EXPLAINs already
+matched). Tests: `tests/wire.rs` `row_locks_at_the_query_level_top` (two sessions: SKIP LOCKED
+queue, NOWAIT over a join, the recheck after a concurrent update), `tests/sql/a9_lockrows.sql`.
+
+Rule-rewritten RETURNING (returning 103 / 105, still differing): EXPLAIN shows the rule action's
+ModifyTable (no CTE Scan on `*RULE*`) with the statement's RETURNING over its old / new rows
+(`old.f1`, `new.f1`). Left: which relation takes the plain name (Postgres names the statement's
+own relation first: the action's target is `foo_1`), the target's restriction derived from the
+equivalence class with the statement's rows (`f1 = 4` on both sides: a Nested Loop over a
+Materialize), the non-target rows' ctids in the join's target list.
 
 ## Fixed in round 14, agent 3 (strict-NULL folding, semi joins unique-ified early, EXISTS with sublinks)
 

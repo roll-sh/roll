@@ -25,9 +25,11 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
     work), so the ceiling is about 99.998%.
 - No engine crashes or panics in a full run. A full run of 286306f measured 50,792: STATUS's
-  per-file counts hold except that run's artifacts (see STATUS.md). One is open: in that full
-  run `ALTER TABLE tt7 DROP q` in alter_table stalled past the 600 s psql timeout, which doesn't
-  reproduce in a subset run.
+  per-file counts hold except that run's artifacts (see STATUS.md). The "stalls" in full runs
+  (`ALTER TABLE tt7 DROP q` in alter_table, fast_default 177–179) were no hang: every ALTER TABLE
+  copied the whole catalog once per table (`column_using`), seconds per statement over a full
+  run's catalog, so those files ran past the per-file timeout. Fixed in round 15;
+  `tests/ddl_scaling.rs` counts the catalog copies DDL makes.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
@@ -133,6 +135,26 @@ PGREGRESS_PORT=55843 PGREGRESS_REPORT_DIR=/tmp/pgregress/report \
   silently reuses the previous engine binary.
 - Some files are batch-dependent (catalog sizes grow with earlier files); compare like for
   like.
+- Timeouts: `PGREGRESS_TIMEOUT` (default 300 s) is how long **one statement** may run with psql
+  printing nothing (psql `-a` echoes each statement as it starts it); past it the file counts
+  as stalled, the engine restarts and the file resumes after that unit. `PGREGRESS_FILE_TIMEOUT`
+  (default 3600 s) caps a whole run of a file. (It used to be one cap per file: `join` takes
+  about 400 s on a loaded machine and lost its last units to it.)
+- The reference cluster is shared, and tablespaces are cluster-global: when another run already
+  made test_setup's `regress_tblspace`, the reference's `CREATE TABLESPACE` fails; the harness
+  drops just that `ERROR` line from the reference's output (the engine is compared with what a
+  fresh cluster prints), and notes it on stderr. And while another run's database
+  (`regression*`) is on the reference, a run ending leaves the tablespaces and roles that
+  appeared during it (they may be the other run's: a run once dropped `regress_tblspace` under
+  another, whose tablespace and stats files then lost 165 units).
+- A full run outlives a tool's 2-hour background limit: start it detached (`setsid nohup ... &`)
+  and poll its log. A run killed midway leaves its `PGREGRESS_DB` on the reference (drop it)
+  and skips the cleanup of the roles / tablespaces it made.
+- Stacks of a running engine (no gdb on the host): a container sharing the host's pid
+  namespace, e.g. `docker run -d --name x --pid=host --cap-add=SYS_PTRACE --security-opt
+  seccomp=unconfined -v <dir of the engine binary>:<same>:ro -v /lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:ro
+  -v /lib64:/lib64:ro nginx:alpine sleep infinity`, `apk add gdb` in it, then
+  `docker exec x gdb <binary> -p <pid> -batch -ex 'thread apply all bt 60'` a few times.
 
 **Probing PostgreSQL directly:**
 `docker exec -i roll-engine-ref psql -U postgres -d <scratch_db> -At < file.sql 2>&1`.
@@ -231,10 +253,15 @@ them all with the "Fixed in round N" sections describing what was already tried.
    merge 348 needs the sub-select copies in a MERGE's action conditions and SET lists.
 4. **Row marks in VERBOSE target lists**: done for UPDATE / DELETE / MERGE over joins with a
    plain (or, for MERGE, partitioned) target, and for locked scans (a FROM subquery's FOR
-   UPDATE). Left: merge 462 (Inner Unique over an empty partitioned target), returning 103/105
-   (rule-rewritten statements, which run as a CTE of the rule's actions), whole-row marks
-   (`s.*`) of subquery / function sources, inherited UPDATE / DELETE targets, and SELECT ...
-   FOR UPDATE over joins (the engine locks at the scans: one LockRows per locked scan).
+   UPDATE), and (round 15) SELECT ... FOR UPDATE / SHARE: one LockRows at the level's top
+   (`sql/paths/rowmarks.rs`), locking only the rows the level returns, EvalPlanQual rechecks
+   of the whole level; its function / VALUES whole-row marks, semi join inner ctids and an
+   inheritance tree's tableoid shown. Left: merge 462 (Inner Unique over an empty partitioned
+   target), returning 103/105 (rule-rewritten statements: EXPLAIN now shows the action's
+   ModifyTable with the statement's RETURNING over its old / new rows; still differing: which
+   relation takes the plain name, the target's restriction from the equivalence class with the
+   statement's rows, the non-target rows' ctids), a FROM subquery's whole-row mark under a
+   locking level (`s.*`, PG keeps its Subquery Scan), inherited UPDATE / DELETE targets.
 5. **collate.icu.utf8** (23), **incremental_sort** (11), **select_parallel** (5; both mostly
    need more than one partial path per relation, see STATUS.md),
    **updatable_views** (13), **groupingsets** (12, including the sorted-vs-hashed choice and

@@ -1042,12 +1042,23 @@ fn cleanup_reference(cfg: &Config, before: &BTreeSet<String>) {
             let _ = writeln!(sql, "DROP DATABASE IF EXISTS \"{d}\" WITH (FORCE);");
         }
     }
-    for g in after.difference(before) {
+    // Tablespaces and roles are cluster-global: while another run is still going (its
+    // `PGREGRESS_DB`, `regression*`, is there) the ones that appeared may be its (test_setup's
+    // `regress_tblspace`, which its tablespace and stats files then lack): the last run to end
+    // drops them.
+    let others = after.iter().any(|g| {
+        g.strip_prefix("db:")
+            .is_some_and(|d| d != db && d != "regression_tbd" && d.starts_with("regression"))
+    });
+    if others {
+        eprintln!("cleanup: another run is using the reference; its tablespaces and roles stay");
+    }
+    for g in after.difference(before).filter(|_| !others) {
         if let Some(t) = g.strip_prefix("ts:") {
             let _ = writeln!(sql, "DROP TABLESPACE IF EXISTS \"{t}\";");
         }
     }
-    for g in after.difference(before) {
+    for g in after.difference(before).filter(|_| !others) {
         if let Some(r) = g.strip_prefix("role:") {
             let _ = writeln!(
                 sql,
