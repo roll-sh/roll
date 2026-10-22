@@ -38,12 +38,7 @@ pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
     // A key that can't see the bucket learns nothing about it (a policy may still let it in).
     let bucket = match ctx.store().bucket(ctx.bucket_name()) {
         Ok(b) => b,
-        Err(e) => {
-            return Err(match &ctx.auth {
-                Some(a) if !a.key.covers(ctx.bucket_name()) => S3Error::new(Code::AccessDenied),
-                _ => store_error(e),
-            });
-        }
+        Err(e) => return Err(if ctx.hides(ctx.bucket_name()) { S3Error::new(Code::AccessDenied) } else { store_error(e) }),
     };
     match ctx.method.clone() {
         Method::GET if ctx.has("uploadId") => multipart::list_parts(ctx, &bucket),
@@ -260,6 +255,8 @@ struct Metered {
     bucket_id: String,
     internal: bool,
     sent: u64,
+    /// Requester Pays: the requester's account.
+    payer: Option<String>,
 }
 
 impl Stream for Metered {
@@ -276,7 +273,7 @@ impl Stream for Metered {
 
 impl Drop for Metered {
     fn drop(&mut self) {
-        self.store.meter.egress(&self.bucket_id, self.sent, self.internal);
+        self.store.meter.egress_by(&self.bucket_id, self.payer.as_deref(), self.sent, self.internal);
     }
 }
 
@@ -374,7 +371,7 @@ pub(crate) async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
         return Ok(r);
     }
     let (_, stream) = ctx.store().open_blob_sse(&meta, range.map(|(a, b)| a..b + 1), key.as_ref()).await.s3()?;
-    let metered = Metered { inner: stream, store: ctx.store().clone(), bucket_id: bucket.id.clone(), internal: ctx.internal(), sent: 0 };
+    let metered = Metered { inner: stream, store: ctx.store().clone(), bucket_id: bucket.id.clone(), internal: ctx.internal(), sent: 0, payer: ctx.payer(&bucket.id) };
     let headers = std::mem::take(r.headers_mut());
     let mut out = Response::new(Body::from_stream(metered));
     *out.status_mut() = code;
@@ -388,6 +385,10 @@ async fn delete(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     let if_match = ctx.h("if-match").map(str::to_string);
     let vid = versioning::version_id(ctx)?;
     let bypass = versioning::bypass(ctx)?;
+    // MFA Delete: permanently deleting a version needs x-amz-mfa.
+    if vid.is_some() && versioning::mfa_delete_on(ctx, bucket)? {
+        versioning::require_mfa(ctx, bucket).await?;
+    }
     let o = ctx.store().delete_object_version(&bucket.name, ctx.key_name(), vid.as_deref(), if_match.as_deref(), bypass).await.s3()?;
     let mut r = response::empty(StatusCode::NO_CONTENT);
     if o.delete_marker {

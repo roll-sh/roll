@@ -221,19 +221,28 @@ pub(crate) fn authorize_olap(ctx: &Ctx) -> Result<(), S3Error> {
     let action = crate::access::action_of(ctx);
     let need = if matches!(ctx.method, Method::GET | Method::HEAD) { Need::Read } else { Need::Write };
     let who = ctx.who();
-    let account = crate::policy::Account { id: ctx.store().account_id(), owner: ctx.store().owner_id() };
+    let resource = crate::access::resource_arn(&r.ap.bucket, ctx.key.as_deref());
+    let owner = ctx.access(&r.ap.bucket)?.owner().to_string();
+    let cond = crate::access::Cond { ctx, who, bucket: &r.ap.bucket, key: ctx.key.as_deref(), resource_account: owner.clone(), tags: Default::default(), prefix: None };
     let decision = match policy {
-        Some(p) => {
-            let principal = crate::access::principal_of(ctx, who);
-            let cond = crate::access::Cond { ctx, who, bucket: &r.ap.bucket, key: ctx.key.as_deref(), account: &account, tags: Default::default(), prefix: None };
-            p.evaluate(&principal, &account, action, arn, &cond)
-        }
+        Some(p) => p.evaluate(who.principal(), action, arn, &cond).decision(),
         None => crate::policy::Decision::None,
     };
     if decision == crate::policy::Decision::Deny {
         return Err(S3Error::new(Code::AccessDenied));
     }
-    if crate::access::key_allows(who, &r.ap.bucket, need) || decision == crate::policy::Decision::Allow {
+    let own = match who {
+        crate::access::Who::Key(k, id) => {
+            let v = id.verdict(action, &resource, &cond, crate::access::key_allows(k, &r.ap.bucket, need));
+            if v.deny {
+                return Err(S3Error::new(Code::AccessDenied));
+            }
+            v.allowed()
+        }
+        crate::access::Who::Anonymous => false,
+    };
+    let same_account = who.account() == Some(owner.as_str());
+    if (own && same_account) || (decision == crate::policy::Decision::Allow && (same_account || own || matches!(who, crate::access::Who::Anonymous))) {
         return Ok(());
     }
     Err(S3Error::new(Code::AccessDenied))

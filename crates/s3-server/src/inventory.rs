@@ -152,7 +152,8 @@ async fn report(server: &Server, source: &Bucket, id: &str, cfg: &Node) -> Resul
     let now = store.now();
     let (folder, hive) = stamps(now);
     let base = if prefix.is_empty() { format!("{}/{id}", source.name) } else { format!("{prefix}/{}/{id}", source.name) };
-    let owner = store.owner_id();
+    // The bucket owner's canonical id.
+    let owner = store.account(&source.account_id).ok().flatten().map_or_else(|| store.owner_id(), |a| a.canonical);
     let mut rep = Report { server, dest, base: base.clone(), files: Vec::new() };
     let mut gz = GzEncoder::new(Vec::new(), Compression::default());
     let mut rows = 0u64;

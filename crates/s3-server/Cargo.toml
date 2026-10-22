@@ -24,6 +24,7 @@ ipnet.workspace = true
 md-5.workspace = true
 memchr.workspace = true
 p256.workspace = true
+qrcode.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 ring.workspace = true
 s3-proto.workspace = true

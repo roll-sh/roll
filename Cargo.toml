@@ -57,6 +57,8 @@ libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["e
 crc32c = "0.6"
 uuid = "1"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+# QR codes of virtual MFA seeds (the module matrix only; roll writes the PNG).
+qrcode = { version = "0.14", default-features = false }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls-pemfile = "2"
 rdkafka = { version = "0.39", features = ["cmake-build", "ssl-vendored", "zstd"] }

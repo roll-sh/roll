@@ -19,11 +19,13 @@
 //! ```
 
 pub mod access_points;
+pub mod accounts;
 pub mod backend;
 pub mod config;
 mod db;
 mod error;
 pub mod events;
+pub mod iam;
 mod ids;
 mod jobs;
 mod lifecycle;
@@ -41,6 +43,7 @@ pub mod validate;
 mod versioning;
 mod versions;
 
+pub use accounts::{Account, AccountUpdate};
 pub use backend::{Backend, BlobAttrs, BlobSse, ByteStream, CopySource, CustomerKey, KmsParams, Listed, LocalBackend, S3Backend, S3Location, SseOp, SseUnsupported, Uploaded, UploadedPart, bytes_body, from_config, sse_c_unsupported, test_backend};
 pub use config::{PublicAccessBlock, RedirectAll, Redirect, RoutingCondition, RoutingRule, WebsiteConfig};
 pub use sse::Encryption;

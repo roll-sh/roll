@@ -241,15 +241,21 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
         }
     };
     let policy = check_post_policy(&policy_b64, &fields, &bucket.name, ctx.store().now())?;
-    crate::access::authorize(ctx, crate::access::Who::Key(&access), &bucket.name, Some(&key), "s3:PutObject", crate::auth::Need::Write)?;
+    // The signer is the request's principal from here on (its form body isn't signed in
+    // chunks).
+    let identity = crate::auth::identity_of(ctx, &access)?;
+    let principal = crate::identity::event_principal(&access, &identity);
+    ctx.auth = Some(crate::auth::Auth {
+        verified: s3_proto::sigv4::Verified { access_key: access.id.clone(), payload: s3_proto::sigv4::Payload::Unsigned, stream: None },
+        key: access.clone(),
+        identity,
+    });
+    crate::access::authorize(ctx, ctx.who(), &bucket.name, Some(&key), "s3:PutObject", crate::auth::Need::Write)?;
     s3_store::events::set_origin(|o| {
-        o.principal = Some(access.id.clone());
+        o.principal = Some(principal);
         o.create = Some("Post");
     });
-    let acl = match field(&fields, "acl") {
-        Some(c) => crate::acl::check_write(ctx, &bucket.name, &crate::acl::Acl::canned(c, false)?)?,
-        None => None,
-    };
+    let acl = crate::acl::for_new_object_canned(ctx, &bucket.name, field(&fields, "acl"))?;
     let website_redirect = field(&fields, "x-amz-website-redirect-location").map(crate::website::check_redirect).transpose()?;
     if let Some(id) = access.acting_key() {
         ctx.store().touch_key(id);

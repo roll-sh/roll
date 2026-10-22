@@ -41,8 +41,8 @@ Design goal, in order:
 |---|---|
 | `s3-proto` | Wire protocol, no I/O: SigV4, SigV4a and SigV2 (header, presigned, chunked/streaming payloads with trailers, POST policies), SSE request headers, XML bodies, S3 error codes, checksums, ETags, ranges and conditional headers. |
 | `s3-store` | Metadata (SQLite + durable log in object storage), branching, refcounts, trash, lifecycle, keys, metering, the blob backend (S3 via `aws-sdk-s3`, or a local directory), the GC/scrub jobs. No HTTP. |
-| `s3-server` | The S3 HTTP API: routing (path and virtual-host style), auth, handlers, streaming to and from the backend, CORS and public buckets. |
-| `s3-control` | Control-plane API `/v1/storage/...` (merged into rolld's API): buckets, branches, keys, browsing/upload/download for the dashboard, presigning, trash, usage and pricing. |
+| `s3-server` | The S3 HTTP API: routing (path and virtual-host style), auth, identities and policy evaluation, handlers, streaming to and from the backend, CORS and public buckets; the STS and IAM query APIs on the same listener. |
+| `s3-control` | Control-plane API `/v1/storage/...` (merged into rolld's API): accounts, buckets, branches, keys, roles, browsing/upload/download for the dashboard, presigning, trash, usage and pricing. |
 
 `rolld` runs all of it in one process (`--s3`, default `127.0.0.1:59000`), the CLI has
 `roll storage` (alias `s3`), and the dashboard has `/dashboard/storage`.
@@ -78,7 +78,8 @@ s3/meta/pruned                              log entries up to here are deleted
 
 ```sql
 buckets (id TEXT PRIMARY KEY,           -- bkt_<12>
-         name TEXT NOT NULL UNIQUE,     -- S3 bucket name rules
+         name TEXT NOT NULL UNIQUE,     -- S3 bucket name rules; unique across accounts
+         account_id TEXT NOT NULL,      -- the owner (migration 8)
          region TEXT NOT NULL, created_at INTEGER NOT NULL,   -- unix ms
          public INTEGER NOT NULL,       -- anonymous GET/HEAD of objects
          recover_days INTEGER NOT NULL,
@@ -132,13 +133,18 @@ parts   (upload_id, part_number, size, etag, checksum, backend_etag, created_at,
 keys    (id TEXT PRIMARY KEY /* access key id, 20 chars: RK + 18 upper base32 */,
          secret TEXT NOT NULL /* 40 chars */, name TEXT NOT NULL,
          permission TEXT NOT NULL /* read | write | admin */,
-         buckets TEXT /* JSON array of bucket names; NULL = all */,
-         created_at INTEGER, last_used_at INTEGER)
+         buckets TEXT /* JSON array of bucket names; NULL = all; [] = none (IAM users' keys) */,
+         created_at INTEGER, last_used_at INTEGER,
+         account_id TEXT NOT NULL, user_name TEXT /* the IAM user; NULL = an account key */,
+         status TEXT /* Active | Inactive */)            -- the last three: migration 8
 
 usage   (bucket_id, day TEXT /* YYYY-MM-DD UTC */, class_a, class_b, bytes_in,
          egress_internet, egress_internal,
          byte_ms REAL /* stored bytes × ms; a float, since a PB-day overflows i64 */,
          PRIMARY KEY (bucket_id, day))
+usage_payer (account_id /* the requester who paid */, bucket_id, day, class_a, class_b,
+         egress_internet, egress_internal,
+         PRIMARY KEY (account_id, bucket_id, day))      -- Requester Pays, migration 7
 
 orphans (blob_key TEXT PRIMARY KEY, size, found_at)   -- orphan-scan candidates
 state   (k TEXT PRIMARY KEY, v TEXT)                  -- scrub report, job barriers, canonical owner id,
@@ -156,12 +162,14 @@ events  (seq INTEGER PRIMARY KEY /* the sequencer; from state.event_seq, never r
 replication_status (bucket_id, key, version_id /* S3's: 'null' or the vid */,
          status TEXT /* PENDING | COMPLETED | FAILED | REPLICA */,
          PRIMARY KEY (bucket_id, key, version_id)) WITHOUT ROWID
-roles   (name TEXT PRIMARY KEY /* IAM role name rules */, id TEXT /* RR + 18 upper base32 */,
-         description, permission /* read | write | admin */, buckets /* JSON; NULL = all */,
-         policy TEXT /* inline IAM policy, JSON; NULL = none */,
+roles   (account_id, name TEXT /* IAM role name rules */, id TEXT /* RR… (control plane) | AROA… (IAM) */,
+         description, permission /* read | write | admin; NULL = an IAM role */, buckets /* JSON; NULL = all */,
+         policy TEXT /* a control-plane role's bound (inline IAM policy, JSON); NULL = none */,
          trust TEXT /* JSON { keys, oidc, external_id } */, max_session_s,
          generation INTEGER /* +1 on every change */, revoked_before INTEGER /* ms; 0 = none */,
-         created_at, updated_at)                               -- migration 6
+         created_at, updated_at,
+         iam TEXT /* JSON { path, trust_policy, policies, attached, boundary, tags }; NULL = none */,
+         PRIMARY KEY (account_id, name)) WITHOUT ROWID       -- migration 6, keyed by account in 8
 access_points (account TEXT /* 12 digits */, kind TEXT /* ap | olap */, name TEXT,
          alias TEXT UNIQUE /* <name>-<random>-s3alias | …--ol-s3 */,
          bucket TEXT /* ap: the bucket's name; olap: the supporting access point's */,
@@ -173,6 +181,13 @@ replication_targets (name TEXT PRIMARY KEY, endpoint /* NULL = AWS S3 */, region
          access_key_id /* NULL = the deployment's AWS credentials */,
          secret TEXT /* AES-256-GCM-sealed under state.replication_target_key */,
          path_style, buckets TEXT /* JSON */, created_at, updated_at)   -- migration 7
+
+accounts (id TEXT PRIMARY KEY /* 12 digits */, canonical TEXT UNIQUE /* 64 hex */,
+          name TEXT /* display name */, email TEXT UNIQUE /* lowercase; NULL = none */,
+          created_at)                                         -- migration 8
+iam     (account_id, kind TEXT /* user | group | policy | mfa | oidc */,
+         name TEXT /* lowercase: IAM names are case-insensitive */, value TEXT /* JSON */,
+         PRIMARY KEY (account_id, kind, name)) WITHOUT ROWID  -- migration 8
 ```
 
 Object ACLs and website redirects live in the row, so every row copy carries them: branch
@@ -180,7 +195,13 @@ push-down, the trash and restores, in-place updates (tagging), and multipart upl
 Create to Complete. `CopyObject` sets them from the request, as S3 does.
 
 The deployment's **canonical owner id** (64 hex chars) is random, created on the first start
-and kept in `state`, so it survives restarts, recovery and moving hosts.
+and kept in `state`, so it survives restarts, recovery and moving hosts. It's the canonical id
+of the **default account**, whose 12-digit id is derived from it (the first 15 hex digits, mod
+10¹²), as the deployment's account id always was. Other accounts get random ids.
+
+An object's **owner** (its account, when it isn't the bucket's) is kept in its ACL document
+(`acl`, S3's `AccessControlPolicy` has an `Owner`), so every copy of the row carries it as the
+ACL already did: branch push-down, the trash, versions, uploads from Create to Complete.
 
 `refs` counts every `objects`, `versions` and `trash` row that points at the blob. `objects`,
 `versions` and `trash` have an index on `blob_id`, so the GC and the orphan scan can check that
@@ -194,6 +215,12 @@ new ids are); migration 4 added `blob_sse`; migration 5 added the event outbox
 and replication statuses; migration 6 added `roles` (temporary credentials; sessions themselves
 are never stored, see [Temporary credentials](#temporary-credentials-sts)); migration 7 added
 `access_points` and `replication_targets`.
+Migration 8 added accounts and IAM: `accounts`, `iam`, `usage_payer`, the owner account of buckets, keys and roles
+(roles rebuilt keyed by account and name), keys' IAM user and status. It makes the deployment's
+owner the default account, computing its id from `state.canonical_owner` in SQL exactly as
+`config::account_id` does, and moves every existing bucket, key and role into it; it's
+deterministic, so replaying the log over an older snapshot gives the same rows. A database
+without an owner yet gets its default account when the store first opens.
 
 A blob's encryption is fixed when it's written, so `blob_sse` is keyed by blob: every row that
 shares the blob (copies, branches, the trash) shares its encryption, and no row of `objects`,
@@ -512,7 +539,12 @@ Egress counts as **internal** when the peer address is inside `internal_cidrs` (
 private ranges and the docker bridge by default; set `ROLL_S3_INTERNAL_CIDRS` on AWS to the
 VPC), and as **internet** otherwise.
 
-Every 60 s the meter flushes into `usage`. It also adds
+Requests to a **Requester Pays** bucket from another account that accepted the charges
+(`x-amz-request-payer: requester`) are metered to the requester (`Meter::request_by`,
+`egress_by`): their class A/B requests and egress go to `usage_payer` (the requester's account,
+the bucket, the day) instead of the bucket's `usage`. Storage is always the bucket owner's.
+
+Every 60 s the meter flushes into `usage` (and `usage_payer`). It also adds
 `(bytes + trash_bytes + version_bytes) × elapsed ms` for every bucket, which gives storage
 GB-months, so restorable trash and noncurrent versions are billed as storage (as S3 bills
 noncurrent versions).
@@ -538,13 +570,48 @@ Usage writes are relaxed: they ride the next group commit without waiting.
   `STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD(-TRAILER)` and `STREAMING-UNSIGNED-PAYLOAD-TRAILER`
   (current SDKs send CRC trailers by default).
 - The credential scope's region is accepted as given (any region; R2 does the same). The
-  service must be `s3` (`sts` for the STS query API on the same listener).
+  service must be `s3` (`sts` and `iam` for the STS and IAM query APIs on the same listener: a
+  form `POST /` signed for `iam` is IAM's, any other STS's).
+- An inactive key (IAM's `UpdateAccessKey`) is `InvalidAccessKeyId`, as an unknown one.
 - Temporary credentials (`RT…` keys) carry their session token in `x-amz-security-token`
   (`X-Amz-Security-Token` in presigned URLs, a form field in POST uploads). See below.
 - Clock skew is limited to 15 minutes (header-signed SigV2 too); presigned URLs until they
   expire.
 - Anonymous requests get what the bucket's policy, ACLs or `public` flag allow.
-- `x-amz-expected-bucket-owner` must be the deployment's 12-digit account id when sent.
+- `x-amz-expected-bucket-owner` (and `x-amz-source-expected-bucket-owner`) must be the bucket
+  owner's 12-digit account id when sent (`AccessDenied` otherwise).
+
+### Accounts and IAM
+
+**Identities** (`s3-server/src/identity.rs`). Every authenticated request resolves its key to an
+identity once: the account it acts in, what it is (the account's root user, an account key
+with a roll permission level, an IAM user, a role session, a federated user), how resource
+policies and ACLs see it (its own ARNs and canonical ids, its role, its account), its condition
+keys, and its policies as they are now: a user's inline and managed policies and its groups', a
+role's, permissions boundaries, session policies. Policy documents come from the metadata on
+every request (a few local SQLite reads for an IAM user; none for account keys), parsed once
+per distinct text (a bounded cache), so a change to any policy applies from the next request.
+
+**Evaluation** (`access.rs`) is AWS's: an explicit `Deny` anywhere refuses; the requester's own
+side (identity policies, permission level or root, bounded by boundaries and session policies)
+and the resource's grants (bucket policy, ACLs, `public`, each saying whether it named the
+requester directly, through its role, or through its account) combine with OR in the same
+account and AND across accounts. The resource's owner is the bucket's account, or for reads and
+ACL changes of an object another account wrote (ACLs on) that account, whose ACL then is the
+only grant.
+
+**IAM entities** are JSON documents in `iam` (users with their tags, inline policies, attached
+policy ARNs, group names and boundary; groups; customer-managed policies with their versions;
+virtual MFA devices with their seed and last accepted step; OIDC providers). The IAM query API
+(`s3-server/src/iam/`) checks and changes them inside one metadata transaction
+(`Store::iam_write`), so every IAM call is atomic and durable like any write. Users' access keys
+are rows of `keys` (`user_name`); roles are rows of `roles` (`iam` holds an IAM role's side).
+
+**MFA** (`mfa.rs`): TOTP (RFC 6238) with 160-bit seeds. A code is accepted only if its 30-second
+step is newer than the device's last accepted one, written durably (`Store::use_mfa_step`)
+before the request goes on, so codes can't be replayed. MFA Delete is the bucket setting
+`mfa_delete` (`bucket_config`), enforced by `PutBucketVersioning` and permanent version deletes
+with `x-amz-mfa`.
 
 ### Temporary credentials (STS)
 
@@ -557,21 +624,32 @@ identity):
   `<ErrorResponse>`. SDKs reach it with `endpoint_url` for `sts`. Calls are SigV4-signed with
   service `sts` (the payload is the body; STS clients don't send `x-amz-content-sha256`),
   except `AssumeRoleWithWebIdentity`, which is unsigned. Bodies are capped at 64 KiB.
-  - `GetSessionToken` (900 s–36 h, default 12 h): a session of the calling permanent key.
-  - `AssumeRole` (900 s up to the role's maximum, default 1 h): a session of a role whose
-    trust names the calling key (permanent, or a `GetSessionToken` session of one). `ExternalId`
-    is checked in constant time when the role requires it. A session policy (`Policy`, at most
-    2 KB) narrows it; `PolicyArns` are refused (no managed policies). Session tags and
-    transitive tag keys (at most 50, 2 KB together), `SourceIdentity`.
-  - `AssumeRoleWithWebIdentity`: an OIDC ID token of a provider in the role's trust (below).
+  - `GetSessionToken` (900 s–36 h, default 12 h; the root user's 900 s–1 h): a session of the
+    calling permanent key, with MFA (`SerialNumber`, `TokenCode` of the caller's own device).
+  - `AssumeRole` (900 s up to the role's maximum, default 1 h; a role session assuming a role:
+    at most 1 h): a session of a role, in the role's account, for a caller its trust allows: an
+    IAM trust policy (evaluated with the caller as principal, `sts:AssumeRole` as action, and
+    conditions such as `sts:ExternalId` and `aws:MultiFactorAuthPresent`), or a control-plane
+    trust naming the caller's permanent key (`ExternalId` checked in constant time). Another
+    account's role, or a trust that names only the caller's account, needs the caller's own
+    policies to allow `sts:AssumeRole` on the role. Session policies: `Policy` (2 KB) and
+    `PolicyArns` (up to 10 managed policies, kept as ARNs and read when a request is checked).
+    Session tags and transitive tag keys (at most 50, 2 KB together; `sts:TagSession` in a trust
+    policy), `SourceIdentity`; chaining carries transitive tags and the source identity over.
+  - `AssumeRoleWithWebIdentity`: an OIDC ID token of a provider in the role's trust (below):
+    an IAM OIDC provider named by a trust policy's `Federated` principal (its URL is the issuer,
+    its client ids the audiences), or a control-plane role's issuer list.
+  - `GetFederationToken` (900 s–36 h; root 1 h): a federated user acting with the caller's
+    policies bounded by the session policies (none: no permissions of its own).
   - `GetCallerIdentity`.
-  - Role chaining (a role session assuming a role), MFA, SAML and `GetFederationToken` are
-    refused with clear errors.
-- **Roles** (`roles` table): a trust (permanent keys; OIDC providers with issuer, audiences,
-  an optional subject pattern and `jwks_uri`; an optional external id), a permission and
-  bucket scope like a key's, an optional inline IAM policy (at most 10 KB) and a maximum
-  session duration (15 min–12 h). `RoleArn` is `arn:aws:iam::<account>:role/<name>`; a session's
-  ARN is `arn:aws:sts::<account>:assumed-role/<name>/<session>` and its `aws:userid` is
+  - SAML is refused with a clear error.
+- **Roles** (`roles` table, per account): control-plane roles have a trust (permanent keys;
+  OIDC providers with issuer, audiences, an optional subject pattern and `jwks_uri`; an optional
+  external id), a permission and bucket scope like a key's, an optional inline IAM policy that
+  bounds their sessions (at most 10 KB); IAM roles (`CreateRole`) have a trust policy, inline and
+  managed policies, a boundary and tags (`iam`). Both have a maximum session duration
+  (15 min–12 h). `RoleArn` is `arn:aws:iam::<account>:role<path><name>`; a session's ARN is
+  `arn:aws:sts::<account>:assumed-role/<name>/<session>` and its `aws:userid` is
   `<role id>:<session>`.
 - **The control plane mints too**: `POST /v1/storage/roles/{name}/sessions` hands a trusted
   backend a role's credentials, optionally narrower (permission, buckets, session policy, tags,
@@ -586,7 +664,8 @@ AES key = HMAC-SHA256(deployment key, "roll sts session token v1\0" | salt)
 associated data = version | key id | salt | nonce
 claims = JSON { access key id, secret, issued/expires (ms), key, role { name, id, generation },
                 session name, permission, buckets, session policy, tags, transitive keys,
-                source identity, web identity { issuer, subject, audience } }
+                source identity, web identity { issuer, subject, audience },
+                account, user, federated user, MFA time, policy ARNs }
 ```
 
 - The **deployment key** (32 random bytes) is created on first use and kept in the metadata
@@ -602,27 +681,29 @@ claims = JSON { access key id, secret, issued/expires (ms), key, role { name, id
   signed with.
 - **Checks on every request:** the token's size (at most 12 KiB, before decoding), the tag,
   the key id, expiry (`ExpiredToken`, by the store's clock, before the request's time is
-  checked), then revocation:
-  - a role session reads its role (a local SQLite read, no write): a deleted role, another
-    role of the same name (`id`), a changed role (`generation`) or a revocation
-    (`issued_at <= revoked_before`) is `InvalidToken`;
-  - a `GetSessionToken` session acts with its key's current permission and dies with the key.
+  checked). Then the session's role (or key) is read as it is now (a local SQLite read, no
+  write): a role session acts with the role's *current* permission level, policies and boundary
+  (never more than its permission and scope were narrowed to when minted); a `GetSessionToken`
+  session with its key's current permission. A session whose role was deleted or replaced (`id`),
+  whose key is gone or inactive, or issued at or before `revoked_before`, authenticates and is
+  denied everything (`AccessDenied`, as on AWS). Revoking adds AWS's `AWSRevokeOlderSessions`
+  inline policy too.
 - **Errors as on AWS:** a temporary key without its token is `InvalidAccessKeyId`; a permanent
-  key with a token is `InvalidToken`.
-- **What a session may do:** its permission and scope (the role's, narrowed when it was minted,
-  never more), bounded by the role's inline policy and the session policy: both must allow
-  every action, whatever else allows it (a bucket policy or an ACL included). That's stricter
-  than AWS, where a resource policy naming the session can exceed its session policy.
-  CreateBucket, ListBuckets and bypassing governance retention are bounded the same way.
+  key with a token, or a malformed, tampered or retired token, is `InvalidToken`.
+- **What a session may do:** its role's identity policies (and permission level), bounded by
+  the role's boundary (and a control-plane role's policy) and the session policies (inline and
+  `PolicyArns`); a resource policy or ACL naming the session itself grants beyond them, one
+  naming the role doesn't, as on AWS (see [Accounts and IAM](#accounts-and-iam)).
 - **Principals and condition keys:** a role session is `Principal: {"AWS": <role ARN>}` or its
   assumed-role ARN in bucket policies. It sets `aws:PrincipalArn` (the role ARN, as on AWS),
-  `aws:userid`, `aws:PrincipalType` (`AssumedRole`), `aws:PrincipalTag/<key>`,
-  `aws:TokenIssueTime`, `aws:SourceIdentity`, `aws:MultiFactorAuthPresent` (`false`),
-  `aws:FederatedProvider` and `<provider>:sub`/`<provider>:aud` for web identities. A
-  `GetSessionToken` session is its key.
-- **Never logged:** secrets and tokens stay out of logs and `Debug` output; server access logs
-  show `X-Amz-Security-Token=REDACTED`.
-- **Billing doesn't change:** requests are metered to buckets as usual.
+  `aws:userid`, `aws:PrincipalType` (`AssumedRole`), `aws:PrincipalAccount` (the role's
+  account), `aws:PrincipalTag/<key>`, `aws:TokenIssueTime`, `aws:SourceIdentity`,
+  `aws:MultiFactorAuthPresent` and `aws:MultiFactorAuthAge`, `aws:FederatedProvider` and
+  `<provider>:sub`/`<provider>:aud` for web identities. A `GetSessionToken` session is its key.
+- **Never logged:** secrets, tokens and MFA seeds stay out of logs and `Debug` output; server
+  access logs show `X-Amz-Security-Token=REDACTED`.
+- **Billing doesn't change:** requests are metered to buckets as usual (to the requester on
+  Requester Pays buckets).
 
 **Web identity** (`s3-server/src/sts/oidc.rs`). Only issuers in the role's trust are ever
 fetched from, so a token can't make roll connect anywhere. The provider's JWKS (`jwks_uri`, or
@@ -663,26 +744,36 @@ for a day if the provider is down. Tokens (at most 20 000 bytes) must be RS256 o
   listings report plaintext sizes on S3 (checked against SeaweedFS too), so the scrub's size
   comparison holds for encrypted blobs.
 
-**Permissions.**
+**Permissions.** Account keys carry a roll permission level, which acts as an identity policy
+attached to the key (IAM users and roles have IAM policies instead; see
+[Accounts and IAM](#accounts-and-iam)):
 - `read`: GET, HEAD, List*, reading bucket configuration
 - `write`: read, plus PUT, DELETE, copy and multipart
-- `admin`: write, plus create/delete bucket and bucket configuration
+- `admin`: write, plus create/delete bucket and bucket configuration; over every bucket, the
+  account's root user
 
 A key with a `buckets` list only sees those buckets (ListBuckets is filtered, and other buckets
 answer `AccessDenied`, existing or not), unless a bucket's policy or ACL grants it more.
 
 **Authorization** (`s3-server/src/access.rs`; every operation maps to its IAM action name):
-1. a bucket policy `Deny` that matches refuses, whoever asks;
-2. the key's own permission allows;
-3. a policy `Allow` allows (also anonymous requests, unless `RestrictPublicBuckets` and the
-   policy is public);
-4. ACL grants allow, when Object Ownership enables ACLs (`IgnorePublicAcls` drops public ones);
-5. the `public` flag allows anonymous `GetObject` (not with `RestrictPublicBuckets`).
+1. an explicit `Deny` refuses, whoever asks: the bucket policy, the requester's identity
+   policies, its boundary or session policies (a revoked or orphaned session is denied
+   everything);
+2. the requester's own side: its identity policies, its permission level, or being the root
+   user, bounded by its boundary and session policies;
+3. the resource's grants: a bucket policy `Allow` (anonymous requests too, unless
+   `RestrictPublicBuckets` and the policy is public, which then only counts for the owner's
+   account), ACL grants when Object Ownership enables ACLs (`IgnorePublicAcls` drops public
+   ones), the `public` flag for `GetObject`;
+4. the same account allows with 2 or 3 (a grant naming only the account needs 2; one naming the
+   role is bounded like 2); another account needs both;
+5. Requester Pays buckets refuse other accounts without `x-amz-request-payer: requester`.
 
-Admin keys can always manage a bucket's policy. Policies are parsed in `policy.rs`, ACLs in
-`acl.rs`; see [compatibility](compatibility.md#policies-acls-and-public-access) for principals,
-condition keys and the canonical ids. `ROLL_S3_BLOCK_PUBLIC_ACCESS` (store config
-`block_public_access`) applies all four Block Public Access settings to every bucket.
+The bucket owner's root user (and its admin keys covering the bucket) can always manage the
+bucket's policy. Policies are parsed in `policy.rs`, ACLs in `acl.rs`; see
+[compatibility](compatibility.md#policies-acls-and-public-access) for principals, condition keys
+and the canonical ids. `ROLL_S3_BLOCK_PUBLIC_ACCESS` (store config `block_public_access`)
+applies all four Block Public Access settings to every bucket.
 
 **Operations.**
 - **Service:** ListBuckets.
@@ -758,11 +849,27 @@ goes through one SQLite database.
 
 All JSON. Errors are `{"error": "..."}` with 400/404/409/500. Times are Unix milliseconds.
 
+**Accounts.** Every endpoint acts in one account: the one named by the `x-roll-account: <account
+id>` header or the `?account=<account id>` query parameter, else the **default account** (the
+deployment's original owner, so every existing caller keeps working unchanged). An unknown
+account is a 404. Buckets, keys, roles and usage are the account's: another account's bucket is
+as missing as one that doesn't exist (404), its keys and roles too.
+
 ```text
 GET    /v1/storage
   → { endpoint, region, virtual_host_domain|null, website_domain|null, storage, storage_class, recover_days_default,
-      owner_id /* canonical owner id */, account_id /* for policy ARNs */, block_public_access,
-      pricing: Pricing, buckets, objects, bytes, scrub: { last_at|null, missing, mismatched } }
+      owner_id /* the account's canonical id */, account_id /* its 12-digit id, for ARNs */, account: Account,
+      default_account_id, block_public_access,
+      pricing: Pricing, buckets, objects, bytes /* the account's */,
+      deployment: { accounts, buckets, objects, bytes }, scrub: { last_at|null, missing, mismatched } }
+
+GET    /v1/storage/accounts                      → [Account]
+POST   /v1/storage/accounts  { name, email?, root_key?: bool (default true) }
+  → Account & { root_key?: Key & { secret_access_key } /* the root user's key: admin over every bucket */ }
+GET    /v1/storage/accounts/{id}                 → Account
+PATCH  /v1/storage/accounts/{id}  { name?, email?: string | null } → Account
+DELETE /v1/storage/accounts/{id}                 → { deleted }   (409 while it owns buckets; deletes its keys, roles and IAM entities;
+                                                                   the default account can't be deleted)
 
 GET    /v1/storage/buckets                       → [Bucket]
 POST   /v1/storage/buckets  { name, public?, recover_days?, object_lock?: bool }   → Bucket
@@ -798,7 +905,11 @@ GET    /v1/storage/buckets/{name}/trash?prefix=&cursor=&limit=
 POST   /v1/storage/buckets/{name}/trash/restore  { key, deleted_at } → ObjectInfo
 
 GET    /v1/storage/buckets/{name}/usage?days=30  → Usage
-GET    /v1/storage/usage?days=30                 → { days, cost: Cost, daily: [same rows as Usage.daily, summed], buckets: [Usage] }
+GET    /v1/storage/usage?days=30&accounts=false  → { days, account, cost: Cost /* the account's bill */,
+                                                     daily: [same rows as Usage.daily, summed], buckets: [Usage],
+                                                     as_requester?: RequesterCharges /* it paid on others' Requester Pays buckets */,
+                                                     billed_to_requesters?: RequesterCharges /* requesters paid on its buckets */,
+                                                     accounts?: [{ account_id, name, cost, as_requester, billed_to_requesters }] /* accounts=true */ }
 
 GET    /v1/storage/keys                          → [Key]
 POST   /v1/storage/keys  { name, permission, buckets?: [string] } → Key & { secret_access_key }
@@ -810,9 +921,9 @@ POST   /v1/storage/roles  { name, permission, description?, buckets?: [string], 
 GET    /v1/storage/roles/{name}                  → Role
 PATCH  /v1/storage/roles/{name}  { any of: description, permission, buckets /* null: all */,
                                    policy /* null: none */, trust, max_session_s } → Role
-                                 /* every change invalidates the role's sessions */
-DELETE /v1/storage/roles/{name}                  → { deleted }
-POST   /v1/storage/roles/{name}/revoke           → Role   (sessions issued until now stop working)
+                                 /* sessions act with the new settings from the next request on */
+DELETE /v1/storage/roles/{name}                  → { deleted }   (its sessions are denied everything)
+POST   /v1/storage/roles/{name}/revoke           → Role   (AWSRevokeOlderSessions: sessions issued until now are denied)
 POST   /v1/storage/roles/{name}/sessions  { session_name?, duration_s? (60 to max_session_s, default 3600),
                                             permission? /* ≤ the role's */, buckets? /* within the role's */,
                                             policy?: IamPolicy, tags?: Record<string,string>,
@@ -883,8 +994,13 @@ ObjectInfo = ObjectSummary & { metadata: Record<string,string>, tags: Record<str
              lock: { mode, retain_until, legal_hold } | null }
 ObjectVersion = { key, version_id, is_latest, delete_marker, size, etag, last_modified }
 TrashEntry = { key, size, etag, deleted_at, expires_at, version_id }
-Key = { id /* access key id */, name, permission, buckets: string[] | null, created_at, last_used_at }
-Role = { name, id /* RR… */, arn, description, permission, buckets: string[] | null,
+Account = { id /* 12 digits */, canonical /* 64 hex */, name, email: string | null, created_at, default: boolean }
+Key = { id /* access key id */, name, permission, buckets: string[] | null, created_at, last_used_at,
+        account, user: string | null /* an IAM user's key */, active }
+RequesterCharges = { class_a, class_b, egress_internet_bytes, egress_internal_bytes, cost: Cost, accounts: [string] }
+Role = { account, name, id /* RR… (AROA… made through IAM) */, arn, description,
+         permission: "read" | "write" | "admin" | null /* null: an IAM role */, buckets: string[] | null,
+         iam: { path, trust_policy?, policies, attached, boundary?, tags } /* IAM's side */,
          policy: IamPolicy | null, trust: Trust, max_session_s, generation, revoked_before /* ms, 0 = never */,
          created_at, updated_at }
 Trust = { keys: string[] /* permanent access key ids (AssumeRole) */,
@@ -927,7 +1043,16 @@ Details:
   gone. Their blobs still go through the internal 24 h quarantine. A bucket holding versions
   under Object Lock is a 409.
 - Presigned PUT URLs sign only `host`, so clients may send any `Content-Type`.
-- Presigned URLs are signed with the control plane's own admin key (`RKROLLCONTROLPLANE00`).
+- MFA Delete: on a bucket with MFA Delete on, `DELETE /object?version_id=`, a `versioning` change
+  in a PATCH and `DELETE /buckets/{name}?force=true` are 409s: those take the S3 API with
+  `x-amz-mfa`.
+- Accounts: `email` is unique across accounts (a 409 otherwise) and stored lowercase; ACL grants
+  by email address resolve to it.
+- Usage: a bucket's own `usage` doesn't include what requesters paid (Requester Pays); usage of
+  buckets deleted within the window counts toward the default account's total.
+- Presigned URLs are signed with the control plane's own admin key (`RKROLLCONTROLPLANE00`), the
+  default account's, so `/presign` is for the default account's buckets (other accounts presign
+  with their own keys).
   It's created once and kept in the metadata, so URLs stay valid across restarts. It's never
   listed by `GET /keys` and can't be deleted through the API.
 - `PUT /upload` needs a `Content-Length` (a chunked body is a 400), except for an empty body,

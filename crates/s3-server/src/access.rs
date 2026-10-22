@@ -1,28 +1,41 @@
-//! Authorization: may this request do this to this bucket or object?
+//! Authorization: may this request do this to this bucket or object? AWS's evaluation logic
+//! (<https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html>,
+//! and S3's for object operations), with roll's account keys standing in for IAM identities
+//! through their permission levels:
 //!
-//! In order (S3's evaluation, with roll keys standing in for IAM identities):
+//! 1. An explicit `Deny` anywhere refuses: the bucket policy, the requester's identity policies,
+//!    its permissions boundary, its session policies. A session that was revoked or whose role
+//!    is gone is refused everything.
+//! 2. The requester's own side ([`crate::identity::Identity::verdict`]): its identity policies,
+//!    its roll permission level (account keys and control-plane roles), or being the account's
+//!    root user, *bounded* by its permissions boundary and session policies.
+//! 3. The resource's side: the bucket policy, ACL grants (when Object Ownership enables ACLs),
+//!    the `public` flag. They name the requester directly (or anyone), its role, or its account
+//!    ([`Via`]).
+//! 4. **Same account** (the requester's account owns the resource): its own side allows, or a
+//!    resource grant names it directly (not bounded), or names its role (bounded). A grant to the
+//!    account alone delegates to the account's own policies.
+//!    **Another account**: both its own side and a resource grant must allow.
 //!
-//! 1. A bucket policy `Deny` that matches refuses the request, whoever asks.
-//! 2. The key's own permission (`read`/`write`/`admin`, scoped to buckets) allows it.
-//! 3. A bucket policy `Allow` that matches allows it, even for anonymous requests or keys
-//!    without that permission. With `RestrictPublicBuckets`, a public policy only allows roll
-//!    keys.
-//! 4. ACL grants allow it, when the bucket's Object Ownership enables ACLs. With
-//!    `IgnorePublicAcls`, grants to `AllUsers`/`AuthenticatedUsers` count for nothing.
-//! 5. The bucket's `public` flag allows anonymous `GetObject` (it counts as a public policy,
-//!    so `RestrictPublicBuckets` turns it off).
+//! The resource owner is the bucket's account, except for object reads and ACL changes on an
+//! object another account owns (ACLs on, the object written by another account): the object's
+//! owner, whose ACL is then the only resource grant (the bucket owner's policy can still deny,
+//! not grant), as on S3.
 //!
-//! Admin keys covering a bucket can always read, write and delete its policy, like an AWS
-//! account's root user, so a policy can't lock its owner out.
+//! The bucket owner's root user (and its admin keys covering the bucket) can always read,
+//! replace and delete the bucket policy, so a policy can't lock its owner out (as on AWS).
 //!
-//! Temporary credentials are bounded first: whatever allows a request, a session's policies
-//! (its role's inline policy, its session policy) must allow it too (see `temporary.rs`).
+//! **Requester Pays**: on a bucket whose payer is `Requester`, a request from another account
+//! must say `x-amz-request-payer: requester` (else `AccessDenied`, anonymous requests too), and
+//! its request and egress charges go to the requester's account; the bucket owner pays for its
+//! own account's requests.
 
 use crate::acl::{self, Acl, Ownership};
 use crate::auth::Need;
 use crate::ctx::Ctx;
 use crate::error::StoreResult;
-use crate::policy::{Account, Context, Decision, Policy, Principal};
+use crate::identity::Identity;
+use crate::policy::{Context, Policy, Principal, Via};
 use axum::http::Method;
 use s3_proto::{Code, S3Error};
 use s3_store::config::kind;
@@ -42,6 +55,8 @@ pub(crate) struct Access {
     pub ownership: Option<Ownership>,
     pub acls_enabled: bool,
     pub bucket_acl: Acl,
+    /// The payer is `Requester`.
+    pub requester_pays: bool,
 }
 
 impl Access {
@@ -62,13 +77,19 @@ impl Access {
         let ownership = Ownership::from_setting(settings.get(kind::OWNERSHIP).map(String::as_str));
         let acls_enabled = ownership != Some(Ownership::BucketOwnerEnforced);
         let bucket_acl = acl::bucket_acl(settings.get(kind::ACL).map(String::as_str));
-        Ok(Self { policy_public: policy.as_ref().is_some_and(Policy::is_public), bucket, settings, policy, block, ownership, acls_enabled, bucket_acl })
+        let requester_pays = settings.get(kind::REQUEST_PAYMENT).is_some_and(|p| p == "Requester");
+        Ok(Self { policy_public: policy.as_ref().is_some_and(Policy::is_public), bucket, settings, policy, block, ownership, acls_enabled, bucket_acl, requester_pays })
     }
 
     /// Whether anonymous users can read through the `public` flag or a public policy (what
     /// `GetBucketPolicyStatus` reports).
     pub fn is_public(&self) -> bool {
         self.policy_public || self.bucket.public
+    }
+
+    /// The bucket owner's account id.
+    pub fn owner(&self) -> &str {
+        &self.bucket.account_id
     }
 }
 
@@ -80,7 +101,34 @@ pub(crate) struct AccessCache(std::sync::Mutex<HashMap<String, Arc<Access>>>);
 #[derive(Clone, Copy)]
 pub(crate) enum Who<'a> {
     Anonymous,
-    Key(&'a AccessKey),
+    Key(&'a AccessKey, &'a Identity),
+}
+
+impl<'a> Who<'a> {
+    pub fn identity(&self) -> Option<&'a Identity> {
+        match self {
+            Who::Key(_, id) => Some(id),
+            Who::Anonymous => None,
+        }
+    }
+
+    /// The requester's account.
+    pub fn account(&self) -> Option<&'a str> {
+        self.identity().map(|i| i.account.id.as_str())
+    }
+
+    pub(crate) fn principal(&self) -> &'a Principal {
+        static ANON: Principal = Principal::Anonymous;
+        match self {
+            Who::Key(_, id) => &id.principal,
+            Who::Anonymous => &ANON,
+        }
+    }
+
+    /// An account key whose bucket scope leaves `bucket` out: it learns nothing about it.
+    fn scoped_out(&self, bucket: &str) -> bool {
+        matches!(self, Who::Key(k, id) if id.kind == crate::identity::Kind::Key && !k.covers(bucket))
+    }
 }
 
 impl Ctx {
@@ -103,20 +151,25 @@ impl Ctx {
 
     pub(crate) fn who(&self) -> Who<'_> {
         match &self.auth {
-            Some(a) => Who::Key(&a.key),
+            Some(a) => Who::Key(&a.key, &a.identity),
             None => Who::Anonymous,
         }
     }
-}
 
-pub(crate) fn principal_of(ctx: &Ctx, who: Who) -> Principal {
-    principal(ctx, who)
-}
+    /// The bucket isn't to be revealed to the requester (an account key scoped to other
+    /// buckets): `AccessDenied` rather than `NoSuchBucket`.
+    pub(crate) fn hides(&self, bucket: &str) -> bool {
+        self.who().scoped_out(bucket)
+    }
 
-fn principal(ctx: &Ctx, who: Who) -> Principal {
-    match who {
-        Who::Anonymous => Principal::Anonymous,
-        Who::Key(k) => crate::temporary::principal(ctx.store(), k),
+    /// For operations no resource policy governs (CreateBucket, ListBuckets): whether the
+    /// requester's own side allows `action` (on `bucket`, or every bucket when `None`).
+    /// `level`: whether its roll permission level does.
+    pub(crate) fn require_identity(&self, action: &str, bucket: Option<&str>, level: bool) -> Result<(), S3Error> {
+        let Who::Key(_, id) = self.who() else { return Err(S3Error::new(Code::AccessDenied)) };
+        let b = bucket.unwrap_or("*");
+        let cond = Cond { ctx: self, who: self.who(), bucket: bucket.unwrap_or_default(), key: None, resource_account: id.account.id.clone(), tags: OnceLock::new(), prefix: None };
+        if id.verdict(action, &resource_arn(b, None), &cond, level).allowed() { Ok(()) } else { Err(S3Error::new(Code::AccessDenied)) }
     }
 }
 
@@ -127,27 +180,14 @@ pub(crate) fn resource_arn(bucket: &str, key: Option<&str>) -> String {
     }
 }
 
-impl Ctx {
-    /// For checks outside [`authorize`] (CreateBucket, ListBuckets, bypassing governance
-    /// retention): refuse if the request's session policies don't allow `action` on the bucket
-    /// (or object), or on every bucket when `bucket` is `None`.
-    pub(crate) fn require_session(&self, action: &str, bucket: Option<&str>, key: Option<&str>) -> Result<(), S3Error> {
-        let Some(k) = self.auth.as_ref().map(|a| &a.key).filter(|k| k.is_temporary()) else { return Ok(()) };
-        let account = Account { id: self.store().account_id(), owner: self.store().owner_id() };
-        let cond = Cond { ctx: self, who: Who::Key(k), bucket: bucket.unwrap_or_default(), key, account: &account, tags: OnceLock::new(), prefix: None };
-        let resource = resource_arn(bucket.unwrap_or("*"), key);
-        if crate::temporary::bounded(k, &account, action, &resource, &cond) { Ok(()) } else { Err(S3Error::new(Code::AccessDenied)) }
-    }
-}
-
-pub(crate) fn key_allows(who: Who, bucket: &str, need: Need) -> bool {
-    match who {
-        Who::Anonymous => false,
-        Who::Key(k) => match need {
-            Need::Read => k.can_read(bucket),
-            Need::Write => k.can_write(bucket),
-            Need::Admin => k.is_admin() && k.covers(bucket),
-        },
+/// What a roll permission level allows (the compatibility layer, equivalent to an attached
+/// policy: `read` = `s3:Get*`/`s3:List*`, `write` adds the object writes, `admin` = `s3:*`, on
+/// the key's buckets).
+pub(crate) fn key_allows(k: &AccessKey, bucket: &str, need: Need) -> bool {
+    match need {
+        Need::Read => k.can_read(bucket),
+        Need::Write => k.can_write(bucket),
+        Need::Admin => k.is_admin() && k.covers(bucket),
     }
 }
 
@@ -166,8 +206,13 @@ fn acl_permission(action: &str) -> Option<(bool, &'static str)> {
     })
 }
 
-/// May `who` do `action` (an IAM action name) on `bucket` (and `key`)? `need` is the key
-/// permission that allows it without any policy or ACL.
+/// Operations on an existing object that its owner (not the bucket's) governs.
+fn object_owned_action(action: &str) -> bool {
+    action.starts_with("s3:GetObject") || matches!(action, "s3:PutObjectAcl" | "s3:PutObjectVersionAcl" | "s3:PutObjectTagging" | "s3:PutObjectVersionTagging" | "s3:DeleteObjectTagging" | "s3:DeleteObjectVersionTagging")
+}
+
+/// May `who` do `action` (an IAM action name) on `bucket` (and `key`)? `need` is the roll
+/// permission level that allows it.
 pub(crate) fn authorize(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, action: &str, need: Need) -> Result<(), S3Error> {
     authorize_as(ctx, who, bucket, key, action, need, None)
 }
@@ -179,80 +224,112 @@ pub(crate) fn may_list_prefix(ctx: &Ctx, who: Who, bucket: &str, prefix: &str) -
     authorize_as(ctx, who, bucket, None, "s3:ListBucket", Need::Read, Some(prefix)).is_ok()
 }
 
+/// Requester Pays: a request from another account must accept the charges, which then go to
+/// it.
+fn requester_pays(ctx: &Ctx, who: Who, a: &Access) -> Result<(), S3Error> {
+    if !a.requester_pays || who.account() == Some(a.owner()) {
+        return Ok(());
+    }
+    let accepted = ctx.h("x-amz-request-payer").is_some_and(|v| v.trim().eq_ignore_ascii_case("requester"));
+    match who.account() {
+        Some(payer) if accepted => {
+            ctx.charge(&a.bucket.id, payer);
+            Ok(())
+        }
+        _ => Err(S3Error::msg(Code::AccessDenied, "Access Denied: this bucket is Requester Pays; send x-amz-request-payer: requester to accept the charges.")),
+    }
+}
+
 fn authorize_as(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, action: &str, need: Need, prefix: Option<&str>) -> Result<(), S3Error> {
     let denied = || S3Error::new(Code::AccessDenied);
     let a = match ctx.access(bucket) {
         Ok(a) => a,
-        // A key that can't see the bucket learns nothing about it.
-        Err(e) if e.code == Code::NoSuchBucket => {
-            return Err(match who {
-                Who::Key(k) if k.covers(bucket) => e,
-                Who::Anonymous => e,
-                _ => denied(),
-            });
-        }
+        // An account key scoped to other buckets learns nothing about this one.
+        Err(e) if e.code == Code::NoSuchBucket => return Err(if who.scoped_out(bucket) { denied() } else { e }),
         Err(e) => return Err(e),
     };
-    if let Who::Key(k) = who
-        && k.is_temporary()
-    {
-        let account = Account { id: ctx.store().account_id(), owner: ctx.store().owner_id() };
-        let cond = Cond { ctx, who, bucket, key, account: &account, tags: OnceLock::new(), prefix };
-        if !crate::temporary::bounded(k, &account, action, &resource_arn(bucket, key), &cond) {
-            return Err(denied());
-        }
-    }
     // Through an access point: its policy and the bucket's (`accesspoint/mod.rs`).
     if let Some(r) = crate::accesspoint::authorize(ctx, who, &a, bucket, key, action, need, prefix) {
         return r;
     }
-    if let Who::Key(k) = who
-        && k.is_admin()
-        && k.covers(bucket)
+    // The bucket owner can always manage the bucket's policy.
+    if let Who::Key(k, id) = who
+        && id.account.id == a.owner()
+        && !id.dead
+        && (id.is_root() || (id.kind == crate::identity::Kind::Key && k.is_admin() && k.covers(bucket)))
         && matches!(action, "s3:GetBucketPolicy" | "s3:PutBucketPolicy" | "s3:DeleteBucketPolicy" | "s3:GetBucketPolicyStatus")
     {
         return Ok(());
     }
-    let p = OnceLock::new();
-    let p = || p.get_or_init(|| principal(ctx, who));
-    let decision = match &a.policy {
-        Some(policy) => {
-            let p = p();
-            let account = Account { id: ctx.store().account_id(), owner: ctx.store().owner_id() };
-            let resource = resource_arn(bucket, key);
-            let cond = Cond { ctx, who, bucket, key, account: &account, tags: OnceLock::new(), prefix };
-            policy.evaluate(p, &account, action, &resource, &cond)
+    requester_pays(ctx, who, &a)?;
+    // The object's owner governs reading it and its ACL when it isn't the bucket's.
+    let mut resource_owner = a.owner().to_string();
+    let mut object_acl: Option<Acl> = None;
+    if a.acls_enabled
+        && object_owned_action(action)
+        && let Some(k) = key
+        && let Ok(m) = ctx.store().get_object_version(bucket, k, ctx.q("versionId").filter(|_| ctx.key.as_deref() == Some(k)))
+    {
+        let acl = acl::object_acl(true, m.headers.acl.as_deref());
+        if let Some(o) = &acl.owner {
+            resource_owner = o.clone();
         }
-        None => Decision::None,
-    };
-    if decision == Decision::Deny {
+        object_acl = Some(acl);
+    }
+    let resource = resource_arn(bucket, key);
+    let cond = Cond { ctx, who, bucket, key, resource_account: a.owner().to_string(), tags: OnceLock::new(), prefix };
+    let principal = who.principal();
+    let bucket_policy = a.policy.as_ref().map(|p| p.evaluate(principal, action, &resource, &cond)).unwrap_or_default();
+    if bucket_policy.deny {
         return Err(denied());
     }
-    if key_allows(who, bucket, need) {
-        return Ok(());
+    let own = match who {
+        Who::Key(k, id) => Some(id.verdict(action, &resource, &cond, key_allows(k, bucket, need))),
+        Who::Anonymous => None,
+    };
+    if own.is_some_and(|v| v.deny) {
+        return Err(denied());
     }
-    if decision == Decision::Allow && !(matches!(who, Who::Anonymous) && a.policy_public && a.block.restrict_public_buckets) {
-        return Ok(());
+    // The resource's grants.
+    let same_account_as_bucket = who.account() == Some(a.owner());
+    let restricted = a.policy_public && a.block.restrict_public_buckets && !same_account_as_bucket;
+    let mut grant: Option<Via> = None;
+    if resource_owner == a.owner() && !restricted {
+        grant = grant.max(bucket_policy.allow);
     }
     if a.acls_enabled
         && let Some((on_object, perm)) = acl_permission(action)
     {
         let ignore = a.block.ignore_public_acls;
-        let granted = match (on_object, key) {
-            (true, Some(k)) => match ctx.store().get_object(bucket, k) {
-                Ok(m) => acl::object_acl(true, m.headers.acl.as_deref()).allows(p(), perm, ignore),
-                Err(_) => false,
-            },
-            _ => a.bucket_acl.allows(p(), perm, ignore),
+        let g = match (on_object, key) {
+            (true, Some(_)) => object_acl.as_ref().and_then(|acl| acl.grants(principal, perm, ignore, &resource_owner)),
+            (true, None) => None,
+            _ => a.bucket_acl.grants(principal, perm, ignore, a.owner()),
         };
-        if granted {
-            return Ok(());
+        grant = grant.max(g);
+    }
+    if a.bucket.public && action == "s3:GetObject" && !a.block.restrict_public_buckets && resource_owner == a.owner() {
+        grant = Some(Via::Direct);
+    }
+    let allowed = match (who, own) {
+        (Who::Key(_, id), Some(v)) => {
+            if id.account.id == resource_owner {
+                v.allowed() || grant == Some(Via::Direct) || (grant == Some(Via::Role) && v.bounded)
+            } else {
+                v.allowed() && grant.is_some()
+            }
         }
+        _ => grant == Some(Via::Direct),
+    };
+    if !allowed {
+        return Err(denied());
     }
-    if a.bucket.public && matches!(action, "s3:GetObject") && !a.block.restrict_public_buckets {
-        return Ok(());
+    // As on S3, only the bucket owner's account may read or change its policy, whatever a
+    // policy grants another account (405, not 403).
+    if matches!(action, "s3:GetBucketPolicy" | "s3:PutBucketPolicy" | "s3:DeleteBucketPolicy") && who.account() != Some(a.owner()) {
+        return Err(S3Error::msg(Code::MethodNotAllowed, "The bucket policy can only be managed by the bucket owner's account."));
     }
-    Err(denied())
+    Ok(())
 }
 
 /// Condition keys of a request.
@@ -261,7 +338,8 @@ pub(crate) struct Cond<'a> {
     pub who: Who<'a>,
     pub bucket: &'a str,
     pub key: Option<&'a str>,
-    pub account: &'a Account,
+    /// The bucket owner's account (`aws:ResourceAccount`, `s3:ResourceAccount`).
+    pub resource_account: String,
     /// The object's current tags, read on first use.
     pub tags: OnceLock<Option<BTreeMap<String, String>>>,
     /// `s3:prefix` when it isn't the request's `prefix` parameter.
@@ -277,8 +355,8 @@ impl Cond<'_> {
 impl Context for Cond<'_> {
     fn values(&self, key: &str) -> Option<Vec<String>> {
         let ctx = self.ctx;
-        if let Who::Key(k) = self.who
-            && let Some(v) = crate::temporary::condition(k, &self.account.id, key)
+        if let Some(id) = self.who.identity()
+            && let Some(v) = id.condition(key, ctx.store().now())
         {
             return v;
         }
@@ -287,10 +365,6 @@ impl Context for Cond<'_> {
         }
         let one = |v: Option<String>| v.map(|v| vec![v]);
         let header = |n: &str| one(ctx.h(n).map(str::to_string));
-        let key_id = match self.who {
-            Who::Key(k) => Some(k.id.clone()),
-            Who::Anonymous => None,
-        };
         match key {
             "aws:sourceip" => one(ctx.peer.map(|p| p.to_string())),
             "aws:securetransport" => one(Some(secure(ctx).to_string())),
@@ -298,10 +372,8 @@ impl Context for Cond<'_> {
             "aws:epochtime" => one(Some(ctx.now_s().to_string())),
             "aws:referer" => header("referer"),
             "aws:useragent" => header("user-agent"),
-            "aws:username" | "aws:userid" => one(key_id),
-            "aws:principalaccount" => one(key_id.map(|_| self.account.id.clone())),
-            "aws:principalarn" => one(key_id.map(|k| format!("arn:aws:iam::{}:user/{k}", self.account.id))),
-            "aws:principaltype" => one(Some(if key_id.is_some() { "User" } else { "Anonymous" }.into())),
+            "aws:principaltype" => one(Some("Anonymous".into())),
+            "aws:resourceaccount" | "s3:resourceaccount" => one(Some(self.resource_account.clone())),
             "s3:prefix" if self.prefix.is_some() => one(self.prefix.map(str::to_string)),
             "s3:prefix" | "s3:delimiter" | "s3:max-keys" => one(ctx.q(&key[3..]).map(str::to_string)),
             "s3:versionid" => one(ctx.q("versionId").map(str::to_string)),

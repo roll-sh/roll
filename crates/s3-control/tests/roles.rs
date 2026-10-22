@@ -194,5 +194,5 @@ async fn sessions_for_backends() {
     let c3 = t.s3_client(&s3);
     put(&c3, "uploads", "c").await.unwrap();
     t.ok("POST", "/v1/storage/roles/web/revoke", None).await;
-    assert_eq!(put(&c3, "uploads", "c").await.unwrap_err(), "InvalidToken");
+    assert_eq!(put(&c3, "uploads", "c").await.unwrap_err(), "AccessDenied", "revoked: denied, as on AWS");
 }

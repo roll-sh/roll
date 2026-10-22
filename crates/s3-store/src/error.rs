@@ -52,6 +52,12 @@ pub enum StoreError {
     /// It already exists (a role of that name).
     #[error("{0}")]
     Conflict(String),
+    /// A quota (IAM's: access keys per user, attached policies, policy versions, …).
+    #[error("{0}")]
+    LimitExceeded(String),
+    /// It can't go while something still refers to it (IAM's `DeleteConflict`).
+    #[error("{0}")]
+    DeleteConflict(String),
     /// This node can't make writes durable any more (another node took over the metadata log,
     /// object storage failed, or it was closed). Nothing more was acknowledged; restart.
     #[error("storage unavailable: {0}")]

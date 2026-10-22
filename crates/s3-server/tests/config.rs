@@ -476,10 +476,12 @@ async fn small_configurations() {
     assert_eq!(c.get_bucket_accelerate_configuration().bucket("cfg").send().await.unwrap().status(), Some(&BucketAccelerateStatus::Enabled));
     c.put_bucket_accelerate_configuration().bucket("cfg").accelerate_configuration(AccelerateConfiguration::builder().status(BucketAccelerateStatus::Suspended).build()).send().await.unwrap();
     assert_eq!(c.get_bucket_accelerate_configuration().bucket("cfg").send().await.unwrap().status(), Some(&BucketAccelerateStatus::Suspended));
-    // Request payment: the owner pays.
+    // Request payment: the owner pays, or the requester (see tests/iam.rs for Requester Pays).
     c.put_bucket_request_payment().bucket("cfg").request_payment_configuration(RequestPaymentConfiguration::builder().payer(Payer::BucketOwner).build().unwrap()).send().await.unwrap();
-    let e = c.put_bucket_request_payment().bucket("cfg").request_payment_configuration(RequestPaymentConfiguration::builder().payer(Payer::Requester).build().unwrap()).send().await.unwrap_err();
-    assert_eq!(err(e), (501, "NotImplemented".into()));
+    assert_eq!(c.get_bucket_request_payment().bucket("cfg").send().await.unwrap().payer(), Some(&Payer::BucketOwner));
+    c.put_bucket_request_payment().bucket("cfg").request_payment_configuration(RequestPaymentConfiguration::builder().payer(Payer::Requester).build().unwrap()).send().await.unwrap();
+    assert_eq!(c.get_bucket_request_payment().bucket("cfg").send().await.unwrap().payer(), Some(&Payer::Requester));
+    c.put_bucket_request_payment().bucket("cfg").request_payment_configuration(RequestPaymentConfiguration::builder().payer(Payer::BucketOwner).build().unwrap()).send().await.unwrap();
     // Notifications: an AWS destination fails validation unless the deployment delivers to AWS
     // (see tests/events.rs for the rest).
     c.put_bucket_notification_configuration().bucket("cfg").notification_configuration(NotificationConfiguration::builder().build()).send().await.unwrap();

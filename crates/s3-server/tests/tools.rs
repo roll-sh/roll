@@ -591,3 +591,85 @@ async fn aws_cli_access_points() {
     assert_eq!(got.body.collect().await.unwrap().into_bytes().as_ref(), b"uploaded by arn\n");
     assert!(t.client.head_object().bucket("apcli").key("up.txt").send().await.is_ok());
 }
+
+/// IAM with the AWS CLI (`--endpoint-url` for every service): the account root creates a user,
+/// a key and an inline policy, and the user lists and copies with `aws s3`; then a group with
+/// AWS's `AmazonS3ReadOnlyAccess`, a virtual MFA device and `get-account-summary`.
+#[tokio::test(flavor = "multi_thread")]
+async fn aws_cli_iam() {
+    if !docker_ok() {
+        return;
+    }
+    let t = start().await;
+    for b in ["iamtool", "elsewhere"] {
+        t.client.create_bucket().bucket(b).send().await.unwrap();
+        t.client.put_object().bucket(b).key("seen.txt").body(aws_sdk_s3::primitives::ByteStream::from_static(b"hi")).send().await.unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("up.txt"), b"uploaded by an IAM user\n").unwrap();
+    let policy = serde_json::json!({"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Action": ["s3:ListBucket", "s3:GetObject", "s3:PutObject"], "Resource": ["arn:aws:s3:::iamtool", "arn:aws:s3:::iamtool/*"]},
+        {"Effect": "Allow", "Action": "s3:ListAllMyBuckets", "Resource": "*"},
+    ]});
+    std::fs::write(dir.path().join("policy.json"), policy.to_string()).unwrap();
+    let account = t.store.account_id();
+    let endpoint = t.endpoint.clone();
+    let path = dir.path().to_path_buf();
+    blocking(move || {
+        let aws = |env: &[(&str, String)], args: &[&str]| {
+            let mut all = vec!["--endpoint-url", endpoint.as_str(), "--output", "json"];
+            all.extend_from_slice(args);
+            run("amazon/aws-cli", env, &path, &all)
+        };
+        let fails = |env: &[(&str, String)], args: &[&str]| {
+            let mut all = vec!["--endpoint-url", endpoint.as_str()];
+            all.extend_from_slice(args);
+            run_fails("amazon/aws-cli", env, &path, &all)
+        };
+        let json = |out: &str| serde_json::from_str::<serde_json::Value>(out).unwrap_or_else(|e| panic!("{e}: {out}"));
+        let root = [("AWS_ACCESS_KEY_ID", ACCESS.to_string()), ("AWS_SECRET_ACCESS_KEY", SECRET.to_string()), ("AWS_DEFAULT_REGION", REGION.to_string())];
+        let user = json(&aws(&root, &["iam", "create-user", "--user-name", "deployer", "--tags", "Key=team,Value=web"]));
+        assert_eq!(user["User"]["Arn"], format!("arn:aws:iam::{account}:user/deployer"));
+        let err = fails(&root, &["iam", "create-user", "--user-name", "deployer"]);
+        assert!(err.contains("EntityAlreadyExists"), "{err}");
+        let key = json(&aws(&root, &["iam", "create-access-key", "--user-name", "deployer"]));
+        let env = [
+            ("AWS_ACCESS_KEY_ID", key["AccessKey"]["AccessKeyId"].as_str().unwrap().to_string()),
+            ("AWS_SECRET_ACCESS_KEY", key["AccessKey"]["SecretAccessKey"].as_str().unwrap().to_string()),
+            ("AWS_DEFAULT_REGION", REGION.to_string()),
+        ];
+        // Before any policy the user may do nothing.
+        assert!(fails(&env, &["s3", "ls"]).contains("AccessDenied"));
+        aws(&root, &["iam", "put-user-policy", "--user-name", "deployer", "--policy-name", "iamtool", "--policy-document", "file:///data/policy.json"]);
+        let got = json(&aws(&root, &["iam", "get-user-policy", "--user-name", "deployer", "--policy-name", "iamtool"]));
+        assert_eq!(got["PolicyDocument"]["Statement"][1]["Action"], "s3:ListAllMyBuckets", "the CLI decodes the document: {got}");
+        let ls = aws(&env, &["s3", "ls"]);
+        assert!(ls.contains("iamtool") && ls.contains("elsewhere"), "{ls}");
+        assert!(aws(&env, &["s3", "ls", "s3://iamtool/"]).contains("seen.txt"));
+        aws(&env, &["s3", "cp", "/data/up.txt", "s3://iamtool/up.txt"]);
+        assert!(fails(&env, &["s3", "ls", "s3://elsewhere/"]).contains("AccessDenied"));
+        let who = json(&aws(&env, &["sts", "get-caller-identity"]));
+        assert_eq!(who["Arn"], format!("arn:aws:iam::{account}:user/deployer"));
+        // A group with AWS's read-only policy opens the other bucket for reading.
+        aws(&root, &["iam", "create-group", "--group-name", "readers"]);
+        aws(&root, &["iam", "attach-group-policy", "--group-name", "readers", "--policy-arn", "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"]);
+        aws(&root, &["iam", "add-user-to-group", "--group-name", "readers", "--user-name", "deployer"]);
+        assert!(aws(&env, &["s3", "ls", "s3://elsewhere/"]).contains("seen.txt"));
+        let groups = json(&aws(&root, &["iam", "list-groups-for-user", "--user-name", "deployer"]));
+        assert_eq!(groups["Groups"][0]["GroupName"], "readers");
+        // Keys and devices.
+        let keys = json(&aws(&root, &["iam", "list-access-keys", "--user-name", "deployer"]));
+        assert_eq!(keys["AccessKeyMetadata"][0]["Status"], "Active");
+        let mfa = json(&aws(&root, &["iam", "create-virtual-mfa-device", "--virtual-mfa-device-name", "deployer", "--outfile", "/data/qr.png", "--bootstrap-method", "QRCodePNG"]));
+        assert_eq!(mfa["VirtualMFADevice"]["SerialNumber"], format!("arn:aws:iam::{account}:mfa/deployer"));
+        let summary = json(&aws(&root, &["iam", "get-account-summary"]));
+        assert_eq!(summary["SummaryMap"]["Users"], 1);
+        // Deactivated, the key no longer works.
+        aws(&root, &["iam", "update-access-key", "--user-name", "deployer", "--access-key-id", &env[0].1, "--status", "Inactive"]);
+        assert!(fails(&env, &["s3", "ls"]).contains("InvalidAccessKeyId"));
+    })
+    .await;
+    assert!(std::fs::read(dir.path().join("qr.png")).unwrap().starts_with(b"\x89PNG"), "the CLI saved the QR code");
+    let got = t.client.get_object().bucket("iamtool").key("up.txt").send().await.unwrap();
+    assert_eq!(got.body.collect().await.unwrap().into_bytes().as_ref(), b"uploaded by an IAM user\n");
+}

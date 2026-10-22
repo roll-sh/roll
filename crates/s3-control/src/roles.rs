@@ -2,6 +2,7 @@
 //! a role's credentials for a trusted server-side caller (a backend handing a browser scoped,
 //! short-lived credentials, no STS client needed). See `s3_store::sts`.
 
+use crate::api::Acct;
 use crate::control::{Control, ControlError, Result};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRequest, Path, State};
@@ -77,24 +78,31 @@ fn spec_from(mut m: Map<String, Value>) -> Result<RoleSpec> {
 impl Control {
     pub fn role_view(&self, r: &Role) -> Value {
         let mut v = json!(r);
-        v["arn"] = json!(r.arn(&self.store.account_id()));
+        v["arn"] = json!(r.own_arn());
         v["policy"] = r.policy.as_deref().and_then(|p| serde_json::from_str(p).ok()).unwrap_or(Value::Null);
         v
     }
 
-    pub async fn create_role(&self, mut body: Map<String, Value>) -> Result<Role> {
+    fn role_in(&self, account: &str, name: &str) -> Result<Role> {
+        self.store.role_in(account, name)?.ok_or_else(|| ControlError::NotFound(format!("no role {name}")))
+    }
+
+    pub async fn create_role(&self, account: &str, mut body: Map<String, Value>) -> Result<Role> {
         let name = match body.remove("name") {
             Some(Value::String(n)) => n,
             _ => return Err(invalid("name is required")),
         };
         let spec = spec_from(body)?;
-        Ok(self.store.create_role(&name, spec).await?)
+        Ok(self.store.create_role_in(account, &name, spec).await?)
     }
 
     /// Change some of a role's fields (`null` clears `buckets` and `policy`). Its sessions
-    /// stop working.
-    pub async fn update_role(&self, name: &str, patch: Map<String, Value>) -> Result<Role> {
-        let r = self.store.role(name)?.ok_or_else(|| ControlError::NotFound(format!("no role {name}")))?;
+    /// keep working, with the role as it is now (as on AWS).
+    pub async fn update_role(&self, account: &str, name: &str, patch: Map<String, Value>) -> Result<Role> {
+        let r = self.role_in(account, name)?;
+        if r.permission.is_none() {
+            return Err(invalid(format!("{name} is an IAM role: change it through the IAM API")));
+        }
         let mut m = Map::new();
         m.insert("description".into(), json!(r.description));
         m.insert("permission".into(), json!(r.permission));
@@ -112,13 +120,17 @@ impl Control {
             m.insert(k, v);
         }
         let spec = spec_from(m)?;
-        Ok(self.store.update_role(name, spec).await?)
+        Ok(self.store.update_role_in(account, name, spec).await?)
     }
 
     /// Mint credentials of role `name` (no trust check: the control plane's callers are
     /// trusted).
-    pub async fn mint(&self, name: &str, req: SessionReq) -> Result<Value> {
-        let role = self.store.role(name)?.ok_or_else(|| ControlError::NotFound(format!("no role {name}")))?;
+    pub async fn mint(&self, account: &str, name: &str, req: SessionReq) -> Result<Value> {
+        let role = self.role_in(account, name)?;
+        if role.permission.is_none() && (req.permission.is_some() || req.buckets.is_some()) {
+            return Err(invalid(format!("{name} is an IAM role: it has no permission level or bucket scope to narrow; narrow it with a session policy")));
+        }
+        let level = role.permission.unwrap_or(Permission::Read);
         let duration = req.duration_s.unwrap_or(st::ROLE_DEFAULT_SESSION_S.min(role.max_session_s));
         if !(MIN_CONTROL_SESSION_S..=role.max_session_s).contains(&duration) {
             return Err(invalid(format!("duration_s must be between {MIN_CONTROL_SESSION_S} and the role's max_session_s ({})", role.max_session_s)));
@@ -126,11 +138,11 @@ impl Control {
         let session_name = req.session_name.unwrap_or_else(|| "roll-control-plane".into());
         st::validate_session_name(&session_name).map_err(invalid)?;
         let permission = match req.permission.as_deref() {
-            None => role.permission,
+            None => level,
             Some(p) => {
                 let p = Permission::parse(p).ok_or_else(|| invalid("permission must be read, write or admin"))?;
-                if st::min_permission(p, role.permission) != p {
-                    return Err(invalid(format!("permission {} is more than the role's {}", p.as_str(), role.permission.as_str())));
+                if st::min_permission(p, level) != p {
+                    return Err(invalid(format!("permission {} is more than the role's {}", p.as_str(), level.as_str())));
                 }
                 p
             }
@@ -140,7 +152,7 @@ impl Control {
                 s3_store::validate::bucket_name(b)?;
             }
         }
-        let buckets = st::narrow_buckets(role.buckets.as_deref(), req.buckets.as_deref()).map_err(invalid)?;
+        let buckets = if role.permission.is_some() { st::narrow_buckets(role.buckets.as_deref(), req.buckets.as_deref()).map_err(invalid)? } else { Some(Vec::new()) };
         let policy = match &req.policy {
             Some(v) => policy_text(v, st::MAX_SESSION_POLICY_BYTES)?,
             None => None,
@@ -151,6 +163,7 @@ impl Control {
         let mut s = Session::new(permission);
         s.buckets = buckets;
         s.role = Some(SessionRole { name: role.name.clone(), id: role.id.clone(), generation: role.generation });
+        s.account = role.account.clone();
         s.name = Some(session_name);
         s.policy = policy;
         s.tags = tags;
@@ -160,7 +173,7 @@ impl Control {
             s.source_identity = Some(si);
         }
         let (s, c) = self.store.mint_session(s, duration).await?;
-        let account = self.store.account_id();
+        let account = role.account.clone();
         let endpoint = self.cfg.endpoint.trim_end_matches('/');
         Ok(json!({
             "access_key_id": c.access_key_id,
@@ -201,38 +214,40 @@ pub struct SessionReq {
     pub source_identity: Option<String>,
 }
 
-async fn list(State(c): State<AppState>) -> Result<Json<Vec<Value>>> {
-    Ok(Json(c.store.roles()?.iter().map(|r| c.role_view(r)).collect()))
+async fn list(State(c): State<AppState>, Acct(a): Acct) -> Result<Json<Vec<Value>>> {
+    Ok(Json(c.store.roles_in(&a)?.iter().map(|r| c.role_view(r)).collect()))
 }
 
-async fn create(State(c): State<AppState>, Body(b): Body) -> Result<Json<Value>> {
-    let r = c.create_role(b).await?;
+async fn create(State(c): State<AppState>, Acct(a): Acct, Body(b): Body) -> Result<Json<Value>> {
+    let r = c.create_role(&a, b).await?;
     Ok(Json(c.role_view(&r)))
 }
 
-async fn show(State(c): State<AppState>, Path(name): Path<String>) -> Result<Json<Value>> {
-    let r = c.store.role(&name)?.ok_or_else(|| ControlError::NotFound(format!("no role {name}")))?;
+async fn show(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>) -> Result<Json<Value>> {
+    let r = c.role_in(&a, &name)?;
     Ok(Json(c.role_view(&r)))
 }
 
-async fn update(State(c): State<AppState>, Path(name): Path<String>, Body(b): Body) -> Result<Json<Value>> {
-    let r = c.update_role(&name, b).await?;
+async fn update(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, Body(b): Body) -> Result<Json<Value>> {
+    let r = c.update_role(&a, &name, b).await?;
     Ok(Json(c.role_view(&r)))
 }
 
-async fn remove(State(c): State<AppState>, Path(name): Path<String>) -> Result<Json<Value>> {
-    c.store.delete_role(&name).await?;
+async fn remove(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>) -> Result<Json<Value>> {
+    c.store.delete_role_in(&a, &name).await?;
     Ok(Json(json!({ "deleted": name })))
 }
 
-async fn revoke(State(c): State<AppState>, Path(name): Path<String>) -> Result<Json<Value>> {
-    let r = c.store.revoke_role_sessions(&name).await?;
+/// Revoke the role's sessions issued until now, as AWS does: an `AWSRevokeOlderSessions`
+/// inline policy denying them (they then get `AccessDenied`).
+async fn revoke(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>) -> Result<Json<Value>> {
+    let r = c.store.revoke_role_sessions_in(&a, &name).await?;
     Ok(Json(c.role_view(&r)))
 }
 
-async fn session(State(c): State<AppState>, Path(name): Path<String>, Body(b): Body) -> Result<Json<Value>> {
+async fn session(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, Body(b): Body) -> Result<Json<Value>> {
     let req: SessionReq = serde_json::from_value(Value::Object(b)).map_err(|e| invalid(e.to_string()))?;
-    Ok(Json(c.mint(&name, req).await?))
+    Ok(Json(c.mint(&a, &name, req).await?))
 }
 
 async fn rotate(State(c): State<AppState>) -> Result<Json<Value>> {

@@ -251,7 +251,7 @@ pub async fn roles(api: &Api, as_json: bool, cmd: Option<RolesCmd>) -> anyhow::R
             }
             let v = api.call(Method::PATCH, &role_path(&name, ""), Some(Value::Object(patch))).await?;
             if !as_json {
-                println!("updated role {name}; its earlier sessions no longer work");
+                println!("updated role {name}; its sessions act with the new settings from now on");
                 return Ok(None);
             }
             v

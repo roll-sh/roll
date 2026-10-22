@@ -33,6 +33,9 @@ pub(crate) struct Ctx {
     pub(crate) started: std::time::Instant,
     /// Addressed to an access point (`accesspoint/`): `bucket` is then its bucket's.
     pub(crate) access_point: Option<Arc<crate::accesspoint::ApRequest>>,
+    /// Requester Pays: buckets whose charges for this request go to the requester's account
+    /// (bucket id, payer account).
+    pub(crate) payers: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl Ctx {
@@ -81,7 +84,20 @@ impl Ctx {
     }
 
     pub fn meter(&self, bucket_id: &str, class: Class) {
-        self.store().meter.request(bucket_id, class);
+        self.store().meter.request_by(bucket_id, self.payer(bucket_id).as_deref(), class);
+    }
+
+    /// Bill this request's charges on `bucket_id` to `payer` (Requester Pays).
+    pub fn charge(&self, bucket_id: &str, payer: &str) {
+        let mut p = self.payers.lock().unwrap();
+        if !p.iter().any(|(b, _)| b == bucket_id) {
+            p.push((bucket_id.to_string(), payer.to_string()));
+        }
+    }
+
+    /// Who pays for this request's charges on `bucket_id`: `None` is the bucket's owner.
+    pub fn payer(&self, bucket_id: &str) -> Option<String> {
+        self.payers.lock().unwrap().iter().find(|(b, _)| b == bucket_id).map(|(_, p)| p.clone())
     }
 
     /// Unix seconds now (the store's clock, so tests can move it).
@@ -147,6 +163,7 @@ pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Req
         access_cache: Default::default(),
         started: std::time::Instant::now(),
         access_point: None,
+        payers: Default::default(),
     };
     let result = match addressed {
         Ok((b, k, vhost)) => {
@@ -181,6 +198,9 @@ pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Req
             r
         }
     };
+    if !ctx.payers.lock().unwrap().is_empty() {
+        response::set(&mut resp, "x-amz-request-charged", "requester");
+    }
     response::set(&mut resp, "x-amz-request-id", &request_id);
     response::set(&mut resp, "x-amz-id-2", &request_id);
     response::set(&mut resp, "server", "roll");
@@ -200,7 +220,7 @@ async fn run(ctx: &mut Ctx, body: Body) -> Reply {
         return Ok(crate::website::serve(ctx).await);
     }
     if crate::sts::is_sts(ctx) {
-        return Ok(crate::sts::handle(ctx, body).await);
+        return Ok(if crate::iam::is_iam(ctx) { crate::iam::handle(ctx, body).await } else { crate::sts::handle(ctx, body).await });
     }
     if ctx.method == Method::OPTIONS {
         return cors::preflight(ctx);
@@ -220,7 +240,7 @@ async fn run(ctx: &mut Ctx, body: Body) -> Reply {
         return crate::accesspoint::control::handle(ctx, body).await;
     }
     crate::owner::check(ctx)?;
-    let principal = ctx.auth.as_ref().map_or_else(|| "anonymous".to_string(), |a| a.key.id.clone());
+    let principal = ctx.auth.as_ref().map_or_else(|| "anonymous".to_string(), |a| crate::identity::event_principal(&a.key, &a.identity));
     s3_store::events::set_origin(|o| o.principal = Some(principal));
     if ctx.access_point.is_some() {
         crate::accesspoint::check_request(ctx)?;
@@ -242,7 +262,7 @@ async fn run(ctx: &mut Ctx, body: Body) -> Reply {
 /// Header values S3 itself refuses.
 fn reject_unsupported_headers(ctx: &Ctx) -> Result<(), S3Error> {
     if let Some(rp) = ctx.h("x-amz-request-payer")
-        && !rp.eq_ignore_ascii_case("requester")
+        && !rp.trim().eq_ignore_ascii_case("requester")
     {
         return Err(S3Error::new(Code::InvalidArgument).with("ArgumentName", "x-amz-request-payer"));
     }

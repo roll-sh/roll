@@ -306,7 +306,7 @@ pub(crate) fn list_parts(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
         is_truncated: more,
         parts: entries,
         storage_class: "STANDARD".into(),
-        owner: crate::acl::owner(ctx.store()),
+        owner: crate::acl::object_owner(ctx.store(), bucket, ctx.access(&bucket.name)?.acls_enabled, up.headers.acl.as_deref()),
         checksum: ck,
     };
     response::ok_xml(xml::list_parts(&l))
@@ -339,7 +339,7 @@ pub(crate) fn list_uploads(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
         url_encode,
         uploads: page.uploads.iter().map(|u| xml::UploadEntry { key: u.key.clone(), upload_id: u.id.clone(), initiated_ms: u.created_at, checksum: upload_checksum(u) }).collect(),
         common_prefixes: page.prefixes.clone(),
-        owner: crate::acl::owner(ctx.store()),
+        owner: crate::acl::bucket_owner(ctx.store(), bucket),
         storage_class: "STANDARD".into(),
     };
     response::ok_xml(xml::list_uploads(&l))

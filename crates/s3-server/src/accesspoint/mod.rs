@@ -34,7 +34,7 @@ use crate::access::{Access, Cond, Who};
 use crate::auth::Need;
 use crate::ctx::Ctx;
 use crate::error::StoreResult;
-use crate::policy::{Account, Decision, Policy};
+use crate::policy::{Decision, Policy};
 use axum::http::Method;
 use s3_proto::http::percent_decode_utf8;
 use s3_proto::{Code, S3Error};
@@ -232,22 +232,37 @@ pub(crate) fn check_request(ctx: &Ctx) -> Result<(), S3Error> {
 pub(crate) fn authorize(ctx: &Ctx, who: Who, a: &Access, bucket: &str, key: Option<&str>, action: &str, need: Need, prefix: Option<&str>) -> Option<Result<(), S3Error>> {
     let r = ctx.access_point.as_ref().filter(|r| r.ap.bucket == bucket)?;
     let denied = || S3Error::new(Code::AccessDenied);
-    let account = Account { id: ctx.store().account_id(), owner: ctx.store().owner_id() };
-    let p = crate::access::principal_of(ctx, who);
-    let cond = Cond { ctx, who, bucket, key, account: &account, tags: OnceLock::new(), prefix };
+    let p = who.principal();
+    let resource = crate::access::resource_arn(bucket, key);
+    let cond = Cond { ctx, who, bucket, key, resource_account: a.owner().to_string(), tags: OnceLock::new(), prefix };
     let ap_resource = match key {
         Some(k) => format!("{}/object/{k}", r.arn),
         None => r.arn.clone(),
     };
-    let ap_decision = r.policy.as_ref().map_or(Decision::None, |pol| pol.evaluate(&p, &account, action, &ap_resource, &cond));
-    let bucket_decision = a.policy.as_ref().map_or(Decision::None, |pol| pol.evaluate(&p, &account, action, &crate::access::resource_arn(bucket, key), &cond));
+    let ap_decision = r.policy.as_ref().map_or(Decision::None, |pol| pol.evaluate(p, action, &ap_resource, &cond).decision());
+    let bucket_decision = a.policy.as_ref().map_or(Decision::None, |pol| pol.evaluate(p, action, &resource, &cond).decision());
     if ap_decision == Decision::Deny || bucket_decision == Decision::Deny {
         return Some(Err(denied()));
     }
-    if crate::access::key_allows(who, bucket, need) {
+    // As AWS evaluates it: in the bucket owner's account, the requester's own side (identity
+    // policies, roll permission level) or both resource policies; across accounts, both; and
+    // anonymously, the two resource policies.
+    let own = match who {
+        Who::Key(k, id) => {
+            let v = id.verdict(action, &resource, &cond, crate::access::key_allows(k, bucket, need));
+            if v.deny {
+                return Some(Err(denied()));
+            }
+            v.allowed()
+        }
+        Who::Anonymous => false,
+    };
+    let both = ap_decision == Decision::Allow && bucket_decision == Decision::Allow;
+    let same_account = who.account() == Some(a.owner());
+    if own && same_account {
         return Some(Ok(()));
     }
-    if ap_decision == Decision::Allow && bucket_decision == Decision::Allow {
+    if both && (same_account || own || matches!(who, Who::Anonymous)) {
         let public = r.policy.as_ref().is_some_and(Policy::is_public) || a.policy_public;
         let restricted = r.ap.block.restrict_public_buckets || a.block.restrict_public_buckets;
         if !(matches!(who, Who::Anonymous) && public && restricted) {

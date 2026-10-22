@@ -20,8 +20,14 @@ pub fn invalid_version_id(v: &str) -> S3Error {
 
 /// `GetBucketVersioning`: no `Status` for a bucket that was never versioned.
 pub fn versioning_configuration(status: Option<&str>) -> String {
+    versioning_configuration_with(status, None)
+}
+
+/// With `MfaDelete` (`Enabled`, or `Disabled` once it was ever set), as S3 shows it.
+pub fn versioning_configuration_with(status: Option<&str>, mfa_delete: Option<&str>) -> String {
     let mut w = W::root("VersioningConfiguration");
     w.opt("Status", status);
+    w.opt("MfaDelete", mfa_delete);
     w.finish("VersioningConfiguration")
 }
 

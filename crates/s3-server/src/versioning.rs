@@ -107,36 +107,81 @@ pub(crate) fn require_integrity(ctx: &Ctx) -> Result<(), S3Error> {
     if has { Ok(()) } else { Err(S3Error::msg(Code::InvalidRequest, "Content-MD5 OR x-amz-checksum- HTTP header is required for Put Object requests with Object Lock parameters")) }
 }
 
-/// `x-amz-bypass-governance-retention: true`, allowed for admin keys only.
+/// `x-amz-bypass-governance-retention: true`: allowed to whoever may
+/// `s3:BypassGovernanceRetention` here (an admin permission level, the root user, identity or
+/// bucket policies).
 pub(crate) fn bypass(ctx: &Ctx) -> Result<bool, S3Error> {
     if !ctx.h("x-amz-bypass-governance-retention").is_some_and(|v| v.trim().eq_ignore_ascii_case("true")) {
         return Ok(false);
     }
-    match &ctx.auth {
-        Some(a) if a.key.is_admin() => {
-            ctx.require_session("s3:BypassGovernanceRetention", ctx.bucket.as_deref(), ctx.key.as_deref())?;
-            Ok(true)
-        }
-        _ => Err(S3Error::msg(Code::AccessDenied, "Bypassing a governance retention needs an admin key.")),
+    crate::access::authorize(ctx, ctx.who(), ctx.bucket_name(), ctx.key.as_deref(), "s3:BypassGovernanceRetention", Need::Admin)
+        .map_err(|_| S3Error::msg(Code::AccessDenied, "Access Denied: bypassing a governance retention needs s3:BypassGovernanceRetention."))?;
+    Ok(true)
+}
+
+/// The bucket's MFA Delete state as stored (`Enabled`, `Disabled`, or never set).
+fn mfa_delete_state(ctx: &Ctx, bucket: &Bucket) -> Result<Option<String>, S3Error> {
+    Ok(ctx.access(&bucket.name)?.settings.get(s3_store::config::kind::MFA_DELETE).cloned())
+}
+
+/// MFA Delete is on: permanently deleting versions and changing the versioning state need
+/// `x-amz-mfa`.
+pub(crate) fn mfa_delete_on(ctx: &Ctx, bucket: &Bucket) -> Result<bool, S3Error> {
+    Ok(mfa_delete_state(ctx, bucket)?.as_deref() == Some("Enabled"))
+}
+
+/// `x-amz-mfa: <serial> <code>`, checked against the bucket owner's root MFA device and used
+/// up (a code works once). Only the bucket owner's account may present it.
+pub(crate) async fn require_mfa(ctx: &Ctx, bucket: &Bucket) -> Result<(), S3Error> {
+    let denied = |m: &str| S3Error::msg(Code::AccessDenied, m.to_string());
+    let Some(v) = ctx.h("x-amz-mfa") else { return Err(denied("Mfa Authentication must be used for this request")) };
+    let Some((serial, code)) = v.trim().split_once(char::is_whitespace) else { return Err(denied("x-amz-mfa must be the MFA device's serial number and a code, separated by a space")) };
+    if ctx.who().account() != Some(bucket.account_id.as_str()) {
+        return Err(denied("Access Denied"));
     }
+    if !crate::mfa::check(ctx.store(), &bucket.account_id, serial.trim(), code.trim(), None).await.s3()? {
+        return Err(denied("Mfa Authentication failed: the serial number or code is invalid, or the code was already used"));
+    }
+    Ok(())
 }
 
 pub(crate) fn get_versioning(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     ctx.require(&bucket.name, Need::Read)?;
     ctx.meter(&bucket.id, Class::B);
-    response::ok_xml(v::versioning_configuration(bucket.versioning.as_deref()))
+    let mfa = mfa_delete_state(ctx, bucket)?;
+    response::ok_xml(v::versioning_configuration_with(bucket.versioning.as_deref(), mfa.as_deref()))
 }
 
+/// PutBucketVersioning. Turning MFA Delete on or off takes the bucket owner's root user and
+/// `x-amz-mfa`, as on S3; while it's on, any change needs `x-amz-mfa` too. Saying
+/// `MfaDelete=Disabled` for a bucket that doesn't have it changes nothing and needs neither.
 pub(crate) async fn put_versioning(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     ctx.require(&bucket.name, Need::Admin)?;
     ctx.meter(&bucket.id, Class::A);
     let raw = read_small(ctx, body, xml::MAX_XML_BYTES).await?;
-    let req = v::parse_versioning(&raw)?;
-    if req.mfa_delete.as_deref() == Some("Enabled") {
-        return Err(S3Error::msg(Code::NotImplemented, "MFA Delete is not supported: roll has no MFA devices. Object Lock protects versions instead."));
+    let mut req = v::parse_versioning(&raw)?;
+    let on = mfa_delete_on(ctx, bucket)?;
+    if req.mfa_delete.as_deref() == Some(if on { "Enabled" } else { "Disabled" }) {
+        req.mfa_delete = None;
+    }
+    if req.mfa_delete.is_some() {
+        let root = ctx.auth.as_ref().is_some_and(|a| a.identity.is_root() && a.identity.account.id == bucket.account_id && !a.identity.dead);
+        if !root {
+            return Err(S3Error::msg(Code::AccessDenied, "Access Denied: only the bucket owner's root user can change MFA Delete"));
+        }
+        if req.mfa_delete.as_deref() == Some("Enabled") && req.status.as_deref().or(bucket.versioning.as_deref()) != Some("Enabled") {
+            return Err(S3Error::msg(Code::InvalidRequest, "MFA Delete can only be enabled on a versioning-enabled bucket"));
+        }
+    }
+    if req.mfa_delete.is_some() || on {
+        require_mfa(ctx, bucket).await?;
     }
     if let Some(status) = req.status {
         ctx.store().update_bucket(&bucket.name, BucketUpdate { versioning: Some(status), ..Default::default() }).await.s3()?;
+    }
+    if let Some(m) = &req.mfa_delete {
+        ctx.store().set_bucket_config(&bucket.name, s3_store::config::kind::MFA_DELETE, "", Some(m), None).await.s3()?;
+        ctx.forget_access(&bucket.name);
     }
     Ok(response::empty(StatusCode::OK))
 }
@@ -201,7 +246,7 @@ pub(crate) fn list_versions(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
             .collect(),
         common_prefixes: page.prefixes.clone(),
         // The deployment's canonical owner id, as in every other listing and ACL.
-        owner: crate::acl::owner(ctx.store()),
+        owner: crate::acl::bucket_owner(ctx.store(), bucket),
     };
     response::ok_xml(v::list_versions(&l))
 }
@@ -304,6 +349,11 @@ pub(crate) async fn delete_objects(ctx: &mut Ctx, bucket: &Bucket, body: Body) -
     }
     if items.is_empty() && denied > 0 {
         return Err(S3Error::new(Code::AccessDenied));
+    }
+    // Permanently deleting versions of an MFA Delete bucket needs x-amz-mfa (once for the
+    // request).
+    if items.iter().any(|(_, v)| v.is_some()) && mfa_delete_on(ctx, bucket)? {
+        require_mfa(ctx, bucket).await?;
     }
     ctx.meter(&bucket.id, Class::Free);
     let results = ctx.store().delete_versions(&bucket.name, &items, bypass).await.s3()?;

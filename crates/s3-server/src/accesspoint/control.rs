@@ -219,10 +219,7 @@ fn permit(ctx: &Ctx, bucket: &str, need: Need, action: &str) -> Result<(), S3Err
         Need::Write => k.can_write(bucket),
         Need::Admin => k.is_admin() && k.covers(bucket),
     };
-    if !ok {
-        return Err(S3Error::new(Code::AccessDenied));
-    }
-    ctx.require_session(action, Some(bucket), None)
+    ctx.require_identity(action, Some(bucket), ok)
 }
 
 fn action(kind: AccessPointKind, base: &str) -> String {
@@ -307,7 +304,7 @@ fn get(ctx: &Ctx, call: &Call<'_>) -> Reply {
 
 fn list(ctx: &Ctx, call: &Call<'_>) -> Reply {
     let k = ctx.auth.as_ref().map(|a| a.key.clone()).ok_or_else(|| S3Error::new(Code::AccessDenied))?;
-    ctx.require_session(&action(call.kind, "ListAccessPoints"), None, None)?;
+    ctx.require_identity(&action(call.kind, "ListAccessPoints"), None, true)?;
     let max = match ctx.q("maxResults") {
         None => 1000,
         Some(m) => m.parse::<usize>().ok().filter(|n| (1..=1000).contains(n)).ok_or_else(|| S3Error::msg(Code::InvalidRequest, "maxResults must be 1-1000"))?,
