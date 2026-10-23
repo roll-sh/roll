@@ -170,6 +170,8 @@ moxcms = { version = "0.8", default-features = false, features = ["avx_shaper_pa
 ravif = { version = "0.13", default-features = false }
 imgref = "1.12"
 rgb = "0.8"
+# The gateway's hot-object cache: W-TinyLFU admission for its memory and disk tiers.
+moka = { version = "0.12", default-features = false, features = ["sync"] }
 
 # kafka-protocol 0.18.0 sizes decode buffers from peer-supplied counts; see vendor/kafka-protocol/ROLL.md.
 [patch.crates-io]

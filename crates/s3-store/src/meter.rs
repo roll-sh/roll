@@ -21,6 +21,8 @@ pub struct Counters {
     pub bytes_in: u64,
     pub egress_internet: u64,
     pub egress_internal: u64,
+    /// Bytes sent to the CDN on its cache misses (origin pulls).
+    pub egress_cdn_origin: u64,
 }
 
 #[derive(Default)]
@@ -106,6 +108,14 @@ impl Meter {
         }
     }
 
+    /// Bytes sent to the CDN on a cache miss (an origin pull): counted apart from egress, since
+    /// the customer pays for what the CDN serves instead.
+    pub fn cdn_origin(&self, bucket_id: &str, n: u64) {
+        if n > 0 {
+            self.with(bucket_id, |c| c.egress_cdn_origin += n);
+        }
+    }
+
     /// Everything counted since the last call.
     pub fn take(&self) -> HashMap<String, Counters> {
         std::mem::take(&mut *self.counters.lock().unwrap_or_else(|e| e.into_inner()))
@@ -120,6 +130,7 @@ impl Meter {
                 c.bytes_in += t.bytes_in;
                 c.egress_internet += t.egress_internet;
                 c.egress_internal += t.egress_internal;
+                c.egress_cdn_origin += t.egress_cdn_origin;
             });
         }
     }
@@ -145,7 +156,8 @@ mod tests {
         m.bytes_in("b", 7);
         m.egress("b", 3, true);
         m.egress("b", 4, false);
-        let want = Counters { class_a: 1, class_b: 1, bytes_in: 7, egress_internet: 4, egress_internal: 3 };
+        m.cdn_origin("b", 9);
+        let want = Counters { class_a: 1, class_b: 1, bytes_in: 7, egress_internet: 4, egress_internal: 3, egress_cdn_origin: 9 };
         assert_eq!(m.pending("b"), want);
         assert_eq!(m.pending("other"), Counters::default());
         m.request("only-free", Class::Free);

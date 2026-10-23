@@ -1,0 +1,20 @@
+{
+  "name": "@roll/cdn-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --platform=neutral --target=es2022 --outfile=dist/worker.js && esbuild src/lib.ts --bundle --format=esm --platform=neutral --target=es2022 --outfile=dist/lib.js",
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm run build && node --test test/*.test.mjs",
+    "serve": "pnpm run build && node test/serve.mjs",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261019.1",
+    "esbuild": "^0.28.2",
+    "miniflare": "^4.20260730.0",
+    "typescript": "^5",
+    "wrangler": "^4.140.0"
+  }
+}

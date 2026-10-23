@@ -86,6 +86,8 @@ pub struct RenderRequest<'a> {
     pub internal: bool,
     /// Requester Pays: the requester's account, billed for the request and egress.
     pub payer: Option<&'a str>,
+    /// Fetched by the CDN (a miss at the edge): its bytes are an origin pull, not egress.
+    pub cdn: bool,
 }
 
 /// A rendered image: status 200 with a body, or 304 without.
@@ -187,7 +189,7 @@ pub async fn render(server: &Server, req: &RenderRequest<'_>) -> Result<Renditio
     set(&mut headers, "content-type", &content_type);
     set(&mut headers, "content-length", &len.to_string());
     set(&mut headers, "x-roll-transform-cache", if hit { "hit" } else { "miss" });
-    let body = crate::object::Metered::new(stream, store.clone(), &bucket.id, req.internal, req.payer.map(str::to_string)).boxed();
+    let body = crate::object::Metered::new(stream, store.clone(), &bucket.id, req.internal, req.payer.map(str::to_string), req.cdn).boxed();
     Ok(Rendition { status: StatusCode::OK, headers, body: Some(body) })
 }
 
@@ -326,6 +328,7 @@ pub(crate) async fn get(ctx: &mut Ctx, bucket: &s3_store::Bucket) -> Reply {
         if_none_match: ctx.h("if-none-match"),
         internal: ctx.internal(),
         payer: payer.as_deref(),
+        cdn: ctx.cdn.is_some(),
     };
     Ok(render(&ctx.server, &req).await?.into_response())
 }

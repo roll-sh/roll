@@ -61,6 +61,42 @@ pub enum Storage {
         /// Suspended; existing versions stay). A versioned bucket can't become unversioned.
         #[arg(long, value_enum)]
         versioning: Option<Toggle>,
+        /// Serve the bucket through the CDN: by key (`mutable`, purged on change), by version
+        /// (`immutable`), or not (`off`).
+        #[arg(long, value_enum)]
+        cdn: Option<CdnArg>,
+    },
+    /// The URL to give out for an object: the CDN's when the bucket has it on, else S3's
+    /// (presigned unless the bucket is public).
+    Url {
+        path: String,
+        /// An immutable CDN URL (`/v/<token>/…`, cached for a year) even in a mutable bucket.
+        #[arg(long)]
+        immutable: bool,
+        /// Presign it for this long (90s, 15m, 1h, 7d); default only for private buckets.
+        #[arg(long)]
+        expires: Option<String>,
+    },
+    /// The CDN (Cloudflare): show it, or change its settings.
+    Cdn {
+        /// What clients use, e.g. https://cdn.example.com (`""` removes it).
+        #[arg(long)]
+        base_url: Option<String>,
+        /// The Cloudflare zone id.
+        #[arg(long)]
+        zone_id: Option<String>,
+        /// A Cloudflare API token with Zone.Cache Purge (stored sealed; `""` removes it).
+        #[arg(long, env = "ROLL_CDN_API_TOKEN", hide_env_values = true)]
+        api_token: Option<String>,
+        /// Purge changed objects by URL (`files`) or by cache tag (`tags`).
+        #[arg(long)]
+        purge: Option<String>,
+        /// Edge TTL of mutable URLs, in seconds.
+        #[arg(long)]
+        mutable_ttl: Option<u32>,
+        /// Print what to configure the Worker with (wrangler vars and secrets).
+        #[arg(long)]
+        worker: bool,
     },
     /// Delete a bucket (it must be empty unless --force).
     Delete {
@@ -216,6 +252,13 @@ pub enum KeysCmd {
     },
     /// Delete an access key.
     Delete { id: String },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum CdnArg {
+    Off,
+    Mutable,
+    Immutable,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -650,6 +693,9 @@ fn print_bucket(b: &Value) {
     for r in b["replication"]["rules"].as_array().into_iter().flatten() {
         println!("  replicate  {}", events::replicate_line(r));
     }
+    if b["cdn"]["enabled"].as_bool() == Some(true) {
+        println!("  cdn        {} ({})", s(&b["public_url"]), s(&b["cdn"]["mode"]));
+    }
     println!("  url        {}", s(&b["url"]));
     if let Some(v) = b["virtual_host_url"].as_str() {
         println!("             {v}");
@@ -666,6 +712,7 @@ fn print_usage_row(t: &mut Table, name: String, u: &Value) {
         count(f(&u["class_b"])),
         size(f(&u["egress_internet_bytes"])),
         size(f(&u["egress_internal_bytes"])),
+        size(f(&u["egress_cached_bytes"])),
         usd(f(&c["total_usd"])),
         usd(f(&c["projected_month_usd"])),
     ]);
@@ -680,6 +727,7 @@ fn usage_table() -> Table {
         ("class b", R),
         ("egress", R),
         ("internal", R),
+        ("cdn", R),
         ("cost", R),
         ("/month", R),
     ])
@@ -717,13 +765,18 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
                 println!("buckets       {}  objects {}  {}", count(f(&v["buckets"])), count(f(&v["objects"])), size(f(&v["bytes"])));
                 println!("recover       {} days by default", s(&v["recover_days_default"]));
                 println!(
-                    "pricing       {}/GB-month  class A {}/M  class B {}/M  egress {}/GB (internal {})",
+                    "pricing       {}/GB-month  class A {}/M  class B {}/M  egress {}/GB (internal {}, through the CDN {})",
                     price(f(&p["usd_per_gb_month"])),
                     price(f(&p["usd_per_million_class_a"])),
                     price(f(&p["usd_per_million_class_b"])),
                     price(f(&p["usd_per_gb_egress_internet"])),
                     price(f(&p["usd_per_gb_egress_internal"])),
+                    price(f(&p["usd_per_gb_egress_cached"])),
                 );
+                if let Some(c) = v["cache"].as_object().filter(|c| c.get("enabled").and_then(Value::as_bool) == Some(true)) {
+                    let n = |k: &str| c.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+                    println!("cache         {} hits, {} misses, {} S3 GETs avoided, {} saved", count(n("memory_hits") + n("disk_hits")), count(n("misses")), count(n("gets_avoided")), size(n("bytes_saved")));
+                }
                 let sc = &v["scrub"];
                 if sc["missing"].as_i64().unwrap_or(0) > 0 || sc["mismatched"].as_i64().unwrap_or(0) > 0 {
                     eprintln!("scrub: {} missing and {} mismatched blobs (last run {})", s(&sc["missing"]), s(&sc["mismatched"]), when(&sc["last_at"]));
@@ -765,7 +818,83 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
             }
             v
         }
-        Storage::Update { bucket, public, private, recover_days, cors_origins, no_cors, tags, no_tags, versioning } => {
+        Storage::Url { path, immutable, expires } => {
+            let (bucket, key) = split_key(&path)?;
+            let mut body = json!({ "key": key });
+            if immutable {
+                body["immutable"] = json!(true);
+            }
+            if let Some(e) = expires {
+                body["expires_s"] = json!(duration(&e)?);
+            }
+            let v = api.post(&bucket_path(&bucket, "/url"), body).await?;
+            if !as_json {
+                println!("{}", s(&v["url"]));
+                let via = if v["cdn"].as_bool() == Some(true) { if v["immutable"].as_bool() == Some(true) { "CDN, immutable" } else { "CDN" } } else { "S3" };
+                match v["expires_at"].as_i64() {
+                    Some(_) => eprintln!("{via}, valid until {} UTC", when(&v["expires_at"])),
+                    None => eprintln!("{via}"),
+                }
+                return Ok(());
+            }
+            v
+        }
+        Storage::Cdn { base_url, zone_id, api_token, purge, mutable_ttl, worker } => {
+            if worker {
+                let v = api.get("/v1/storage/cdn/worker?secrets=true").await?;
+                if !as_json {
+                    for (k, val) in v["vars"].as_object().into_iter().flatten() {
+                        println!("{k}={}", val.as_str().map(str::to_string).unwrap_or_else(|| val.to_string()));
+                    }
+                    for n in v["secrets"].as_array().into_iter().flatten() {
+                        eprintln!("secret: wrangler secret put {}", s(n));
+                    }
+                    return Ok(());
+                }
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            let mut body = json!({});
+            for (k, val) in [("base_url", base_url), ("zone_id", zone_id), ("api_token", api_token), ("purge", purge)] {
+                if let Some(val) = val {
+                    body[k] = json!(val);
+                }
+            }
+            if let Some(t) = mutable_ttl {
+                body["mutable_ttl_s"] = json!(t);
+            }
+            let v = if body.as_object().is_some_and(|o| o.is_empty()) { api.get("/v1/storage/cdn").await? } else { api.call(Method::PATCH, "/v1/storage/cdn", Some(body)).await? };
+            if !as_json {
+                println!("base url      {}", v["base_url"].as_str().unwrap_or("(none: no CDN)"));
+                println!("zone          {}", v["zone_id"].as_str().unwrap_or("-"));
+                println!("api token     {}", if v["api_token_set"].as_bool() == Some(true) { "set" } else { "not set (purges wait)" });
+                println!("purge         by {}  ttl {}s", s(&v["purge"]), s(&v["mutable_ttl_s"]));
+                let m = &v["margin"];
+                if m.is_object() {
+                    println!(
+                        "last 30 days  {} served by the CDN, {} pulled from roll (byte hit ratio {:.1}%), billed {}",
+                        size(f(&m["cached_bytes"])),
+                        size(f(&m["origin_pull_bytes"])),
+                        f(&m["byte_hit_ratio"]) * 100.0,
+                        usd(f(&m["billed_usd"])),
+                    );
+                }
+                let c = &v["cache"];
+                if c["enabled"].as_bool() == Some(true) {
+                    println!(
+                        "gateway cache {} hits ({} from disk), {} misses, {} S3 GETs avoided, {} saved",
+                        count(f(&c["memory_hits"]) + f(&c["disk_hits"])),
+                        count(f(&c["disk_hits"])),
+                        count(f(&c["misses"])),
+                        count(f(&c["gets_avoided"])),
+                        size(f(&c["bytes_saved"])),
+                    );
+                }
+                return Ok(());
+            }
+            v
+        }
+        Storage::Update { bucket, public, private, recover_days, cors_origins, no_cors, tags, no_tags, versioning, cdn } => {
             let mut body = json!({});
             if public || private {
                 body["public"] = json!(public);
@@ -799,8 +928,14 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
                 Some(Toggle::Off) => body["versioning"] = json!("Suspended"),
                 None => {}
             }
+            match cdn {
+                Some(CdnArg::Off) => body["cdn"] = Value::Null,
+                Some(CdnArg::Mutable) => body["cdn"] = json!({ "enabled": true, "mode": "mutable" }),
+                Some(CdnArg::Immutable) => body["cdn"] = json!({ "enabled": true, "mode": "immutable" }),
+                None => {}
+            }
             if body.as_object().is_some_and(|o| o.is_empty()) {
-                bail!("nothing to change: pass --public, --private, --recover-days, --cors-origin, --no-cors, --tag, --no-tags or --versioning");
+                bail!("nothing to change: pass --public, --private, --recover-days, --cors-origin, --no-cors, --tag, --no-tags, --versioning or --cdn");
             }
             let v = api.call(Method::PATCH, &bucket_path(&bucket, ""), Some(body)).await?;
             if !as_json {
@@ -1102,6 +1237,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
                 println!("  class B   {:>10}  {:>21}", count(f(&u["class_b"])), usd(f(&c["class_b_usd"])));
                 println!("  egress    {:>10}  {:>21}", size(f(&u["egress_internet_bytes"])), usd(f(&c["egress_usd"])));
                 println!("  internal  {:>10}  {:>21}", size(f(&u["egress_internal_bytes"])), "free");
+                println!("  cdn       {:>10}  {:>21}", size(f(&u["egress_cached_bytes"])), usd(f(&c["egress_cached_usd"])));
                 println!("  uploaded  {:>10}  {:>21}", size(f(&u["bytes_in"])), "free");
                 println!("  total                 {:>21}", usd(f(&c["total_usd"])));
                 println!("  projected / month     {:>21}", usd(f(&c["projected_month_usd"])));
@@ -1120,12 +1256,13 @@ pub async fn run(api: &Api, as_json: bool, cmd: Storage) -> anyhow::Result<()> {
                 t.print();
                 let c = &u["cost"];
                 println!(
-                    "total {}  (storage {}, class A {}, class B {}, egress {})  projected {} / month",
+                    "total {}  (storage {}, class A {}, class B {}, egress {}, cdn {})  projected {} / month",
                     usd(f(&c["total_usd"])),
                     usd(f(&c["storage_usd"])),
                     usd(f(&c["class_a_usd"])),
                     usd(f(&c["class_b_usd"])),
                     usd(f(&c["egress_usd"])),
+                    usd(f(&c["egress_cached_usd"])),
                     usd(f(&c["projected_month_usd"])),
                 );
                 return Ok(());

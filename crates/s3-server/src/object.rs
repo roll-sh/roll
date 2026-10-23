@@ -262,11 +262,13 @@ pub(crate) struct Metered {
     sent: u64,
     /// Requester Pays: the requester's account.
     payer: Option<String>,
+    /// Sent to the CDN on a cache miss: an origin pull, not egress.
+    cdn: bool,
 }
 
 impl Metered {
-    pub(crate) fn new(inner: ByteStream, store: Arc<Store>, bucket_id: &str, internal: bool, payer: Option<String>) -> Self {
-        Self { inner, store, bucket_id: bucket_id.to_string(), internal, sent: 0, payer }
+    pub(crate) fn new(inner: ByteStream, store: Arc<Store>, bucket_id: &str, internal: bool, payer: Option<String>, cdn: bool) -> Self {
+        Self { inner, store, bucket_id: bucket_id.to_string(), internal, sent: 0, payer, cdn }
     }
 }
 
@@ -284,7 +286,11 @@ impl Stream for Metered {
 
 impl Drop for Metered {
     fn drop(&mut self) {
-        self.store.meter.egress_by(&self.bucket_id, self.payer.as_deref(), self.sent, self.internal);
+        if self.cdn {
+            self.store.meter.cdn_origin(&self.bucket_id, self.sent);
+        } else {
+            self.store.meter.egress_by(&self.bucket_id, self.payer.as_deref(), self.sent, self.internal);
+        }
     }
 }
 
@@ -307,6 +313,7 @@ pub(crate) async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
     }
     let vid = versioning::version_id(ctx)?;
     let (meta, enc) = ctx.store().get_version_encryption(&bucket.name, ctx.key_name(), vid.as_deref()).s3()?;
+    let cdn_mode = crate::cdn::check(ctx, bucket, &meta)?;
     ctx.meter(&bucket.id, Class::B);
     let key = sse::key_for(ctx, enc.as_ref(), sse::Use::Read)?;
     let overrides = Overrides::from_query(ctx.query.iter().map(|(k, v)| (k.as_str(), v.as_str())));
@@ -365,6 +372,7 @@ pub(crate) async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
     if part.is_some() && meta.parts > 0 {
         set(&mut r, "x-amz-mp-parts-count", &meta.parts.to_string());
     }
+    crate::cdn::set_headers(ctx, &mut r, cdn_mode);
     let whole = range.is_none() || (part.is_some() && meta.parts == 0);
     if ctx.h("x-amz-checksum-mode").is_some_and(|m| m.eq_ignore_ascii_case("ENABLED"))
         && let Some(c) = &meta.checksum
@@ -384,8 +392,12 @@ pub(crate) async fn get(ctx: &mut Ctx, bucket: &Bucket, head: bool) -> Reply {
     if head || len == 0 {
         return Ok(r);
     }
-    let (_, stream) = ctx.store().open_blob_sse(&meta, range.map(|(a, b)| a..b + 1), key.as_ref()).await.s3()?;
-    let metered = Metered { inner: stream, store: ctx.store().clone(), bucket_id: bucket.id.clone(), internal: ctx.internal(), sent: 0, payer: ctx.payer(&bucket.id) };
+    let stream = match &ctx.server.cache {
+        // Hot objects come from the gateway's cache (blobs never change, so it's never stale).
+        Some(c) if c.eligible(&meta, enc.as_ref()) => c.open(ctx.store(), &meta, range.map_or(0..meta.size, |(a, b)| a..b + 1)).await.s3()?,
+        _ => ctx.store().open_blob_sse(&meta, range.map(|(a, b)| a..b + 1), key.as_ref()).await.s3()?.1,
+    };
+    let metered = Metered { inner: stream, store: ctx.store().clone(), bucket_id: bucket.id.clone(), internal: ctx.internal(), sent: 0, payer: ctx.payer(&bucket.id), cdn: ctx.cdn.is_some() };
     let headers = std::mem::take(r.headers_mut());
     let mut out = Response::new(Body::from_stream(metered));
     *out.status_mut() = code;

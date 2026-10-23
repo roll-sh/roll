@@ -39,8 +39,9 @@ cargo test -p s3-server --lib
 for t in crates/s3-server/tests/*.rs; do
   [[ -e $t ]] || continue
   name=$(basename "$t" .rs)
-  # The Docker suites: real tools below, LocalStack in scripts/test-storage-aws.sh.
-  [[ $name == tools || $name == aws ]] && continue
+  # The Docker suites: real tools below, LocalStack in scripts/test-storage-aws.sh, the CDN
+  # Worker in scripts/test-storage-cdn.sh.
+  [[ $name == tools || $name == aws || $name == cdn_worker ]] && continue
   cargo test -p s3-server --test "$name"
 done
 cargo test -p s3-control

@@ -572,22 +572,28 @@ fn event_row(r: &rusqlite::Row) -> rusqlite::Result<PendingEvent> {
 
 /// The bucket's notification and replication configurations, if it has either.
 fn targets(c: &Connection, bucket_id: &str) -> Result<Option<(Option<NotificationConfig>, Option<ReplicationConfig>)>> {
+    let (n, r, _) = configs(c, bucket_id)?;
+    Ok(if n.is_none() && r.is_none() { None } else { Some((n, r)) })
+}
+
+/// The bucket's notification and replication configurations, and whether it has the CDN on
+/// (one read).
+fn configs(c: &Connection, bucket_id: &str) -> Result<(Option<NotificationConfig>, Option<ReplicationConfig>, bool)> {
     let rows = c
-        .prepare_cached("SELECT kind, value FROM bucket_config WHERE bucket_id = ?1 AND id = '' AND kind IN ('notification', 'replication')")?
+        .prepare_cached("SELECT kind, value FROM bucket_config WHERE bucket_id = ?1 AND id = '' AND kind IN ('notification', 'replication', 'cdn')")?
         .query_map([bucket_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    if rows.is_empty() {
-        return Ok(None);
-    }
-    let (mut n, mut r) = (None, None);
+    let (mut n, mut r, mut cdn) = (None, None, false);
     for (k, v) in rows {
         if k == kind::NOTIFICATION {
             n = Some(serde_json::from_str(&v)?);
-        } else {
+        } else if k == kind::REPLICATION {
             r = Some(serde_json::from_str(&v)?);
+        } else {
+            cdn = crate::cdn::is_on(&v);
         }
     }
-    Ok(Some((n, r)))
+    Ok((n, r, cdn))
 }
 
 /// Take `n` sequence numbers (never reused: the counter lives in `state`, not in the table).
@@ -706,7 +712,12 @@ impl<'a> Change<'a> {
 /// Record `ch`'s events (and replication) for bucket `b`, inside the transaction making the
 /// change. Writes nothing unless a configuration matches.
 pub(crate) fn emit(c: &Connection, b: &BucketRow, ch: Change<'_>, now: i64) -> Result<()> {
-    let Some((notify, replicate)) = targets(c, &b.id)? else { return Ok(()) };
+    let (notify, replicate, cdn) = configs(c, &b.id)?;
+    if notify.is_none() && replicate.is_none() && !cdn {
+        return Ok(());
+    }
+    // A bucket with the CDN on: what the edge has of the key goes (after this commits).
+    let purge = cdn && crate::cdn::purges(ch.name);
     let mut rows: Vec<(String, &'static str, String)> = Vec::new(); // (dest, kind, body)
     let o = origin();
     let mut record = EventRecord {
@@ -751,10 +762,10 @@ pub(crate) fn emit(c: &Connection, b: &BucketRow, ch: Change<'_>, now: i64) -> R
             set_status(c, &b.id, ch.key, vid, None)?;
         }
     }
-    if notify_hits.is_empty() && replicas.is_empty() {
+    if notify_hits.is_empty() && replicas.is_empty() && !purge {
         return Ok(());
     }
-    let first = take_seqs(c, (notify_hits.len() + replicas.len()) as i64)?;
+    let first = take_seqs(c, (notify_hits.len() + replicas.len() + usize::from(purge)) as i64)?;
     record.sequencer = sequencer(first);
     for (dest, id) in notify_hits {
         record.config_id = id;
@@ -769,10 +780,21 @@ pub(crate) fn emit(c: &Connection, b: &BucketRow, ch: Change<'_>, now: i64) -> R
             set_status(c, &b.id, ch.key, vid, Some("PENDING"))?;
         }
     }
+    if purge {
+        rows.push((crate::cdn::dest(&b.id), crate::cdn::PURGE, serde_json::to_string(&crate::cdn::PurgeTask { bucket: b.name.clone(), all: false })?));
+    }
     for (i, (dest, kind, body)) in rows.iter().enumerate() {
         insert_event(c, first + i as i64, &b.id, ch.key, dest, kind, body, now)?;
     }
     Ok(())
+}
+
+/// Queue a CDN purge of `key` (or, with `all`, of the whole bucket; `key` is then empty), inside
+/// the transaction making the change.
+pub(crate) fn emit_cdn_purge(c: &Connection, b: &BucketRow, key: &str, all: bool, now: i64) -> Result<()> {
+    let body = serde_json::to_string(&crate::cdn::PurgeTask { bucket: b.name.clone(), all })?;
+    let seq = take_seqs(c, 1)?;
+    insert_event(c, seq, &b.id, key, &crate::cdn::dest(&b.id), crate::cdn::PURGE, &body, now)
 }
 
 /// `ObjectCreated:Put`, or `ObjectCreated:Post` for a browser form upload.

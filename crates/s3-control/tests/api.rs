@@ -135,7 +135,7 @@ async fn info_reports_endpoint_pricing_and_totals() {
     assert_eq!(v["virtual_host_domain"], Value::Null);
     assert_eq!(v["storage_class"], "LOCAL");
     assert_eq!(v["recover_days_default"], 7);
-    assert_eq!(v["pricing"], json!({ "usd_per_gb_month": 0.023, "usd_per_million_class_a": 5.0, "usd_per_million_class_b": 0.4, "usd_per_gb_egress_internet": 0.09, "usd_per_gb_egress_internal": 0.0, "usd_per_1000_origin_images": 5.0, "included_origin_images_per_month": 100 }));
+    assert_eq!(v["pricing"], json!({ "usd_per_gb_month": 0.023, "usd_per_million_class_a": 5.0, "usd_per_million_class_b": 0.4, "usd_per_gb_egress_internet": 0.09, "usd_per_gb_egress_internal": 0.0, "usd_per_1000_origin_images": 5.0, "included_origin_images_per_month": 100, "usd_per_gb_egress_cached": 0.03 }));
     assert_eq!((v["buckets"].as_u64(), v["objects"].as_u64(), v["bytes"].as_u64()), (Some(1), Some(1), Some(5)));
     assert_eq!(v["scrub"], json!({ "last_at": null, "missing": 0, "mismatched": 0 }));
     assert!(v["storage"].as_str().is_some_and(|s| !s.is_empty()));
@@ -1333,4 +1333,80 @@ async fn bucket_website_policy_and_public_access_block() {
     assert_eq!((b["public_access_block"].clone(), b["public"].clone(), b["policy_public"].clone()), (Value::Null, json!(true), json!(true)));
     let b = t.ok("PATCH", "/v1/storage/buckets/site", Some(json!({ "policy": null }))).await;
     assert_eq!((b["policy"].clone(), b["policy_public"].clone()), (Value::Null, json!(false)));
+}
+
+/// The CDN in the control plane: its settings (the API token never shown), a bucket's CDN
+/// setting and public URL, object URLs (CDN, immutable, presigned at the CDN, S3), the
+/// Worker's configuration, and cached egress priced at its own rate.
+#[tokio::test]
+async fn cdn_settings_urls_and_cached_egress() {
+    let t = start().await;
+    let s = t.ok("PATCH", "/v1/storage/cdn", Some(json!({ "base_url": "https://cdn.test/", "zone_id": "zone1", "api_token": "cf-secret-token" }))).await;
+    assert_eq!(s["base_url"], "https://cdn.test");
+    assert_eq!(s["api_token_set"], true);
+    assert!(!s.to_string().contains("cf-secret-token"));
+    let shown = t.ok("GET", "/v1/storage/cdn", None).await;
+    assert!(!shown.to_string().contains("cf-secret-token"));
+    assert_eq!(shown["margin"]["cached_bytes"], 0);
+    assert_eq!(t.err("PATCH", "/v1/storage/cdn", Some(json!({ "base_url": "ftp://x" }))).await, StatusCode::BAD_REQUEST);
+    assert_eq!(t.err("PATCH", "/v1/storage/cdn", Some(json!({ "nope": 1 }))).await, StatusCode::BAD_REQUEST);
+
+    t.bucket("media").await;
+    t.bucket("priv").await;
+    t.bucket("plain").await;
+    let b = t.ok("PATCH", "/v1/storage/buckets/media", Some(json!({ "public": true, "cdn": { "enabled": true, "mode": "mutable" } }))).await;
+    assert_eq!(b["cdn"], json!({ "enabled": true, "mode": "mutable" }));
+    assert_eq!(b["public_url"], "https://cdn.test/media");
+    t.ok("PATCH", "/v1/storage/buckets/priv", Some(json!({ "cdn": { "enabled": true, "mode": "immutable" } }))).await;
+    let plain = t.ok("PATCH", "/v1/storage/buckets/plain", Some(json!({ "public": true }))).await;
+    assert_eq!(plain["public_url"], plain["url"]);
+    for b in ["media", "priv", "plain"] {
+        let r = t.http.put(t.url(&format!("/v1/storage/buckets/{b}/upload?key=a%20b.png"))).body("png").send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+    }
+    let u = t.ok("POST", "/v1/storage/buckets/media/url", Some(json!({ "key": "a b.png" }))).await;
+    assert_eq!(u, json!({ "url": "https://cdn.test/media/a%20b.png", "cdn": true, "immutable": false, "expires_at": null }));
+    let blob = t.store.get_object("media", "a b.png").unwrap().blob_id;
+    let u = t.ok("POST", "/v1/storage/buckets/media/url", Some(json!({ "key": "a b.png", "immutable": true }))).await;
+    assert_eq!(u["url"], format!("https://cdn.test/v/{}/media/a%20b.png", s3_store::cdn::immutable_token(&blob)));
+    // A private bucket's URL is presigned for the CDN host (the edge checks it); immutable by
+    // the bucket's mode.
+    let u = t.ok("POST", "/v1/storage/buckets/priv/url", Some(json!({ "key": "a b.png", "expires_s": 120 }))).await;
+    assert!(u["url"].as_str().unwrap().starts_with("https://cdn.test/v/"), "{u}");
+    assert!(u["url"].as_str().unwrap().contains("X-Amz-Expires=120"));
+    assert!(u["expires_at"].as_i64().is_some());
+    let u = t.ok("POST", "/v1/storage/buckets/plain/url", Some(json!({ "key": "a b.png" }))).await;
+    assert_eq!(u["url"], format!("{}/plain/a%20b.png", t.s3));
+    assert_eq!(u["cdn"], false);
+    assert_eq!(t.err("POST", "/v1/storage/buckets/media/url", Some(json!({ "key": "missing" }))).await, StatusCode::NOT_FOUND);
+    // The presigning key the edge holds is nobody's to list or delete.
+    let keys = t.ok("GET", "/v1/storage/keys", None).await;
+    assert!(!keys.to_string().contains(s3_server::cdn::CDN_KEY_ID));
+    assert_eq!(t.err("DELETE", &format!("/v1/storage/keys/{}", s3_server::cdn::CDN_KEY_ID), None).await, StatusCode::NOT_FOUND);
+    let w = t.ok("GET", "/v1/storage/cdn/worker", None).await;
+    assert_eq!(w["vars"]["ROLL_ORIGIN"], t.s3);
+    assert!(w["vars"]["ROLL_ROUTES"].as_str().unwrap().contains("immutable"));
+    assert!(w["vars"].get("ROLL_CDN_PRESIGN_SECRET").is_none());
+    let w = t.ok("GET", "/v1/storage/cdn/worker?secrets=true", None).await;
+    assert_eq!(w["vars"]["ROLL_CDN_PRESIGN_SECRET"], t.store.access_key(s3_server::cdn::CDN_KEY_ID).unwrap().unwrap().secret);
+
+    // Cached egress: what the Worker reported, at $0.03/GB.
+    let info = t.ok("GET", "/v1/storage", None).await;
+    assert_eq!(info["pricing"]["usd_per_gb_egress_cached"], 0.03);
+    t.store.record_cdn_usage("batch-1", &[("media".into(), 2_000_000_000)]).await.unwrap();
+    t.store.flush_meter().unwrap();
+    let u = t.ok("GET", "/v1/storage/buckets/media/usage?days=1", None).await;
+    assert_eq!(u["egress_cached_bytes"], 2_000_000_000u64);
+    assert_eq!(u["cost"]["egress_cached_usd"], 0.06);
+    assert_eq!(u["cost"]["egress_usd"], 0.0, "not billed as internet egress");
+    assert!(u["cost"]["total_usd"].as_f64().unwrap() >= 0.06, "{u}");
+    assert_eq!(u["daily"][0]["egress_cached_bytes"], 2_000_000_000u64);
+    let all = t.ok("GET", "/v1/storage/usage?days=1", None).await;
+    assert!(all["cost"]["egress_cached_usd"].as_f64().unwrap() >= 0.06);
+    assert_eq!(t.ok("GET", "/v1/storage/cdn", None).await["margin"]["cached_bytes"], 2_000_000_000u64);
+
+    // Off again: the bucket's public URL is S3's.
+    let b = t.ok("PATCH", "/v1/storage/buckets/media", Some(json!({ "cdn": null }))).await;
+    assert_eq!(b["cdn"]["enabled"], false);
+    assert_eq!(b["public_url"], b["url"]);
 }

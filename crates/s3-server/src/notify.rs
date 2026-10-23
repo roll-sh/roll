@@ -266,6 +266,8 @@ pub struct Notifier {
     rtc_checked: std::sync::atomic::AtomicI64,
     /// Replication to buckets outside roll.
     pub(crate) external: crate::replicate_ext::External,
+    /// CDN purges.
+    cdn: Arc<crate::cdn::Cdn>,
 }
 
 /// Resolves webhook hosts, refusing addresses inside the network unless allowed.
@@ -424,7 +426,7 @@ fn backoff(cfg: &NotifyConfig, attempts: u32) -> i64 {
 }
 
 impl Notifier {
-    pub(crate) fn new(store: Arc<Store>, cfg: NotifyConfig, region: String) -> Arc<Self> {
+    pub(crate) fn new(store: Arc<Store>, cfg: NotifyConfig, region: String, cdn: Arc<crate::cdn::Cdn>) -> Arc<Self> {
         let http = reqwest::Client::builder()
             .timeout(cfg.webhook_timeout)
             .redirect(reqwest::redirect::Policy::none())
@@ -434,7 +436,7 @@ impl Notifier {
             .expect("an HTTP client");
         let aws_http = reqwest::Client::builder().timeout(cfg.webhook_timeout.max(Duration::from_secs(70))).redirect(reqwest::redirect::Policy::none()).user_agent("roll-storage/1").build().expect("an HTTP client");
         let external = crate::replicate_ext::External::new(store.clone());
-        Arc::new(Self { store, cfg, region, sink: RwLock::new(None), http, aws_http, aws: Default::default(), counters: Counters::default(), rtc_checked: Default::default(), wake: Default::default(), external })
+        Arc::new(Self { store, cfg, region, sink: RwLock::new(None), http, aws_http, aws: Default::default(), counters: Counters::default(), rtc_checked: Default::default(), wake: Default::default(), external, cdn })
     }
 
     /// Install the delivery into roll queues and streams (rolld does, once they're up).
@@ -545,7 +547,10 @@ impl Notifier {
         if n == 0 {
             return Ok(0);
         }
-        let results: Vec<(PendingEvent, Result<bool, Failure>)> = futures::stream::iter(rows)
+        // CDN purges go out together, batched into as few API calls as they fit.
+        let (purges, rows): (Vec<PendingEvent>, Vec<PendingEvent>) = rows.into_iter().partition(|e| e.kind == s3_store::cdn::PURGE);
+        let purged = if purges.is_empty() { Vec::new() } else { self.cdn.purge(&self.store, purges).await };
+        let mut results: Vec<(PendingEvent, Result<bool, Failure>)> = futures::stream::iter(rows)
             .map(|ev| async move {
                 let r = self.handle(&ev).await;
                 (ev, r)
@@ -553,6 +558,7 @@ impl Notifier {
             .buffer_unordered(32)
             .collect()
             .await;
+        results.extend(purged);
         let now = self.store.now();
         let retention = self.cfg.retention.as_millis() as i64;
         let mut done = Vec::new();

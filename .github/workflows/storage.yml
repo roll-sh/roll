@@ -18,6 +18,8 @@ on:
       - "Cargo.lock"
       - "scripts/test-storage.sh"
       - "scripts/test-storage-aws.sh"
+      - "scripts/test-storage-cdn.sh"
+      - "apps/cdn-worker/**"
       - "scripts/test-s3-conformance.sh"
       - "tests/s3-conformance/**"
       - ".github/workflows/storage.yml"
@@ -64,6 +66,23 @@ jobs:
       - run: docker pull -q localstack/localstack:4.9
       - name: SSE-KMS, notifications, replication and Object Lambda against LocalStack
         run: scripts/test-storage-aws.sh --force
+
+  cdn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter @roll/cdn-worker...
+      - run: docker pull -q node:22-bookworm-slim
+      - name: The CDN Worker in workerd (Miniflare) against roll, purges to a mock Cloudflare API
+        run: scripts/test-storage-cdn.sh --force
 
   conformance:
     runs-on: ubuntu-latest

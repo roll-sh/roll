@@ -512,6 +512,10 @@ pub struct UsageDay {
     pub bytes_in: u64,
     pub egress_internet: u64,
     pub egress_internal: u64,
+    /// Bytes the CDN served (cached egress), as its edge Worker reported them.
+    pub egress_cached: u64,
+    /// Bytes sent to the CDN on its cache misses (origin pulls): roll's cost, not billed.
+    pub egress_cdn_origin: u64,
     /// Stored bytes (own objects plus trash) × milliseconds: / (1e9 × ms per month) = GB-months.
     /// A float: a petabyte-day overflows 64-bit integers.
     pub byte_ms: f64,

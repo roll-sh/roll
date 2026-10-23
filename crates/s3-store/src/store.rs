@@ -513,6 +513,9 @@ impl Store {
                 if p {
                     crate::config::check_may_be_public(c, &b.id, name, self.cfg.block_public_access)?;
                 }
+                if b.public && !p {
+                    crate::cdn::purge_bucket(c, &b, self.now())?;
+                }
                 c.execute("UPDATE buckets SET public = ?2 WHERE id = ?1", params![b.id, p as i64])?;
             }
             if let Some(d) = u.recover_days {
@@ -651,6 +654,7 @@ impl Store {
                         if uploads > 0 {
                             return Err(StoreError::Unavailable("uploads started while the bucket was being deleted; retry".into()));
                         }
+                        crate::cdn::purge_bucket(c, &b, now)?;
                         crate::config::drop_bucket_config(c, &b.id)?;
                         c.execute("DELETE FROM buckets WHERE id = ?1", [&b.id])?;
                         return Ok(true);
@@ -802,10 +806,11 @@ impl Store {
                 c.prepare("SELECT id, bytes + trash_bytes + version_bytes FROM buckets")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
             let known: HashSet<&str> = sizes.iter().map(|(id, _)| id.as_str()).collect();
             let mut st = c.prepare_cached(
-                "INSERT INTO usage (bucket_id, day, class_a, class_b, bytes_in, egress_internet, egress_internal, byte_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "INSERT INTO usage (bucket_id, day, class_a, class_b, bytes_in, egress_internet, egress_internal, byte_ms, egress_cdn_origin) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT (bucket_id, day) DO UPDATE SET class_a = class_a + excluded.class_a, class_b = class_b + excluded.class_b,
                    bytes_in = bytes_in + excluded.bytes_in, egress_internet = egress_internet + excluded.egress_internet,
-                   egress_internal = egress_internal + excluded.egress_internal, byte_ms = byte_ms + excluded.byte_ms",
+                   egress_internal = egress_internal + excluded.egress_internal, byte_ms = byte_ms + excluded.byte_ms,
+                   egress_cdn_origin = egress_cdn_origin + excluded.egress_cdn_origin",
             )?;
             for (id, bytes) in &sizes {
                 let t = taken.get(id).cloned().unwrap_or_default();
@@ -813,12 +818,12 @@ impl Store {
                 if byte_ms == 0.0 && t == Default::default() {
                     continue;
                 }
-                st.execute(params![id, day, t.class_a as i64, t.class_b as i64, t.bytes_in as i64, t.egress_internet as i64, t.egress_internal as i64, byte_ms])?;
+                st.execute(params![id, day, t.class_a as i64, t.class_b as i64, t.bytes_in as i64, t.egress_internet as i64, t.egress_internal as i64, byte_ms, t.egress_cdn_origin as i64])?;
             }
             // Requests to buckets deleted meanwhile still count.
             for (id, t) in &taken {
                 if !known.contains(id.as_str()) {
-                    st.execute(params![id, day, t.class_a as i64, t.class_b as i64, t.bytes_in as i64, t.egress_internet as i64, t.egress_internal as i64, 0.0])?;
+                    st.execute(params![id, day, t.class_a as i64, t.class_b as i64, t.bytes_in as i64, t.egress_internet as i64, t.egress_internal as i64, 0.0, t.egress_cdn_origin as i64])?;
                 }
             }
             let mut st = c.prepare_cached(
@@ -878,9 +883,11 @@ impl Store {
                     egress_internet: r.get::<_, i64>(5)? as u64,
                     egress_internal: r.get::<_, i64>(6)? as u64,
                     byte_ms: r.get(7)?,
+                    egress_cached: r.get::<_, i64>(8)? as u64,
+                    egress_cdn_origin: r.get::<_, i64>(9)? as u64,
                 })
             };
-            const Q: &str = "SELECT bucket_id, day, class_a, class_b, bytes_in, egress_internet, egress_internal, byte_ms FROM usage";
+            const Q: &str = "SELECT bucket_id, day, class_a, class_b, bytes_in, egress_internet, egress_internal, byte_ms, egress_cached, egress_cdn_origin FROM usage";
             let rows = match bucket_id {
                 Some(b) => c.prepare(&format!("{Q} WHERE bucket_id = ?1 AND day >= ?2 ORDER BY day"))?.query_map(params![b, since_day], map)?.collect::<rusqlite::Result<Vec<_>>>()?,
                 None => c.prepare(&format!("{Q} WHERE day >= ?1 ORDER BY day, bucket_id"))?.query_map([since_day], map)?.collect::<rusqlite::Result<Vec<_>>>()?,

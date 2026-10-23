@@ -19,6 +19,8 @@ mod attributes;
 mod auth;
 mod body;
 mod bucket;
+pub mod cache;
+pub mod cdn;
 mod config;
 pub mod console;
 mod cors;
@@ -69,6 +71,8 @@ pub use notify::{AwsCredentials, Delivery, EventSink, EventStats, Notifier, Noti
 pub use replicate_ext::RuleMetrics;
 pub use sts::oidc::{HttpFetch, JwksFetch};
 pub use upload::put_object;
+pub use cache::{BlobCache, CacheConfig, CacheStats};
+pub use cdn::{Cdn, CdnConfig, CdnStats};
 
 /// Check an IAM identity policy (a role's inline policy, or a session policy) of at most `max`
 /// bytes, and return it minified. `Err` says what's wrong.
@@ -139,6 +143,10 @@ pub struct Config {
     pub image_concurrency: usize,
     /// Limits of one image transformation (input bytes, pixels, output size, time).
     pub image_limits: s3_image::Limits,
+    /// The hot-object cache (off by default; rolld turns it on).
+    pub cache: CacheConfig,
+    /// The CDN's origin secret and Cloudflare's API.
+    pub cdn: CdnConfig,
 }
 
 impl Default for Config {
@@ -157,6 +165,8 @@ impl Default for Config {
             saml_audiences: Vec::new(),
             image_concurrency: render::default_concurrency(),
             image_limits: s3_image::Limits::default(),
+            cache: CacheConfig::default(),
+            cdn: CdnConfig::default(),
         }
     }
 }
@@ -185,15 +195,27 @@ pub struct Server {
     pub(crate) renames: rename::Tokens,
     /// Image transformation slots and the images being made.
     pub(crate) images: render::Images,
+    /// The hot-object cache (`None`: off).
+    pub cache: Option<Arc<BlobCache>>,
+    /// The CDN's origin checks, purges and counters.
+    pub cdn: Arc<Cdn>,
 }
 
 impl Server {
     pub fn new(store: Arc<Store>, cfg: Config) -> Arc<Self> {
-        let notifier = Notifier::new(store.clone(), cfg.notify.clone(), cfg.region.clone());
+        let cdn = Cdn::new(cfg.cdn.clone());
+        let notifier = Notifier::new(store.clone(), cfg.notify.clone(), cfg.region.clone(), cdn.clone());
         notifier.spawn();
         let oidc = sts::oidc::Oidc::new(Arc::new(HttpFetch::new(cfg.oidc_allow_http)));
         let images = render::Images::new(cfg.image_concurrency);
-        let server = Arc::new(Self { store, cfg, logs: Default::default(), notifier, oidc, lambda: Default::default(), renames: Default::default(), images });
+        let cache = match BlobCache::new(cfg.cache.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "the storage cache's disk tier can't be used; running without the cache");
+                None
+            }
+        };
+        let server = Arc::new(Self { store, cfg, logs: Default::default(), notifier, oidc, lambda: Default::default(), renames: Default::default(), images, cache, cdn });
         if let (Some(every), Ok(rt)) = (server.cfg.notify.inventory_interval, tokio::runtime::Handle::try_current()) {
             let weak = Arc::downgrade(&server);
             rt.spawn(async move {
@@ -232,6 +254,11 @@ impl Server {
     /// Fetch OIDC providers' keys with `fetch` from now on (tests serve their own keys).
     pub fn set_jwks_fetcher(&self, fetch: Arc<dyn JwksFetch>) {
         self.oidc.set_fetch(fetch);
+    }
+
+    /// The hot-object cache's counters (`enabled: false` when it's off).
+    pub fn cache_stats(&self) -> CacheStats {
+        self.cache.as_ref().map(|c| c.stats()).unwrap_or_default()
     }
 
     /// Access log lines dropped because the buffer was full.
