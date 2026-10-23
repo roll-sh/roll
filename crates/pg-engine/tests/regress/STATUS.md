@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51044 (**99.79%**) |
-| units differing | 106 |
+| units matching | 51046 (**99.80%**) |
+| units differing | 104 |
 | files fully matching | 219 |
 | engine output == expected/*.out (pg_regress "ok") | 181 files |
 | engine crashes / panics | none |
@@ -45,16 +45,16 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 102 | 96.2% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.8% |
-| by design (a parallel plan's combine function) | 1 | 0.9% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 100 | 96.2% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.9% |
+| by design (a parallel plan's combine function) | 1 | 1.0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 102 units
-join (64), partition_join (18), partition_prune (2), select_parallel (1), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (1), select_distinct (1)
+### EXPLAIN (group C1) — 100 units
+join (62), partition_join (18), partition_prune (2), select_parallel (1), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (1), select_distinct (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -248,7 +248,11 @@ What changed:
   each member, however written (`3 = j2.c` shows `c = 3`), and a scan's constant clauses come
   in the order their classes were made (a merged class keeping its left operand's place),
   the ones derived across the join (`ec_constants`) among them (`ec_const_order`,
-  `order_by_places`).
+  `order_by_places`). A join clause is between each side's first member of its class
+  (generate_join_implied_equalities_normal: `t1.a = t2.b` after `t1.a = t1.b`), only through
+  equalities a side checks itself (join 609 / 610; a first version also went through other
+  join clauses, `t1.a = t2.a AND t1.a = t2.b` becoming two `t1.a = t2.a`, a wrong result the
+  subset run caught: partition_join 22).
 
 Goldens added: `tests/sql/a12_union_appendrel.sql`, `a12_lateral_pw.sql`,
 `a12_ordered_append_pruning.sql`, `a12_ec_const_order.sql`.
@@ -273,9 +277,8 @@ Still open from agent 5's list, and why:
   clause only when tt3 ⟕ tt4 is joined first; plus the subquery scan's derived filter and a
   Memoize), 502 / 503 (a grouped subquery's sorted path kept beside the cheapest for a merge
   join), 123 (the class clause's first derivation fixes its orientation), 410 / 414 (join
-  orders: parameterized join relations for LATERAL items aren't built), 609 / 610 (the class
-  with scan-level members picks the first members for the join clause); 643 fixed in the third
-  batch. sqljson_jsontable 101 (agent 11's): JSON_TABLE is a call joined to the row it reads
+  orders: parameterized join relations for LATERAL items aren't built); 609 / 610 / 643 fixed
+  in the third batch. sqljson_jsontable 101 (agent 11's): JSON_TABLE is a call joined to the row it reads
   (`from_call`), no item of the join search, so the search never makes `x ⋈ jt` parameterized
   by `y`; join 414 needs the same parameterized join relations for a LATERAL item, inside an
   outer join (and a hash join under the nested loop). partition_join 48 / 207: the clause
@@ -2318,7 +2321,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 861 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (64) |
+| join | 925 | 863 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (62) |
 | aggregates | 556 | 554 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |

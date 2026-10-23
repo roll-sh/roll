@@ -17,9 +17,9 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,044 of 51,150 statements match (99.79%).** 106 differ. The full
+- **Regression suite: 51,046 of 51,150 statements match (99.80%).** 104 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 102 are `EXPLAIN` plan text (96%). Query results already match.
+  - 100 are `EXPLAIN` plan text (96%). Query results already match.
   - 3 are plan choices that show up in results (mostly which side a hash join builds on,
     grouping-set output order).
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
@@ -332,10 +332,10 @@ them all with the "Fixed in round N" sections describing what was already tried.
    parameterized by a LATERAL inner side (744: the executor runs a parameterized hash join as
    a nested loop, so it needs executor work first), a partitionwise join with a LATERAL
    PlaceHolderVar (partition_join 41).
-2. **Remaining join / partition_join / partition_prune plan shapes** (join 64, partition_join 18,
+2. **Remaining join / partition_join / partition_prune plan shapes** (join 62, partition_join 18,
    partition_prune 2 units; round 14's agent 5 and round 16's agent 12 sections in STATUS.md have
    what changed and why the rest is open): cost-driven choices (join 123/410/424/450/543,
-   partition_join 21/74), equivalence classes with scan-level members (join 609/610),
+   partition_join 21/74),
    partitionwise LATERAL joins left (partition_join 48/207: a class clause's orientation; 204:
    a PlaceHolderVar), IN over a partitioned subquery as a semi join (partition_join 86/88/92: the
    subquery is planned before the WHERE's sublinks are pulled up), partition_prune 265 / 410.

@@ -31,3 +31,21 @@ SELECT count(*) FROM a12_t1 t1, a12_t2 t2
   WHERE t1.z = t2.z AND 1 = t1.x AND t2.y = 0 AND 1 = t2.x;
 SELECT count(*) FROM a12_t1 t1, a12_t2 t2
   WHERE t1.z = t2.z AND 1 = t1.x AND t2.y = 0 AND 1 = t2.x;
+-- A join clause between each side's first member of its class: a same-side equality before
+-- it makes that another column.
+EXPLAIN (COSTS OFF)
+SELECT * FROM a12_sj t1, a12_sj t2 WHERE t1.a = t1.b AND t1.b = t2.b AND t2.b = t2.a;
+SELECT * FROM a12_sj t1, a12_sj t2 WHERE t1.a = t1.b AND t1.b = t2.b AND t2.b = t2.a;
+EXPLAIN (COSTS OFF)
+SELECT * FROM a12_sj t1, a12_sj t2, a12_sj t3
+  WHERE t1.a = t1.b AND t1.b = t2.b AND t2.b = t2.a AND t1.b = t3.b AND t3.b = t3.a;
+SELECT * FROM a12_sj t1, a12_sj t2, a12_sj t3
+  WHERE t1.a = t1.b AND t1.b = t2.b AND t2.b = t2.a AND t1.b = t3.b AND t3.b = t3.a;
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM a12_t1 t1, a12_t2 t2 WHERE t1.y = t1.z AND t1.z = t2.z;
+SELECT count(*) FROM a12_t1 t1, a12_t2 t2 WHERE t1.y = t1.z AND t1.z = t2.z;
+-- Equal only through the join clauses: each clause stays.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM a12_t1 t1, a12_t2 t2 WHERE t1.x = t2.x AND t1.x = t2.z;
+SELECT count(*) FROM a12_t1 t1, a12_t2 t2 WHERE t1.x = t2.x AND t1.x = t2.z;
+SELECT count(*) FROM a12_t1 t1, a12_t2 t2 WHERE t1.x = t2.y AND t1.x = t2.z AND t2.z = t2.y;

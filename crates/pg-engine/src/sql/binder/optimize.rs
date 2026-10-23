@@ -520,7 +520,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 conjuncts(c, &mut cond_parts);
             }
             let mut parts = parts;
-            let places = if kind == JoinKind::Inner { ec_const_order(&mut parts) } else { Vec::new() };
+            let places = if kind == JoinKind::Inner { ec_const_order(&mut parts, nleft) } else { Vec::new() };
             // (A left join's: the WHERE's conjuncts in their order, for the classes above it.)
             let all_parts = if kind == JoinKind::Left { parts.clone() } else { Vec::new() };
             for p in parts {
@@ -2358,7 +2358,11 @@ fn leaf_ranges(p: &Plan, off: usize) -> Vec<(usize, usize)> {
 /// clause gives that clause back as written, at its class's place. The `column = constant`
 /// conjuncts are reoriented so and put in that order (in the places they had).
 /// Returns each column member's class place.
-fn ec_const_order(parts: &mut [Expr]) -> Vec<(usize, usize)> {
+///
+/// A join clause between the sides (`nleft` columns on the left) is between each side's
+/// first member of its class (generate_join_implied_equalities_normal), a same-side
+/// equality before it making the class's first member another column.
+fn ec_const_order(parts: &mut [Expr], nleft: usize) -> Vec<(usize, usize)> {
     // Members: columns and non-null constants of `=` clauses of one type family.
     let operands = |e: &Expr| -> Option<(Expr, Expr)> {
         let Expr::Call(def, args, _) = e else { return None };
@@ -2453,6 +2457,55 @@ fn ec_const_order(parts: &mut [Expr]) -> Vec<(usize, usize)> {
     items.sort_by_key(|(pl, i, _)| (*pl, *i));
     for (slot, (_, _, e)) in slots.into_iter().zip(items) {
         parts[slot] = e;
+    }
+    // (Only through equalities of one side's columns, which that side checks itself: a
+    // member the class has only through other join clauses isn't equal to it there.)
+    let mut side: Vec<usize> = (0..members.len()).collect();
+    fn root(side: &mut [usize], i: usize) -> usize {
+        let mut r = i;
+        while side[r] != r {
+            r = side[r];
+        }
+        side[i] = r;
+        r
+    }
+    for (i, p) in parts.iter().enumerate() {
+        if !classed[i] {
+            continue;
+        }
+        let Expr::Call(_, args, _) = p else { continue };
+        let (Expr::Col(x, _), Expr::Col(y, _)) = (&args[0], &args[1]) else { continue };
+        if (*x < nleft) != (*y < nleft) {
+            continue;
+        }
+        let (Some(a), Some(b)) = (
+            members.iter().position(|m| m.same_as(&args[0])),
+            members.iter().position(|m| m.same_as(&args[1])),
+        ) else {
+            continue;
+        };
+        let (ra, rb) = (root(&mut side, a), root(&mut side, b));
+        side[rb] = ra;
+    }
+    let mut first_of = |e: &Expr| {
+        let k = members.iter().position(|m| m.same_as(e))?;
+        let r = root(&mut side, k);
+        (0..members.len()).find(|&j| root(&mut side, j) == r).map(|j| members[j].clone())
+    };
+    for (i, p) in parts.iter_mut().enumerate() {
+        if !classed[i] {
+            continue;
+        }
+        let Expr::Call(def, args, ty) = &*p else { continue };
+        let (Expr::Col(x, _), Expr::Col(y, _)) = (&args[0], &args[1]) else { continue };
+        if (*x < nleft) == (*y < nleft) {
+            continue;
+        }
+        let (Some(a), Some(b)) = (first_of(&args[0]), first_of(&args[1])) else { continue };
+        if a.same_as(&args[0]) && b.same_as(&args[1]) {
+            continue;
+        }
+        *p = Expr::Call(def.clone(), vec![a, b], ty.clone());
     }
     members
         .iter()

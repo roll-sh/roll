@@ -101,3 +101,78 @@ count:int8
 0
 -- SELECT 1
 
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a12_sj t1, a12_sj t2 WHERE t1.a = t1.b AND t1.b = t2.b AND t2.b = t2.a
+QUERY PLAN:text
+Nested Loop
+  Join Filter: (t1.a = t2.b)
+  ->  Seq Scan on a12_sj t1
+        Filter: (a = b)
+  ->  Seq Scan on a12_sj t2
+        Filter: (b = a)
+-- EXPLAIN
+
+> SELECT * FROM a12_sj t1, a12_sj t2 WHERE t1.a = t1.b AND t1.b = t2.b AND t2.b = t2.a
+a:int4 | b:int4 | c:int4 | a:int4 | b:int4 | c:int4
+-- SELECT 0
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a12_sj t1, a12_sj t2, a12_sj t3
+>   WHERE t1.a = t1.b AND t1.b = t2.b AND t2.b = t2.a AND t1.b = t3.b AND t3.b = t3.a
+QUERY PLAN:text
+Nested Loop
+  Join Filter: (t1.a = t3.b)
+  ->  Nested Loop
+        Join Filter: (t1.a = t2.b)
+        ->  Seq Scan on a12_sj t1
+              Filter: (a = b)
+        ->  Seq Scan on a12_sj t2
+              Filter: (b = a)
+  ->  Seq Scan on a12_sj t3
+        Filter: (b = a)
+-- EXPLAIN
+
+> SELECT * FROM a12_sj t1, a12_sj t2, a12_sj t3
+>   WHERE t1.a = t1.b AND t1.b = t2.b AND t2.b = t2.a AND t1.b = t3.b AND t3.b = t3.a
+a:int4 | b:int4 | c:int4 | a:int4 | b:int4 | c:int4 | a:int4 | b:int4 | c:int4
+-- SELECT 0
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(*) FROM a12_t1 t1, a12_t2 t2 WHERE t1.y = t1.z AND t1.z = t2.z
+QUERY PLAN:text
+Aggregate
+  ->  Hash Join
+        Hash Cond: (t2.z = t1.y)
+        ->  Seq Scan on a12_t2 t2
+        ->  Hash
+              ->  Seq Scan on a12_t1 t1
+                    Filter: (y = z)
+-- EXPLAIN
+
+> SELECT count(*) FROM a12_t1 t1, a12_t2 t2 WHERE t1.y = t1.z AND t1.z = t2.z
+count:int8
+1160
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(*) FROM a12_t1 t1, a12_t2 t2 WHERE t1.x = t2.x AND t1.x = t2.z
+QUERY PLAN:text
+Aggregate
+  ->  Hash Join
+        Hash Cond: (t1.x = t2.x)
+        ->  Seq Scan on a12_t1 t1
+        ->  Hash
+              ->  Seq Scan on a12_t2 t2
+                    Filter: (x = z)
+-- EXPLAIN
+
+> SELECT count(*) FROM a12_t1 t1, a12_t2 t2 WHERE t1.x = t2.x AND t1.x = t2.z
+count:int8
+4
+-- SELECT 1
+
+> SELECT count(*) FROM a12_t1 t1, a12_t2 t2 WHERE t1.x = t2.y AND t1.x = t2.z AND t2.z = t2.y
+count:int8
+28
+-- SELECT 1
+
