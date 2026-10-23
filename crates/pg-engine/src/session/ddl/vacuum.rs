@@ -873,6 +873,7 @@ impl Ddl<'_, '_> {
         let pushed = t.owner != self.ctx.current_user();
         if pushed {
             self.ctx.sess.definer.borrow_mut().push(t.owner);
+            crate::scoped::checkpoint("session::definer");
         }
         let level = self.ctx.sess.settings.borrow_mut().restrict_search_path();
         let r = self.cluster_rel_inner(t, ix, verbose);

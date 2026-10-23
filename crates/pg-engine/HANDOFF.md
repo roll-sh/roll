@@ -230,20 +230,31 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
   - Subquery / CTE ids (`Binder::fresh_id`) are unique in the process: `ExecCtx`'s
     `subq_cache`, `exists_hash`, `scalar_hash`, `ctes`, `work` are keyed by them, and a SQL
     function's statements (bound by binders of their own) run in their caller's context.
-- **Set from the statement's catalog / settings by every `Binder::new`**: `cast::USER_CASTS`,
-  `optimize::ALIAS_FAMILIES`, `partition::PRUNING`. Readers outside a binder (run-time partition
-  pruning, PL/pgSQL assignment casts, CREATE AGGREGATE's lookup) see the last binder's on the
-  thread, normally this statement's.
-- **Scoped to a call**, put back when it returns (a guard's `Drop`, or set / restore around a
-  call that can't fail): `current::CURRENT`, `partition::COLLS`, `range::COLL`,
-  `depend::USER_TYPES`, `dml::DML_TARGETS`, PL/pgSQL `DEPTH` / `TRIGGER_DEPTH`,
-  `ddl::TOP_LEVEL`, `event_trigger::STATES`, the binder's `SECURITY_QUALS` / `QUERY_RLS` /
-  `PHV_*` / `EXISTS_SUBLINKS` / `CASE_TEST_DOMAIN`, ruleutils' `FN_ARGS` / `RTABLES` /
-  `NO_INDENT` / `STORED_TABLE`, explain's builder flags, `CTE_ESTIMATES` / `CTE_ORDERS`
-  (`CteEstimatesPushed` pops them on an error too), trigger `MOVING_ROW` / `UPDATED_COLS`.
-  The set / restore ones without a guard stay set if a panic unwinds through them (the server
-  turns a panic into an ERROR and keeps the session): an engine panic can leave the session's
-  thread with a stale flag.
+- **Set from the catalog by `binder::note_catalog`** (every `Binder::new`, every statement a
+  session runs, every DDL command): `cast::USER_CASTS`, `optimize::ALIAS_FAMILIES`. Readers
+  outside a binder (CREATE AGGREGATE's lookup, PL/pgSQL assignment casts) see this statement's
+  catalog's. `partition::PRUNING` (enable_partition_pruning) is the last `Binder::new`'s: it
+  only decides which partitions run-time pruning skips.
+- **Scoped to a call**, put back by a guard's `Drop` (on an error and on a panic too; the
+  server turns a panic into an ERROR and keeps the session): `current::CURRENT`,
+  `partition::COLLS`, `range::COLL`, `depend::USER_TYPES`, `dml::DML_TARGETS`, PL/pgSQL
+  `DEPTH` / `TRIGGER_DEPTH` / definer / SET clauses, and through `crate::scoped::set` /
+  `set_ref`: `ddl::TOP_LEVEL`, the binder's `SECURITY_QUALS` / `QUERY_RLS` / `PHV_OUTPUTS` /
+  `EXISTS_SUBLINKS` / `CASE_TEST_DOMAIN`, ruleutils' `RTABLES` / `NO_INDENT` (`FN_ARGS` by
+  `body::Reset`), explain's `FILTER_OVER_WINDOW` / `MERGE_MEMBERS` / `UNDER_LOCK_ROWS` /
+  `RULE_RETURNING`, `scs::OPTS` / `QUIET`, `regex::INTERRUPTS`, trigger `MOVING_ROW` /
+  `UPDATED_COLS`; `event_trigger::STATES` (`Begun`'s `Drop`), `CTE_ESTIMATES` / `CTE_ORDERS`
+  (`CteEstimatesPushed`), the session's error frames (`SessionState::framed`).
+- **Per-statement scratch set in one place and taken in another** (explain's `WINDOW_TLIST` /
+  `WINDOW_ORDER` / `INH_SCANS`, `PHV_PENDING`, and as a backstop everything above that has a
+  rest value): cleared by `scoped::reset_statement_scratch` at the start of every statement a
+  `Session` runs (`with_ctx_path`).
+- **A session's running stacks** (`SessionState`'s definer roles, `sro`, frames, tables in use,
+  COPY progress): pushed and popped by hand in a few places; `Session::recover_from_panic`
+  (what the server runs after catching a panic, and an embedder catching one must call)
+  clears them, with the scratch. `tests/session_state.rs::panic_leaves_no_state` panics just
+  after each guarded point is set (`scoped::panic_at_for_test`) and checks the session's next
+  statements run as in a session where the statement never ran.
 - **Per session, synced before each statement**: `scs::OPTS` (lexer settings), `SOURCE`,
   `catalog::SESSION_TEMP_SCHEMA` (set by `execute_with`; a Parse / Describe message binding
   before any execute on a thread another session used sees that session's `pg_temp`).
@@ -258,8 +269,10 @@ Rules for a new cache:
    the database (`Database::instance`, never an oid alone or an address), the search path,
    the role, the settings it reads. Never key by `Arc::as_ptr` / an address without holding a
    `Weak` (or the `Arc`) to keep the allocation.
-3. A thread-local set for a call goes back in a guard's `Drop`, so errors (`?`) and panics
-   restore it.
+3. A thread-local set for a call goes back in a guard's `Drop` (`crate::scoped::set` /
+   `set_ref`, which also give `panic_at_for_test` a point), so errors (`?`) and panics restore
+   it; scratch set here and taken there gets cleared in its module's `reset_scratch` and
+   reported by `unsettled`. Add the point to `panic_leaves_no_state`.
 4. Add a case to `tests/session_state.rs` (the same script alone, after another store's,
    after another database's, after the same session's) or a golden whose statements would hit
    a stale entry.

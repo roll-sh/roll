@@ -530,6 +530,15 @@ impl Session {
         Ok(())
     }
 
+    /// After an engine panic caught around this session's work (the server's `guard`): the
+    /// statement failed as after an error, and the session goes on.
+    pub fn recover_from_panic(&mut self) {
+        self.state.clear_running();
+        self.set_batch_len(0);
+        self.on_error();
+        crate::scoped::reset_statement_scratch();
+    }
+
     /// After an error: an explicit block fails; an implicit transaction rolls back.
     pub(crate) fn on_error(&mut self) {
         let keep = self.state.commit_on_error.replace(false);
@@ -584,7 +593,10 @@ impl Session {
     ) -> Result<T> {
         self.ensure_txn();
         self.sync_lex();
+        // (What a panic left half-set in an earlier statement goes.)
+        crate::scoped::reset_statement_scratch();
         let txn = self.txn.as_ref().unwrap();
+        crate::sql::binder::note_catalog(&txn.borrow().catalog());
         txn.borrow_mut().begin_statement();
         let search_path = search_path.unwrap_or_else(|| self.state.search_path());
         let ctx = ExecCtx::with_search_path(

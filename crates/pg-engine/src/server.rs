@@ -880,8 +880,7 @@ fn guard<T>(
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "unknown cause".into());
             c.drop_partial();
-            s.set_batch_len(0);
-            s.on_error();
+            s.recover_from_panic();
             send_notices(c, s);
             let e = crate::error::internal(format!("internal engine error: {what}"));
             Err(e)

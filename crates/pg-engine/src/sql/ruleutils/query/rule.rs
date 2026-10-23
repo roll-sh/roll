@@ -126,10 +126,8 @@ pub(in crate::sql::ruleutils) fn rule_def(ctx: &ExecCtx, r: &Rule, pretty: bool)
                 v.dml(&node, &mut buf, 0)?
             }
             NodeEnum::SelectStmt(_) => {
-                RTABLES.set(RTABLES.get() + 1);
-                let r = v.query(&node, &mut buf, 0, &[], Nest::Action);
-                RTABLES.set(RTABLES.get() - 1);
-                r?
+                let _g = crate::scoped::set(&RTABLES, RTABLES.get() + 1, "ruleutils::RTABLES.rule");
+                v.query(&node, &mut buf, 0, &[], Nest::Action)?
             }
             NodeEnum::NotifyStmt(s) => {
                 let mut indent = 0;

@@ -61,6 +61,13 @@ thread_local! {
     static CASE_TEST_DOMAIN: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
 }
 
+/// The flags not at rest (`scoped::unsettled_for_test`).
+pub(super) fn unsettled(out: &mut Vec<&'static str>) {
+    if CASE_TEST_DOMAIN.get().is_some() {
+        out.push("expr::CASE_TEST_DOMAIN");
+    }
+}
+
 impl Binder<'_, '_> {
     pub fn bind_expr(&mut self, n: &Node) -> Result<Expr> {
         let e = self.bind_node(n)?;
@@ -3086,10 +3093,9 @@ impl Binder<'_, '_> {
                     let v = self.bind_expr(w.expr.as_deref().unwrap())?;
                     let test = Expr::CaseTest(op.ty());
                     // (The CaseTestExpr has the operand's type, a domain included.)
-                    let saved = CASE_TEST_DOMAIN.replace(self.declared_domain(op));
-                    let r = self.binop("=", test, v, w.location);
-                    CASE_TEST_DOMAIN.set(saved);
-                    r?
+                    let dom = self.declared_domain(op);
+                    let _g = crate::scoped::set(&CASE_TEST_DOMAIN, dom, "expr::CASE_TEST_DOMAIN");
+                    self.binop("=", test, v, w.location)?
                 }
                 None => {
                     let e = self.bind_expr(w.expr.as_deref().unwrap())?;

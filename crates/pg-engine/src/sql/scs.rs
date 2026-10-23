@@ -79,11 +79,8 @@ pub fn opts() -> LexOpts {
 
 /// Run `f` with the scanner reading strings the standard way (text the engine wrote itself).
 pub fn with_standard<T>(f: impl FnOnce() -> T) -> T {
-    let saved = opts();
-    set_opts(LexOpts::default());
-    let r = f();
-    set_opts(saved);
-    r
+    let _g = crate::scoped::set(&OPTS, LexOpts::default(), "scs::OPTS");
+    f()
 }
 
 /// Remember the query string being run: (as made standard, as sent) when they differ.
@@ -184,10 +181,15 @@ fn literal_match(prosrc: &str, lit: &[u8], mut cursor: usize) -> Option<usize> {
 
 /// Run `f` without scanner warnings (text scanned before, warnings given then).
 pub fn quietly<T>(f: impl FnOnce() -> T) -> T {
-    let saved = QUIET.with(|q| q.replace(true));
-    let r = f();
-    QUIET.with(|q| q.set(saved));
-    r
+    let _g = crate::scoped::set(&QUIET, true, "scs::QUIET");
+    f()
+}
+
+/// The flags not at rest (`scoped::unsettled_for_test`).
+pub(crate) fn unsettled(out: &mut Vec<&'static str>) {
+    if QUIET.get() {
+        out.push("scs::QUIET");
+    }
 }
 
 /// The scanner warnings raised since the last call.

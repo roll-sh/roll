@@ -171,15 +171,16 @@ impl Views<'_, '_, '_> {
         let lvl = self.b.level();
         let saved = (std::mem::take(&mut lvl.scope), std::mem::take(&mut lvl.st));
         let used = self.used.len();
-        RTABLES.set(RTABLES.get() + 1);
         if with.is_some() {
             self.b.ctes.push(Vec::new());
         }
-        let r = self.dml_body(n, with, buf, indent);
+        let r = {
+            let _g = crate::scoped::set(&RTABLES, RTABLES.get() + 1, "ruleutils::RTABLES.dml");
+            self.dml_body(n, with, buf, indent)
+        };
         if with.is_some() {
             self.b.ctes.pop();
         }
-        RTABLES.set(RTABLES.get() - 1);
         self.used.truncate(used);
         let lvl = self.b.level();
         (lvl.scope, lvl.st) = saved;

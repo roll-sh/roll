@@ -277,9 +277,49 @@ impl SessionState {
             frames.push(frame);
             frames.len() - 1
         };
-        let r = f(n).map_err(|e| e.in_frames(&self.frames.borrow()));
-        self.frames.borrow_mut().truncate(n);
-        r
+        // (Popped when this returns, on a panic too.)
+        struct Pop<'a>(&'a RefCell<Vec<crate::error::Frame>>, usize);
+        impl Drop for Pop<'_> {
+            fn drop(&mut self) {
+                if let Ok(mut f) = self.0.try_borrow_mut() {
+                    f.truncate(self.1);
+                }
+            }
+        }
+        let _pop = Pop(&self.frames, n);
+        f(n).map_err(|e| e.in_frames(&self.frames.borrow()))
+    }
+
+    /// After a panic ended the running statement: what its calls had pushed goes (the
+    /// SECURITY DEFINER roles and restricted operations running, the frames, the tables in
+    /// use, the COPY's progress).
+    pub(crate) fn clear_running(&self) {
+        self.definer.borrow_mut().clear();
+        self.sro.set(0);
+        self.frames.borrow_mut().clear();
+        self.in_use.borrow_mut().clear();
+        *self.copy_progress.borrow_mut() = None;
+        self.in_vacuum.set(false);
+        self.on_commit_truncating.set(false);
+    }
+
+    /// What `clear_running` clears that isn't at rest (outside any statement). For tests.
+    pub fn running_for_test(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        for (name, set) in [
+            ("definer", !self.definer.borrow().is_empty()),
+            ("sro", self.sro.get() != 0),
+            ("frames", !self.frames.borrow().is_empty()),
+            ("in_use", !self.in_use.borrow().is_empty()),
+            ("copy_progress", self.copy_progress.borrow().is_some()),
+            ("in_vacuum", self.in_vacuum.get()),
+            ("on_commit_truncating", self.on_commit_truncating.get()),
+        ] {
+            if set {
+                out.push(name);
+            }
+        }
+        out
     }
 
     /// Change frame `i` (a PL/pgSQL function moving to another statement).

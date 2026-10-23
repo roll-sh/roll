@@ -126,37 +126,53 @@ thread_local! {
     static PHV_PENDING: std::cell::RefCell<Vec<Expr>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Per-statement scratch back at rest (`scoped::reset_statement_scratch`).
+pub(crate) fn reset_scratch() {
+    PHV_PENDING.with(|p| p.borrow_mut().clear());
+    SECURITY_QUALS.set(false);
+    QUERY_RLS.set(false);
+    PHV_OUTPUTS.set(false);
+}
+
+/// The flags not at rest (`scoped::unsettled_for_test`).
+pub(crate) fn unsettled(out: &mut Vec<&'static str>) {
+    for (name, set) in [
+        ("optimize::SECURITY_QUALS", SECURITY_QUALS.get()),
+        ("optimize::QUERY_RLS", QUERY_RLS.get()),
+        ("optimize::PHV_OUTPUTS", PHV_OUTPUTS.get()),
+        ("optimize::PHV_PENDING", PHV_PENDING.with_borrow(|p| !p.is_empty())),
+    ] {
+        if set {
+            out.push(name);
+        }
+    }
+}
+
 /// `add_filter` with the projections' computed outputs as PlaceHolderVars (quals reading
 /// them stay above the projection).
 pub fn add_filter_phv(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
-    let saved = PHV_OUTPUTS.with(|f| f.replace(true));
-    let out = add_filter(cat, plan, pred);
-    PHV_OUTPUTS.with(|f| f.set(saved));
-    out
+    let _phv = crate::scoped::set(&PHV_OUTPUTS, true, "optimize::PHV_OUTPUTS");
+    add_filter(cat, plan, pred)
 }
 
-/// Binding a statement: whether it has row-level security quals starts false (the
-/// previous value, to put back after it).
-pub fn begin_statement_rls() -> bool {
-    QUERY_RLS.with(|f| f.replace(false))
+/// Binding a statement: whether it has row-level security quals starts false, the previous
+/// value back when the guard drops.
+pub fn begin_statement_rls() -> crate::scoped::CellGuard<bool> {
+    crate::scoped::set(&QUERY_RLS, false, "optimize::QUERY_RLS.begin")
 }
 
 pub fn mark_statement_rls() {
     QUERY_RLS.with(|f| f.set(true));
+    crate::scoped::checkpoint("optimize::QUERY_RLS");
 }
 
-pub fn end_statement_rls(saved: bool) {
-    QUERY_RLS.with(|f| f.set(saved));
-}
 
 /// Add row-level security quals over `plan`: on a scan they go ahead of the quals already
 /// there (the statement's own), as a SELECT's do (security level 0 vs 1).
 pub fn add_security_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
     QUERY_RLS.with(|f| f.set(true));
-    SECURITY_QUALS.with(|f| f.set(true));
-    let p = add_filter(cat, plan, pred);
-    SECURITY_QUALS.with(|f| f.set(false));
-    p
+    let _sq = crate::scoped::set(&SECURITY_QUALS, true, "optimize::SECURITY_QUALS");
+    add_filter(cat, plan, pred)
 }
 
 /// The pg_proc functions marked LEAKPROOF.

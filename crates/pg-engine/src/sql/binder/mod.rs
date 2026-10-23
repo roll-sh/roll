@@ -584,11 +584,26 @@ pub struct Binder<'b, 'a> {
     next_id: usize,
 }
 
+/// Make what the binder reads of the catalog through thread-locals (made casts, built-in
+/// operator families with made types) `cat`'s: each binder does, and so does each statement
+/// and DDL command, whose lookups outside a binder (CREATE AGGREGATE's support functions,
+/// PL/pgSQL assignment casts) would see the last binder's on the thread, which may be of a
+/// catalog before a DROP CAST or a rollback.
+pub(crate) fn note_catalog(cat: &crate::catalog::Catalog) {
+    crate::types::cast::set_user_casts(cat.casts.values().map(|c| &**c));
+    optimize::note_alias_families(cat);
+}
+
+/// The binder's thread-local flags not at rest (`scoped::unsettled_for_test`).
+pub(crate) fn unsettled(out: &mut Vec<&'static str>) {
+    expr::unsettled(out);
+    sublink::unsettled(out);
+}
+
 impl<'b, 'a> Binder<'b, 'a> {
     pub fn new(ctx: &'b ExecCtx<'a>, params: Vec<DataType>) -> Self {
         let cat = ctx.catalog();
-        crate::types::cast::set_user_casts(cat.casts.values().map(|c| &**c));
-        optimize::note_alias_families(&cat);
+        note_catalog(&cat);
         partition::set_pruning(
             ctx.sess
                 .settings
@@ -784,7 +799,7 @@ impl<'b, 'a> Binder<'b, 'a> {
 
     fn bind_statement_inner(&mut self, n: &pb::Node) -> Result<BoundQuery> {
         crate::stack::check()?;
-        let saved = optimize::begin_statement_rls();
+        let _rls = optimize::begin_statement_rls();
         // (Row-level security applying to a table the statement names: its own quals
         // sit at a higher security level.)
         if let Some(ne) = n.node.as_ref() {
@@ -803,9 +818,7 @@ impl<'b, 'a> Binder<'b, 'a> {
                 optimize::mark_statement_rls();
             }
         }
-        let r = self.bind_statement_body(n);
-        optimize::end_statement_rls(saved);
-        r
+        self.bind_statement_body(n)
     }
 
     fn bind_statement_body(&mut self, n: &pb::Node) -> Result<BoundQuery> {

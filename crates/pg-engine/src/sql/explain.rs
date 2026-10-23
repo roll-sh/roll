@@ -3722,9 +3722,11 @@ impl Builder<'_, '_> {
                 }
                 let inits_before = self.inits.last().map_or(0, |v| v.len());
                 // (Windows of a FROM subquery under it: the filter decides their scan.)
-                let saved_fw = FILTER_OVER_WINDOW.with(|f| f.replace(subquery_of(input).is_some()));
-                let mut c = self.node(input);
-                FILTER_OVER_WINDOW.with(|f| f.set(saved_fw));
+                let mut c = {
+                    let over = subquery_of(input).is_some();
+                    let _g = crate::scoped::set(&FILTER_OVER_WINDOW, over, "explain::FILTER_OVER_WINDOW");
+                    self.node(input)
+                };
                 let inits_mid = self.inits.last().map_or(0, |v| v.len());
                 self.having = saved;
                 if c.node.pw_full {
@@ -3767,10 +3769,8 @@ impl Builder<'_, '_> {
             // in the action's own RETURNING list): over the action's.
             Plan::Project { .. } if rule_returning(p).is_some() => {
                 let (dml, list) = rule_returning(p).expect("checked");
-                RULE_RETURNING.with(|r| *r.borrow_mut() = Some(list));
-                let b = self.node(dml);
-                RULE_RETURNING.with(|r| r.borrow_mut().take());
-                b
+                let _g = crate::scoped::set_ref(&RULE_RETURNING, Some(list), "explain::RULE_RETURNING");
+                self.node(dml)
             }
             Plan::Project { input, exprs } => {
                 let under_filter = FILTER_OVER_WINDOW.with(|f| f.replace(false));
@@ -3789,6 +3789,9 @@ impl Builder<'_, '_> {
                     _ => Vec::new(),
                 };
                 WINDOW_TLIST.with(|w| *w.borrow_mut() = tl);
+                if WINDOW_TLIST.with_borrow(|w| !w.is_empty()) {
+                    crate::scoped::checkpoint("explain::WINDOW_TLIST");
+                }
                 // (JSON_ARRAYAGG / JSON_OBJECTAGG ... RETURNING text: the level's top
                 // projection shows the constructor, its json cast merged; below.)
                 let casts: Vec<(usize, DataType)> = Vec::new();
@@ -4370,9 +4373,14 @@ impl Builder<'_, '_> {
                 // An aggregation below may group in this order (its keys by position).
                 self.group_order = sort_group_order(input, keys);
                 self.group_order_full = self.group_order.as_ref().is_some_and(|g| g.len() == keys.len());
-                let saved_members = MERGE_MEMBERS.with(|m| m.replace(merge_appended(input)));
-                let mut c = self.node(input);
-                MERGE_MEMBERS.with(|m| m.set(saved_members));
+                let mut c = {
+                    let merged = merge_appended(input);
+                    let _g = crate::scoped::set(&MERGE_MEMBERS, merged, "explain::MERGE_MEMBERS.set");
+                    if merged {
+                        crate::scoped::checkpoint("explain::MERGE_MEMBERS");
+                    }
+                    self.node(input)
+                };
                 // (VERBOSE: a projection over an inheritance tree merged in order is its
                 // members' to compute, each over its own columns; a Result above returns
                 // the query's columns when those aren't the members'.)
@@ -5484,6 +5492,7 @@ impl Builder<'_, '_> {
                     }
                 }
                 INH_SCANS.with(|m| m.borrow_mut().extend(direct.iter().copied()));
+                crate::scoped::checkpoint("explain::INH_SCANS");
                 // Partitions pruned when the executor starts aren't shown (a UNION ALL's
                 // too).
                 let kept = if inh.is_some() || !inputs.iter().any(|i| i.writes()) {
@@ -5899,9 +5908,11 @@ impl Builder<'_, '_> {
                     lock_level_marks(input, false, &mut semi, &mut copies);
                     self.rowmarks.extend(semi.iter().copied());
                 }
-                UNDER_LOCK_ROWS.with(|u| u.set(u.get() + 1));
-                let mut c = self.node(input);
-                UNDER_LOCK_ROWS.with(|u| u.set(u.get() - 1));
+                let mut c = {
+                    let n = UNDER_LOCK_ROWS.get() + 1;
+                    let _g = crate::scoped::set(&UNDER_LOCK_ROWS, n, "explain::UNDER_LOCK_ROWS");
+                    self.node(input)
+                };
                 // An inheritance tree's row mark has its tableoid too (expand_inherited_rtentry
                 // adds it after the target list's other junk), from each member's scan up.
                 if self.o.verbose {
@@ -11895,6 +11906,37 @@ pub(crate) fn pop_cte_estimates(n: usize) {
         let keep = m.len().saturating_sub(n);
         m.truncate(keep);
     });
+}
+
+/// Per-statement scratch back at rest (`scoped::reset_statement_scratch`).
+pub(crate) fn reset_scratch() {
+    FILTER_OVER_WINDOW.set(false);
+    MERGE_MEMBERS.set(false);
+    UNDER_LOCK_ROWS.set(0);
+    RULE_RETURNING.with_borrow_mut(|r| *r = None);
+    WINDOW_TLIST.with_borrow_mut(|w| w.clear());
+    WINDOW_ORDER.with_borrow_mut(|w| w.clear());
+    INH_SCANS.with_borrow_mut(|m| m.clear());
+    CTE_ESTIMATES.with_borrow_mut(|m| m.clear());
+    CTE_ORDERS.with_borrow_mut(|m| m.clear());
+}
+
+/// The flags and scratch not at rest (`scoped::unsettled_for_test`).
+pub(crate) fn unsettled(out: &mut Vec<&'static str>) {
+    for (name, set) in [
+        ("explain::RULE_RETURNING", RULE_RETURNING.with_borrow(|r| r.is_some())),
+        ("explain::UNDER_LOCK_ROWS", UNDER_LOCK_ROWS.get() != 0),
+        ("explain::WINDOW_TLIST", WINDOW_TLIST.with_borrow(|w| !w.is_empty())),
+        ("explain::CTE_ESTIMATES", CTE_ESTIMATES.with_borrow(|m| !m.is_empty())),
+        ("explain::CTE_ORDERS", CTE_ORDERS.with_borrow(|m| !m.is_empty())),
+        ("explain::FILTER_OVER_WINDOW", FILTER_OVER_WINDOW.get()),
+        ("explain::MERGE_MEMBERS", MERGE_MEMBERS.get()),
+        ("explain::INH_SCANS", INH_SCANS.with_borrow(|m| !m.is_empty())),
+    ] {
+        if set {
+            out.push(name);
+        }
+    }
 }
 
 /// CTE estimates pushed (`push_cte_estimates`), popped when dropped.

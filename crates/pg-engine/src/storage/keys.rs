@@ -106,10 +106,8 @@ thread_local! {
 /// Run `f` encoding index keys the legacy way (format 0), on this thread.
 #[doc(hidden)]
 pub fn with_legacy_index_keys<R>(f: impl FnOnce() -> R) -> R {
-    LEGACY_INDEX_KEYS.with(|l| l.set(true));
-    let r = f();
-    LEGACY_INDEX_KEYS.with(|l| l.set(false));
-    r
+    let _g = crate::scoped::set(&LEGACY_INDEX_KEYS, true, "keys::LEGACY_INDEX_KEYS");
+    f()
 }
 
 /// The index key format this build writes (`Catalog::index_key_format`): 1 places a NULL
@@ -126,10 +124,8 @@ thread_local! {
 /// Run `f` storing new primary-keyed tables the legacy way (format 0), on this thread.
 #[doc(hidden)]
 pub fn with_legacy_pk_storage<R>(f: impl FnOnce() -> R) -> R {
-    LEGACY_PK_STORAGE.with(|l| l.set(true));
-    let r = f();
-    LEGACY_PK_STORAGE.with(|l| l.set(false));
-    r
+    let _g = crate::scoped::set(&LEGACY_PK_STORAGE, true, "keys::LEGACY_PK_STORAGE");
+    f()
 }
 
 /// The table storage format this build writes (`Catalog::storage_format`): 1 stores every

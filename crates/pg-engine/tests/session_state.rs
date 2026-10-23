@@ -159,3 +159,147 @@ fn range_constructors_per_database() {
         &["[a,b)", "[a,b]"],
     );
 }
+
+/// Objects the panic cases below use.
+const PANIC_SETUP: &str = "
+CREATE TABLE t (a int, b text);
+INSERT INTO t SELECT g, 'x' || g FROM generate_series(1, 20) g;
+CREATE VIEW v AS SELECT a, CASE WHEN a > 1 THEN 'big' ELSE 'small' END AS c
+  FROM (SELECT a FROM t WHERE a < 10) s;
+CREATE DOMAIN d AS int;
+CREATE FUNCTION sqlv(int) RETURNS int LANGUAGE sql VOLATILE AS $$ SELECT 1; SELECT $1 + 1 $$;
+CREATE ROLE ru;
+CREATE TABLE r (a int);
+ALTER TABLE r ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON r USING (a > 0);
+GRANT SELECT, UPDATE ON r TO ru;
+INSERT INTO r VALUES (1), (2), (-1);
+CREATE TABLE pt (a int, b int GENERATED ALWAYS AS (a * 2) STORED) PARTITION BY RANGE (a);
+CREATE TABLE pt1 PARTITION OF pt FOR VALUES FROM (0) TO (10);
+CREATE TABLE pt2 PARTITION OF pt FOR VALUES FROM (10) TO (20);
+INSERT INTO pt (a) VALUES (1), (15);
+CREATE FUNCTION trg() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'trg % %', TG_OP, NEW; RETURN NEW; END $$;
+CREATE TRIGGER pt_b BEFORE INSERT OR UPDATE ON pt FOR EACH ROW EXECUTE FUNCTION trg();
+CREATE TABLE inh_p (a int);
+CREATE TABLE inh_c () INHERITS (inh_p);
+CREATE INDEX ON inh_p (a);
+CREATE INDEX ON inh_c (a);
+CREATE TABLE rt (a int);
+CREATE TABLE rt2 (a int);
+CREATE RULE rr AS ON INSERT TO rt DO INSTEAD INSERT INTO rt2 VALUES (new.a) RETURNING *;
+CREATE FUNCTION evt() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'evt %', tg_tag; END $$;
+CREATE EVENT TRIGGER e ON ddl_command_start EXECUTE FUNCTION evt();
+CREATE TABLE ct (a int);
+CREATE INDEX ct_i ON ct (a);
+ALTER TABLE ct OWNER TO ru;
+";
+
+/// What the session runs after the panic: statements that read the flags a panic could
+/// leave set.
+const PANIC_AFTER: &str = "
+RESET ROLE;
+RESET enable_seqscan;
+SELECT 1;
+SELECT current_user;
+SHOW search_path;
+ALTER TABLE pt DISABLE TRIGGER pt_b;
+ALTER TABLE pt ENABLE TRIGGER pt_b;
+EXPLAIN (COSTS OFF) SELECT * FROM t WHERE a = 1 AND b = 'x1';
+SELECT pg_get_viewdef('v');
+SELECT a, b FROM t WHERE b ~ 'x1' ORDER BY a;
+SELECT sqlv(a) FROM t WHERE a < 3 ORDER BY 1;
+SELECT CASE 1::d WHEN 1 THEN 'one' END;
+SELECT * FROM t WHERE EXISTS (SELECT 1 FROM t t2 WHERE t2.a = t.a + 18) ORDER BY a;
+UPDATE pt SET a = 5 WHERE a = 15;
+INSERT INTO pt (a) VALUES (3);
+SELECT * FROM pt ORDER BY a;
+VACUUM t;
+CREATE TABLE z (a int);
+DROP TABLE z;
+SET ROLE ru;
+UPDATE r SET a = a + 10 WHERE a < 5;
+EXPLAIN (COSTS OFF) SELECT * FROM r WHERE a < 15;
+RESET ROLE;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT a, row_number() OVER (ORDER BY a) FROM t;
+EXPLAIN (COSTS OFF) SELECT * FROM inh_p ORDER BY a;
+EXPLAIN (COSTS OFF) SELECT * FROM t FOR UPDATE;
+EXPLAIN (VERBOSE, COSTS OFF) INSERT INTO rt VALUES (1) RETURNING *;
+EXPLAIN (COSTS OFF) WITH c AS MATERIALIZED (SELECT a FROM t) SELECT * FROM c WHERE a = 1;
+";
+
+/// An engine panic in the middle of a statement (which the server turns into an ERROR, the
+/// session going on) leaves nothing set for the session's next statements: they run as in a
+/// session where the statement never ran. For each point where a thread-local flag or scratch
+/// is set, a panic is made just after it is.
+#[test]
+fn panic_leaves_no_state() {
+    // (point, statements before, the statement reaching the point)
+    let cases: &[(&'static str, &'static str, &'static str)] = &[
+        ("optimize::PHV_OUTPUTS", "", "SELECT * FROM t LEFT JOIN (SELECT a, a + 1 AS c FROM t) s ON t.a = s.a WHERE s.c > 3"),
+        ("optimize::SECURITY_QUALS", "SET ROLE ru", "UPDATE r SET a = a WHERE a < 5"),
+        ("optimize::QUERY_RLS", "SET ROLE ru", "SELECT * FROM r WHERE a < 5"),
+        ("sublink::EXISTS_SUBLINKS", "", "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM t t2 WHERE t2.a = t.a)"),
+        ("expr::CASE_TEST_DOMAIN", "", "SELECT CASE a WHEN 1 THEN 'one' END FROM t"),
+        ("ruleutils::NO_INDENT", "", "EXPLAIN SELECT * FROM t WHERE a = 1"),
+        ("ruleutils::RTABLES", "", "SELECT pg_get_viewdef('v')"),
+        ("ddl::TOP_LEVEL", "", "CREATE TABLE z2 (a int)"),
+        ("event_trigger::STATES", "", "CREATE TABLE z3 (a int)"),
+        ("trigger::MOVING_ROW", "", "UPDATE pt SET a = 16 WHERE a = 1"),
+        ("trigger::UPDATED_COLS", "", "UPDATE pt SET a = 2 WHERE a = 1"),
+        ("scs::QUIET", "", "SELECT sqlv(1)"),
+        ("regex::INTERRUPTS", "", "SELECT 'abc' ~ 'b'"),
+        ("explain::FILTER_OVER_WINDOW", "", "EXPLAIN SELECT * FROM (SELECT a, row_number() OVER () AS r FROM t) s WHERE r < 3"),
+        ("explain::RULE_RETURNING", "", "EXPLAIN (VERBOSE, COSTS OFF) INSERT INTO rt VALUES (1) RETURNING *"),
+        ("explain::WINDOW_TLIST", "", "EXPLAIN (VERBOSE, COSTS OFF) SELECT a, row_number() OVER (ORDER BY a) FROM t"),
+        ("explain::MERGE_MEMBERS", "SET enable_seqscan = off", "EXPLAIN (COSTS OFF) SELECT * FROM inh_p ORDER BY a"),
+        ("explain::INH_SCANS", "", "EXPLAIN SELECT * FROM inh_p"),
+        ("explain::UNDER_LOCK_ROWS", "", "EXPLAIN SELECT * FROM t FOR UPDATE"),
+        ("explain::CTE_ESTIMATES", "", "WITH c AS MATERIALIZED (SELECT a FROM t) SELECT * FROM c WHERE a = 1"),
+        ("session::definer", "", "CLUSTER ct USING ct_i"),
+        ("session::in_use", "", "UPDATE pt SET a = 2 WHERE a = 1"),
+    ];
+    let problems = on_thread(move || {
+        let mut problems = Vec::new();
+        for &(point, before, stmt) in cases {
+            // As if the statement never ran.
+            let want = {
+                let dir = tempfile::tempdir().unwrap();
+                let mut s = engine_session(open_store(dir.path()), "b");
+                run(&mut s, PANIC_SETUP);
+                run(&mut s, before);
+                run(&mut s, PANIC_AFTER)
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let mut s = engine_session(open_store(dir.path()), "b");
+            run(&mut s, PANIC_SETUP);
+            run(&mut s, before);
+            pg_engine::scoped::panic_at_for_test(Some(point));
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&mut s, stmt)));
+            pg_engine::scoped::panic_at_for_test(None);
+            if r.is_ok() {
+                problems.push(format!("{point}: not reached by {stmt}"));
+                continue;
+            }
+            // (What the server does with a panic.)
+            s.recover_from_panic();
+            s.notices.clear();
+            let mut left = pg_engine::scoped::unsettled_for_test();
+            left.extend(s.state.running_for_test());
+            if !left.is_empty() {
+                problems.push(format!("{point}: left set: {left:?}"));
+            }
+            let got = run(&mut s, PANIC_AFTER);
+            if got != want {
+                let at = want.lines().zip(got.lines()).position(|(x, y)| x != y).unwrap_or(0);
+                let show = |t: &str| t.lines().skip(at.saturating_sub(3)).take(8).collect::<Vec<_>>().join("\n");
+                problems.push(format!(
+                    "{point}: the next statements differ:\n--- fresh\n{}\n--- after the panic\n{}",
+                    show(&want),
+                    show(&got)
+                ));
+            }
+        }
+        problems
+    });
+    assert!(problems.is_empty(), "{}", problems.join("\n\n"));
+}

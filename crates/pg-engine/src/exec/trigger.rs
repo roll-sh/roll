@@ -229,6 +229,7 @@ fn call_with(
         u.push(t.oid);
         u.len() - 1
     };
+    crate::scoped::checkpoint("session::in_use");
     let r = call_trigger_fn(bt, t, before, row, event, old, new, &schema, ctx);
     ctx.sess.in_use.borrow_mut().truncate(depth);
     *ctx.enrs.borrow_mut() = saved;
@@ -312,6 +313,22 @@ thread_local! {
     static UPDATED_COLS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Per-statement scratch back at rest (`scoped::reset_statement_scratch`).
+pub(crate) fn reset_scratch() {
+    UPDATED_COLS.with_borrow_mut(|c| c.clear());
+    MOVING_ROW.set(false);
+}
+
+/// The flags not at rest (`scoped::unsettled_for_test`).
+pub(crate) fn unsettled(out: &mut Vec<&'static str>) {
+    if UPDATED_COLS.with_borrow(|c| !c.is_empty()) {
+        out.push("trigger::UPDATED_COLS");
+    }
+    if MOVING_ROW.get() {
+        out.push("trigger::MOVING_ROW");
+    }
+}
+
 /// BEFORE ROW triggers for INSERT / UPDATE: each may change NEW; `None` skips the row.
 pub fn before_row(
     trigs: &[BoundTrigger],
@@ -335,10 +352,8 @@ thread_local! {
 /// the new partition's BEFORE INSERT triggers see its stored generated columns as computed
 /// for the partition it left.
 pub fn moving_row<R>(f: impl FnOnce() -> R) -> R {
-    MOVING_ROW.with(|m| m.set(true));
-    let r = f();
-    MOVING_ROW.with(|m| m.set(false));
-    r
+    let _g = crate::scoped::set(&MOVING_ROW, true, "trigger::MOVING_ROW");
+    f()
 }
 
 /// before_row for a partition's new rows: one of its partitioned table's triggers may not
@@ -377,10 +392,10 @@ pub fn before_row_in(
         if !when_ok(bt, t, old, Some(&new), ctx)? {
             continue;
         }
-        let saved =
-            UPDATED_COLS.with(|c| std::mem::replace(&mut *c.borrow_mut(), set_cols.to_vec()));
-        let r = call(bt, t, true, true, event, old.cloned(), Some(new), ctx);
-        UPDATED_COLS.with(|c| *c.borrow_mut() = saved);
+        let r = {
+            let _g = crate::scoped::set_ref(&UPDATED_COLS, set_cols.to_vec(), "trigger::UPDATED_COLS");
+            call(bt, t, true, true, event, old.cloned(), Some(new), ctx)
+        };
         match r? {
             Some(r) => new = r,
             None => return Ok(None),

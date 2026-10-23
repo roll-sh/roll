@@ -219,10 +219,15 @@ thread_local! {
 
 /// Run `f` with interrupt checks against `i`.
 pub fn with_interrupts<T>(i: Interrupts, f: impl FnOnce() -> T) -> T {
-    let prev = INTERRUPTS.with(|x| x.replace(Some(i)));
-    let r = f();
-    INTERRUPTS.with(|x| *x.borrow_mut() = prev);
-    r
+    let _g = crate::scoped::set_ref(&INTERRUPTS, Some(i), "regex::INTERRUPTS");
+    f()
+}
+
+/// The state not at rest (`scoped::unsettled_for_test`).
+pub(crate) fn unsettled(out: &mut Vec<&'static str>) {
+    if INTERRUPTS.with_borrow(|i| i.is_some()) {
+        out.push("regex::INTERRUPTS");
+    }
 }
 
 /// Error code of an interrupted compile or match (the error itself is PENDING).

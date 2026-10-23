@@ -383,6 +383,18 @@ thread_local! {
     static STATES: RefCell<Vec<State>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Per-statement scratch back at rest (`scoped::reset_statement_scratch`).
+pub(crate) fn reset_scratch() {
+    STATES.with_borrow_mut(|s| s.clear());
+}
+
+/// The states not at rest (`scoped::unsettled_for_test`).
+pub(crate) fn unsettled(out: &mut Vec<&'static str>) {
+    if STATES.with_borrow(|s| !s.is_empty()) {
+        out.push("event_trigger::STATES");
+    }
+}
+
 /// A command event triggers fire around (see `begin`).
 pub(crate) struct Begun {
     tag: String,
@@ -410,16 +422,29 @@ pub(crate) fn begin(ctx: &ExecCtx, node: &NodeEnum) -> Result<Option<Begun>> {
         });
         s.len()
     });
-    Ok(Some(Begun {
+    let b = Begun {
         tag,
         depth,
         before: ctx.catalog(),
-    }))
+    };
+    crate::scoped::checkpoint("event_trigger::STATES");
+    Ok(Some(b))
+}
+
+/// The command's state goes when it does (on an error or a panic too).
+impl Drop for Begun {
+    fn drop(&mut self) {
+        let _ = STATES.try_with(|s| {
+            if let Ok(mut s) = s.try_borrow_mut() {
+                s.truncate(self.depth - 1);
+            }
+        });
+    }
 }
 
 /// The command failed: forget its state.
 pub(crate) fn abort(b: Begun) {
-    STATES.with_borrow_mut(|s| s.truncate(b.depth - 1));
+    drop(b);
 }
 
 /// After a DDL command: its sql_drop triggers (when it dropped something), then its

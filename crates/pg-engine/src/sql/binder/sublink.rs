@@ -138,6 +138,13 @@ thread_local! {
     static EXISTS_SUBLINKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// The flags not at rest (`scoped::unsettled_for_test`).
+pub(super) fn unsettled(out: &mut Vec<&'static str>) {
+    if EXISTS_SUBLINKS.get() {
+        out.push("sublink::EXISTS_SUBLINKS");
+    }
+}
+
 fn has_aggregates(e: &Expr) -> bool {
     let mut found = false;
     e.walk(&mut |x| found |= matches!(x, Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..)));
@@ -648,9 +655,10 @@ fn exists_join(cat: &Catalog, plan: &Plan, sub: &Subquery, anti: bool) -> Option
             info,
         });
     }
-    EXISTS_SUBLINKS.with(|c| c.set(true));
-    let rel = sub_rel(p);
-    EXISTS_SUBLINKS.with(|c| c.set(false));
+    let rel = {
+        let _g = crate::scoped::set(&EXISTS_SUBLINKS, true, "sublink::EXISTS_SUBLINKS");
+        sub_rel(p)
+    };
     let (corr, rhs, _, scan_limited) = match rel {
         Some(x) => x,
         None => {

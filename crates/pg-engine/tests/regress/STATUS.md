@@ -160,21 +160,44 @@ on the fixed one (seeds 0xa13 and 7): no file differed by its order (on the old 
 two new goldens differed, and they differ alone too). A regress subset (create_function_sql,
 triggers, subselect, plpgsql, rangefuncs, polymorphism, with) matches as before (3736/3746).
 
-Open, found on the way (not state, for the long tail):
+Second batch (state an engine panic leaves, the last binder's catalog):
+
+- **A panic left flags set for the session's later statements.** The server turns an engine
+  panic into an ERROR and the session goes on, but flags set and restored by hand stayed set
+  on its thread: after one, `pg_get_viewdef` printed views on one line (ruleutils'
+  `NO_INDENT`), the next statements' notices carried the panicked call's CONTEXT line (the
+  session's frames), scanner warnings went missing (`scs::QUIET`), regex matches checked the
+  old statement's deadline (`regex::INTERRUPTS`), a CLUSTER's table owner stayed
+  `current_user` (the session's definer roles), and the planner kept security-qual,
+  PlaceHolderVar, EXISTS pull-up and EXPLAIN flags. All are guards now (`crate::scoped::set` /
+  `set_ref`, `Begun`'s and the frames' `Drop`); scratch set in one place and taken in another
+  is cleared at each statement's start (`scoped::reset_statement_scratch`), and
+  `Session::recover_from_panic` (which the server calls) clears the session's running stacks.
+  Test: `session_state::panic_leaves_no_state` panics just after each of 22 points is set
+  (`scoped::panic_at_for_test`) and checks nothing is left set and the next statements run as in
+  a session where the statement never ran (it failed at all 22 before).
+- **Wrong error: a dropped (or rolled-back) cast still counted.** The made casts (and made types
+  in built-in operator families) the binder reads through thread-locals were the last
+  `Binder::new`'s on the thread: CREATE AGGREGATE after DROP CAST still found `sf(t2, int)` for
+  an `int`-state `t1` aggregate ("requires run-time type coercion"; PostgreSQL: "function
+  sf(t1, integer) does not exist"). Each statement and DDL command now notes its own catalog's.
+  Golden: a13_user_casts_after_drop. (`partition::PRUNING`, the last binder's
+  enable_partition_pruning, only decides which partitions run-time pruning skips, never rows:
+  left as it is.)
+
+Open, found on the way:
 
 - `SET search_path = s, pg_catalog` with `CREATE OPERATOR s.= (int, int)`: `SELECT 1 = 2` errors
-  "operator is not unique: integer = integer" (PostgreSQL takes the first schema's, `t`).
-- An engine panic (turned into an ERROR, the session goes on) can leave a set / restore flag
-  without a `Drop` guard set on the thread (the binder's `SECURITY_QUALS`, `PHV_OUTPUTS`,
-  `EXISTS_SUBLINKS`, `CASE_TEST_DOMAIN`, ruleutils' `RTABLES` / `NO_INDENT`, explain's builder
-  flags, `ddl::TOP_LEVEL`): the session's later statements then plan or print differently.
+  "operator is not unique: integer = integer" (PostgreSQL takes the first schema's, `t`). Not
+  state, for the long tail.
 - The planner keys `lifted` / `pw_joins` by plan `Arc` addresses within a statement; a dropped
   plan's address can come back for another during the same planning (agents 8 / 12's areas).
 - `catalog::SESSION_TEMP_SCHEMA` is set by `execute_with`: an embedder's Parse / Describe on a
   thread that ran another session, before this one executed anything, resolves `pg_temp` to
   that session's schema. (The server runs a thread per connection.)
-- `cast::USER_CASTS` / `ALIAS_FAMILIES` / `PRUNING` are the last `Binder::new`'s on the thread;
-  run-time partition pruning reads `PRUNING` as of the last binder, not the plan's.
+- Process-wide caches behind a `std::sync::Mutex` that `unwrap` its lock (`static_rows`,
+  text search dictionaries) would panic in every session after a panic while one held it
+  (poisoned); their critical sections only look up and insert.
 
 ## Round 15, agent 9 (full-run ALTER TABLE "stalls", harness timeouts, row locks at the level's top)
 

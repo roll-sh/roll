@@ -160,13 +160,14 @@ impl Binder<'_, '_> {
     ) -> Result<(Plan, Vec<OutCol>)> {
         let (mut plans, mut cte_names) = self.define_ctes(w)?;
         // (The body is planned now: its CTE Scans' sizes are the queries' estimates.)
-        let pushed = if self.deparse {
+        let pushed = crate::sql::explain::CteEstimatesPushed(if self.deparse {
             0
         } else {
             crate::sql::explain::push_cte_estimates(&plans, &cte_names, self.ctx)
-        };
+        });
+        crate::scoped::checkpoint("explain::CTE_ESTIMATES");
         let r = body(self);
-        crate::sql::explain::pop_cte_estimates(pushed);
+        drop(pushed);
         let (body_plan, cols) = r?;
         // (Those inlined are no CTEs of the plan.)
         let inlined: Vec<usize> = self

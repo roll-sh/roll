@@ -4821,9 +4821,11 @@ impl Planner<'_, '_> {
                     self.walk(take(c), &vec![true; cw], None);
                 }
                 // (Its CTE Scans' sizes: their queries' estimates.)
-                let pushed = crate::sql::explain::push_cte_estimates(ctes, names, self.ctx);
+                let _pushed = crate::sql::explain::CteEstimatesPushed(crate::sql::explain::push_cte_estimates(
+                    ctes, names, self.ctx,
+                ));
+                crate::scoped::checkpoint("explain::CTE_ESTIMATES.plan");
                 visit(body, lim_in);
-                crate::sql::explain::pop_cte_estimates(pushed);
             }
             Plan::Filter { input, .. }
             | Plan::Project { input, .. }
@@ -4864,8 +4866,8 @@ impl Planner<'_, '_> {
                 visit(base, None);
                 // (The recursive term's WorkTable Scan: ten times the non-recursive term.)
                 crate::sql::explain::push_work_estimate(*id, base, self.ctx);
+                let _pushed = crate::sql::explain::CteEstimatesPushed(1);
                 visit(recursive, None);
-                crate::sql::explain::pop_cte_estimates(1);
             }
             Plan::Insert(i) => visit(&mut i.source, None),
             Plan::Update(u) => visit(&mut u.source, None),

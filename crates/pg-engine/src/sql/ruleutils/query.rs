@@ -331,10 +331,10 @@ pub(super) fn stored_expr_query(
         ..ViewLevel::default()
     };
     let mut buf = String::new();
-    super::RTABLES.set(super::RTABLES.get() + 1);
-    let r = v.print(&level, 0, &mut buf, &[], |d| d.expr(&e, false));
-    super::RTABLES.set(super::RTABLES.get() - 1);
-    r?;
+    {
+        let _g = crate::scoped::set(&super::RTABLES, super::RTABLES.get() + 1, "ruleutils::RTABLES.expr");
+        v.print(&level, 0, &mut buf, &[], |d| d.expr(&e, false))?;
+    }
     Some(buf)
 }
 
@@ -369,9 +369,10 @@ impl Nested for Views<'_, '_, '_> {
             Ok(pb::SetOperation::SetopNone | pb::SetOperation::Undefined) | Err(_)
         );
         let rtable = usize::from(!s.from_clause.is_empty() || !s.values_lists.is_empty() || setop);
-        super::RTABLES.set(super::RTABLES.get() + rtable);
-        let r = self.select(s, buf, indent, &how);
-        super::RTABLES.set(super::RTABLES.get() - rtable);
+        let r = {
+            let _g = crate::scoped::set(&super::RTABLES, super::RTABLES.get() + rtable, "ruleutils::RTABLES");
+            self.select(s, buf, indent, &how)
+        };
         self.used.truncate(used);
         match saved {
             None => {

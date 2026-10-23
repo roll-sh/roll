@@ -57,18 +57,21 @@ thread_local! {
 
 /// Run `f` as a client's top-level utility statement, `in_block` or not.
 pub(crate) fn run_top_level<T>(in_block: bool, f: impl FnOnce() -> T) -> T {
-    let old = TOP_LEVEL.with(|t| t.replace(Some(in_block)));
-    let r = f();
-    TOP_LEVEL.with(|t| t.set(old));
-    r
+    let _g = crate::scoped::set(&TOP_LEVEL, Some(in_block), "ddl::TOP_LEVEL");
+    f()
 }
 
 /// Run `f` as a utility statement inside a function (not at top level).
 pub(crate) fn run_nested<T>(f: impl FnOnce() -> T) -> T {
-    let old = TOP_LEVEL.with(|t| t.replace(None));
-    let r = f();
-    TOP_LEVEL.with(|t| t.set(old));
-    r
+    let _g = crate::scoped::set(&TOP_LEVEL, None, "ddl::TOP_LEVEL.nested");
+    f()
+}
+
+/// The flags not at rest (`scoped::unsettled_for_test`).
+pub(crate) fn unsettled(out: &mut Vec<&'static str>) {
+    if TOP_LEVEL.get().is_some() {
+        out.push("ddl::TOP_LEVEL");
+    }
 }
 
 /// PreventInTransactionBlock: `what` runs only at top level, outside a transaction block.
@@ -114,6 +117,7 @@ pub fn execute(ctx: &ExecCtx, node: &NodeEnum, sql: &str) -> Result<String> {
     if let Some(r) = crate::session::cursor::spi_cursor_stmt(ctx, node, sql, &[]) {
         return r;
     }
+    crate::sql::binder::note_catalog(&ctx.catalog());
     // Event triggers fire around the command (ddl_command_start, sql_drop, ddl_command_end).
     let evt = event_trigger::begin(ctx, node)?;
     let mut d = Ddl::new(ctx, sql);

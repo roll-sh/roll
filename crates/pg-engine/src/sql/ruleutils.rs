@@ -28,6 +28,19 @@ thread_local! {
     static NO_INDENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// The flags not at rest (`scoped::unsettled_for_test`).
+pub(crate) fn unsettled(out: &mut Vec<&'static str>) {
+    if FN_ARGS.with_borrow(|a| a.is_some()) {
+        out.push("ruleutils::FN_ARGS");
+    }
+    if RTABLES.get() != 0 {
+        out.push("ruleutils::RTABLES");
+    }
+    if NO_INDENT.get() {
+        out.push("ruleutils::NO_INDENT");
+    }
+}
+
 /// How parameter `$i+1` prints: by name in a SQL function body.
 fn param_name(i: usize) -> String {
     let named = FN_ARGS.with_borrow(|a| {
@@ -99,10 +112,10 @@ pub fn deparse_explain(
         nested: None,
     };
     // (deparse_expression: no PRETTYFLAG_INDENT, CASE stays on one line.)
-    let saved = NO_INDENT.replace(true);
-    let r = d.expr(e, false);
-    NO_INDENT.set(saved);
-    r?;
+    {
+        let _g = crate::scoped::set(&NO_INDENT, true, "ruleutils::NO_INDENT");
+        d.expr(e, false)?;
+    }
     Some(d.buf)
 }
 
