@@ -4891,6 +4891,19 @@ impl Builder<'_, '_> {
                             }
                             _ => None,
                         });
+                        // (Or a grouping's key under a written COLLATE: the sort's collation,
+                        // show_sortorder_options.)
+                        let declared = declared.or_else(|| match (&k.expr, &**input) {
+                            (Expr::Col(i, _), Plan::Agg { groups, sets: None, .. }) if k.using.is_none() => {
+                                match groups.get(*i) {
+                                    Some(Expr::Collate(x, coll, loc)) if *loc >= 0 && matches!(&**x, Expr::Col(..)) => {
+                                        Some(coll.clone())
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        });
                         let t = match declared {
                             Some(n) => format!("{t} COLLATE {}", quote_ident(&n)),
                             None => t,
@@ -9622,10 +9635,42 @@ impl Builder<'_, '_> {
         // (Over a Result computing a row of values, a pulled-up VALUES list's: a key
         // computed there is over its values, as they are.)
         let values_row = c.node.node_type == "Result" && c.node.children.is_empty() && c.internal.len() == c.exported.len();
+        // (A written COLLATE over a column of another collation is a RelabelType to
+        // Postgres (eval_const_expressions), which a key shows as a cast:
+        // `(c)::text`.)
+        let relabel_key = |b: &mut Self, g: &Expr| -> Option<Name> {
+            let Expr::Collate(x, coll, loc) = g else { return None };
+            let Expr::Col(j, _) = &**x else { return None };
+            if *loc < 0 {
+                return None;
+            }
+            let own = c
+                .node
+                .cols
+                .get(*j)
+                .and_then(|ci| ci.var.as_ref())
+                .filter(|v| v.expr.is_none())
+                .and_then(|v| v.table.columns.get(v.col))
+                .map(|col| col.collation.clone().unwrap_or_else(|| "default".into()))?;
+            if own == *coll {
+                return None;
+            }
+            let n = b.name(x, &c.exported, &[]);
+            let ty = x.ty().typname();
+            Some(Name {
+                plain: format!("({})::{ty}", n.plain),
+                full: format!("({})::{ty}", n.full),
+            })
+        };
+        let mut relabeled: Vec<bool> = Vec::new();
         let gnames: Vec<Name> = groups
             .iter()
             .map(|g| {
-                if values_row && !matches!(g, Expr::Col(..)) && !g.columns().is_empty() {
+                let r = relabel_key(self, g);
+                relabeled.push(r.is_some());
+                if let Some(n) = r {
+                    n
+                } else if values_row && !matches!(g, Expr::Col(..)) && !g.columns().is_empty() {
                     self.name(g, &c.internal, &[])
                 } else {
                     self.name(g, &c.exported, &[])
@@ -9647,9 +9692,11 @@ impl Builder<'_, '_> {
         // (With grouping sets a constant key is computed below too: the sets null it.)
         let computed: Vec<bool> = groups
             .iter()
-            .map(|g| {
+            .zip(&relabeled)
+            .map(|(g, &r)| {
                 (!plain_col(g) && !g.columns().is_empty())
                     || (sets.is_some() && matches!(g, Expr::Const(..)))
+                    || r
             })
             .collect();
         let gref: Vec<Name> = gnames
@@ -9675,14 +9722,23 @@ impl Builder<'_, '_> {
         // keys, then the columns the aggregates read.)
         if self.o.verbose && computed.iter().any(|k| *k) && (c.node.is_scan() || values_row) {
             let mut out: Vec<String> = Vec::new();
-            for (g, n) in groups.iter().zip(&gnames) {
+            // (A relabelled column shows bare at the target list's top: an entry of its own.)
+            let mut seen: Vec<String> = Vec::new();
+            for ((g, n), &r) in groups.iter().zip(&gnames).zip(&relabeled) {
+                if r && let Expr::Collate(x, ..) = g && let Expr::Col(j, _) = &**x {
+                    if let Some(n) = c.exported.get(*j) {
+                        out.push(self.pick(n, Cx::Output));
+                    }
+                    continue;
+                }
                 // (A column the scan computes, a virtual generated one's: its expression.)
                 let n = match g {
                     Expr::Col(j, _) => c.internal.get(*j).unwrap_or(n),
                     _ => n,
                 };
                 let t = self.pick(n, Cx::Output);
-                if !out.contains(&t) {
+                if !seen.contains(&t) {
+                    seen.push(t.clone());
                     out.push(t);
                 }
             }
@@ -9695,7 +9751,8 @@ impl Builder<'_, '_> {
             for j in cols {
                 if let Some(n) = if values_row { c.internal.get(j) } else { c.exported.get(j) } {
                     let t = self.pick(n, Cx::Output);
-                    if !out.contains(&t) {
+                    if !seen.contains(&t) {
+                        seen.push(t.clone());
                         out.push(t);
                     }
                 }
@@ -12272,10 +12329,37 @@ impl Builder<'_, '_> {
                     && !matches!(strip_widening(k), Expr::Col(..) | Expr::Const(..))
                     && !matches!(strip_widening(k), Expr::Cast(x, ..) if matches!(**x, Expr::Col(..)))
             };
-            let a = side(self, oa, outer_names, outer_cols);
+            // (A written COLLATE over a column of another collation is a RelabelType, and so
+            // is, in an inner join's clause from its equivalence class, the other side's
+            // column when its collation isn't the class's: `(c)::text`.)
+            let explicit = |k: &Expr| match strip_widening(k) {
+                Expr::Collate(x, coll, loc) if *loc >= 0 && matches!(**x, Expr::Col(..)) => Some(((**x).clone(), coll.clone())),
+                _ => None,
+            };
+            let pair_coll = explicit(oa).or_else(|| explicit(ib)).map(|x| x.1);
+            let relabeled = |this: &mut Self, k: &Expr, names: &[Name], cols: &[ColInfo]| -> Option<String> {
+                let (x, coll) = match explicit(k) {
+                    Some(x) => x,
+                    None if matches!(kind, JoinKind::Inner) && matches!(strip_widening(k), Expr::Col(..)) => {
+                        (strip_widening(k).clone(), pair_coll.clone()?)
+                    }
+                    None => return None,
+                };
+                if own_coll(&x, cols).unwrap_or_else(|| "default".into()) == coll {
+                    return None;
+                }
+                Some(format!("({})::{}", this.show(&x, names, Cx::Upper), x.ty().typname()))
+            };
+            let a = match relabeled(self, oa, outer_names, outer_cols) {
+                Some(t) => t,
+                None => side(self, oa, outer_names, outer_cols),
+            };
             let a = if sorted_expr(oa, &l.node) { format!("({a})") } else { a };
             let before = self.pending.len();
-            let b = side(self, ib, inner_names, inner_cols);
+            let b = match relabeled(self, ib, inner_names, inner_cols) {
+                Some(t) => t,
+                None => side(self, ib, inner_names, inner_cols),
+            };
             let b = if sorted_expr(ib, &r.node) { format!("({b})") } else { b };
             // (The inner keys are the Hash's to compute: their SubPlans are its.)
             if method == JoinMethod::Hash && self.pending.len() > before {

@@ -69,7 +69,13 @@ impl Ddl<'_, '_> {
             targets.push(Target {
                 attnum: i as i16 + 1,
                 ty: c.ty.clone(),
-                coll: crate::catalog::system::column_collation(c),
+                // (A made collation's oid too: the catalog's.)
+                coll: match &c.collation {
+                    Some(n) if crate::catalog::system::type_collation(&c.ty) != 0 => {
+                        crate::types::collation::def_by_name(&self.cat, n).map_or(100, |d| d.oid)
+                    }
+                    _ => crate::catalog::system::column_collation(c),
+                },
                 stattarget,
                 fresh: false,
             });
@@ -92,7 +98,7 @@ impl Ddl<'_, '_> {
                     let ty = k.ty();
                     let coll = match &c.collation {
                         Some(n) if crate::catalog::system::type_collation(&ty) != 0 => {
-                            crate::catalog::system::collation_oid(n).unwrap_or(100)
+                            crate::types::collation::def_by_name(&self.cat, n).map_or(100, |d| d.oid)
                         }
                         _ => crate::catalog::system::type_collation(&ty),
                     };
@@ -456,8 +462,15 @@ impl Ddl<'_, '_> {
             _ => {}
         }
         let (eq, lt) = type_ops(&tg.ty);
+        // (Values sort and compare under the column's collation, attcollation: a
+        // non-byte-order one's groups and order are its own.)
+        let coll = (tg.coll != 0)
+            .then(|| crate::types::collation::def_by_oid(&self.cat, tg.coll))
+            .flatten()
+            .and_then(|d| crate::types::collation::get(&d).ok())
+            .filter(|c| !c.bytewise() || !c.deterministic);
         let mut st = if lt != 0 {
-            scalar_stats(tg, values, total, eq, lt, &width, &raw, fmt)
+            scalar_stats(tg, values, total, eq, lt, &width, &raw, fmt, coll.as_deref())
         } else if eq != 0 {
             distinct_stats(tg, values, total, eq, &width, &raw, fmt)
         } else {
@@ -1031,7 +1044,12 @@ fn scalar_stats(
     width: &dyn Fn(&Value) -> usize,
     raw: &dyn Fn(&Value) -> usize,
     fmt: &FormatCtx,
+    coll: Option<&crate::types::collation::Collation>,
 ) -> Option<ColStats> {
+    let cmpv = |a: &Value, b: &Value| match coll {
+        Some(c) => crate::types::collation::cmp_values(c, a, b),
+        None => a.cmp_total(b),
+    };
     let samplerows = values.len();
     let (mut null_cnt, mut nonnull_cnt, mut toowide_cnt, mut total_width) =
         (0usize, 0usize, 0usize, 0usize);
@@ -1078,7 +1096,7 @@ fn scalar_stats(
         }
         return None;
     }
-    sorted.sort_by(|a, b| a.0.cmp_total(b.0).then(a.1.cmp(&b.1)));
+    sorted.sort_by(|a, b| cmpv(a.0, b.0).then(a.1.cmp(&b.1)));
     // Groups of equal values, their counts, and the most common (by count, then value).
     let num_mcv_max = tg.stattarget as usize;
     let mut track: Vec<(usize, usize)> = Vec::new(); // (count, first)
@@ -1086,7 +1104,7 @@ fn scalar_stats(
     let mut i = 0;
     while i < values_cnt {
         let mut j = i + 1;
-        while j < values_cnt && sorted[j].0.cmp_total(sorted[i].0) == Ordering::Equal {
+        while j < values_cnt && cmpv(sorted[j].0, sorted[i].0) == Ordering::Equal {
             j += 1;
         }
         for (k, item) in sorted.iter().enumerate().take(j).skip(i) {
