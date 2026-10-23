@@ -35,26 +35,26 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51037 (**99.78%**) |
-| units differing | 113 |
-| files fully matching | 215 |
-| engine output == expected/*.out (pg_regress "ok") | 178 files |
+| units matching | 51043 (**99.79%**) |
+| units differing | 107 |
+| files fully matching | 218 |
+| engine output == expected/*.out (pg_regress "ok") | 180 files |
 | engine crashes / panics | none |
 
 ## Remaining differences, classified
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 109 | 96.5% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.7% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 103 | 96.3% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.8% |
 | by design (a parallel plan's combine function) | 1 | 0.9% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 109 units
-join (64), partition_join (18), partition_prune (2), collate.icu.utf8 (1), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
+### EXPLAIN (group C1) — 103 units
+join (64), partition_join (18), partition_prune (2), collate.icu.utf8 (1), select_parallel (1), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (1), select_distinct (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -111,6 +111,76 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 9 (rule-rewritten statements' plans, MERGE sub-select copies, row marks, locks pushed into subqueries)
+
+Two full runs of the schedule in one database (`PGREGRESS_TIMEOUT=300`) on this round's commits
+over e038970: 51013 with the first three commits, 51017 with all of them. Against the counts
+below before this round, +6: merge 348, returning 103, foreign_key 516, updatable_views 817,
+819, 914 (merge, foreign_key and updatable_views now match fully). Three units lost in both
+runs aren't this round's: alter_table 953 (`to_json(bt.*)` for Postgres's `to_json(ROW(bt.id,
+bt.stuff))`, from 1a2f31a's whole-row Vars), and domain 482 / oidjoins 0, timeouts (the
+statement ran past 300 s). Both time out the same way in a full run of the base commit
+e038970, so they came with earlier commits. The table keeps their earlier counts.
+
+- **MERGE 348** (`sql/paths/sublinkcopy.rs`): a pulled-up source subquery's output computed by
+  a sub-select (`(SELECT count(*) ...) cnt`) is copied into each place reading it, as
+  pullup_replace_vars does: the join's clauses, each action's condition, SET and VALUES, and
+  RETURNING. Each copy is a SubPlan of its own, with its own relations (named in the order the
+  planner meets them: the join's, then each action's target list, then its qual). A copy read
+  by a multiple-column SET's sub-select (`SET (b, c) = (SELECT s.b, s.cnt)`) is nested into it
+  as an InitPlan, once per sub-select. A join clause's correlated SubPlan is now costed
+  (cost_qual_eval), which turns the join into Postgres's Hash Join. The source keeps the
+  columns its actions, join and RETURNING read.
+- **Rule-rewritten statements' EXPLAIN** (`explain.rs` `rule_statements`): a statement a rule
+  rewrote into several (an INSTEAD action, run as a `*RULE*` CTE under a statement that
+  returns nothing; a qualified or DO ALSO rule's Append of statements) is shown as Postgres's
+  list of queries: each plan apart, a blank line between. The statement's relations are named
+  before the action's target and FROM items (rewriteRuleAction's range table order); an
+  inheritance parent's nominal name is reserved (returning 103, updatable_views 817,
+  foreign_key 516). An INSERT's single VALUES row of constants is NEW in the rule's
+  qualification (ReplaceVarsFromTargetList), and `pull_up_consts` puts a constant row's values
+  into a filter's sub-selects and merges a constant join side gated by such a clause. The
+  qualification is then an uncorrelated InitPlan with a One-Time Filter (updatable_views 819).
+- **Row marks.** An UPDATE / DELETE / MERGE's joined subquery, a security barrier view's too,
+  keeps its Subquery Scan (its whole-row mark), and a pseudoconstant qual over it shows inside
+  it (updatable_views 914). A locking level's non-pulled-up FROM subquery shows its whole-row
+  mark (`s.*`) with the locked relations' marks; an inheritance parent's tableoid comes after
+  all of them, and its member scans and Append are in the parent's reltarget order. The
+  non-target relations of a data-modifying statement and a locking level's unlocked ones
+  (ROW_MARK_REFERENCE) return their ctid, so they get no index-only scan
+  (`rowmarks::referenced`, before access paths are chosen).
+- **Locks pushed into FROM subqueries and views** (a correctness fix): FOR UPDATE / SHARE with
+  no relation list, or naming a FROM subquery or a view, now locks the relations inside it
+  (transformLockingClause / markQueryForLocking). Before, a subquery's or a view's rows were
+  never locked. A subquery planned apart locks every row it returns (its own LockRows); one
+  pulled up joins the statement's level, which locks only the rows it returns.
+  CheckSelectLocking's errors follow (aggregates, GROUP BY, a UNION in FROM), and a VALUES list
+  and a view's set operation lock nothing. Test: `tests/wire.rs`
+  `row_locks_pushed_into_subqueries_and_views`.
+
+Goldens: `a9_dml_rowmarks`, `a9_rule_plans`.
+
+Left:
+- returning 105: the view's NEW values are computed below the join, where Postgres computes
+  them in the ModifyTable's target list, and the top join's equivalence-class member differs
+  (`foo_2.f2 = foo_1.f2` for Postgres's `foo_1.f2 = joinme.f2j`). These are plan internals,
+  not names.
+- `FOR UPDATE OF s` where the level has no locked relation of its own: Postgres still puts a
+  LockRows carrying only `s.*` at the top; the engine shows none.
+- A whole-row mark needs all the subquery's columns: Postgres's Subquery Scan returns them
+  (`s.*` reads every one), while the engine's unused-output pruning drops them (`s.other`
+  missing below a FOR SHARE subquery).
+- VERBOSE target lists of an UPDATE joined with an inherited target (the target's tableoid,
+  the joined subquery's `s.*` junk).
+- A semi join unique-ified under FOR UPDATE: `rowmarks::key` has no case for the Distinct, so
+  the level's rows are locked by its scans, not by one LockRows at the top.
+- MERGE costs: the per-row SubPlans in the actions' target lists aren't charged (Postgres's
+  ModifyTable total is far higher), and a nested copy's InitPlan is counted in its Result's
+  total as well as its startup.
+- Not this round's, found by it: domain 482 (`information_schema.column_domain_usage`) and
+  oidjoins (its DO block over every catalog) run past 300 s in full runs, over the catalog the
+  earlier files leave (also on e038970), but return at once on a fresh database.
 
 ## Round 16, agent 12 (UNION ALL appendrel names, LATERAL partitionwise joins)
 
@@ -2223,7 +2293,7 @@ produces no units on Linux (skipped by the file itself).
 | typed_table | 36 | 36 | 100% | yes | yes |  |
 | vacuum | 328 | 328 | 100% | yes | yes |  |
 | drop_if_exists | 161 | 161 | 100% | yes | yes |  |
-| updatable_views | 1109 | 1106 | 100% | no | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
+| updatable_views | 1109 | 1109 | 100% | no | no |  |
 | roleattributes | 80 | 80 | 100% | yes | yes |  |
 | create_am | 142 | 142 | 100% | yes | yes |  |
 | hash_func | 43 | 43 | 100% | yes | yes |  |
@@ -2278,7 +2348,7 @@ produces no units on Linux (skipped by the file itself).
 | misc | 68 | 68 | 100% | no | no |  |
 | async | 11 | 11 | 100% | yes | yes |  |
 | dbsize | 25 | 25 | 100% | yes | yes |  |
-| merge | 572 | 571 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| merge | 572 | 572 | 100% | yes | yes |  |
 | misc_functions | 148 | 148 | 100% | no | no |  |
 | sysviews | 29 | 29 | 100% | yes | yes |  |
 | tsrf | 74 | 74 | 100% | yes | yes |  |
@@ -2306,7 +2376,7 @@ produces no units on Linux (skipped by the file itself).
 | subscription | 179 | 179 | 100% | no | no |  |
 | select_views | 52 | 52 | 100% | no | no |  |
 | portals_p2 | 41 | 41 | 100% | yes | yes |  |
-| foreign_key | 1267 | 1266 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| foreign_key | 1267 | 1267 | 100% | yes | yes |  |
 | cluster | 205 | 205 | 100% | yes | yes |  |
 | dependency | 68 | 68 | 100% | yes | yes |  |
 | guc | 222 | 222 | 100% | yes | yes |  |
@@ -2344,7 +2414,7 @@ produces no units on Linux (skipped by the file itself).
 | sequence | 265 | 265 | 100% | no | no |  |
 | polymorphism | 426 | 426 | 100% | yes | yes |  |
 | rowtypes | 237 | 237 | 100% | yes | no |  |
-| returning | 145 | 143 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
+| returning | 145 | 144 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 303 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (4) |
 | xml | 281 | 281 | 100% | yes | yes |  |

@@ -347,20 +347,23 @@ them all with the "Fixed in round N" sections describing what was already tried.
    - 327: a correlated aggregate IN as a LATERAL subquery (Memoize over a Subquery Scan).
    - 328 (an EC member relabeled to the class's collation: `("*VALUES*".column1)::text`), 332
      (unique-ifying a semi join's side on a computed expression).
-   merge 348 needs the sub-select copies in a MERGE's action conditions and SET lists.
+   (merge 348, a MERGE's sub-select copies: done in round 16, `paths/sublinkcopy.rs`.)
 4. **Row marks in VERBOSE target lists**: done for UPDATE / DELETE / MERGE over joins with a
    plain (or, for MERGE, partitioned) target, and for locked scans (a FROM subquery's FOR
    UPDATE), and (round 15) SELECT ... FOR UPDATE / SHARE: one LockRows at the level's top
    (`sql/paths/rowmarks.rs`), locking only the rows the level returns, EvalPlanQual rechecks
    of the whole level; its function / VALUES whole-row marks, semi join inner ctids and an
-   inheritance tree's tableoid shown. Left: merge 462 (Inner Unique over an empty partitioned
-   target), returning 103/105 (rule-rewritten statements: EXPLAIN now shows the action's
-   ModifyTable with the statement's RETURNING over its old / new rows; still differing: which
-   relation takes the plain name, the target's restriction from the equivalence class with the
-   statement's rows, the non-target rows' ctids), a FROM subquery's whole-row mark under a
-   locking level (`s.*`, PG keeps its Subquery Scan), inherited UPDATE / DELETE targets.
+   inheritance tree's tableoid shown. Round 16 (agent 9): a FROM subquery's whole-row mark
+   (`s.*`), a DML statement's joined subquery kept as its Subquery Scan, reference-marked
+   relations without index-only scans, locks pushed into FROM subqueries and views, and
+   rule-rewritten statements explained as Postgres's list of plans (`explain.rs`
+   `rule_statements`). Left (STATUS.md, round 16 agent 9): merge 462 (Inner Unique over an
+   empty partitioned target), returning 105 (the view's NEW values computed below the join),
+   `FOR UPDATE OF s` with no locked relation at the level, a whole-row mark's subquery keeping
+   all its columns, VERBOSE lists of an UPDATE joined with an inherited target, a unique-ified
+   semi join under FOR UPDATE.
 5. **select_parallel** (1),
-   **updatable_views** (3), **groupingsets** (12, including the sorted-vs-hashed choice and
+   **groupingsets** (12, including the sorted-vs-hashed choice and
    output order), **with** (10; 52/55/58/76/77 need a materialized CTE's sort order offered to a
    merge join), **memoize**, **privileges** (8 each), then the long tail in
    STATUS.md.
