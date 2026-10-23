@@ -1758,6 +1758,21 @@ impl Want {
     }
 }
 
+/// A planner flag set for a scope, its value put back as the scope ends.
+struct FlagScope<'a>(&'a std::cell::Cell<bool>, bool);
+
+impl<'a> FlagScope<'a> {
+    fn set(c: &'a std::cell::Cell<bool>, v: bool) -> Self {
+        let old = c.replace(v);
+        FlagScope(c, old)
+    }
+}
+
+impl Drop for FlagScope<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.1);
+    }
+}
 
 struct Planner<'c, 'a> {
     ctx: &'c ExecCtx<'a>,
@@ -1788,6 +1803,10 @@ struct Planner<'c, 'a> {
     group_dirs: std::cell::RefCell<Option<GroupDirs>>,
     /// Planning a join group under a grouping that may go partitionwise.
     pw_agg_join: std::cell::Cell<bool>,
+    /// Planning what is below a join group or inside one (its items, a partitionwise
+    /// join's child joins): a join group there isn't its query level's topmost scan/join
+    /// relation.
+    join_nested: std::cell::Cell<bool>,
     /// Planning a MERGE's source join: its target table (the first relation of Postgres's
     /// range table, so the first one the join search tries).
     merge_target: std::cell::Cell<Option<u32>>,
@@ -1832,6 +1851,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             post_cost: Default::default(),
             group_dirs: Default::default(),
             pw_agg_join: Default::default(),
+            join_nested: Default::default(),
             merge_target: Default::default(),
             phv_quals: Default::default(),
             lifting: Default::default(),
@@ -4992,10 +5012,12 @@ impl Planner<'_, '_> {
         };
         match p {
             Plan::With { ctes, body, names } => {
+                let nested = self.join_nested.replace(false);
                 for (_, c) in ctes.iter_mut() {
                     let cw = crate::sql::binder::plan_width(c);
                     self.walk(take(c), &vec![true; cw], None);
                 }
+                self.join_nested.set(nested);
                 // (Its CTE Scans' sizes: their queries' estimates.)
                 let _pushed = crate::sql::explain::CteEstimatesPushed(crate::sql::explain::push_cte_estimates(
                     ctes, names, self.ctx,
@@ -5012,12 +5034,20 @@ impl Planner<'_, '_> {
             | Plan::Limit { input, .. }
             | Plan::Distinct { input, .. }
             | Plan::LockRows { input, .. }
-            | Plan::Barrier { input, .. } | Plan::Context { input, .. } => visit(input, lim_in),
+            | Plan::Context { input, .. } => visit(input, lim_in),
+            // (A query level of its own: its joins its topmost scan/join relation.)
+            Plan::Barrier { input, .. } => {
+                let nested = self.join_nested.replace(false);
+                visit(input, lim_in);
+                self.join_nested.set(nested);
+            }
             Plan::SetOp {
                 kind, left, right, ..
             } => {
+                let nested = self.join_nested.replace(false);
                 visit(left, lim_in);
                 visit(right, lim_in);
+                self.join_nested.set(nested);
                 // generate_nonunion_paths: INTERSECT puts the input with fewer groups
                 // first.
                 if *kind == crate::sql::plan::SetOpKind::Intersect
@@ -5027,6 +5057,7 @@ impl Planner<'_, '_> {
                 }
             }
             Plan::Join { left, right, params, .. } => {
+                let nested = self.join_nested.replace(true);
                 visit(left, None);
                 // (A LATERAL right side: clauses reading its values stay out of its subquery
                 // levels.)
@@ -5045,16 +5076,21 @@ impl Planner<'_, '_> {
                 if lateral {
                     crate::sql::binder::optimize::lateral_pop();
                 }
+                self.join_nested.set(nested);
                 self.lateral_memoize(p);
             }
-            Plan::Append { inputs, .. } => {
+            Plan::Append { inputs, inh, .. } => {
+                // (A UNION ALL's arms: subqueries, each a query level.)
+                let nested = if inh.is_none() { self.join_nested.replace(false) } else { self.join_nested.get() };
                 for i in inputs.iter_mut() {
                     visit(i, lim_in);
                 }
+                self.join_nested.set(nested);
             }
             Plan::Recursive {
                 id, base, recursive, ..
             } => {
+                let _level = FlagScope::set(&self.join_nested, false);
                 visit(base, None);
                 // (The recursive term's WorkTable Scan: ten times the non-recursive term.)
                 crate::sql::explain::push_work_estimate(*id, base, self.ctx);

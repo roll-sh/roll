@@ -2926,10 +2926,10 @@ pub fn join(
     // params too.
     let mut params = params;
     if !params.is_empty() && matches!(kind, JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti) {
-        // (A subquery level, not pulled up, takes only those over the relations its
-        // LATERAL references read: its parameterized path's clauses. The others are the
-        // join's.)
-        let sources: Option<Vec<(usize, usize)>> = matches!(right, Plan::Barrier { .. }).then(|| {
+        // (Only those over the relations its LATERAL references read: the clauses of its
+        // parameterized path, whose required relations are its lateral_relids
+        // (get_baserel_parampathinfo). The others are the join's.)
+        let sources: Option<Vec<(usize, usize)>> = Some({
             let read: Vec<usize> = params.iter().flat_map(|e| e.columns()).collect();
             leaf_ranges(&left, 0)
                 .into_iter()

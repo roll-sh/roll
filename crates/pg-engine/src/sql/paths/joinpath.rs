@@ -252,7 +252,8 @@ struct JRel {
     rows: f64,
     width: u32,
     paths: Vec<JP>,
-    /// Parameterized paths (base relations): the cheapest for each set of required leaves.
+    /// Parameterized paths (base relations: the cheapest for each set of required leaves;
+    /// join relations: those add_path keeps).
     param: Vec<JP>,
 }
 
@@ -293,6 +294,13 @@ fn has_qual(p: &Plan, q: &Expr) -> bool {
 }
 
 fn add_jpath(list: &mut Vec<JP>, new: JP, startup: bool) {
+    add_jpath_rows(list, new, startup, true)
+}
+
+/// add_path, comparing the paths' rows or not (parameterized join paths: Postgres's of
+/// one parameterization have their ParamPathInfo's rows, all the same).
+fn add_jpath_rows(list: &mut Vec<JP>, new: JP, startup: bool, by_rows: bool) {
+    let rows_of = |p: &JP| if by_rows { p.rows } else { 0.0 };
     let as_path = |p: &JP| Path {
         kind: PathKind::Seq,
         startup: p.startup,
@@ -328,12 +336,12 @@ fn add_jpath(list: &mut Vec<JP>, new: JP, startup: bool) {
             if kc != KeysCmp::Different {
                 match cc {
                     CostCmp::Equal => match kc {
-                        KeysCmp::Better1 => remove_old = new.rows <= old.rows,
-                        KeysCmp::Better2 => accept = new.rows < old.rows,
+                        KeysCmp::Better1 => remove_old = rows_of(&new) <= rows_of(old),
+                        KeysCmp::Better2 => accept = rows_of(&new) < rows_of(old),
                         _ => {
-                            if new.rows < old.rows {
+                            if rows_of(&new) < rows_of(old) {
                                 remove_old = true
-                            } else if new.rows > old.rows {
+                            } else if rows_of(&new) > rows_of(old) {
                                 accept = false
                             } else if fuzzy_cmp(&np, &op, 1.0000000001, startup) == CostCmp::Better1
                             {
@@ -344,12 +352,12 @@ fn add_jpath(list: &mut Vec<JP>, new: JP, startup: bool) {
                         }
                     },
                     CostCmp::Better1 => {
-                        if kc != KeysCmp::Better2 && new.rows <= old.rows {
+                        if kc != KeysCmp::Better2 && rows_of(&new) <= rows_of(old) {
                             remove_old = true
                         }
                     }
                     CostCmp::Better2 => {
-                        if kc != KeysCmp::Better1 && new.rows >= old.rows {
+                        if kc != KeysCmp::Better1 && rows_of(&new) >= rows_of(old) {
                             accept = false
                         }
                     }
@@ -431,6 +439,9 @@ struct Search<'s, 'c, 'a> {
     /// Building a parameterized join path's plan: per enclosing nested loop, the values
     /// (over the group row) it passes in, which a scan inside reads as `Outer(1, k)`.
     param_stack: std::cell::RefCell<Vec<Vec<Expr>>>,
+    /// Building a LATERAL item as the inner side of the nested loop that passes it its
+    /// values itself (else, inside a parameterized join, they come from an enclosing one).
+    lateral_supplied: std::cell::Cell<bool>,
     /// A partitionwise child join's parent leaves' rows (`Planner::pw_loop_rows`).
     loop_rows: Vec<f64>,
     /// PlaceHolderVars evaluated at joins of the group (a pulled-up subquery's outputs an
@@ -1219,7 +1230,11 @@ impl Search<'_, '_, '_> {
         };
         match &leaf.scan {
             None => {
-                let (params, req) = leaf.lateral.clone().unwrap_or_default();
+                let (params, _) = leaf.lateral.clone().unwrap_or_default();
+                // (Parameterized by its lateral_relids: the items it reads, and those they
+                // read in turn.)
+                let req = if leaf.lateral.is_some() { self.lateral_closure(l) } else { 0 };
+                let leaf = &self.leaves[l];
                 let keys = self.opaque_keys(l);
                 let jp = JP {
                     node: JNode::Opaque {
@@ -2497,20 +2512,104 @@ impl Search<'_, '_, '_> {
                 src |= all & !sj.min_r;
             }
         }
-        src
+        // (A relation with LATERAL references outside it has no paths but ones
+        // parameterized by them: its residual lateral_relids may parameterize the join.)
+        src | self.lateral_relids(set)
     }
 
-    /// LATERAL items can only be the inside of a nested loop whose outer side has every
-    /// item they read (join_is_legal's LATERAL checks; parameterized join relations aren't
-    /// made, so the item itself is that inner side).
-    fn lateral_ok(&self, a: u32, b: u32) -> bool {
-        for (l, leaf) in self.leaves.iter().enumerate() {
-            let Some((_, deps)) = &leaf.lateral else { continue };
-            let bit = 1u32 << l;
-            for (mine, other) in [(a, b), (b, a)] {
-                if mine & bit != 0 && deps & !mine != 0 && (mine != bit || deps & !other != 0) {
-                    return false;
+    /// The items leaf `l` reads LATERAL values from, directly or through the items it
+    /// reads (create_lateral_join_info's transitive closure of lateral_relids).
+    fn lateral_closure(&self, l: usize) -> u32 {
+        let direct = |k: usize| self.leaves[k].lateral.as_ref().map_or(0, |(_, d)| *d);
+        let mut deps = direct(l);
+        loop {
+            let mut more = deps;
+            for k in 0..self.leaves.len() {
+                if deps & (1u32 << k) != 0 {
+                    more |= direct(k);
                 }
+            }
+            more &= !(1u32 << l);
+            if more == deps {
+                return deps;
+            }
+            deps = more;
+        }
+    }
+
+    /// A relation's lateral_relids (min_join_parameterization): the items outside it its
+    /// items read LATERAL values from, directly or not. Every path of it is parameterized
+    /// by at least these.
+    fn lateral_relids(&self, set: u32) -> u32 {
+        (0..self.leaves.len())
+            .filter(|&l| set & (1u32 << l) != 0 && self.leaves[l].lateral.is_some())
+            .fold(0u32, |m, l| m | self.lateral_closure(l))
+            & !set
+    }
+
+    /// A relation's direct_lateral_relids: the items outside it its items read directly.
+    fn direct_lateral_relids(&self, set: u32) -> u32 {
+        (0..self.leaves.len())
+            .filter(|&l| set & (1u32 << l) != 0)
+            .fold(0u32, |m, l| m | self.leaves[l].lateral.as_ref().map_or(0, |(_, d)| *d))
+            & !set
+    }
+
+    /// Whether some item reads LATERAL values from base relation `set` (its
+    /// lateral_referencers; a join relation has none).
+    fn lateral_referenced(&self, set: u32) -> bool {
+        set.count_ones() == 1
+            && (0..self.leaves.len())
+                .any(|l| self.leaves[l].lateral.is_some() && self.lateral_closure(l) & set != 0)
+    }
+
+    /// join_is_legal's LATERAL checks for joining `a` and `b` (as the caller passes them,
+    /// before an outer join's sides are put in order): references both ways are
+    /// impossible; one way the join is a nested loop with the referencing side inside,
+    /// which an outer join `sj` whose left side is the other (`reversed`), a unique-ified
+    /// semi join or a FULL JOIN can't be, and the reference must be direct. Then the join's
+    /// remaining lateral_relids must not be (even indirectly) inside an outer join's
+    /// right side with it.
+    fn lateral_legal(&self, a: u32, b: u32, sj: Option<usize>, reversed: bool, unique: bool) -> bool {
+        let fwd = a & self.lateral_relids(b) != 0;
+        let rev = b & self.lateral_relids(a) != 0;
+        if fwd && rev {
+            return false;
+        }
+        let full = sj.is_some_and(|t| self.sjs[t].kind == JoinKind::Full);
+        if fwd {
+            if sj.is_some() && (reversed || unique || full) {
+                return false;
+            }
+            if a & self.direct_lateral_relids(b) == 0 {
+                return false;
+            }
+        } else if rev {
+            if sj.is_some() && (!reversed || unique || full) {
+                return false;
+            }
+            if b & self.direct_lateral_relids(a) == 0 {
+                return false;
+            }
+        }
+        let join = a | b;
+        let lat = self.lateral_relids(join);
+        if lat != 0 {
+            let mut plus_rhs = join;
+            loop {
+                let mut more = false;
+                for s in &self.sjs {
+                    if s.kind != JoinKind::Full && s.min_l & plus_rhs != 0 && s.min_r & !plus_rhs != 0 {
+                        plus_rhs |= s.min_r;
+                        more = true;
+                    }
+                }
+                if !more {
+                    break;
+                }
+            }
+            if plus_rhs & lat != 0 {
+                return false;
             }
         }
         true
@@ -2535,6 +2634,9 @@ impl Search<'_, '_, '_> {
             let Some((sj, rev, u)) = self.join_is_legal_u(self.rels[r1].set, self.rels[r2].set) else {
                 return;
             };
+            if !self.lateral_legal(self.rels[r1].set, self.rels[r2].set, sj, rev, u) {
+                return;
+            }
             unique_only = u;
             if rev {
                 std::mem::swap(&mut r1, &mut r2);
@@ -2550,7 +2652,7 @@ impl Search<'_, '_, '_> {
             self.jt()
         };
         let (s1, s2) = (self.rels[r1].set, self.rels[r2].set);
-        if !self.lateral_ok(s1, s2) {
+        if !self.general && !self.lateral_legal(s1, s2, None, false, false) {
             return;
         }
         let set = s1 | s2;
@@ -2566,7 +2668,7 @@ impl Search<'_, '_, '_> {
                     width: self.width_of(set),
                     paths: Vec::new(),
                     param: Vec::new(),
-                });
+                        });
                 self.rels.len() - 1
             }
         };
@@ -3228,12 +3330,12 @@ impl Search<'_, '_, '_> {
         merge: &[(usize, bool)],
         ex: &Extra,
     ) {
-        let (Some(op), Some(ip)) = (
-            cheapest_of(&self.rels[outer].paths, false).cloned(),
-            cheapest_of(&self.rels[inner].paths, false).cloned(),
-        ) else {
+        let (Some(op), Some(ip)) = (self.cheapest_total(outer), self.cheapest_total(inner)) else {
             return;
         };
+        if op.req & self.rels[inner].set != 0 || ip.req & self.rels[outer].set != 0 {
+            return;
+        }
         let all = self.outer_keys_for_merge(merge, ex.set);
         for f in 0..all.len() {
             let mut okeys = all.clone();
@@ -3385,7 +3487,6 @@ impl Search<'_, '_, '_> {
             }
             _ => None,
         };
-        let oset = self.rels[outer].set;
         let outer_paths: Vec<JP> = self.rels[outer].paths.clone();
         let inner_params: Vec<JP> = inner_total
             .iter()
@@ -3394,12 +3495,9 @@ impl Search<'_, '_, '_> {
                 self.rels[inner]
                     .param
                     .iter()
-                    // (Or parameterized by the outer side and others: a parameterized
-                    // join path's inner side.)
-                    .filter(|p| {
-                        (p.req & !oset == 0 || (ex.jt == Jt::Inner && p.req & oset != 0))
-                            && ex.uniq != Uniq::Inner
-                    })
+                    // (Or parameterized by others too: a parameterized join path's inner
+                    // side, which try_nestloop keeps or not.)
+                    .filter(|_| ex.uniq != Uniq::Inner)
                     .cloned(),
             )
             .collect();
@@ -3515,18 +3613,72 @@ impl Search<'_, '_, '_> {
         hash: &[(usize, bool)],
         ex: &Extra,
     ) {
-        let (Some(ot), Some(os), Some(it)) = (
-            cheapest_of(&self.rels[outer].paths, false).cloned(),
-            cheapest_of(&self.rels[outer].paths, true).cloned(),
-            cheapest_of(&self.rels[inner].paths, false).cloned(),
-        ) else {
+        // (A relation with LATERAL references has only parameterized paths: its
+        // cheapest_total_path is the least parameterized one, set_cheapest.)
+        let (Some(ot), Some(it)) = (self.cheapest_total(outer), self.cheapest_total(inner)) else {
             return;
         };
-        self.try_hash(ri, &os, &it, hash, ex);
-        let same = os.total == ot.total && os.startup == ot.startup;
-        if !same {
-            self.try_hash(ri, &ot, &it, hash, ex);
+        let (oset, iset) = (self.rels[outer].set, self.rels[inner].set);
+        if ot.req & iset != 0 || it.req & oset != 0 {
+            return;
         }
+        let os = cheapest_of(&self.rels[outer].paths, true).cloned();
+        if let Some(os) = &os {
+            self.try_hash(ri, os, &it, hash, ex);
+        }
+        // Each of the outer side's cheapest_parameterized_paths with each of the inner
+        // side's (a pair parameterized by relations outside the join only when those may
+        // parameterize it: param_source_rels).
+        let opaths = self.cheapest_parameterized(outer);
+        let ipaths = self.cheapest_parameterized(inner);
+        for op in &opaths {
+            if op.req & iset != 0 {
+                continue;
+            }
+            for ip in &ipaths {
+                if ip.req & oset != 0 {
+                    continue;
+                }
+                let tried = os.as_ref().is_some_and(|os| {
+                    os.req == 0 && op.req == 0 && os.total == op.total && os.startup == op.startup
+                }) && ip.req == it.req
+                    && ip.total == it.total;
+                if tried {
+                    continue;
+                }
+                self.try_hash(ri, op, ip, hash, ex);
+            }
+        }
+    }
+
+    /// set_cheapest's cheapest_total_path: the cheapest unparameterized path, else (a
+    /// relation with LATERAL references) the parameterized path with the fewest required
+    /// relations, the cheapest of those.
+    fn cheapest_total(&self, r: usize) -> Option<JP> {
+        if let Some(p) = cheapest_of(&self.rels[r].paths, false) {
+            return Some(p.clone());
+        }
+        self.rels[r]
+            .param
+            .iter()
+            .min_by(|a, b| {
+                a.req
+                    .count_ones()
+                    .cmp(&b.req.count_ones())
+                    .then(a.disabled.cmp(&b.disabled))
+                    .then(a.total.total_cmp(&b.total))
+            })
+            .cloned()
+    }
+
+    /// set_cheapest's cheapest_parameterized_paths: the cheapest unparameterized path (if
+    /// any), then the cheapest path for each parameterization.
+    fn cheapest_parameterized(&self, r: usize) -> Vec<JP> {
+        cheapest_of(&self.rels[r].paths, false)
+            .into_iter()
+            .chain(self.rels[r].param.iter())
+            .cloned()
+            .collect()
     }
 
     /// get_memoize_path: a Memoize over parameterized inner path `ip` (cached on the
@@ -3678,6 +3830,75 @@ impl Search<'_, '_, '_> {
         (joins::memo_ndistinct(&self.pl.cat, &vs, rows), width)
     }
 
+    /// get_joinrel_parampathinfo: the clauses a join path parameterized by `req_all` (beyond
+    /// the join's own restriction list `quals`) checks: the join clauses movable into the
+    /// join given those relations, and an equivalence class's clause between the
+    /// parameters and the outer side when the inner path enforces the class's clause.
+    #[allow(clippy::too_many_arguments)]
+    fn param_clauses(
+        &self,
+        set: u32,
+        req_all: u32,
+        op: &JP,
+        ip: &JP,
+        star: bool,
+        enforced: &[usize],
+        quals: &mut Vec<usize>,
+    ) {
+        // get_joinrel_parampathinfo's equivalence classes: a class's clause between the
+        // parameters and the join that the inner path enforces is replaced by one between
+        // the parameters and the outer side's member (else nothing would equate those).
+        {
+            let members = self.ec_members();
+            let in_set = |g: usize, s: u32| (1u32 << self.leaf_of[g]) & s != 0;
+            let mut ecs: Vec<usize> = Vec::new();
+            for &g in &members {
+                if !ecs.contains(&self.ec[g]) {
+                    ecs.push(self.ec[g]);
+                }
+            }
+            for e in ecs {
+                let first = |s: u32| members.iter().copied().find(|&g| self.ec[g] == e && in_set(g, s));
+                let (Some(x), Some(y)) = (first(req_all), first(set)) else { continue };
+                if !in_set(y, ip.set) {
+                    continue;
+                }
+                let Some(z) = first(op.set) else { continue };
+                let found = (0..self.clauses.len()).find(|&j| {
+                    self.clauses[j].eq.as_ref().is_some_and(|(p, q, _, _)| {
+                        let (p, q) = (key_col(p), key_col(q));
+                        (p == Some(x) && q == Some(z)) || (p == Some(z) && q == Some(x))
+                    })
+                });
+                if let Some(j) = found
+                    && !quals.contains(&j)
+                    && !enforced.contains(&j)
+                {
+                    quals.push(j);
+                }
+            }
+        }
+        // (A join path parameterized by an outer join's left side checks the join clauses
+        // movable into it from there: get_joinrel_parampathinfo.)
+        if !star {
+            for (ci, c) in self.clauses.iter().enumerate() {
+                if quals.contains(&ci)
+                    || enforced.contains(&ci)
+                    || c.leaves & !(set | req_all) != 0
+                    || c.leaves & req_all == 0
+                    || c.leaves & set == 0
+                    || c.expr.is_volatile()
+                    || (0..self.leaves.len())
+                        .filter(|l| c.leaves & set & (1u32 << l) != 0)
+                        .any(|l| !self.movable_to(ci, l))
+                {
+                    continue;
+                }
+                quals.push(ci);
+            }
+        }
+    }
+
     fn try_nestloop(&mut self, ri: usize, op: &JP, ip: &JP, keys: Vec<GKey>, ex: &Extra) {
         // An inner (or outer) path parameterized by more than the join: a join path itself
         // parameterized by the rest. Either an inner join's nested loop with the outer side
@@ -3685,9 +3906,12 @@ impl Search<'_, '_, '_> {
         // by relations an outer join above has on its left (param_source_rels).
         let req_all = (ip.req | op.req) & !ex.set;
         let param_join = req_all != 0;
+        // (allow_star_schema_join: the outer side gives some of the inner side's
+        // parameters, not all.)
         let star = ex.jt == Jt::Inner
             && op.req == 0
             && !self.general
+            && ip.req & op.set != 0
             && matches!(ip.node, JNode::Scan { .. } | JNode::Join { .. });
         let sourced = self.general
             && matches!(ex.jt, Jt::Inner | Jt::Left)
@@ -3717,57 +3941,8 @@ impl Search<'_, '_, '_> {
             .copied()
             .filter(|c| !enforced.contains(c))
             .collect();
-        // get_joinrel_parampathinfo's equivalence classes: a class's clause between the
-        // parameters and the join that the inner path enforces is replaced by one between
-        // the parameters and the outer side's member (else nothing would equate those).
         if param_join {
-            let members = self.ec_members();
-            let in_set = |g: usize, s: u32| (1u32 << self.leaf_of[g]) & s != 0;
-            let mut ecs: Vec<usize> = Vec::new();
-            for &g in &members {
-                if !ecs.contains(&self.ec[g]) {
-                    ecs.push(self.ec[g]);
-                }
-            }
-            for e in ecs {
-                let first = |s: u32| members.iter().copied().find(|&g| self.ec[g] == e && in_set(g, s));
-                let (Some(x), Some(y)) = (first(req_all), first(ex.set)) else { continue };
-                if !in_set(y, ip.set) {
-                    continue;
-                }
-                let Some(z) = first(op.set) else { continue };
-                let found = (0..self.clauses.len()).find(|&j| {
-                    self.clauses[j].eq.as_ref().is_some_and(|(p, q, _, _)| {
-                        let (p, q) = (key_col(p), key_col(q));
-                        (p == Some(x) && q == Some(z)) || (p == Some(z) && q == Some(x))
-                    })
-                });
-                if let Some(j) = found
-                    && !quals.contains(&j)
-                    && !enforced.contains(&j)
-                {
-                    quals.push(j);
-                }
-            }
-        }
-        // (A join path parameterized by an outer join's left side checks the join clauses
-        // movable into it from there: get_joinrel_parampathinfo.)
-        if param_join && !star {
-            for (ci, c) in self.clauses.iter().enumerate() {
-                if quals.contains(&ci)
-                    || enforced.contains(&ci)
-                    || c.leaves & !(ex.set | req_all) != 0
-                    || c.leaves & req_all == 0
-                    || c.leaves & ex.set == 0
-                    || c.expr.is_volatile()
-                    || (0..self.leaves.len())
-                        .filter(|l| c.leaves & ex.set & (1u32 << l) != 0)
-                        .any(|l| !self.movable_to(ci, l))
-                {
-                    continue;
-                }
-                quals.push(ci);
-            }
+            self.param_clauses(ex.set, req_all, op, ip, star, &enforced, &mut quals);
         }
         let full = (1u32 << self.leaves.len()) - 1;
         let post = if ex.set == full { self.post } else { 0.0 };
@@ -3830,16 +4005,7 @@ impl Search<'_, '_, '_> {
                 req,
                 set: ex.set,
             };
-            let params = &mut self.rels[ri].param;
-            match params.iter().position(|o| o.req == req) {
-                Some(i) if jp.disabled < params[i].disabled
-                    || (jp.disabled == params[i].disabled && jp.total < params[i].total) =>
-                {
-                    params[i] = jp
-                }
-                Some(_) => {}
-                None => params.push(jp),
-            }
+            self.add_join_path(ri, jp);
             return;
         }
         let jp = JP {
@@ -3875,12 +4041,15 @@ impl Search<'_, '_, '_> {
 
     fn try_hash(&mut self, ri: usize, op: &JP, ip: &JP, hash: &[(usize, bool)], ex: &Extra) {
         let keys: Vec<usize> = hash.iter().map(|h| h.0).collect();
-        let quals: Vec<usize> = ex
+        let mut quals: Vec<usize> = ex
             .restrict
             .iter()
             .copied()
             .filter(|c| !keys.contains(c))
             .collect();
+        let Some((req, prows)) = self.nonnest_param(op, ip, ex, &mut quals, &keys) else {
+            return;
+        };
         let (nb, nbatch) = joins::hash_table_size(ip.rows, ip.width, &self.g);
         let vb = nb as f64 * nbatch as f64;
         let mut bucket = (1.0_f64, 1.0_f64);
@@ -3983,19 +4152,65 @@ impl Search<'_, '_, '_> {
                 semi: ex.semi,
                 indexed: false,
                 scansel: None,
-                rows: ex.rows,
+                rows: prows,
                 batches,
             },
-            rows: ex.rows,
+            rows: prows,
             startup: c.startup,
             total: c.total,
             width: ex.width,
             disabled: c.disabled,
             keys: Vec::new(),
-            req: 0,
+            req,
             set: ex.set,
         };
+        self.add_join_path(ri, jp);
+    }
+
+    /// A hash or merge join path of `op` and `ip` that is still parameterized
+    /// (calc_non_nestloop_required_outer: by what either input is): allowed only by
+    /// relations that may parameterize the join (param_source_rels: its residual LATERAL
+    /// references, an outer join's left side), and then also checking the join clauses
+    /// movable into it (get_joinrel_parampathinfo). The required relations and the rows.
+    fn nonnest_param(
+        &self,
+        op: &JP,
+        ip: &JP,
+        ex: &Extra,
+        quals: &mut Vec<usize>,
+        keys: &[usize],
+    ) -> Option<(u32, f64)> {
+        let req = (op.req | ip.req) & !ex.set;
+        if req == 0 {
+            return Some((0, ex.rows));
+        }
+        if req & !self.param_source_rels(ex.set) != 0 {
+            return None;
+        }
+        let mut enforced: Vec<usize> = enforced_of(ip);
+        enforced.extend(enforced_of(op));
+        quals.retain(|c| !enforced.contains(c));
+        let mut all: Vec<usize> = quals.iter().chain(keys.iter()).copied().collect();
+        self.param_clauses(ex.set, req, op, ip, false, &enforced, &mut all);
+        for &c in &all {
+            if !keys.contains(&c) && !quals.contains(&c) {
+                quals.push(c);
+            }
+        }
+        // (As a parameterized nested loop's: the inputs' rows times the clauses'
+        // selectivity.)
+        let sel: f64 = all.iter().map(|&q| self.clause_sel(&self.clauses[q], None)).product();
+        Some((req, costs::clamp_rows(op.rows * ip.rows * sel)))
+    }
+
+    /// add_path: a parameterized path into the join relation's list of them (compared
+    /// with those of its parameterization only), else into its paths.
+    fn add_join_path(&mut self, ri: usize, jp: JP) {
         let startup = self.startup;
+        if jp.req != 0 {
+            add_jpath_rows(&mut self.rels[ri].param, jp, startup, false);
+            return;
+        }
         add_jpath(&mut self.rels[ri].paths, jp, startup);
     }
 
@@ -4092,12 +4307,15 @@ impl Search<'_, '_, '_> {
         });
         let inner_sort = inner_sort.filter(|k| !ip.keys.starts_with(k));
         let ckeys: Vec<usize> = clauses.iter().map(|c| c.0).collect();
-        let quals: Vec<usize> = ex
+        let mut quals: Vec<usize> = ex
             .restrict
             .iter()
             .copied()
             .filter(|c| !ckeys.contains(c))
             .collect();
+        let Some((req, prows)) = self.nonnest_param(op, ip, ex, &mut quals, &ckeys) else {
+            return;
+        };
         let mut msel = 1.0;
         for &c in &ckeys {
             msel *= self.clause_sel(&self.clauses[c], None);
@@ -4150,20 +4368,19 @@ impl Search<'_, '_, '_> {
                 semi: ex.semi,
                 indexed: false,
                 scansel: Some(scansel),
-                rows: ex.rows,
+                rows: prows,
                 batches: 1,
             },
-            rows: ex.rows,
+            rows: prows,
             startup: c.startup,
             total: c.total,
             width: ex.width,
             disabled: c.disabled,
             keys,
-            req: 0,
+            req,
             set: ex.set,
         };
-        let startup = self.startup;
-        add_jpath(&mut self.rels[ri].paths, jp, startup);
+        self.add_join_path(ri, jp);
     }
 }
 
@@ -4535,6 +4752,40 @@ impl Search<'_, '_, '_> {
     }
 
     fn build_node(&self, p: &JP) -> (Plan, Vec<usize>) {
+        // (A Memoize or Material passes the nested loop's values on to what it reads.)
+        if matches!(p.node, JNode::Memoize { .. } | JNode::Material(_)) {
+            return self.build_path_node(p);
+        }
+        let supplied = self.lateral_supplied.replace(false);
+        let (plan, layout) = self.build_path_node(p);
+        // A parameterized scan or LATERAL item inside a parameterized join, not the inner
+        // side of the nested loop passing its values (a hash or merge join's input, a
+        // nested loop's outer side): the values come from the nested loop above that join,
+        // through a one-row join passing them in as its parameters.
+        match &p.node {
+            JNode::Scan { params, .. } | JNode::Append { params, .. } | JNode::Opaque { params, .. }
+                if !supplied && !params.is_empty() =>
+            {
+                let ps: Vec<Expr> = params.iter().map(|e| self.param_ref(e, &[])).collect();
+                let n = crate::sql::binder::plan_width(&plan);
+                let plan = Plan::Join {
+                    kind: JoinKind::Inner,
+                    left: Arc::new(Plan::One),
+                    right: Arc::new(plan),
+                    cond: None,
+                    hash: None,
+                    params: ps,
+                    nleft: 0,
+                    nright: n,
+                    meta: Box::default(),
+                };
+                (plan, layout)
+            }
+            _ => (plan, layout),
+        }
+    }
+
+    fn build_path_node(&self, p: &JP) -> (Plan, Vec<usize>) {
         match &p.node {
             JNode::Opaque { leaf, merged, .. } => {
                 let l = &self.leaves[*leaf];
@@ -4806,7 +5057,17 @@ impl Search<'_, '_, '_> {
                 if let Some(ps) = &join_params {
                     self.param_stack.borrow_mut().push(ps.clone());
                 }
+                self.lateral_supplied.set(
+                    *method == JoinMethod::NestLoop
+                        && !swapped
+                        && matches!(
+                            &inner.memoized().node,
+                            JNode::Scan { params, .. } | JNode::Append { params, .. } | JNode::Opaque { params, .. }
+                                if !params.is_empty()
+                        ),
+                );
                 let (mut rp, rl) = self.build(rnode);
+                self.lateral_supplied.set(false);
                 if join_params.is_some() {
                     self.param_stack.borrow_mut().pop();
                 }
@@ -4852,8 +5113,11 @@ impl Search<'_, '_, '_> {
                 let nright = rl.len();
                 // At an outer (or semi / anti) join, the clauses pushed down to it are
                 // checked on its result (Postgres's "other quals": the join's Filter).
+                // (So is a clause moved into a parameterized join from above it: one needing
+                // relations outside the join, RINFO_IS_PUSHED_DOWN.)
                 let post_join = |c: usize| {
-                    self.general && *jt != Jt::Inner && self.clauses[c].sj.is_none()
+                    let cl = &self.clauses[c];
+                    self.general && *jt != Jt::Inner && (cl.sj.is_none() || (cl.req | cl.leaves) & !p.set != 0)
                 };
                 let post: Vec<usize> = quals.iter().copied().filter(|&c| post_join(c)).collect();
                 let mut cond: Vec<Expr> = quals
@@ -5021,8 +5285,10 @@ impl Search<'_, '_, '_> {
                         }
                     }
                 }
-                // A parameterized inner scan: the outer values it reads.
+                // A parameterized inner scan: the outer values it reads. (A hash or merge
+                // join passes none: its inputs' values come from a nested loop above.)
                 let params = match &inner.memoized().node {
+                    _ if *method != JoinMethod::NestLoop => Vec::new(),
                     _ if lateral_params.is_some() => lateral_params
                         .as_ref()
                         .unwrap()
@@ -6107,6 +6373,10 @@ impl Planner<'_, '_> {
         {
             return self.plan_lifted(p, l, needed, order, sort_exprs);
         }
+        // The query level's topmost scan/join relation (all_query_rels), when the group
+        // isn't inside another one; what it plans (its items, child joins) isn't.
+        let scanjoin_top = !self.join_nested.get();
+        let _nested = super::FlagScope::set(&self.join_nested, true);
         // (A LATERAL join at the top: only as part of a group with outer joins.)
         let lateral_top = !params.is_empty();
         let mut kind = match &*p {
@@ -6444,6 +6714,7 @@ impl Planner<'_, '_> {
             post: self.post_cost.take(),
             cur_sj: None,
             param_stack: Default::default(),
+            lateral_supplied: Default::default(),
             loop_rows: self.pw_loop_rows.take(),
             phvs,
         };
@@ -6962,7 +7233,21 @@ impl Planner<'_, '_> {
                 }
                 _ => tot,
             };
-            if frac(st, tot, rows) < frac(best.startup, best.total, best.rows) {
+            // (At the query level's topmost scan/join relation the partitioned join has only
+            // Append paths, apply_scanjoin_target_to_paths: the Merge Append competes with
+            // the Append sorted.)
+            let (bst, btot, brows) = match &pwj {
+                Some((_, pw_total, pw_rows, _, _)) if scanjoin_top => {
+                    let limit = match o.limit {
+                        Some((c, off)) if c > 0.0 && off >= 0.0 => Some(c + off),
+                        _ => None,
+                    };
+                    let (sst, stot) = costs::sort_cost(*pw_total, *pw_rows, o.width, limit);
+                    (sst, stot, *pw_rows)
+                }
+                _ => (best.startup, best.total, best.rows),
+            };
+            if frac(st, tot, rows) < frac(bst, btot, brows) {
                 let mut inputs = Vec::new();
                 for c in ordered.iter() {
                     let mut c = c.clone();
@@ -7023,7 +7308,9 @@ impl Planner<'_, '_> {
                 }
                 None => pw < best.total,
             };
-            if cheaper || self.pw_agg_join.get() {
+            // (The topmost scan/join relation, partitioned, keeps only the partitionwise
+            // paths: apply_scanjoin_target_to_paths drops the others.)
+            if cheaper || self.pw_agg_join.get() || scanjoin_top {
                 // (One child join needs no Append: Postgres removes it.)
                 *p = if children.len() == 1 {
                     children.into_iter().next().unwrap()

@@ -315,13 +315,6 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
         _ => phv_at.iter().find(|(c, _)| *c == g).map_or(0, |x| x.1),
     };
     let items = |e: &Expr| e.columns().into_iter().fold(0u32, |m, g| m | item(g));
-    // The items each LATERAL item reads values of.
-    let lateral_deps = |set: u32| {
-        laterals
-            .iter()
-            .filter(|(i, _)| set & (1u32 << i) != 0)
-            .fold(0u32, |m, (_, ps)| m | ps.iter().fold(0, |m, e| m | items(e)))
-    };
     let mut sjs: Vec<Sj> = Vec::new();
     let mut clauses = Vec::new();
     let mut meta = Vec::new();
@@ -345,8 +338,9 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
             | j.pushed.iter().fold(0u32, |m, &g| m | item(g));
         let strict = j.conds.iter().fold(0u32, |m, e| m | strict_items(e, &item));
         let semi = matches!(j.kind, JoinKind::Semi | JoinKind::Anti);
-        // (What the right side's LATERAL items read must be joined before it.)
-        let mut min_l = (clause_items | lateral_deps(j.r)) & j.l;
+        // (Not what the right side's LATERAL items read: a join relation with LATERAL
+        // references left is parameterized by them, join_is_legal's LATERAL checks.)
+        let mut min_l = clause_items & j.l;
         let mut min_r = (clause_items | j.inner) & j.r;
         for o in &sjs {
             if j.l & o.syn_r != 0
@@ -562,11 +556,9 @@ impl Search<'_, '_, '_> {
         if self.phvs.iter().any(|p| a & !p.eval_at == 0 && a != p.eval_at) {
             return true;
         }
-        if self.leaves.iter().enumerate().any(|(l, leaf)| {
-            leaf.lateral
-                .as_ref()
-                .is_some_and(|(_, deps)| a & (1u32 << l) != 0 || deps & a != 0)
-        }) {
+        // (Residual LATERAL references, or a base relation others read LATERAL values
+        // from: its lateral_relids / lateral_referencers.)
+        if self.lateral_relids(a) != 0 || self.lateral_referenced(a) {
             return true;
         }
         self.sjs.iter().any(|s| {

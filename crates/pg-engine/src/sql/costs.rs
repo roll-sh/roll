@@ -1864,10 +1864,12 @@ pub fn function_rows(name: &str, args: &[Expr], srf: bool) -> f64 {
         }
         // (With a time zone.)
         "generate_series" if args.len() == 4 => timestamp_series_rows(&args[..3]).unwrap_or(1000.0),
+        // (array_unnest_support: estimate_array_length, whose default guess is 10.)
         "unnest" if args.len() == 1 => match (c(&args[0]), strip(&args[0])) {
             (Some(Value::Array(a)), _) => a.items.len() as f64,
+            (Some(Value::Null), _) => 0.0,
             (_, Expr::Array(items, _)) => items.len() as f64,
-            _ => 100.0,
+            _ => 10.0,
         },
         _ if srf => 1000.0,
         _ => 1.0,

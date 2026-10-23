@@ -12659,6 +12659,14 @@ impl Builder<'_, '_> {
                 "Materialize" => InKind::Material,
                 "Sort" => InKind::Sort,
                 "Nested Loop" | "Merge Join" => InKind::Join,
+                // (A parameterized hash join under a nested loop: a single batch keeps its
+                // table for a rescan, cost_rescan.)
+                "Hash Join" => InKind::HashJoin(
+                    x.children
+                        .iter()
+                        .find(|c| c.node_type == "Hash")
+                        .map_or(1, |h| joins::hash_table_size(h.rows, h.width, &g).1),
+                ),
                 "Seq Scan" | "Bitmap Heap Scan" | "Values Scan" | "Subquery Scan" | "Append" => {
                     InKind::NoMark
                 }

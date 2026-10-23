@@ -1,0 +1,267 @@
+> CREATE TABLE a17_i8 (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> INSERT INTO a17_i8 VALUES (123, 456), (123, 4567890123456789), (4567890123456789, 123),
+>   (4567890123456789, 4567890123456789), (4567890123456789, -4567890123456789)
+-- INSERT 0 5
+
+> CREATE TABLE a17_i4 (f1 int4)
+-- CREATE TABLE
+
+> INSERT INTO a17_i4 VALUES (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> ANALYZE a17_i8
+-- ANALYZE
+
+> ANALYZE a17_i4
+-- ANALYZE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM generate_series(1, 3) x, generate_series(1, 3) y,
+>   JSON_TABLE(jsonb '[[1,2,3],[2,3,4,5],[3,4,5,6]]', 'strict $[*] ? (@[*] <= $x)'
+>     PASSING x AS x, y AS y
+>     COLUMNS (y text FORMAT JSON PATH '$',
+>       NESTED PATH 'strict $[*] ? (@ == $y)' COLUMNS (z int PATH '$'))) jt
+QUERY PLAN:text
+Nested Loop
+  Output: x.x, y.y, jt.y, jt.z
+  ->  Function Scan on pg_catalog.generate_series y
+        Output: y.y
+        Function Call: generate_series(1, 3)
+  ->  Nested Loop
+        Output: x.x, jt.y, jt.z
+        ->  Function Scan on pg_catalog.generate_series x
+              Output: x.x
+              Function Call: generate_series(1, 3)
+        ->  Table Function Scan on "json_table" jt
+              Output: jt.y, jt.z
+              Table Function Call: JSON_TABLE('[[1, 2, 3], [2, 3, 4, 5], [3, 4, 5, 6]]'::jsonb, 'strict $[*]?(@[*] <= $"x")' AS json_table_path_0 PASSING x.x AS x, y.y AS y COLUMNS (y text FORMAT JSON PATH '$' WITHOUT WRAPPER KEEP QUOTES, NESTED PATH 'strict $[*]?(@ == $"y")' AS json_table_path_1 COLUMNS (z integer PATH '$')))
+-- EXPLAIN
+
+> EXPLAIN
+> SELECT * FROM generate_series(1, 3) x, generate_series(1, 3) y,
+>   JSON_TABLE(jsonb '[[1,2,3],[2,3,4,5],[3,4,5,6]]', 'strict $[*] ? (@[*] <= $x)'
+>     PASSING x AS x, y AS y
+>     COLUMNS (y text FORMAT JSON PATH '$',
+>       NESTED PATH 'strict $[*] ? (@ == $y)' COLUMNS (z int PATH '$'))) jt
+QUERY PLAN:text
+Nested Loop  (cost=0.01..27.20 rows=900 width=44)
+  ->  Function Scan on generate_series y  (cost=0.00..0.03 rows=3 width=4)
+  ->  Nested Loop  (cost=0.01..6.05 rows=300 width=40)
+        ->  Function Scan on generate_series x  (cost=0.00..0.03 rows=3 width=4)
+        ->  Table Function Scan on "json_table" jt  (cost=0.01..1.01 rows=100 width=36)
+-- EXPLAIN
+
+> SELECT * FROM generate_series(1, 3) x, generate_series(1, 3) y,
+>   JSON_TABLE(jsonb '[[1,2,3],[2,3,4,5],[3,4,5,6]]', 'strict $[*] ? (@[*] <= $x)'
+>     PASSING x AS x, y AS y
+>     COLUMNS (y text FORMAT JSON PATH '$',
+>       NESTED PATH 'strict $[*] ? (@ == $y)' COLUMNS (z int PATH '$'))) jt
+x:int4 | y:int4 | y:text | z:int4
+1 | 1 | [1, 2, 3] | 1
+1 | 2 | [1, 2, 3] | 2
+1 | 3 | [1, 2, 3] | 3
+2 | 1 | [1, 2, 3] | 1
+2 | 1 | [2, 3, 4, 5] | NULL
+2 | 2 | [1, 2, 3] | 2
+2 | 2 | [2, 3, 4, 5] | 2
+2 | 3 | [1, 2, 3] | 3
+2 | 3 | [2, 3, 4, 5] | 3
+3 | 1 | [1, 2, 3] | 1
+3 | 1 | [2, 3, 4, 5] | NULL
+3 | 1 | [3, 4, 5, 6] | NULL
+3 | 2 | [1, 2, 3] | 2
+3 | 2 | [2, 3, 4, 5] | 2
+3 | 2 | [3, 4, 5, 6] | NULL
+3 | 3 | [1, 2, 3] | 3
+3 | 3 | [2, 3, 4, 5] | 3
+3 | 3 | [3, 4, 5, 6] | 3
+-- SELECT 18
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM (VALUES (1, array[10,20]), (2, array[20,30])) AS v1(v1x, v1ys)
+>   LEFT JOIN (VALUES (1, 10), (2, 20)) AS v2(v2x, v2y) ON v2x = v1x
+>   LEFT JOIN unnest(v1ys) AS u1(u1y) ON u1y = v2y
+QUERY PLAN:text
+Nested Loop Left Join
+  ->  Values Scan on "*VALUES*"
+  ->  Hash Right Join
+        Hash Cond: (u1.u1y = "*VALUES*_1".column2)
+        Filter: ("*VALUES*_1".column1 = "*VALUES*".column1)
+        ->  Function Scan on unnest u1
+        ->  Hash
+              ->  Values Scan on "*VALUES*_1"
+-- EXPLAIN
+
+> SELECT * FROM (VALUES (1, array[10,20]), (2, array[20,30])) AS v1(v1x, v1ys)
+>   LEFT JOIN (VALUES (1, 10), (2, 20)) AS v2(v2x, v2y) ON v2x = v1x
+>   LEFT JOIN unnest(v1ys) AS u1(u1y) ON u1y = v2y
+>   ORDER BY 1, 3, 5
+v1x:int4 | v1ys:int4[] | v2x:int4 | v2y:int4 | u1y:int4
+1 | {10,20} | 1 | 10 | 10
+2 | {20,30} | 2 | 20 | 20
+-- SELECT 2
+
+> CREATE TABLE a17_arr (k int, a int[])
+-- CREATE TABLE
+
+> EXPLAIN SELECT * FROM a17_arr t, unnest(t.a) u
+QUERY PLAN:text
+Nested Loop  (cost=0.00..276.70 rows=12700 width=40)
+  ->  Seq Scan on a17_arr t  (cost=0.00..22.70 rows=1270 width=36)
+  ->  Function Scan on unnest u  (cost=0.00..0.10 rows=10 width=4)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM unnest(NULL::int[]) u
+QUERY PLAN:text
+Function Scan on unnest u  (cost=0.00..0.01 rows=1 width=4)
+-- EXPLAIN
+
+> DROP TABLE a17_arr
+-- DROP TABLE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a17_i8 a,
+>   a17_i8 x LEFT JOIN LATERAL (SELECT a.q1 FROM a17_i4 y) ss(z) ON x.q2 = ss.z
+>   ORDER BY a.q1, a.q2, x.q1, x.q2, ss.z
+QUERY PLAN:text
+Sort
+  Output: a.q1, a.q2, x.q1, x.q2, (a.q1)
+  Sort Key: a.q1, a.q2, x.q1, x.q2, (a.q1)
+  ->  Nested Loop
+        Output: a.q1, a.q2, x.q1, x.q2, (a.q1)
+        ->  Seq Scan on public.a17_i8 a
+              Output: a.q1, a.q2
+        ->  Hash Left Join
+              Output: x.q1, x.q2, (a.q1)
+              Hash Cond: (x.q2 = (a.q1))
+              ->  Seq Scan on public.a17_i8 x
+                    Output: x.q1, x.q2
+              ->  Hash
+                    Output: (a.q1)
+                    ->  Seq Scan on public.a17_i4 y
+                          Output: a.q1
+-- EXPLAIN
+
+> SELECT * FROM a17_i8 a,
+>   a17_i8 x LEFT JOIN LATERAL (SELECT a.q1 FROM a17_i4 y) ss(z) ON x.q2 = ss.z
+>   ORDER BY a.q1, a.q2, x.q1, x.q2, ss.z
+q1:int8 | q2:int8 | q1:int8 | q2:int8 | z:int8
+123 | 456 | 123 | 456 | NULL
+123 | 456 | 123 | 4567890123456789 | NULL
+123 | 456 | 4567890123456789 | -4567890123456789 | NULL
+123 | 456 | 4567890123456789 | 123 | 123
+123 | 456 | 4567890123456789 | 123 | 123
+123 | 456 | 4567890123456789 | 123 | 123
+123 | 456 | 4567890123456789 | 123 | 123
+123 | 456 | 4567890123456789 | 123 | 123
+123 | 456 | 4567890123456789 | 4567890123456789 | NULL
+123 | 4567890123456789 | 123 | 456 | NULL
+123 | 4567890123456789 | 123 | 4567890123456789 | NULL
+123 | 4567890123456789 | 4567890123456789 | -4567890123456789 | NULL
+123 | 4567890123456789 | 4567890123456789 | 123 | 123
+123 | 4567890123456789 | 4567890123456789 | 123 | 123
+123 | 4567890123456789 | 4567890123456789 | 123 | 123
+123 | 4567890123456789 | 4567890123456789 | 123 | 123
+123 | 4567890123456789 | 4567890123456789 | 123 | 123
+123 | 4567890123456789 | 4567890123456789 | 4567890123456789 | NULL
+4567890123456789 | -4567890123456789 | 123 | 456 | NULL
+4567890123456789 | -4567890123456789 | 123 | 4567890123456789 | 4567890123456789
+4567890123456789 | -4567890123456789 | 123 | 4567890123456789 | 4567890123456789
+4567890123456789 | -4567890123456789 | 123 | 4567890123456789 | 4567890123456789
+4567890123456789 | -4567890123456789 | 123 | 4567890123456789 | 4567890123456789
+4567890123456789 | -4567890123456789 | 123 | 4567890123456789 | 4567890123456789
+4567890123456789 | -4567890123456789 | 4567890123456789 | -4567890123456789 | NULL
+4567890123456789 | -4567890123456789 | 4567890123456789 | 123 | NULL
+4567890123456789 | -4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | -4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | -4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | -4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | -4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | 123 | 123 | 456 | NULL
+4567890123456789 | 123 | 123 | 4567890123456789 | 4567890123456789
+4567890123456789 | 123 | 123 | 4567890123456789 | 4567890123456789
+4567890123456789 | 123 | 123 | 4567890123456789 | 4567890123456789
+4567890123456789 | 123 | 123 | 4567890123456789 | 4567890123456789
+4567890123456789 | 123 | 123 | 4567890123456789 | 4567890123456789
+4567890123456789 | 123 | 4567890123456789 | -4567890123456789 | NULL
+4567890123456789 | 123 | 4567890123456789 | 123 | NULL
+4567890123456789 | 123 | 4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | 123 | 4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | 123 | 4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | 123 | 4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | 123 | 4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789 | 123 | 456 | NULL
+4567890123456789 | 4567890123456789 | 123 | 4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789 | 123 | 4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789 | 123 | 4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789 | 123 | 4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789 | 123 | 4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789 | 4567890123456789 | -4567890123456789 | NULL
+4567890123456789 | 4567890123456789 | 4567890123456789 | 123 | NULL
+4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789
+-- SELECT 57
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM (SELECT 1 AS x OFFSET 0) x CROSS JOIN (SELECT 2 AS y OFFSET 0) y
+>   LEFT JOIN LATERAL (SELECT * FROM (SELECT 3 AS z OFFSET 0) z WHERE z.z = x.x) zz ON zz.z = y.y
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: (1), (2), (3)
+  Join Filter: (((3) = (1)) AND ((3) = (2)))
+  ->  Nested Loop
+        Output: (1), (2)
+        ->  Result
+              Output: 1
+        ->  Result
+              Output: 2
+  ->  Result
+        Output: 3
+-- EXPLAIN
+
+> SELECT * FROM (VALUES (1, array[1,2,3]), (2, array[2,5])) AS a(k, arr)
+>   CROSS JOIN (VALUES (2), (3)) AS b(m)
+>   LEFT JOIN LATERAL unnest(a.arr) AS u(e) ON u.e = b.m
+>   ORDER BY 1, 3, 4
+k:int4 | arr:int4[] | m:int4 | e:int4
+1 | {1,2,3} | 2 | 2
+1 | {1,2,3} | 3 | 3
+2 | {2,5} | 2 | 2
+2 | {2,5} | 3 | NULL
+-- SELECT 4
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a17_i4 a, LATERAL (SELECT a.f1 + 1 AS g OFFSET 0) b,
+>   LATERAL (SELECT b.g * 2 AS h OFFSET 0) c, a17_i8 d
+>   WHERE d.q1 = c.h
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (((((a.f1 + 1)) * 2)) = d.q1)
+  ->  Nested Loop
+        ->  Nested Loop
+              ->  Seq Scan on a17_i4 a
+              ->  Result
+        ->  Result
+  ->  Hash
+        ->  Seq Scan on a17_i8 d
+-- EXPLAIN
+
+> SELECT * FROM a17_i4 a, LATERAL (SELECT a.f1 + 1 AS g OFFSET 0) b,
+>   LATERAL (SELECT b.g * 2 AS h OFFSET 0) c, a17_i8 d
+>   WHERE abs(a.f1) < 1000000 AND (d.q1 = c.h OR c.h = 2) ORDER BY 1, 4, 5
+f1:int4 | g:int4 | h:int4 | q1:int8 | q2:int8
+0 | 1 | 2 | 123 | 456
+0 | 1 | 2 | 123 | 4567890123456789
+0 | 1 | 2 | 4567890123456789 | -4567890123456789
+0 | 1 | 2 | 4567890123456789 | 123
+0 | 1 | 2 | 4567890123456789 | 4567890123456789
+-- SELECT 5
+
+> DROP TABLE a17_i8, a17_i4
+-- DROP TABLE
+
