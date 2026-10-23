@@ -178,7 +178,12 @@ Prefix scratch objects, and drop scratch databases and roles afterwards.
 - **`CARGO_BUILD_JOBS=2`**, and wrap long cargo commands with a timeout.
 - **Disk:** on macOS the default `split-debuginfo = unpacked` leaves every build's `*.o` files in
   `target/debug/deps`. 1.5 million of them (~500 GB) once filled the disk. `heavy.sh` prunes
-  ones older than 4 hours and drops `target/debug/incremental` below 15 GB free.
+  ones older than 4 hours. It also builds with `CARGO_PROFILE_DEV_DEBUG=line-tables-only`
+  (full debuginfo made each test binary ~400 MB and a worktree's target ~15 GB), drops
+  `target/debug/incremental` once it passes `HEAVY_MAX_INCREMENTAL_GB` (3) or the disk runs low,
+  and waits instead of starting a job while less than `HEAVY_MIN_FREE_GB` (30) is free. The disk
+  is shared with other projects: delete a finished worktree's `target/` and your `/tmp` and
+  `~/.cache` data when you're done.
 - Stop any engine you start after each run; never kill processes, drop databases or delete
   files you didn't create.
 
