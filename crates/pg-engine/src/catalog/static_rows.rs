@@ -93,10 +93,26 @@ pub fn rows(table: SysTable) -> Arc<Vec<Row>> {
     rows_of(table)
 }
 
+static CACHE: OnceLock<Mutex<HashMap<u32, Arc<Vec<Row>>>>> = OnceLock::new();
+
+/// The cache's lock. A panic while another thread held it (poisoning) leaves its map whole:
+/// the critical sections are one lookup or one insert.
+fn cache() -> std::sync::MutexGuard<'static, HashMap<u32, Arc<Vec<Row>>>> {
+    CACHE.get_or_init(Default::default).lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Poison the cache's lock (a thread panics holding it). For tests.
+#[doc(hidden)]
+pub fn poison_cache_for_test() {
+    let _ = std::thread::spawn(|| {
+        let _g = cache();
+        panic!("test panic holding the static rows cache");
+    })
+    .join();
+}
+
 fn rows_of(table: SysTable) -> Arc<Vec<Row>> {
-    static CACHE: OnceLock<Mutex<HashMap<u32, Arc<Vec<Row>>>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(Default::default);
-    if let Some(r) = cache.lock().unwrap().get(&table.oid()) {
+    if let Some(r) = cache().get(&table.oid()) {
         return r.clone();
     }
     let cols = table.columns();
@@ -120,7 +136,7 @@ fn rows_of(table: SysTable) -> Arc<Vec<Row>> {
         type_stat_values(&mut parsed);
     }
     let parsed = Arc::new(parsed);
-    cache.lock().unwrap().insert(table.oid(), parsed.clone());
+    cache().insert(table.oid(), parsed.clone());
     parsed
 }
 

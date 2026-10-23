@@ -749,9 +749,21 @@ fn synonym_init(options: &[DictOption]) -> Result<Dict> {
 /// Initialized dictionaries, by oid and the definition they were built from.
 type DictCache = HashMap<u32, (u32, Vec<DictOption>, Arc<Dict>)>;
 
-fn dict_cache() -> &'static Mutex<DictCache> {
+/// The dictionary cache's lock. A panic while another thread held it (poisoning) leaves the
+/// map whole: the critical sections are one lookup or one insert.
+fn dict_cache() -> std::sync::MutexGuard<'static, DictCache> {
     static CACHE: OnceLock<Mutex<DictCache>> = OnceLock::new();
-    CACHE.get_or_init(Default::default)
+    CACHE.get_or_init(Default::default).lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Poison the dictionary cache's lock (a thread panics holding it). For tests.
+#[doc(hidden)]
+pub fn poison_dict_cache_for_test() {
+    let _ = std::thread::spawn(|| {
+        let _g = dict_cache();
+        panic!("test panic holding the text search dictionary cache");
+    })
+    .join();
 }
 
 /// `lookup_ts_dictionary_cache`.
@@ -761,7 +773,7 @@ pub fn lookup_dict(lookup: &dyn TsLookup, oid: u32) -> Result<Arc<Dict>> {
             "cache lookup failed for text search dictionary {oid}"
         )));
     };
-    if let Some((t, o, d)) = dict_cache().lock().unwrap().get(&oid)
+    if let Some((t, o, d)) = dict_cache().get(&oid)
         && *t == def.template
         && *o == def.options
     {
@@ -771,10 +783,7 @@ pub fn lookup_dict(lookup: &dyn TsLookup, oid: u32) -> Result<Arc<Dict>> {
         .template(def.template)
         .map_or(def.template, |t| template_kind(&t));
     let d = Arc::new(Dict::init(kind, &def.options, lookup)?);
-    dict_cache()
-        .lock()
-        .unwrap()
-        .insert(oid, (def.template, def.options.clone(), d.clone()));
+    dict_cache().insert(oid, (def.template, def.options.clone(), d.clone()));
     Ok(d)
 }
 

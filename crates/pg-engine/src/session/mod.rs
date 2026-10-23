@@ -648,6 +648,9 @@ impl Session {
 
     /// Parse a query string into statements.
     pub fn parse(&mut self, sql: &str) -> Result<Vec<Arc<Prepared>>> {
+        // (`pg_temp` is this session's while it binds, on a thread another session may
+        // have run on: an embedder's Parse / Describe before any execute.)
+        crate::catalog::set_session_temp_schema(&self.state.temp_schema());
         self.sync_lex();
         let parsed = crate::sql::parse::parse_live(sql);
         self.take_lex_warnings();
@@ -1278,6 +1281,9 @@ impl Session {
         sql: &str,
         param_oids: &[u32],
     ) -> Result<Arc<Prepared>> {
+        // (`pg_temp` is this session's while it binds, on a thread another session may
+        // have run on: an embedder's Parse / Describe before any execute.)
+        crate::catalog::set_session_temp_schema(&self.state.temp_schema());
         if !name.is_empty() && self.prepared.contains_key(name) {
             return Err(Error::new(
                 code::DUPLICATE_PREPARED_STATEMENT,
@@ -1429,6 +1435,9 @@ impl Session {
 
     /// Result columns of a statement, without running it.
     pub fn describe(&mut self, p: &Arc<Prepared>) -> Result<Option<Vec<OutCol>>> {
+        // (`pg_temp` is this session's while it binds, on a thread another session may
+        // have run on: an embedder's Parse / Describe before any execute.)
+        crate::catalog::set_session_temp_schema(&self.state.temp_schema());
         let Some(stmt) = p.stmt.clone() else {
             return Ok(None);
         };

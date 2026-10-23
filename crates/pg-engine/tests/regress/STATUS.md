@@ -299,11 +299,12 @@ Open, found on the way:
   plan's address can come back for another during the same planning (agents 8 / 12's areas).
   `lifted`: fixed by agent 8 (round 14 section); `pw_joins` still open.
 - `catalog::SESSION_TEMP_SCHEMA` is set by `execute_with`: an embedder's Parse / Describe on a
-  thread that ran another session, before this one executed anything, resolves `pg_temp` to
-  that session's schema. (The server runs a thread per connection.)
+  thread that ran another session, before this one executed anything, resolved `pg_temp` to
+  that session's schema. Fixed (agent 11): `parse`, `parse_message` and `describe` set it too.
 - Process-wide caches behind a `std::sync::Mutex` that `unwrap` its lock (`static_rows`,
   text search dictionaries) would panic in every session after a panic while one held it
-  (poisoned); their critical sections only look up and insert.
+  (poisoned); their critical sections only look up and insert. Fixed (agent 11): both take a
+  poisoned lock's map as it is. Test: tests/poisoned_caches.rs (also the `pg_temp` case).
 
 ## Round 15, agent 9 (full-run ALTER TABLE "stalls", harness timeouts, row locks at the level's top)
 
