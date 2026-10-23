@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51030 (**99.77%**) |
-| units differing | 120 |
+| units matching | 51031 (**99.77%**) |
+| units differing | 119 |
 | files fully matching | 214 |
 | engine output == expected/*.out (pg_regress "ok") | 177 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 116 | 96.7% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 115 | 96.6% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.5% |
 | by design (a parallel plan's combine function) | 1 | 0.8% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 116 units
-join (65), partition_join (18), partition_prune (3), subselect (2), collate.icu.utf8 (4), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
+### EXPLAIN (group C1) — 115 units
+join (65), partition_join (18), partition_prune (2), subselect (2), collate.icu.utf8 (4), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -960,6 +960,7 @@ none broken (test_setup 7 differs in some runs: the shared reference cluster's t
 | partition_prune | 377, 378, 380, 381, 383 |
 | aggregates | second batch: 342, 505, 507 |
 | incremental_sort | third batch: 99, 100, 101, 102, 106, 107 |
+| partition_prune | fourth batch: 652 |
 
 What changed:
 
@@ -1034,17 +1035,27 @@ What changed:
   `COLLATE "C"` (the name's collation wins over the default) and shows it. Measured in the
   subset above plus returning, merge, insert_conflict and rangefuncs, rebased onto 27da13f:
   6 units fixed, none broken (rangefuncs 422 too, already fixed upstream by then).
+- Fourth batch (partition_prune 652): a UNION ALL arm kept a subquery charges its InitPlans
+  to its partial plan too (SS_charge_for_initplans: every path of the level), so it starts
+  later. A Parallel Append's members costing the same keep their relids' order
+  (append_startup_cost_compare / append_total_cost_compare's bms_compare, `ExNode::rank`): a
+  query level's own UNION ALL takes its leftmost arm's entry as the appendrel's parent, the
+  arm a copy after the others (flatten_simple_union_all), and arms pulled up bring their
+  relations after all the arms' entries. setrefs names the subquery arms' relations as it
+  reaches them, in the final plan's order: when a Parallel Append reorders the arms, EXPLAIN
+  names them again in its order (`arm_orders`, the build run again as for partitionwise
+  groupings). Measured in the same subset on 23e447c: 1 unit fixed, none broken.
+  Seen while probing, not in the suite: a UNION ALL of three such arms stays one Append of
+  them all in Postgres (the engine nests the first two); a one-table arm without quals
+  pulled up beside them names its parent and partitions first.
 
 Goldens added: `tests/sql/a7_partial_paths.sql`, `a7_partial_joins.sql`; second batch:
-`a7_parallel_aggs.sql`; third batch: `a7_lateral_gather.sql`.
+`a7_parallel_aggs.sql`; third batch: `a7_lateral_gather.sql`; fourth batch:
+`a7_union_arms.sql`.
 
 Still open in these files, and why:
 
 - select_parallel 132 (a LATERAL subquery with ORDER BY).
-- partition_prune 652: the shape matches; the two arms' order and names differ. Postgres
-  appends the UNION ALL's leftmost arm as the last range table entry (flatten_simple_union_all),
-  so the other arm's relations take the lower alias numbers (`listp_1`) and, the Parallel
-  Append's members costing the same, come first (append_total_cost_compare's relids).
 - Cosmetic: a partial nested loop's Memoize keeps the serial path's rescan costs (Postgres
   costs it for the partial outer rows: memoize 67's costs); a Gather over an Append keeps the
   partial rows times the divisor.
@@ -2296,7 +2307,7 @@ produces no units on Linux (skipped by the file itself).
 | with | 307 | 303 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (4) |
 | xml | 281 | 281 | 100% | yes | yes |  |
 | partition_join | 614 | 596 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (18) |
-| partition_prune | 771 | 768 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
+| partition_prune | 771 | 769 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |
 | indexing | 645 | 645 | 100% | yes | yes |  |

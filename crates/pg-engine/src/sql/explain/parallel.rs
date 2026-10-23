@@ -940,16 +940,19 @@ impl Builder<'_, '_> {
         if aware {
             n.title = "Parallel Append".into();
             // Members run whole by descending total cost, then the partial ones by
-            // descending startup cost (members in order when equal).
+            // descending startup cost (in their relids' order when equal:
+            // append_total_cost_compare, append_startup_cost_compare).
             whole.sort_by(|a, b| {
                 b.total_cost
                     .total_cmp(&a.total_cost)
                     .then(b.startup_cost.total_cmp(&a.startup_cost))
+                    .then(a.rank.cmp(&b.rank))
             });
             partial.sort_by(|a, b| {
                 b.startup_cost
                     .total_cmp(&a.startup_cost)
                     .then(b.total_cost.total_cmp(&a.total_cost))
+                    .then(a.rank.cmp(&b.rank))
             });
             let div = cfg.divisor(workers);
             let first_partial = whole.len();

@@ -441,6 +441,12 @@ struct ExNode {
     charged: bool,
     /// An EXISTS InitPlan: it reads its first row only (cost_subplan charges that).
     exists_init: bool,
+    /// An Append member's place in its relids order: a Parallel Append's members costing
+    /// the same keep it (append_startup_cost_compare's bms_compare).
+    rank: usize,
+    /// A UNION ALL arm kept a subquery: its plan (0: not one). Its relations are named as
+    /// setrefs reaches it, in the order the final plan has the arms.
+    arm: usize,
     children: Vec<ExNode>,
     subplans: Vec<ExNode>,
     /// A parallel-aware node (Parallel Seq Scan, Parallel Append, …).
@@ -1717,15 +1723,18 @@ fn assign_refnames(root: &Plan) -> (HashMap<usize, String>, usize) {
 /// The same, leaving out the members of inheritance Appends that pruning when the executor
 /// starts removes (`ctx`): EXPLAIN names only the relations the plan still scans.
 fn assign_refnames_in(root: &Plan, ctx: Option<&ExecCtx>) -> (HashMap<usize, String>, usize) {
-    assign_refnames_skip(root, ctx, &[])
+    assign_refnames_skip(root, ctx, &[], &[])
 }
 
 /// The same, the inheritance Appends at `skip` (grouped partitionwise) taking no name:
 /// their members are the parent's scans then.
+/// `orders`: UNION ALL arms kept subqueries, in the order the final plan has them (a
+/// Parallel Append's, by cost): named in that order.
 fn assign_refnames_skip(
     root: &Plan,
     ctx: Option<&ExecCtx>,
     skip: &[usize],
+    orders: &[Vec<usize>],
 ) -> (HashMap<usize, String>, usize) {
     let mut out = HashMap::new();
     let mut results = 0;
@@ -2009,6 +2018,20 @@ fn assign_refnames_skip(
                 later.extend(ctes.iter().map(|(_, c)| &**c));
             }
             let mut inputs = plan_inputs(p);
+            if let Plan::Append { inh: None, .. } = p {
+                for order in orders {
+                    let at: Vec<usize> = (0..inputs.len()).filter(|&k| order.contains(&addr(inputs[k]))).collect();
+                    if at.len() == order.len() {
+                        let moved: Vec<&Arc<Plan>> = order
+                            .iter()
+                            .filter_map(|o| inputs.iter().find(|i| addr(i) == *o).copied())
+                            .collect();
+                        for (k, m) in at.into_iter().zip(moved) {
+                            inputs[k] = m;
+                        }
+                    }
+                }
+            }
             if matches!(p, Plan::Join { meta, .. } if meta.from_call.is_some()) {
                 inputs.clear();
             }
@@ -2199,6 +2222,17 @@ fn assign_refnames_skip(
         }
     }
     (out, results)
+}
+
+/// The UNION ALL arms kept subqueries of each Append of the final plan, in its order.
+fn arm_orders(n: &ExNode, out: &mut Vec<Vec<usize>>) {
+    let arms: Vec<usize> = n.children.iter().map(|c| c.arm).filter(|a| *a != 0).collect();
+    if n.node_type == "Append" && arms.len() > 1 {
+        out.push(arms);
+    }
+    for c in n.children.iter().chain(&n.initplans).chain(&n.subplans) {
+        arm_orders(c, out);
+    }
 }
 
 /// The collation a grouping key of an aggregation over `input` groups (and sorts) under,
@@ -5073,7 +5107,7 @@ impl Builder<'_, '_> {
                     next = a.alt.take();
                     alts.push(*a);
                 }
-                if let Some(i) = alts.iter().position(|a| sorted_on(a)) {
+                if let Some(i) = alts.iter().position(&sorted_on) {
                     let mut sn = ExNode::new("Sort");
                     self.sort_costs(&mut sn, &c.node);
                     let alt = &alts[i];
@@ -6064,7 +6098,12 @@ impl Builder<'_, '_> {
                     }
                     b
                 } else {
-                    let mut b = self.append_of(&arms, inh.is_some());
+                    // (flatten_simple_union_all: a query level's own UNION ALL takes its
+                    // leftmost arm's entry as the appendrel's parent, the arm a copy of it
+                    // after the others.)
+                    let leftmost_last = matches!(&**p, Plan::Append { alias: Some(a), .. } if a == "*SELECT* 1")
+                        && arms.first().is_some_and(|a| Arc::ptr_eq(a, &inputs[0]));
+                    let mut b = self.append_of_ranked(&arms, inh.is_some(), leftmost_last);
                     // (The plan was made, and costed, for every member: pruning removes
                     // them only as the executor starts.)
                     if inh.is_some() && arms.len() < inputs.len() {
@@ -7991,6 +8030,12 @@ impl Builder<'_, '_> {
     }
 
     fn append_of(&mut self, arms: &[&Arc<Plan>], inh: bool) -> Built {
+        self.append_of_ranked(arms, inh, false)
+    }
+
+    /// `leftmost_last`: the first arm's range table entry comes after the others'
+    /// (flatten_simple_union_all).
+    fn append_of_ranked(&mut self, arms: &[&Arc<Plan>], inh: bool, leftmost_last: bool) -> Built {
         let mut n = ExNode::new("Append");
         // (A partitionwise join's child joins: each one's column statistics, for the
         // partitioned tables' columns above.)
@@ -8050,12 +8095,15 @@ impl Builder<'_, '_> {
                     let cost: f64 = inits.iter().filter(|i| !i.charged).map(|i| i.total_cost).sum();
                     c.node.startup_cost += cost;
                     c.node.total_cost += cost;
+                    // (Its partial plan pays for all of them, the ones the level's top
+                    // node already paid for too: every path of the level does.)
+                    let pcost: f64 = inits.iter().map(|i| i.init_charge()).sum();
                     for i in &mut inits {
                         i.charged = true;
                     }
                     if !unsafe_inits && let Some(pt) = c.node.partial.as_deref_mut() {
-                        pt.startup_cost += cost;
-                        pt.total_cost += cost;
+                        pt.startup_cost += pcost;
+                        pt.total_cost += pcost;
                         let mut own = inits.clone();
                         own.append(&mut pt.initplans);
                         pt.initplans = own;
@@ -8068,6 +8116,21 @@ impl Builder<'_, '_> {
                 }
             }
             self.member_scan = saved;
+            // (Its relids: a partition's in bound order; a UNION ALL arm kept a subquery
+            // its own entry's, the leftmost's copy after the others; one pulled up the
+            // relations it brings, after all the arms' entries, in the arms' order.)
+            c.node.rank = if inh || own_level {
+                if leftmost_last && i == 0 { arms.len() } else { i }
+            } else {
+                2 * arms.len() + 1 + i
+            };
+            if own_level {
+                c.node.arm = addr(a);
+            }
+            if let Some(pt) = c.node.partial.as_deref_mut() {
+                pt.rank = c.node.rank;
+                pt.arm = c.node.arm;
+            }
             members.push(c.node.clone());
             c.node.partial = None;
             c.node.out_names = c.exported.iter().map(|k| self.pick(k, Cx::Upper)).collect();
@@ -11623,7 +11686,7 @@ impl Builder<'_, '_> {
         }
         // Or over its inputs gathered from workers (their Gather paths, when cheaper).
         if parts && !lateral {
-            if b1.node.partial.as_deref().is_some_and(&nl_inner_gathered) {
+            if b1.node.partial.as_deref().is_some_and(nl_inner_gathered) {
                 b1.node.partial = None;
             }
             if lgath || rgath {
@@ -15524,8 +15587,10 @@ pub fn explain(
     let mut skip: Vec<usize> = Vec::new();
     union_inh_appends(plan, &mut skip);
     let mut pw_named = false;
+    let mut orders: Vec<Vec<usize>> = Vec::new();
+    let mut ordered = false;
     let root = loop {
-    let (refnames, results) = assign_refnames_skip(plan, Some(ctx), &skip);
+    let (refnames, results) = assign_refnames_skip(plan, Some(ctx), &skip, &orders);
     // ON CONFLICT DO UPDATE's EXCLUDED is a range table entry of its own.
     // (Under a rule's actions too: a CTE of them, a frame.)
     fn excluded_rte(p: &Plan) -> bool {
@@ -15600,6 +15665,17 @@ pub fn explain(
         pw_named = true;
         skip.extend(b.pw_aggs.iter().copied());
         continue;
+    }
+    // (Again when a Parallel Append runs a UNION ALL's arms kept subqueries in another
+    // order than the query lists them: setrefs names their relations in the plan's.)
+    if !ordered {
+        ordered = true;
+        let mut o2 = Vec::new();
+        arm_orders(&root, &mut o2);
+        if !o2.is_empty() && assign_refnames_skip(plan, Some(ctx), &skip, &o2).0 != b.refnames {
+            orders = o2;
+            continue;
+        }
     }
     let root = b.single_copy(plan, root);
     break if o.scroll && !backward_ok(&root) { b.materialize_top(root) } else { root };

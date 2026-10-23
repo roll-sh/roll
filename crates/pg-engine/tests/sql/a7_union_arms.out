@@ -1,0 +1,116 @@
+> CREATE TABLE a7_ua (a int) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE a7_ua_12 PARTITION OF a7_ua FOR VALUES IN (1, 2) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE a7_ua_12_1 PARTITION OF a7_ua_12 FOR VALUES IN (1)
+-- CREATE TABLE
+
+> CREATE TABLE a7_ua_12_2 PARTITION OF a7_ua_12 FOR VALUES IN (2)
+-- CREATE TABLE
+
+> ALTER TABLE a7_ua_12_1 SET (parallel_workers = 0)
+-- ALTER TABLE
+
+> INSERT INTO a7_ua VALUES (1), (2), (2)
+-- INSERT 0 3
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL parallel_setup_cost = 0
+-- SET
+
+> SET LOCAL parallel_tuple_cost = 0
+-- SET
+
+> SET LOCAL max_parallel_workers_per_gather = 2
+-- SET
+
+> SELECT * FROM a7_ua WHERE a = (SELECT 1)
+>   UNION ALL
+> SELECT * FROM a7_ua WHERE a = (SELECT 2)
+> ORDER BY 1
+a:int4
+1
+2
+2
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a7_ua WHERE a = (SELECT 1)
+>   UNION ALL
+> SELECT * FROM a7_ua WHERE a = (SELECT 2)
+QUERY PLAN:text
+Gather
+  Workers Planned: 2
+  ->  Parallel Append
+        ->  Parallel Append
+              InitPlan 2
+                ->  Result
+              ->  Seq Scan on a7_ua_12_1 a7_ua_1
+                    Filter: (a = (InitPlan 2).col1)
+              ->  Parallel Seq Scan on a7_ua_12_2 a7_ua_2
+                    Filter: (a = (InitPlan 2).col1)
+        ->  Parallel Append
+              InitPlan 1
+                ->  Result
+              ->  Seq Scan on a7_ua_12_1 a7_ua_4
+                    Filter: (a = (InitPlan 1).col1)
+              ->  Parallel Seq Scan on a7_ua_12_2 a7_ua_5
+                    Filter: (a = (InitPlan 1).col1)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM (SELECT * FROM a7_ua WHERE a = (SELECT 1)
+>   UNION ALL
+> SELECT * FROM a7_ua WHERE a = (SELECT 2)) s
+QUERY PLAN:text
+Gather
+  Workers Planned: 2
+  ->  Parallel Append
+        ->  Parallel Append
+              InitPlan 1
+                ->  Result
+              ->  Seq Scan on a7_ua_12_1 a7_ua_1
+                    Filter: (a = (InitPlan 1).col1)
+              ->  Parallel Seq Scan on a7_ua_12_2 a7_ua_2
+                    Filter: (a = (InitPlan 1).col1)
+        ->  Parallel Append
+              InitPlan 2
+                ->  Result
+              ->  Seq Scan on a7_ua_12_1 a7_ua_4
+                    Filter: (a = (InitPlan 2).col1)
+              ->  Parallel Seq Scan on a7_ua_12_2 a7_ua_5
+                    Filter: (a = (InitPlan 2).col1)
+-- EXPLAIN
+
+> SET LOCAL max_parallel_workers_per_gather = 0
+-- SET
+
+> EXPLAIN SELECT * FROM a7_ua WHERE a = (SELECT 1)
+>   UNION ALL
+> SELECT * FROM a7_ua WHERE a = (SELECT 2)
+QUERY PLAN:text
+Append  (cost=0.01..168.04 rows=52 width=4)
+  ->  Append  (cost=0.01..83.89 rows=26 width=4)
+        InitPlan 1
+          ->  Result  (cost=0.00..0.01 rows=1 width=4)
+        ->  Seq Scan on a7_ua_12_1 a7_ua_1  (cost=0.00..41.88 rows=13 width=4)
+              Filter: (a = (InitPlan 1).col1)
+        ->  Seq Scan on a7_ua_12_2 a7_ua_2  (cost=0.00..41.88 rows=13 width=4)
+              Filter: (a = (InitPlan 1).col1)
+  ->  Append  (cost=0.01..83.89 rows=26 width=4)
+        InitPlan 2
+          ->  Result  (cost=0.00..0.01 rows=1 width=4)
+        ->  Seq Scan on a7_ua_12_1 a7_ua_4  (cost=0.00..41.88 rows=13 width=4)
+              Filter: (a = (InitPlan 2).col1)
+        ->  Seq Scan on a7_ua_12_2 a7_ua_5  (cost=0.00..41.88 rows=13 width=4)
+              Filter: (a = (InitPlan 2).col1)
+-- EXPLAIN
+
+> COMMIT
+-- COMMIT
+
+> DROP TABLE a7_ua
+-- DROP TABLE
+
