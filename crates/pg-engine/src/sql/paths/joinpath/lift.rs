@@ -96,7 +96,19 @@ fn reads_outer(p: &Plan) -> bool {
     if exprs.iter().any(|e| e.has_outer_refs()) {
         return true;
     }
-    crate::sql::explain::plan_inputs(p).into_iter().any(|c| reads_outer(c))
+    // (A sub-select without parameters of its own, a planner-made MIN / MAX InitPlan's,
+    // reads the level's outer values as its own `Outer(1, …)`.)
+    let mut framed = false;
+    for e in &exprs {
+        e.walk(&mut |x| {
+            if let Expr::Subquery(s) = x
+                && s.params.is_empty()
+            {
+                framed |= reads_outer(&s.plan);
+            }
+        });
+    }
+    framed || crate::sql::explain::plan_inputs(p).into_iter().any(|c| reads_outer(c))
 }
 
 /// A FROM subquery over one table scan: its select list and the scan.

@@ -915,6 +915,11 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
     if let Some(j) = any_join_srf(cat, plan, sub) {
         return Some(j);
     }
+    // A correlated sub-select that isn't a simple one (an aggregate's): convert_ANY_sublink_to_join
+    // makes it a LATERAL subquery ("ANY_subquery") the join reads.
+    if let Some(j) = any_join_lateral(cat, plan, sub) {
+        return Some(j);
+    }
     // The select list (through the binder's casting projection) over one table scan.
     let mut exprs: Option<Vec<Expr>> = None;
     let mut p: &Plan = &sub.plan;
@@ -1148,6 +1153,72 @@ fn any_join_srf(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
         })
         .collect();
     Some(super::optimize::join(cat, JoinKind::Semi, plan.clone(), rhs, and_all(cond), Vec::new(), nleft, n))
+}
+
+/// `any_join` for a correlated sub-select planned as a query level of its own (an
+/// aggregation, or the MIN / MAX InitPlan planning made of one): the join's right side is
+/// that subquery, LATERAL, its outer references the join's values. At most one row (no
+/// grouping): an inner join, as reduce_unique_semijoins makes it.
+fn any_join_lateral(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
+    if sub.params.is_empty() || sub.test_op.is_some() {
+        return None;
+    }
+    let mut p: &Plan = &sub.plan;
+    let mut minmax = false;
+    while let Plan::Project { input, exprs } = p {
+        if exprs.iter().any(crate::sql::explain::expr_volatile_deep) {
+            return None;
+        }
+        if exprs.iter().any(has_sublink) {
+            if !matches!(&**input, Plan::One) {
+                return None;
+            }
+            minmax = true;
+        }
+        p = input;
+    }
+    if !matches!(p, Plan::Agg { .. }) && !(minmax && matches!(p, Plan::One)) {
+        return None;
+    }
+    let one_row = minmax || matches!(p, Plan::Agg { groups, sets: None, .. } if groups.is_empty());
+    // (Its outer references read this level's rows only.)
+    let level_ok = sub.params.iter().all(|e| {
+        let mut ok = !e.is_volatile();
+        e.walk(&mut |x| ok &= !matches!(x, Expr::Subquery(_) | Expr::Outer(..)));
+        ok && !e.columns().is_empty()
+    });
+    if !level_ok || crate::sql::explain::plan_volatile_deep(&sub.plan) {
+        return None;
+    }
+    let n = width(&sub.plan);
+    if n != sub.left.len() {
+        return None;
+    }
+    let cols = if sub.names.len() == n {
+        (*sub.names).clone()
+    } else {
+        (1..=n).map(|i| format!("column{i}")).collect()
+    };
+    let rhs = Plan::Barrier {
+        input: sub.plan.clone(),
+        alias: "ANY_subquery".into(),
+        cols,
+        secure: false,
+        sorted: None,
+    };
+    let nleft = width(plan);
+    let cond: Vec<Expr> = sub
+        .left
+        .iter()
+        .zip(&sub.ops)
+        .enumerate()
+        .map(|(i, (l, op))| {
+            let ty = op.args.get(1).cloned().unwrap_or(crate::types::DataType::Unknown);
+            Expr::Call(op.clone(), vec![l.clone(), Expr::Col(nleft + i, ty)], crate::types::DataType::Bool)
+        })
+        .collect();
+    let kind = if one_row { JoinKind::Inner } else { JoinKind::Semi };
+    Some(super::optimize::join(cat, kind, plan.clone(), rhs, and_all(cond), sub.params.clone(), nleft, n))
 }
 
 /// reduce_unique_semijoins: a semi join whose right side (one table) has a unique index

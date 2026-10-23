@@ -14634,6 +14634,12 @@ pub fn plan_volatile(p: &Plan) -> bool {
     plan_volatile_by(p, &|e| e.is_volatile())
 }
 
+/// `plan_volatile` with its sub-selects counted by their plans' functions
+/// (`expr_volatile_deep`).
+pub fn plan_volatile_deep(p: &Plan) -> bool {
+    plan_volatile_by(p, &expr_volatile_deep)
+}
+
 /// contain_volatile_functions over a planned expression: a SubPlan counts by its
 /// plan's functions, not as volatile itself.
 pub fn expr_volatile_deep(e: &Expr) -> bool {

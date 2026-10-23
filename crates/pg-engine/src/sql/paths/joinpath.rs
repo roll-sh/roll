@@ -3506,12 +3506,7 @@ impl Search<'_, '_, '_> {
             if lateral_join_leaf(&self.leaves[*leaf].plan) {
                 return None;
             }
-            let mut keys: Vec<Expr> = Vec::new();
-            for e in params {
-                if !keys.iter().any(|k| k.same_as(e)) {
-                    keys.push(e.clone());
-                }
-            }
+            let keys = super::lateral_memo_keys(&self.leaves[*leaf].plan, params);
             let sub = ip.input();
             let calls = costs::clamp_rows(op.rows);
             let (ndistinct, key_width) = self.memo_groups(&keys, calls);

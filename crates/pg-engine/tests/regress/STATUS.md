@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51028 (**99.76%**) |
-| units differing | 122 |
+| units matching | 51029 (**99.76%**) |
+| units differing | 121 |
 | files fully matching | 214 |
 | engine output == expected/*.out (pg_regress "ok") | 177 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 118 | 96.7% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 117 | 96.7% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.5% |
 | by design (a parallel plan's combine function) | 1 | 0.8% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 118 units
-join (65), partition_join (18), partition_prune (4), subselect (3), collate.icu.utf8 (4), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
+### EXPLAIN (group C1) — 117 units
+join (65), partition_join (18), partition_prune (4), subselect (2), collate.icu.utf8 (4), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -554,7 +554,7 @@ display, not this batch).
 | file | fixed units |
 |---|---|
 | join | 328, 343, 388; second batch: 347 |
-| subselect | 218, 221, 288, 350 |
+| subselect | 218, 221, 288, 350; third batch: 327 |
 | memoize | 11 |
 | merge | 462 |
 
@@ -631,9 +631,21 @@ What changed:
   its other side with them computed over it (remove_result_refs), its clauses with the values
   plain clauses (hash keys over a constant turned back first), and that merged side's own
   outputs aren't inlined into the join above's clause as a subquery's would be.
+- Third batch (the same 35-file subset, unit by unit against a run of the base: only subselect
+  327 changed): convert_ANY_sublink_to_join for a correlated aggregate sub-select (subselect
+  327). `x IN (SELECT agg(...) ... WHERE c = outer)` whose sub-select planning already made
+  an aggregation, or its MIN / MAX InitPlan under a Result, is a LATERAL subquery
+  (`"ANY_subquery"`, a Barrier) the join reads: an inner join when it returns one row at most
+  (no GROUP BY: reduce_unique_semijoins), else a semi join. It broke ("outer reference without
+  an outer row") because the lifting dropped the join's LATERAL values when the right side's
+  only outer reference was inside a MIN / MAX InitPlan: a sub-select without parameters of its
+  own reads its level's outer values as its own `Outer(1, …)`, which `reads_outer` didn't look
+  into, so the join became a plain inner join and the search put the subquery on the outer
+  side. A LATERAL subquery's Memoize keys are the values of the join clauses pushed into it
+  first, then its own references (paraminfo_get_equal_hashops).
 
 Goldens added: `tests/sql/a8_phv_join.sql`, `a8_sublink_lateral.sql`, `a8_dummy_unique.sql`,
-`a8_catalog_lateral.sql`, `a8_result_merge.sql`.
+`a8_catalog_lateral.sql`, `a8_result_merge.sql`, `a8_lateral_any.sql`.
 
 Still open from this list, and why:
 
@@ -643,21 +655,24 @@ Still open from this list, and why:
   Result showing a view's expressions), 744 (a hash join parameterized by a LATERAL inner side,
   under a nested loop: the executor runs a parameterized hash join as a nested loop).
 - partition_join 41: a partitionwise join with a LATERAL PlaceHolderVar.
-- subselect 327 (a correlated aggregate IN as a LATERAL subquery: Memoize over a Subquery
-  Scan). Tried: the sub-select reaches `any_join` already planned (its MIN() an InitPlan
-  under a Result, `Project` over the empty row); as a LATERAL semi join over a Barrier it gives
-  the right rows but a `Nested Loop Semi Join` without Memoize. Made an inner join, as
-  reduce_unique_semijoins makes it (the sub-select returns one row at most), the join search
-  took the LATERAL Barrier apart ("outer reference without an outer row"). It needs the search
-  to keep a LATERAL subquery as a leaf of an inner join, then a Memoize over it. Not
-  committed. 328 (an equivalence class member relabeled to the class's collation), 332 (a semi
+- subselect 328 (an equivalence class member relabeled to the class's collation), 332 (a semi
   join's side unique-ified on a computed expression).
 - A one-row VALUES under a left join that stays one (`i left join (select v.x, 5 as c from
   (values (0, 1)) v(x, y)) s on s.x = i.f1`): Postgres's join clause reads `0` itself
   (`Join Filter: (0 = i.f1)`, a Nested Loop over the Result); here `x` is a PlaceHolderVar of
   the subquery's projection, so a merge join on `(0)`. Rows match (a8_result_merge); no unit of
   the measured subset has this shape.
-- groupingsets 55/57, 189/191/195/197, 215 (queued from agents 2 and 11): not started.
+- groupingsets 189/191/195/197 (queued from agents 2 and 11): EXPLAIN numbering, not started
+  past a probe. Postgres plans a copy of a sub-select for each GROUPING() argument, numbered
+  before the group key's copy (in 18 the keys are an RTE_GROUP's expressions, preprocessed after
+  the target list): 189 lists `InitPlan 1` (the argument's copy, unused) before `SubPlan 2`
+  and the key's `InitPlan 3`. The engine keeps GROUPING as key positions
+  (`Expr::Grouping(pos)`), so an argument has no copy of its own, and EXPLAIN numbers sub-selects
+  as it meets them, child first, so the key's comes first. 191 also needs a GroupAggregate
+  without keys for a pseudoconstant key and `(select grouping(v1))` as a SubPlan (the engine
+  folds GROUPING to 0 without grouping sets, making it an InitPlan). 195/197 also need the
+  key's SubPlan attached to the scan computing it (make_group_input_target) and the GROUP BY
+  column `t1.v` in the Agg's target list. 55/57, 215: not started.
 
 ## Fixed in round 14, agent 3 (strict-NULL folding, semi joins unique-ified early, EXISTS with sublinks)
 
@@ -2153,7 +2168,7 @@ produces no units on Linux (skipped by the file itself).
 | select_distinct_on | 23 | 23 | 100% | yes | yes |  |
 | select_implicit | 44 | 44 | 100% | yes | yes |  |
 | select_having | 23 | 23 | 100% | yes | yes |  |
-| subselect | 356 | 353 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
+| subselect | 356 | 354 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
 | join | 925 | 860 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (65) |

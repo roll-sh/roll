@@ -4567,12 +4567,7 @@ impl Planner<'_, '_> {
             return;
         }
         let r = crate::sql::explain::estimate(right, self.ctx);
-        let mut keys: Vec<Expr> = Vec::new();
-        for e in params.iter() {
-            if !keys.iter().any(|k| k.same_as(e)) {
-                keys.push(e.clone());
-            }
-        }
+        let keys = lateral_memo_keys(right, params);
         let mut cols: Vec<usize> = Vec::new();
         let mut width = 0.0;
         for k in &keys {
@@ -6181,4 +6176,33 @@ fn values_row(p: &Plan) -> Option<Vec<Expr>> {
         }
         _ => None,
     }
+}
+
+/// A LATERAL item's Memoize cache keys: the values it reads (`params`), those of the join
+/// clauses pushed into a subquery's scan first, then its own LATERAL references
+/// (paraminfo_get_equal_hashops), each once.
+pub(crate) fn lateral_memo_keys(right: &Plan, params: &[Expr]) -> Vec<Expr> {
+    let mut first: Vec<usize> = Vec::new();
+    if let Plan::Filter { input, pred } = right
+        && matches!(&**input, Plan::Barrier { .. })
+    {
+        pred.walk(&mut |x| {
+            if let Expr::Outer(1, i, _) = x
+                && !first.contains(i)
+            {
+                first.push(*i);
+            }
+        });
+    }
+    let ordered = first
+        .iter()
+        .filter_map(|&i| params.get(i))
+        .chain(params.iter().enumerate().filter(|(i, _)| !first.contains(i)).map(|(_, e)| e));
+    let mut keys: Vec<Expr> = Vec::new();
+    for e in ordered {
+        if !keys.iter().any(|k| k.same_as(e)) {
+            keys.push(e.clone());
+        }
+    }
+    keys
 }
