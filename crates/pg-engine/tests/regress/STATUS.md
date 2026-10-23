@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51053 (**99.81%**) |
-| units differing | 97 |
+| units matching | 51056 (**99.82%**) |
+| units differing | 94 |
 | files fully matching | 221 |
 | engine output == expected/*.out (pg_regress "ok") | 183 files |
 | engine crashes / panics | none |
@@ -45,16 +45,16 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 96 | 99.0% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 1 | 1.0% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 93 | 98.9% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 1 | 1.1% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 96 units
-join (62), partition_join (18), partition_prune (2), groupingsets (7), with (3), aggregates (1), join_hash (2), returning (1)
+### EXPLAIN (group C1) — 93 units
+join (61), partition_join (16), partition_prune (2), groupingsets (7), with (3), aggregates (1), join_hash (2), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -107,6 +107,39 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 19 (PlaceHolderVar class order, semi joins over FROM-less relations)
+
+Measured in subset runs (test_setup, create_misc, create_index, create_view, select, union,
+subselect, join, aggregates, inherit, partition_join, partition_prune, partition_aggregate,
+equivclass, memoize, with, rowsecurity, updatable_views, select_distinct, groupingsets,
+incremental_sort, merge, returning, rules, insert_conflict, join_hash, select_parallel,
+rangefuncs, tsrf, limit, window, stats_ext, sqljson_jsontable), unit by unit against a run of
+the base: 3 units fixed, none broken (on 357ae27, and again rebased onto f8c1317).
+
+| file | fixed units |
+|---|---|
+| join | 366 |
+| partition_join | 48, 207 |
+
+What changed:
+
+- generate_base_implied_equalities_no_const for a LATERAL subquery's output under a LEFT
+  JOIN a WHERE reduces (a PlaceHolderVar the scan evaluates, read here as the join's value):
+  its equality with a column an earlier clause already put in a class (the ON clause's
+  `t1.a = s.b`) comes back `column = PlaceHolderVar`, the class's earlier member first
+  (`Filter: (b = t1_1.b)`, `(a = t1_1.b)`), and is the scan's restriction, ahead of the join
+  clauses; a column no clause had equated keeps the clause as written
+  (`optimize::phv_class_order`, as `add_filter` places it). partition_join 48 / 207, and
+  the same shape without partitions.
+- remove_useless_results_recurse for a semi join (`reducejoins::remove_result_semijoins`,
+  after reduce_outer_joins): an IN whose sub-select is a FROM-less relation, or a join on
+  true of such relations reduce_outer_joins made inner, left or right (a full join stays a
+  join), is its left side under the join's clauses with the right side's values put in
+  (remove_result_refs); a FROM-less left side's Result gates on them, unfolded
+  (`One-Time Filter: (1 = 1)`, create_resultscan_plan). join 366.
+
+Goldens: `a19_phv_lateral_ec`, `a19_result_semijoin`.
 
 ## Round 16, agent 14 (parallel join inputs, partial DISTINCT orders, hash table sizing, inherited DML row marks, combine functions)
 
@@ -2430,7 +2463,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 863 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (62) |
+| join | 925 | 864 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (61) |
 | aggregates | 556 | 555 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
@@ -2540,7 +2573,7 @@ produces no units on Linux (skipped by the file itself).
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 304 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
 | xml | 281 | 281 | 100% | yes | yes |  |
-| partition_join | 614 | 596 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (18) |
+| partition_join | 614 | 598 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (16) |
 | partition_prune | 771 | 769 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |

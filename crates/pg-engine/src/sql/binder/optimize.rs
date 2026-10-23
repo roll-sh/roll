@@ -369,6 +369,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             if let Some(f) = s.filter.take() {
                 conjuncts(f, &mut all);
             }
+            let parts = phv_class_order(&all, parts);
             // (Quals reading a PlaceHolderVar: no index quals.)
             PHV_PENDING.with(|pend| {
                 let pend = pend.borrow();
@@ -2198,6 +2199,62 @@ fn ec_scan_constants(all: &mut Vec<Expr>) {
         !drop[i - 1]
     });
     all.extend(derived);
+}
+
+/// generate_base_implied_equalities_no_const for a scan's restriction equating a
+/// PlaceHolderVar it evaluates (a LATERAL subquery's output under an outer join, read as
+/// the join's value) with one of its columns: the class lists its members in the order the
+/// clauses brought them in, and gives the scan `earlier member = later member`. A column an
+/// earlier equality already put in a class (a join clause below, the subquery's own clause,
+/// distributed before the clause above) comes first, so `phv = col` comes back `col = phv`.
+fn phv_class_order(have: &[Expr], parts: Vec<Expr>) -> Vec<Expr> {
+    let pend = PHV_PENDING.with(|p| p.borrow().clone());
+    if pend.is_empty() {
+        return parts;
+    }
+    let reads_phv = |e: &Expr| {
+        let mut r = false;
+        e.walk(&mut |x| r |= pend.iter().any(|v| v.same_as(x)));
+        r
+    };
+    let member_col = |e: &Expr| match e {
+        Expr::Col(c, _) => Some(*c),
+        Expr::Relabel(x, _) => match &**x {
+            Expr::Col(c, _) => Some(*c),
+            _ => None,
+        },
+        _ => None,
+    };
+    // (An equality of two members: one with a constant gives each member `= constant`.)
+    let in_class = |c: usize, earlier: &[Expr]| {
+        earlier.iter().any(|q| {
+            ec_clause(q)
+                && matches!(q, Expr::Call(_, a, _) if a.len() == 2
+                    && a.iter().enumerate().any(|(i, x)| member_col(x) == Some(c)
+                        && (!a[1 - i].columns().is_empty() || a[1 - i].has_outer_refs())))
+        })
+    };
+    let mut out: Vec<Expr> = Vec::with_capacity(parts.len());
+    for p in parts {
+        let p = match p {
+            Expr::Call(d, a, ty)
+                if d.name == "="
+                    && a.len() == 2
+                    && a[0].columns().is_empty()
+                    && reads_phv(&a[0])
+                    && !reads_phv(&a[1])
+                    && !a.iter().any(Expr::is_volatile)
+                    && a[0].ty().without_typmod() == a[1].ty().without_typmod()
+                    && member_col(&a[1]).is_some_and(|c| in_class(c, have) || in_class(c, &out)) =>
+            {
+                let [x, y]: [Expr; 2] = a.try_into().unwrap();
+                Expr::Call(d, vec![y, x], ty)
+            }
+            p => p,
+        };
+        out.push(p);
+    }
+    out
 }
 
 fn ec_clause(e: &Expr) -> bool {

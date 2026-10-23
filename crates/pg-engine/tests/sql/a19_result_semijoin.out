@@ -1,0 +1,56 @@
+> EXPLAIN (VERBOSE, COSTS OFF)
+> WITH ctetable AS NOT MATERIALIZED (SELECT 1 AS f1)
+> SELECT * FROM ctetable c1
+> WHERE f1 IN (SELECT c3.f1 FROM ctetable c2 FULL JOIN ctetable c3 ON true)
+QUERY PLAN:text
+Result
+  Output: 1
+  One-Time Filter: (1 = 1)
+-- EXPLAIN
+
+> WITH ctetable AS NOT MATERIALIZED (SELECT 1 AS f1)
+> SELECT * FROM ctetable c1
+> WHERE f1 IN (SELECT c3.f1 FROM ctetable c2 FULL JOIN ctetable c3 ON true)
+f1:int4
+1
+-- SELECT 1
+
+> WITH ctetable AS NOT MATERIALIZED (SELECT 1 AS f1)
+> SELECT * FROM ctetable c1
+> WHERE f1 IN (SELECT c3.f1 + 1 FROM ctetable c2 FULL JOIN ctetable c3 ON true)
+f1:int4
+-- SELECT 0
+
+> CREATE TABLE a19_rs (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO a19_rs SELECT i, i % 7 FROM generate_series(1, 20) i
+-- INSERT 0 20
+
+> ANALYZE a19_rs
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a19_rs WHERE a IN (SELECT x FROM (SELECT 5 AS x) s1 LEFT JOIN (SELECT 6 AS y) s2 ON true)
+QUERY PLAN:text
+Seq Scan on a19_rs
+  Filter: (a = 5)
+-- EXPLAIN
+
+> SELECT * FROM a19_rs WHERE a IN (SELECT x FROM (SELECT 5 AS x) s1 LEFT JOIN (SELECT 6 AS y) s2 ON true)
+a:int4 | b:int4
+5 | 5
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a19_rs WHERE a IN (SELECT s2.y FROM (SELECT 5 AS x) s1 FULL JOIN (SELECT 6 AS y) s2 ON true)
+QUERY PLAN:text
+Seq Scan on a19_rs
+  Filter: (a = 6)
+-- EXPLAIN
+
+> SELECT * FROM a19_rs WHERE a IN (SELECT s2.y FROM (SELECT 5 AS x) s1 FULL JOIN (SELECT 6 AS y) s2 ON true)
+a:int4 | b:int4
+6 | 6
+-- SELECT 1
+

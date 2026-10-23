@@ -5903,6 +5903,7 @@ fn plan_level_ordered(
     p.ref_marks.replace(rowmarks::referenced(plan));
     p.pull_up_consts(plan);
     p.reduce_outer_joins(plan);
+    p.remove_result_semijoins(plan);
     p.remove_useless_joins(plan, needed);
     p.reduce_dummies(plan);
     joinpath::whole_rows(plan, &mut p.whole_rows.borrow_mut());

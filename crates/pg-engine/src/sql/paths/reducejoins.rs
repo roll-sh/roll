@@ -538,3 +538,126 @@ impl Planner<'_, '_> {
         Done { changed, nulled }
     }
 }
+
+/// A FROM-less one-row relation's values: a pulled-up select without FROM (an RTE_RESULT,
+/// its projections composed), or a left join on true of such relations (which
+/// remove_useless_results_recurse reduces to its left side, the right side's values
+/// evaluated there). None for anything else.
+fn result_values(p: &Plan) -> Option<Vec<Expr>> {
+    let ok = |e: &Expr| {
+        let mut ok = !e.is_volatile() && !e.has_outer_refs();
+        e.walk(&mut |x| {
+            ok &= !matches!(x, Expr::Subquery(_) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..) | Expr::Param(..))
+        });
+        ok
+    };
+    match p {
+        Plan::One => Some(Vec::new()),
+        Plan::Project { input, exprs } => {
+            let below = result_values(input)?;
+            let vals: Vec<Expr> = exprs.iter().map(|e| subst_cols(e, &below)).collect();
+            vals.iter().all(ok).then_some(vals)
+        }
+        // (A subquery level kept for itself: its row.)
+        Plan::Barrier { input, secure: false, .. } => result_values(input),
+        // (Of two such relations, on true, after reduce_outer_joins: one row whichever side
+        // it preserves; a full join stays a join.)
+        Plan::Join {
+            kind: JoinKind::Inner | JoinKind::Left | JoinKind::Right,
+            left,
+            right,
+            cond: None,
+            hash: None,
+            params,
+            ..
+        } if params.is_empty() => {
+            let mut vals = result_values(left)?;
+            vals.extend(result_values(right)?);
+            Some(vals)
+        }
+        _ => None,
+    }
+}
+
+/// `e` over a row whose columns are `vals`.
+fn subst_cols(e: &Expr, vals: &[Expr]) -> Expr {
+    e.clone()
+        .transform(&mut |x| {
+            Ok(match x {
+                Expr::Col(c, t) => vals.get(c).cloned().unwrap_or(Expr::Col(c, t)),
+                x => x,
+            })
+        })
+        .unwrap()
+}
+
+impl Planner<'_, '_> {
+    /// remove_useless_results_recurse (prepjointree.c) for a semi join, after
+    /// reduce_outer_joins: one whose right side is a FROM-less relation (`result_values`)
+    /// returns each left row or not, so it is its left side under the join's clauses, the
+    /// right side's values (PlaceHolderVars) evaluated there (remove_result_refs).
+    pub(super) fn remove_result_semijoins(&self, p: &mut Plan) {
+        for c in crate::sql::explain::plan_inputs_mut(p) {
+            self.remove_result_semijoins(take(c));
+        }
+        let Plan::Join {
+            kind: JoinKind::Semi,
+            left,
+            right,
+            cond,
+            hash,
+            params,
+            nleft,
+            meta,
+            ..
+        } = &*p
+        else {
+            return;
+        };
+        if !params.is_empty() || meta.from_call.is_some() {
+            return;
+        }
+        let Some(vals) = result_values(right) else { return };
+        let nl = *nleft;
+        let mut parts = Vec::new();
+        if let Some(c) = cond {
+            conjuncts(c.clone(), &mut parts);
+        }
+        // (Its hash keys: the join's clauses again.)
+        if let Some((lk, rk)) = hash {
+            for (i, (a, b)) in lk.iter().zip(rk).enumerate() {
+                let (a, bad, coll) = crate::sql::binder::hash_key_operand(a);
+                let (b, _, _) = crate::sql::binder::hash_key_operand(b);
+                let b = b.shift_cols(nl as isize);
+                let flip = meta.key_flipped.get(i) == Some(&true) || meta.hash_swapped.get(i) == Some(&true);
+                let (a, b) = if flip { (b, a) } else { (a, b) };
+                let Ok(r) = crate::sql::func::resolve_binop("=", &a.ty(), &b.ty()) else { return };
+                let e = crate::sql::binder::eq_under(Expr::Call(r.def, vec![a, b], DataType::Bool), coll);
+                parts.push(if bad { crate::sql::binder::indeterminate_eq(e) } else { e });
+            }
+        }
+        let parts: Vec<Expr> = parts
+            .into_iter()
+            .map(|q| {
+                q.transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(c, t) if c >= nl => vals.get(c - nl).cloned().unwrap_or(Expr::Col(c, t)),
+                        x => x,
+                    })
+                })
+                .unwrap()
+            })
+            .collect();
+        let l = (**left).clone();
+        *p = if parts.is_empty() {
+            l
+        } else if let Some(lv) = result_values(&l) {
+            // (A FROM-less left side too: its quals, over its values, are the Result's
+            // One-Time Filter (create_resultscan_plan), not folded.)
+            let pred = subst_cols(&Expr::And(parts), &lv);
+            Plan::Filter { input: Arc::new(l), pred }
+        } else {
+            crate::sql::binder::optimize::add_filter(&self.cat, l, Expr::And(parts))
+        };
+    }
+}
