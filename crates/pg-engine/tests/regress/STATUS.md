@@ -192,6 +192,7 @@ Open, found on the way:
   state, for the long tail.
 - The planner keys `lifted` / `pw_joins` by plan `Arc` addresses within a statement; a dropped
   plan's address can come back for another during the same planning (agents 8 / 12's areas).
+  `lifted`: fixed by agent 8 (round 14 section); `pw_joins` still open.
 - `catalog::SESSION_TEMP_SCHEMA` is set by `execute_with`: an embedder's Parse / Describe on a
   thread that ran another session, before this one executed anything, resolves `pg_temp` to
   that session's schema. (The server runs a thread per connection.)
@@ -332,6 +333,17 @@ What changed:
   Filter (221). `x IN (VALUES ..., (correlated sub-select))` is a LATERAL semi join (350).
 - An empty relation that is a table (a partitioned table without partitions, or read ONLY; a
   scan whose quals are false) keeps its unique indexes for Inner Unique (merge 462).
+- Round 16 audit item: the planner's `lifted` list (lifted groups' joins, not lifted again;
+  projections computing lifted outputs, for `lifted_into_aggs`) was keyed by plan addresses a
+  dropped plan's could be reused for within one planning. A lifted join is now marked in its
+  `JoinMeta::lifted_by` with the planning's process-unique `Planner::id`; a lifted projection
+  is noted by a `Weak` of its input (the allocation stays, so its address can't be another
+  plan's) and asked about before `lifted_into_aggs` makes inputs mutable. Checked against the
+  old keys on every lookup through the whole `cargo test` and the 30-file subset (join,
+  subselect, aggregates, partition_*, memoize, window, groupingsets, ...): no lookup differed,
+  no unit changed. No reuse case changing a result was found: a wrongly skipped lift plans the
+  group unlifted (same rows), and a wrongly moved expression goes into the aggregates' arguments
+  over the same row (only a volatile one read twice could differ).
 
 Goldens added: `tests/sql/a8_phv_join.sql`, `a8_sublink_lateral.sql`, `a8_dummy_unique.sql`,
 `a8_catalog_lateral.sql`.

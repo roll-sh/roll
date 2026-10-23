@@ -273,6 +273,9 @@ pub struct JoinMeta {
     /// takes its relations in and evaluates each PlaceHolderVar at the lowest join of
     /// the relations it reads (ph_eval_at), as the projection would.
     pub phv_join: bool,
+    /// The planner (`paths::Planner::id`) that planned this join as a lifted group's
+    /// tree (`paths::joinpath::lift`): not lifted again when its walk comes to it (0: none).
+    pub lifted_by: u64,
 }
 
 /// `p` with its join (if it is one) marked as computing PlaceHolderVars in the projection

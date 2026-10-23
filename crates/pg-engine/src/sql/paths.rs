@@ -1767,10 +1767,14 @@ struct Planner<'c, 'a> {
     /// never index quals.
     phv_quals: std::cell::RefCell<Vec<(u32, Expr)>>,
     /// Planning a join group whose subqueries' outputs were lifted (`joinpath::lift`).
-    /// (Its address: a group inside it is lifted for itself.)
+    /// (Its address, only while that group is planned, when no other plan can have it: a
+    /// group inside it is lifted for itself.)
     lifting: std::cell::Cell<usize>,
-    /// The projections computing lifted subquery outputs over join groups, by address.
-    lifted: std::cell::RefCell<Vec<usize>>,
+    /// This planning's id, unique in the process (`JoinMeta::lifted_by`).
+    id: u64,
+    /// The projections computing lifted subquery outputs over join groups, by their
+    /// inputs (a Weak keeps an allocation's address from going to another plan).
+    lifted: std::cell::RefCell<Vec<std::sync::Weak<Plan>>>,
     /// Planning a partitionwise join's child join: the parent group's leaves' rows, which
     /// its parameterized paths' loop counts come from (a child relation's are made
     /// parameterized by the parent relations, then reparameterized by child).
@@ -1800,6 +1804,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             merge_target: Default::default(),
             phv_quals: Default::default(),
             lifting: Default::default(),
+            id: PLANNER_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             lifted: Default::default(),
             pw_loop_rows: Default::default(),
             pw_limit: Default::default(),
@@ -5745,6 +5750,9 @@ fn plan_level_ordered(
 }
 
 /// Subqueries the planner makes (MIN / MAX InitPlans): ids apart from the binder's.
+/// `Planner::id`s.
+static PLANNER_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 static PLANNER_SUBQUERY_IDS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(PLANNER_SUBQUERY_BASE);
 

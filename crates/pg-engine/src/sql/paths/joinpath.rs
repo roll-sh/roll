@@ -4814,6 +4814,7 @@ impl Search<'_, '_, '_> {
                         phv_eval: false,
                         presorted: false,
                         phv_join: false,
+                        lifted_by: 0,
                     }),
                 };
                 let layout = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
@@ -5524,7 +5525,7 @@ impl Planner<'_, '_> {
                 input: Arc::new(lp),
                 exprs: map,
             };
-            self.lifted.borrow_mut().push(p as *const Plan as usize);
+            self.note_lifted(p);
             return Some(false);
         }
         let orig_lp = matches!(&*p, Plan::Join { params, .. } if !params.is_empty()).then(|| lp.clone());
@@ -5545,8 +5546,8 @@ impl Planner<'_, '_> {
                 let rneed: Vec<bool> = (0..w).map(|i| need.get(nl + i).copied().unwrap_or(true)).collect();
                 self.walk(take(left), &lneed, None);
                 self.walk(take(right), &rneed, None);
+                self.mark_lifted_join(&mut lp);
                 let input = Arc::new(lp);
-                self.lifted.borrow_mut().push(Arc::as_ptr(&input) as usize);
                 *p = Plan::Project { input, exprs: map };
                 return Some(false);
             }
@@ -5556,11 +5557,11 @@ impl Planner<'_, '_> {
             // (its scan returns the relation's columns, then its PlaceHolderVars).
             if r.is_none()
                 && matches!(&*p, Plan::Join { params, .. } if !params.is_empty())
-                && let Some(orig) = orig_lp
+                && let Some(mut orig) = orig_lp
             {
-                let input = Arc::new(orig);
                 // (Not lifted again when the walk comes to it.)
-                self.lifted.borrow_mut().push(Arc::as_ptr(&input) as usize);
+                self.mark_lifted_join(&mut orig);
+                let input = Arc::new(orig);
                 *p = Plan::Project { input, exprs: map };
             }
             return r;
@@ -5578,9 +5579,34 @@ impl Planner<'_, '_> {
             },
         };
         if computed {
-            self.lifted.borrow_mut().push(p as *const Plan as usize);
+            self.note_lifted(p);
         }
         Some(sorted)
+    }
+
+    /// A join planned as a lifted group's tree: this planning doesn't lift it again.
+    fn mark_lifted_join(&self, p: &mut Plan) {
+        if let Plan::Join { meta, .. } = p {
+            meta.lifted_by = self.id;
+        }
+    }
+
+    /// The projection `p` (over a planned lifted group) computes lifted subquery outputs
+    /// (`lifted_into_aggs`).
+    fn note_lifted(&self, p: &Plan) {
+        if let Plan::Project { input, .. } = p {
+            self.lifted.borrow_mut().push(Arc::downgrade(input));
+        }
+    }
+
+    /// `input` is a projection `note_lifted` noted.
+    fn is_lifted(&self, input: &Arc<Plan>) -> bool {
+        match &**input {
+            Plan::Project { input: inner, .. } => {
+                self.lifted.borrow().iter().any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(inner)))
+            }
+            _ => false,
+        }
     }
 
     /// eval_const_expressions over the clauses and PlaceHolderVars a pulled-up subquery's
@@ -5655,13 +5681,15 @@ impl Planner<'_, '_> {
     /// aggregates' arguments read (the arguments are the Agg's to compute); a lifted
     /// expression it groups by stays computed below.
     pub(super) fn lifted_into_aggs(&self, p: &mut Plan) {
+        // (Asked before the inputs are made mutable, which can move them.)
+        let hit = matches!(p, Plan::Agg { input, .. } if self.is_lifted(input));
         for c in crate::sql::explain::plan_inputs_mut(p) {
             self.lifted_into_aggs(Arc::make_mut(c));
         }
         let Plan::Agg { input, groups, aggs, .. } = p else {
             return;
         };
-        if !self.lifted.borrow().contains(&(Arc::as_ptr(input) as usize)) {
+        if !hit {
             return;
         }
         let Plan::Project { input: inner, exprs } = &**input else {
@@ -5776,8 +5804,9 @@ impl Planner<'_, '_> {
         };
         // A subquery's computed outputs that need no PlaceHolderVar are evaluated above
         // the joins: the group planned over its tables (`lift`).
+        let done = matches!(&*p, Plan::Join { meta, .. } if meta.lifted_by == self.id);
         if self.lifting.get() != p as *const Plan as usize
-            && !self.lifted.borrow().contains(&(p as *const Plan as usize))
+            && !done
             && let Some(l) = lift::lift_group(p)
         {
             return self.plan_lifted(p, l, needed, order, sort_exprs);
