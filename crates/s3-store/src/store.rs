@@ -71,6 +71,9 @@ pub struct StoreConfig {
     pub max_single_copy: u64,
     /// … in parts of this size (at least `size / 10 000`).
     pub copy_part_size: u64,
+    /// Derived images (image transformations) unused for this many days are dropped by the
+    /// sweeper (`ROLL_S3_DERIVED_EXPIRY_DAYS`).
+    pub derived_expiry_days: u32,
 }
 
 impl StoreConfig {
@@ -101,6 +104,7 @@ impl StoreConfig {
             sse_s3_at_rest: None,
             max_single_copy: 5 << 30,
             copy_part_size: 512 << 20,
+            derived_expiry_days: 30,
         }
     }
 

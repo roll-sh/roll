@@ -17,8 +17,8 @@ impl Store {
         every(self, self.cfg.meter_interval, "meter", |s| async move { s.flush_meter() });
         every(self, self.cfg.sweep_interval, "sweep", |s| async move {
             let st = s.sweep().await?;
-            if st.trash_expired + st.blobs_deleted + st.uploads_aborted > 0 {
-                tracing::info!(trash_expired = st.trash_expired, blobs_deleted = st.blobs_deleted, bytes = st.blob_bytes_deleted, uploads_aborted = st.uploads_aborted, "storage sweep");
+            if st.trash_expired + st.blobs_deleted + st.uploads_aborted + st.derived_expired > 0 {
+                tracing::info!(trash_expired = st.trash_expired, blobs_deleted = st.blobs_deleted, bytes = st.blob_bytes_deleted, uploads_aborted = st.uploads_aborted, derived_expired = st.derived_expired, "storage sweep");
             }
             Ok(())
         });
@@ -73,6 +73,9 @@ impl Store {
             }
         }
 
+        // Derived images unused for too long.
+        st.derived_expired += self.expire_derived().await?;
+
         // Blobs unreferenced for longer than the quarantine: object storage first, then the row
         // (a crash in between leaves a row that the next sweep deletes again).
         let cutoff = now - self.cfg.quarantine.as_millis() as i64;
@@ -97,18 +100,22 @@ impl Store {
                     Err(e) => tracing::warn!(error = %e, blob = id, "deleting an unreferenced blob failed; retrying next sweep"),
                 }
             }
-            let gone = self
+            let (gone, derived) = self
                 .write(|c| {
-                    let mut n = 0;
+                    let (mut n, mut derived) = (0, 0);
                     for (id, _) in &deleted {
                         n += c.execute("DELETE FROM blobs WHERE id = ?1 AND refs = 0", [id])?;
                         crate::sse::forget_if_unused(c, id)?;
                         crate::torrent::forget(c, id)?;
+                        // A deleted source's derived images go with it (their blobs are
+                        // quarantined in turn).
+                        derived += crate::derived::forget_source(c, id, now)?;
                     }
-                    Ok(n)
+                    Ok((n, derived))
                 })
                 .await?;
             st.blobs_deleted += gone as u64;
+            st.derived_expired += derived;
             st.blob_bytes_deleted += deleted.iter().map(|(_, s)| *s as u64).sum::<u64>();
             if deleted.len() < due.len() || due.len() < 1000 {
                 break;
@@ -234,12 +241,14 @@ impl Store {
         Ok(self.read(|c| Ok(c.query_row("SELECT 1 FROM blobs WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some()))? || self.blob_referenced(id)?)
     }
 
-    /// Whether any version row (current, noncurrent, trashed) or upload points at the blob.
+    /// Whether any version row (current, noncurrent, trashed), upload or derived image entry
+    /// points at the blob.
     pub(crate) fn blob_referenced(&self, id: &str) -> Result<bool> {
         self.read(|c| {
             Ok(c.prepare_cached(
                 "SELECT 1 FROM objects WHERE blob_id = ?1 UNION ALL SELECT 1 FROM versions WHERE blob_id = ?1
-                 UNION ALL SELECT 1 FROM trash WHERE blob_id = ?1 UNION ALL SELECT 1 FROM uploads WHERE blob_id = ?1 LIMIT 1",
+                 UNION ALL SELECT 1 FROM trash WHERE blob_id = ?1 UNION ALL SELECT 1 FROM uploads WHERE blob_id = ?1
+                 UNION ALL SELECT 1 FROM derived WHERE blob_id = ?1 LIMIT 1",
             )?
             .exists([id])?)
         })
@@ -306,12 +315,12 @@ impl Store {
                 }
             }
         }
-        // Versions (current, noncurrent or trashed) whose blob has no metadata at all: their
-        // bytes could be deleted as orphans, so they count as missing.
+        // Versions (current, noncurrent or trashed) and derived images whose blob has no
+        // metadata at all: their bytes could be deleted as orphans, so they count as missing.
         let dangling: Vec<String> = self.read(|c| {
             Ok(c.prepare(
                 "SELECT DISTINCT blob_id FROM (SELECT blob_id FROM objects WHERE blob_id IS NOT NULL UNION ALL SELECT blob_id FROM versions WHERE blob_id IS NOT NULL
-                   UNION ALL SELECT blob_id FROM trash) WHERE blob_id NOT IN (SELECT id FROM blobs) LIMIT 1000",
+                   UNION ALL SELECT blob_id FROM trash UNION ALL SELECT blob_id FROM derived) WHERE blob_id NOT IN (SELECT id FROM blobs) LIMIT 1000",
             )?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<String>>>()?)

@@ -283,6 +283,22 @@ CREATE TABLE blob_torrent (
 r#"
 CREATE INDEX iam_by_kind ON iam (kind, name);
 "#,
+// Image transformations (`derived.rs`): a transformed image is its own blob, cached by its
+// source blob and the transformation's key, with the `derived` row as the blob's one reference;
+// and the unique source images transformed per bucket per month (billed).
+r#"
+CREATE TABLE derived (
+  source_blob TEXT NOT NULL, params TEXT NOT NULL, blob_id TEXT NOT NULL UNIQUE,
+  size INTEGER NOT NULL, content_type TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL,
+  PRIMARY KEY (source_blob, params)
+) WITHOUT ROWID;
+CREATE INDEX derived_used ON derived (last_used_at);
+CREATE TABLE image_usage (
+  bucket_id TEXT NOT NULL, month TEXT NOT NULL, source_blob TEXT NOT NULL, first_at INTEGER NOT NULL,
+  variants INTEGER NOT NULL,
+  PRIMARY KEY (bucket_id, month, source_blob)
+) WITHOUT ROWID;
+"#,
 ];
 
 pub(crate) const LATEST: u32 = MIGRATIONS.len() as u32;

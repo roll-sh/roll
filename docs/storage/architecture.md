@@ -43,6 +43,7 @@ Design goal, in order:
 | `s3-store` | Metadata (SQLite + durable log in object storage), branching, refcounts, trash, lifecycle, keys, metering, the blob backend (S3 via `aws-sdk-s3`, or a local directory), the GC/scrub jobs. No HTTP. |
 | `s3-server` | The S3 HTTP API: routing (path and virtual-host style), auth, identities and policy evaluation, handlers, streaming to and from the backend, CORS and public buckets; the STS and IAM query APIs on the same listener. |
 | `s3-select` | S3 Select, no I/O: the request XML, the SQL dialect (parser and evaluator), CSV and JSON input (GZIP, BZIP2) and output, fed the object's bytes as they stream, with bounded memory. |
+| `s3-image` | Image transformations, no I/O: format sniffing, decoding (JPEG, PNG, WebP, GIF) with size and pixel limits checked before allocating, EXIF orientation, ICC to sRGB, SIMD resizing (cover, contain, fill), deterministic encoding (JPEG, PNG, WebP, AVIF). `s3-server` runs it on a bounded blocking pool and caches its output as derived blobs. |
 | `s3-control` | Control-plane API `/v1/storage/...` (merged into rolld's API): accounts, buckets, branches, keys, roles, browsing/upload/download for the dashboard, presigning, trash, usage and pricing. |
 
 `rolld` runs all of it in one process (`--s3`, default `127.0.0.1:59000`), the CLI has
@@ -187,6 +188,12 @@ replica_versions (bucket_id, key, version_id /* the source version */, dest /* <
          PRIMARY KEY (bucket_id, key, version_id, dest)) WITHOUT ROWID   -- migration 9
 blob_torrent (blob_id TEXT PRIMARY KEY, piece_length INTEGER, pieces BLOB /* 20-byte SHA-1s */,
          created_at)                                   -- GetObjectTorrent's cache, migration 10
+derived (source_blob TEXT, params TEXT /* SHA-256 of the resolved transformation */,
+         blob_id TEXT UNIQUE /* the derived image's own blob */, size, content_type,
+         created_at, last_used_at,
+         PRIMARY KEY (source_blob, params)) WITHOUT ROWID       -- image transformations, migration 12
+image_usage (bucket_id, month TEXT /* YYYY-MM UTC */, source_blob, first_at,
+         PRIMARY KEY (bucket_id, month, source_blob)) WITHOUT ROWID  -- billed, migration 12
 
 accounts (id TEXT PRIMARY KEY /* 12 digits */, canonical TEXT UNIQUE /* 64 hex */,
           name TEXT /* display name */, email TEXT UNIQUE /* lowercase; NULL = none */,
@@ -209,7 +216,7 @@ An object's **owner** (its account, when it isn't the bucket's) is kept in its A
 (`acl`, S3's `AccessControlPolicy` has an `Owner`), so every copy of the row carries it as the
 ACL already did: branch push-down, the trash, versions, uploads from Create to Complete.
 
-`refs` counts every `objects`, `versions` and `trash` row that points at the blob. `objects`,
+`refs` counts every `objects`, `versions`, `trash` and `derived` row that points at the blob. `objects`,
 `versions` and `trash` have an index on `blob_id`, so the GC and the orphan scan can check that
 nothing points at a blob before it goes.
 
@@ -246,6 +253,20 @@ Migration 11 indexes `iam` by `(kind, name)` (account aliases are unique across 
 and sign-in finds an account by its alias); login profiles, SSH keys, certificates, SAML
 providers, password policies, credential reports and the throttle counts are rows of `iam`, so
 it adds no tables.
+Migration 12 added `derived` and `image_usage` (image transformations): nothing existing changes.
+
+A **derived image** (an object resized, compressed or converted, `s3-server/src/render.rs`) is a
+blob like any other: written once under a fresh id, with a `blobs` row whose one reference is
+its `derived` row, keyed by the source blob and the resolved transformation. Source blobs never
+change, so the cache never needs invalidating: an overwrite is a new source blob with new
+entries. The entry is written durably (it adds a blob) and only while the source has
+`refs > 0`; `last_used_at` is updated relaxed, at most daily. The sweeper drops entries unused
+for `derived_expiry_days` (30, `ROLL_S3_DERIVED_EXPIRY_DAYS`), and when it deletes a source blob
+it drops that blob's entries in the same transaction; either way the derived blob loses its
+reference and goes through the quarantine like any other. A derived image of an SSE-KMS source
+is encrypted with the same KMS parameters (a `blob_sse` row); SSE-C sources are never
+transformed. `image_usage` records each source blob transformed per bucket per month, once,
+durably (it's billed).
 
 A blob's encryption is fixed when it's written, so `blob_sse` is keyed by blob: every row that
 shares the blob (copies, branches, the trash) shares its encryption, and no row of `objects`,
@@ -408,8 +429,10 @@ source's.
     Object Lock.
   - Blobs with `refs = 0` and `unreferenced_at` older than 24 h are deleted from the
     backend, then their row is removed. Before each, the sweeper checks that no `objects`,
-    `versions`, `trash` or `uploads` row points at it; one that does means `refs` is wrong, so
-    the blob is kept and the problem logged.
+    `versions`, `trash`, `uploads` or `derived` row points at it; one that does means `refs` is
+    wrong, so the blob is kept and the problem logged. A deleted blob's derived images go in the
+    same transaction (their blobs are quarantined in turn).
+  - Derived images unused for `derived_expiry_days` are dropped (`refs - 1` on their blob).
   - Uploads older than the bucket's abort rule (default 7 days) are aborted.
 - **Lifecycle (daily).** Rules filter by prefix, tags (all must match) and size, and do:
   - `Expiration` `Days`/`Date`: matching current versions are deleted as a normal delete (to
@@ -635,6 +658,10 @@ Every 60 s the meter flushes into `usage` (and `usage_payer`). It also adds
 GB-months, so restorable trash and noncurrent versions are billed as storage (as S3 bills
 noncurrent versions).
 Usage writes are relaxed: they ride the next group commit without waiting.
+
+**Image transformations** are billed per unique source image per bucket per month
+(`image_usage`, written durably the first time a source is transformed in a month, and only for
+renders that succeed); `s3-control` prices them per account, after a monthly allowance.
 
 ## S3 API (`s3-server`, `s3-proto`)
 
@@ -1348,6 +1375,7 @@ Customers pay **S3 Standard list prices** (us-east-1):
 | DELETE, Abort | free |
 | egress to the internet | $0.09 / GB |
 | egress inside roll (same region) | free |
+| image transformations | $5 / 1000 unique source images a month, 100 a month free per account |
 
 Where the margin comes from (see the [pricing notes](pricing.md)):
 

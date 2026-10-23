@@ -45,6 +45,7 @@ pub(crate) async fn route(ctx: &mut Ctx, body: Body) -> Reply {
         Method::GET if ctx.has("acl") => crate::acl::get_object_acl(ctx, &bucket),
         Method::GET if ctx.has("attributes") => crate::attributes::get_attributes(ctx, &bucket),
         Method::GET if ctx.has("torrent") => crate::torrent::get(ctx, &bucket).await,
+        Method::GET if ctx.has("x-roll-transform") => crate::render::get(ctx, &bucket).await,
         Method::GET => get(ctx, &bucket, false).await,
         Method::HEAD => get(ctx, &bucket, true).await,
         Method::PUT if ctx.has("uploadId") || ctx.has("partNumber") => multipart::upload_part(ctx, &bucket, body).await,
@@ -253,7 +254,7 @@ impl Drop for InflightBlob {
 }
 
 /// Counts the bytes handed to the client, metered as egress when the response is done.
-struct Metered {
+pub(crate) struct Metered {
     inner: ByteStream,
     store: Arc<Store>,
     bucket_id: String,
@@ -261,6 +262,12 @@ struct Metered {
     sent: u64,
     /// Requester Pays: the requester's account.
     payer: Option<String>,
+}
+
+impl Metered {
+    pub(crate) fn new(inner: ByteStream, store: Arc<Store>, bucket_id: &str, internal: bool, payer: Option<String>) -> Self {
+        Self { inner, store, bucket_id: bucket_id.to_string(), internal, sent: 0, payer }
+    }
 }
 
 impl Stream for Metered {
