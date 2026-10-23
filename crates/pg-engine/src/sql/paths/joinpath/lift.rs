@@ -330,6 +330,10 @@ struct Cx {
     nrel: u32,
     /// An empty relation was pulled up or removed.
     results: bool,
+    /// The plan `lift` just returned is a join merged into a projection over one side
+    /// (remove_useless_result_rtes): its PlaceHolderVars are a lower join's, nulled at the
+    /// join above.
+    merged: bool,
 }
 
 /// `nulled`: the outer joins above `p` (in the group) that null its rows, as written;
@@ -380,6 +384,7 @@ fn lift(
             let alnull = anulled | if matches!(kind, JoinKind::Right | JoinKind::Full) { bit } else { 0 };
             let arnull = anulled | if matches!(kind, JoinKind::Left | JoinKind::Full) { bit } else { 0 };
             let (l2, ml, nl) = lift(left, lnull, alnull, None, cx);
+            let lmerged = std::mem::take(&mut cx.merged);
             let nleft2 = crate::sql::binder::plan_width(&l2);
             let params2: Vec<Expr> = params.iter().map(|e| subst(e, &ml)).collect();
             let pnull: Vec<(u32, u64)> = params2
@@ -394,6 +399,7 @@ fn lift(
             // (A side the hash keys read: its lifted values must stay over that side.)
             let lat = (!params.is_empty()).then_some((&params2[..], &pnull[..]));
             let (r2, mr, nr) = lift(right, rnull, arnull, lat, cx);
+            let rmerged = std::mem::take(&mut cx.merged);
             let nright2 = crate::sql::binder::plan_width(&r2);
             // The right side's columns over the combined row (its LATERAL values put in).
             let mr: Vec<Expr> = mr
@@ -406,6 +412,9 @@ fn lift(
             // read before any join nulls them, no PlaceHolderVars there, as
             // pullup_replace_vars has it for Vars without varnullingrels.)
             let direct = |e: Expr, side: &Plan, off: usize| -> Expr {
+                if std::ptr::eq(side, &l2) && lmerged || std::ptr::eq(side, &r2) && rmerged {
+                    return e;
+                }
                 // (A subquery over a join: its PlaceHolderVars' expressions over its row.)
                 let side = match side {
                     Plan::Filter { input, .. } if crate::sql::plan::phv_projection(input).is_some() => &**input,
@@ -415,6 +424,8 @@ fn lift(
                     Some((_, pe, n)) => (0..n).map(|_| None).chain(pe.iter().cloned().map(Some)).collect(),
                     // (A subquery over one table: an output it computes, when it reads only
                     // columns the subquery returns.)
+                    // (A FROM-less relation's values.)
+                    None if one_row(side).is_some() => one_row(side).unwrap().into_iter().map(Some).collect(),
                     None => match side {
                         Plan::Project { input, exprs } if matches!(&**input, Plan::Scan(_)) => exprs
                             .iter()
@@ -543,13 +554,15 @@ fn lift(
             // FROM-less subquery or one-row VALUES) on true is its left side, the right
             // side's PlaceHolderVars evaluated there; one that computes nothing, whatever
             // its clause.
+            // (A clause folded to true, `1 = 1` of two empty relations' values: none.)
+            let cond2 = cond2.filter(|c| !matches!(c, Expr::Const(Value::Bool(true), _)));
             let fromless = |q: &Plan| match q {
                 Plan::One => true,
                 Plan::Project { input, .. } => matches!(&**input, Plan::One),
                 _ => false,
             };
             if *kind == JoinKind::Left
-                && wk == JoinKind::Left
+                && matches!(wk, JoinKind::Left | JoinKind::Full)
                 && fromless(&r2)
                 && hash2.is_none()
                 && params2.is_empty()
@@ -563,6 +576,7 @@ fn lift(
                         let types = super::super::analyzejoins::col_types(&l);
                         let mut all: Vec<Expr> = (0..nl).map(|i| Expr::Col(i, types.get(i).cloned().unwrap_or(DataType::Unknown))).collect();
                         all.extend(exprs);
+                        cx.merged = true;
                         Plan::Project {
                             input: Arc::new(crate::sql::plan::mark_phv_eval(&l)),
                             exprs: all,
@@ -639,6 +653,20 @@ fn lift(
                 h => (h, cond2),
             };
             let cond2 = cond2.filter(|c| !matches!(c, Expr::Const(Value::Bool(true), _)));
+            // remove_useless_result_rtes, by the join's kind after reduce_outer_joins: an
+            // inner join with a FROM-less relation computing PlaceHolderVars is its other
+            // side, the PlaceHolderVars evaluated there (remove_result_refs). (Its clauses
+            // with the relation's values: plain clauses again, above.)
+            if *kind == JoinKind::Inner
+                && wk != JoinKind::Inner
+                && params2.is_empty()
+                && hash2.is_none()
+                && (one_row(&l2).is_some_and(|e| !e.is_empty()) || one_row(&r2).is_some_and(|e| !e.is_empty()))
+            {
+                let (plan, map, nul) = merge_one_row(l2, r2, cond2, map, nul, nleft2);
+                cx.merged = true;
+                return (plan, map, nul);
+            }
             // remove_useless_result_rtes: an inner join with an empty relation (a pulled
             // up one-row VALUES) is its other side, the join's clauses checked there.
             if matches!(l2, Plan::One) && *kind == JoinKind::Inner && wk == JoinKind::Inner && hash2.is_none() && params2.is_empty() {
@@ -687,6 +715,20 @@ fn lift(
                 nul,
             )
         }
+        // (Under an outer join that nulls it: an empty relation computing its values as
+        // PlaceHolderVars, as a FROM-less select is.)
+        Plan::Values { rows, .. }
+            if rows.len() == 1
+                && nulled != 0
+                && rows[0].iter().all(movable)
+                && rows[0].iter().all(|e| outer_refs(e).is_empty()) =>
+        {
+            let fromless = Plan::Project {
+                input: Arc::new(Plan::One),
+                exprs: rows[0].clone(),
+            };
+            lift(&fromless, nulled, anulled, lateral, cx)
+        }
         // A one-row VALUES list (a FROM-less subquery's): pull_up_simple_values, an
         // empty relation (RTE_RESULT) whose values are computed where they're read,
         // when no outer join of the group nulls them.
@@ -698,6 +740,16 @@ fn lift(
             cx.results = true;
             cx.nrel += 1;
             (Plan::One, rows[0].clone(), Vec::new())
+        }
+        // (Projections over one: the FROM-less relation's values, composed.)
+        Plan::Project { input, .. }
+            if matches!(&**input, Plan::Project { .. }) && one_row(p).is_some_and(|e| !e.is_empty()) =>
+        {
+            let flat = Plan::Project {
+                input: Arc::new(Plan::One),
+                exprs: one_row(p).unwrap_or_default(),
+            };
+            lift(&flat, nulled, anulled, lateral, cx)
         }
         // A FROM-less subquery (an RTE_RESULT pulled up): its outputs computed where
         // they're read, those an outer join of the group nulls staying computed in it
@@ -954,6 +1006,73 @@ fn lift(
             (plan, map, vec![(nulled, rel); w])
         }
     }
+}
+
+/// A FROM-less one-row relation's values (a pulled-up select without FROM or one-row
+/// VALUES, its projections composed): None for anything else.
+fn one_row(p: &Plan) -> Option<Vec<Expr>> {
+    match p {
+        Plan::One => Some(Vec::new()),
+        Plan::Project { input, exprs } => {
+            let below = one_row(input)?;
+            Some(exprs.iter().map(|e| subst(e, &below)).collect())
+        }
+        _ => None,
+    }
+}
+
+/// An inner join of a FROM-less relation (`one_row`) with another side: that side, the
+/// FROM-less relation's values computed over it as PlaceHolderVars (after its columns),
+/// the join's clause a filter above. The map and nulling info follow the columns.
+fn merge_one_row(
+    l2: Plan,
+    r2: Plan,
+    cond: Option<Expr>,
+    map: Vec<Expr>,
+    nul: Vec<(u32, u64)>,
+    nleft: usize,
+) -> (Plan, Vec<Expr>, Vec<(u32, u64)>) {
+    let left_one = one_row(&l2).is_some_and(|e| !e.is_empty());
+    let (vals, other) = if left_one { (one_row(&l2).unwrap(), r2) } else { (one_row(&r2).unwrap(), l2) };
+    let w = crate::sql::binder::plan_width(&other);
+    // (Old column → new: the other side's columns first, then the values.)
+    let reloc = |c: usize| -> usize {
+        if left_one {
+            if c < nleft { w + c } else { c - nleft }
+        } else {
+            c
+        }
+    };
+    let map: Vec<Expr> = map.into_iter().map(|e| e.remap_cols(&reloc)).collect();
+    let nul = if left_one {
+        let (l, r) = nul.split_at(nleft.min(nul.len()));
+        let mut n = r.to_vec();
+        n.extend_from_slice(l);
+        n
+    } else {
+        nul
+    };
+    let types = super::super::analyzejoins::col_types(&other);
+    let mut exprs: Vec<Expr> = (0..w)
+        .map(|i| Expr::Col(i, types.get(i).cloned().unwrap_or(DataType::Unknown)))
+        .collect();
+    exprs.extend(vals);
+    // (A join computes them for the projection above it; a scan stays a leaf of its own.)
+    let plan = Plan::Project {
+        input: Arc::new(match other {
+            Plan::Scan(_) => other,
+            o => crate::sql::plan::mark_phv_join(o),
+        }),
+        exprs,
+    };
+    let plan = match cond {
+        Some(c) => Plan::Filter {
+            input: Arc::new(plan),
+            pred: c.remap_cols(&reloc),
+        },
+        None => plan,
+    };
+    (plan, map, nul)
 }
 
 /// The scan's restriction clauses that read the LATERAL values (`params`, over the left
@@ -1397,6 +1516,7 @@ pub(super) fn lift_group(p: &Plan) -> Option<Lifted> {
         bad: false,
         nrel: 0,
         results: false,
+        merged: false,
     };
     let (plan, map, _) = lift(p, 0, 0, None, &mut cx);
     if !cx.lifted || cx.bad {

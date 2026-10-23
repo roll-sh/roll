@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51013 (**99.73%**) |
-| units differing | 137 |
+| units matching | 51014 (**99.73%**) |
+| units differing | 136 |
 | files fully matching | 213 |
 | engine output == expected/*.out (pg_regress "ok") | 177 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 133 | 97.1% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 132 | 97.1% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.2% |
 | by design (a parallel plan's combine function) | 1 | 0.7% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 133 units
-join (67), partition_join (21), partition_prune (7), subselect (3), collate.icu.utf8 (5), incremental_sort (6), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
+### EXPLAIN (group C1) — 132 units
+join (66), partition_join (21), partition_prune (7), subselect (3), collate.icu.utf8 (5), incremental_sort (6), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -474,7 +474,7 @@ display, not this batch).
 
 | file | fixed units |
 |---|---|
-| join | 328, 343, 388 |
+| join | 328, 343, 388; second batch: 347 |
 | subselect | 218, 221, 288, 350 |
 | memoize | 11 |
 | merge | 462 |
@@ -538,23 +538,47 @@ What changed:
   no unit changed. No reuse case changing a result was found: a wrongly skipped lift plans the
   group unlifted (same rows), and a wrongly moved expression goes into the aggregates' arguments
   over the same row (only a volatile one read twice could differ).
+- Second batch (measured in a 35-file subset: test_setup, create_*, select, inherit,
+  updatable_views, select_distinct, subselect, union, join, aggregates, rowsecurity,
+  groupingsets, join_hash, merge, sysviews, tsrf, incremental_sort, rules, psql,
+  select_parallel, window, equivclass, limit, rangefuncs, returning, with, partition_join,
+  partition_prune, partition_aggregate, memoize, insert_conflict; every file's count as this
+  table had it or better, join, subselect, partition_join, memoize, merge and equivclass unit by
+  unit): remove_useless_result_rtes over pulled-up one-row VALUES (join 347). A one-row VALUES
+  under an outer join that nulls it is a FROM-less relation computing its values as
+  PlaceHolderVars; projections over one compose; a left (or full, as written) join of a
+  FROM-less relation on a clause folded to true (`1 = 1` of two such relations' values) is its
+  left side; an outer join reduced to inner with a FROM-less side computing PlaceHolderVars is
+  its other side with them computed over it (remove_result_refs), its clauses with the values
+  plain clauses (hash keys over a constant turned back first), and that merged side's own
+  outputs aren't inlined into the join above's clause as a subquery's would be.
 
 Goldens added: `tests/sql/a8_phv_join.sql`, `a8_sublink_lateral.sql`, `a8_dummy_unique.sql`,
-`a8_catalog_lateral.sql`.
+`a8_catalog_lateral.sql`, `a8_result_merge.sql`.
 
 Still open from this list, and why:
 
-- join 347: the VALUES version of 343: Postgres's remove_useless_result_rtes merges the empty
-  relations into `i1`, evaluating the PlaceHolderVars there; here the RESULT relations stay.
-  366: a semi join over a full join of RESULT relations, all removed by Postgres. 345 (a
+- join 366: a semi join over a full join of RESULT relations, all removed by Postgres. 345 (a
   PlaceHolderVar computed in a LATERAL subquery scan), 360 (one computed over a parameterized
   appendrel), 362/363 (PlaceHolderVars with sub-selects, copied per place), 368 (a dummy
   Result showing a view's expressions), 744 (a hash join parameterized by a LATERAL inner side,
   under a nested loop: the executor runs a parameterized hash join as a nested loop).
 - partition_join 41: a partitionwise join with a LATERAL PlaceHolderVar.
 - subselect 327 (a correlated aggregate IN as a LATERAL subquery: Memoize over a Subquery
-  Scan), 328 (an equivalence class member relabeled to the class's collation), 332 (a semi
+  Scan). Tried: the sub-select reaches `any_join` already planned (its MIN() an InitPlan
+  under a Result, `Project` over the empty row); as a LATERAL semi join over a Barrier it gives
+  the right rows but a `Nested Loop Semi Join` without Memoize. Made an inner join, as
+  reduce_unique_semijoins makes it (the sub-select returns one row at most), the join search
+  took the LATERAL Barrier apart ("outer reference without an outer row"). It needs the search
+  to keep a LATERAL subquery as a leaf of an inner join, then a Memoize over it. Not
+  committed. 328 (an equivalence class member relabeled to the class's collation), 332 (a semi
   join's side unique-ified on a computed expression).
+- A one-row VALUES under a left join that stays one (`i left join (select v.x, 5 as c from
+  (values (0, 1)) v(x, y)) s on s.x = i.f1`): Postgres's join clause reads `0` itself
+  (`Join Filter: (0 = i.f1)`, a Nested Loop over the Result); here `x` is a PlaceHolderVar of
+  the subquery's projection, so a merge join on `(0)`. Rows match (a8_result_merge); no unit of
+  the measured subset has this shape.
+- groupingsets 55/57, 189/191/195/197, 215 (queued from agents 2 and 11): not started.
 
 ## Fixed in round 14, agent 3 (strict-NULL folding, semi joins unique-ified early, EXISTS with sublinks)
 
@@ -2044,7 +2068,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 353 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 858 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (65) |
+| join | 925 | 859 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (64) |
 | aggregates | 556 | 554 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
