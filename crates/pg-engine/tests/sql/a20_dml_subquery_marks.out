@@ -1,0 +1,164 @@
+> CREATE TABLE a20_m (k int UNIQUE, v text)
+-- CREATE TABLE
+
+> INSERT INTO a20_m SELECT i, i || ' v' FROM generate_series(1, 16, 3) i
+-- INSERT 0 6
+
+> CREATE TABLE a20_o (k int, v text, w int)
+-- CREATE TABLE
+
+> INSERT INTO a20_o VALUES (1, 'o1', 10), (4, 'o4', 40), (100, 'o100', 1000)
+-- INSERT 0 3
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> MERGE INTO a20_m m USING (SELECT 0 k, 'merge source' v OFFSET 0) o ON m.k = o.k
+> WHEN MATCHED THEN UPDATE SET v = 'upd'
+> WHEN NOT MATCHED THEN INSERT VALUES (o.k, o.v)
+QUERY PLAN:text
+Merge on public.a20_m m
+  ->  Nested Loop Left Join
+        Output: m.ctid, o.k, o.v, o.*
+        Inner Unique: true
+        ->  Subquery Scan on o
+              Output: o.k, o.v, o.*
+              ->  Result
+                    Output: 0, 'merge source'::text
+        ->  Index Scan using a20_m_k_key on public.a20_m m
+              Output: m.ctid, m.k
+              Index Cond: (m.k = o.k)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> MERGE INTO a20_m m USING (SELECT k, v FROM a20_o OFFSET 0) o ON m.k = o.k
+> WHEN MATCHED THEN UPDATE SET v = o.v
+> WHEN NOT MATCHED THEN INSERT VALUES (o.k, o.v)
+QUERY PLAN:text
+Merge on public.a20_m m
+  ->  Hash Left Join
+        Output: m.ctid, o.v, o.k, o.*
+        Inner Unique: true
+        Hash Cond: (o.k = m.k)
+        ->  Subquery Scan on o
+              Output: o.v, o.k, o.*
+              ->  Seq Scan on public.a20_o
+                    Output: a20_o.k, a20_o.v
+        ->  Hash
+              Output: m.ctid, m.k
+              ->  Seq Scan on public.a20_m m
+                    Output: m.ctid, m.k
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> UPDATE a20_m m SET v = o.v FROM (SELECT k, v FROM a20_m OFFSET 0) o WHERE m.k = o.k
+QUERY PLAN:text
+Update on public.a20_m m
+  ->  Hash Join
+        Output: o.v, m.ctid, o.*
+        Inner Unique: true
+        Hash Cond: (o.k = m.k)
+        ->  Subquery Scan on o
+              Output: o.v, o.*, o.k
+              ->  Seq Scan on public.a20_m
+                    Output: a20_m.k, a20_m.v
+        ->  Hash
+              Output: m.ctid, m.k
+              ->  Seq Scan on public.a20_m m
+                    Output: m.ctid, m.k
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> DELETE FROM a20_m m USING (SELECT k FROM a20_m OFFSET 0) o WHERE m.k = o.k
+QUERY PLAN:text
+Delete on public.a20_m m
+  ->  Hash Join
+        Output: m.ctid, o.*
+        Inner Unique: true
+        Hash Cond: (o.k = m.k)
+        ->  Subquery Scan on o
+              Output: o.*, o.k
+              ->  Seq Scan on public.a20_m
+                    Output: a20_m.k
+        ->  Hash
+              Output: m.ctid, m.k
+              ->  Seq Scan on public.a20_m m
+                    Output: m.ctid, m.k
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> MERGE INTO a20_m m USING (SELECT k, v, w FROM a20_o OFFSET 0) o ON m.k = o.k
+> WHEN MATCHED AND o.w > 10 THEN UPDATE SET v = o.v
+> WHEN NOT MATCHED THEN INSERT (v, k) VALUES (o.v || o.w, o.k)
+QUERY PLAN:text
+Merge on public.a20_m m
+  ->  Hash Left Join
+        Output: m.ctid, o.w, o.v, o.k, o.*
+        Inner Unique: true
+        Hash Cond: (o.k = m.k)
+        ->  Subquery Scan on o
+              Output: o.w, o.v, o.k, o.*
+              ->  Seq Scan on public.a20_o
+                    Output: a20_o.k, a20_o.v, a20_o.w
+        ->  Hash
+              Output: m.ctid, m.k
+              ->  Seq Scan on public.a20_m m
+                    Output: m.ctid, m.k
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> MERGE INTO a20_m m USING a20_o o ON m.k = o.k
+> WHEN NOT MATCHED THEN INSERT VALUES (o.w, o.v)
+> WHEN MATCHED THEN DELETE
+QUERY PLAN:text
+Merge on public.a20_m m
+  ->  Hash Left Join
+        Output: m.ctid, o.w, o.v, o.ctid
+        Inner Unique: true
+        Hash Cond: (o.k = m.k)
+        ->  Seq Scan on public.a20_o o
+              Output: o.w, o.v, o.ctid, o.k
+        ->  Hash
+              Output: m.ctid, m.k
+              ->  Seq Scan on public.a20_m m
+                    Output: m.ctid, m.k
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> UPDATE a20_m m SET v = o.v FROM (SELECT k, v FROM a20_o) o WHERE m.k = o.k
+QUERY PLAN:text
+Update on public.a20_m m
+  ->  Hash Join
+        Output: a20_o.v, m.ctid, a20_o.ctid
+        Inner Unique: true
+        Hash Cond: (a20_o.k = m.k)
+        ->  Seq Scan on public.a20_o
+              Output: a20_o.v, a20_o.ctid, a20_o.k
+        ->  Hash
+              Output: m.ctid, m.k
+              ->  Seq Scan on public.a20_m m
+                    Output: m.ctid, m.k
+-- EXPLAIN
+
+> MERGE INTO a20_m m USING (SELECT k, v FROM a20_o OFFSET 0) o ON m.k = o.k
+> WHEN MATCHED THEN UPDATE SET v = o.v
+> WHEN NOT MATCHED THEN INSERT VALUES (o.k, o.v)
+-- MERGE 3
+
+> UPDATE a20_m m SET v = o.v || '!' FROM (SELECT k, v FROM a20_m OFFSET 0) o WHERE m.k = o.k AND m.k < 5
+-- UPDATE 2
+
+> DELETE FROM a20_m m USING (SELECT k FROM a20_o OFFSET 0) o WHERE m.k = o.k AND o.k > 50
+-- DELETE 1
+
+> SELECT * FROM a20_m ORDER BY k
+k:int4 | v:text
+1 | o1!
+4 | o4!
+7 | 7 v
+10 | 10 v
+13 | 13 v
+16 | 16 v
+-- SELECT 6
+
+> DROP TABLE a20_m, a20_o
+-- DROP TABLE
+

@@ -1894,11 +1894,32 @@ impl Binder<'_, '_> {
         let mut having = having;
         let mut order_exprs: Vec<Expr> = order.iter().map(|k| k.expr.clone()).collect();
         let mut on_exprs = distinct_on;
+        // Untyped literals in the select list are text (resolveTargetListUnknowns), unless a
+        // set operation or the INSERT above resolves them (p_resolve_unknowns off); a GROUP BY,
+        // ORDER BY or DISTINCT key that is one is text either way, and so is the entry it is
+        // (addTargetToGroupList, addTargetToSortList).
+        let mut groups = groups;
+        let unknown = |e: &Expr| matches!(e.ty(), DataType::Unknown);
+        for t in tgt_exprs.iter_mut() {
+            if unknown(t)
+                && (!keep_unknown
+                    || distinct_all
+                    || order_exprs.iter().chain(&on_exprs).chain(&groups).any(|k| k.same_as(t)))
+            {
+                let e = std::mem::replace(t, Expr::null(DataType::Unknown));
+                *t = self.coerce_implicit(e, &DataType::Text)?;
+            }
+        }
+        for e in order_exprs.iter_mut().chain(on_exprs.iter_mut()).chain(groups.iter_mut()) {
+            if unknown(e) {
+                let k = std::mem::replace(e, Expr::null(DataType::Unknown));
+                *e = self.coerce_implicit(k, &DataType::Text)?;
+            }
+        }
         let mut windows = std::mem::take(&mut st.windows);
         let mut srfs = std::mem::take(&mut st.srfs);
 
         // Aggregation.
-        let mut groups = groups;
         let mut sets = sets;
         // Set-returning functions in GROUP BY run below the aggregation (and the select
         // list's same calls are the grouped values).

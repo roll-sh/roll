@@ -35,17 +35,17 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51072 (**99.85%**) |
-| units differing | 78 |
-| files fully matching | 223 |
-| engine output == expected/*.out (pg_regress "ok") | 184 files |
+| units matching | 51075 (**99.85%**) |
+| units differing | 75 |
+| files fully matching | 224 |
+| engine output == expected/*.out (pg_regress "ok") | 185 files |
 | engine crashes / panics | none |
 
 ## Remaining differences, classified
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 78 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 75 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 78 units
-join (48), partition_join (15), partition_prune (2), groupingsets (7), with (3), join_hash (2), returning (1)
+### EXPLAIN (group C1) — 75 units
+join (48), partition_join (15), partition_prune (2), groupingsets (7), join_hash (2), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -106,6 +106,61 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 20 (untyped literals in a select list are text; DML subqueries' whole-row marks)
+
+Two full runs of the schedule in one database (`PGREGRESS_TIMEOUT=300`), f8c1317's engine and
+f8c1317 plus this batch: 51042 -> 51045, the units below fixed, no unit broken (compared unit by
+unit). Both runs share the full-run artifacts the table doesn't count (oidjoins, domain 482 and
+alter_table time out; select_views' 8 units over the catalog earlier files leave).
+
+| file | fixed units |
+|---|---|
+| with | 235, 238, 241 (with matches fully, and equals `expected/with.out`) |
+
+What changed:
+
+- **Untyped literals in a SELECT's output are text in its target list**
+  (resolveTargetListUnknowns), not cast in a projection above it: a constant is a text constant
+  (`'lit'::text`, `NULL::text` in EXPLAIN VERBOSE and view definitions), an untyped parameter
+  becomes a text one (`PREPARE p AS SELECT $1`: `{text}`). The result types (RowDescription,
+  `pg_typeof`, CREATE TABLE AS, views, CTE and FROM-subquery columns) were already text; what
+  moves is the plan text, and through it pulled-up subqueries' and CTEs' constants. As in
+  PostgreSQL, a set operation's leaves and an INSERT's SELECT keep them unknown
+  (p_resolve_unknowns off) for the set operation (select_common_type) or the target columns to
+  resolve, but a GROUP BY / ORDER BY / DISTINCT key that is one is text in every case, and so is
+  the select-list entry it is (addTargetToGroupList, addTargetToSortList): `INSERT INTO t(int)
+  SELECT '5' ORDER BY 1` errors "column ... is of type integer but expression is of type text"
+  as in PostgreSQL (it used to insert 5). (`binder/select.rs`, `bind_simple_select`.)
+- INSERT ... SELECT copies an unknown-typed constant or parameter of the select list up as it is
+  (transformInsertStmt's hack), so coercing it to the column's type makes a constant of that type
+  (`Output: 1, '2020-01-01'::date`, where the engine showed `'1', '2020-01-01'`); an INSERT over a
+  set operation reports a coercion error at the leftmost leaf's column (`dml.rs`).
+- **DML row marks of a FROM subquery planned apart**: an UPDATE / DELETE / MERGE joined with one
+  gives it a whole-row mark (ROW_MARK_COPY), its Subquery Scan returning `o.*` up the plan to the
+  ModifyTable (`explain::dml_copy_marks`, now for subqueries too, not one holding the target, a
+  view written through); its own relations have no mark (`rowmark_scans` stops at it: a DELETE
+  ... USING (SELECT ... FROM m OFFSET 0) showed `m_1.ctid`, read inside the subquery, for `o.*`).
+- MERGE's processed target list orders the source's columns as preprocess_targetlist adds them:
+  each action's condition's Vars, then its target list's (in column order), in action order
+  (`m.ctid, o.v, o.k, o.*` for `UPDATE SET v = o.v` before `INSERT VALUES (o.k, o.v)`).
+
+Goldens added: `tests/sql/a20_unknown_literals.sql`, `a20_dml_subquery_marks.sql`.
+
+Found, not fixed (none fails a unit today):
+
+- A constant select-list entry under a Sort shows wrapped (`('a'::text)`, Postgres: `'a'::text`;
+  set_dummy_tlist_references keeps Consts). The engine can't tell such a constant from a
+  pulled-up subquery's output standing for a PlaceHolderVar (explain.rs's comment on
+  `UNREAD_NULLS`), so it stays wrapped.
+- `GROUP BY` a constant: Postgres shows a GroupAggregate with no group key, the engine a
+  HashAggregate keyed by the constant.
+- A pulled-up subquery's constant isn't folded into the expressions over it
+  (`SELECT b || 'y' FROM (SELECT 'x' b) s`: Postgres `'xy'::text`), as HANDOFF lists.
+- A DML statement's subquery whose output only its whole-row mark reads loses that output to
+  unused-output pruning (`count(*)` shown `NULL::bigint` under `o.*`): agent 15's "whole-row
+  mark's subquery keeping all its columns".
+
 
 ## Round 16, agent 17 (join relations parameterized by LATERAL references, partitionwise topmost relations)
 
@@ -543,7 +598,7 @@ Goldens added: `tests/sql/a14_parallel_shapes.sql`, `a14_dml_rowmarks.sql`,
 
 Still open in these files, and why:
 
-- with 235, 238, 241: since agent 9's MERGE sub-select copies, two things are left. An
+- with 235, 238, 241 (fixed in round 16, agent 20): since agent 9's MERGE sub-select copies, two things are left. An
   untyped literal in a SELECT's (a CTE's, a FROM subquery's) target list is resolved to text
   (resolveTargetListUnknowns) and shows `'cte_basic val'::text`; the engine keeps the constant
   `unknown` and shows `'cte_basic val'` (top-level `EXPLAIN VERBOSE SELECT 'lit'` too). And a
@@ -2893,7 +2948,7 @@ produces no units on Linux (skipped by the file itself).
 | rowtypes | 237 | 237 | 100% | yes | no |  |
 | returning | 145 | 144 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | largeobject | 151 | 151 | 100% | yes | yes |  |
-| with | 307 | 304 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
+| with | 307 | 307 | 100% | yes | yes |  |
 | xml | 281 | 281 | 100% | yes | yes |  |
 | partition_join | 614 | 599 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (15) |
 | partition_prune | 771 | 769 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |

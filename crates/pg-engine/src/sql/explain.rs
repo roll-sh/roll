@@ -936,6 +936,15 @@ fn rowmark_scans(root: &Arc<Plan>) -> std::collections::HashSet<usize> {
             }
             return;
         }
+        // (A subquery planned apart has a whole-row mark of its own (ROW_MARK_COPY,
+        // `dml_copy_marks`); its relations have none. Unless the target is in it: a view
+        // written through.)
+        if let Plan::Barrier { alias, .. } = p
+            && !alias.is_empty()
+            && target_scans(p).is_empty()
+        {
+            return;
+        }
         for c in plan_inputs(p) {
             marks(c, out);
         }
@@ -7394,6 +7403,40 @@ impl Builder<'_, '_> {
                             }
                         }
                     }
+                    // (preprocess_targetlist adds the Vars of each action's qual, then of its
+                    // target list (in column order, as the rewriter leaves it), in the
+                    // actions' order.)
+                    let mut read: Vec<usize> = Vec::new();
+                    let mut add = |e: &Expr| {
+                        e.walk(&mut |x| {
+                            if let Expr::Col(i, _) = x
+                                && !read.contains(i)
+                            {
+                                read.push(*i);
+                            }
+                        })
+                    };
+                    for a in &mp.actions {
+                        if let Some(q) = &a.cond {
+                            add(q);
+                        }
+                        match &a.cmd {
+                            MergeCmd::Update { sets, .. } => {
+                                let mut sets: Vec<&(usize, Expr)> = sets.iter().collect();
+                                sets.sort_by_key(|s| s.0);
+                                sets.into_iter().for_each(|(_, e)| add(e));
+                            }
+                            MergeCmd::Insert { target, values, .. } => {
+                                let mut vals: Vec<(usize, &Expr)> = target.iter().copied().zip(values).collect();
+                                vals.sort_by_key(|v| v.0);
+                                vals.into_iter().for_each(|(_, e)| add(e));
+                            }
+                            _ => {}
+                        }
+                    }
+                    let read: Vec<String> =
+                        read.iter().filter_map(|&i| c.exported.get(i)).map(|n| self.pick(n, Cx::Output)).collect();
+                    top.sort_by_key(|o| read.iter().position(|r| r == o).unwrap_or(read.len()));
                     top.extend(junk_in(&c.node, &self.rowmark_junk));
                     let last = if mp.members.is_empty() && !dummy {
                         ident.append(&mut top);
@@ -7723,8 +7766,16 @@ impl Builder<'_, '_> {
         }
         let (mut semi, mut copies) = (Vec::new(), Vec::new());
         lock_level_marks(source, false, &mut semi, &mut copies);
-        // (A FROM subquery keeps its Subquery Scan for its mark, `shown_subqueries`.)
-        for (a, p) in copies.into_iter().filter(|(_, p)| !matches!(p, Plan::Barrier { .. })) {
+        // (A FROM subquery's mark is its whole row too, which its Subquery Scan returns
+        // (`shown_subqueries`); not a subquery holding the target, a view written through.)
+        fn holds(p: &Plan, a: usize) -> bool {
+            addr(p) == a || plan_inputs(p).into_iter().any(|c| holds(c, a))
+        }
+        let targets: Vec<usize> = target_scans(source).into_iter().map(addr).collect();
+        for (a, p) in copies.into_iter().filter(|(_, p)| match p {
+            Plan::Barrier { alias, .. } => !alias.is_empty() && !targets.iter().any(|&t| holds(p, t)),
+            _ => true,
+        }) {
             let name = format!("{}.*", quote_ident(&self.refname(p)));
             self.rowmark_junk.insert(a, vec![((2, super::plan::Rti(usize::MAX)), name)]);
         }
@@ -14408,6 +14459,19 @@ fn has_join(p: &Plan) -> bool {
         Plan::Join { .. } => true,
         p => plan_inputs(p).into_iter().any(|c| has_join(c)),
     }
+}
+
+/// Every scan of a data-modifying statement's target (an inheritance tree's members too).
+fn target_scans(p: &Plan) -> Vec<&Plan> {
+    fn go<'p>(p: &'p Plan, out: &mut Vec<&'p Plan>) {
+        match p {
+            Plan::Scan(s) if s.with_key => out.push(p),
+            _ => plan_inputs(p).into_iter().for_each(|c| go(c, out)),
+        }
+    }
+    let mut out = Vec::new();
+    go(p, &mut out);
+    out
 }
 
 fn target_scan(p: &Plan, oid: u32) -> Option<&Plan> {

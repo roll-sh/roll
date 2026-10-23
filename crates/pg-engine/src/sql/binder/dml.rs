@@ -923,12 +923,29 @@ impl Binder<'_, '_> {
                     ));
                 }
                 target.truncate(cols.len());
+                // (transformInsertStmt's hack: an unknown-typed constant or parameter of the
+                // select list is copied up as it is, not read as the subquery's output, so
+                // coercing it to the column's type makes a constant of that type.)
+                let literal = |i: usize| match &plan {
+                    Plan::Project { exprs, .. } => exprs
+                        .get(i)
+                        .filter(|e| {
+                            matches!(e, Expr::Const(_, DataType::Unknown) | Expr::Param(_, DataType::Unknown))
+                        })
+                        .cloned(),
+                    _ => None,
+                };
                 let vals = cols
                     .iter()
                     .enumerate()
-                    .map(|(i, c)| Expr::Col(i, c.ty.clone()))
+                    .map(|(i, c)| literal(i).unwrap_or_else(|| Expr::Col(i, c.ty.clone())))
                     .collect();
-                self.insert_locs = sel
+                // (A set operation's columns are at its leftmost leaf's: transformSetOperationStmt.)
+                let mut leaf: &pb::SelectStmt = sel;
+                while let Some(l) = leaf.larg.as_deref() {
+                    leaf = l;
+                }
+                self.insert_locs = leaf
                     .target_list
                     .iter()
                     .map(|n| match inner(n) {
