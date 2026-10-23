@@ -146,7 +146,8 @@ async fn sessions_for_backends() {
     let s = t.ok("POST", "/v1/storage/roles/web/sessions", Some(json!({ "duration_s": 300, "buckets": ["uploads"], "session_name": "user-42", "tags": { "user": "42" } }))).await;
     assert!(s["access_key_id"].as_str().unwrap().starts_with("RT"));
     let exp = s["expiration"].as_i64().unwrap();
-    assert!((exp - (now_ms() + 300_000)).abs() < 5_000);
+    // On the store's clock, which the test moves by hand (wall time, however slow, doesn't count).
+    assert_eq!(exp, t.clock.load(Ordering::SeqCst) + 300_000);
     let account = t.store.account_id();
     assert_eq!(s["assumed_role_arn"], format!("arn:aws:sts::{account}:assumed-role/web/user-42"));
     assert_eq!(s["env"]["AWS_SESSION_TOKEN"], s["session_token"]);

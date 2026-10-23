@@ -13,6 +13,53 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Holds operations until opened, so a test can act at an exact point in another operation
+/// (instead of sleeping and hoping the machine is fast enough).
+#[derive(Default)]
+struct Gate {
+    closed: AtomicBool,
+    /// Operations that reached the gate while it was closed (never decremented).
+    arrived: AtomicU32,
+    opened: tokio::sync::Notify,
+}
+
+impl Gate {
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    fn open(&self) {
+        self.closed.store(false, Ordering::SeqCst);
+        self.opened.notify_waiters();
+    }
+
+    /// Wait here while the gate is closed.
+    async fn pass(&self) {
+        if !self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        self.arrived.fetch_add(1, Ordering::SeqCst);
+        loop {
+            let opened = self.opened.notified();
+            tokio::pin!(opened);
+            opened.as_mut().enable();
+            if !self.closed.load(Ordering::SeqCst) {
+                return;
+            }
+            opened.await;
+        }
+    }
+
+    /// Wait (up to 30 s) until an operation is held at the gate.
+    async fn wait_held(&self) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while self.arrived.load(Ordering::SeqCst) == 0 {
+            assert!(tokio::time::Instant::now() < deadline, "nothing reached the gate within 30 s");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+}
+
 /// A backend that misbehaves on demand.
 struct Faulty {
     inner: Arc<dyn Backend>,
@@ -25,6 +72,10 @@ struct Faulty {
     fail_gets: Mutex<Option<(String, u32)>>,
     /// Log entry writes wait this long.
     wal_delay_ms: AtomicU64,
+    /// Log entry writes wait here while it's closed.
+    wal_gate: Gate,
+    /// Completing a multipart upload waits here while it's closed.
+    complete_gate: Gate,
     /// Completing a multipart upload waits this long; completing it again succeeds, as on S3.
     complete_delay_ms: AtomicU64,
     completed: Mutex<HashSet<String>>,
@@ -48,6 +99,8 @@ impl Faulty {
             lose_create_response: AtomicU32::new(0),
             fail_gets: Mutex::new(None),
             wal_delay_ms: AtomicU64::new(0),
+            wal_gate: Gate::default(),
+            complete_gate: Gate::default(),
             complete_delay_ms: AtomicU64::new(0),
             completed: Mutex::new(HashSet::new()),
             abort_delay_ms: AtomicU64::new(0),
@@ -86,6 +139,7 @@ impl Backend for Faulty {
     async fn put_create_only(&self, key: &str, data: Bytes) -> anyhow::Result<bool> {
         if key.contains("/wal/") {
             sleep_ms(self.wal_delay_ms.load(Ordering::SeqCst)).await;
+            self.wal_gate.pass().await;
             assert!(!self.panic_wal.load(Ordering::SeqCst), "injected panic writing {key}");
             if self.fail_wal.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n > 0).then(|| if n == u32::MAX { n } else { n - 1 })).is_ok() {
                 anyhow::bail!("injected failure writing {key}");
@@ -161,6 +215,7 @@ impl Backend for Faulty {
 
     async fn complete_multipart(&self, key: &str, upload_id: &str, parts: &[(u32, String)], sse: Option<&BlobSse>) -> anyhow::Result<()> {
         sleep_ms(self.complete_delay_ms.load(Ordering::SeqCst)).await;
+        self.complete_gate.pass().await;
         if self.completed.lock().unwrap().contains(upload_id) {
             return Ok(());
         }
@@ -533,12 +588,21 @@ async fn an_abandoned_upload_is_collected_but_a_dropped_commit_is_kept() {
     s.put_blob(&abandoned, &b.id, "gone", bytes_body(Bytes::from_static(b"never")), 5, None).await.unwrap();
     s.release_blob(&abandoned);
 
-    // A client that went away while its commit was on its way to the log: it landed.
-    faulty.wal_delay_ms.store(300, Ordering::SeqCst);
-    let dropped = tokio::time::timeout(Duration::from_millis(50), put(&s, "drp", "landed", b"kept")).await;
-    assert!(dropped.is_err(), "the commit was still waiting");
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    faulty.wal_delay_ms.store(0, Ordering::SeqCst);
+    // A client that went away while its commit was on its way to the log: it landed. The log
+    // write is held until the client is gone (nothing else writes meanwhile, so the held entry
+    // is the one carrying this put).
+    faulty.wal_gate.close();
+    let client = {
+        let s = s.clone();
+        tokio::spawn(async move { put(&s, "drp", "landed", b"kept").await })
+    };
+    faulty.wal_gate.wait_held().await;
+    assert!(!client.is_finished(), "the commit was still waiting");
+    client.abort();
+    assert!(client.await.unwrap_err().is_cancelled());
+    faulty.wal_gate.open();
+    // A durable write after it: once it returns, the earlier entry is in the log too.
+    s.create_bucket("drp-sync", BucketOptions::default()).await.unwrap();
     let landed = s.get_object("drp", "landed").unwrap();
 
     collect_everything(&s, &clock).await;
@@ -571,15 +635,19 @@ async fn a_failed_complete_on_a_deposed_node_keeps_the_blob() {
     let p1 = part(&a, &up, 1, b"assembled").await;
     let list = [(1, p1.etag.clone())];
     let only_new = WriteCondition { if_match: None, if_none_match: Some("*".into()) };
-    // While the parts are assembled, a put takes the key (so the commit fails its condition)
-    // and another node takes over the log (so dropping the upload can't commit either).
-    faulty.complete_delay_ms.store(500, Ordering::SeqCst);
-    let (r, b) = tokio::join!(a.complete_upload("mpu", &up.id, &list, None, &only_new), async {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        put(&a, "mpu", "obj", b"racing put").await;
-        open(&backend, &clock).await
-    });
-    faulty.complete_delay_ms.store(0, Ordering::SeqCst);
+    // While the parts are assembled (the backend's Complete held at its gate), a put takes the
+    // key (so the commit fails its condition) and another node takes over the log (so dropping
+    // the upload can't commit either).
+    faulty.complete_gate.close();
+    let completing = {
+        let (a, id, list, cond) = (a.clone(), up.id.clone(), list.clone(), only_new.clone());
+        tokio::spawn(async move { a.complete_upload("mpu", &id, &list, None, &cond).await })
+    };
+    faulty.complete_gate.wait_held().await;
+    put(&a, "mpu", "obj", b"racing put").await;
+    let b = open(&backend, &clock).await;
+    faulty.complete_gate.open();
+    let r = completing.await.unwrap();
     assert!(matches!(r, Err(StoreError::PreconditionFailed)), "{r:?}");
     // The new writer still has the upload, so the blob it references must still be there.
     b.upload("mpu", &up.id).unwrap();

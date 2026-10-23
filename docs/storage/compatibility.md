@@ -312,6 +312,42 @@ requests for it (the same key, copies, branches, versions) read nothing. As on S
 5 GB and SSE-C objects have no torrent (`InvalidRequest`). roll serves the metainfo; seeding is
 up to the clients (or a web seed).
 
+## Image transformations (roll extension)
+
+Not an S3 API: roll's own, the engine behind Supabase-style `/render/image` URLs, exposed on the
+S3 API so any signed or public GET can use it:
+
+```text
+GET /<bucket>/<key>?x-roll-transform=width:300,height:200,resize:contain,quality:70,format:webp
+```
+
+It's authorized exactly like GetObject (`s3:GetObject`, `s3:GetObjectVersion` with a
+`versionId`; public buckets and presigned URLs work), and metered like one (class B, egress).
+The spec is comma-separated `name:value` pairs, all optional (Supabase's options):
+
+| option | values | default |
+|---|---|---|
+| `width`, `height` | 1–2500 pixels (0 or empty: not given) | the source's size |
+| `resize` | `cover` (fill the box, crop the overflow, centred), `contain` (fit inside), `fill` (stretch) | `cover` |
+| `quality` | 20–100 (ignored for PNG) | 80 |
+| `format` | `origin`, `webp`, `avif`, `jpeg`, `png`; none: WebP if `Accept` lists `image/webp`, else the source's | none |
+
+- Inputs: JPEG, PNG, WebP and GIF (the first frame). Animated GIF/WebP/PNG are returned as they
+  are unless a `format` is given explicitly. AVIF and HEIC inputs, and anything else, are refused
+  (`InvalidRequest`), as are SSE-C objects, objects over 25 MiB and images over 50 megapixels.
+- Images are never enlarged; EXIF orientation is applied; colours are converted to sRGB from an
+  embedded ICC profile; all metadata is stripped.
+- A bad option is `InvalidArgument` (400); an object that isn't a usable image is
+  `InvalidRequest` (400); a server too busy to start a transformation within 10 s, or one that
+  runs out of time, is `SlowDown` (503).
+- Responses: the output's `Content-Type`; an `ETag` naming the derived image (stable: outputs are
+  deterministic); `Cache-Control: max-age=31536000, immutable` when a `versionId` is given, else
+  the object's `Cache-Control` or `max-age=3600`; `Vary: Accept` when the format came from
+  `Accept`; `If-None-Match` answers 304; `x-roll-transform-cache: hit | miss`.
+- Results are cached by the object's blob, so every key, copy, branch and version sharing it
+  shares them; an overwrite makes new ones. Billed per unique source image per month (see
+  [pricing](pricing.md#image-transformations)).
+
 ## Accounts
 
 A deployment holds any number of **accounts**, as AWS has accounts. Each has:

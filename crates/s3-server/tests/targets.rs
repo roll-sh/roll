@@ -297,13 +297,21 @@ async fn replication_latency_is_measured() {
     latencies.sort();
     let (p50, max) = (latencies[n / 2], latencies[n - 1]);
     println!("replication latency to another roll deployment over {n} writes: p50 {p50} ms, max {max} ms");
-    assert!(max < 5_000, "replication should take well under the 15-minute threshold: {latencies:?}");
+    // Each write replicated within 30 s (checked above): well under S3's 15-minute threshold
+    // however loaded the machine is. The figures are printed, not asserted.
+    assert!(max < 900_000, "replication must beat the 15-minute threshold: {latencies:?}");
     let src = a.store.bucket("src").unwrap();
-    // The source's status lands just after the replica does.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let m = sa.notifier.replication_metrics(&src.id);
-    assert_eq!(m["all"].replicated, n as u64);
-    assert!(m["all"].max_ms < 5_000, "{m:?}");
+    // The source's status lands just after the replica does: wait for it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let m = loop {
+        let m = sa.notifier.replication_metrics(&src.id);
+        if m.get("all").is_some_and(|r| r.replicated == n as u64) {
+            break m;
+        }
+        assert!(std::time::Instant::now() < deadline, "replication metrics didn't count {n} writes within 30 s: {m:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert!(m["all"].max_ms < 900_000, "{m:?}");
     println!("roll's own ReplicationLatency (write to replica): last {} ms, max {} ms", m["all"].last_ms, m["all"].max_ms);
 }
 

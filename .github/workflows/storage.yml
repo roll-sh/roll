@@ -7,6 +7,7 @@ on:
     paths:
       - "crates/s3-proto/**"
       - "crates/s3-select/**"
+      - "crates/s3-image/**"
       - "crates/s3-store/**"
       - "crates/s3-server/**"
       - "crates/s3-control/**"

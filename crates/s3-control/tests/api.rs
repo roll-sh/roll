@@ -135,7 +135,7 @@ async fn info_reports_endpoint_pricing_and_totals() {
     assert_eq!(v["virtual_host_domain"], Value::Null);
     assert_eq!(v["storage_class"], "LOCAL");
     assert_eq!(v["recover_days_default"], 7);
-    assert_eq!(v["pricing"], json!({ "usd_per_gb_month": 0.023, "usd_per_million_class_a": 5.0, "usd_per_million_class_b": 0.4, "usd_per_gb_egress_internet": 0.09, "usd_per_gb_egress_internal": 0.0 }));
+    assert_eq!(v["pricing"], json!({ "usd_per_gb_month": 0.023, "usd_per_million_class_a": 5.0, "usd_per_million_class_b": 0.4, "usd_per_gb_egress_internet": 0.09, "usd_per_gb_egress_internal": 0.0, "usd_per_1000_origin_images": 5.0, "included_origin_images_per_month": 100 }));
     assert_eq!((v["buckets"].as_u64(), v["objects"].as_u64(), v["bytes"].as_u64()), (Some(1), Some(1), Some(5)));
     assert_eq!(v["scrub"], json!({ "last_at": null, "missing": 0, "mismatched": 0 }));
     assert!(v["storage"].as_str().is_some_and(|s| !s.is_empty()));
@@ -805,6 +805,64 @@ async fn usage_all_sums_buckets_per_day() {
     let v = fresh.ok("GET", "/v1/storage/usage", None).await;
     assert_eq!((v["days"].as_i64(), v["daily"].clone(), v["buckets"].clone()), (Some(30), json!([]), json!([])));
     assert_eq!(v["cost"]["total_usd"], 0.0);
+}
+
+/// Image transformations: $5 per 1000 unique source images a month, 100 a month free per
+/// account; a bucket shows its own count at the list price, the account's bill applies the
+/// allowance month by month.
+#[tokio::test]
+async fn image_transformations_are_priced_per_unique_source() {
+    // Mid-month (2024-10-15), so a 40-day window touches two months.
+    let t0 = 20_011 * DAY + DAY / 2;
+    let (clock, now) = manual_clock(t0);
+    let t = start_with(|c| c.clock = clock, |_| {}).await;
+    t.bucket("pics-1").await;
+    t.bucket("pics-2").await;
+    let (one, two) = (t.store.bucket("pics-1").unwrap().id, t.store.bucket("pics-2").unwrap().id);
+    let this_month = s3_store::derived::month_of(t0);
+    for i in 0..120 {
+        t.store.record_transform(&one, &format!("blob{i}"), true).await.unwrap();
+    }
+    // The same sources again, and a second bucket's: unique per bucket per month.
+    for i in 0..120 {
+        t.store.record_transform(&one, &format!("blob{i}"), true).await.unwrap();
+    }
+    for i in 0..30 {
+        t.store.record_transform(&two, &format!("blob{i}"), true).await.unwrap();
+    }
+    let close = |v: &Value, want: f64| assert!((v.as_f64().unwrap() - want).abs() < 1e-9, "{v} != {want}");
+    let b = t.ok("GET", "/v1/storage/buckets/pics-1/usage", None).await;
+    assert_eq!(b["image_transformations"]["origin_images"], 120);
+    close(&b["image_transformations"]["usd"], 0.6);
+    assert_eq!(b["cost"]["images_usd"], 0.0, "the allowance is the account's");
+    let all = t.ok("GET", "/v1/storage/usage", None).await;
+    let it = &all["image_transformations"];
+    assert_eq!((it["origin_images"].as_u64(), it["included"].as_u64(), it["billable"].as_u64()), (Some(150), Some(100), Some(50)));
+    assert_eq!(it["variants"], 270, "every call above made a variant; only sources are billed");
+    close(&it["usd"], 0.25);
+    close(&all["cost"]["images_usd"], 0.25);
+    close(&all["cost"]["total_usd"], 0.25);
+    close(&all["cost"]["projected_month_usd"], 0.25);
+    assert_eq!(it["months"][0]["month"], this_month.as_str());
+    // Next month starts again from zero, with its own allowance.
+    now.store(t0 + 20 * DAY, Ordering::SeqCst);
+    let next_month = s3_store::derived::month_of(t0 + 20 * DAY);
+    assert_ne!(next_month, this_month);
+    for i in 0..90 {
+        t.store.record_transform(&one, &format!("blob{i}"), true).await.unwrap();
+    }
+    let all = t.ok("GET", "/v1/storage/usage?days=40", None).await;
+    let months = all["image_transformations"]["months"].as_array().unwrap();
+    assert_eq!(months.len(), 2);
+    assert_eq!((months[1]["month"].as_str(), months[1]["origin_images"].as_u64(), months[1]["billable"].as_u64()), (Some(next_month.as_str()), Some(90), Some(0)));
+    close(&all["cost"]["images_usd"], 0.25);
+    // A window inside this month only sees it.
+    let now_only = t.ok("GET", "/v1/storage/usage?days=1", None).await;
+    assert_eq!(now_only["image_transformations"]["origin_images"], 90);
+    assert_eq!(now_only["cost"]["images_usd"], 0.0);
+    // The price list shows the rates.
+    let p = s3_control::Pricing::default();
+    assert_eq!((p.usd_per_1000_origin_images, p.included_origin_images_per_month), (5.0, 100));
 }
 
 #[tokio::test]

@@ -158,6 +158,18 @@ s3-control = { path = "crates/s3-control" }
 s3-select = { path = "crates/s3-select" }
 # S3 Select: BZIP2 input (pure Rust, libbz2-rs-sys).
 bzip2 = "0.6"
+# Image transformations (s3-image): decoders (JPEG via zune-jpeg, PNG, GIF, WebP: pure Rust), SIMD
+# resizing, a pure-Rust JPEG encoder, libwebp for lossy WebP (C, vendored and statically linked:
+# there's no pure-Rust lossy WebP encoder under a usable licence), AVIF encoding via rav1e.
+s3-image = { path = "crates/s3-image" }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+fast_image_resize = { version = "6.1", default-features = false, features = ["std"] }
+jpeg-encoder = { version = "0.7", features = ["simd"] }
+libwebp-sys = { version = "0.14", default-features = false, features = ["std"] }
+moxcms = { version = "0.8", default-features = false, features = ["avx_shaper_paths", "sse_shaper_paths", "neon_shaper_paths", "lut"] }
+ravif = { version = "0.13", default-features = false }
+imgref = "1.12"
+rgb = "0.8"
 
 # kafka-protocol 0.18.0 sizes decode buffers from peer-supplied counts; see vendor/kafka-protocol/ROLL.md.
 [patch.crates-io]
@@ -172,6 +184,36 @@ opt-level = 3
 [profile.dev.package.argon2]
 opt-level = 3
 [profile.dev.package.blake2]
+opt-level = 3
+
+# Image codecs: unoptimised, an AVIF encode or a 12 MP decode takes many seconds in tests.
+[profile.dev.package.rav1e]
+opt-level = 3
+[profile.dev.package.fast_image_resize]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.jpeg-encoder]
+opt-level = 3
+[profile.dev.package.image-webp]
+opt-level = 3
+[profile.dev.package.libwebp-sys]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.gif]
+opt-level = 3
+[profile.dev.package.weezl]
+opt-level = 3
+[profile.dev.package.moxcms]
+opt-level = 3
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.s3-image]
 opt-level = 3
 
 [profile.release]

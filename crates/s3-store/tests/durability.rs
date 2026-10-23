@@ -200,10 +200,14 @@ async fn concurrent_writes_group_commit_and_snapshot_while_writing() {
     // Enough metadata for a snapshot to take many steps.
     let mut h = ObjectHeaders::default();
     h.metadata.insert("pad".into(), "x".repeat(1500));
+    // The writers commit in step (a barrier before each commit), so their writes are pending
+    // together however slowly the machine runs them, and grouping doesn't depend on timing.
+    let step = Arc::new(tokio::sync::Barrier::new(8));
     let tasks: Vec<_> = (0..8)
         .map(|t| {
             let s = s.clone();
             let h = h.clone();
+            let step = step.clone();
             tokio::spawn(async move {
                 for i in 0..40 {
                     let key = format!("t{t}/{i:03}");
@@ -212,6 +216,7 @@ async fn concurrent_writes_group_commit_and_snapshot_while_writing() {
                     let data = key.as_bytes().to_vec();
                     let up = s.put_blob(&blob, &b.id, &key, bytes_body(Bytes::from(data.clone())), data.len() as u64, None).await.unwrap();
                     let obj = NewObject { blob_id: blob, size: up.size, crc32c: up.crc32c, etag: md5_hex(&data), headers: h.clone(), checksum: None };
+                    step.wait().await;
                     s.commit_put("busy", &key, obj, &WriteCondition::none()).await.unwrap();
                     if i % 7 == 0 {
                         s.delete_object("busy", &key, None).await.unwrap();

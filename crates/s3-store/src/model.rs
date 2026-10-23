@@ -536,6 +536,8 @@ pub struct SweepStats {
     pub blobs_deleted: u64,
     pub blob_bytes_deleted: u64,
     pub uploads_aborted: u64,
+    /// Derived images dropped: unused too long, or their source blob deleted.
+    pub derived_expired: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

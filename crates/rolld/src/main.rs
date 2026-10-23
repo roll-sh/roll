@@ -449,6 +449,12 @@ async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &Sto
     cfg.region = scfg.region.clone();
     cfg.kms = args.s3_kms;
     cfg.sse_s3_at_rest = args.s3_sse_s3_at_rest;
+    if let Some(d) = std::env::var("ROLL_S3_DERIVED_EXPIRY_DAYS").ok().filter(|v| !v.trim().is_empty()) {
+        cfg.derived_expiry_days = d.trim().parse().map_err(|_| anyhow::anyhow!("ROLL_S3_DERIVED_EXPIRY_DAYS: {d} isn't a number of days"))?;
+    }
+    if let Some(n) = std::env::var("ROLL_S3_IMAGE_CONCURRENCY").ok().filter(|v| !v.trim().is_empty()) {
+        scfg.image_concurrency = n.trim().parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(|| anyhow::anyhow!("ROLL_S3_IMAGE_CONCURRENCY: {n} isn't a positive number"))?;
+    }
     let store = s3_store::Store::open(cfg, backend).await?;
     if let (Some(id), Some(secret)) = (&args.s3_access_key, &args.s3_secret_key) {
         store.ensure_key(id, secret, "ROLL_S3_ACCESS_KEY").await?;

@@ -41,7 +41,7 @@ SERIAL=(s3tests/functional/test_s3.py::test_list_buckets_paginated)
 # The same LocalStack as scripts/test-storage-aws.sh.
 LOCALSTACK_IMAGE=localstack/localstack:4.9
 
-PATHS=(crates/s3-proto crates/s3-select crates/s3-store crates/s3-server Cargo.toml Cargo.lock tests/s3-conformance scripts/test-s3-conformance.sh)
+PATHS=(crates/s3-proto crates/s3-select crates/s3-image crates/s3-store crates/s3-server Cargo.toml Cargo.lock tests/s3-conformance scripts/test-s3-conformance.sh)
 
 force=0
 backend=${S3_CONFORMANCE_BACKEND:-local}

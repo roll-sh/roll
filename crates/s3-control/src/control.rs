@@ -66,11 +66,24 @@ pub struct Pricing {
     pub usd_per_gb_egress_internet: f64,
     /// Inside roll (same region): free.
     pub usd_per_gb_egress_internal: f64,
+    /// Image transformations: per 1000 unique source images transformed in a month (Supabase's
+    /// price), however many variants of each.
+    pub usd_per_1000_origin_images: f64,
+    /// Unique source images an account may transform each month for free.
+    pub included_origin_images_per_month: u64,
 }
 
 impl Default for Pricing {
     fn default() -> Self {
-        Self { usd_per_gb_month: 0.023, usd_per_million_class_a: 5.0, usd_per_million_class_b: 0.4, usd_per_gb_egress_internet: 0.09, usd_per_gb_egress_internal: 0.0 }
+        Self {
+            usd_per_gb_month: 0.023,
+            usd_per_million_class_a: 5.0,
+            usd_per_million_class_b: 0.4,
+            usd_per_gb_egress_internet: 0.09,
+            usd_per_gb_egress_internal: 0.0,
+            usd_per_1000_origin_images: 5.0,
+            included_origin_images_per_month: 100,
+        }
     }
 }
 
@@ -167,6 +180,9 @@ pub struct Cost {
     pub class_a_usd: f64,
     pub class_b_usd: f64,
     pub egress_usd: f64,
+    /// Image transformations, after the account's monthly allowance (only on an account's
+    /// total: the allowance is the account's, not a bucket's).
+    pub images_usd: f64,
     pub total_usd: f64,
     /// Requests and egress at this window's daily rate for 30 days, plus what's stored now for a
     /// month.
@@ -192,6 +208,35 @@ pub struct Usage {
     /// `cost`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billed_to_requesters: Option<RequesterCharges>,
+    /// Unique source images transformed, by month (the months the window touches).
+    pub image_transformations: ImageTransformations,
+}
+
+/// Image transformations: unique source images transformed per month (a source counts once a
+/// month per bucket, however many variants are made of it), priced per account.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ImageTransformations {
+    pub origin_images: u64,
+    /// Derived images made (not billed).
+    pub variants: u64,
+    /// Free each month (on an account's total; 0 on a bucket's).
+    pub included: u64,
+    /// Beyond the allowance.
+    pub billable: u64,
+    pub usd: f64,
+    pub months: Vec<ImageMonth>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ImageMonth {
+    /// `YYYY-MM`.
+    pub month: String,
+    pub origin_images: u64,
+    /// Derived images made for them (not billed: what they cost to make).
+    pub variants: u64,
+    pub included: u64,
+    pub billable: u64,
+    pub usd: f64,
 }
 
 /// Requester Pays charges: requests and egress billed to the requester's account.
@@ -222,6 +267,9 @@ pub struct UsageAll {
     /// What requesters paid on the account's buckets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billed_to_requesters: Option<RequesterCharges>,
+    /// Image transformations across the account's buckets, after the monthly allowance (in
+    /// `cost.images_usd`).
+    pub image_transformations: ImageTransformations,
 }
 
 fn round(v: f64) -> f64 {
@@ -560,6 +608,7 @@ impl Control {
             class_a_usd: round(class_a_usd),
             class_b_usd: round(class_b_usd),
             egress_usd: round(egress_usd),
+            images_usd: 0.0,
             total_usd: round(storage_usd + traffic),
             projected_month_usd: round(projected),
         };
@@ -583,6 +632,38 @@ impl Control {
             daily,
             cost,
             billed_to_requesters: None,
+            image_transformations: ImageTransformations::default(),
+        }
+    }
+
+    /// The first month (`YYYY-MM`) a `days` window touches.
+    fn since_month(&self, days: i64) -> String {
+        self.since_day(days)[..7].to_string()
+    }
+
+    /// Price image transformations: per month, the unique source images beyond `included`.
+    fn price_images(&self, rows: &[&s3_store::ImageUsage], included: u64) -> ImageTransformations {
+        let p = &self.cfg.pricing;
+        let mut by_month: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
+        for r in rows {
+            let e = by_month.entry(r.month.as_str()).or_default();
+            e.0 += r.origin_images;
+            e.1 += r.variants;
+        }
+        let months: Vec<ImageMonth> = by_month
+            .into_iter()
+            .map(|(m, (n, variants))| {
+                let billable = n.saturating_sub(included);
+                ImageMonth { month: m.to_string(), origin_images: n, variants, included: n.min(included), billable, usd: round(billable as f64 / 1000.0 * p.usd_per_1000_origin_images) }
+            })
+            .collect();
+        ImageTransformations {
+            origin_images: months.iter().map(|m| m.origin_images).sum(),
+            variants: months.iter().map(|m| m.variants).sum(),
+            included: months.iter().map(|m| m.included).sum(),
+            billable: months.iter().map(|m| m.billable).sum(),
+            usd: round(months.iter().map(|m| m.usd).sum()),
+            months,
         }
     }
 
@@ -591,6 +672,8 @@ impl Control {
         let b = self.bucket_in(account, bucket)?;
         let rows = self.store.usage(Some(&b.id), &self.since_day(days))?;
         let mut u = self.bucket_usage(&b, &rows.iter().collect::<Vec<_>>(), days);
+        let images = self.store.image_usage(Some(&b.id), &self.since_month(days))?;
+        u.image_transformations = self.price_images(&images.iter().collect::<Vec<_>>(), 0);
         let paid = self.store.usage_paid(None, Some(&b.id), &self.since_day(days))?;
         u.billed_to_requesters = (!paid.is_empty()).then(|| self.requester_charges(&paid, days));
         Ok(u)
@@ -621,7 +704,17 @@ impl Control {
         let buckets: Vec<&Bucket> = all.iter().filter(|b| b.account_id == account).collect();
         let default = account == self.store.default_account_id();
         let mine = |r: &&UsageDay| buckets.iter().any(|b| b.id == r.bucket_id) || (default && !all.iter().any(|b| b.id == r.bucket_id));
-        let per = buckets.iter().map(|b| self.bucket_usage(b, &rows.iter().filter(|r| r.bucket_id == b.id).collect::<Vec<_>>(), days)).collect();
+        let images = self.store.image_usage(None, &self.since_month(days))?;
+        let per = buckets
+            .iter()
+            .map(|b| {
+                let mut u = self.bucket_usage(b, &rows.iter().filter(|r| r.bucket_id == b.id).collect::<Vec<_>>(), days);
+                u.image_transformations = self.price_images(&images.iter().filter(|r| r.bucket_id == b.id).collect::<Vec<_>>(), 0);
+                u
+            })
+            .collect();
+        let my_images: Vec<&s3_store::ImageUsage> = images.iter().filter(|r| buckets.iter().any(|b| b.id == r.bucket_id) || (default && !all.iter().any(|b| b.id == r.bucket_id))).collect();
+        let image_transformations = self.price_images(&my_images, self.cfg.pricing.included_origin_images_per_month);
         let stored: u64 = buckets.iter().map(|b| b.bytes + b.trash_bytes + b.version_bytes).sum();
         // What it paid as a requester counts as its own traffic.
         let paid = self.store.usage_paid(Some(account), None, &since)?;
@@ -630,7 +723,13 @@ impl Control {
             .map(|r| UsageDay { bucket_id: r.bucket_id.clone(), day: r.day.clone(), class_a: r.class_a, class_b: r.class_b, egress_internet: r.egress_internet, egress_internal: r.egress_internal, ..Default::default() })
             .collect();
         let total: Vec<&UsageDay> = rows.iter().filter(mine).chain(paid_rows.iter()).collect();
-        let (daily, cost, _, _) = self.price(&total, days, stored);
+        let (daily, mut cost, _, _) = self.price(&total, days, stored);
+        // Image transformations are billed by month: the window's months, and this month's so far
+        // in the projection.
+        cost.images_usd = image_transformations.usd;
+        cost.total_usd = round(cost.total_usd + image_transformations.usd);
+        let this_month = s3_store::derived::month_of(self.store.now());
+        cost.projected_month_usd = round(cost.projected_month_usd + image_transformations.months.iter().filter(|m| m.month == this_month).map(|m| m.usd).sum::<f64>());
         let charged_by_others = {
             let ids: Vec<&str> = buckets.iter().map(|b| b.id.as_str()).collect();
             let rows: Vec<s3_store::PaidUsageDay> = self.store.usage_paid(None, None, &since)?.into_iter().filter(|r| ids.contains(&r.bucket_id.as_str())).collect();
@@ -644,6 +743,7 @@ impl Control {
             buckets: per,
             as_requester: (!paid.is_empty()).then(|| self.requester_charges(&paid, days)),
             billed_to_requesters: charged_by_others,
+            image_transformations,
         })
     }
 

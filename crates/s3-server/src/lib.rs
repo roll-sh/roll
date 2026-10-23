@@ -41,6 +41,7 @@ mod x509;
 mod policy;
 mod principals;
 mod post;
+pub mod render;
 mod rename;
 mod replicate_ext;
 mod replication;
@@ -134,6 +135,10 @@ pub struct Config {
     /// More endpoints SAML assertions may be for (`Recipient`, `Audience`), besides AWS's
     /// sign-in endpoints (`AssumeRoleWithSAML`).
     pub saml_audiences: Vec<String>,
+    /// Image transformations running at once (`ROLL_S3_IMAGE_CONCURRENCY`); more wait for a slot.
+    pub image_concurrency: usize,
+    /// Limits of one image transformation (input bytes, pixels, output size, time).
+    pub image_limits: s3_image::Limits,
 }
 
 impl Default for Config {
@@ -150,6 +155,8 @@ impl Default for Config {
             public_endpoint: None,
             torrent_announce: None,
             saml_audiences: Vec::new(),
+            image_concurrency: render::default_concurrency(),
+            image_limits: s3_image::Limits::default(),
         }
     }
 }
@@ -176,6 +183,8 @@ pub struct Server {
     pub(crate) lambda: accesspoint::lambda::Routes,
     /// RenameObject's recent client tokens (idempotent retries).
     pub(crate) renames: rename::Tokens,
+    /// Image transformation slots and the images being made.
+    pub(crate) images: render::Images,
 }
 
 impl Server {
@@ -183,7 +192,8 @@ impl Server {
         let notifier = Notifier::new(store.clone(), cfg.notify.clone(), cfg.region.clone());
         notifier.spawn();
         let oidc = sts::oidc::Oidc::new(Arc::new(HttpFetch::new(cfg.oidc_allow_http)));
-        let server = Arc::new(Self { store, cfg, logs: Default::default(), notifier, oidc, lambda: Default::default(), renames: Default::default() });
+        let images = render::Images::new(cfg.image_concurrency);
+        let server = Arc::new(Self { store, cfg, logs: Default::default(), notifier, oidc, lambda: Default::default(), renames: Default::default(), images });
         if let (Some(every), Ok(rt)) = (server.cfg.notify.inventory_interval, tokio::runtime::Handle::try_current()) {
             let weak = Arc::downgrade(&server);
             rt.spawn(async move {

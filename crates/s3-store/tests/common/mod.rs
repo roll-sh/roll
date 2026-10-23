@@ -134,8 +134,9 @@ fn rows<T: rusqlite::types::FromSql>(c: &rusqlite::Connection, sql: &str) -> Vec
     c.prepare(sql).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
 }
 
-/// The bookkeeping invariants: `refs` counts exactly the `objects`, `versions` and `trash` rows
-/// pointing at each blob, `unreferenced_at` is set exactly when it's zero, no row points at a
+/// The bookkeeping invariants: `refs` counts exactly the `objects`, `versions`, `trash` and
+/// `derived` rows pointing at each blob (a derived image's blob has exactly one, and its source
+/// is a known blob), `unreferenced_at` is set exactly when it's zero, no row points at a
 /// blob without metadata, bucket counters match their rows, tombstones only exist in branches,
 /// noncurrent versions only exist behind a current version the bucket owns, a key has at most
 /// one null version, nothing dangles, and every referenced blob is in object storage with the
@@ -146,7 +147,7 @@ pub async fn assert_consistent(store: &Store, backend: &Arc<dyn Backend>) {
     let counted: std::collections::BTreeMap<String, i64> = rows(
         &c,
         "SELECT blob_id, count(*) FROM (SELECT blob_id FROM objects WHERE blob_id IS NOT NULL UNION ALL SELECT blob_id FROM versions WHERE blob_id IS NOT NULL
-           UNION ALL SELECT blob_id FROM trash) GROUP BY blob_id",
+           UNION ALL SELECT blob_id FROM trash UNION ALL SELECT blob_id FROM derived) GROUP BY blob_id",
     )
     .into_iter()
     .collect();
@@ -179,6 +180,9 @@ pub async fn assert_consistent(store: &Store, backend: &Arc<dyn Backend>) {
          UNION ALL SELECT 'upload', id FROM uploads WHERE bucket_id NOT IN (SELECT id FROM buckets)
          UNION ALL SELECT 'part', upload_id FROM parts WHERE upload_id NOT IN (SELECT id FROM uploads)
          UNION ALL SELECT 'encryption', blob_id FROM blob_sse WHERE blob_id NOT IN (SELECT id FROM blobs) AND blob_id NOT IN (SELECT blob_id FROM uploads)
+         UNION ALL SELECT 'derived image of an unknown source', blob_id FROM derived WHERE source_blob NOT IN (SELECT id FROM blobs)
+         UNION ALL SELECT 'derived image whose blob is also an object', d.blob_id FROM derived d WHERE EXISTS (SELECT 1 FROM objects o WHERE o.blob_id = d.blob_id)
+           OR EXISTS (SELECT 1 FROM versions v WHERE v.blob_id = d.blob_id) OR EXISTS (SELECT 1 FROM trash t WHERE t.blob_id = d.blob_id)
          UNION ALL SELECT 'tombstone', bucket_id || '/' || key FROM objects WHERE blob_id IS NULL AND delete_marker = 0 AND bucket_id IN (SELECT id FROM buckets WHERE parent_id IS NULL)
          UNION ALL SELECT 'version without its current one', v.bucket_id || '/' || v.key FROM versions v
            WHERE NOT EXISTS (SELECT 1 FROM objects o WHERE o.bucket_id = v.bucket_id AND o.key = v.key AND (o.blob_id IS NOT NULL OR o.delete_marker = 1))

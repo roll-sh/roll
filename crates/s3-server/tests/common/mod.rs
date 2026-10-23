@@ -48,6 +48,13 @@ pub async fn start_full(store_tweak: impl FnOnce(&mut StoreConfig), tweak: impl 
     (TestServer { store, endpoint, port, client, dir }, server)
 }
 
+/// The SDK aborts a body that moves less than a byte a second for a few seconds ("stalled
+/// stream protection"). On a heavily loaded test machine a starved test process trips it, which
+/// says nothing about the server, so the test clients don't use it.
+fn no_stall_check() -> aws_sdk_s3::config::StalledStreamProtectionConfig {
+    aws_sdk_s3::config::StalledStreamProtectionConfig::disabled()
+}
+
 pub fn client(endpoint: &str, access: &str, secret: &str) -> Client {
     let conf = aws_sdk_s3::Config::builder()
         .behavior_version(BehaviorVersion::latest())
@@ -55,6 +62,7 @@ pub fn client(endpoint: &str, access: &str, secret: &str) -> Client {
         .endpoint_url(endpoint)
         .credentials_provider(Credentials::new(access, secret, None, None, "test"))
         .force_path_style(true)
+        .stalled_stream_protection(no_stall_check())
         .build();
     Client::from_conf(conf)
 }
@@ -95,6 +103,7 @@ pub fn host_client(port: u16, access: &str, secret: &str) -> Client {
         .endpoint_url(format!("http://localhost:{port}"))
         .credentials_provider(Credentials::new(access, secret, None, None, "test"))
         .interceptor(Loopback(port))
+        .stalled_stream_protection(no_stall_check())
         .build();
     Client::from_conf(conf)
 }

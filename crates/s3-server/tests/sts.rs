@@ -147,8 +147,9 @@ async fn get_session_token_and_caller_identity() {
     assert_eq!(sts_code(admin.get_session_token().duration_seconds(3601).send().await), "ValidationError");
     let key = t.store.create_key("app", Permission::Write, None).await.unwrap();
     let app = sts(&t.endpoint, &key.id, &key.secret, None);
+    // On the store's clock, which the test moves by hand (wall time, however slow, doesn't count).
     let long = app.get_session_token().duration_seconds(129_600).send().await.unwrap();
-    assert!((long.credentials().unwrap().expiration().secs() - (now_s() + 129_600)).abs() <= 2);
+    assert_eq!(long.credentials().unwrap().expiration().secs(), e.clock.load(Ordering::SeqCst) / 1000 + 129_600);
     assert_eq!(sts_code(app.get_session_token().duration_seconds(129_601).send().await), "ValidationError");
     let id = app.get_caller_identity().send().await.unwrap();
     assert_eq!(id.arn(), Some(format!("arn:aws:iam::{account}:user/{}", key.id).as_str()), "an account key is a user named by its id");
