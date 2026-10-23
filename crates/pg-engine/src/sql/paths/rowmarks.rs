@@ -55,7 +55,7 @@ pub(super) fn hoist(plan: &mut Plan) {
             Plan::Barrier { input, .. } => hoist(Arc::make_mut(input)),
             _ => {
                 for c in crate::sql::explain::plan_inputs_mut(p) {
-                    if wants(&**c) {
+                    if wants(c) {
                         apart(Arc::make_mut(c));
                     }
                 }
@@ -160,7 +160,7 @@ pub(super) fn referenced(plan: &Plan) -> std::collections::HashSet<usize> {
                 ctes.iter().for_each(|(_, c)| go(c, out));
                 go(body, out);
             }
-            Plan::Append { inputs, inh: None } => inputs.iter().for_each(|i| go(i, out)),
+            Plan::Append { inputs, inh: None, .. } => inputs.iter().for_each(|i| go(i, out)),
             Plan::Limit { input, .. } | Plan::Project { input, .. } | Plan::Context { input, .. } => go(input, out),
             p if has_marks(p) => level(p, out),
             _ => {}

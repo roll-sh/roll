@@ -962,7 +962,7 @@ fn rule_statements(p: &Arc<Plan>) -> Option<Vec<(Arc<Plan>, bool)>> {
     }
     fn several(p: &Plan) -> Option<&Vec<Arc<Plan>>> {
         match p {
-            Plan::Append { inputs, inh: None } if inputs.len() > 1 && inputs.iter().all(|i| statement(i)) => Some(inputs),
+            Plan::Append { inputs, inh: None, .. } if inputs.len() > 1 && inputs.iter().all(|i| statement(i)) => Some(inputs),
             _ => None,
         }
     }
@@ -2008,7 +2008,7 @@ fn assign_refnames_skip(
             match p {
                 Plan::Scan(s) => out.push((p, s.rti.0)),
                 // (A one-member inheritance Append is its member.)
-                Plan::Append { inputs, inh: Some(_) } if inputs.len() == 1 => scans(&inputs[0], out),
+                Plan::Append { inputs, inh: Some(_), .. } if inputs.len() == 1 => scans(&inputs[0], out),
                 Plan::Barrier { .. } | Plan::Append { .. } | Plan::With { .. } => {}
                 p => plan_inputs(p).into_iter().for_each(|c| scans(c, out)),
             }
