@@ -38,7 +38,7 @@ fn check_condition(cur: Option<&Row>, cond: &WriteCondition, key: &str) -> Resul
 
 const UPLOAD_COLS: &str = "id, bucket_id, key, blob_id, backend_upload_id, content_type, cache_control, content_disposition, content_encoding, \
      content_language, expires, metadata, tags, checksum_algorithm, checksum_type, created_at, acl, website_redirect, lock_mode, lock_until, \
-     legal_hold";
+     legal_hold, owner";
 
 fn upload_row(r: &rusqlite::Row) -> rusqlite::Result<Upload> {
     let json = |i: usize| -> rusqlite::Result<BTreeMap<String, String>> {
@@ -62,12 +62,17 @@ fn upload_row(r: &rusqlite::Row) -> rusqlite::Result<Upload> {
             tags: json(12)?,
             acl: r.get(16)?,
             website_redirect: r.get(17)?,
+            owner: r.get(21)?,
         },
         checksum_algorithm: r.get(13)?,
         checksum_type: r.get(14)?,
         created_at: r.get(15)?,
         lock: ObjectLock { mode: r.get(18)?, retain_until: r.get(19)?, legal_hold: r.get::<_, Option<i64>>(20)?.map(|v| v != 0) },
     })
+}
+
+pub(crate) fn find_upload_row(c: &Connection, id: &str) -> Result<Upload> {
+    find_upload(c, id)
 }
 
 fn find_upload(c: &Connection, id: &str) -> Result<Upload> {
@@ -266,8 +271,13 @@ impl Store {
             row.modified_at = now;
             if let Some(h) = &opts.headers {
                 let tags = std::mem::take(&mut row.headers.tags);
+                let owner = row.headers.owner.take();
                 row.headers = h.clone();
                 row.headers.tags = tags;
+                // A copy carries the source's owner unless the new headers name one.
+                if row.headers.owner.is_none() {
+                    row.headers.owner = owner;
+                }
             }
             if let Some(t) = &opts.tags {
                 row.headers.tags = t.clone();
@@ -419,6 +429,28 @@ impl Store {
         lock: ObjectLock,
         sse: Option<&BlobSse>,
     ) -> Result<Upload> {
+        self.create_upload_inner(bucket, key, headers, checksum_algorithm, checksum_type, lock, sse, None).await
+    }
+
+    /// A multipart upload that's also a resumable (TUS) upload of the storage developer API:
+    /// its `api_uploads` row is written in the transaction that records the upload.
+    pub async fn create_api_upload(&self, bucket: &str, key: &str, headers: ObjectHeaders, sse: Option<&BlobSse>, api: crate::api::NewApiUpload) -> Result<Upload> {
+        self.bucket_limits(bucket)?.check(key, api.length, headers.content_type.as_deref())?;
+        self.create_upload_inner(bucket, key, headers, None, None, ObjectLock::default(), sse, Some(api)).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_upload_inner(
+        &self,
+        bucket: &str,
+        key: &str,
+        headers: ObjectHeaders,
+        checksum_algorithm: Option<String>,
+        checksum_type: Option<String>,
+        lock: ObjectLock,
+        sse: Option<&BlobSse>,
+        api: Option<crate::api::NewApiUpload>,
+    ) -> Result<Upload> {
         validate::key(key)?;
         validate::headers(&headers)?;
         self.check_sse_supported(sse)?;
@@ -448,7 +480,7 @@ impl Store {
             .write(move |c| {
                 find_bucket(c, bucket)?;
                 c.execute(
-                    &format!("INSERT INTO uploads ({UPLOAD_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)"),
+                    &format!("INSERT INTO uploads ({UPLOAD_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)"),
                     params![
                         u.id,
                         u.bucket_id,
@@ -470,11 +502,15 @@ impl Store {
                         u.headers.website_redirect,
                         u.lock.mode,
                         u.lock.retain_until,
-                        u.lock.legal_hold.map(i64::from)
+                        u.lock.legal_hold.map(i64::from),
+                        u.headers.owner
                     ],
                 )?;
                 if let Some(e) = &enc {
                     crate::sse::insert(c, &u.blob_id, e, now)?;
+                }
+                if let Some(a) = &api {
+                    crate::api::insert_upload(c, &u.id, a, now)?;
                 }
                 Ok(())
             })
@@ -781,6 +817,7 @@ impl Store {
                     if let Some(there) = events::existing_replica(c, &chain, &row.key, rw, Some((size, crc)))? {
                         c.execute("DELETE FROM parts WHERE upload_id = ?1", [upload_id])?;
                         c.execute("DELETE FROM uploads WHERE id = ?1", [upload_id])?;
+                c.execute("DELETE FROM api_uploads WHERE id = ?1", [upload_id])?;
                         crate::sse::forget_if_unused(c, &up.blob_id)?;
                         return Ok((there, false));
                     }
@@ -804,6 +841,7 @@ impl Store {
             };
             c.execute("DELETE FROM parts WHERE upload_id = ?1", [upload_id])?;
             c.execute("DELETE FROM uploads WHERE id = ?1", [upload_id])?;
+                c.execute("DELETE FROM api_uploads WHERE id = ?1", [upload_id])?;
             Ok((stored, true))
         });
         if replica.is_some() && attempt.is_ok() {
@@ -823,6 +861,7 @@ impl Store {
                     .write(|c| {
                         c.execute("DELETE FROM parts WHERE upload_id = ?1", [upload_id])?;
                         c.execute("DELETE FROM uploads WHERE id = ?1", [upload_id])?;
+                c.execute("DELETE FROM api_uploads WHERE id = ?1", [upload_id])?;
                         crate::sse::forget_if_unused(c, &up.blob_id)?;
                         Ok(())
                     })
@@ -860,6 +899,7 @@ impl Store {
                 let u = find_upload(c, upload_id)?;
                 c.execute("DELETE FROM parts WHERE upload_id = ?1", [upload_id])?;
                 c.execute("DELETE FROM uploads WHERE id = ?1", [upload_id])?;
+                c.execute("DELETE FROM api_uploads WHERE id = ?1", [upload_id])?;
                 crate::sse::forget_if_unused(c, &u.blob_id)?;
                 Ok(u)
             })

@@ -219,6 +219,8 @@ fn put_versioned(c: &Connection, b: &BucketRow, chain: &[String], key: &str, new
 /// Write `row` (whose blob reference is the caller's) as the key's new version: it gets its
 /// version id and default retention here. Returns it as stored.
 pub(crate) fn put_key(c: &Connection, b: &BucketRow, chain: &[String], key: &str, mut row: Row, now: i64) -> Result<Row> {
+    // The bucket's limits (`api.rs`), on every write path.
+    crate::api::check_limits(c, &b.id, key, row.size, row.headers.content_type.as_deref())?;
     apply_lock(b, &mut row.lock, now)?;
     row.vid = new_vid(c, &b.id, chain, key, now)?;
     row.delete_marker = false;

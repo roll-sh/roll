@@ -8,14 +8,21 @@ import {
   bucketTagsError,
   lifecycleExtras,
   lifecycleHasAction,
+  mimeTypeError,
   normalizeLifecycleRule,
+  normalizeMimeType,
+  formatSizeLimit,
   RECOVER_OPTIONS,
   retentionLabel,
+  SIZE_UNITS,
+  sizeLimitBytes,
+  splitSize,
   storageApi,
   effectiveBlock,
   type Bucket,
   type CorsRule,
   type LifecycleRule,
+  type SizeUnit,
   type StorageInfo,
 } from "@/lib/storage-api";
 import { iconBtn } from "../tasks/ui";
@@ -58,6 +65,7 @@ export function SettingsTab({
   return (
     <div className="space-y-4">
       <AccessPanel bucket={bucket} info={info} busy={busy} run={run} />
+      <LimitsPanel bucket={bucket} busy={busy} run={run} />
       <PublicAccessBlockPanel bucket={bucket} info={info} onChanged={onChanged} />
       <PolicyPanel bucket={bucket} info={info} onChanged={onChanged} />
       <VersioningPanel bucket={bucket} busy={busy} run={run} />
@@ -135,6 +143,160 @@ function AccessPanel({ bucket, info, busy, run }: { bucket: Bucket; info: Storag
           onReset={() => {
             setPublic(bucket.public);
             setRecover(bucket.recover_days);
+          }}
+        />
+      </form>
+    </Panel>
+  );
+}
+
+const COMMON_TYPES = ["image/*", "video/*", "audio/*", "application/pdf", "text/plain"];
+
+/** The developer API's upload limits (Supabase's bucket settings), enforced on every write path. */
+function LimitsPanel({ bucket, busy, run }: { bucket: Bucket; busy: string | null; run: Run }) {
+  const savedSize = (): { value: string; unit: SizeUnit } =>
+    bucket.file_size_limit == null ? { value: "", unit: "MB" } : splitSize(bucket.file_size_limit);
+  const savedTypes = bucket.allowed_mime_types ?? [];
+  const [size, setSize] = useState(savedSize);
+  const [types, setTypes] = useState<string[]>(savedTypes);
+  const [draft, setDraft] = useState("");
+  const parsed = sizeLimitBytes(size.value, size.unit);
+  const draftErr = draft.trim() ? mimeTypeError(draft) : null;
+  const dirty = (!parsed.error && parsed.bytes !== bucket.file_size_limit) || !same(types, savedTypes) || !!draft.trim();
+  const add = (raw: string) => {
+    const items = raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (items.some((s) => mimeTypeError(s))) return false;
+    setTypes((t) => [...t, ...items.map(normalizeMimeType).filter((m, i, all) => !t.includes(m) && all.indexOf(m) === i)]);
+    return true;
+  };
+  const current =
+    bucket.file_size_limit == null && !bucket.allowed_mime_types?.length
+      ? "no limits"
+      : [
+          bucket.file_size_limit != null && `up to ${formatSizeLimit(bucket.file_size_limit)}`,
+          bucket.allowed_mime_types?.length && bucket.allowed_mime_types.join(", "),
+        ]
+          .filter(Boolean)
+          .join(" · ");
+  return (
+    <Panel
+      title="Upload limits"
+      aside={
+        <span className="max-w-[60%] truncate font-mono text-[12px] text-subtle" title={current}>
+          {current}
+        </span>
+      }
+    >
+      <form
+        className="space-y-5 px-5 py-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (parsed.error || draftErr) return;
+          // A type still in the box counts: Save shouldn't drop what was typed.
+          const pending = draft.trim()
+            ? draft
+                .split(",")
+                .map((s) => normalizeMimeType(s))
+                .filter((m) => m && !types.includes(m))
+            : [];
+          const all = [...types, ...pending];
+          setTypes(all);
+          setDraft("");
+          run("limits", () =>
+            storageApi.setUploadLimits(bucket.name, { file_size_limit: parsed.bytes, allowed_mime_types: all.length ? all : null }),
+          );
+        }}
+      >
+        <p className="text-[13px] text-muted">
+          Refuse objects that are too large or of the wrong type, on every write: the developer API, the S3 API and uploads here.
+        </p>
+        <div className="grid gap-x-3 gap-y-4 sm:grid-cols-2">
+          <Field label="Max file size" hint={parsed.error ?? (parsed.bytes == null ? "empty: no limit" : `${parsed.bytes.toLocaleString("en-US")} bytes · decimal units`)}>
+            <span className="flex gap-2">
+              <input
+                value={size.value}
+                onChange={(e) => setSize((s) => ({ ...s, value: e.target.value }))}
+                inputMode="decimal"
+                placeholder="no limit"
+                aria-invalid={!!parsed.error}
+                className={`${input} min-w-0 flex-1 font-mono text-[12px] ${parsed.error ? "border-danger/50" : ""}`}
+              />
+              <select
+                value={size.unit}
+                onChange={(e) => setSize((s) => ({ ...s, unit: e.target.value as SizeUnit }))}
+                aria-label="Unit"
+                className={`${input} w-20 font-mono text-[12px]`}
+              >
+                {SIZE_UNITS.map((u) => (
+                  <option key={u.unit} value={u.unit}>
+                    {u.unit}
+                  </option>
+                ))}
+              </select>
+            </span>
+          </Field>
+          <div className="min-w-0 space-y-1">
+            <span className="block text-[11px] text-subtle">Allowed MIME types</span>
+            <div className="flex min-h-9 flex-wrap items-center gap-1 rounded-lg border border-line bg-bg px-1.5 py-1 focus-within:border-line-2">
+              {types.map((t) => (
+                <span key={t} className="rise inline-flex items-center gap-1 rounded-md border border-line bg-panel-2 py-0.5 pr-0.5 pl-1.5 font-mono text-[11px]">
+                  {t}
+                  <button
+                    type="button"
+                    onClick={() => setTypes((x) => x.filter((y) => y !== t))}
+                    className="rounded p-0.5 text-subtle transition hover:text-fg"
+                    aria-label={`Remove ${t}`}
+                  >
+                    <X className="size-3" strokeWidth={1.5} />
+                  </button>
+                </span>
+              ))}
+              <input
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if ((e.key === "Enter" || e.key === ",") && draft.trim()) {
+                    e.preventDefault();
+                    if (add(draft)) setDraft("");
+                  } else if (e.key === "Backspace" && !draft && types.length) {
+                    setTypes((x) => x.slice(0, -1));
+                  }
+                }}
+                onBlur={() => draft.trim() && add(draft) && setDraft("")}
+                placeholder={types.length ? "" : "any type"}
+                spellCheck={false}
+                aria-label="Add an allowed MIME type"
+                aria-invalid={!!draftErr}
+                className="min-w-24 flex-1 bg-transparent px-1 py-0.5 font-mono text-[12px] outline-none placeholder:text-subtle"
+              />
+            </div>
+            <span className={`block text-[11px] ${draftErr ? "text-danger" : "text-subtle"}`}>
+              {draftErr ?? "Enter or comma to add; wildcards like image/* work; empty: any type"}
+            </span>
+            <span className="flex flex-wrap gap-1 pt-1">
+              {COMMON_TYPES.filter((t) => !types.includes(t)).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setTypes((x) => [...x, t])}
+                  className="inline-flex items-center gap-1 rounded-md border border-line px-1.5 py-0.5 font-mono text-[11px] text-subtle transition hover:text-fg"
+                >
+                  <Plus className="size-3" strokeWidth={1.5} /> {t}
+                </button>
+              ))}
+            </span>
+          </div>
+        </div>
+        <SaveBar
+          dirty={dirty}
+          busy={busy === "limits"}
+          onReset={() => {
+            setSize(savedSize());
+            setTypes(savedTypes);
+            setDraft("");
           }}
         />
       </form>

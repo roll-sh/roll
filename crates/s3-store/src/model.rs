@@ -200,6 +200,10 @@ pub struct ObjectHeaders {
     /// `x-amz-website-redirect-location`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub website_redirect: Option<String>,
+    /// Who wrote it through the storage developer API: the app user's `sub` (Supabase's
+    /// `owner_id`); `None` for writes through the S3 API, the service key or the control plane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 /// An `x-amz-checksum-*` value: `algorithm` is `CRC32`, `CRC32C`, `CRC64NVME`, `SHA1` or

@@ -109,6 +109,7 @@ fn identity(c: &Call, kind_: Kind, arn: &str, user_id: &str, policies: &[Input],
         session_policies: Vec::new(),
         session: None,
         dead: false,
+        app: None,
     }
 }
 

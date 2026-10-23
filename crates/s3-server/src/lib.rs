@@ -13,6 +13,7 @@
 
 mod access;
 mod accesspoint;
+pub mod app;
 mod acl;
 mod append;
 mod attributes;

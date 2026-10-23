@@ -6,6 +6,10 @@ boto3, the JS v3 SDK, rclone, `mc` and so on. It also has two things S3 doesn't:
 - **branching buckets:** a copy-on-write copy of a bucket in one call, for previews and tests
 - **a recovery window:** deleted and overwritten objects stay restorable for a few days
 
+It also serves a [developer API](api.md) that's compatible with Supabase Storage, for apps that
+talk to storage straight from the browser with their users' JWTs. Bucket policies decide what
+each user may do.
+
 Underneath, every object is one object in Amazon S3 (or any S3-compatible store), so durability
 is S3's own.
 
@@ -15,6 +19,7 @@ is S3's own.
 | --------------------------------------- | --------------------------------------------------------------------- |
 | [architecture.md](architecture.md)      | how it's built: one blob per object, the metadata log, branching, trash, GC, the control-plane API (`/v1/storage/...`) |
 | [compatibility.md](compatibility.md)    | which S3 operations, headers and features are supported, and which aren't |
+| [api.md](api.md)                        | the developer API (Supabase Storage compatible, `/storage/v1`): clients, routes, auth, rules, limits, migrating from Supabase |
 | [pricing.md](pricing.md)                | internal notes: what each line item costs us and where the margin comes from |
 
 ## Migration guides
@@ -23,12 +28,14 @@ is S3's own.
 | ----------------------------------------- | ------------------------------------------------------------ |
 | [Amazon S3](migrate-from-s3.md)           | `rclone sync` or `aws s3 sync`, then change the endpoint     |
 | [Cloudflare R2](migrate-from-r2.md)       | `rclone sync` between two S3 remotes, then change the endpoint |
+| [Supabase Storage](api.md#migrating-from-supabase-storage) | change the URL and key, trust your JWT secret, rules as bucket policies, copy with rclone or a script |
 
 ## Local endpoints
 
 | listener                      | default            | flag / env                     |
 | ----------------------------- | ------------------ | ------------------------------ |
 | S3 API                        | `127.0.0.1:59000`  | `--s3` / `ROLL_S3`             |
+| developer API (`/storage/v1`) | `127.0.0.1:59001`  | `--storage-api` / `ROLL_STORAGE_API` |
 | roll API (`/v1/storage`)      | `127.0.0.1:7070`   | `--api` / `ROLL_API`           |
 
 Other settings:
@@ -68,6 +75,8 @@ Other settings:
   webhooks work without it.
 - `ROLL_S3_WEBHOOK_ALLOW_PRIVATE`: let notification webhooks reach loopback and private
   addresses (single-tenant installs, local development).
+- `ROLL_STORAGE_API_PUBLIC_URL`: the developer API's public URL
+  (`https://storage.example.com/storage/v1`), for resumable upload URLs and the dashboard.
 - `--no-storage` / `ROLL_NO_STORAGE`: don't run roll storage.
 
 The roll API on `:7070` has no authentication. Keep it private.

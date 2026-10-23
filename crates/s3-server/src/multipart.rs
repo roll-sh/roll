@@ -60,6 +60,8 @@ pub(crate) async fn create(ctx: &mut Ctx, bucket: &Bucket) -> Reply {
     }
     let lock = crate::versioning::lock_headers(ctx, bucket)?;
     let target = sse::target(ctx, bucket)?;
+    // The bucket's allowed media types now; its size limit when the upload completes.
+    crate::app::check_type_limit(ctx.store(), bucket, ctx.key_name(), headers.content_type.as_deref())?;
     ctx.meter(&bucket.id, Class::A);
     let up = ctx
         .store()
@@ -99,6 +101,8 @@ pub(crate) async fn upload_part(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> R
     if len > MAX_PUT {
         return Err(S3Error::new(Code::EntityTooLarge).with("ProposedSize", len.to_string()).with("MaxSizeAllowed", MAX_PUT.to_string()));
     }
+    // A part alone over the bucket's size limit can't make an object within it.
+    crate::app::check_size_limit(ctx.store(), bucket, &up.key, len)?;
     let store = ctx.store().clone();
     let result = incoming.result();
     let uploaded = store.put_part_data_sse(&up, n, incoming.into_stream(), len, key.as_ref()).await;

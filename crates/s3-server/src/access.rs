@@ -184,7 +184,7 @@ impl Ctx {
             Some(b) if crate::directory::is_directory(b) => crate::directory::bucket_arn(self, b),
             b => resource_arn(b.unwrap_or("*"), None),
         };
-        let cond = Cond { ctx: self, who: self.who(), bucket: bucket.unwrap_or_default(), key: None, resource_account: id.account.id.clone(), tags: OnceLock::new(), prefix: None, ap: self.access_point.as_deref(), mode: None };
+        let cond = Cond { ctx: self, who: self.who(), bucket: bucket.unwrap_or_default(), key: None, resource_account: id.account.id.clone(), tags: OnceLock::new(), owner: OnceLock::new(), prefix: None, ap: self.access_point.as_deref(), mode: None };
         if id.verdict(action, &resource, &cond, level).allowed() { Ok(()) } else { Err(S3Error::new(Code::AccessDenied)) }
     }
 }
@@ -266,7 +266,7 @@ fn requester_pays(ctx: &Ctx, who: Who, a: &Access) -> Result<(), S3Error> {
     }
 }
 
-fn authorize_as(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, action: &str, need: Need, prefix: Option<&str>) -> Result<(), S3Error> {
+pub(crate) fn authorize_as(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, action: &str, need: Need, prefix: Option<&str>) -> Result<(), S3Error> {
     let denied = || S3Error::new(Code::AccessDenied);
     let a = match ctx.access(bucket) {
         Ok(a) => a,
@@ -316,7 +316,7 @@ fn authorize_as(ctx: &Ctx, who: Who, bucket: &str, key: Option<&str>, action: &s
     } else {
         (action, resource_arn(bucket, key), None)
     };
-    let cond = Cond { ctx, who, bucket, key, resource_account: a.owner().to_string(), tags: OnceLock::new(), prefix, ap: ctx.access_point.as_deref(), mode };
+    let cond = Cond { ctx, who, bucket, key, resource_account: a.owner().to_string(), tags: OnceLock::new(), owner: OnceLock::new(), prefix, ap: ctx.access_point.as_deref(), mode };
     let principal = who.principal();
     let bucket_policy = a.policy.as_ref().map(|p| p.evaluate(principal, policy_action, &resource, &cond)).unwrap_or_default();
     if bucket_policy.deny {
@@ -382,6 +382,9 @@ pub(crate) struct Cond<'a> {
     pub resource_account: String,
     /// The object's current tags, read on first use.
     pub tags: OnceLock<Option<BTreeMap<String, String>>>,
+    /// `roll:ObjectOwner`, read on first use: the current object's owner (`""` without one),
+    /// `None` when there's no object.
+    pub owner: OnceLock<Option<String>>,
     /// `s3:prefix` when it isn't the request's `prefix` parameter.
     pub prefix: Option<&'a str>,
     /// The access point the resource is reached through (its condition keys), if any.
@@ -437,6 +440,11 @@ impl Context for Cond<'_> {
                 tags.as_ref()?.iter().find(|(t, _)| t.eq_ignore_ascii_case(name)).map(|(_, v)| vec![v.clone()])
             }
             k if k.starts_with("s3:x-amz-") => header(&k[3..]),
+            // The developer API's owner rules (`s3-api`): who wrote the object now at the key.
+            "roll:objectowner" => {
+                let owner = self.owner.get_or_init(|| self.key.and_then(|key| ctx.store().get_object(self.bucket, key).ok()).map(|m| m.headers.owner.unwrap_or_default()));
+                one(owner.clone())
+            }
             _ => None,
         }
     }

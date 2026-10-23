@@ -1,0 +1,35 @@
+{
+  "name": "@roll/storage",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript client for roll storage's developer API (Supabase Storage compatible)",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "README.md"],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.build.json && tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.test.json && node --test --test-reporter=spec .test-build/test/*.test.js"
+  },
+  "dependencies": {
+    "@supabase/storage-js": "^2.118.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "tus-js-client": "^4.3.1",
+    "typescript": "^5"
+  }
+}

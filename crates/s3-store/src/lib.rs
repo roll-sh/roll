@@ -20,6 +20,7 @@
 
 pub mod access_points;
 pub mod accounts;
+pub mod api;
 mod append;
 pub mod backend;
 pub mod cdn;
@@ -51,6 +52,7 @@ mod versioning;
 mod versions;
 
 pub use accounts::{Account, AccountUpdate};
+pub use api::{ApiKey, ApiProject, ApiRole, ApiUpload, ApiUploadInfo, AuthUpdate, BucketLimits, NewApiUpload};
 pub use backend::{Backend, BlobAttrs, BlobSse, ByteStream, CopySource, CustomerKey, KmsParams, Listed, LocalBackend, S3Backend, S3Location, SseOp, SseUnsupported, Uploaded, UploadedPart, bytes_body, from_config, sse_c_unsupported, test_backend};
 pub use config::{PublicAccessBlock, RedirectAll, Redirect, RoutingCondition, RoutingRule, WebsiteConfig};
 pub use sse::Encryption;

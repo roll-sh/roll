@@ -254,6 +254,8 @@ pub(crate) struct Verified {
     pub transitive_tag_keys: Vec<String>,
     /// The `https://aws.amazon.com/source_identity` claim.
     pub source_identity: Option<String>,
+    /// Every claim of the token (the developer API's `jwt:*` condition keys).
+    pub claims: serde_json::Map<String, Value>,
 }
 
 struct Cached {
@@ -378,7 +380,7 @@ impl Oidc {
         if let Some(si) = &source_identity {
             s3_store::sts::validate_source_identity(si).map_err(invalid)?;
         }
-        Ok(Verified { issuer: iss, subject: sub, audience, tags, transitive_tag_keys, source_identity })
+        Ok(Verified { issuer: iss, subject: sub, audience, tags, transitive_tag_keys, source_identity, claims: jwt.claims.clone() })
     }
 }
 

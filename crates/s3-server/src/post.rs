@@ -284,6 +284,7 @@ pub(crate) async fn upload(ctx: &mut Ctx, body: Body) -> Reply {
         tags,
         acl,
         website_redirect,
+        owner: None,
     };
     let lock = crate::versioning::lock_from(|n| field(&fields, n), bucket.object_lock.is_some(), ctx.store().now())?;
 

@@ -309,6 +309,26 @@ ALTER TABLE usage ADD COLUMN egress_cdn_origin INTEGER NOT NULL DEFAULT 0;
 CREATE TABLE cdn_batches (id TEXT PRIMARY KEY, received_at INTEGER NOT NULL);
 CREATE INDEX cdn_batches_by_time ON cdn_batches (received_at);
 "#,
+// The storage developer API (`s3-api`, `api.rs`): an object's `owner` (the `sub` of the app
+// user that wrote it, like Supabase's `owner_id`), kept in the row so every copy of it carries
+// it (branch push-down, versions, the trash, uploads from create to complete); an account's API
+// project (its API keys, sealed, and its auth providers, as JSON); and resumable (TUS) uploads,
+// each one a multipart upload of `uploads` (same id) plus what TUS needs to resume it. A TUS
+// upload's row goes in the transaction that completes or aborts its multipart upload.
+r#"
+ALTER TABLE objects ADD COLUMN owner TEXT;
+ALTER TABLE versions ADD COLUMN owner TEXT;
+ALTER TABLE trash ADD COLUMN owner TEXT;
+ALTER TABLE uploads ADD COLUMN owner TEXT;
+CREATE TABLE api_projects (
+  account_id TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE api_uploads (
+  id TEXT PRIMARY KEY, account_id TEXT NOT NULL, length INTEGER, part_size INTEGER NOT NULL,
+  value TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX api_uploads_expiry ON api_uploads (expires_at);
+"#,
 ];
 
 pub(crate) const LATEST: u32 = MIGRATIONS.len() as u32;

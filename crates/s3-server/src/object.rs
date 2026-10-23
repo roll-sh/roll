@@ -106,6 +106,7 @@ pub(crate) fn object_headers(ctx: &Ctx) -> Result<ObjectHeaders, S3Error> {
         tags,
         acl,
         website_redirect,
+        owner: None,
     })
 }
 
@@ -158,6 +159,12 @@ async fn put(ctx: &mut Ctx, bucket: &Bucket, body: Body) -> Reply {
     let len = incoming.len().ok_or_else(|| S3Error::new(Code::MissingContentLength))?;
     if len > MAX_PUT {
         return Err(S3Error::new(Code::EntityTooLarge).with("ProposedSize", len.to_string()).with("MaxSizeAllowed", MAX_PUT.to_string()));
+    }
+    // The bucket's limits (`file_size_limit`, `allowed_mime_types`), before any bytes move; the
+    // store checks them again when it writes the version.
+    if replica.is_none() {
+        crate::app::check_size_limit(ctx.store(), bucket, ctx.key_name(), len)?;
+        crate::app::check_type_limit(ctx.store(), bucket, ctx.key_name(), headers.content_type.as_deref())?;
     }
     ctx.meter(&bucket.id, Class::A);
     match replica {

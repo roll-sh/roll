@@ -302,7 +302,7 @@ fn authorize_with(ctx: &Ctx, r: &ApRequest, who: Who, a: &Access, bucket: &str, 
     let denied = || S3Error::new(Code::AccessDenied);
     let p = who.principal();
     let resource = crate::access::resource_arn(bucket, key);
-    let cond = Cond { ctx, who, bucket, key, resource_account: a.owner().to_string(), tags: OnceLock::new(), prefix, ap: Some(r), mode: None };
+    let cond = Cond { ctx, who, bucket, key, resource_account: a.owner().to_string(), tags: OnceLock::new(), owner: OnceLock::new(), prefix, ap: Some(r), mode: None };
     let ap_resource = match key {
         Some(k) => format!("{}/object/{k}", r.arn),
         None => r.arn.clone(),

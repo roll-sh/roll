@@ -40,6 +40,8 @@ pub mod kind {
     pub const METRICS: &str = "metrics";
     pub const INVENTORY: &str = "inventory";
     pub const INTELLIGENT_TIERING: &str = "intelligent_tiering";
+    /// The developer API's upload limits (`api.rs`): `file_size_limit`, `allowed_mime_types`.
+    pub const LIMITS: &str = crate::api::LIMITS;
     pub use crate::events::kind::{NOTIFICATION, REPLICATION, WEBHOOK_SECRET};
 }
 

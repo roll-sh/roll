@@ -36,6 +36,7 @@ redis-server.workspace = true
 s3-control.workspace = true
 s3-server.workspace = true
 s3-store.workspace = true
+s3-api.workspace = true
 stream-broker.workspace = true
 tasks.workspace = true
 tokio.workspace = true

@@ -129,6 +129,9 @@ pub struct Control {
     pub(crate) notifier: std::sync::OnceLock<Arc<s3_server::Notifier>>,
     /// The S3 API; set by [`Control::set_server`].
     pub(crate) server: std::sync::OnceLock<Arc<s3_server::Server>>,
+    /// The developer API's URL (`http://host:59001/storage/v1`); set by
+    /// [`Control::set_api_endpoint`] when it's served.
+    pub(crate) api_endpoint: std::sync::OnceLock<String>,
 }
 
 fn random_secret() -> String {
@@ -295,7 +298,7 @@ impl Control {
             Some(k) => k.secret,
             None => store.ensure_key(CONTROL_KEY_ID, &random_secret(), CONTROL_KEY_NAME).await?.secret,
         };
-        Ok(Arc::new(Self { store, cfg, presign_secret: secret, notifier: Default::default(), server: Default::default() }))
+        Ok(Arc::new(Self { store, cfg, presign_secret: secret, notifier: Default::default(), server: Default::default(), api_endpoint: Default::default() }))
     }
 
     /// Connect the S3 API's notifier, so `PATCH` can set notifications (their destinations are
@@ -306,6 +309,11 @@ impl Control {
 
     /// Connect the S3 API (its notifier too): the dashboard's sign-in, IAM and what signed-in
     /// users may do go through it (`console.rs`).
+    /// Where the developer API (`s3-api`) is served, as clients reach it.
+    pub fn set_api_endpoint(&self, url: impl Into<String>) {
+        let _ = self.api_endpoint.set(url.into());
+    }
+
     pub fn set_server(&self, s: Arc<s3_server::Server>) {
         self.set_notifier(s.notifier.clone());
         let _ = self.server.set(s);
@@ -379,6 +387,10 @@ impl Control {
         let mut v = serde_json::to_value(b).unwrap_or_default();
         let endpoint = self.cfg.endpoint.trim_end_matches('/');
         v["tags"] = json!(self.store.bucket_tags(&b.name).unwrap_or_default());
+        // The developer API's upload limits (enforced on every write path).
+        let limits = self.store.bucket_limits(&b.name).unwrap_or_default();
+        v["file_size_limit"] = json!(limits.file_size_limit);
+        v["allowed_mime_types"] = json!(limits.allowed_mime_types);
         let website = self.store.bucket_website(&b.name).ok().flatten();
         let has_website = website.is_some();
         v["website"] = json!(website);

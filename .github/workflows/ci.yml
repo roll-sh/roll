@@ -38,7 +38,7 @@ jobs:
           match storage '^(crates/(s3-[a-z]+|pg-storage|rolld|roll-cli)/|Cargo\.(toml|lock)$|apps/cdn-worker/|scripts/test-(storage|storage-cdn|s3-conformance)\.sh$|tests/s3-conformance/|\.github/workflows/(storage|ci)\.yml$)'
           match stream '^(crates/(stream-log|stream-broker|pg-storage|rolld|roll-cli)/|vendor/kafka-protocol/|Cargo\.(toml|lock)$|scripts/test-stream\.sh$|\.github/workflows/(stream|ci)\.yml$)'
           match tasks '^(crates/(tasks|rolld|roll-cli)/|deploy/aws/|Cargo\.(toml|lock)$|scripts/test-tasks\.sh$|\.github/workflows/(tasks|ci)\.yml$)'
-          match web '^(apps/|packages/|package\.json$|pnpm-(lock|workspace)\.yaml$|\.github/workflows/(web|ci)\.yml$)'
+          match web '^(apps/|packages/|crates/s3-[a-z]+/|package\.json$|pnpm-(lock|workspace)\.yaml$|\.github/workflows/(web|ci)\.yml$)'
 
   postgres:
     needs: changes

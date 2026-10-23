@@ -66,7 +66,9 @@ enum Effect {
 enum Principals {
     /// `"*"` or `{"AWS": "*"}`.
     Anyone,
-    Some { aws: Vec<String>, canonical: Vec<String>, federated: Vec<String> },
+    /// `app`: roles of the storage developer API's callers (`{"App": "authenticated"}`, `anon`,
+    /// a JWT's own `role`, or `*` for any of them; `s3-api`).
+    Some { aws: Vec<String>, canonical: Vec<String>, federated: Vec<String>, app: Vec<String> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -332,6 +334,9 @@ pub(crate) struct Requester {
     /// The OIDC provider ARN of a web identity (`AssumeRoleWithWebIdentity` trust policies'
     /// `Federated` principals).
     pub federated: Option<String>,
+    /// A storage developer API caller's role (`anon`, `authenticated`, or its JWT's `role`):
+    /// what `App` principals name.
+    pub app_role: Option<String>,
 }
 
 impl Principal {
@@ -383,7 +388,7 @@ pub(crate) trait Context {
 
 impl Principals {
     fn matches(&self, who: &Principal) -> Option<Via> {
-        let Principals::Some { aws, canonical, federated } = self else { return Some(Via::Direct) };
+        let Principals::Some { aws, canonical, federated, app } = self else { return Some(Via::Direct) };
         let r = match who {
             Principal::Known(r) => r,
             Principal::Anonymous => return aws.iter().any(|a| a == "*").then_some(Via::Direct),
@@ -411,13 +416,17 @@ impl Principals {
         if r.federated.as_ref().is_some_and(|f| federated.contains(f)) {
             see(Via::Direct);
         }
+        if r.app_role.as_ref().is_some_and(|role| app.iter().any(|a| a == "*" || a == role)) {
+            see(Via::Direct);
+        }
         best
     }
 
     fn anyone(&self) -> bool {
         match self {
             Principals::Anyone => true,
-            Principals::Some { aws, .. } => aws.iter().any(|a| a == "*"),
+            // The developer API's anonymous role is anyone holding the (public) anon key.
+            Principals::Some { aws, app, .. } => aws.iter().any(|a| a == "*") || app.iter().any(|a| a == "*" || a == "anon"),
         }
     }
 }
@@ -463,6 +472,7 @@ fn principals(v: &Value) -> Result<Principals, S3Error> {
             let mut aws = Vec::new();
             let mut canonical = Vec::new();
             let mut federated = Vec::new();
+            let mut app = Vec::new();
             for (k, v) in m {
                 let vals = strings(v, "Principal")?;
                 match k.as_str() {
@@ -484,10 +494,17 @@ fn principals(v: &Value) -> Result<Principals, S3Error> {
                     "Service" => {}
                     // OIDC providers (web identities in trust policies).
                     "Federated" => federated.extend(vals),
+                    // Developer API roles (`s3-api`); they never match an S3 request.
+                    "App" => {
+                        if vals.iter().any(|r| r.is_empty() || r.len() > 64 || !r.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'*')) {
+                            return Err(malformed("Invalid principal in policy"));
+                        }
+                        app.extend(vals);
+                    }
                     _ => return Err(malformed("Invalid principal in policy")),
                 }
             }
-            Ok(Principals::Some { aws, canonical, federated })
+            Ok(Principals::Some { aws, canonical, federated, app })
         }
         _ => Err(malformed("Invalid principal in policy")),
     }

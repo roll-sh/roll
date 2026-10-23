@@ -167,6 +167,14 @@ struct Args {
     /// `http://<public host>:<S3 port>`.
     #[arg(long, env = "ROLL_S3_PUBLIC_ENDPOINT")]
     s3_public_endpoint: Option<String>,
+    /// roll storage's developer API (Supabase-Storage-compatible REST, `/storage/v1`) listen
+    /// address.
+    #[arg(long, env = "ROLL_STORAGE_API", default_value = "127.0.0.1:59001")]
+    storage_api: SocketAddr,
+    /// The developer API's public URL (`https://storage.example.com/storage/v1`): resumable
+    /// upload URLs and the dashboard; default `http://<public host>:<port>/storage/v1`.
+    #[arg(long, env = "ROLL_STORAGE_API_PUBLIC_URL")]
+    storage_api_public_url: Option<String>,
     /// More endpoints SAML assertions may be for (comma-separated `Recipient`/`Audience`
     /// values), besides `https://signin.aws.amazon.com/saml`.
     #[arg(long, env = "ROLL_S3_SAML_AUDIENCES")]
@@ -340,7 +348,10 @@ async fn run() -> anyhow::Result<()> {
     }
     let storage_serve = async {
         match (&storage_svc, s3_listener) {
-            (Some(st), Some(l)) => s3_server::serve(l, st.server.clone()).await,
+            (Some(st), Some((l, api))) => tokio::select! {
+                r = s3_server::serve(l, st.server.clone()) => r,
+                r = s3_api::serve(api, st.api.clone()) => r,
+            },
             _ => std::future::pending().await,
         }
     };
@@ -385,6 +396,8 @@ async fn run() -> anyhow::Result<()> {
 struct Storage {
     server: std::sync::Arc<s3_server::Server>,
     control: std::sync::Arc<s3_control::Control>,
+    /// The developer API (`s3-api`).
+    api: std::sync::Arc<s3_api::Api>,
 }
 
 /// rolld's storage flags (taken before the other products consume theirs).
@@ -406,6 +419,8 @@ struct StorageOpts {
     s3_notify_aws_endpoints: Option<String>,
     s3_replication_metrics_cloudwatch: bool,
     s3_public_endpoint: Option<String>,
+    storage_api: SocketAddr,
+    storage_api_public_url: Option<String>,
     s3_saml_audiences: Option<String>,
     s3_webhook_allow_private: bool,
     s3_cache_memory: String,
@@ -437,6 +452,8 @@ impl From<&Args> for StorageOpts {
             s3_notify_aws_endpoints: a.s3_notify_aws_endpoints.clone(),
             s3_replication_metrics_cloudwatch: a.s3_replication_metrics_cloudwatch,
             s3_public_endpoint: a.s3_public_endpoint.clone(),
+            storage_api: a.storage_api,
+            storage_api_public_url: a.storage_api_public_url.clone(),
             s3_saml_audiences: a.s3_saml_audiences.clone(),
             s3_webhook_allow_private: a.s3_webhook_allow_private,
             s3_cache_memory: a.s3_cache_memory.clone(),
@@ -450,7 +467,7 @@ impl From<&Args> for StorageOpts {
     }
 }
 
-async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &StorageConfig) -> anyhow::Result<(Storage, tokio::net::TcpListener)> {
+async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &StorageConfig) -> anyhow::Result<(Storage, (tokio::net::TcpListener, tokio::net::TcpListener))> {
     let class = args.s3_storage_class.clone().or_else(|| match storage {
         StorageConfig::S3 { endpoint: None, .. } => Some("INTELLIGENT_TIERING".into()),
         StorageConfig::S3 { endpoint: Some(_), .. } => Some("STANDARD".into()),
@@ -459,6 +476,7 @@ async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &Sto
     let class = class.filter(|_| matches!(storage, StorageConfig::S3 { .. }));
     // Bind first: a node that can't serve shouldn't take over the metadata log.
     let listener = tokio::net::TcpListener::bind(args.s3).await?;
+    let api_listener = tokio::net::TcpListener::bind(args.storage_api).await?;
     let backend = s3_store::from_config(storage, class.as_deref()).await?;
     let mut scfg = s3_server::Config {
         virtual_host_domain: args.s3_domain.clone(),
@@ -513,9 +531,14 @@ async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &Sto
     let endpoint = format!("http://{}:{}", args.public_host, args.s3.port());
     let ccfg = s3_control::ControlConfig { endpoint, region: scfg.region.clone(), virtual_host_domain: args.s3_domain.clone(), website_domain: args.s3_website_domain.clone(), storage_class: class, pricing: Default::default() };
     let control = s3_control::Control::new(store.clone(), ccfg).await?;
+    let spool = scfg.spool_dir.clone();
     let server = s3_server::Server::new(store, scfg);
     info!(s3 = %args.s3, storage = %server.store.describe(), "storage (S3 API) listening");
-    Ok((Storage { server, control }, listener))
+    let api_url = args.storage_api_public_url.clone().unwrap_or_else(|| format!("http://{}:{}{}", args.public_host, args.storage_api.port(), s3_api::PREFIX));
+    control.set_api_endpoint(api_url.clone());
+    let api = s3_api::Api::new(server.clone(), s3_api::Config { public_url: args.storage_api_public_url.clone(), spool_dir: spool, ..Default::default() });
+    info!(api = %args.storage_api, url = api_url, "storage developer API listening");
+    Ok((Storage { server, control, api }, (listener, api_listener)))
 }
 
 /// Ctrl-C, or SIGTERM from a supervisor (systemd, ECS, Kubernetes) during a rolling upgrade.

@@ -11,6 +11,7 @@ on:
       - "crates/s3-store/**"
       - "crates/s3-server/**"
       - "crates/s3-control/**"
+      - "crates/s3-api/**"
       - "crates/pg-storage/**"
       - "crates/rolld/**"
       - "crates/roll-cli/**"

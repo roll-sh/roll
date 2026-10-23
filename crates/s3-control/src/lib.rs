@@ -9,6 +9,7 @@ pub mod api;
 mod cdn;
 mod console;
 pub mod control;
+mod devapi;
 pub mod roles;
 pub mod settings;
 mod targets;

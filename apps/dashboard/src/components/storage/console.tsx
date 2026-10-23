@@ -35,6 +35,7 @@ import { Field } from "./shared";
 export const SIGNIN_HREF = "/dashboard/storage/-/signin";
 export const IAM_HREF = "/dashboard/storage/-/iam";
 export const ACCOUNTS_HREF = "/dashboard/storage/-/accounts";
+export const API_HREF = "/dashboard/storage/-/api";
 
 /** The console session (IAM user signed in), or `null` in operator mode. */
 export function useConsoleSession() {

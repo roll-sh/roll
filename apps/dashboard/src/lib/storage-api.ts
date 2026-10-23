@@ -265,6 +265,10 @@ export interface Bucket {
   policy_public: boolean;
   /** The bucket's own block (`null`: none); the deployment's applies on top. */
   public_access_block: PublicAccessBlock | null;
+  /** Largest object, in bytes (`null`: no limit). Enforced on every write path. */
+  file_size_limit: number | null;
+  /** Media types objects may have (`image/png`, `image/*`); `null`: any. */
+  allowed_mime_types: string[] | null;
 }
 
 export interface BucketPatch {
@@ -284,6 +288,69 @@ export interface BucketPatch {
   /** The bucket policy (object or JSON text); `null` removes it. */
   policy?: IamPolicy | string | null;
   public_access_block?: PublicAccessBlock | null;
+  /** Bytes, or text such as `"20MB"` / `"1.5GB"` (decimal units); `null` removes the limit. */
+  file_size_limit?: number | string | null;
+  /** `null` removes the list (any type). */
+  allowed_mime_types?: string[] | null;
+}
+
+/** A bucket's upload limits, as written. */
+export interface UploadLimits {
+  file_size_limit: number | string | null;
+  allowed_mime_types: string[] | null;
+}
+
+// --- Developer API (Supabase-Storage-compatible REST API) --------------------------------------
+
+/** An OIDC issuer whose ID tokens the developer API accepts as user tokens. */
+export interface ApiOidcProvider {
+  /** Exactly the tokens' `iss`. */
+  issuer: string;
+  /** Accepted `aud` values. */
+  audiences: string[];
+  /** Default: the issuer's discovery document. */
+  jwks_uri?: string | null;
+}
+
+export interface ApiAuth {
+  /** The HS256 secret is write-only: only whether one is set. */
+  jwt_secret_set: boolean;
+  jwt_issuer: string | null;
+  jwt_audience: string | null;
+  oidc: ApiOidcProvider[];
+}
+
+/** A change to the auth providers: left out, unchanged; `null`, removed. */
+export interface ApiAuthPatch {
+  /** 32–512 characters. */
+  jwt_secret?: string | null;
+  jwt_issuer?: string | null;
+  jwt_audience?: string | null;
+  /** Replaces the list. */
+  oidc?: ApiOidcProvider[];
+}
+
+/** A rules preset: a bucket policy generated for one bucket. */
+export interface RulePreset {
+  id: string;
+  name: string;
+  description: string;
+}
+
+/** The developer API of the account the dashboard acts in (its "project"). */
+export interface StorageApiView {
+  account_id: string;
+  /** e.g. `http://host:59001/storage/v1`; `null` when the API listener isn't running. */
+  endpoint: string | null;
+  /** Public: safe in browsers; requests act as `anon` unless a user token is sent. */
+  anon_key: string;
+  /** Secret: full access, for servers only. */
+  service_key: string;
+  key_generation: number;
+  /** Unix ms. */
+  keys_issued_at: number;
+  auth: ApiAuth;
+  presets: RulePreset[];
 }
 
 export interface ObjectSummary {
@@ -573,6 +640,19 @@ export const storageApi = {
   setPolicy: (name: string, policy: IamPolicy | string | null) => call<Bucket>("PATCH", bucket(name), { policy }),
   setPublicAccessBlock: (name: string, block: PublicAccessBlock | null) =>
     call<Bucket>("PATCH", bucket(name), { public_access_block: block }),
+  /** Both upload limits at once (`null` removes either). */
+  setUploadLimits: (name: string, limits: UploadLimits) => call<Bucket>("PATCH", bucket(name), limits),
+
+  /** The developer API: endpoint, keys, auth providers and rule presets. */
+  devApi: () => call<StorageApiView>("GET", "/v1/storage/api"),
+  /** New anon and service keys; the old ones stop working at once. */
+  rotateApiKeys: () => call<StorageApiView>("POST", "/v1/storage/api/keys/rotate"),
+  setApiAuth: (patch: ApiAuthPatch) => call<StorageApiView>("PUT", "/v1/storage/api/auth", patch),
+  /** The policy a preset would give the bucket (nothing is applied). */
+  rulePreview: (name: string, preset: string) =>
+    call<{ preset: string; policy: IamPolicy }>("GET", `${bucket(name)}/rules/${encodeURIComponent(preset)}`),
+  /** Replace the bucket's policy with the preset's. */
+  applyRule: (name: string, preset: string) => call<Bucket>("POST", `${bucket(name)}/rules`, { preset }),
 
   roles: () => call<Role[]>("GET", "/v1/storage/roles"),
   role: (name: string) => call<Role>("GET", role(name)),
@@ -1061,4 +1141,121 @@ export function sessionEnv(s: Session): string {
   return Object.entries(s.env)
     .map(([k, v]) => `${k}=${v}`)
     .join("\n");
+}
+
+// --- Upload limits -----------------------------------------------------------------------------
+
+/** Decimal units, as the server parses `"20MB"`. */
+export const SIZE_UNITS = [
+  { unit: "B", bytes: 1 },
+  { unit: "KB", bytes: 1e3 },
+  { unit: "MB", bytes: 1e6 },
+  { unit: "GB", bytes: 1e9 },
+] as const;
+export type SizeUnit = (typeof SIZE_UNITS)[number]["unit"];
+
+/** A byte count in the largest unit it fits with at most 3 decimals: 1500000000 → 1.5 GB. */
+export function splitSize(bytes: number): { value: string; unit: SizeUnit } {
+  for (const { unit, bytes: b } of [...SIZE_UNITS].reverse()) {
+    if (b > 1 && bytes >= b && bytes % (b / 1000) === 0) return { value: String(Number((bytes / b).toFixed(3))), unit };
+  }
+  return { value: String(bytes), unit: "B" };
+}
+
+/** A size limit for display, in decimal units: `20 MB`, `1.5 GB`, `no limit`. */
+export function formatSizeLimit(bytes: number | null): string {
+  if (bytes == null) return "no limit";
+  const { value, unit } = splitSize(bytes);
+  return `${value} ${unit}`;
+}
+
+/** A typed size in a unit as bytes (`null`: empty, no limit), or what's wrong with it. */
+export function sizeLimitBytes(value: string, unit: SizeUnit): { bytes: number | null; error: null } | { bytes: null; error: string } {
+  const v = value.trim();
+  if (!v) return { bytes: null, error: null };
+  if (!/^\d+(\.\d+)?$/.test(v)) return { bytes: null, error: "Enter a number, e.g. 20 or 1.5." };
+  const bytes = Math.round(Number(v) * SIZE_UNITS.find((u) => u.unit === unit)!.bytes);
+  if (!Number.isSafeInteger(bytes)) return { bytes: null, error: "That's too large." };
+  return { bytes, error: null };
+}
+
+const TOKEN = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
+/**
+ * An allowed-types entry: `null` when it's `type/subtype` or `type/*` (parameters are allowed and
+ * dropped by the server), else what's wrong. Mirrors crates/s3-store/src/api.rs `media_type`.
+ */
+export function mimeTypeError(s: string): string | null {
+  const [essence, ...params] = s.split(";");
+  const e = essence.trim();
+  const slash = e.indexOf("/");
+  const t = e.slice(0, slash);
+  const sub = e.slice(slash + 1);
+  if (slash < 0 || !TOKEN.test(t) || !TOKEN.test(sub) || t.includes("*") || (sub.includes("*") && sub !== "*")) {
+    return `${s.trim()} isn't a media type like image/png or image/*.`;
+  }
+  for (const p of params) {
+    const kv = p.trim();
+    if (!kv) continue;
+    const eq = kv.indexOf("=");
+    const v = kv.slice(eq + 1);
+    const quoted = v.length >= 2 && v.startsWith('"') && v.endsWith('"');
+    if (eq < 0 || !TOKEN.test(kv.slice(0, eq)) || !(TOKEN.test(v) || quoted)) return `${s.trim()} has a malformed parameter.`;
+  }
+  return null;
+}
+
+/** An allowed-types entry as the server stores it: lowercase `type/subtype`, parameters dropped. */
+export function normalizeMimeType(s: string): string {
+  return s.split(";")[0].trim().toLowerCase();
+}
+
+// --- Developer API -----------------------------------------------------------------------------
+
+/** An HS256 secret as typed: `null` when it's 32–512 characters. */
+export function jwtSecretError(s: string): string | null {
+  if (s.length < 32) return `At least 32 characters (${s.length} so far).`;
+  if (s.length > 512) return "At most 512 characters.";
+  return null;
+}
+
+const isHttpUrl = (v: string) => {
+  try {
+    const u = new URL(v);
+    return u.protocol === "https:" || u.protocol === "http:";
+  } catch {
+    return false;
+  }
+};
+
+/** An OIDC issuer as typed: `null` when the issuer (and the JWKS URI, if any) are URLs and it has 1–20 audiences. */
+export function apiOidcError(p: ApiOidcProvider): string | null {
+  if (!p.issuer.trim()) return "Every issuer needs its URL.";
+  if (!isHttpUrl(p.issuer.trim())) return `${p.issuer} isn't a URL.`;
+  const auds = p.audiences.map((a) => a.trim()).filter(Boolean);
+  if (auds.length === 0 || auds.length > 20) return `${p.issuer.trim()}: give 1–20 audiences (the tokens' aud).`;
+  if (auds.some((a) => a.length > 255)) return `${p.issuer.trim()}: an audience is at most 255 characters.`;
+  if (p.jwks_uri?.trim() && !isHttpUrl(p.jwks_uri.trim())) return `${p.jwks_uri} isn't a URL.`;
+  return null;
+}
+
+export const DEV_API_CLIENTS = ["@roll/storage", "@supabase/storage-js"] as const;
+export type DevApiClient = (typeof DEV_API_CLIENTS)[number];
+
+/** Quickstart code for a developer-API client. */
+export function devApiSnippet(client: DevApiClient, endpoint: string, anonKey: string): string {
+  const upload = "const { data, error } = await storage.from('avatars').upload('public/avatar.png', file)";
+  if (client === "@roll/storage") {
+    return ["import { createClient } from '@roll/storage'", "", `const storage = createClient('${endpoint}', '${anonKey}')`, "", upload].join("\n");
+  }
+  return [
+    "import { StorageClient } from '@supabase/storage-js'",
+    "",
+    `const storage = new StorageClient('${endpoint}', {`,
+    `  apikey: '${anonKey}',`,
+    `  Authorization: 'Bearer ${anonKey}',`,
+    "})",
+    "",
+    upload,
+  ].join("\n");
 }

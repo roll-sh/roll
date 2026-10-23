@@ -603,6 +603,9 @@ permissions boundary. Through IAM they show their trust as the equivalent trust 
   A `GetSessionToken` session is its key.
 - `Service` principals are accepted and never match; `Federated` principals match web identities
   and SAML providers in trust policies.
+- `{"App": "<role>"}` principals name callers of the [developer API](api.md#rules-bucket-policies)
+  and never match an S3 request (see
+  [below](#developer-api-limits-and-rules-seen-from-s3)).
 - Each one must exist when the policy is put (`Invalid principal in policy`); one deleted later
   reads as its unique id (see [IAM](#iam)).
 
@@ -1009,6 +1012,42 @@ bucket (`arn:aws:s3:::<roll bucket>`):
 - Files are written through the normal put path: durable once written, billed to the destination
   bucket, and they trigger the destination's own notifications. Data files are split every
   16 MiB compressed. A report that fails is retried at the next hourly check.
+
+## Developer API: limits and rules seen from S3
+
+The [developer API](api.md) (Supabase-Storage-compatible) shares buckets with the S3 API. Two of
+its settings show up here.
+
+**Bucket limits** (`file_size_limit`, `allowed_mime_types`, set through the developer API, the
+control plane's bucket PATCH or the dashboard) apply to S3 writes too:
+- **Errors:**
+  - A write over the size limit is `400 EntityTooLarge`.
+  - A `Content-Type` that isn't allowed is `400 InvalidRequest`, `mime type <type> is not
+    supported`. No `Content-Type` counts as `application/octet-stream`.
+- **When it's checked:**
+  - `PutObject` checks both before reading the body.
+  - `CreateMultipartUpload` checks the type, `UploadPart` refuses a part that alone exceeds the
+    size limit, and `CompleteMultipartUpload` checks the object's size.
+  - Every write is checked again in the transaction that writes the version: POST uploads,
+    `CopyObject`, appends, `RenameObject` and the control plane.
+- Keys ending in `.emptyFolderPlaceholder` are exempt.
+- Limits are copied to branches like the rest of a bucket's configuration.
+
+**Bucket policies** can hold the developer API's rules next to S3 statements:
+- `{"App": "<role>"}` principals (`anon`, `authenticated`, a JWT's `role`, or `*`). Role names are
+  letters, digits, `_`, `-` and `*`, up to 64 characters (`Invalid principal in policy`
+  otherwise).
+- `jwt:<claim>` condition keys and `${jwt:sub}`-style policy variables, from the developer API
+  caller's token.
+- `roll:ObjectOwner`, the `sub` of the developer API user who wrote the object now at the key
+  (`""` for objects written otherwise).
+
+`App` principals and `jwt:*` keys never match an S3 request. An S3 request has no app role, and
+`jwt:*` keys are absent for it, so their conditions are false unless they're negated or
+`…IfExists`, and a resource or value with a `${jwt:…}` variable matches nothing. `roll:ObjectOwner` is evaluated for any
+request. Objects written through the S3 API have no owner (`""`), and a `CopyObject` keeps the
+source's. For Block Public Access, `{"App": "anon"}` and `{"App": "*"}` count as public, since the
+anon key is public.
 
 ## Behaviour differences
 
