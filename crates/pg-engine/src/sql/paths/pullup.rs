@@ -28,9 +28,29 @@ fn const_rel(p: &Plan, ctx: &ExecCtx) -> Option<Vec<Expr>> {
         return Some(vec![Expr::Const(v, c.ty.clone())]);
     }
     // (A one-row VALUES list is pulled up as that row: pull_up_simple_values.)
+    // (A projection over such a row composes with it: a rule's `*RULE*` row over a
+    // statement's VALUES.)
+    let composed;
     let exprs = match p {
         Plan::Project { input, exprs } if matches!(&**input, Plan::One) => exprs,
         Plan::Values { rows, .. } if rows.len() == 1 => &rows[0],
+        Plan::Project { input, exprs } if matches!(&**input, Plan::Values { rows, .. } if rows.len() == 1) => {
+            let inner = const_rel(input, ctx)?;
+            composed = exprs
+                .iter()
+                .map(|e| {
+                    e.clone()
+                        .transform(&mut |x| {
+                            Ok(match x {
+                                Expr::Col(i, t) => inner.get(i).cloned().unwrap_or(Expr::Col(i, t)),
+                                x => x,
+                            })
+                        })
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            &composed
+        }
         _ => return None,
     };
     let ok = exprs.iter().all(|e| {
@@ -123,6 +143,11 @@ impl Planner<'_, '_> {
                         info: None,
                     }
                 };
+            } else if q.columns().is_empty() && !super::expr_volatile_deep(&q) && !q.has_outer_refs() && pred.columns() != q.columns() {
+                // (One with a sub-select: the row's values put in for its columns, its
+                // parameters too (ReplaceVarsFromTargetList), a clause of no variable left,
+                // the sub-select uncorrelated: a gating qual, an InitPlan.)
+                *pred = q;
             }
         }
         if let Some(out) = lateral_one_row(p) {
@@ -157,10 +182,23 @@ impl Planner<'_, '_> {
         let (nl, nr) = (*nleft, *nright);
         // (On an outer join's preserved side the constants are never nulled: they go into
         // its clauses all the same, the side staying as the row it is.)
-        let (consts, const_left) = match (const_rel(left, self.ctx), const_rel(right, self.ctx)) {
-            (_, Some(c)) => (c, false),
-            (Some(c), _) => (c, true),
-            _ => return None,
+        // (An inner join's constant side may be gated by a clause of no variable (a rule's
+        // qualification over the statement's VALUES row): the gate goes over the join's
+        // other side.)
+        let gated = |s: &Plan| -> Option<(Vec<Expr>, Expr)> {
+            let Plan::Filter { input, pred } = s else { return None };
+            (*kind == JoinKind::Inner && pred.columns().is_empty() && !super::expr_volatile_deep(pred) && !pred.has_outer_refs())
+                .then(|| const_rel(input, self.ctx).map(|c| (c, pred.clone())))
+                .flatten()
+        };
+        let (consts, const_left, gate) = match (const_rel(left, self.ctx), const_rel(right, self.ctx)) {
+            (_, Some(c)) => (c, false, None),
+            (Some(c), _) => (c, true, None),
+            _ => match (gated(left), gated(right)) {
+                (_, Some((c, g))) => (c, false, Some(g)),
+                (Some((c, g)), _) => (c, true, Some(g)),
+                _ => return None,
+            },
         };
         // (An outer join's nullable constants: in its own clauses only; above it they
         // go NULL with the row, so that side stays, a Result.)
@@ -246,9 +284,16 @@ impl Planner<'_, '_> {
         } else {
             cols.chain(consts).collect()
         };
-        Some(Plan::Project {
+        let merged = Plan::Project {
             input: Arc::new(other),
             exprs,
+        };
+        Some(match gate {
+            Some(pred) => Plan::Filter {
+                input: Arc::new(merged),
+                pred,
+            },
+            None => merged,
         })
     }
 }

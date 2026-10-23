@@ -1483,12 +1483,30 @@ impl Binder<'_, '_> {
             }
             Plan::Insert(ip) => {
                 let t = ip.rules.table.clone();
+                // (One VALUES row of constants: its values are NEW's, put in for it
+                // (ReplaceVarsFromTargetList), the qualification of no variable then.)
+                let row: Option<Vec<Expr>> = match &*ip.source {
+                    Plan::Values { rows, .. }
+                        if rows.len() == 1
+                            && rows[0].iter().all(|e| {
+                                let mut plain = e.columns().is_empty() && !e.is_volatile() && !e.has_outer_refs();
+                                e.walk(&mut |x| plain &= !matches!(x, Expr::Subquery(_) | Expr::Param(..)));
+                                plain
+                            }) =>
+                    {
+                        Some(rows[0].clone())
+                    }
+                    _ => None,
+                };
                 let new: Vec<Expr> = rel
                     .columns
                     .iter()
                     .map(|c| {
                         let j = t.column_index(&c.name);
                         match j.and_then(|j| ip.target.iter().position(|x| *x == j)) {
+                            Some(p) if row.as_ref().is_some_and(|r| p < r.len()) => {
+                                row.as_ref().expect("checked")[p].clone()
+                            }
                             Some(p) => Expr::Col(p, c.ty.clone()),
                             None => j
                                 .and_then(|j| ip.rules.defaults.get(j).cloned().flatten())

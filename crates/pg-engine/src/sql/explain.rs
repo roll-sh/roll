@@ -935,6 +935,54 @@ thread_local! {
     /// The RETURNING list a rule's action computes the statement's with (`rule_returning`),
     /// for the data-modifying node built next to show.
     static RULE_RETURNING: std::cell::RefCell<Option<Vec<Expr>>> = const { std::cell::RefCell::new(None) };
+    /// The plan being explained is a rule's action (`rule_statements`).
+    static RULE_ACTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The statements a rule rewrote one into (QueryRewrite's list, each planned and explained
+/// apart, ExplainSeparatePlans between them): an INSTEAD action the engine runs as a CTE under
+/// a statement that returns nothing (`*RULE*`), and a qualified rule's statements run one
+/// after another (an Append of data-modifying statements). Whether each is a rule's action.
+/// None when the plan is one statement.
+fn rule_statements(p: &Arc<Plan>) -> Option<Vec<(Arc<Plan>, bool)>> {
+    fn instead(p: &Plan) -> Option<&Arc<Plan>> {
+        if let Plan::With { ctes, body, names } = p
+            && names.len() == 1
+            && names[0] == super::binder::rules::RULE_RTE
+            && let Plan::Filter { input, pred } = &**body
+            && matches!(pred, Expr::Const(crate::types::Value::Bool(false), _))
+            && matches!(&**input, Plan::CteScan { id, .. } if ctes.first().is_some_and(|c| c.0 == *id))
+        {
+            return Some(&ctes[0].1);
+        }
+        None
+    }
+    fn statement(p: &Plan) -> bool {
+        matches!(p, Plan::Insert(_) | Plan::Update(_) | Plan::Delete(_) | Plan::Merge(_)) || instead(p).is_some()
+    }
+    fn several(p: &Plan) -> Option<&Vec<Arc<Plan>>> {
+        match p {
+            Plan::Append { inputs, inh: None } if inputs.len() > 1 && inputs.iter().all(|i| statement(i)) => Some(inputs),
+            _ => None,
+        }
+    }
+    fn flat(p: &Arc<Plan>, action: bool, out: &mut Vec<(Arc<Plan>, bool)>) {
+        if let Some(a) = instead(p) {
+            flat(a, true, out);
+        } else if let Some(all) = several(p) {
+            for i in all {
+                flat(i, action, out);
+            }
+        } else {
+            out.push((p.clone(), action));
+        }
+    }
+    if instead(p).is_none() && several(p).is_none() {
+        return None;
+    }
+    let mut out = Vec::new();
+    flat(p, false, &mut out);
+    Some(out)
 }
 
 /// The RETURNING list a data-modifying node shows: `own`, or the one `rule_returning` left.
@@ -1014,6 +1062,10 @@ fn copy_names_in_order(root: &Plan, out: &mut HashMap<usize, String>) {
 /// The data-modifying statement a rule's action is, computing the statement's RETURNING
 /// (`rule_returning`), possibly read as a CTE (a DELETE done as an UPDATE): the plan's root.
 fn rule_action_dml(root: &Plan) -> Option<&Plan> {
+    // (A rule's action shown as a statement of its own, `rule_statements`.)
+    if RULE_ACTION.get() && matches!(root, Plan::Update(_) | Plan::Delete(_)) {
+        return Some(root);
+    }
     let mut q = root;
     if let Plan::With { ctes, body, names } = q
         && names.len() == 1
@@ -1529,6 +1581,37 @@ fn shown_subqueries(root: &Plan, needed: &HashMap<usize, Vec<bool>>) -> HashMap<
         plan_inputs(p).into_iter().for_each(|c| locked_levels(c, out));
     }
     locked_levels(root, &mut out);
+    // (So does a subquery an UPDATE / DELETE / MERGE joins its target with, a security
+    // barrier view's too: preprocess_rowmarks gives every non-target relation of a
+    // data-modifying statement its mark.)
+    fn dml_levels(p: &Plan, out: &mut HashMap<usize, bool>) {
+        let source = match p {
+            Plan::Update(u) => Some((&u.source, u.rules.table.oid)),
+            Plan::Delete(d) => Some((&d.source, d.table.oid)),
+            Plan::Merge(m) => Some((&m.source, m.rules.table.oid)),
+            _ => None,
+        };
+        if let Some((source, oid)) = source {
+            fn holds(p: &Plan, a: usize) -> bool {
+                addr(p) == a || plan_inputs(p).into_iter().any(|c| holds(c, a))
+            }
+            let target = target_scan(source, oid).map(addr);
+            let (mut semi, mut copies) = (Vec::new(), Vec::new());
+            lock_level_marks(source, false, &mut semi, &mut copies);
+            for (a, q) in copies {
+                if matches!(q, Plan::Barrier { alias, .. } if !alias.is_empty())
+                    && target.is_none_or(|t| !holds(q, t))
+                {
+                    out.insert(a, true);
+                }
+            }
+        }
+        if let Plan::With { ctes, .. } = p {
+            ctes.iter().for_each(|(_, c)| dml_levels(c, out));
+        }
+        plan_inputs(p).into_iter().for_each(|c| dml_levels(c, out));
+    }
+    dml_levels(root, &mut out);
     out
 }
 
@@ -1903,7 +1986,9 @@ fn assign_refnames_skip(
     let returning_firsts = dml_returning_firsts(root);
     // (An UPDATE / DELETE's target is the range table's first entry: named first.)
     // (Not an inheritance tree's: its Append takes the parent's name.)
+    // (Nor a rule action's: the statement's relations come first, below.)
     let target = match root {
+        _ if RULE_ACTION.get() => None,
         Plan::Update(u) if find_inh_append(&u.source).is_none() => target_scan(&u.source, u.rules.table.oid),
         Plan::Delete(d) if find_inh_append(&d.source).is_none() => target_scan(&d.source, d.table.oid),
         _ => None,
@@ -3733,7 +3818,10 @@ impl Builder<'_, '_> {
             // unless trivial (setrefs' trivial_subqueryscan): it returns columns its plan
             // computes but doesn't return (resjunk sort or group keys), or the node above
             // wants fewer columns than the subquery has (no physical target list then).
-            Plan::Barrier { input, alias, cols, secure: false, sorted } if !alias.is_empty() => {
+            // (A security barrier's too when a data-modifying statement's row mark keeps it.)
+            Plan::Barrier { input, alias, cols, secure, sorted }
+                if !alias.is_empty() && (!*secure || self.shown.get(&key) == Some(&true)) =>
+            {
                 let junk = barrier_junk(input, *sorted);
                 let Some(&demand) = self.shown.get(&key) else {
                     // (Its plan returns its resjunk columns as well, past the ones the
@@ -9924,6 +10012,21 @@ impl Builder<'_, '_> {
                     None,
                 );
                 c.node.subplans.append(&mut self.pending);
+            } else if quals.is_empty()
+                && c.node.node_type == "Subquery Scan"
+                && c.node.children.len() == 1
+                && !matches!(
+                    c.node.children[0].node_type,
+                    "Append" | "Merge Append" | "SetOp" | "HashSetOp" | "Unique" | "Recursive Union"
+                )
+                && !c.node.details.iter().any(|d| matches!(d, Detail::Text("Filter", _)))
+            {
+                // (A subquery's Subquery Scan kept (a row mark): the pseudoconstant quals go
+                // into it, set_subquery_pathlist, as a Result over its plan; their InitPlans
+                // are this level's, where the sub-selects became Params.)
+                let inner = c.node.children.pop().expect("checked");
+                let g = self.gate(inner, &gating, &[]);
+                c.node.children.push(g.child("Subquery"));
             } else {
                 let child = std::mem::take(&mut c.node);
                 let names = c.internal.clone();
@@ -16035,6 +16138,24 @@ pub fn explain(
     planning: f64,
     execution: f64,
 ) -> String {
+    // A statement a rule rewrote into several: each one's plan, a blank line between.
+    if instr.is_none()
+        && o.format == Format::Text
+        && let Some(list) = rule_statements(plan)
+    {
+        let mut out = String::new();
+        for (i, (s, action)) in list.iter().enumerate() {
+            if i > 0 {
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push('\n');
+            }
+            let _g = crate::scoped::set(&RULE_ACTION, *action, "explain::RULE_ACTION");
+            out.push_str(&explain(s, hidden_rtes, o, ctx, params, None, planning, execution));
+        }
+        return out;
+    }
     let split = if instr.is_none() { split_shared_subqueries(plan) } else { None };
     let plan = split.as_ref().unwrap_or(plan);
     // (Built again when it groups partitionwise: the parents' names go unused then.)

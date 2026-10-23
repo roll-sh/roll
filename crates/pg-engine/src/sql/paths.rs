@@ -1766,6 +1766,10 @@ struct Planner<'c, 'a> {
     removed: std::cell::Cell<usize>,
     /// Row types of the whole-row references in the plan (`joinpath::whole_rows`).
     whole_rows: std::cell::RefCell<Vec<u32>>,
+    /// The range table indexes of the scans a row mark will read the key of (a
+    /// data-modifying statement's other relations, a locking level's unlocked ones:
+    /// ROW_MARK_REFERENCE): their ctid is needed, no index-only scan (`rowmarks::referenced`).
+    ref_marks: std::cell::RefCell<std::collections::HashSet<usize>>,
     /// Partitionwise joins made, by their first child's address: as FROM items of joins
     /// above (`joinpath::PwJoin`).
     /// Partitionwise joins' Appends (by their `pw` id) and how they are partitioned.
@@ -1818,6 +1822,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             ends: Default::default(),
             removed: Default::default(),
             whole_rows: Default::default(),
+            ref_marks: Default::default(),
             pw_joins: Default::default(),
             absorbed: Default::default(),
             post_cost: Default::default(),
@@ -3308,7 +3313,8 @@ impl Planner<'_, '_> {
         }
         let ncols = t.columns.len();
         let mut need = vec![false; ncols];
-        let mut other = s.with_key || s.mark.is_some();
+        let mut other =
+            s.with_key || s.mark.is_some() || (s.rti.0 != 0 && self.ref_marks.borrow().contains(&s.rti.0));
         for (i, n) in needed.iter().enumerate() {
             if *n {
                 if i < ncols {
@@ -5891,6 +5897,7 @@ fn plan_level_ordered(
     let p = Planner::new(ctx);
     p.group_dirs.replace(dirs);
     sublinkcopy::copy_into_merge(plan);
+    p.ref_marks.replace(rowmarks::referenced(plan));
     p.pull_up_consts(plan);
     p.reduce_outer_joins(plan);
     p.remove_useless_joins(plan, needed);

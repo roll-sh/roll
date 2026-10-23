@@ -134,6 +134,43 @@ fn hoist_level(plan: &mut Plan) {
     };
 }
 
+/// The range table indexes of the scans whose rows a row mark will re-read by key
+/// (ROW_MARK_REFERENCE, preprocess_rowmarks): an UPDATE / DELETE / MERGE's relations other
+/// than its target, and a locking level's relations it doesn't lock. They return their ctid,
+/// so no index-only scan reads them.
+pub(super) fn referenced(plan: &Plan) -> std::collections::HashSet<usize> {
+    // (A level's scans, not a subquery's planned apart.)
+    fn level(p: &Plan, out: &mut std::collections::HashSet<usize>) {
+        match p {
+            Plan::Scan(s) => {
+                if !s.with_key && s.mark.is_none() && s.rti.0 != 0 {
+                    out.insert(s.rti.0);
+                }
+            }
+            Plan::Barrier { .. } | Plan::With { .. } | Plan::CteScan { .. } | Plan::LockRows { .. } => {}
+            p => crate::sql::explain::plan_inputs(p).into_iter().for_each(|c| level(c, out)),
+        }
+    }
+    fn go(p: &Plan, out: &mut std::collections::HashSet<usize>) {
+        match p {
+            Plan::Update(u) => level(&u.source, out),
+            Plan::Delete(d) => level(&d.source, out),
+            Plan::Merge(m) => level(&m.source, out),
+            Plan::With { ctes, body, .. } => {
+                ctes.iter().for_each(|(_, c)| go(c, out));
+                go(body, out);
+            }
+            Plan::Append { inputs, inh: None } => inputs.iter().for_each(|i| go(i, out)),
+            Plan::Limit { input, .. } | Plan::Project { input, .. } | Plan::Context { input, .. } => go(input, out),
+            p if has_marks(p) => level(p, out),
+            _ => {}
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    go(plan, &mut out);
+    out
+}
+
 /// Whether a scan of this query level (not of a subquery planned apart) has a row mark.
 fn has_marks(p: &Plan) -> bool {
     match p {
