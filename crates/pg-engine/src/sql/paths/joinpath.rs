@@ -765,6 +765,7 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
             endpoint: Some(&|v, min| self.pl.endpoint(v, min)),
             distinct: None,
             user: None,
+            same_rel: false,
         };
         est.clause(&c.expr)
     }
@@ -3982,6 +3983,7 @@ impl Search<'_, '_, '_> {
             endpoint: Some(&|v, min| self.pl.endpoint(v, min)),
             distinct: None,
             user: None,
+            same_rel: false,
         };
         let (Some((omin, omax)), Some((imin, imax))) = (est.var_range(&ov), est.var_range(&iv))
         else {

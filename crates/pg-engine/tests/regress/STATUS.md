@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51027 (**99.76%**) |
-| units differing | 123 |
+| units matching | 51028 (**99.76%**) |
+| units differing | 122 |
 | files fully matching | 214 |
 | engine output == expected/*.out (pg_regress "ok") | 177 files |
 | engine crashes / panics | none |
@@ -45,16 +45,16 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 119 | 96.7% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.4% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 118 | 96.7% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.5% |
 | by design (a parallel plan's combine function) | 1 | 0.8% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 119 units
-join (65), partition_join (18), partition_prune (4), subselect (3), collate.icu.utf8 (5), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
+### EXPLAIN (group C1) — 118 units
+join (65), partition_join (18), partition_prune (4), subselect (3), collate.icu.utf8 (4), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -196,14 +196,15 @@ incremental_sort, generated_virtual, rules, stats_ext, select_parallel, foreign_
 equivclass, sqljson_jsontable, limit, rangefuncs, rowtypes, returning, with, partition_join,
 partition_prune, partition_aggregate, partition_info, tuplesort, explain, memoize, plus
 collate.icu.utf8), compared unit by unit with the same subset run on the engine before:
-15 units fixed, none broken.
+15 units fixed, none broken; a second batch (rebased onto e038970, the same subset) fixed
+1 more, none broken.
 
 | file | fixed units |
 |---|---|
 | equivclass | 38, 48, 52, 59, 87, 94 (all) |
 | inherit | 445, 453 |
 | aggregates | 455, 458, 461 |
-| collate.icu.utf8 | 328, 630, 647 |
+| collate.icu.utf8 | 328, 630, 647; second batch: 644 |
 | join | 817 |
 
 What changed:
@@ -259,15 +260,19 @@ What changed:
 
 Goldens added: `tests/sql/a10_ec_alias.sql`, `a10_group_reorder.sql`, `a10_nondet_ec.sql`.
 
+Second batch: a restriction comparing two columns of one relation (`c = b`, also one an
+equivalence class derives) is estimated with DEFAULT_EQ_SEL, as eqsel does when
+get_restriction_variable finds two Vars of the relation (it was 1/ndistinct, a join's
+estimate): `costs::Est::same_rel` marks the estimates of one relation's restrictions, so the
+per-partition nested loops of 644 cost what Postgres's do. Golden: `a10_varvar_sel.sql`.
+
 Still open in these files, and why:
 
 - collate.icu.utf8 611, 619, 622: a `COLLATE "C"` over a column of another collation is a
   RelabelType in Postgres's plan, shown `(c)::text` in Group Key, Hash Cond and (as a
   reference) Sort Key `((c)::text) COLLATE "C"`; the engine shows the column (`c COLLATE "C"`
   is a byte-order collation it doesn't tell from the database default there). 619 also
-  needs the partitionwise join chosen under it. 644: a scan's `c = b` (two columns of one
-  relation) is estimated as 1/ndistinct, where eqsel's get_restriction_variable gives
-  DEFAULT_EQ_SEL (0.005), so the per-partition nested loops cost more here. 334: an EXISTS
+  needs the partitionwise join chosen under it. 334: an EXISTS
   over a DISTINCT subquery isn't pulled up into a semi join (the correlated clause is pushed
   into the subquery level).
 - updatable_views 173 / 174 match since agent 9's `ec_constants` change (an input's own
@@ -2199,7 +2204,7 @@ produces no units on Linux (skipped by the file itself).
 | tidscan | 49 | 49 | 100% | yes | yes |  |
 | tidrangescan | 45 | 45 | 100% | yes | yes |  |
 | collate.utf8 | 61 | 61 | 100% | yes | yes |  |
-| collate.icu.utf8 | 681 | 676 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (5) |
+| collate.icu.utf8 | 681 | 677 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (4) |
 | incremental_sort | 120 | 120 | 100% | yes | no |  |
 | create_role | 144 | 144 | 100% | yes | yes |  |
 | without_overlaps | 674 | 674 | 100% | yes | yes |  |

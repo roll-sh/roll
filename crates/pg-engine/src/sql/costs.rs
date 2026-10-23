@@ -372,6 +372,9 @@ pub struct Est<'a> {
     /// What clauses of user-defined operators need (None: they get no estimate of their
     /// own).
     pub user: Option<&'a UserOps<'a>>,
+    /// The clauses are one relation's restrictions: `var = var` of it is no join clause
+    /// (eqsel's get_restriction_variable fails: DEFAULT_EQ_SEL).
+    pub same_rel: bool,
 }
 
 /// Estimating a clause of a user-defined operator (CREATE OPERATOR ... RESTRICT = eqsel,
@@ -954,7 +957,7 @@ impl Est<'_> {
                         "=" => {
                             // var = var of the same relation, or an expression.
                             match (self.var(l), self.var(r)) {
-                                (Some(a), Some(_)) => 1.0 / a.ndistinct(self.cat).0.max(1.0),
+                                (Some(a), Some(_)) if !self.same_rel => 1.0 / a.ndistinct(self.cat).0.max(1.0),
                                 _ => DEFAULT_EQ_SEL,
                             }
                         }

@@ -1951,6 +1951,7 @@ impl Planner<'_, '_> {
                 },
                 hidden: &rel.hidden,
             }),
+            same_rel: true,
         };
         // (With the table's extended statistics where they cover the clauses.)
         crate::sql::extstat::ExtSel::new(self.ctx, &est, &rel.table).clauses(quals, true)

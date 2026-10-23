@@ -3705,6 +3705,7 @@ impl Builder<'_, '_> {
                                 endpoint: None,
                                 distinct: None,
                                 user: None,
+                                same_rel: false,
                             };
                             let mut parts = Vec::new();
                             conjuncts(f, &mut parts);
@@ -8417,6 +8418,7 @@ impl Builder<'_, '_> {
                 endpoint: None,
                 distinct: None,
                 user: None,
+                same_rel: true,
             };
             let qc: f64 = rest.iter().map(costs::qual_cost).sum();
             n.total_cost += size.tuples * qc;
@@ -8431,6 +8433,7 @@ impl Builder<'_, '_> {
                 endpoint: None,
                 distinct: None,
                 user: None,
+                same_rel: true,
             };
             let conds: Vec<Expr> = index_conds.iter().map(|(e, _)| e.clone()).collect();
             let index_sel = est.clauses(&conds);
@@ -9273,6 +9276,7 @@ impl Builder<'_, '_> {
                         endpoint: None,
                         distinct: scan_like.then_some(&nd as &dyn Fn(usize) -> Option<f64>),
                         user: None,
+                        same_rel: scan_like,
                     };
                     costs::clamp_rows(c.node.rows * est.clauses(&quals))
                 };
@@ -9313,6 +9317,7 @@ impl Builder<'_, '_> {
                     endpoint: None,
                     distinct: scan_like.then_some(&nd as &dyn Fn(usize) -> Option<f64>),
                     user: None,
+                    same_rel: scan_like,
                 };
                 let qc: f64 = quals.iter().map(costs::qual_cost).sum();
                 let sel = est.clauses(&quals);
@@ -9376,6 +9381,7 @@ impl Builder<'_, '_> {
                         endpoint: None,
                         distinct: None,
                         user: None,
+                        same_rel: true,
                     };
                     (est.clauses(&quals), quals.iter().map(costs::qual_cost).sum::<f64>())
                 };
@@ -11697,6 +11703,7 @@ impl Builder<'_, '_> {
             endpoint: None,
             distinct: None,
             user: None,
+            same_rel: false,
         };
         let other_sel = est.clauses(&others);
         let fmt = self.ctx.fmt();

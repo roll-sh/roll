@@ -17,9 +17,9 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,027 of 51,150 statements match (99.76%).** 123 differ. The full
+- **Regression suite: 51,028 of 51,150 statements match (99.76%).** 122 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 119 are `EXPLAIN` plan text (97%). Query results already match.
+  - 118 are `EXPLAIN` plan text (97%). Query results already match.
   - 3 are plan choices that show up in results (mostly which side a hash join builds on,
     grouping-set output order).
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
@@ -360,14 +360,14 @@ them all with the "Fixed in round N" sections describing what was already tried.
    relation takes the plain name, the target's restriction from the equivalence class with the
    statement's rows, the non-target rows' ctids), a FROM subquery's whole-row mark under a
    locking level (`s.*`, PG keeps its Subquery Scan), inherited UPDATE / DELETE targets.
-5. **collate.icu.utf8** (5), **select_parallel** (1),
+5. **collate.icu.utf8** (4), **select_parallel** (1),
    **updatable_views** (3), **groupingsets** (12, including the sorted-vs-hashed choice and
    output order), **with** (10; 52/55/58/76/77 need a materialized CTE's sort order offered to a
    merge join), **memoize**, **privileges** (8 each), then the long tail in
    STATUS.md.
-6. **equivclass** and **inherit**: done (round 15, agent 10). collate.icu.utf8's remaining five
-   (611/619/622: `COLLATE "C"` relabels shown `(c)::text`; 644: a scan's `c = b` selectivity;
-   334: EXISTS over a DISTINCT subquery) are in STATUS.md's agent 10 section.
+6. **equivclass** and **inherit**: done (round 15, agent 10). collate.icu.utf8's remaining four
+   (611/619/622: `COLLATE "C"` relabels shown `(c)::text`; 334: EXISTS over a DISTINCT
+   subquery) are in STATUS.md's agent 10 section.
 7. **partition_aggregate**: done (137/137).
 8. The 18 plan-choice units listed in STATUS.md ("Plan choice visible in results").
 

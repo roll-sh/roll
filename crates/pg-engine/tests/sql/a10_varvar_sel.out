@@ -1,0 +1,147 @@
+> CREATE COLLATION a10_vci (provider = icu, locale = '@colStrength=secondary', deterministic = false)
+NOTICE 00000: using standard form "und-u-ks-level2" for ICU locale "@colStrength=secondary"
+-- CREATE COLLATION
+
+> CREATE TABLE a10_vs1 (a int, b int, c text collate a10_vci, d text collate a10_vci, e text, f text)
+-- CREATE TABLE
+
+> INSERT INTO a10_vs1 SELECT i % 3, i % 2, substr('abAB', (i % 4) + 1 , 1), substr('abAB', (i % 2) + 1 , 1), i::text, (i%5)::text FROM generate_series(0, 599) i
+-- INSERT 0 600
+
+> ANALYZE a10_vs1
+-- ANALYZE
+
+> EXPLAIN SELECT * FROM a10_vs1 WHERE a = b
+QUERY PLAN:text
+Seq Scan on a10_vs1  (cost=0.00..11.50 rows=3 width=17)
+  Filter: (a = b)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a10_vs1 WHERE c = d
+QUERY PLAN:text
+Seq Scan on a10_vs1  (cost=0.00..11.50 rows=3 width=17)
+  Filter: (c = d)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a10_vs1 WHERE e = f
+QUERY PLAN:text
+Seq Scan on a10_vs1  (cost=0.00..11.50 rows=3 width=17)
+  Filter: (e = f)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a10_vs1 x JOIN a10_vs1 y ON x.a = y.b
+QUERY PLAN:text
+Hash Join  (cost=17.50..1379.00 rows=120000 width=34)
+  Hash Cond: (y.b = x.a)
+  ->  Seq Scan on a10_vs1 y  (cost=0.00..10.00 rows=600 width=17)
+  ->  Hash  (cost=10.00..10.00 rows=600 width=17)
+        ->  Seq Scan on a10_vs1 x  (cost=0.00..10.00 rows=600 width=17)
+-- EXPLAIN
+
+> SET max_parallel_workers_per_gather TO 0
+-- SET
+
+> SET enable_incremental_sort TO off
+-- SET
+
+> SET enable_partitionwise_aggregate TO true
+-- SET
+
+> SET enable_partitionwise_join TO true
+-- SET
+
+> CREATE TABLE a10_vtab5 (c text collate a10_vci, b text collate a10_vci) PARTITION BY LIST (c collate a10_vci)
+-- CREATE TABLE
+
+> CREATE TABLE a10_vtab5_p1 PARTITION OF a10_vtab5 FOR VALUES IN ('a', 'b')
+-- CREATE TABLE
+
+> CREATE TABLE a10_vtab5_p2 PARTITION OF a10_vtab5 FOR VALUES IN ('c', 'd')
+-- CREATE TABLE
+
+> INSERT INTO a10_vtab5 (b, c) SELECT substr('abAB', (i % 4) + 1 , 1), substr('abAB', (i % 2) + 1 , 1) FROM generate_series(0, 5) i
+-- INSERT 0 6
+
+> INSERT INTO a10_vtab5 (b, c) SELECT substr('cdCD', (i % 4) + 1 , 1), substr('cdCD', (i % 2) + 1 , 1) FROM generate_series(0, 5) i
+-- INSERT 0 6
+
+> ANALYZE a10_vtab5
+-- ANALYZE
+
+> CREATE TABLE a10_vtab6 (c text collate a10_vci, b text collate a10_vci) PARTITION BY LIST (b collate a10_vci)
+-- CREATE TABLE
+
+> CREATE TABLE a10_vtab6_p1 PARTITION OF a10_vtab6 FOR VALUES IN ('a', 'b')
+-- CREATE TABLE
+
+> CREATE TABLE a10_vtab6_p2 PARTITION OF a10_vtab6 FOR VALUES IN ('c', 'd')
+-- CREATE TABLE
+
+> INSERT INTO a10_vtab6 (b, c) SELECT substr('abAB', (i % 4) + 1 , 1), substr('abAB', (i % 2) + 1 , 1) FROM generate_series(0, 5) i
+-- INSERT 0 6
+
+> INSERT INTO a10_vtab6 (b, c) SELECT substr('cdCD', (i % 4) + 1 , 1), substr('cdCD', (i % 2) + 1 , 1) FROM generate_series(0, 5) i
+-- INSERT 0 6
+
+> ANALYZE a10_vtab6
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.c, count(t2.c) FROM a10_vtab5 t1 JOIN a10_vtab6 t2 ON t1.c = t2.c AND t1.c = t2.b GROUP BY 1 ORDER BY t1.c COLLATE "C"
+QUERY PLAN:text
+Sort
+  Sort Key: t1.c COLLATE "C"
+  ->  Append
+        ->  HashAggregate
+              Group Key: t1.c
+              ->  Nested Loop
+                    Join Filter: (t1.c = t2.c)
+                    ->  Seq Scan on a10_vtab6_p1 t2
+                          Filter: (c = b)
+                    ->  Seq Scan on a10_vtab5_p1 t1
+        ->  HashAggregate
+              Group Key: t1_1.c
+              ->  Nested Loop
+                    Join Filter: (t1_1.c = t2_1.c)
+                    ->  Seq Scan on a10_vtab6_p2 t2_1
+                          Filter: (c = b)
+                    ->  Seq Scan on a10_vtab5_p2 t1_1
+-- EXPLAIN
+
+> SELECT t1.c, count(t2.c) FROM a10_vtab5 t1 JOIN a10_vtab6 t2 ON t1.c = t2.c AND t1.c = t2.b GROUP BY 1 ORDER BY t1.c COLLATE "C"
+c:text | count:int8
+a | 9
+b | 9
+c | 9
+d | 9
+-- SELECT 4
+
+> SET enable_partitionwise_aggregate TO false
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.c, count(t2.c) FROM a10_vtab5 t1 JOIN a10_vtab6 t2 ON t1.c = t2.c AND t1.c = t2.b GROUP BY 1 ORDER BY t1.c COLLATE "C"
+QUERY PLAN:text
+Sort
+  Sort Key: t1.c COLLATE "C"
+  ->  HashAggregate
+        Group Key: t1.c
+        ->  Append
+              ->  Nested Loop
+                    Join Filter: (t1_1.c = t2_1.c)
+                    ->  Seq Scan on a10_vtab6_p1 t2_1
+                          Filter: (c = b)
+                    ->  Seq Scan on a10_vtab5_p1 t1_1
+              ->  Nested Loop
+                    Join Filter: (t1_2.c = t2_2.c)
+                    ->  Seq Scan on a10_vtab6_p2 t2_2
+                          Filter: (c = b)
+                    ->  Seq Scan on a10_vtab5_p2 t1_2
+-- EXPLAIN
+
+> DROP TABLE a10_vs1, a10_vtab5, a10_vtab6
+-- DROP TABLE
+
+> DROP COLLATION a10_vci
+-- DROP COLLATION
+
