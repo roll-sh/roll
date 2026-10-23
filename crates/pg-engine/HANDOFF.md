@@ -17,9 +17,9 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,014 of 51,150 statements match (99.73%).** 136 differ. The full
+- **Regression suite: 51,021 of 51,150 statements match (99.75%).** 129 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 132 are `EXPLAIN` plan text (97%). Query results already match.
+  - 125 are `EXPLAIN` plan text (97%). Query results already match.
   - 3 are plan choices that show up in results (mostly which side a hash join builds on,
     grouping-set output order).
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
@@ -147,6 +147,10 @@ PGREGRESS_PORT=55843 PGREGRESS_REPORT_DIR=/tmp/pgregress/report \
   as stalled, the engine restarts and the file resumes after that unit. `PGREGRESS_FILE_TIMEOUT`
   (default 3600 s) caps a whole run of a file. (It used to be one cap per file: `join` takes
   about 400 s on a loaded machine and lost its last units to it.)
+- `PGREGRESS_HUNKS` (default 12): how many differing units per file `hunks/` shows.
+  `PGREGRESS_ENGINE_BIN`: the engine binary to run (default: the one cargo built), e.g. one
+  copied aside with the test binary (`cargo test --no-run`), so the source can change while a
+  run waits for a heavy slot.
 - The reference cluster is shared, and tablespaces are cluster-global: when another run already
   made test_setup's `regress_tblspace`, the reference's `CREATE TABLESPACE` fails; the harness
   drops just that `ERROR` line from the reference's output (the engine is compared with what a
@@ -328,15 +332,14 @@ them all with the "Fixed in round N" sections describing what was already tried.
    parameterized by a LATERAL inner side (744: the executor runs a parameterized hash join as
    a nested loop, so it needs executor work first), a partitionwise join with a LATERAL
    PlaceHolderVar (partition_join 41).
-2. **Remaining join / partition_join / partition_prune plan shapes** (join 68, partition_join 21,
-   partition_prune 7 units; round 14's agent 5 section in STATUS.md has what changed): cost-driven
-   choices (join 123/410/424/450/543, partition_join 21/74), equivalence classes with scan-level
-   members (join 609/610), partitionwise joins with a LATERAL item
-   (partition_join 41/43/45/46/48/204–207), IN over a partitioned subquery as a semi join
-   (partition_join 86/88/92: the subquery is planned before the WHERE's sublinks are pulled up),
-   a pulled-up UNION ALL's alias as a range table entry
-   (partition_prune 392/393/399), partition_prune's parallel plans (377–383, 652), 265 / 410 /
-   746.
+2. **Remaining join / partition_join / partition_prune plan shapes** (join 65, partition_join 18,
+   partition_prune 4 units; round 14's agent 5 and round 16's agent 12 sections in STATUS.md have
+   what changed and why the rest is open): cost-driven choices (join 123/410/424/450/543,
+   partition_join 21/74), equivalence classes with scan-level members (join 609/610),
+   partitionwise LATERAL joins left (partition_join 48/207: a class clause's orientation; 204:
+   a PlaceHolderVar), IN over a partitioned subquery as a semi join (partition_join 86/88/92: the
+   subquery is planned before the WHERE's sublinks are pulled up), partition_prune 265 / 410 /
+   746 and its parallel plan 652.
 3. **subselect** (3 units; rounds 13–14 fixed the row comparisons with sub-selects, most of
    PostgreSQL 18's IN / VALUES pull-up, sub-select copies, per-member EXISTS alternatives,
    reltarget orders, strict-NULL folding, early unique-ified semi joins, IN over a

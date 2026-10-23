@@ -1,0 +1,287 @@
+> SET enable_partitionwise_join TO true
+-- SET
+
+> CREATE TABLE a12_p1 (a int, b int, c varchar) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE a12_p1_1 PARTITION OF a12_p1 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE a12_p1_3 PARTITION OF a12_p1 FOR VALUES FROM (500) TO (600)
+-- CREATE TABLE
+
+> CREATE TABLE a12_p1_2 PARTITION OF a12_p1 FOR VALUES FROM (250) TO (500)
+-- CREATE TABLE
+
+> INSERT INTO a12_p1 SELECT i, i % 25, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 2 = 0
+-- INSERT 0 300
+
+> ANALYZE a12_p1
+-- ANALYZE
+
+> CREATE TABLE a12_p2 (a int, b int, c varchar) PARTITION BY RANGE (b)
+-- CREATE TABLE
+
+> CREATE TABLE a12_p2_1 PARTITION OF a12_p2 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE a12_p2_2 PARTITION OF a12_p2 FOR VALUES FROM (250) TO (500)
+-- CREATE TABLE
+
+> CREATE TABLE a12_p2_3 PARTITION OF a12_p2 FOR VALUES FROM (500) TO (600)
+-- CREATE TABLE
+
+> INSERT INTO a12_p2 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 3 = 0
+-- INSERT 0 200
+
+> ANALYZE a12_p2
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a12_p1 t1 JOIN LATERAL
+>   (SELECT * FROM a12_p1 t2 TABLESAMPLE SYSTEM (t1.a) REPEATABLE (t1.b)) s ON t1.a = s.a
+QUERY PLAN:text
+Append
+  ->  Nested Loop
+        ->  Seq Scan on a12_p1_1 t1_1
+        ->  Sample Scan on a12_p1_1 t2_1
+              Sampling: system (t1_1.a) REPEATABLE (t1_1.b)
+              Filter: (t1_1.a = a)
+  ->  Nested Loop
+        ->  Seq Scan on a12_p1_2 t1_2
+        ->  Sample Scan on a12_p1_2 t2_2
+              Sampling: system (t1_2.a) REPEATABLE (t1_2.b)
+              Filter: (t1_2.a = a)
+  ->  Nested Loop
+        ->  Seq Scan on a12_p1_3 t1_3
+        ->  Sample Scan on a12_p1_3 t2_3
+              Sampling: system (t1_3.a) REPEATABLE (t1_3.b)
+              Filter: (t1_3.a = a)
+-- EXPLAIN
+
+> SELECT count(*) FROM a12_p1 t1 JOIN LATERAL
+>   (SELECT * FROM a12_p1 t2 TABLESAMPLE SYSTEM (100) REPEATABLE (t1.b)) s ON t1.a = s.a
+count:int8
+300
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, s.b FROM a12_p1 t1 LEFT JOIN LATERAL
+>   (SELECT * FROM a12_p2 t2 TABLESAMPLE SYSTEM (100) REPEATABLE (t1.b)) s ON t1.a = s.b
+>   WHERE t1.a % 25 = 0 ORDER BY 1, 2
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a, t2.b
+  ->  Append
+        ->  Nested Loop Left Join
+              ->  Seq Scan on a12_p1_1 t1_1
+                    Filter: ((a % 25) = 0)
+              ->  Sample Scan on a12_p2_1 t2_1
+                    Sampling: system ('100'::real) REPEATABLE (t1_1.b)
+                    Filter: (t1_1.a = b)
+        ->  Nested Loop Left Join
+              ->  Seq Scan on a12_p1_2 t1_2
+                    Filter: ((a % 25) = 0)
+              ->  Sample Scan on a12_p2_2 t2_2
+                    Sampling: system ('100'::real) REPEATABLE (t1_2.b)
+                    Filter: (t1_2.a = b)
+        ->  Nested Loop Left Join
+              ->  Seq Scan on a12_p1_3 t1_3
+                    Filter: ((a % 25) = 0)
+              ->  Sample Scan on a12_p2_3 t2_3
+                    Sampling: system ('100'::real) REPEATABLE (t1_3.b)
+                    Filter: (t1_3.a = b)
+-- EXPLAIN
+
+> SELECT t1.a, s.b FROM a12_p1 t1 LEFT JOIN LATERAL
+>   (SELECT * FROM a12_p2 t2 TABLESAMPLE SYSTEM (100) REPEATABLE (t1.b)) s ON t1.a = s.b
+>   WHERE t1.a % 25 = 0 ORDER BY 1, 2
+a:int4 | b:int4
+0 | 0
+50 | NULL
+100 | NULL
+150 | 150
+200 | NULL
+250 | NULL
+300 | 300
+350 | NULL
+400 | NULL
+450 | 450
+500 | NULL
+550 | NULL
+-- SELECT 12
+
+> SELECT count(*) FROM a12_p1 t1 JOIN LATERAL
+>   (SELECT * FROM a12_p2 t2 TABLESAMPLE SYSTEM (100) REPEATABLE (t1.b)) s ON t1.a = s.a
+count:int8
+104
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(*) FROM a12_p1 t1 JOIN LATERAL
+>   (SELECT * FROM a12_p2 t2 TABLESAMPLE SYSTEM (100) REPEATABLE (t1.b) WHERE t2.b < 400) s ON t1.a = s.b
+>   WHERE t1.a >= 200
+QUERY PLAN:text
+Aggregate
+  ->  Append
+        ->  Nested Loop
+              ->  Seq Scan on a12_p1_1 t1_1
+                    Filter: (a >= 200)
+              ->  Sample Scan on a12_p2_1 t2_1
+                    Sampling: system ('100'::real) REPEATABLE (t1_1.b)
+                    Filter: ((b < 400) AND (t1_1.a = b))
+        ->  Nested Loop
+              ->  Seq Scan on a12_p1_2 t1_2
+                    Filter: (a >= 200)
+              ->  Sample Scan on a12_p2_2 t2_2
+                    Sampling: system ('100'::real) REPEATABLE (t1_2.b)
+                    Filter: ((b < 400) AND (t1_2.a = b))
+-- EXPLAIN
+
+> SELECT count(*) FROM a12_p1 t1 JOIN LATERAL
+>   (SELECT * FROM a12_p2 t2 TABLESAMPLE SYSTEM (100) REPEATABLE (t1.b) WHERE t2.b < 400) s ON t1.a = s.b
+>   WHERE t1.a >= 200
+count:int8
+33
+-- SELECT 1
+
+> SELECT count(*), count(s.b) FROM a12_p1 t1 LEFT JOIN LATERAL
+>   (SELECT * FROM a12_p2 t2 TABLESAMPLE SYSTEM (100) REPEATABLE (t1.b) WHERE t2.b < 400) s ON t1.a = s.b
+count:int8 | count:int8
+300 | 67
+-- SELECT 1
+
+> CREATE INDEX a12_p2_1_b ON a12_p2_1 (b)
+-- CREATE INDEX
+
+> CREATE INDEX a12_p2_2_b ON a12_p2_2 (b)
+-- CREATE INDEX
+
+> CREATE INDEX a12_p2_3_b ON a12_p2_3 (b)
+-- CREATE INDEX
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(*) FROM a12_p1 t1 LEFT JOIN LATERAL
+>   (SELECT t1.b AS t1b, t2.* FROM a12_p2 t2) s ON t1.a = s.b WHERE s.t1b = s.a
+QUERY PLAN:text
+Aggregate
+  ->  Append
+        ->  Nested Loop
+              ->  Seq Scan on a12_p1_1 t1_1
+              ->  Index Scan using a12_p2_1_b on a12_p2_1 t2_1
+                    Index Cond: (b = t1_1.a)
+                    Filter: (t1_1.b = a)
+        ->  Nested Loop
+              ->  Seq Scan on a12_p1_2 t1_2
+              ->  Index Scan using a12_p2_2_b on a12_p2_2 t2_2
+                    Index Cond: (b = t1_2.a)
+                    Filter: (t1_2.b = a)
+        ->  Nested Loop
+              ->  Seq Scan on a12_p1_3 t1_3
+              ->  Index Scan using a12_p2_3_b on a12_p2_3 t2_3
+                    Index Cond: (b = t1_3.a)
+                    Filter: (t1_3.b = a)
+-- EXPLAIN
+
+> SELECT count(*) FROM a12_p1 t1 LEFT JOIN LATERAL
+>   (SELECT t1.b AS t1b, t2.* FROM a12_p2 t2) s ON t1.a = s.b WHERE s.t1b = s.a
+count:int8
+100
+-- SELECT 1
+
+> SELECT count(*), count(s.b) FROM a12_p1 t1 LEFT JOIN LATERAL
+>   (SELECT t1.b AS t1b, t2.* FROM a12_p2 t2) s ON t1.a = s.b
+count:int8 | count:int8
+300 | 100
+-- SELECT 1
+
+> CREATE TABLE a12_l1 (a int, b int, c varchar) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE a12_l1_1 PARTITION OF a12_l1 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE a12_l1_2 PARTITION OF a12_l1 FOR VALUES FROM (250) TO (500) PARTITION BY LIST (c)
+-- CREATE TABLE
+
+> CREATE TABLE a12_l1_2_1 PARTITION OF a12_l1_2 FOR VALUES IN ('0000', '0001')
+-- CREATE TABLE
+
+> CREATE TABLE a12_l1_2_2 PARTITION OF a12_l1_2 FOR VALUES IN ('0002', '0003')
+-- CREATE TABLE
+
+> CREATE TABLE a12_l1_3 PARTITION OF a12_l1 FOR VALUES FROM (500) TO (600) PARTITION BY RANGE (b)
+-- CREATE TABLE
+
+> CREATE TABLE a12_l1_3_1 PARTITION OF a12_l1_3 FOR VALUES FROM (0) TO (13)
+-- CREATE TABLE
+
+> CREATE TABLE a12_l1_3_2 PARTITION OF a12_l1_3 FOR VALUES FROM (13) TO (25)
+-- CREATE TABLE
+
+> INSERT INTO a12_l1 SELECT i, i % 25, to_char(i % 4, 'FM0000') FROM generate_series(0, 599, 2) i
+-- INSERT 0 300
+
+> ANALYZE a12_l1
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a12_l1 t1 JOIN LATERAL
+>   (SELECT * FROM a12_l1 t2 TABLESAMPLE SYSTEM (t1.a) REPEATABLE (t1.b)) s
+>   ON t1.a = s.a AND t1.b = s.b AND t1.c = s.c
+QUERY PLAN:text
+Append
+  ->  Nested Loop
+        ->  Seq Scan on a12_l1_1 t1_1
+        ->  Sample Scan on a12_l1_1 t2_1
+              Sampling: system (t1_1.a) REPEATABLE (t1_1.b)
+              Filter: ((t1_1.a = a) AND (t1_1.b = b) AND ((t1_1.c)::text = (c)::text))
+  ->  Nested Loop
+        ->  Seq Scan on a12_l1_2_1 t1_2
+        ->  Sample Scan on a12_l1_2_1 t2_2
+              Sampling: system (t1_2.a) REPEATABLE (t1_2.b)
+              Filter: ((t1_2.a = a) AND (t1_2.b = b) AND ((t1_2.c)::text = (c)::text))
+  ->  Nested Loop
+        ->  Seq Scan on a12_l1_2_2 t1_3
+        ->  Sample Scan on a12_l1_2_2 t2_3
+              Sampling: system (t1_3.a) REPEATABLE (t1_3.b)
+              Filter: ((t1_3.a = a) AND (t1_3.b = b) AND ((t1_3.c)::text = (c)::text))
+  ->  Nested Loop
+        ->  Seq Scan on a12_l1_3_1 t1_4
+        ->  Sample Scan on a12_l1_3_1 t2_4
+              Sampling: system (t1_4.a) REPEATABLE (t1_4.b)
+              Filter: ((t1_4.a = a) AND (t1_4.b = b) AND ((t1_4.c)::text = (c)::text))
+  ->  Nested Loop
+        ->  Seq Scan on a12_l1_3_2 t1_5
+        ->  Sample Scan on a12_l1_3_2 t2_5
+              Sampling: system (t1_5.a) REPEATABLE (t1_5.b)
+              Filter: ((t1_5.a = a) AND (t1_5.b = b) AND ((t1_5.c)::text = (c)::text))
+-- EXPLAIN
+
+> SELECT count(*) FROM a12_l1 t1 JOIN LATERAL
+>   (SELECT * FROM a12_l1 t2 TABLESAMPLE SYSTEM (100) REPEATABLE (t1.b)) s
+>   ON t1.a = s.a AND t1.b = s.b AND t1.c = s.c
+count:int8
+300
+-- SELECT 1
+
+> SELECT count(*) FROM a12_l1 t1 JOIN LATERAL
+>   (SELECT * FROM a12_l1 t2 TABLESAMPLE SYSTEM (100) REPEATABLE (t1.b)) s
+>   ON t1.a = s.a
+count:int8
+300
+-- SELECT 1
+
+> SET enable_partitionwise_join TO false
+-- SET
+
+> SELECT count(*) FROM a12_l1 t1 JOIN LATERAL
+>   (SELECT * FROM a12_l1 t2 TABLESAMPLE SYSTEM (100) REPEATABLE (t1.b)) s
+>   ON t1.a = s.a AND t1.b = s.b AND t1.c = s.c
+count:int8
+300
+-- SELECT 1
+
+> RESET enable_partitionwise_join
+-- RESET
+

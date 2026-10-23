@@ -137,9 +137,8 @@ impl Search<'_, '_, '_> {
     fn parted(&self, l: usize) -> Option<Parted> {
         let leaf = &self.leaves[l];
         // A partitionwise join below.
-        if let Plan::Append { inputs, inh: None } = &leaf.plan
-            && let Some(first) = inputs.first()
-            && let Some(pw) = self.pl.pw_joins.borrow().iter().find(|(a, _)| *a == Arc::as_ptr(first) as usize).map(|(_, p)| p.clone())
+        if let Plan::Append { inputs, inh: None, pw: Some(id), .. } = &leaf.plan
+            && let Some(pw) = self.pl.pw_joins.borrow().iter().find(|(a, _)| a == id).map(|(_, p)| p.clone())
             && pw.idx.len() == inputs.len()
         {
             let mut parts: Vec<Option<Plan>> = vec![None; pw.bounds.len()];
@@ -168,6 +167,7 @@ impl Search<'_, '_, '_> {
             Plan::Append {
                 inputs,
                 inh: inh @ Some(_),
+                ..
             } => {
                 proj = None;
                 (leaf.members.as_ref()?, inputs, inh.clone())
@@ -176,6 +176,7 @@ impl Search<'_, '_, '_> {
                 let Plan::Append {
                     inputs,
                     inh: inh @ Some(_),
+                    ..
                 } = &**input
                 else {
                     return None;
@@ -275,6 +276,8 @@ impl Search<'_, '_, '_> {
                     _ => Plan::Append {
                         inputs: g,
                         inh: inh.clone(),
+                        alias: None,
+                        pw: None,
                     },
                 };
                 Some(match proj {
@@ -880,5 +883,307 @@ impl Planner<'_, '_> {
             colls: first.colls.clone(),
         };
         Some((children, total, rows, pw, None))
+    }
+}
+
+/// A LATERAL join's side as partitions: an inheritance Append, under projections and filters
+/// (`wraps`, outermost first), whose members are partition scans.
+struct LatSide<'a> {
+    wraps: Vec<&'a Plan>,
+    inh: Option<String>,
+    inputs: &'a [Arc<Plan>],
+    /// Per member (Empty inputs left out): its place among the inputs, its scan, and the
+    /// member column of each of the Append's columns.
+    members: Vec<(usize, &'a ScanPlan, Vec<Option<usize>>)>,
+}
+
+fn lat_side(p: &Plan) -> Option<LatSide<'_>> {
+    let mut wraps = Vec::new();
+    let mut x = p;
+    loop {
+        match x {
+            Plan::Project { input, exprs } if !exprs.iter().any(Expr::is_volatile) => {
+                wraps.push(x);
+                x = input;
+            }
+            Plan::Filter { input, pred } if !pred.is_volatile() => {
+                wraps.push(x);
+                x = input;
+            }
+            _ => break,
+        }
+    }
+    let Plan::Append {
+        inputs,
+        inh: inh @ Some(_),
+        ..
+    } = x
+    else {
+        return None;
+    };
+    let width = crate::sql::binder::plan_width(x);
+    let mut members = Vec::new();
+    for (i, inp) in inputs.iter().enumerate() {
+        let (sp, proj) = match &**inp {
+            Plan::Empty { .. } => continue,
+            Plan::Scan(sp) => (&**sp, None),
+            Plan::Project { input, exprs } => match &**input {
+                Plan::Scan(sp) => (&**sp, Some(exprs)),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if sp.part.is_none() || sp.current_of.is_some() || sp.mark.is_some() || sp.limit.is_some() {
+            return None;
+        }
+        let map = (0..width)
+            .map(|k| match proj {
+                None => Some(k),
+                Some(ex) => match ex.get(k) {
+                    Some(Expr::Col(j, _)) => Some(*j),
+                    _ => None,
+                },
+            })
+            .collect();
+        members.push((i, sp, map));
+    }
+    if members.is_empty() {
+        return None;
+    }
+    Some(LatSide {
+        wraps,
+        inh: inh.clone(),
+        inputs,
+        members,
+    })
+}
+
+/// The side's members by partition of the deepest partitioned table they are all in: that
+/// level (of the first member), the partitions' bounds in order, and per partition the
+/// members' places among the inputs.
+fn lat_groups(side: &LatSide) -> Option<(PartLevel, Vec<PartBound>, Vec<Vec<usize>>)> {
+    let in_all = |oid: u32| {
+        side.members
+            .iter()
+            .all(|(_, s, _)| s.part.as_ref().is_some_and(|ls| ls.iter().any(|l| l.parent.oid == oid)))
+    };
+    let level = side.members[0].1.part.as_ref()?.iter().find(|l| in_all(l.parent.oid))?.clone();
+    level.parent.partkey.as_ref()?;
+    let mut bounds: Vec<PartBound> = level.siblings.clone();
+    bounds.push(level.bound.clone());
+    {
+        let _g = crate::catalog::partition::under(level.colls.clone());
+        bounds.sort_by(bound_order);
+    }
+    let mut groups = vec![Vec::new(); bounds.len()];
+    for (i, s, _) in &side.members {
+        let lv = s.part.as_ref()?.iter().find(|l| l.parent.oid == level.parent.oid)?;
+        let b = bounds.iter().position(|b| *b == lv.bound)?;
+        groups[b].push(*i);
+    }
+    Some((level, bounds, groups))
+}
+
+/// The side's partition key columns at `level` over the Append's row (plain columns only),
+/// the same for every member.
+fn lat_keys(side: &LatSide, level: &PartLevel) -> Option<Vec<usize>> {
+    let mut out: Option<Vec<usize>> = None;
+    for (_, s, map) in &side.members {
+        let lv = s.part.as_ref()?.iter().find(|l| l.parent.oid == level.parent.oid)?;
+        let mut keys = Vec::new();
+        for k in &lv.key {
+            let Expr::Col(c, _) = k else { return None };
+            keys.push(map.iter().position(|m| *m == Some(*c))?);
+        }
+        match &out {
+            None => out = Some(keys),
+            Some(o) if *o == keys => {}
+            Some(_) => return None,
+        }
+    }
+    out
+}
+
+impl Planner<'_, '_> {
+    /// try_partitionwise_join for a LATERAL join of two items (the join search doesn't take
+    /// those): a nested loop whose sides are partitioned the same way, the LATERAL side's
+    /// clauses equating its partition keys with the other side's, is the Append of the
+    /// joins of matching partitions, each a nested loop of its own (each outer row reads
+    /// one partition, not them all: cheaper). Whether it made it.
+    pub(in crate::sql::paths) fn lateral_partitionwise(&self, p: &mut Plan) -> bool {
+        {
+            let st = self.ctx.sess.settings.borrow();
+            if !st
+                .get_raw("enable_partitionwise_join")
+                .is_some_and(|v| v == "on" || v == "true")
+            {
+                return false;
+            }
+        }
+        let Plan::Join {
+            kind,
+            left,
+            right,
+            cond,
+            hash: None,
+            params,
+            nleft,
+            nright,
+            meta,
+        } = &*p
+        else {
+            return false;
+        };
+        if params.is_empty() || !matches!(kind, JoinKind::Inner | JoinKind::Left) || meta.from_call.is_some() {
+            return false;
+        }
+        let (Some(ls), Some(rs)) = (lat_side(left), lat_side(right)) else {
+            return false;
+        };
+        // (The outer side's row is its Append's: a filter over it at most.)
+        if ls.wraps.iter().any(|w| !matches!(w, Plan::Filter { .. })) {
+            return false;
+        }
+        let (Some((llevel, lbounds, lgroups)), Some((rlevel, rbounds, rgroups))) = (lat_groups(&ls), lat_groups(&rs)) else {
+            return false;
+        };
+        if llevel.strategy != rlevel.strategy
+            || llevel.types.len() != rlevel.types.len()
+            || llevel.types.iter().zip(&rlevel.types).any(|(a, b)| a.without_typmod() != b.without_typmod())
+            || lbounds != rbounds
+            || llevel.colls.iter().chain(&rlevel.colls).flatten().any(|c| !c.deterministic)
+            || [llevel.parent.rowtype, rlevel.parent.rowtype]
+                .iter()
+                .any(|r| self.whole_rows.borrow().contains(r))
+        {
+            return false;
+        }
+        let (Some(lkeys), Some(rkeys)) = (lat_keys(&ls, &llevel), lat_keys(&rs, &rlevel)) else {
+            return false;
+        };
+        // have_partkey_equi_join: each key column equated with the other side's, by a clause
+        // every member of the LATERAL side checks (`param = column`, the param the outer
+        // side's key column).
+        let is_param = |e: &Expr, j: usize| {
+            matches!(e, Expr::Outer(1, i, _) if matches!(params.get(*i), Some(Expr::Col(c, _)) if *c == lkeys[j]))
+        };
+        for j in 0..lkeys.len() {
+            let ty = &llevel.types[j];
+            let equated = rs.members.iter().all(|(_, s, map)| {
+                let Some(rc) = map.get(rkeys[j]).copied().flatten() else {
+                    return false;
+                };
+                let mut parts = Vec::new();
+                if let Some(f) = &s.filter {
+                    conjuncts(f.clone(), &mut parts);
+                }
+                parts.iter().any(|q| match q {
+                    Expr::Call(d, args, _) if d.name == "=" && args.len() == 2 && !q.is_volatile() => {
+                        let col = |e: &Expr| matches!(e, Expr::Col(c, t) if *c == rc && t.without_typmod() == ty.without_typmod());
+                        let (a, b) = (key_operand(&args[0]), key_operand(&args[1]));
+                        (is_param(a, j) && col(b)) || (col(a) && is_param(b, j))
+                    }
+                    _ => false,
+                })
+            });
+            if !equated {
+                return false;
+            }
+        }
+        let group_plan = |side: &LatSide, g: &[usize]| -> Plan {
+            if g.len() == 1 {
+                (*side.inputs[g[0]]).clone()
+            } else {
+                Plan::Append {
+                    inputs: g.iter().map(|&i| side.inputs[i].clone()).collect(),
+                    inh: side.inh.clone(),
+                    alias: None,
+                    pw: None,
+                }
+            }
+        };
+        let wrap = |side: &LatSide, mut inner: Plan| -> Plan {
+            for w in side.wraps.iter().rev() {
+                inner = match (*w, inner) {
+                    // (A projection over the member's own: one projection, the member a
+                    // subquery over its scan as the join tree's leaves are.)
+                    (Plan::Project { exprs, .. }, Plan::Project { input, exprs: below })
+                        if below.iter().all(|e| !e.is_volatile()) =>
+                    {
+                        Plan::Project {
+                            input,
+                            exprs: exprs.iter().map(|e| super::lift::subst(e, &below)).collect(),
+                        }
+                    }
+                    (Plan::Project { exprs, .. }, inner) => Plan::Project {
+                        input: Arc::new(inner),
+                        exprs: exprs.clone(),
+                    },
+                    (Plan::Filter { pred, .. }, inner) => Plan::Filter {
+                        input: Arc::new(inner),
+                        pred: pred.clone(),
+                    },
+                    _ => unreachable!(),
+                };
+            }
+            inner
+        };
+        let mut children = Vec::new();
+        let mut idx = Vec::new();
+        for b in 0..lbounds.len() {
+            if lgroups[b].is_empty() {
+                continue;
+            }
+            if rgroups[b].is_empty() {
+                // (An outer row's partition without the other side's: its rows null-extended,
+                // a join this doesn't make.)
+                if *kind == JoinKind::Inner {
+                    continue;
+                }
+                return false;
+            }
+            let l = wrap(&ls, group_plan(&ls, &lgroups[b]));
+            let r = wrap(&rs, group_plan(&rs, &rgroups[b]));
+            children.push(Arc::new(Plan::Join {
+                kind: *kind,
+                left: Arc::new(l),
+                right: Arc::new(r),
+                cond: cond.clone(),
+                hash: None,
+                params: params.clone(),
+                nleft: *nleft,
+                nright: *nright,
+                meta: meta.clone(),
+            }));
+            idx.push(b);
+        }
+        if children.is_empty() {
+            return false;
+        }
+        let pw = PwJoin {
+            strategy: llevel.strategy,
+            types: llevel.types.clone(),
+            bounds: lbounds,
+            idx,
+            keys: {
+                let types = super::super::analyzejoins::col_types(left);
+                lkeys.iter().map(|&c| vec![Expr::Col(c, types.get(c).cloned().unwrap_or(DataType::Unknown))]).collect()
+            },
+            rowtypes: vec![llevel.parent.rowtype, rlevel.parent.rowtype],
+            colls: llevel.colls.clone(),
+        };
+        *p = if children.len() == 1 {
+            Arc::try_unwrap(children.pop().unwrap()).unwrap_or_else(|a| (*a).clone())
+        } else {
+            let id = super::super::next_pw_id();
+            self.pw_joins.borrow_mut().push((id, pw));
+            Plan::Append {
+                inputs: children,
+                inh: None,
+                alias: None,
+                pw: Some(id),
+            }
+        };
+        true
     }
 }

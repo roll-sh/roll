@@ -1112,6 +1112,15 @@ pub enum Plan {
     Append {
         inputs: Vec<Arc<Plan>>,
         inh: Option<String>,
+        /// A UNION ALL flattened into an appendrel (pull_up_simple_union_all,
+        /// flatten_simple_union_all): its parent range table entry's name, which the Append
+        /// references (its apprelids) and so takes first: the FROM subquery's alias, or
+        /// `*SELECT* 1` for a query level's own UNION ALL.
+        alias: Option<String>,
+        /// A partitionwise join's Append of child joins: the id the planner keeps its
+        /// partitioning under (a stable id, not the plan's address, which a dropped plan's
+        /// replacement may reuse).
+        pw: Option<u64>,
     },
     /// Output: left columns, then right columns (Semi/Anti: left only).
     /// `hash`: equi-join keys (left exprs over left row, right exprs over right row).

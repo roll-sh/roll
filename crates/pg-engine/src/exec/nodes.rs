@@ -205,7 +205,7 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
                 .nondet(nondet)
                 .planned(plan.clone()),
         ),
-        Plan::Append { inputs, inh } => {
+        Plan::Append { inputs, inh, .. } => {
             let dml = inh.is_some()
                 && inputs
                     .first()
@@ -1433,7 +1433,7 @@ impl SetOpNode {
                         arms(left, out);
                         arms(right, out);
                     }
-                    Plan::Append { inputs, inh: None } => {
+                    Plan::Append { inputs, inh: None, .. } => {
                         inputs.iter().for_each(|i| arms(i, out));
                     }
                     _ => out.push(p.clone()),

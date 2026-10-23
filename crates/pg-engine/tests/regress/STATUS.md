@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51014 (**99.73%**) |
-| units differing | 136 |
+| units matching | 51021 (**99.75%**) |
+| units differing | 129 |
 | files fully matching | 213 |
 | engine output == expected/*.out (pg_regress "ok") | 177 files |
 | engine crashes / panics | none |
@@ -45,16 +45,16 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 132 | 97.1% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.2% |
-| by design (a parallel plan's combine function) | 1 | 0.7% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 125 | 96.9% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.3% |
+| by design (a parallel plan's combine function) | 1 | 0.8% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 132 units
-join (66), partition_join (21), partition_prune (7), subselect (3), collate.icu.utf8 (5), incremental_sort (6), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
+### EXPLAIN (group C1) — 125 units
+join (65), partition_join (18), partition_prune (4), subselect (3), collate.icu.utf8 (5), incremental_sort (6), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -111,6 +111,80 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 12 (UNION ALL appendrel names, LATERAL partitionwise joins)
+
+Measured in subset runs (test_setup, create_misc, create_index, create_view, select, union,
+subselect, join, aggregates, inherit, partition_join, partition_prune, partition_aggregate,
+equivclass, memoize, with, rowsecurity, updatable_views, select_distinct, groupingsets,
+incremental_sort, merge, returning, rules, insert_conflict, join_hash, select_parallel,
+rangefuncs, tsrf, limit, window, stats_ext) on 27da13f, against the subset's baseline: 7 units
+fixed, none broken (rowsecurity's three DROP USER units differed from a concurrent run's
+database on the shared reference).
+
+| file | fixed units |
+|---|---|
+| partition_prune | 392, 393, 399 |
+| join | 374 |
+| partition_join | 45, 46, 206 |
+
+What changed:
+
+- A UNION ALL flattened into an appendrel keeps its parent range table entry's name
+  (`Plan::Append`'s `alias`): a FROM subquery's alias, or `*SELECT* 1` for a query level's own
+  UNION ALL (flatten_simple_union_all; none when a leaf's columns are coerced, as
+  is_simple_union_all). The Append references it (apprelids), so it is named before its
+  members (`ab`, then `ab_1`…); arms kept as subqueries (a WHERE: is_safe_append_member) name
+  their relations after the level's own, as setrefs reaches them, nested UNION ALLs flattened
+  into the appendrel included (partition_prune 392 / 393 / 399, whose InitPlan now shows at the
+  top Append too).
+- restriction_is_always_true in a LATERAL UNION ALL's arms: the WHERE over the union goes into
+  each FROM-less arm where the join's parameters are known, and an arm outputting a NOT NULL
+  column no outer join below nulls drops its `IS NOT NULL` (an `IS NULL` drops the arm)
+  (join 374). Only when that changes an arm; else the planner pushes the clauses as before.
+- Partitionwise LATERAL joins of two items (`lateral_partitionwise`, the join search doesn't
+  take those): when both sides are inheritance Appends partitioned the same way and every
+  LATERAL member checks `param = its key` with the param the outer side's key, the join is the
+  Append of the joins of matching partitions, level by level for sub-partitioned tables (a
+  LEFT JOIN only when the inner side has every partition the outer has). Each child is a
+  nested loop of its own; a member's projection and the subquery's are one, so a pulled-up
+  scan lifts into the child's join tree.
+- A LATERAL inner relation (a scan, or an appendrel of scans) reading the outer side's values
+  is costed for the outer rows as its loops (get_loop_count), so its parameterized index scans
+  compete as Postgres's do (partition_join 46: an index scan per partition).
+- Partitionwise join Appends carry a stable id (`Plan::Append`'s `pw`, unique in the process)
+  the planner keeps their partitioning under, not the first child's address, which a dropped
+  plan's replacement could reuse (agent 13's audit).
+- Harness: `PGREGRESS_HUNKS` (differing units per file in `hunks/`, default 12) and
+  `PGREGRESS_ENGINE_BIN` (an engine binary copied aside, so the source can change while a run
+  waits for a heavy slot).
+
+Goldens added: `tests/sql/a12_union_appendrel.sql`, `a12_lateral_pw.sql`.
+
+Still open from agent 5's list, and why:
+
+- partition_prune 265 (an AlternativeSubPlan's EXISTS copied into each index condition: PG
+  shows the plain SubPlan there and a hashed one elsewhere), 410 (a cross-partition UPDATE's
+  moved row seen by a later bitmap index scan of the same command: an index entry of an
+  invisible tuple counted, `Heap Blocks: exact=1`), 746 (window functions over ordered
+  partitions: an ordered Append with a nested Merge Append isn't chosen when run-time pruning
+  removes members, `count_members` against the shown members; and the arms' Subquery Scans
+  on `"*SELECT* 1_1"` / `"*SELECT* 2"` aren't shown).
+- partition_join 48 / 207: partitionwise now, the clause equating the LATERAL output with a
+  class member is generated `column = output` by Postgres (a new member equated to an old
+  one), written order here; 204 needs the PlaceHolderVar `least(...)` (agent 8's area); 21
+  (a merge join's sort key: Postgres takes the first class member in the scan's target list,
+  the reltarget order for a partition), 74 (a parameterized index scan on an expression
+  index costed differently), 86 / 88 / 92 (IN over a partitioned join subquery planned
+  partitionwise before its pull-up).
+- join 442 (the derived `tt4.f1 = 'foo'` is valid in every join order but dropping the join
+  clause only when tt3 ⟕ tt4 is joined first; plus the subquery scan's derived filter and a
+  Memoize), 502 / 503 (a grouped subquery's sorted path kept beside the cheapest for a merge
+  join), 123 (the class clause's first derivation fixes its orientation), 410 / 414 (join
+  orders: parameterized join relations for LATERAL items aren't built), 609 / 610 (the class
+  with scan-level members picks the first members for the join clause), 643 (class clause
+  order and orientation: generated in class order, `member = constant` for classes of three
+  or more members).
 
 ## Fixed in round 15, agent 10 (equivalence classes: broken classes, made operators, nondeterministic collations, Merge Appends as join inputs, GROUP BY reordering)
 
@@ -2068,7 +2142,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 353 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 859 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (64) |
+| join | 925 | 860 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (65) |
 | aggregates | 556 | 554 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
@@ -2178,8 +2252,8 @@ produces no units on Linux (skipped by the file itself).
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 303 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (4) |
 | xml | 281 | 281 | 100% | yes | yes |  |
-| partition_join | 614 | 593 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (21) |
-| partition_prune | 771 | 764 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
+| partition_join | 614 | 596 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (18) |
+| partition_prune | 771 | 767 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (4) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |
 | indexing | 645 | 645 | 100% | yes | yes |  |

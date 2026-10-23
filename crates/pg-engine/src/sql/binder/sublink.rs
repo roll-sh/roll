@@ -271,6 +271,7 @@ fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bo
     let Plan::Append {
         inputs,
         inh: inh @ Some(_),
+        ..
     } = p
     else {
         return None;
@@ -355,6 +356,8 @@ fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bo
         Plan::Append {
             inputs: members,
             inh: inh.clone(),
+            alias: None,
+            pw: None,
         },
         types,
         limited,
@@ -830,7 +833,7 @@ fn scan_constants(s: &ScanPlan) -> Vec<(usize, Expr, Expr)> {
 fn plan_constants(p: &Plan) -> Vec<(usize, Expr, Expr)> {
     match p {
         Plan::Scan(s) => scan_constants(s),
-        Plan::Append { inputs, inh: Some(_) } if !inputs.is_empty() => {
+        Plan::Append { inputs, inh: Some(_), .. } if !inputs.is_empty() => {
             let mut common: Option<Vec<(usize, Expr, Expr)>> = None;
             for m in inputs {
                 let mine: Vec<(usize, Expr, Expr)> = match &**m {

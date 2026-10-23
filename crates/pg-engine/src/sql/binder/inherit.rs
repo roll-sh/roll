@@ -59,6 +59,8 @@ fn expand(
     Ok(Plan::Append {
         inputs,
         inh: Some(refname.to_string()),
+        alias: None,
+        pw: None,
     })
 }
 

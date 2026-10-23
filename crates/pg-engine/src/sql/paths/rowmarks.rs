@@ -107,7 +107,7 @@ fn has_marks(p: &Plan) -> bool {
         | Plan::Context { input, .. }
         | Plan::With { body: input, .. } => has_marks(input),
         Plan::Join { left, right, .. } => has_marks(left) || has_marks(right),
-        Plan::Append { inputs, inh: Some(_) } => inputs.iter().any(|i| has_marks(i)),
+        Plan::Append { inputs, inh: Some(_), .. } => inputs.iter().any(|i| has_marks(i)),
         _ => false,
     }
 }
@@ -138,7 +138,7 @@ pub fn level_scans(p: &Plan) -> Vec<Vec<&ScanPlan>> {
                     go(right, out);
                 }
             }
-            Plan::Append { inputs, inh: Some(_) } => {
+            Plan::Append { inputs, inh: Some(_), .. } => {
                 let mut members = Vec::new();
                 for i in inputs {
                     let mut one = Vec::new();
@@ -321,6 +321,7 @@ fn key(p: &Plan) -> Option<Keyed> {
         Plan::Append {
             inputs,
             inh: inh @ Some(_),
+            ..
         } => {
             let mut out = Vec::with_capacity(inputs.len());
             let mut first: Option<(Vec<usize>, Key)> = None;
@@ -345,6 +346,8 @@ fn key(p: &Plan) -> Option<Keyed> {
                 Plan::Append {
                     inputs: out,
                     inh: inh.clone(),
+                    alias: None,
+                    pw: None,
                 },
                 map,
                 vec![k],

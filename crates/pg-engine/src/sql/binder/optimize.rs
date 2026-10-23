@@ -587,7 +587,8 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 l = add_filter(cat, l, Expr::And(lpush));
             }
             if !rpush.is_empty() {
-                r = push_lateral(cat, r, rpush, &params);
+                let nonnull = nonnull_params(&l, &params);
+                r = push_lateral(cat, r, rpush, &params, &nonnull);
             }
             BROKEN_DUPS.with(|b| *b.borrow_mut() = saved);
             let mut j = join(cat, kind, l, r, and_all(cond_parts), params, nleft, nright);
@@ -647,6 +648,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
         Plan::Append {
             inputs,
             inh: inh @ Some(_),
+            ..
         } => {
             let ncols = inputs.first().map_or(0, |i| width(i));
             // (A dummy relation's columns keep their names.)
@@ -700,7 +702,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 let info = Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec, table: None, ..Default::default() }));
                 return Plan::Empty { ncols, cols, info };
             }
-            Plan::Append { inputs, inh }
+            Plan::Append { inputs, inh, alias: None, pw: None }
         }
         // reconsider_full_join_clause: `COALESCE(l, r) = constant` over a full join on
         // `l = r` (a USING column) holds the constant on both sides: each side is restricted
@@ -1166,7 +1168,7 @@ fn push_into_level(cat: &Catalog, plan: Plan, parts: Vec<Expr>) -> Plan {
 fn grouping_level(p: &Plan) -> bool {
     match p {
         Plan::Distinct { .. } | Plan::Agg { .. } | Plan::SetOp { .. } => true,
-        Plan::Append { inh: None, inputs } => inputs.iter().any(|i| grouping_level(i)),
+        Plan::Append { inh: None, inputs, .. } => inputs.iter().any(|i| grouping_level(i)),
         Plan::Project { input, .. }
         | Plan::Sort { input, .. }
         | Plan::Filter { input, .. }
@@ -1204,7 +1206,7 @@ pub(crate) fn output_collation(p: &Plan, c: usize) -> Option<String> {
             _ => None,
         },
         Plan::SetOp { left, .. } => output_collation(left, c),
-        Plan::Append { inh: None, inputs } => output_collation(inputs.first()?, c),
+        Plan::Append { inh: None, inputs, .. } => output_collation(inputs.first()?, c),
         Plan::Join { left, right, nleft, .. } => {
             if c < *nleft {
                 output_collation(left, c)
@@ -1997,6 +1999,7 @@ pub fn scans_mut(p: &mut Plan, f: &mut dyn FnMut(&mut ScanPlan)) {
         Plan::Append {
             inputs,
             inh: Some(_),
+            ..
         } => inputs
             .iter_mut()
             .for_each(|i| scans_mut(Arc::make_mut(i), f)),
@@ -2343,8 +2346,13 @@ fn leaf_ranges(p: &Plan, off: usize) -> Vec<(usize, usize)> {
 /// Clauses onto a join's right side; a LATERAL subquery planned apart takes none reading
 /// the left side's values (qual_is_pushdown_safe refuses lateral references): they stay its
 /// Subquery Scan's filter.
-fn push_lateral(cat: &Catalog, right: Plan, parts: Vec<Expr>, params: &[Expr]) -> Plan {
+/// `nonnull`: per LATERAL parameter, whether it is a NOT NULL column no outer join nulls.
+fn push_lateral(cat: &Catalog, right: Plan, parts: Vec<Expr>, params: &[Expr], nonnull: &[bool]) -> Plan {
     let lateral = !params.is_empty();
+    let right = match push_lateral_union(cat, right, &parts, nonnull) {
+        Ok(p) => return p,
+        Err(p) => p,
+    };
     if lateral && matches!(right, Plan::Barrier { secure: false, .. }) {
         let (up, down): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(Expr::has_outer_refs);
         let right = if down.is_empty() { right } else { add_filter(cat, right, Expr::And(down)) };
@@ -2396,6 +2404,86 @@ fn reads_lateral_var(e: &Expr) -> bool {
             }
         });
         found
+    })
+}
+
+/// Per LATERAL parameter of a join over `left`: a NOT NULL column of `left` no outer join
+/// nulls (restriction_is_always_true of a NullTest of it: its Var has no nullingrels).
+fn nonnull_params(left: &Plan, params: &[Expr]) -> Vec<bool> {
+    params
+        .iter()
+        .map(|e| matches!(e, Expr::Col(c, _) if nonnullable_col(left, *c)))
+        .collect()
+}
+
+/// set_append_rel_size over a LATERAL UNION ALL of FROM-less arms: the clauses go into each
+/// arm, and in an arm that outputs a parameter `nonnull` marks, a NullTest of it is always
+/// true (restriction_is_always_true: dropped) or false (the arm goes). Done here, where the
+/// join's parameters are known, only when that changes an arm (else the planner pushes the
+/// clauses into the arms as usual): Err gives `right` back.
+fn push_lateral_union(cat: &Catalog, right: Plan, parts: &[Expr], nonnull: &[bool]) -> std::result::Result<Plan, Plan> {
+    if !nonnull.iter().any(|b| *b) {
+        return Err(right);
+    }
+    let Plan::Append { inputs, inh: None, alias, .. } = &right else {
+        return Err(right);
+    };
+    let safe = parts.iter().all(|p| {
+        let mut ok = !p.is_volatile();
+        p.walk(&mut |x| ok &= !matches!(x, Expr::Subquery(_) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..)));
+        ok
+    });
+    if !safe || inputs.len() < 2 {
+        return Err(right);
+    }
+    let mut arms = Vec::new();
+    let mut changed = false;
+    for a in inputs {
+        let Plan::Project { input, exprs } = &**a else {
+            return Err(right);
+        };
+        if !matches!(&**input, Plan::One) {
+            return Err(right);
+        }
+        let mut qs: Vec<Expr> = parts
+            .iter()
+            .map(|p| {
+                p.clone()
+                    .transform(&mut |e| {
+                        Ok(match e {
+                            Expr::Col(i, t) => exprs.get(i).cloned().unwrap_or(Expr::Col(i, t)),
+                            e => e,
+                        })
+                    })
+                    .unwrap()
+            })
+            .collect();
+        let before: Vec<Expr> = qs.clone();
+        reduce_null_tests(&mut qs, &|x| matches!(x, Expr::Outer(1, i, _) if nonnull.get(*i).copied().unwrap_or(false)));
+        changed |= qs.len() != before.len() || qs.iter().zip(&before).any(|(a, b)| !a.same_as(b));
+        arms.push((a.clone(), exprs.clone(), qs));
+    }
+    if !changed {
+        return Err(right);
+    }
+    let mut out = Vec::new();
+    for (arm, exprs, qs) in arms {
+        if qs.iter().any(super::refute::always_false) {
+            continue;
+        }
+        out.push(match and_all(qs) {
+            None => arm,
+            Some(q) => Arc::new(Plan::Project {
+                input: Arc::new(add_filter(cat, Plan::One, q)),
+                exprs,
+            }),
+        });
+    }
+    let ncols = width(&right);
+    Ok(match out.len() {
+        0 => Plan::Empty { ncols, cols: None, info: None },
+        1 => Arc::try_unwrap(out.pop().unwrap()).unwrap_or_else(|a| (*a).clone()),
+        _ => Plan::Append { inputs: out, inh: None, alias: alias.clone(), pw: None },
     })
 }
 
@@ -2575,7 +2663,8 @@ pub fn join(
         left = add_filter(cat, left, Expr::And(lpush));
     }
     if !rpush.is_empty() {
-        right = push_lateral(cat, right, rpush, &params);
+        let nonnull = nonnull_params(&left, &params);
+        right = push_lateral(cat, right, rpush, &params, &nonnull);
     }
     BROKEN_DUPS.with(|b| *b.borrow_mut() = saved_broken);
     // Hash keys: `l = r` with each side reading only one input, same type.

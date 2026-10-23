@@ -1202,8 +1202,11 @@ fn run_all(cfg: &Config, schedule: &[String]) {
     let log = cfg.out.join("engine.log");
     let _ = std::fs::remove_file(&log);
     // A private copy: other builds may relink target/debug/roll-engine during the run.
+    // (PGREGRESS_ENGINE_BIN: another engine binary, e.g. one copied aside while the run
+    // waits for a heavy slot.)
     let bin = cfg.root.join("roll-engine.bin");
-    std::fs::copy(env!("CARGO_BIN_EXE_roll-engine"), &bin).expect("copy roll-engine");
+    let src = std::env::var("PGREGRESS_ENGINE_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_roll-engine").to_string());
+    std::fs::copy(&src, &bin).expect("copy roll-engine");
     let mut engine = EngineProc::start(&bin, &data, &log, cfg.port, &cfg.root);
     let eng = Target::Engine(cfg.port);
 
@@ -2000,7 +2003,11 @@ fn write_report(cfg: &Config, results: &[FileResult]) {
     );
     std::fs::write(cfg.report_dir.join("REPORT.md"), s).unwrap();
 
-    // Hunks.
+    // Hunks (PGREGRESS_HUNKS: how many differing units per file, default 12).
+    let hunks = std::env::var("PGREGRESS_HUNKS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(HUNKS_PER_FILE);
     for r in results {
         if r.gaps.is_empty() {
             continue;
@@ -2010,9 +2017,9 @@ fn write_report(cfg: &Config, results: &[FileResult]) {
             r.name,
             r.matched,
             r.units,
-            HUNKS_PER_FILE.min(r.gaps.len())
+            hunks.min(r.gaps.len())
         );
-        for g in r.gaps.iter().take(HUNKS_PER_FILE) {
+        for g in r.gaps.iter().take(hunks) {
             let _ = writeln!(
                 h,
                 "@@ unit {} (sql line {}) [{}] {}",

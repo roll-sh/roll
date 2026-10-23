@@ -183,6 +183,7 @@ fn distinct_for(ctx: &ExecCtx, p: &Plan, keys: &[Cand], base: bool) -> bool {
         Plan::Append {
             inputs,
             inh: Some(_),
+            ..
         } if base => {
             let parent = inputs.iter().find_map(|i| {
                 let mut q: &Plan = i;
@@ -778,6 +779,7 @@ fn plain_cols(p: &Plan) -> Option<Vec<(String, Option<String>)>> {
         Plan::Append {
             inputs,
             inh: Some(n),
+            ..
         } => inputs
             .first()
             .and_then(|i| plain_cols(i))

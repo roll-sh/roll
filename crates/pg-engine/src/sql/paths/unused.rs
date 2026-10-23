@@ -223,7 +223,7 @@ impl Planner<'_, '_> {
                 visit(right);
             }
             // (Not into an inheritance tree's members: scans of the parent's columns.)
-            Plan::Append { inputs, inh: None } => inputs.iter_mut().for_each(visit),
+            Plan::Append { inputs, inh: None, .. } => inputs.iter_mut().for_each(visit),
             // (Each arm's whole row: the set operation compares them.)
             Plan::SetOp { left, right, .. } => {
                 for c in [left, right] {

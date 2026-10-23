@@ -56,12 +56,13 @@ fn inh_append(p: &Arc<Plan>) -> Option<&Arc<Plan>> {
         Plan::Append {
             inputs,
             inh: Some(_),
+            ..
         } if inputs.len() > 1
             && !matches!(&*inputs[0], Plan::Update(_) | Plan::Delete(_)) =>
         {
             Some(p)
         }
-        Plan::Append { inputs, inh: None } if inputs.len() > 1 && inputs.iter().all(|i| is_join(i)) => Some(p),
+        Plan::Append { inputs, inh: None, .. } if inputs.len() > 1 && inputs.iter().all(|i| is_join(i)) => Some(p),
         Plan::Project { input, .. } | Plan::Filter { input, .. } => inh_append(input),
         _ => None,
     }
@@ -565,6 +566,8 @@ impl Builder<'_, '_> {
                         Arc::new(Plan::Append {
                             inputs: g.iter().map(|&i| members[i].clone()).collect(),
                             inh: inh.clone(),
+                            alias: None,
+                            pw: None,
                         })
                     }
                 })

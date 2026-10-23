@@ -925,6 +925,23 @@ fn rowcompare_clause(
     })
 }
 
+/// A LATERAL join's inner side that is a relation: a scan (under projections and filters),
+/// or an inheritance Append of them.
+fn lateral_rel(p: &Plan) -> bool {
+    match p {
+        Plan::Scan(_) => true,
+        Plan::Project { input, .. } | Plan::Filter { input, .. } => lateral_rel(input),
+        Plan::Append { inputs, inh: Some(_), .. } => inputs.iter().all(|i| matches!(&**i, Plan::Empty { .. }) || lateral_rel(i)),
+        _ => false,
+    }
+}
+
+/// A partitionwise join Append's id (`Plan::Append`'s `pw`), unique in the process.
+fn next_pw_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Planner<'_, '_> {
     /// match_pattern_prefix (like_support.c): a LIKE / regular expression with a fixed
     /// prefix as a btree range (or `=` for an exact pattern), both lossy.
@@ -1749,7 +1766,8 @@ struct Planner<'c, 'a> {
     whole_rows: std::cell::RefCell<Vec<u32>>,
     /// Partitionwise joins made, by their first child's address: as FROM items of joins
     /// above (`joinpath::PwJoin`).
-    pw_joins: std::cell::RefCell<Vec<(usize, joinpath::PwJoin)>>,
+    /// Partitionwise joins' Appends (by their `pw` id) and how they are partitioned.
+    pw_joins: std::cell::RefCell<Vec<(u64, joinpath::PwJoin)>>,
     /// WHERE clauses a join group takes in (`plan_filtered_join`), for the next group.
     absorbed: std::cell::RefCell<Vec<Expr>>,
     /// The per-row cost of a filter over an outer join that its group didn't take in: the
@@ -1779,6 +1797,8 @@ struct Planner<'c, 'a> {
     /// its parameterized paths' loop counts come from (a child relation's are made
     /// parameterized by the parent relations, then reparameterized by child).
     pw_loop_rows: std::cell::RefCell<Vec<f64>>,
+    /// Walking a LATERAL join's inner relation: the outer side's rows (its scans' loops).
+    lateral_loops: std::cell::Cell<Option<f64>>,
     /// Planning a partitionwise join's child joins under a LIMIT (no ORDER BY): its count
     /// and offset, each child's cheapest path for that fraction (get_cheapest_fractional_path).
     pw_limit: std::cell::Cell<Option<(f64, f64)>>,
@@ -1807,6 +1827,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             id: PLANNER_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             lifted: Default::default(),
             pw_loop_rows: Default::default(),
+            lateral_loops: Default::default(),
             pw_limit: Default::default(),
             pw_order: Default::default(),
         }
@@ -4822,6 +4843,11 @@ impl Planner<'_, '_> {
             self.removed.set(self.removed.get() + removed);
             return;
         }
+        // A LATERAL join of two partitioned items the join search doesn't take: joined
+        // partition by partition when it can be.
+        if matches!(p, Plan::Join { params, .. } if !params.is_empty()) && self.lateral_partitionwise(p) {
+            return self.walk(p, needed, lim);
+        }
         let needs = child_needs(p, needed);
         // A LIMIT reaches the scan through projections (and a CTE's body).
         let lim_in = match p {
@@ -4901,7 +4927,14 @@ impl Planner<'_, '_> {
                 if lateral {
                     crate::sql::binder::optimize::lateral_push(params);
                 }
+                // A LATERAL side that is a relation (a pulled-up subquery's scan, or an
+                // appendrel of them): its paths are parameterized by the outer side,
+                // costed for that side's rows as their loops (get_loop_count).
+                let loops = (lateral && lateral_rel(right))
+                    .then(|| crate::sql::explain::estimate(left, self.ctx).rows.max(1.0));
+                let saved = self.lateral_loops.replace(loops);
                 visit(right, None);
+                self.lateral_loops.set(saved);
                 if lateral {
                     crate::sql::binder::optimize::lateral_pop();
                 }
@@ -4933,25 +4966,21 @@ impl Planner<'_, '_> {
         }
         // A WHERE clause over a join made partitionwise: each child join's own.
         if let Plan::Filter { input, pred } = p
-            && let Plan::Append { inputs, inh: None } = &**input
-            && let Some(first) = inputs.first()
+            && let Plan::Append { inputs, inh: None, pw: Some(id), .. } = &**input
             && joinpath::absorbable(pred)
+            && self.pw_joins.borrow().iter().any(|(a, _)| a == id)
         {
-            let key = Arc::as_ptr(first) as usize;
-            let pos = self.pw_joins.borrow().iter().position(|(a, _)| *a == key);
-            if let Some(pos) = pos {
-                let inputs: Vec<Arc<Plan>> = inputs
-                    .iter()
-                    .map(|c| {
-                        Arc::new(Plan::Filter {
-                            input: c.clone(),
-                            pred: pred.clone(),
-                        })
+            let id = *id;
+            let inputs: Vec<Arc<Plan>> = inputs
+                .iter()
+                .map(|c| {
+                    Arc::new(Plan::Filter {
+                        input: c.clone(),
+                        pred: pred.clone(),
                     })
-                    .collect();
-                self.pw_joins.borrow_mut()[pos].0 = Arc::as_ptr(&inputs[0]) as usize;
-                *p = Plan::Append { inputs, inh: None };
-            }
+                })
+                .collect();
+            *p = Plan::Append { inputs, inh: None, alias: None, pw: Some(id) };
         }
     }
 
@@ -5000,7 +5029,7 @@ impl Planner<'_, '_> {
                         || grouping_setop(left)
                         || grouping_setop(right)
                 }
-                Plan::Append { inh: None, inputs } => inputs.iter().any(|i| grouping_setop(i)),
+                Plan::Append { inh: None, inputs, .. } => inputs.iter().any(|i| grouping_setop(i)),
                 Plan::Distinct { .. } | Plan::Agg { .. } => true,
                 Plan::Project { input, .. } | Plan::Filter { input, .. } => grouping_setop(input),
                 _ => false,
@@ -5010,8 +5039,8 @@ impl Planner<'_, '_> {
             return false;
         }
         // (An Append that isn't a UNION ALL's: a partitionwise join's, a rule's commands.)
-        if let Plan::Append { inputs, .. } = &**input
-            && self.pw_joins.borrow().iter().any(|(a, _)| inputs.first().is_some_and(|f| Arc::as_ptr(f) as usize == *a))
+        if let Plan::Append { pw: Some(id), .. } = &**input
+            && self.pw_joins.borrow().iter().any(|(a, _)| a == id)
         {
             return false;
         }
@@ -5059,7 +5088,7 @@ impl Planner<'_, '_> {
                     for x in [l, r] {
                         match &*x {
                             Plan::Empty { .. } => {}
-                            Plan::Append { inputs: xs, inh: None } => inputs.extend(xs.iter().cloned()),
+                            Plan::Append { inputs: xs, inh: None, .. } => inputs.extend(xs.iter().cloned()),
                             _ => inputs.push(x),
                         }
                     }
@@ -5067,7 +5096,7 @@ impl Planner<'_, '_> {
                     return Some(Arc::new(match inputs.len() {
                         0 => Plan::Empty { ncols, cols: None, info: None },
                         1 => Arc::try_unwrap(inputs.pop().unwrap()).unwrap_or_else(|a| (*a).clone()),
-                        _ => Plan::Append { inputs, inh: None },
+                        _ => Plan::Append { inputs, inh: None, alias: None, pw: None },
                     }));
                 }
                 Some(Arc::new(Plan::SetOp {
@@ -5079,13 +5108,13 @@ impl Planner<'_, '_> {
                     sub: sub.clone(),
                 }))
             }
-            Plan::Append { inputs, inh: None } => {
+            Plan::Append { inputs, inh: None, alias, .. } => {
                 let mut out = Vec::new();
                 for i in inputs {
                     let x = self.push_qual_setop(i, pred, cols, drop)?;
                     match &*x {
                         Plan::Empty { .. } if drop => {}
-                        Plan::Append { inputs: xs, inh: None } if drop => out.extend(xs.iter().cloned()),
+                        Plan::Append { inputs: xs, inh: None, .. } if drop => out.extend(xs.iter().cloned()),
                         _ => out.push(x),
                     }
                 }
@@ -5093,7 +5122,7 @@ impl Planner<'_, '_> {
                 Some(Arc::new(match out.len() {
                     0 => Plan::Empty { ncols, cols: None, info: None },
                     1 if drop => Arc::try_unwrap(out.pop().unwrap()).unwrap_or_else(|a| (*a).clone()),
-                    _ => Plan::Append { inputs: out, inh: None },
+                    _ => Plan::Append { inputs: out, inh: None, alias: alias.clone(), pw: None },
                 }))
             }
             // pull_up_simple_values: a one-row VALUES arm is its expressions over an empty
@@ -5332,9 +5361,19 @@ impl Planner<'_, '_> {
             (!want.keys.is_empty() || !want.merge.is_empty())
                 .then(|| Arc::new((want.keys.clone(), want.merge.clone()))),
         );
-        let Some(rel) = self.rel(s, needed) else {
+        let Some(mut rel) = self.rel(s, needed) else {
             return false;
         };
+        // (A LATERAL relation's scan reading the outer side's values: once per outer row.)
+        if let Some(loops) = self.lateral_loops.get()
+            && rel.quals.iter().any(|q| {
+                let mut outer = false;
+                q.walk(&mut |x| outer |= matches!(x, Expr::Outer(1, ..)));
+                outer
+            })
+        {
+            rel.loop_count = loops;
+        }
         if rel.indexes.is_empty()
             && want.keys.is_empty()
             && tid_quals(&rel).is_none()
@@ -5790,8 +5829,7 @@ impl Planner<'_, '_> {
             self.push_pw_targets(take(c));
         }
         if let Plan::Project { input, exprs } = p
-            && let Plan::Append { inputs, inh: None } = &**input
-            && let Some(first) = inputs.first()
+            && let Plan::Append { inputs, inh: None, pw: Some(id), .. } = &**input
             && exprs.iter().any(|e| !matches!(e, Expr::Col(..)))
             && exprs.iter().all(|e| {
                 let mut ok = !e.is_volatile();
@@ -5800,22 +5838,19 @@ impl Planner<'_, '_> {
                 });
                 ok
             })
+            && self.pw_joins.borrow().iter().any(|(a, _)| a == id)
         {
-            let key = Arc::as_ptr(first) as usize;
-            let pos = self.pw_joins.borrow().iter().position(|(a, _)| *a == key);
-            if let Some(pos) = pos {
-                let inputs: Vec<Arc<Plan>> = inputs
-                    .iter()
-                    .map(|c| {
-                        Arc::new(Plan::Project {
-                            input: c.clone(),
-                            exprs: exprs.clone(),
-                        })
+            let id = *id;
+            let inputs: Vec<Arc<Plan>> = inputs
+                .iter()
+                .map(|c| {
+                    Arc::new(Plan::Project {
+                        input: c.clone(),
+                        exprs: exprs.clone(),
                     })
-                    .collect();
-                self.pw_joins.borrow_mut()[pos].0 = Arc::as_ptr(&inputs[0]) as usize;
-                *p = Plan::Append { inputs, inh: None };
-            }
+                })
+                .collect();
+            *p = Plan::Append { inputs, inh: None, alias: None, pw: Some(id) };
         }
     }
 
@@ -5873,13 +5908,13 @@ impl Planner<'_, '_> {
                     && s.current_of.is_none()
                     && !s.with_key
             }
-            Plan::Append { inh: Some(_), inputs } => inputs.iter().all(|m| match &**m {
+            Plan::Append { inh: Some(_), inputs, .. } => inputs.iter().all(|m| match &**m {
                 Plan::Scan(s) => s.mark.is_none() && !s.with_key,
                 Plan::Project { input, .. } => matches!(&**input, Plan::Scan(s) if s.mark.is_none() && !s.with_key),
                 _ => false,
             }),
             // (A UNION ALL of single tables: an appendrel all the same.)
-            Plan::Append { inh: None, inputs } => inputs.iter().all(|m| match &**m {
+            Plan::Append { inh: None, inputs, .. } => inputs.iter().all(|m| match &**m {
                 Plan::Scan(s) => s.mark.is_none() && !s.with_key && s.part.is_none(),
                 Plan::Project { input, exprs } => {
                     matches!(&**input, Plan::Scan(s) if s.mark.is_none() && !s.with_key && s.part.is_none())
@@ -5963,7 +5998,7 @@ impl Planner<'_, '_> {
             unplanned(&mut src);
             // (A UNION ALL's members each take the test, as an appendrel's children do.)
             let mut src = match src {
-                Plan::Append { inh: None, inputs } => Plan::Append {
+                Plan::Append { inh: None, inputs, alias, .. } => Plan::Append {
                     inputs: inputs
                         .into_iter()
                         .map(|m| {
@@ -5972,6 +6007,8 @@ impl Planner<'_, '_> {
                         })
                         .collect(),
                     inh: None,
+                    alias,
+                    pw: None,
                 },
                 src => crate::sql::binder::optimize::add_filter(&self.cat, src, notnull.clone()),
             };

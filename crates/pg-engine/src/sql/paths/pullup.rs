@@ -272,7 +272,7 @@ fn simple_target(e: &Expr) -> bool {
 /// member that is itself a UNION ALL, through a simple projection of its rows, gives its
 /// members, each projected as the outer one says.
 fn flatten_union_all(p: &mut Plan) {
-    let Plan::Append { inputs, inh: None } = p else {
+    let Plan::Append { inputs, inh: None, .. } = p else {
         return;
     };
     let nested = |i: &Plan| match i {

@@ -939,7 +939,7 @@ fn rule_returning(p: &Plan) -> Option<(&Arc<Plan>, Vec<Expr>)> {
 /// (the parent's reference name, the member scans).
 fn inherited_marks<'p>(p: &'p Plan, out: &mut Vec<(String, Vec<&'p Plan>)>) {
     match p {
-        Plan::Append { inputs, inh: Some(parent) } => {
+        Plan::Append { inputs, inh: Some(parent), .. } => {
             let members: Vec<&Plan> = inputs
                 .iter()
                 .map(|i| match &**i {
@@ -1651,7 +1651,7 @@ fn tableoid_first(n: &mut ExNode) {
 fn inh_parents(p: &Plan) -> usize {
     // (Its members are range table entries too, the ones pruning removes as well.)
     let own = match p {
-        Plan::Append { inh: Some(_), inputs } => inputs.len(),
+        Plan::Append { inh: Some(_), inputs, .. } => inputs.len(),
         _ => 0,
     };
     own + plan_inputs(p).into_iter().map(|c| inh_parents(c)).sum::<usize>()
@@ -1748,6 +1748,7 @@ fn assign_refnames_skip(
     let mut mid_first: HashMap<usize, Vec<String>> = HashMap::new();
     let mut fake = usize::MAX;
     let mut inline_barriers: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut appendrel_nested: std::collections::HashSet<usize> = std::collections::HashSet::new();
     while qi < queue.len() {
         let mut stack = vec![queue[qi]];
         qi += 1;
@@ -1758,7 +1759,7 @@ fn assign_refnames_skip(
         while let Some(p) = stack.pop() {
             // (A UNION ALL's arm flattened into its Append: no level of it named, its
             // sub-partitioned members' neither.)
-            if let Plan::Append { inh: Some(n), inputs } = p
+            if let Plan::Append { inh: Some(n), inputs, .. } = p
                 && skip.contains(&addr(p))
                 && !union_flat.contains(&addr(p))
             {
@@ -1783,7 +1784,7 @@ fn assign_refnames_skip(
                 while let Plan::Project { input, .. } = a {
                     a = input;
                 }
-                if let Plan::Append { inh: Some(n), inputs } = a
+                if let Plan::Append { inh: Some(n), inputs, .. } = a
                     && let Some(order) = crate::sql::paths::partition_order(input, &exprs, &dirs)
                 {
                     fn mark(
@@ -1906,11 +1907,20 @@ fn assign_refnames_skip(
                     None
                 }
                 Plan::Insert(i) => Some(i.alias.clone().unwrap_or_else(|| i.rules.table.name.clone())),
+                // A UNION ALL appendrel's parent entry (the Append's apprelids): named before
+                // its members.
+                Plan::Append {
+                    inh: None,
+                    alias: Some(a),
+                    inputs,
+                    ..
+                } if inputs.len() > 1 => Some(a.clone()),
                 // The parent's own name; its member scans are `name_1`, `name_2`, …. (A single
                 // member's Append is dropped, and it takes the name itself.)
                 Plan::Append {
                     inh: Some(n),
                     inputs,
+                    ..
                 } if !skip.contains(&addr(p))
                     && (inputs.len() > 1
                     || matches!(
@@ -2016,7 +2026,27 @@ fn assign_refnames_skip(
             }
             // (A set operation's arms are all subqueries of a level with no relations of
             // its own: named in plan order as they are.)
-            if let Plan::SetOp { .. } | Plan::Append { inh: None, .. } = p {
+            // (Not an appendrel's: its arms pulled up are the level's relations, and the
+            // ones planned apart are subqueries named after them, as setrefs reaches them.
+            // Nor a nested UNION ALL's in it, which is flattened into it.)
+            if let Plan::Append { inh: None, alias: Some(_), inputs, .. } = p {
+                fn nested(inputs: &[Arc<Plan>], out: &mut std::collections::HashSet<usize>) {
+                    for i in inputs {
+                        let mut x: &Plan = i;
+                        while let Plan::Project { input, .. } = x {
+                            x = input;
+                        }
+                        if let Plan::Append { inh: None, inputs, .. } = x {
+                            out.insert(addr(x));
+                            nested(inputs, out);
+                        }
+                    }
+                }
+                nested(inputs, &mut appendrel_nested);
+            }
+            if let Plan::SetOp { .. } | Plan::Append { inh: None, alias: None, .. } = p
+                && !appendrel_nested.contains(&addr(p))
+            {
                 for c in plan_inputs(p) {
                     let mut a: &Plan = c;
                     loop {
@@ -2035,7 +2065,7 @@ fn assign_refnames_skip(
                     }
                 }
             }
-            if let (Some(ctx), Plan::Append { inputs: all, inh }) = (ctx, p)
+            if let (Some(ctx), Plan::Append { inputs: all, inh, .. }) = (ctx, p)
                 && !matches!(all.first().map(|i| &**i), Some(Plan::Update(_) | Plan::Delete(_)))
                 && (inh.is_some() || !all.iter().any(|i| i.writes()))
             {
@@ -2260,12 +2290,13 @@ fn partitionwise_parents(p: &Plan, under: bool, out: &mut Vec<String>, skip: &[u
         Plan::Append {
             inputs,
             inh: Some(_),
+            ..
         } => inputs.iter().for_each(|i| partitionwise_parents(i, true, out, skip)),
         // (A partitionwise join of one partition pair has no Append: its partitions keep
         // their parents' names.)
         // (One grouped partitionwise: its parents go unnamed.)
         Plan::Append { inh: None, .. } if skip.contains(&addr(p)) => {}
-        Plan::Append { inputs, inh: None } if inputs.len() > 1 => inputs
+        Plan::Append { inputs, inh: None, .. } if inputs.len() > 1 => inputs
             .iter()
             .for_each(|i| partitionwise_parents(i, false, out, skip)),
         _ => plan_inputs(p)
@@ -3002,7 +3033,7 @@ impl Builder<'_, '_> {
             }
             // (An inheritance tree's copy is range table entries of its own: the parent's
             // next number, then its members'.)
-            if let Plan::Append { inputs, inh: Some(base) } = &*hplan {
+            if let Plan::Append { inputs, inh: Some(base), .. } = &*hplan {
                 let next = self
                     .refnames
                     .values()
@@ -5802,6 +5833,7 @@ impl Builder<'_, '_> {
             Plan::Append {
                 inputs,
                 inh: Some(_),
+                ..
             } if inputs.len() == 1 => {
                 let mut c = self.node(&inputs[0]);
                 // (Its columns are still the partitioned table's: its inherited statistics.)
@@ -5827,7 +5859,7 @@ impl Builder<'_, '_> {
                 }
                 c
             }
-            Plan::Append { inputs, inh } => {
+            Plan::Append { inputs, inh, .. } => {
                 let mut direct = Vec::new();
                 for i in inputs.iter() {
                     let mut x = &**i;
@@ -12424,7 +12456,7 @@ fn unique_for(cat: &crate::catalog::Catalog, p: &Plan, keys: &[&Expr]) -> bool {
         Plan::Filter { input, .. } | Plan::Barrier { input, .. } | Plan::Context { input, .. } => unique_for(cat, input, keys),
         // A partitioned table's members: its own unique indexes (which hold the partition
         // key, so they are unique across the partitions too), over its columns.
-        Plan::Append { inputs, inh: Some(_) } => {
+        Plan::Append { inputs, inh: Some(_), .. } => {
             let mut m: &Plan = match inputs.first() {
                 Some(m) => m,
                 None => return false,
@@ -12508,7 +12540,7 @@ fn union_arms<'p>(p: &'p Arc<Plan>, all: bool, out: &mut Vec<&'p Arc<Plan>>) {
             union_arms(left, all, out);
             union_arms(right, all, out);
         }
-        Plan::Append { inputs, inh: None } if all => {
+        Plan::Append { inputs, inh: None, .. } if all => {
             inputs.iter().for_each(|i| union_arms(i, all, out))
         }
         _ => out.push(p),
@@ -12865,7 +12897,7 @@ fn union_inh_appends(p: &Plan, out: &mut Vec<usize>) {
             while let Plan::Project { input, .. } = x {
                 x = input;
             }
-            if let Plan::Append { inh: Some(_), inputs } = x
+            if let Plan::Append { inh: Some(_), inputs, .. } = x
                 && inputs.iter().filter(|i| !matches!(&***i, Plan::Empty { .. })).count() > 1
             {
                 // (By the address in `p`'s tree: the arms are shared, not copied.)
@@ -12957,7 +12989,7 @@ fn target_append(p: &Plan) -> Option<&Plan> {
             _ => false,
         }
     }
-    if let Plan::Append { inh: Some(_), inputs } = p
+    if let Plan::Append { inh: Some(_), inputs, .. } = p
         && inputs.iter().any(|i| keyed(i))
     {
         return Some(p);
@@ -14191,7 +14223,7 @@ pub(crate) fn exists_hashed_from(
         p = input;
     }
     // An inheritance tree: each member's the same way, the same correlated keys.
-    if let Plan::Append { inputs, inh: inh @ Some(_) } = p
+    if let Plan::Append { inputs, inh: inh @ Some(_), .. } = p
         && preds.is_empty()
         && !inputs.is_empty()
     {
@@ -14209,7 +14241,7 @@ pub(crate) fn exists_hashed_from(
             }
             members.push(Arc::new(hp));
         }
-        return Some((Plan::Append { inputs: members, inh: inh.clone() }, keys0?));
+        return Some((Plan::Append { inputs: members, inh: inh.clone(), alias: None, pw: None }, keys0?));
     }
     let Plan::Scan(sc) = p else {
         return None;
@@ -15077,6 +15109,8 @@ pub fn dump_plan(p: &Plan, depth: usize) {
             .join(","),
         Plan::Scan(s) => format!("{} {:?} filter={:?}", s.table.name, s.access, s.filter).chars().take(400).collect(),
         Plan::Filter { pred, .. } => format!("{pred:?}"),
+        Plan::Append { inh, alias, .. } => format!("inh={inh:?} alias={alias:?}"),
+        Plan::Barrier { alias, .. } => format!("alias={alias:?}"),
         Plan::Sort { keys, .. } => keys
             .iter()
             .map(|k| format!("{:?} using={:?}", k.expr, k.using.as_ref().map(|u| (u.name, u.coll.as_ref().map(|c| c.name.clone())))).chars().take(400).collect::<String>())

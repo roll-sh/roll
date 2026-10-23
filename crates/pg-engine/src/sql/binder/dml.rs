@@ -3304,6 +3304,7 @@ fn set_current_of(p: &mut Plan, table: u32, cursor: Expr) -> bool {
         Plan::Append {
             inh: Some(_),
             inputs,
+            ..
         } => {
             fn member(p: &Plan) -> Option<u32> {
                 match p {

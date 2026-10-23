@@ -1228,6 +1228,7 @@ pub fn keyed_plan(plan: &Plan) -> Option<(Plan, u32)> {
             Plan::Append {
                 inputs,
                 inh: inh @ Some(_),
+                ..
             } => {
                 let mut out = Vec::with_capacity(inputs.len());
                 let mut first: Option<(u32, usize)> = None;
@@ -1244,6 +1245,8 @@ pub fn keyed_plan(plan: &Plan) -> Option<(Plan, u32)> {
                     Plan::Append {
                         inputs: out,
                         inh: inh.clone(),
+                        alias: None,
+                        pw: None,
                     },
                     oid,
                     key,
@@ -1414,6 +1417,7 @@ fn marked_keyed_plan(plan: &Plan) -> Option<(Plan, u32)> {
             Plan::Append {
                 inputs,
                 inh: inh @ Some(_),
+                ..
             } => {
                 let mut out = Vec::with_capacity(inputs.len());
                 let mut first: Option<(Vec<usize>, Vec<(usize, u32)>)> = None;
@@ -1436,6 +1440,8 @@ fn marked_keyed_plan(plan: &Plan) -> Option<(Plan, u32)> {
                     Plan::Append {
                         inputs: out,
                         inh: inh.clone(),
+                        alias: None,
+                        pw: None,
                     },
                     map,
                     keys,

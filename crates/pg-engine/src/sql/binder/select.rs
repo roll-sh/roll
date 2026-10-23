@@ -105,6 +105,7 @@ impl Binder<'_, '_> {
                 None => None,
             };
             let top = self.setop_leaves.is_none();
+            let saved_coerced = std::mem::replace(&mut self.setop_coerced, false);
             if top {
                 self.setop_leaves = Some(0);
             }
@@ -112,8 +113,19 @@ impl Binder<'_, '_> {
             if top {
                 self.setop_leaves = None;
             }
+            let coerced = self.setop_coerced;
+            self.setop_coerced = saved_coerced || (!top && coerced);
             self.arm_limit = saved;
-            let (plan, cols) = r?;
+            let (mut plan, cols) = r?;
+            // flatten_simple_union_all: a query level that is a UNION ALL of leaves of its
+            // own types is an appendrel, its parent the leftmost leaf's entry (`*SELECT* 1`).
+            if top
+                && union_all
+                && !coerced
+                && let Plan::Append { inh: None, alias, .. } = &mut plan
+            {
+                *alias = Some("*SELECT* 1".to_string());
+            }
             return self.finish_over_output(plan, cols, s);
         }
         if !s.values_lists.is_empty() {
@@ -1054,6 +1066,10 @@ impl Binder<'_, '_> {
                 require_equality(t, loc)?;
             }
         }
+        let same = |c: &OutCol, t: &DataType| matches!(c.ty, DataType::Unknown) || c.ty.same_base(t);
+        if !lcols.iter().zip(&types).all(|(c, t)| same(c, t)) || !rcols.iter().zip(&types).all(|(c, t)| same(c, t)) {
+            self.setop_coerced = true;
+        }
         let lp = self.coerce_plan_types(
             lp,
             &lcols.iter().map(|c| c.ty.clone()).collect::<Vec<_>>(),
@@ -1146,6 +1162,8 @@ impl Binder<'_, '_> {
             Plan::Append {
                 inputs: vec![Arc::new(lp), Arc::new(rp)],
                 inh: None,
+                alias: None,
+                pw: None,
             }
         } else {
             // Columns under a nondeterministic collation compare by it.
@@ -2120,6 +2138,8 @@ impl Binder<'_, '_> {
                     Plan::Append {
                         inputs: (0..n).map(|_| Arc::new(one.clone())).collect(),
                         inh: None,
+                        alias: None,
+                        pw: None,
                     }
                 } else {
                     one
@@ -3486,11 +3506,14 @@ impl Binder<'_, '_> {
                 } else if deferred {
                     // (Not one: its level planned now, as any.)
                     let mut plan = plan;
+                    union_alias(&mut plan, &name);
                     let lim = self.arm_limit.filter(|a| a.0 == sub_level).map(|a| (a.1, a.2));
                     self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut plan, lim);
                     super::check_merge_keys(self.ctx, &mut plan)?;
                     plan
                 } else {
+                    let mut plan = plan;
+                    union_alias(&mut plan, &name);
                     plan
                 };
                 Ok((plan, Scope { rels: vec![rel] }, params))
@@ -7231,6 +7254,18 @@ fn unique_colnames(names: impl Iterator<Item = String>) -> Vec<String> {
         out.push(name);
     }
     out
+}
+
+/// pull_up_simple_union_all: a FROM subquery that is a simple UNION ALL is an appendrel
+/// whose parent is the subquery's own range table entry (its alias), not `*SELECT* 1`.
+fn union_alias(p: &mut Plan, name: &str) {
+    match p {
+        Plan::Project { input, .. } => union_alias(Arc::make_mut(input), name),
+        Plan::Append { inh: None, alias: alias @ Some(_), .. } => {
+            *alias = Some(if name.is_empty() { "unnamed_subquery" } else { name }.to_string());
+        }
+        _ => {}
+    }
 }
 
 /// A FROM subquery's own windows (below its projection, sort and limit): the alias and

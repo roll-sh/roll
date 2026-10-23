@@ -452,7 +452,7 @@ fn part_members(p: &Plan, keys: Vec<Expr>) -> Option<Vec<(&ScanPlan, Vec<Expr>)>
     }
     match p {
         Plan::Project { input, exprs } => part_members(input, through(exprs, &keys)),
-        Plan::Append { inputs, inh: Some(_) } => inputs
+        Plan::Append { inputs, inh: Some(_), .. } => inputs
             .iter()
             .filter(|i| !matches!(&***i, Plan::Empty { .. }))
             .map(|i| member(i, keys.clone()))

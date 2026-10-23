@@ -281,7 +281,7 @@ fn classes(p: &Plan) -> Classes {
         }
         // An inheritance tree's columns the parent's clauses (pushed into every member)
         // equate with constants.
-        Plan::Append { inputs, inh: Some(_) } => {
+        Plan::Append { inputs, inh: Some(_), .. } => {
             let mut c = Classes::new(w);
             let mut live = inputs.iter().filter(|i| !matches!(&***i, Plan::Empty { .. })).peekable();
             if live.peek().is_none() {
@@ -310,7 +310,7 @@ fn classes(p: &Plan) -> Classes {
         }
         // (A partitionwise join's child joins: the columns every one equates, the parent
         // join's classes. Not a UNION ALL's arms: their classes aren't the query's.)
-        Plan::Append { inputs, inh: None } if !inputs.is_empty() && inputs.iter().all(|i| child_join(i)) => {
+        Plan::Append { inputs, inh: None, .. } if !inputs.is_empty() && inputs.iter().all(|i| child_join(i)) => {
             let mut c = Classes::new(w);
             let mut members: Vec<Classes> = inputs
                 .iter()

@@ -634,7 +634,7 @@ impl Binder<'_, '_> {
         let plan = match inputs.len() {
             0 => Plan::Empty { ncols: 0, cols: None, info: None },
             1 => Arc::try_unwrap(inputs.pop().unwrap()).unwrap_or_else(|a| (*a).clone()),
-            _ => Plan::Append { inputs, inh: None },
+            _ => Plan::Append { inputs, inh: None, alias: None, pw: None },
         };
         (plan, cols.unwrap_or_default())
     }

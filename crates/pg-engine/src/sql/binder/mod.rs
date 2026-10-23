@@ -510,6 +510,9 @@ pub struct Binder<'b, 'a> {
     /// Binding a set operation's tree: how many of its leaf queries are bound so far
     /// (their range table entries are `*SELECT* n`).
     pub(crate) setop_leaves: Option<usize>,
+    /// Binding a set operation's tree: whether a leaf's columns were coerced to the tree's
+    /// types (is_simple_union_all_recurse: such a UNION ALL is no appendrel).
+    pub(crate) setop_coerced: bool,
     /// A FROM subquery being bound whose query level the query above plans (a Subquery
     /// Scan's, once it knows the columns read: remove_unused_subquery_outputs): the level
     /// it is at, whose planning waits; `deferred` once it did.
@@ -647,6 +650,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             unplanned: false,
             arm_limit: None,
             setop_leaves: None,
+            setop_coerced: false,
             defer_level: None,
             deferred: false,
             defer_fold: false,

@@ -269,7 +269,7 @@ fn has_qual(p: &Plan, q: &Expr) -> bool {
     match p {
         Plan::Scan(sp) => sp.filter.as_ref().is_some_and(|f| in_parts(f, q)),
         Plan::Filter { input, pred } => in_parts(pred, q) || has_qual(input, q),
-        Plan::Append { inputs, inh: Some(_) } => !inputs.is_empty() && inputs.iter().all(|i| has_qual(i, q)),
+        Plan::Append { inputs, inh: Some(_), .. } => !inputs.is_empty() && inputs.iter().all(|i| has_qual(i, q)),
         Plan::Project { input, exprs } if exprs.iter().all(|e| matches!(e, Expr::Col(..))) => {
             let mapped = q
                 .clone()
@@ -2901,7 +2901,7 @@ impl Search<'_, '_, '_> {
             },
             // A partitioned table's members: its own unique indexes, which hold the
             // partition key (unique across the partitions), over its columns.
-            (None, Plan::Append { inputs, inh: Some(_) }) => {
+            (None, Plan::Append { inputs, inh: Some(_), .. }) => {
                 let mut m: &Plan = match inputs.first() {
                     Some(m) => m,
                     None => return false,
@@ -4597,7 +4597,7 @@ impl Search<'_, '_, '_> {
                 ..
             } => {
                 let l = &self.leaves[*leaf];
-                let (Plan::Append { inputs, inh }, Some(members)) = (&l.plan, &l.members) else {
+                let (Plan::Append { inputs, inh, .. }, Some(members)) = (&l.plan, &l.members) else {
                     unreachable!("an Append leaf")
                 };
                 let mut inputs = inputs.clone();
@@ -4632,6 +4632,8 @@ impl Search<'_, '_, '_> {
                     Plan::Append {
                         inputs,
                         inh: inh.clone(),
+                        alias: None,
+                        pw: None,
                     },
                     (l.off..l.off + l.ncols).collect(),
                 )
@@ -6870,9 +6872,10 @@ impl Planner<'_, '_> {
                         using: None,
                     })
                     .collect();
-                self.pw_joins.borrow_mut().push((Arc::as_ptr(&inputs[0]) as usize, pw_join.clone()));
+                let id = super::next_pw_id();
+                self.pw_joins.borrow_mut().push((id, pw_join.clone()));
                 *p = Plan::Sort {
-                    input: Arc::new(Plan::Append { inputs, inh: None }),
+                    input: Arc::new(Plan::Append { inputs, inh: None, alias: None, pw: Some(id) }),
                     keys,
                 };
                 return Some(true);
@@ -6910,10 +6913,9 @@ impl Planner<'_, '_> {
                 } else {
                     let inputs: Vec<Arc<Plan>> = children.into_iter().map(Arc::new).collect();
                     // (A join above may join this one partitionwise in turn.)
-                    self.pw_joins
-                        .borrow_mut()
-                        .push((Arc::as_ptr(&inputs[0]) as usize, pw_join));
-                    Plan::Append { inputs, inh: None }
+                    let id = super::next_pw_id();
+                    self.pw_joins.borrow_mut().push((id, pw_join));
+                    Plan::Append { inputs, inh: None, alias: None, pw: Some(id) }
                 };
                 return Some(false);
             }
