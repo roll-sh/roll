@@ -3796,6 +3796,7 @@ impl Binder<'_, '_> {
                         }
                     };
                     let mut rel = derived_rel(alias.as_deref().unwrap_or(&rv.relname), &cols, 0);
+                    rel.whole_var = c.aux == 0;
                     let n = rel.cols.len();
                     for col in &mut rel.cols[n - c.aux..] {
                         col.merged = true;
@@ -4035,7 +4036,7 @@ impl Binder<'_, '_> {
                         Plan::Empty {
                             ncols: super::optimize::width(&Plan::Scan(Box::new(scan))),
                             cols: Some(Arc::new(names)),
-                            info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table })),
+                            info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table, ..Default::default() })),
                         }
                     } else {
                         if self.exclusion_mode() == "on" {
@@ -4056,7 +4057,7 @@ impl Binder<'_, '_> {
                         quals.push(q);
                     }
                     }
-                    plan = super::optimize::add_filter(&self.cat, plan, Expr::And(quals));
+                    plan = super::optimize::add_rls_filter(&self.cat, plan, Expr::And(quals));
                 }
                 Ok((plan, rel))
             }

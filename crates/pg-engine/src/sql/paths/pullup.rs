@@ -216,7 +216,7 @@ impl Planner<'_, '_> {
                 } else {
                     (a, k)
                 };
-                let eq = b.binop("=", subst(a), subst(k), -1).ok()?;
+                let eq = b.builtin_binop("=", subst(a), subst(k)).ok()?;
                 conds.push(eq);
             }
         }

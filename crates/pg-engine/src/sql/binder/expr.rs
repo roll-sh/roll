@@ -92,7 +92,9 @@ impl Binder<'_, '_> {
             NodeEnum::AExpr(a) => self.bind_aexpr(a),
             NodeEnum::BoolExpr(b) => self.bind_bool_expr(b),
             NodeEnum::NullTest(t) => {
+                self.whole_var_ref = false;
                 let arg = self.bind_expr(t.arg.as_deref().unwrap())?;
+                let whole_var = std::mem::take(&mut self.whole_var_ref);
                 let not = t.nulltesttype == pb::NullTestType::IsNotNull as i32;
                 // Postgres's tree keeps `row IS NULL` as written; a whole-row reference's
                 // test stays whole when planned too (only a ROW() constructor is expanded).
@@ -100,7 +102,9 @@ impl Binder<'_, '_> {
                 // (One of a VALUES list or subquery, an anonymous row: its ROW()
                 // expanded, each field tested as a scalar — a composite one's test is
                 // IS [NOT] DISTINCT FROM NULL then.)
+                // (Not one of a relation the planner keeps whole, a CTE's: `(r.* IS NULL)`.)
                 if !self.deparse
+                    && !whole_var
                     && is_whole_row(&arg)
                     && matches!(arg.ty(), DataType::Row(ref rt) if rt.oid == 0)
                     && let Expr::Row(items, _) = &arg
@@ -1136,6 +1140,7 @@ impl Binder<'_, '_> {
                 }
             });
             let exists = r.exists_col;
+            self.whole_var_ref = r.whole_var;
             let row_ref = super::refs::RowRef {
                 loc,
                 rel: table.unwrap_or(0),
@@ -1609,6 +1614,7 @@ impl Binder<'_, '_> {
             lateral: 0,
             join_rte: false,
             in_join: false,
+            whole_var: false,
         };
         let mut lvl = super::Level::new();
         lvl.barrier = true;
@@ -1759,6 +1765,14 @@ impl Binder<'_, '_> {
             }
             _ => Err(crate::error::unsupported("this operator form")),
         }
+    }
+
+    /// A built-in (pg_catalog) operator over `l` and `r`, whatever operator of that name the
+    /// search path finds first: the planner's clauses made from an operator family's
+    /// members (rebuilt hash keys, index conditions) are those, not looked up by name.
+    pub(crate) fn builtin_binop(&mut self, op: &str, l: Expr, r: Expr) -> Result<Expr> {
+        let res = resolve_binop(op, &l.ty(), &r.ty())?;
+        self.call_resolved(res, vec![l, r])
     }
 
     pub(crate) fn binop(&mut self, op: &str, l: Expr, r: Expr, loc: i32) -> Result<Expr> {
@@ -1919,6 +1933,35 @@ impl Binder<'_, '_> {
         if ops.is_empty() {
             return Ok(None);
         }
+        // OpernameGetCandidates: the built-ins are pg_catalog's, at its place in the path; an
+        // operator of the same argument types in a schema searched earlier hides a later one.
+        let builtin: Vec<Arc<FuncDef>> = if schema.is_none_or(|s| s == "pg_catalog") {
+            let reg = func::registry();
+            let b = if l.is_some() {
+                reg.binops.get(op)
+            } else {
+                reg.prefix.get(op)
+            };
+            b.into_iter().flatten().cloned().collect()
+        } else {
+            Vec::new()
+        };
+        let pc = path.iter().position(|&s| s == crate::catalog::PG_CATALOG_OID);
+        let at = |o: &crate::catalog::Operator| path.iter().position(|&s| s == o.schema);
+        let sig = |o: &crate::catalog::Operator| -> Vec<DataType> { o.left.iter().cloned().chain([o.right.clone()]).collect() };
+        let same = |a: &[DataType], b: &[DataType]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.same_base(y));
+        let builtin: Vec<Arc<FuncDef>> = builtin
+            .into_iter()
+            .filter(|b| {
+                !ops.iter().any(|o| pc.is_some_and(|pc| at(o).is_some_and(|i| i < pc)) && same(&sig(o), &b.args))
+            })
+            .collect();
+        if pc.is_some() && !builtin.is_empty() {
+            ops.retain(|o| !(at(o) > pc && builtin.iter().any(|b| same(&sig(o), &b.args))));
+        }
+        if ops.is_empty() {
+            return Ok(None);
+        }
         let inputs: Vec<DataType> = l.iter().map(|e| e.ty()).chain([r.ty()]).collect();
         let mut cands: Vec<Arc<FuncDef>> = ops
             .iter()
@@ -1930,15 +1973,7 @@ impl Binder<'_, '_> {
                 )
             })
             .collect();
-        if schema.is_none_or(|s| s == "pg_catalog") {
-            let reg = func::registry();
-            let builtin = if l.is_some() {
-                reg.binops.get(op)
-            } else {
-                reg.prefix.get(op)
-            };
-            cands.extend(builtin.into_iter().flatten().cloned());
-        }
+        cands.extend(builtin);
         // The exact match looks at the declared types before a domain input is reduced to
         // its base type (func_select_candidate): an operator over a domain isn't exact for
         // a plain value of the base type, nor a built-in for a value of the domain.
@@ -3728,7 +3763,14 @@ impl Binder<'_, '_> {
                 loc,
             ));
         }
-        let (plan, cols, params) = self.bind_subquery(s.subselect.as_deref().unwrap())?;
+        // make_subplan: an EXISTS sub-select is planned for its first row (as a LIMIT 1).
+        let saved_limit = self.arm_limit;
+        if kind == T::ExistsSublink {
+            self.arm_limit = Some((self.levels.len() + 1, 1.0, 0.0));
+        }
+        let r = self.bind_subquery(s.subselect.as_deref().unwrap());
+        self.arm_limit = saved_limit;
+        let (plan, cols, params) = r?;
         let id = self.fresh_id();
         if self.deparse {
             self.sublink_nodes
@@ -6313,7 +6355,7 @@ impl Binder<'_, '_> {
                 .unwrap_or_default(),
             None => self.cat.routine_path(&self.ctx.search_path),
         };
-        let cands: Vec<Arc<crate::catalog::Function>> = self
+        let mut cands: Vec<Arc<crate::catalog::Function>> = self
             .cat
             .functions
             .values()
@@ -6323,6 +6365,32 @@ impl Binder<'_, '_> {
         if cands.is_empty() && !call {
             return Ok(None);
         }
+        // (FuncnameGetCandidates walks the path: of the same argument types, the function of
+        // the schema searched first; the built-ins are pg_catalog's, at its place.)
+        let at = |f: &crate::catalog::Function| schemas.iter().position(|&s| s == f.schema);
+        cands.sort_by_key(|f| at(f));
+        let pc = schemas.iter().position(|&s| s == crate::catalog::PG_CATALOG_OID);
+        let builtin: Vec<Arc<FuncDef>> = match pc {
+            Some(pc) if !call && !variadic && schema.is_none_or(|s| s == "pg_catalog") => {
+                let same = |f: &crate::catalog::Function, b: &FuncDef| {
+                    f.args.len() == b.args.len() && f.args.iter().zip(&b.args).all(|(x, y)| x.1.same_base(y))
+                };
+                let b: Vec<Arc<FuncDef>> = func::registry()
+                    .funcs
+                    .get(name)
+                    .into_iter()
+                    .flatten()
+                    .filter(|b| !cands.iter().any(|f| at(f).is_some_and(|i| i < pc) && same(f, b)))
+                    .cloned()
+                    .collect();
+                cands.retain(|f| !(at(f).is_some_and(|i| i > pc) && b.iter().any(|b| same(f, b))));
+                if cands.is_empty() {
+                    return Ok(None);
+                }
+                b
+            }
+            _ => Vec::new(),
+        };
         let mut args = Vec::with_capacity(arg_nodes.len());
         let mut arg_names: Vec<Option<String>> = Vec::with_capacity(arg_nodes.len());
         for a in arg_nodes {
@@ -6435,7 +6503,12 @@ impl Binder<'_, '_> {
                     })
                 })
                 .collect();
+            let mut defs = defs;
+            let nuser = defs.len();
+            defs.extend(builtin.iter().cloned());
             match select_candidate(&defs, &types, false) {
+                // (A built-in of pg_catalog's matches best: it's the caller's to bind.)
+                Ok(Some(r)) if nuser < defs.len() && !r.def.name.is_empty() => return Ok(None),
                 Ok(Some(r)) => {
                     let fdef = cands.iter().find(|c| c.oid == r.def.oid).cloned().unwrap();
                     let n = params(&fdef).len();

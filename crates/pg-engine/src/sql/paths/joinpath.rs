@@ -5107,7 +5107,7 @@ fn remember_equalities(p: &Plan, ctx: &ExecCtx) {
         }
         let mut b = crate::sql::binder::Binder::new(ctx, Vec::new());
         let (x, y) = (Expr::Col(0, t.clone()), Expr::Col(1, t.clone()));
-        if let Ok(Expr::Call(d, ..)) = b.binop("=", x, y, -1) {
+        if let Ok(Expr::Call(d, ..)) = b.builtin_binop("=", x, y) {
             EQ_OPS.with(|m| m.borrow_mut().1.push((t, d)));
         }
     }
@@ -5287,7 +5287,8 @@ impl Planner<'_, '_> {
     /// A grouping over a join group (through projections): the group planned with the
     /// GROUP BY keys as its query order (standard_qp_callback's group_pathkeys), the
     /// ORDER BY's directions on the keys it starts with (`dirs`: per group key).
-    pub(super) fn grouped_join(&self, p: &mut Plan, needed: &[bool], dirs: &[(usize, bool, bool)]) -> bool {
+    pub(super) fn grouped_join(&self, p: &mut Plan, needed: &[bool], dirs: &super::GroupDirs) -> bool {
+        let (dirs, named) = (&dirs.0, &dirs.1);
         let mut need = super::child_needs(p, needed).pop().unwrap_or_default();
         let Plan::Agg {
             input,
@@ -5310,7 +5311,7 @@ impl Planner<'_, '_> {
         }
         for i in 0..groups.len() {
             if !order.iter().any(|o| o.0 == i) {
-                order.push((i, false, false));
+                order.push(named.iter().find(|n| n.0 == i).copied().unwrap_or((i, false, false)));
             }
         }
         let mut key_exprs: Vec<Expr> = order.iter().map(|o| groups[o.0].clone()).collect();

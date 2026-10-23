@@ -1,0 +1,758 @@
+> CREATE TABLE a11_t (a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO a11_t VALUES (1, 'x')
+-- INSERT 0 1
+
+> CREATE VIEW a11_v AS SELECT a, b FROM a11_t
+-- CREATE VIEW
+
+> CREATE VIEW a11_v2 AS SELECT a, b, a + 1 AS c FROM a11_t
+-- CREATE VIEW
+
+> UPDATE a11_v SET a = 2 RETURNING old, new, pg_typeof(old), pg_typeof(new), pg_typeof(a11_v)
+old:user | new:user | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+(1,x) | (2,x) | a11_v | a11_v | a11_v
+-- UPDATE 1
+
+> INSERT INTO a11_v VALUES (5, 'y') RETURNING old, new, pg_typeof(new), pg_typeof(a11_v)
+old:user | new:user | pg_typeof:regtype | pg_typeof:regtype
+NULL | (5,y) | a11_v | a11_v
+-- INSERT 0 1
+
+> DELETE FROM a11_v WHERE a = 5 RETURNING old, pg_typeof(old), new
+old:user | pg_typeof:regtype | new:user
+(5,y) | a11_v | NULL
+-- DELETE 1
+
+> UPDATE a11_v2 SET a = 7 RETURNING old, new, pg_typeof(new)
+old:user | new:user | pg_typeof:regtype
+(2,x,3) | (7,x,8) | a11_v2
+-- UPDATE 1
+
+> MERGE INTO a11_v USING (SELECT 1 AS k) s ON a11_v.a = 7 WHEN MATCHED THEN UPDATE SET b = 'q'
+>   RETURNING pg_typeof(old), pg_typeof(new), old, new
+pg_typeof:regtype | pg_typeof:regtype | old:user | new:user
+a11_v | a11_v | (7,x) | (7,q)
+-- MERGE 1
+
+> CREATE TABLE a11_d (a int, b int, c text)
+-- CREATE TABLE
+
+> INSERT INTO a11_d SELECT i % 10, i % 7, 'x' || i FROM generate_series(1, 1000) i
+-- INSERT 0 1000
+
+> ANALYZE a11_d
+-- ANALYZE
+
+> SET enable_hashagg = off
+-- SET
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT DISTINCT a + 1 FROM a11_d
+QUERY PLAN:text
+Unique
+  Output: ((a + 1))
+  ->  Sort
+        Output: ((a + 1))
+        Sort Key: ((a11_d.a + 1))
+        ->  Seq Scan on public.a11_d
+              Output: (a + 1)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT DISTINCT a + 1, b FROM a11_d LIMIT 3
+QUERY PLAN:text
+Limit
+  Output: ((a + 1)), b
+  ->  Unique
+        Output: ((a + 1)), b
+        ->  Sort
+              Output: ((a + 1)), b
+              Sort Key: ((a11_d.a + 1)), a11_d.b
+              ->  Seq Scan on public.a11_d
+                    Output: (a + 1), b
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT a, count(*) FROM a11_d GROUP BY 1 ORDER BY 2 DESC, 1 DESC
+QUERY PLAN:text
+Sort
+  Sort Key: (count(*)) DESC, a DESC
+  ->  GroupAggregate
+        Group Key: a
+        ->  Sort
+              Sort Key: a DESC
+              ->  Seq Scan on a11_d
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT a, count(DISTINCT b) FROM a11_d GROUP BY 1 ORDER BY 2 DESC, 1 DESC
+QUERY PLAN:text
+Sort
+  Sort Key: (count(DISTINCT b)) DESC, a DESC
+  ->  GroupAggregate
+        Group Key: a
+        ->  Sort
+              Sort Key: a DESC, b
+              ->  Seq Scan on a11_d
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT a, b, count(*) FROM a11_d GROUP BY 1, 2 ORDER BY 3, 2 DESC NULLS LAST, 1 DESC
+QUERY PLAN:text
+Sort
+  Sort Key: (count(*)), b DESC NULLS LAST, a DESC
+  ->  GroupAggregate
+        Group Key: a, b
+        ->  Sort
+              Sort Key: a DESC, b DESC NULLS LAST
+              ->  Seq Scan on a11_d
+-- EXPLAIN
+
+> SET enable_nestloop = off
+-- SET
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_material = off
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT x.a, count(DISTINCT x.b), count(*) FROM a11_d x JOIN a11_d y USING (a)
+>   GROUP BY 1 HAVING count(*) > 1 ORDER BY 2 DESC, 1 DESC LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: (count(DISTINCT x.b)) DESC, x.a DESC
+        ->  GroupAggregate
+              Group Key: x.a
+              Filter: (count(*) > 1)
+              ->  Incremental Sort
+                    Sort Key: x.a DESC, x.b
+                    Presorted Key: x.a
+                    ->  Merge Join
+                          Merge Cond: (x.a = y.a)
+                          ->  Sort
+                                Sort Key: x.a DESC
+                                ->  Seq Scan on a11_d x
+                          ->  Sort
+                                Sort Key: y.a DESC
+                                ->  Seq Scan on a11_d y
+-- EXPLAIN
+
+> SELECT x.a, count(DISTINCT x.b), count(*) FROM a11_d x JOIN a11_d y USING (a)
+>   GROUP BY 1 HAVING count(*) > 1 ORDER BY 2 DESC, 1 DESC LIMIT 3
+a:int4 | count:int8 | count:int8
+9 | 7 | 10000
+8 | 7 | 10000
+7 | 7 | 10000
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF)
+> SELECT x.a, count(DISTINCT x.b) FROM a11_d x JOIN a11_d y USING (a) GROUP BY 1 ORDER BY 1 DESC
+QUERY PLAN:text
+GroupAggregate
+  Group Key: x.a
+  ->  Incremental Sort
+        Sort Key: x.a DESC, x.b
+        Presorted Key: x.a
+        ->  Merge Join
+              Merge Cond: (x.a = y.a)
+              ->  Sort
+                    Sort Key: x.a DESC
+                    ->  Seq Scan on a11_d x
+              ->  Sort
+                    Sort Key: y.a DESC
+                    ->  Seq Scan on a11_d y
+-- EXPLAIN
+
+> RESET enable_nestloop
+-- RESET
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_material
+-- RESET
+
+> RESET enable_hashagg
+-- RESET
+
+> CREATE TABLE a11_g (a int, e int)
+-- CREATE TABLE
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT a * 2, count(*) FROM a11_g t GROUP BY a * 2, e
+QUERY PLAN:text
+HashAggregate
+  Output: ((a * 2)), count(*), e
+  Group Key: (t.a * 2), t.e
+  ->  Seq Scan on public.a11_g t
+        Output: (a * 2), e
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT a * 2, count(*) FROM a11_g t GROUP BY cube(a * 2, e)
+QUERY PLAN:text
+MixedAggregate
+  Output: ((a * 2)), count(*), e
+  Hash Key: (t.a * 2), t.e
+  Hash Key: (t.a * 2)
+  Hash Key: t.e
+  Group Key: ()
+  ->  Seq Scan on public.a11_g t
+        Output: (a * 2), e
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM a11_g t GROUP BY GROUPING SETS (a, e)
+QUERY PLAN:text
+HashAggregate
+  Output: count(*), a, e
+  Hash Key: t.a
+  Hash Key: t.e
+  ->  Seq Scan on public.a11_g t
+        Output: a, e
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT a, a * 2, coalesce(a, 100), e FROM a11_g t GROUP BY GROUPING SETS (a, a * 2, coalesce(a, 100), e)
+QUERY PLAN:text
+HashAggregate
+  Output: a, ((a * 2)), (COALESCE(a, 100)), e
+  Hash Key: t.a
+  Hash Key: (t.a * 2)
+  Hash Key: COALESCE(t.a, 100)
+  Hash Key: t.e
+  ->  Seq Scan on public.a11_g t
+        Output: a, (a * 2), COALESCE(a, 100), e
+-- EXPLAIN
+
+> SET enable_hashagg = off
+-- SET
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT a * 2, count(*) FROM a11_g t GROUP BY rollup(a * 2, e)
+QUERY PLAN:text
+GroupAggregate
+  Output: ((a * 2)), count(*), e
+  Group Key: ((t.a * 2)), t.e
+  Group Key: ((t.a * 2))
+  Group Key: ()
+  ->  Sort
+        Output: ((a * 2)), e
+        Sort Key: ((t.a * 2)), t.e
+        ->  Seq Scan on public.a11_g t
+              Output: (a * 2), e
+-- EXPLAIN
+
+> RESET enable_hashagg
+-- RESET
+
+> CREATE TABLE a11_gv (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 2) VIRTUAL,
+>   c int GENERATED ALWAYS AS (10 + 10) VIRTUAL, d int GENERATED ALWAYS AS (coalesce(a, 100)) VIRTUAL, e int)
+-- CREATE TABLE
+
+> INSERT INTO a11_gv VALUES (1), (2)
+-- INSERT 0 2
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM a11_gv t GROUP BY GROUPING SETS (a, b, c, d, e) HAVING c = 20
+QUERY PLAN:text
+HashAggregate
+  Output: a, ((a * 2)), (20), (COALESCE(a, 100)), e
+  Hash Key: t.a
+  Hash Key: (t.a * 2)
+  Hash Key: 20
+  Hash Key: COALESCE(t.a, 100)
+  Hash Key: t.e
+  Filter: ((20) = 20)
+  ->  Seq Scan on public.a11_gv t
+        Output: a, (a * 2), 20, COALESCE(a, 100), e
+-- EXPLAIN
+
+> SELECT * FROM a11_gv t GROUP BY GROUPING SETS (a, b, c, d, e) HAVING c = 20 ORDER BY 1, 2, 3, 4, 5
+a:int4 | b:int4 | c:int4 | d:int4 | e:int4
+NULL | NULL | 20 | NULL | NULL
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT a < b AND b < 3 FROM (VALUES (1, 2)) t(a, b) GROUP BY rollup(a < b AND b < 3) HAVING a < b AND b < 3
+QUERY PLAN:text
+MixedAggregate
+  Hash Key: ((1 < 2) AND (2 < 3))
+  Group Key: ()
+  Filter: (((1 < 2) AND (2 < 3)))
+  ->  Result
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT NOT a FROM (VALUES (true)) t(a) GROUP BY rollup(NOT a) HAVING NOT NOT a
+QUERY PLAN:text
+MixedAggregate
+  Hash Key: (NOT true)
+  Group Key: ()
+  Filter: (NOT ((NOT true)))
+  ->  Result
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> WITH r(a, b) AS MATERIALIZED (VALUES (1, row(1, 2)), (1, row(NULL, NULL)), (1, NULL), (NULL, row(1, 2)), (NULL, NULL))
+> SELECT r, r IS NULL AS isnull, r IS NOT NULL AS isnotnull FROM r
+QUERY PLAN:text
+CTE Scan on r
+  Output: r.*, (r.* IS NULL), (r.* IS NOT NULL)
+  CTE r
+    ->  Values Scan on "*VALUES*"
+          Output: "*VALUES*".column1, "*VALUES*".column2
+-- EXPLAIN
+
+> WITH r(a, b) AS MATERIALIZED (VALUES (1, row(1, 2)), (1, row(NULL, NULL)), (1, NULL), (NULL, row(1, 2)), (NULL, NULL))
+> SELECT r, r IS NULL AS isnull, r IS NOT NULL AS isnotnull FROM r
+r:record | isnull:bool | isnotnull:bool
+(,"(1,2)") | f | f
+(,) | t | f
+(1,"(,)") | f | t
+(1,"(1,2)") | f | t
+(1,) | f | f
+-- SELECT 5
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> WITH r AS MATERIALIZED (SELECT a, e FROM a11_g) SELECT r IS NULL FROM r WHERE r IS NOT NULL
+QUERY PLAN:text
+CTE Scan on r
+  Output: (r.* IS NULL)
+  Filter: (r.* IS NOT NULL)
+  CTE r
+    ->  Seq Scan on public.a11_g
+          Output: a11_g.a, a11_g.e
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> WITH cte(c) AS MATERIALIZED (SELECT row(1, 2)) SELECT c, (c).f1 FROM cte AS t WHERE false
+QUERY PLAN:text
+Result
+  Output: t.c, (t.c).f1
+  One-Time Filter: false
+  CTE cte
+    ->  Result
+          Output: '(1,2)'::record
+-- EXPLAIN
+
+> CREATE FUNCTION a11_rf(int) RETURNS TABLE (x int, n int) LANGUAGE sql AS 'SELECT $1, 2'
+-- CREATE FUNCTION
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT (ss.a).x, (ss.a).n FROM (SELECT a11_rf(1) AS a) ss WHERE false
+QUERY PLAN:text
+Result
+  Output: (a).f1, (a).f2
+  One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT ss.a FROM (SELECT generate_series(1, 2) AS a) ss WHERE false
+QUERY PLAN:text
+Result
+  Output: a
+  One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT (ss.a).x, (ss.a).n FROM (SELECT a11_rf(t.a) AS a FROM a11_g t) ss WHERE false
+QUERY PLAN:text
+Result
+  Output: (ss.a).f1, (ss.a).f2
+  One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT ss.a, ss.c FROM (SELECT a, e + 1 AS c FROM a11_g OFFSET 0) ss WHERE false
+QUERY PLAN:text
+Result
+  Output: ss.a, ss.c
+  One-Time Filter: false
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM a11_g WHERE (SELECT x FROM (SELECT a AS x) s WHERE (SELECT x > 0)) IS NOT NULL
+QUERY PLAN:text
+Seq Scan on public.a11_g
+  Output: a11_g.a, a11_g.e
+  Filter: ((SubPlan 2) IS NOT NULL)
+  SubPlan 2
+    ->  Result
+          Output: a11_g.a
+          One-Time Filter: (InitPlan 1).col1
+          InitPlan 1
+            ->  Result
+                  Output: (a11_g.a > 0)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM a11_g WHERE (SELECT x FROM (SELECT a AS x) s WHERE x > 0) IS NOT NULL
+QUERY PLAN:text
+Seq Scan on public.a11_g
+  Output: a11_g.a, a11_g.e
+  Filter: ((SubPlan 1) IS NOT NULL)
+  SubPlan 1
+    ->  Result
+          Output: a11_g.a
+          One-Time Filter: (a11_g.a > 0)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT f FROM ROWS FROM (generate_series(1, 3), generate_series(1, 2)) f(x, y)
+QUERY PLAN:text
+Function Scan on f
+  Output: f.*
+  Function Call: generate_series(1, 3), generate_series(1, 2)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM (SELECT jsonb_path_query_array(module -> 'lectures', '$[*]') AS lecture
+>                FROM unnest(array['{"lectures": [{"id": "1"}]}'::jsonb]) AS um(module)) AS ss,
+>   jsonb_to_recordset(ss.lecture) AS j (id text)
+QUERY PLAN:text
+Nested Loop
+  Output: jsonb_path_query_array((um.module -> 'lectures'::text), '$[*]'::jsonpath, '{}'::jsonb, false), j.id
+  ->  Function Scan on pg_catalog.unnest um
+        Output: um.module
+        Function Call: unnest('{"{\"lectures\": [{\"id\": \"1\"}]}"}'::jsonb[])
+  ->  Function Scan on pg_catalog.jsonb_to_recordset j
+        Output: j.id
+        Function Call: jsonb_to_recordset(jsonb_path_query_array((um.module -> 'lectures'::text), '$[*]'::jsonpath, '{}'::jsonb, false))
+-- EXPLAIN
+
+> SELECT * FROM (SELECT jsonb_path_query_array(module -> 'lectures', '$[*]') AS lecture
+>                FROM unnest(array['{"lectures": [{"id": "1"}]}'::jsonb]) AS um(module)) AS ss,
+>   jsonb_to_recordset(ss.lecture) AS j (id text)
+lecture:jsonb | id:text
+[{"id": "1"}] | 1
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM (SELECT a + 1 AS c FROM unnest(array[1, 2]) a) ss, generate_series(1, ss.c) g
+QUERY PLAN:text
+Nested Loop
+  Output: (a.a + 1), g.g
+  ->  Function Scan on pg_catalog.unnest a
+        Output: a.a
+        Function Call: unnest('{1,2}'::integer[])
+  ->  Function Scan on pg_catalog.generate_series g
+        Output: g.g
+        Function Call: generate_series(1, (a.a + 1))
+-- EXPLAIN
+
+> CREATE TABLE a11_ins (a int, b int, c int)
+-- CREATE TABLE
+
+> EXPLAIN (VERBOSE, COSTS OFF) INSERT INTO a11_ins SELECT * FROM (SELECT b, c FROM a11_ins ORDER BY a) ss
+QUERY PLAN:text
+Insert on public.a11_ins
+  ->  Subquery Scan on ss
+        Output: ss.b, ss.c, NULL::integer
+        ->  Sort
+              Output: a11_ins_1.b, a11_ins_1.c, a11_ins_1.a
+              Sort Key: a11_ins_1.a
+              ->  Seq Scan on public.a11_ins a11_ins_1
+                    Output: a11_ins_1.b, a11_ins_1.c, a11_ins_1.a
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) INSERT INTO a11_ins (b, c) SELECT * FROM (SELECT b, c FROM a11_ins ORDER BY a) ss
+QUERY PLAN:text
+Insert on public.a11_ins
+  ->  Subquery Scan on ss
+        Output: NULL::integer, ss.b, ss.c
+        ->  Sort
+              Output: a11_ins_1.b, a11_ins_1.c, a11_ins_1.a
+              Sort Key: a11_ins_1.a
+              ->  Seq Scan on public.a11_ins a11_ins_1
+                    Output: a11_ins_1.b, a11_ins_1.c, a11_ins_1.a
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) INSERT INTO a11_ins SELECT * FROM (SELECT b, c, a FROM a11_ins ORDER BY a) ss
+QUERY PLAN:text
+Insert on public.a11_ins
+  ->  Sort
+        Output: a11_ins_1.b, a11_ins_1.c, a11_ins_1.a
+        Sort Key: a11_ins_1.a
+        ->  Seq Scan on public.a11_ins a11_ins_1
+              Output: a11_ins_1.b, a11_ins_1.c, a11_ins_1.a
+-- EXPLAIN
+
+> CREATE TABLE a11_ic (key int4, fruit text)
+-- CREATE TABLE
+
+> CREATE UNIQUE INDEX a11_ic_k ON a11_ic (key, fruit)
+-- CREATE INDEX
+
+> EXPLAIN (COSTS OFF) INSERT INTO a11_ic VALUES (0, 'Crowberry') ON CONFLICT (key, fruit) DO UPDATE SET fruit = excluded.fruit
+>   WHERE EXISTS (SELECT 1 FROM a11_ic ii WHERE ii.key = excluded.key)
+QUERY PLAN:text
+Insert on a11_ic
+  Conflict Resolution: UPDATE
+  Conflict Arbiter Indexes: a11_ic_k
+  Conflict Filter: EXISTS(SubPlan 1)
+  ->  Result
+  SubPlan 1
+    ->  Index Only Scan using a11_ic_k on a11_ic ii
+          Index Cond: (key = excluded.key)
+-- EXPLAIN
+
+> EXPLAIN SELECT EXISTS (SELECT 1 FROM a11_ic ii WHERE ii.key = 5)
+QUERY PLAN:text
+Result  (cost=4.17..4.18 rows=1 width=1)
+  InitPlan 1
+    ->  Index Only Scan using a11_ic_k on a11_ic ii  (cost=0.15..24.26 rows=6 width=0)
+          Index Cond: (key = 5)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT EXISTS (SELECT 1 FROM a11_ic ii WHERE ii.key = v.k) FROM (VALUES (1), (2)) v(k)
+QUERY PLAN:text
+Values Scan on "*VALUES*"
+  SubPlan 1
+    ->  Index Only Scan using a11_ic_k on a11_ic ii
+          Index Cond: (key = "*VALUES*".column1)
+-- EXPLAIN
+
+> CREATE TABLE a11_p (a int, b int) PARTITION BY LIST ((a11_p))
+-- CREATE TABLE
+
+> CREATE TABLE a11_p1 PARTITION OF a11_p FOR VALUES IN ('(1,2)')
+-- CREATE TABLE
+
+> CREATE TABLE a11_p2 PARTITION OF a11_p FOR VALUES IN ('(2,4)')
+-- CREATE TABLE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a11_p WHERE a11_p = '(1,2)'::a11_p
+QUERY PLAN:text
+Seq Scan on a11_p1 a11_p
+  Filter: ((a11_p.*)::a11_p = '(1,2)'::a11_p)
+-- EXPLAIN
+
+> CREATE FUNCTION a11_est(text) RETURNS TABLE (estimated int, actual int) LANGUAGE plpgsql AS $$
+> DECLARE ln text; tmp text[]; first_row bool := true;
+> BEGIN
+>   FOR ln IN EXECUTE format('explain analyze %s', $1) LOOP
+>     IF first_row THEN
+>       first_row := false;
+>       tmp := regexp_match(ln, 'rows=(\d*) .* rows=(\d*)');
+>       RETURN QUERY SELECT tmp[1]::int, tmp[2]::int;
+>     END IF;
+>   END LOOP;
+> END;
+> $$
+-- CREATE FUNCTION
+
+> CREATE TABLE a11_sp (i int, a int, b int) PARTITION BY RANGE (i)
+-- CREATE TABLE
+
+> CREATE TABLE a11_sp1 PARTITION OF a11_sp FOR VALUES FROM (1) TO (100)
+-- CREATE TABLE
+
+> INSERT INTO a11_sp SELECT 1, a / 100, a / 100 FROM generate_series(1, 999) a
+-- INSERT 0 999
+
+> CREATE STATISTICS a11_sps ON (a + 1), a, b FROM a11_sp
+-- CREATE STATISTICS
+
+> VACUUM ANALYZE a11_sp
+-- VACUUM
+
+> SELECT * FROM a11_est('SELECT a, b FROM a11_sp GROUP BY 1, 2')
+estimated:int4 | actual:int4
+10 | 10
+-- SELECT 1
+
+> SELECT * FROM a11_est('SELECT a + 1, b FROM ONLY a11_sp GROUP BY 1, 2')
+estimated:int4 | actual:int4
+1 | 0
+-- SELECT 1
+
+> DROP ROLE IF EXISTS a11_alice
+NOTICE 00000: role "a11_alice" does not exist, skipping
+-- DROP ROLE
+
+> DROP ROLE IF EXISTS a11_bob
+NOTICE 00000: role "a11_bob" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE a11_alice
+-- CREATE ROLE
+
+> CREATE ROLE a11_bob
+-- CREATE ROLE
+
+> GRANT CREATE ON SCHEMA public TO a11_alice, a11_bob
+-- GRANT
+
+> CREATE FUNCTION a11_leak(text) RETURNS bool COST 0.0000001 LANGUAGE plpgsql AS 'BEGIN RETURN true; END'
+-- CREATE FUNCTION
+
+> SET SESSION AUTHORIZATION a11_alice
+-- SET
+
+> CREATE TABLE a11_y1 (a int, b text)
+-- CREATE TABLE
+
+> GRANT ALL ON a11_y1 TO a11_bob
+-- GRANT
+
+> CREATE POLICY p1 ON a11_y1 FOR ALL USING (a % 2 = 0)
+-- CREATE POLICY
+
+> CREATE POLICY p2 ON a11_y1 FOR SELECT USING (a > 2)
+-- CREATE POLICY
+
+> ALTER TABLE a11_y1 ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> CREATE VIEW a11_sbv WITH (security_barrier) AS SELECT * FROM a11_y1 WHERE a11_leak(b)
+-- CREATE VIEW
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a11_sbv WHERE (a = 1)
+QUERY PLAN:text
+Seq Scan on a11_y1
+  Filter: (a11_leak(b) AND (a = 1))
+-- EXPLAIN
+
+> DROP VIEW a11_sbv
+-- DROP VIEW
+
+> SET SESSION AUTHORIZATION a11_bob
+-- SET
+
+> CREATE VIEW a11_sbv WITH (security_barrier) AS SELECT * FROM a11_y1 WHERE a11_leak(b)
+-- CREATE VIEW
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a11_sbv WHERE (a = 1)
+QUERY PLAN:text
+Seq Scan on a11_y1
+  Filter: ((a = 1) AND ((a > 2) OR ((a % 2) = 0)) AND a11_leak(b))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a11_sbv WHERE (a < 1)
+QUERY PLAN:text
+Seq Scan on a11_y1
+  Filter: ((a < 1) AND ((a > 2) OR ((a % 2) = 0)) AND a11_leak(b))
+-- EXPLAIN
+
+> DROP VIEW a11_sbv
+-- DROP VIEW
+
+> RESET SESSION AUTHORIZATION
+-- RESET
+
+> DROP TABLE a11_y1
+-- DROP TABLE
+
+> REVOKE CREATE ON SCHEMA public FROM a11_alice, a11_bob
+-- REVOKE
+
+> DROP ROLE a11_alice
+-- DROP ROLE
+
+> DROP ROLE a11_bob
+-- DROP ROLE
+
+> CREATE TABLE a11_i1 (a int, b float, c text)
+-- CREATE TABLE
+
+> INSERT INTO a11_i1 SELECT i, i, 'i1' FROM generate_series(1, 10) g(i)
+-- INSERT 0 10
+
+> CREATE TABLE a11_i11 (d text) INHERITS (a11_i1)
+-- CREATE TABLE
+
+> INSERT INTO a11_i11 SELECT i, i, 'i11', 'i11d' FROM generate_series(1, 10) g(i)
+-- INSERT 0 10
+
+> CREATE TABLE a11_i12 (e int[]) INHERITS (a11_i1)
+-- CREATE TABLE
+
+> INSERT INTO a11_i12 SELECT i, i, 'i12', '{1,2}'::int[] FROM generate_series(1, 10) g(i)
+-- INSERT 0 10
+
+> CREATE TABLE a11_i111 () INHERITS (a11_i11, a11_i12)
+NOTICE 00000: merging multiple inherited definitions of column "a"
+NOTICE 00000: merging multiple inherited definitions of column "b"
+NOTICE 00000: merging multiple inherited definitions of column "c"
+-- CREATE TABLE
+
+> INSERT INTO a11_i111 SELECT i, i, 'i111', 'i111d', '{1,1,1}'::int[] FROM generate_series(1, 10) g(i)
+-- INSERT 0 10
+
+> ANALYZE a11_i1, a11_i11, a11_i12, a11_i111
+-- ANALYZE
+
+> CREATE VIEW a11_iv WITH (security_barrier = true) AS
+> SELECT *, (SELECT d FROM a11_i11 WHERE a11_i11.a = a11_i1.a LIMIT 1) AS d
+> FROM a11_i1 WHERE a > 5 AND EXISTS (SELECT 1 FROM a11_i12 WHERE a11_i12.a = a11_i1.a)
+-- CREATE VIEW
+
+> UPDATE a11_i1 SET a = a + 1 WHERE a = 8
+-- UPDATE 4
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a11_iv WHERE b = 8
+QUERY PLAN:text
+Hash Semi Join
+  Hash Cond: (a11_i1.a = a11_i12.a)
+  ->  Append
+        ->  Seq Scan on a11_i1 a11_i1_1
+              Filter: ((a > 5) AND (b = '8'::double precision))
+        ->  Seq Scan on a11_i11 a11_i1_2
+              Filter: ((a > 5) AND (b = '8'::double precision))
+        ->  Seq Scan on a11_i12 a11_i1_3
+              Filter: ((a > 5) AND (b = '8'::double precision))
+        ->  Seq Scan on a11_i111 a11_i1_4
+              Filter: ((a > 5) AND (b = '8'::double precision))
+  ->  Hash
+        ->  Append
+              ->  Seq Scan on a11_i12 a11_i12_1
+              ->  Seq Scan on a11_i111 a11_i12_2
+  SubPlan 1
+    ->  Limit
+          ->  Append
+                ->  Seq Scan on a11_i11 a11_i11_1
+                      Filter: (a = a11_i1.a)
+                ->  Seq Scan on a11_i111 a11_i11_2
+                      Filter: (a = a11_i1.a)
+-- EXPLAIN
+
+> SELECT * FROM a11_iv WHERE b = 8
+a:int4 | b:float8 | c:text | d:text
+9 | 8 | i1 | i11d
+9 | 8 | i11 | i11d
+9 | 8 | i111 | i11d
+9 | 8 | i12 | i11d
+-- SELECT 4
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a11_iv WHERE a = 7
+QUERY PLAN:text
+Nested Loop Semi Join
+  ->  Append
+        ->  Seq Scan on a11_i1 a11_i1_1
+              Filter: ((a > 5) AND (a = 7))
+        ->  Seq Scan on a11_i11 a11_i1_2
+              Filter: ((a > 5) AND (a = 7))
+        ->  Seq Scan on a11_i12 a11_i1_3
+              Filter: ((a > 5) AND (a = 7))
+        ->  Seq Scan on a11_i111 a11_i1_4
+              Filter: ((a > 5) AND (a = 7))
+  ->  Materialize
+        ->  Append
+              ->  Seq Scan on a11_i12 a11_i12_1
+                    Filter: (a = 7)
+              ->  Seq Scan on a11_i111 a11_i12_2
+                    Filter: (a = 7)
+  SubPlan 1
+    ->  Limit
+          ->  Append
+                ->  Seq Scan on a11_i11 a11_i11_1
+                      Filter: (a = a11_i1.a)
+                ->  Seq Scan on a11_i111 a11_i11_2
+                      Filter: (a = a11_i1.a)
+-- EXPLAIN
+
+> SELECT * FROM a11_iv WHERE a = 7
+a:int4 | b:float8 | c:text | d:text
+7 | 7 | i1 | i11d
+7 | 7 | i11 | i11d
+7 | 7 | i111 | i11d
+7 | 7 | i12 | i11d
+-- SELECT 4
+
+> EXPLAIN (COSTS OFF) SELECT * FROM ONLY a11_i1 WHERE a > 5 AND EXISTS (SELECT 1 FROM ONLY a11_i12 WHERE a11_i12.a = a11_i1.a) AND a = 7
+QUERY PLAN:text
+Nested Loop Semi Join
+  ->  Seq Scan on a11_i1
+        Filter: ((a > 5) AND (a = 7))
+  ->  Seq Scan on a11_i12
+        Filter: (a = 7)
+-- EXPLAIN
+

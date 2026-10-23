@@ -747,6 +747,12 @@ fn plain_cols(p: &Plan) -> Option<Vec<(String, Option<String>)>> {
                 })
                 .collect()
         }
+        // (A CTE's columns by its reference's name.)
+        Plan::CteScan { alias, cols, ncols, .. } if cols.len() == *ncols => Some(
+            cols.iter()
+                .map(|c| (crate::catalog::quote_ident(c), Some(alias.clone())))
+                .collect(),
+        ),
         Plan::Join {
             kind, left, right, ..
         } => {
@@ -821,7 +827,39 @@ fn dummy(p: &Plan) -> Plan {
     let cols = named.map(|v| Arc::new(v.into_iter().map(|(n, _)| n).collect()));
     // (The classes its quals made stay.)
     let ec = super::column_classes(p);
-    Plan::Empty { ncols, cols, info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec, table: None })) }
+    let mut unplanned = Vec::new();
+    unplanned_subqueries(p, &mut unplanned);
+    Plan::Empty { ncols, cols, info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec, table: None, unplanned })) }
+}
+
+/// The FROM subqueries (not pulled up) a plan proven empty reads, never planned: each with
+/// the count of the relations its query reads.
+fn unplanned_subqueries(p: &Plan, out: &mut Vec<(String, usize)>) {
+    fn relations(p: &Plan) -> usize {
+        // (One proven empty already: the relations it was read from.)
+        if let Plan::Empty { info: Some(d), .. } = p {
+            let mut rels: Vec<&String> = d.rels.iter().flatten().collect();
+            rels.sort();
+            rels.dedup();
+            return rels
+                .iter()
+                .map(|r| d.unplanned.iter().find(|u| u.0 == **r).map_or(1, |u| u.1))
+                .sum();
+        }
+        let own = matches!(p, Plan::Scan(_) | Plan::SysScan { .. }) as usize;
+        own + crate::sql::explain::plan_inputs(p).iter().map(|c| relations(c)).sum::<usize>()
+    }
+    match p {
+        Plan::Barrier { input, alias, .. } if !alias.is_empty() => out.push((alias.clone(), relations(input))),
+        Plan::Filter { input, .. } | Plan::Project { input, .. } | Plan::Sort { input, .. } | Plan::Limit { input, .. } => {
+            unplanned_subqueries(input, out)
+        }
+        Plan::Join { left, right, .. } => {
+            unplanned_subqueries(left, out);
+            unplanned_subqueries(right, out);
+        }
+        _ => {}
+    }
 }
 
 /// A plan's outputs as expressions over the relations below its projections and joins

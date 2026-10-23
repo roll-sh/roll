@@ -124,6 +124,11 @@ thread_local! {
     static PHV_OUTPUTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The PlaceHolderVars (column-free computed outputs) the quals being pushed down read.
     static PHV_PENDING: std::cell::RefCell<Vec<Expr>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The statement's row-level security quals as placed in their scans (security level
+    /// 0): the quals of a security barrier view above them sit at a higher level.
+    static LEVEL0_QUALS: std::cell::RefCell<Vec<Expr>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// `add_rls_filter` is adding a scan's row-level security quals.
+    static RLS_ADDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Per-statement scratch back at rest (`scoped::reset_statement_scratch`).
@@ -132,6 +137,8 @@ pub(crate) fn reset_scratch() {
     SECURITY_QUALS.set(false);
     QUERY_RLS.set(false);
     PHV_OUTPUTS.set(false);
+    RLS_ADDING.set(false);
+    LEVEL0_QUALS.with(|l| l.borrow_mut().clear());
 }
 
 /// The flags not at rest (`scoped::unsettled_for_test`).
@@ -141,6 +148,8 @@ pub(crate) fn unsettled(out: &mut Vec<&'static str>) {
         ("optimize::QUERY_RLS", QUERY_RLS.get()),
         ("optimize::PHV_OUTPUTS", PHV_OUTPUTS.get()),
         ("optimize::PHV_PENDING", PHV_PENDING.with_borrow(|p| !p.is_empty())),
+        ("optimize::RLS_ADDING", RLS_ADDING.get()),
+        ("optimize::LEVEL0_QUALS", LEVEL0_QUALS.with_borrow(|p| !p.is_empty())),
     ] {
         if set {
             out.push(name);
@@ -155,10 +164,13 @@ pub fn add_filter_phv(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
     add_filter(cat, plan, pred)
 }
 
-/// Binding a statement: whether it has row-level security quals starts false, the previous
-/// value back when the guard drops.
-pub fn begin_statement_rls() -> crate::scoped::CellGuard<bool> {
-    crate::scoped::set(&QUERY_RLS, false, "optimize::QUERY_RLS.begin")
+/// Binding a statement: whether it has row-level security quals starts false, and its
+/// security level 0 quals none, the previous values back when the guards drop.
+pub fn begin_statement_rls() -> (crate::scoped::CellGuard<bool>, crate::scoped::RefGuard<Vec<Expr>>) {
+    (
+        crate::scoped::set(&QUERY_RLS, false, "optimize::QUERY_RLS.begin"),
+        crate::scoped::set_ref(&LEVEL0_QUALS, Vec::new(), "optimize::LEVEL0_QUALS.begin"),
+    )
 }
 
 pub fn mark_statement_rls() {
@@ -172,6 +184,14 @@ pub fn mark_statement_rls() {
 pub fn add_security_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
     QUERY_RLS.with(|f| f.set(true));
     let _sq = crate::scoped::set(&SECURITY_QUALS, true, "optimize::SECURITY_QUALS");
+    let _rls = crate::scoped::set(&RLS_ADDING, true, "optimize::RLS_ADDING");
+    add_filter(cat, plan, pred)
+}
+
+/// Add a relation's row-level security quals over its scan (security level 0), where they
+/// are the first quals.
+pub fn add_rls_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
+    let _rls = crate::scoped::set(&RLS_ADDING, true, "optimize::RLS_ADDING");
     add_filter(cat, plan, pred)
 }
 
@@ -261,20 +281,34 @@ fn full_qual_cost(cat: &Catalog, e: &Expr) -> f64 {
 
 fn order_security_quals(cat: &Catalog, first: Vec<Expr>, rest: Vec<Expr>) -> Vec<Expr> {
     let cost = |e: &Expr| full_qual_cost(cat, e);
+    let cheap_proof = |e: &Expr, c: f64| c < 10.0 && !leaks(cat, e);
+    // (Of `first`, the quals at security level 0: row-level security's, and cheap leakproof
+    // ones, which order_qual_clauses moves there.)
+    let rls_qual = |e: &Expr| LEVEL0_QUALS.with(|l| l.borrow().iter().any(|q| q.same_as(e)));
+    // (Without row-level security quals there, the first level's are the quals there.)
+    let any_rls = first.iter().any(rls_qual);
+    let level0 = |e: &Expr, c: f64| !any_rls || cheap_proof(e, c) || rls_qual(e);
     // `first` keep their order; of `rest` (in their order), a cheap leakproof one moves ahead
-    // of the costlier quals of `first` before it.
-    let mut out: Vec<(bool, f64, Expr)> = first.into_iter().map(|e| (true, cost(&e), e)).collect();
+    // of the costlier quals of `first` before it, and of those at a higher security level
+    // (a security barrier view's).
+    let mut out: Vec<(bool, f64, bool, Expr)> = first
+        .into_iter()
+        .map(|e| {
+            let c = cost(&e);
+            (true, c, level0(&e, c), e)
+        })
+        .collect();
     for e in rest {
         let c = cost(&e);
         let mut j = out.len();
-        if c < 10.0 && !leaks(cat, &e) {
-            while j > 0 && out[j - 1].0 && out[j - 1].1 > c {
+        if cheap_proof(&e, c) {
+            while j > 0 && out[j - 1].0 && (out[j - 1].1 > c || !out[j - 1].2) {
                 j -= 1;
             }
         }
-        out.insert(j, (false, c, e));
+        out.insert(j, (false, c, false, e));
     }
-    out.into_iter().map(|i| i.2).collect()
+    out.into_iter().map(|i| i.3).collect()
 }
 
 /// Add a filter over `plan`'s output, pushing it as far down as is safe.
@@ -324,6 +358,9 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             // (eval_const_expressions: a COLLATE naming the collation its column already has
             // is no relabelling at all.)
             let parts: Vec<Expr> = parts.into_iter().map(|p| same_collation_dropped(p, &s.table.columns)).collect();
+            if RLS_ADDING.with(|f| f.get()) {
+                LEVEL0_QUALS.with(|l| l.borrow_mut().extend(parts.iter().cloned()));
+            }
             let mut all = Vec::new();
             if let Some(f) = s.filter.take() {
                 conjuncts(f, &mut all);
@@ -402,7 +439,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 return Plan::Empty {
                     ncols,
                     cols: Some(Arc::new(names)),
-                    info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table })),
+                    info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table, ..Default::default() })),
                 };
             }
             if super::partprune::const_conflict(&all)
@@ -426,7 +463,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 let ec = crate::sql::paths::column_classes(&scan);
                 let ncols = width(&scan);
                 let cols = (names.len() == ncols).then(|| Arc::new(names));
-                let info = Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec, table }));
+                let info = Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec, table, ..Default::default() }));
                 return Plan::Empty { ncols, cols, info };
             }
             s.filter = and_all(all);
@@ -630,7 +667,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             // A constant false filter excludes every member whatever constraint_exclusion
             // says.
             if parts.iter().any(super::refute::always_false) {
-                let info = Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table: None }));
+                let info = Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table: None, ..Default::default() }));
                 return Plan::Empty { ncols, cols, info };
             }
             // (The classes the parent's quals make, should no member be left.)
@@ -654,7 +691,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 .filter(|p| !super::inherit::excluded(p))
                 .collect();
             if inputs.is_empty() {
-                let info = Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec, table: None }));
+                let info = Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec, table: None, ..Default::default() }));
                 return Plan::Empty { ncols, cols, info };
             }
             Plan::Append { inputs, inh }
@@ -724,6 +761,75 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
         } => {
             let (above, push): (Vec<Expr>, Vec<Expr>) =
                 parts.into_iter().partition(|p| p.is_volatile() && p.columns().is_empty());
+            // (A semi join's clauses are equivalence classes: a left column fixed to a
+            // constant fixes the right one it equals, and the clause goes.)
+            let (mut cond, mut hash, mut right) = (cond, hash, right);
+            if kind == JoinKind::Semi && params.is_empty() {
+                let mut rpush = Vec::new();
+                for p in &push {
+                    let Expr::Call(d, args, _) = p else { continue };
+                    if d.name != "=" || args.len() != 2 || p.is_volatile() || d.coll.as_ref().is_some_and(|c| !c.deterministic) {
+                        continue;
+                    }
+                    let (l, k, col_first) = match (&args[0], &args[1]) {
+                        (Expr::Col(l, _), k @ Expr::Const(..)) => (*l, k.clone(), true),
+                        (k @ Expr::Const(..), Expr::Col(l, _)) => (*l, k.clone(), false),
+                        _ => continue,
+                    };
+                    if l >= nleft {
+                        continue;
+                    }
+                    let fix = |rcol: &Expr| -> Option<Expr> {
+                        let Expr::Col(r, rt) = rcol else { return None };
+                        let lt = args[if col_first { 0 } else { 1 }].ty();
+                        (lt.without_typmod() == rt.without_typmod()).then(|| {
+                            let c = Expr::Col(*r, rt.clone());
+                            if col_first {
+                                Expr::Call(d.clone(), vec![c, k.clone()], DataType::Bool)
+                            } else {
+                                Expr::Call(d.clone(), vec![k.clone(), c], DataType::Bool)
+                            }
+                        })
+                    };
+                    if let Some((lk, rk)) = &mut hash
+                        && let Some(i) = lk.iter().position(|e| matches!(e, Expr::Col(c, _) if *c == l))
+                        && let Some(q) = fix(&rk[i])
+                    {
+                        rpush.push(q);
+                        lk.remove(i);
+                        rk.remove(i);
+                        if lk.is_empty() {
+                            hash = None;
+                        }
+                        continue;
+                    }
+                    if let Some(c) = cond.take() {
+                        let mut cps = Vec::new();
+                        conjuncts(c, &mut cps);
+                        let at = cps.iter().position(|q| match q {
+                            Expr::Call(qd, qa, _) if qd.name == "=" && qa.len() == 2 => matches!(
+                                (&qa[0], &qa[1]),
+                                (Expr::Col(a, _), Expr::Col(b, _)) if (*a == l && *b >= nleft) || (*b == l && *a >= nleft)
+                            ),
+                            _ => false,
+                        });
+                        if let Some(at) = at
+                            && let Expr::Call(_, qa, _) = &cps[at]
+                        {
+                            let rc = if matches!(&qa[0], Expr::Col(a, _) if *a == l) { &qa[1] } else { &qa[0] };
+                            if let Some(q) = fix(&rc.clone().shift_cols(-(nleft as isize))) {
+                                rpush.push(q);
+                                cps.remove(at);
+                            }
+                        }
+                        cond = and_all(cps);
+                    }
+                }
+                if !rpush.is_empty() {
+                    let r = Arc::try_unwrap(right).unwrap_or_else(|a| (*a).clone());
+                    right = Arc::new(add_filter(cat, r, Expr::And(rpush)));
+                }
+            }
             let mut left = left;
             if !push.is_empty() {
                 let l = Arc::try_unwrap(left).unwrap_or_else(|a| (*a).clone());
@@ -791,7 +897,17 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             if matches!(
                 &*input,
                 Plan::Scan(_) | Plan::SysScan { .. } | Plan::Join { .. } | Plan::Project { .. } | Plan::Append { inh: Some(_), .. }
-            ) && parts.iter().any(|p| projectable(p, &exprs)) =>
+                // (A FROM-less one: its clauses over the values are its gating quals, when
+                // they read an enclosing query's values; constant ones fold, as below.)
+                | Plan::One
+            ) && parts.iter().any(|p| projectable(p, &exprs))
+                && (!matches!(&*input, Plan::One)
+                    || parts.iter().all(|p| {
+                        let mut sub = false;
+                        p.walk(&mut |x| sub |= matches!(x, Expr::Subquery(_)));
+                        sub || p.has_outer_refs()
+                            || p.columns().iter().any(|&c| exprs.get(c).is_some_and(|e| e.has_outer_refs()))
+                    })) =>
         {
             let (down, up): (Vec<Expr>, Vec<Expr>) =
                 parts.into_iter().partition(|p| projectable(p, &exprs));
@@ -2431,6 +2547,11 @@ fn ec_pair(e: &Expr, nleft: usize) -> Option<(Expr, Expr)> {
     if def.name != "=" || args.len() != 2 || !def.strict || e.is_volatile() {
         return None;
     }
+    // (A made type's `=` added to a built-in family: its own function. Not a CREATE
+    // OPERATOR `=` of built-in types over some other built-in function.)
+    if func_is_builtin_for_builtin_types(def, &args[0].ty(), &args[1].ty()) && !builtin_eq(def, &args[0].ty(), &args[1].ty()) {
+        return None;
+    }
     let fam = |t: &DataType| match t {
         DataType::Int2 | DataType::Int4 | DataType::Int8 => Some(DataType::Int8),
         DataType::Float4 | DataType::Float8 => Some(DataType::Float8),
@@ -2454,7 +2575,7 @@ fn equi_key(e: &Expr, nleft: usize) -> Option<(Expr, Expr)> {
     let Expr::Call(def, args, _) = e else {
         return None;
     };
-    if def.name != "=" || args.len() != 2 {
+    if def.name != "=" || args.len() != 2 || !builtin_eq(def, &args[0].ty(), &args[1].ty()) {
         return None;
     }
     // Under a nondeterministic collation, equal strings needn't be equal bytes (the
@@ -2476,6 +2597,17 @@ fn equi_key(e: &Expr, nleft: usize) -> Option<(Expr, Expr)> {
         (Side::Right, Side::Left) => Some((key(b), key(a))),
         _ => None,
     }
+}
+
+/// Whether `def` is the built-in `=` for these operand types (the equality their hash and
+/// btree operator classes have), not a CREATE OPERATOR `=` shown under that name.
+fn builtin_eq(def: &crate::sql::func::FuncDef, l: &DataType, r: &DataType) -> bool {
+    crate::sql::func::resolve_binop("=", l, r).is_ok_and(|res| res.def.oid == def.oid)
+}
+
+/// Both operands of built-in types: an `=` over them that isn't the built-in one is a user's.
+fn func_is_builtin_for_builtin_types(_def: &crate::sql::func::FuncDef, l: &DataType, r: &DataType) -> bool {
+    l.oid() < crate::catalog::FIRST_USER_OID && r.oid() < crate::catalog::FIRST_USER_OID
 }
 
 /// Types a hash join can use (hashing agrees with their `=`).

@@ -998,7 +998,7 @@ impl Planner<'_, '_> {
             .and_then(|n| crate::types::collation::by_name(&self.ctx.catalog(), &n))
             .filter(|c| !c.bytewise());
         let mut make = |op: &'static str, v: Expr| -> Option<IClause> {
-            let Expr::Call(d, _, ty) = b.binop(op, leftop.clone(), v.clone(), -1).ok()? else {
+            let Expr::Call(d, _, ty) = b.builtin_binop(op, leftop.clone(), v.clone()).ok()? else {
                 return None;
             };
             let d = match &index_coll {
@@ -1081,7 +1081,7 @@ impl Planner<'_, '_> {
         let konst = |a: Vec<u8>, m: u8| Expr::Const(Value::Inet(a.into(), m), kty.clone());
         let mut b = crate::sql::binder::Binder::new(self.ctx, Vec::new());
         let mut make = |op: &'static str, v: Expr| -> Option<IClause> {
-            let Expr::Call(d, _, ty) = b.binop(op, keyop.clone(), v.clone(), -1).ok()? else {
+            let Expr::Call(d, _, ty) = b.builtin_binop(op, keyop.clone(), v.clone()).ok()? else {
                 return None;
             };
             Some(IClause {
@@ -1757,7 +1757,7 @@ struct Planner<'c, 'a> {
     post_cost: std::cell::Cell<f64>,
     /// The ORDER BY over the grouping below: per key, (group key, descending, nulls
     /// first), for the order of the GROUP BY (`joinpath::grouped_join`).
-    group_dirs: std::cell::RefCell<Option<Vec<(usize, bool, bool)>>>,
+    group_dirs: std::cell::RefCell<Option<GroupDirs>>,
     /// Planning a join group under a grouping that may go partitionwise.
     pw_agg_join: std::cell::Cell<bool>,
     /// Planning a MERGE's source join: its target table (the first relation of Postgres's
@@ -3378,7 +3378,7 @@ impl Planner<'_, '_> {
                 if booleq.is_none() && key.ty() == DataType::Bool && ii.am == Am::Btree {
                     let mut b = crate::sql::binder::Binder::new(self.ctx, Vec::new());
                     // (Over two non-constants: `x = true` folds to x.)
-                    if let Ok(Expr::Call(d, ..)) = b.binop("=", key.clone(), key.clone(), -1) {
+                    if let Ok(Expr::Call(d, ..)) = b.builtin_binop("=", key.clone(), key.clone()) {
                         booleq = Some(d);
                     }
                 }
@@ -4243,7 +4243,13 @@ fn sort_target(p: &mut Plan, keys: Vec<Expr>) -> Option<(&mut ScanPlan, Vec<Expr
 
 /// The ORDER BY keys over a grouping (through projections) that are its GROUP BY keys, a
 /// prefix: (group key, descending, nulls first).
-fn sort_group_dirs(input: &Plan, keys: &[SortKey]) -> Option<Vec<(usize, bool, bool)>> {
+/// The ORDER BY's directions on a grouping's keys: (group key, descending, nulls first)
+/// for the keys it starts with (preprocess_groupclause puts them first), and for every
+/// key it names (the GROUP BY item takes the first matching ORDER BY item's sort operator,
+/// as transformGroupClause gives it).
+pub(crate) type GroupDirs = (Vec<(usize, bool, bool)>, Vec<(usize, bool, bool)>);
+
+fn sort_group_dirs(input: &Plan, keys: &[SortKey]) -> Option<GroupDirs> {
     let mut exprs: Vec<Expr> = keys.iter().map(|k| k.expr.clone()).collect();
     let mut cur = input;
     let groups = loop {
@@ -4266,13 +4272,29 @@ fn sort_group_dirs(input: &Plan, keys: &[SortKey]) -> Option<Vec<(usize, bool, b
         }
     };
     let mut out = Vec::new();
+    let mut all: Vec<(usize, bool, bool)> = Vec::new();
+    let mut prefix = true;
     for (e, k) in exprs.iter().zip(keys) {
         match e {
-            Expr::Col(i, _) if *i < groups.len() && k.using.is_none() => out.push((*i, k.desc, k.nulls_first)),
-            _ => break,
+            Expr::Col(i, _) if *i < groups.len() && k.using.is_none() => {
+                if prefix {
+                    out.push((*i, k.desc, k.nulls_first));
+                }
+                if !all.iter().any(|a| a.0 == *i) {
+                    all.push((*i, k.desc, k.nulls_first));
+                }
+            }
+            Expr::Col(i, _) if *i < groups.len() => {
+                prefix = false;
+                // (Another operator: the GROUP BY keeps its own.)
+                if !all.iter().any(|a| a.0 == *i) {
+                    all.push((*i, false, false));
+                }
+            }
+            _ => prefix = false,
         }
     }
-    Some(out)
+    Some((out, all))
 }
 
 /// The columns each input of `p` must produce, given those `p`'s consumers need (PG's
@@ -5728,7 +5750,7 @@ fn plan_level_ordered(
     plan: &mut Plan,
     needed: &[bool],
     lim: Option<(f64, f64)>,
-    dirs: Option<Vec<(usize, bool, bool)>>,
+    dirs: Option<GroupDirs>,
 ) -> usize {
     let p = Planner::new(ctx);
     p.group_dirs.replace(dirs);

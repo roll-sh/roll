@@ -53,7 +53,7 @@ fn expand(
         return Ok(Plan::Empty {
             ncols: super::optimize::width(&Plan::Scan(Box::new(scan))),
             cols: Some(Arc::new(names)),
-            info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table })),
+            info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table, ..Default::default() })),
         });
     }
     Ok(Plan::Append {

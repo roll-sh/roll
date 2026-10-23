@@ -144,6 +144,9 @@ pub struct ScopeRel {
     /// Inside a JOIN expression: its columns are reached through the join, which has no
     /// system columns.
     pub in_join: bool,
+    /// A relation the planner never pulls up (a CTE read by a CTE Scan): its whole row is a
+    /// Var to it (`r.*`), its IS [NOT] NULL test not expanded.
+    pub whole_var: bool,
 }
 
 /// `ScopeCol::attnum` of a recursive self-reference's SEARCH / CYCLE column: `merged` (not
@@ -491,6 +494,9 @@ pub struct Binder<'b, 'a> {
     pub(crate) view_stack: Vec<u32>,
     /// FROM-clause subqueries and views bound so far.
     pub(crate) hidden_rtes: usize,
+    /// The last whole-row reference bound was of a relation whose whole row is a Var to the
+    /// planner (`ScopeRel::whole_var`).
+    pub(crate) whole_var_ref: bool,
     /// The statement runs without parameters: `$n` is an error.
     pub no_params: bool,
     /// Binding a query that isn't planned (CREATE VIEW, CREATE TABLE AS ... WITH NO
@@ -636,6 +642,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             rls_stack: Vec::new(),
             view_stack: Vec::new(),
             hidden_rtes: 0,
+            whole_var_ref: false,
             no_params: false,
             unplanned: false,
             arm_limit: None,
@@ -2023,6 +2030,7 @@ pub fn table_rel(t: &Arc<Table>, alias: &str, schema: Option<String>) -> ScopeRe
         lateral: 0,
         join_rte: false,
         in_join: false,
+        whole_var: false,
     }
 }
 
@@ -2062,6 +2070,7 @@ pub fn derived_rel(alias: &str, cols: &[OutCol], offset: usize) -> ScopeRel {
         lateral: 0,
         join_rte: false,
         in_join: false,
+        whole_var: false,
     }
 }
 

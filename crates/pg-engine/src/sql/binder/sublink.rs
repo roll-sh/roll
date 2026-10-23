@@ -282,12 +282,10 @@ fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bo
     let mut types = Vec::new();
     for m in inputs {
         let (s, proj) = match &**m {
+            // (A member whose columns are the parent's in another order, a multiply
+            // inherited child's: its clauses mapped to the parent's columns.)
             Plan::Project { input, exprs }
-                if exprs.len() == w
-                    && exprs
-                        .iter()
-                        .enumerate()
-                        .all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i)) =>
+                if exprs.len() == w && exprs.iter().all(|e| matches!(e, Expr::Col(..))) =>
             {
                 (plain_scan(input)?, Some(exprs.clone()))
             }
@@ -298,6 +296,35 @@ fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bo
             return None;
         }
         let (c, local) = split(s);
+        // (Over the parent's columns.)
+        let c: Vec<Expr> = match &proj {
+            Some(exprs) if exprs.iter().enumerate().any(|(i, e)| !matches!(e, Expr::Col(j, _) if *j == i)) => {
+                let mut ok = true;
+                let mapped = c
+                    .into_iter()
+                    .map(|e| {
+                        e.transform(&mut |x| {
+                            Ok(match x {
+                                Expr::Col(j, t) => match exprs.iter().position(|e| matches!(e, Expr::Col(k, _) if *k == j)) {
+                                    Some(i) => Expr::Col(i, t),
+                                    None => {
+                                        ok = false;
+                                        Expr::Col(j, t)
+                                    }
+                                },
+                                x => x,
+                            })
+                        })
+                        .unwrap()
+                    })
+                    .collect();
+                if !ok {
+                    return None;
+                }
+                mapped
+            }
+            _ => c,
+        };
         match &corr {
             None => corr = Some(c),
             Some(prev) => {
@@ -308,7 +335,10 @@ fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bo
         }
         limited |= s.limit.is_some();
         if types.is_empty() {
-            types = s.table.columns[..w].iter().map(|c| c.ty.clone()).collect();
+            types = match &proj {
+                Some(exprs) => exprs.iter().map(|e| e.ty()).collect(),
+                None => s.table.columns[..w].iter().map(|c| c.ty.clone()).collect(),
+            };
         }
         let scan = rhs_scan(s, and_all(local));
         members.push(Arc::new(match proj {
@@ -646,7 +676,7 @@ fn exists_join(cat: &Catalog, plan: &Plan, sub: &Subquery, anti: bool) -> Option
                 let rels = vec![Some(super::optimize::scan_refname(s)); names.len()];
                 (
                     Some(Arc::new(names)),
-                    Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table: None })),
+                    Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table: None, ..Default::default() })),
                 )
             }
             _ => (None, None),
@@ -689,7 +719,7 @@ fn exists_join(cat: &Catalog, plan: &Plan, sub: &Subquery, anti: bool) -> Option
     let nright = width(&rhs);
     // (A semi join's clauses are equivalence classes: one equating an outer column with a
     // column the subquery fixes to a constant fixes the outer one too, and goes.)
-    let (left, cond) = if anti { (plan.clone(), cond) } else { semi_constants(cat, plan, &rhs, cond, nleft) };
+    let (left, rhs, cond) = if anti { (plan.clone(), rhs, cond) } else { semi_constants(cat, plan, rhs, cond, nleft) };
     Some(super::optimize::join(
         cat,
         if anti { JoinKind::Anti } else { JoinKind::Semi },
@@ -703,13 +733,76 @@ fn exists_join(cat: &Catalog, plan: &Plan, sub: &Subquery, anti: bool) -> Option
 }
 
 /// generate_base_implied_equalities_const over a semi join: `l = r` where the right side's
-/// scan has `r = k` gives the left side `l = k`, the join clause implied by the two.
-fn semi_constants(cat: &Catalog, left: &Plan, rhs: &Plan, cond: Vec<Expr>, nleft: usize) -> (Plan, Vec<Expr>) {
-    let Plan::Scan(rs) = rhs else {
-        return (left.clone(), cond);
+/// scan has `r = k` gives the left side `l = k`, and where the left side's scans have `l = k`
+/// the right side `r = k`: the join clause implied by the two.
+fn semi_constants(cat: &Catalog, left: &Plan, rhs: Plan, cond: Vec<Expr>, nleft: usize) -> (Plan, Plan, Vec<Expr>) {
+    let rfixed = match &rhs {
+        Plan::Scan(rs) => scan_constants(rs),
+        _ => Vec::new(),
     };
-    let mut fixed: Vec<(usize, Expr, Expr)> = Vec::new();
-    if let Some(f) = &rs.filter {
+    let lfixed = plan_constants(left);
+    if rfixed.is_empty() && lfixed.is_empty() {
+        return (left.clone(), rhs, cond);
+    }
+    // `col op k` with the comparison `q` (`col = k` or `k = col`) as written.
+    let derive = |q: &Expr, col: Expr, k: &Expr| {
+        let Expr::Call(qd, qa, qt) = q else { unreachable!() };
+        if matches!(&qa[0], Expr::Col(..)) {
+            Expr::Call(qd.clone(), vec![col, k.clone()], qt.clone())
+        } else {
+            Expr::Call(qd.clone(), vec![k.clone(), col], qt.clone())
+        }
+    };
+    let mut keep = Vec::new();
+    let mut push_left = Vec::new();
+    let mut push_right = Vec::new();
+    for c in cond {
+        let pair = match &c {
+            Expr::Call(d, args, _) if d.name == "=" && args.len() == 2 && d.coll.as_ref().is_none_or(|c| c.deterministic) => {
+                let side = |e: &Expr| match e {
+                    Expr::Col(i, t) => Some((*i, t.clone())),
+                    _ => None,
+                };
+                match (side(&args[0]), side(&args[1])) {
+                    (Some((l, lt)), Some((r, rt))) | (Some((r, rt)), Some((l, lt)))
+                        if l < nleft && r >= nleft && lt.without_typmod() == rt.without_typmod() =>
+                    {
+                        Some((l, lt, r - nleft, rt))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let Some((l, lt, r, rt)) = pair else {
+            keep.push(c);
+            continue;
+        };
+        if let Some((_, k, q)) = rfixed.iter().find(|(i, _, _)| *i == r) {
+            push_left.push(derive(q, Expr::Col(l, lt), k));
+        } else if let Some((_, k, q)) = lfixed.iter().find(|(i, _, _)| *i == l) {
+            push_right.push(derive(q, Expr::Col(r, rt), k));
+        } else {
+            keep.push(c);
+        }
+    }
+    let left = if push_left.is_empty() {
+        left.clone()
+    } else {
+        super::optimize::add_filter(cat, left.clone(), Expr::And(push_left))
+    };
+    let rhs = if push_right.is_empty() {
+        rhs
+    } else {
+        super::optimize::add_filter(cat, rhs, Expr::And(push_right))
+    };
+    (left, rhs, keep)
+}
+
+/// A scan's quals equating a column with a constant: (column, constant, the qual).
+fn scan_constants(s: &ScanPlan) -> Vec<(usize, Expr, Expr)> {
+    let mut fixed = Vec::new();
+    if let Some(f) = &s.filter {
         let mut parts = Vec::new();
         conjuncts(f.clone(), &mut parts);
         for q in parts {
@@ -729,46 +822,51 @@ fn semi_constants(cat: &Catalog, left: &Plan, rhs: &Plan, cond: Vec<Expr>, nleft
             }
         }
     }
-    if fixed.is_empty() {
-        return (left.clone(), cond);
-    }
-    let mut keep = Vec::new();
-    let mut push = Vec::new();
-    for c in cond {
-        let derived = match &c {
-            Expr::Call(d, args, _) if d.name == "=" && args.len() == 2 && d.coll.as_ref().is_none_or(|c| c.deterministic) => {
-                let side = |e: &Expr| match e {
-                    Expr::Col(i, t) => Some((*i, t.clone())),
-                    _ => None,
+    fixed
+}
+
+/// `scan_constants` of a plan's rows: a scan's, or an inheritance tree's that every member
+/// has (over the parent's columns).
+fn plan_constants(p: &Plan) -> Vec<(usize, Expr, Expr)> {
+    match p {
+        Plan::Scan(s) => scan_constants(s),
+        Plan::Append { inputs, inh: Some(_) } if !inputs.is_empty() => {
+            let mut common: Option<Vec<(usize, Expr, Expr)>> = None;
+            for m in inputs {
+                let mine: Vec<(usize, Expr, Expr)> = match &**m {
+                    Plan::Scan(s) => scan_constants(s),
+                    Plan::Project { input, exprs } => match &**input {
+                        Plan::Scan(s) => scan_constants(s)
+                            .into_iter()
+                            .filter_map(|(j, k, q)| {
+                                let i = exprs.iter().position(|e| matches!(e, Expr::Col(c, _) if *c == j))?;
+                                let q = q
+                                    .transform(&mut |x| {
+                                        Ok(match x {
+                                            Expr::Col(c, t) if c == j => Expr::Col(i, t),
+                                            x => x,
+                                        })
+                                    })
+                                    .ok()?;
+                                Some((i, k, q))
+                            })
+                            .collect(),
+                        _ => return Vec::new(),
+                    },
+                    _ => return Vec::new(),
                 };
-                match (side(&args[0]), side(&args[1])) {
-                    (Some((l, lt)), Some((r, rt))) | (Some((r, rt)), Some((l, lt))) if l < nleft && r >= nleft => fixed
-                        .iter()
-                        .find(|(i, _, _)| *i == r - nleft)
-                        .filter(|_| lt.without_typmod() == rt.without_typmod())
-                        .map(|(_, k, q)| {
-                            let Expr::Call(qd, qa, qt) = q else { unreachable!() };
-                            let col = Expr::Col(l, lt.clone());
-                            if matches!(&qa[0], Expr::Col(..)) {
-                                Expr::Call(qd.clone(), vec![col, k.clone()], qt.clone())
-                            } else {
-                                Expr::Call(qd.clone(), vec![k.clone(), col], qt.clone())
-                            }
-                        }),
-                    _ => None,
-                }
+                common = Some(match common {
+                    None => mine,
+                    Some(c) => c
+                        .into_iter()
+                        .filter(|(i, k, _)| mine.iter().any(|(j, l, _)| i == j && k.same_as(l)))
+                        .collect(),
+                });
             }
-            _ => None,
-        };
-        match derived {
-            Some(d) => push.push(d),
-            None => keep.push(c),
+            common.unwrap_or_default()
         }
+        _ => Vec::new(),
     }
-    if push.is_empty() {
-        return (left.clone(), keep);
-    }
-    (super::optimize::add_filter(cat, left.clone(), Expr::And(push)), keep)
 }
 
 /// The subquery's references to this query: the expressions they stand for.

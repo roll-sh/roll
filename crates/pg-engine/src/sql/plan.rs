@@ -974,6 +974,10 @@ pub struct DummyInfo {
     /// ONLY), its columns the table's: its unique indexes still prove a join's inner side
     /// unique.
     pub table: Option<u32>,
+    /// FROM subqueries proven empty before they were planned (by alias): the relations
+    /// their queries read (flatten_unplanned_rtes keeps them in the range table), and what
+    /// their record columns hold is unknown (EXPLAIN shows their fields as `fN`).
+    pub unplanned: Vec<(String, usize)>,
 }
 
 #[derive(Clone, Debug)]

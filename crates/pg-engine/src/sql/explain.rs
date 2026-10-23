@@ -439,6 +439,8 @@ struct ExNode {
     /// it (create_minmaxagg_path), not the level's top node; `charged` once it has.
     minmax_init: bool,
     charged: bool,
+    /// An EXISTS InitPlan: it reads its first row only (cost_subplan charges that).
+    exists_init: bool,
     children: Vec<ExNode>,
     subplans: Vec<ExNode>,
     /// A parallel-aware node (Parallel Seq Scan, Parallel Append, …).
@@ -479,6 +481,16 @@ impl ExNode {
             node_type,
             title: node_type.to_string(),
             ..ExNode::default()
+        }
+    }
+
+    /// What an InitPlan costs the node that pays for it (SS_charge_for_initplans):
+    /// all of it, or an EXISTS's first row.
+    fn init_charge(&self) -> f64 {
+        if self.exists_init {
+            self.startup_cost + (self.total_cost - self.startup_cost) / costs::clamp_rows(self.rows)
+        } else {
+            self.total_cost
         }
     }
 
@@ -618,6 +630,15 @@ struct Builder<'c, 'a> {
     group_order: Option<Vec<(usize, String)>>,
     /// That ORDER BY is all group keys (`group_order` covers it).
     group_order_full: bool,
+    /// Each group key that ORDER BY names, with its direction (transformGroupClause gives
+    /// the GROUP BY item the first matching ORDER BY item's sort operator).
+    group_named: Vec<(usize, String)>,
+    /// Relations the planner keeps whole (a CTE Scan's): their reference names and column
+    /// counts. A row of all their columns is their whole-row Var, `r.*`.
+    whole_vars: HashMap<String, usize>,
+    /// Columns of FROM subqueries proven empty before they were planned (their full names):
+    /// a record's fields there are unknown, `fN` (get_name_for_var_field).
+    unplanned_cols: std::collections::HashSet<String>,
     /// The FROM subquery (alias, column names) a filter being built is over.
     sub_alias: Option<Arc<(String, Vec<String>)>>,
     /// JSON_ARRAYAGG / JSON_OBJECTAGG results the projection above casts (RETURNING a
@@ -1876,7 +1897,12 @@ fn assign_refnames_skip(
                     let mut rels: Vec<&String> = d.rels.iter().flatten().collect();
                     rels.sort();
                     rels.dedup();
-                    results += rels.len();
+                    // (A FROM subquery never planned counts as the relations its query reads,
+                    // itself being counted with the FROM subqueries.)
+                    results += rels
+                        .iter()
+                        .map(|r| d.unplanned.iter().find(|u| u.0 == **r).map_or(1, |u| u.1))
+                        .sum::<usize>();
                     None
                 }
                 Plan::Insert(i) => Some(i.alias.clone().unwrap_or_else(|| i.rules.table.name.clone())),
@@ -2530,15 +2556,43 @@ impl Builder<'_, '_> {
 
     /// `e` over columns `cols`, deparsed bare and qualified.
     fn name(&mut self, e: &Expr, cols: &[Name], aggs: &[AggCall]) -> Name {
+        // (A record column of a FROM subquery never planned: its fields `f1`, `f2`, ….)
+        if !self.unplanned_cols.is_empty() {
+            let unknown = |x: &Expr| {
+                matches!(x, Expr::Field(b, ..) if matches!(&**b, Expr::Col(j, DataType::Row(rt))
+                    if rt.oid == 0 && cols.get(*j).is_some_and(|n| self.unplanned_cols.contains(&n.full))
+                        && rt.fields.iter().enumerate().any(|(k, f)| f.0 != format!("f{}", k + 1))))
+            };
+            let mut any = false;
+            e.walk(&mut |x| any |= unknown(x));
+            if any {
+                let e2 = e
+                    .clone()
+                    .transform(&mut |x| {
+                        Ok(match x {
+                            Expr::Field(b, k, t) if unknown(&Expr::Field(b.clone(), k, t.clone())) => {
+                                let Expr::Col(j, DataType::Row(rt)) = *b else { unreachable!() };
+                                let fields = rt.fields.iter().enumerate().map(|(k, f)| (format!("f{}", k + 1), f.1.clone())).collect();
+                                let ty = DataType::Row(Arc::new(crate::types::RowType { fields, ..(*rt).clone() }));
+                                Expr::Field(Box::new(Expr::Col(j, ty)), k, t)
+                            }
+                            x => x,
+                        })
+                    })
+                    .unwrap_or_else(|_| e.clone());
+                return self.name(&e2, cols, aggs);
+            }
+        }
         // A relation's whole row (`ROW(...)` of all its columns, of its row type): the
         // whole-row Var `rel.*`, which ruleutils always qualifies.
+        let whole_vars = &self.whole_vars;
         let whole_row_of = |x: &Expr| -> Option<String> {
             // (Null-extended above an outer join: the same Var.)
             let x = crate::sql::binder::nullable_whole_row(x).unwrap_or(x);
             let Expr::Row(items, DataType::Row(rt)) = x else { return None };
             // (A relation of a named row type; a VALUES list's or a subquery's whole row is
-            // a ROW() of its columns by then.)
-            if items.is_empty() || rt.oid == 0 || rt.fields.len() != items.len() || !crate::sql::binder::is_whole_row(x) {
+            // a ROW() of its columns by then, but not a CTE Scan's.)
+            if items.is_empty() || rt.fields.len() != items.len() || !crate::sql::binder::is_whole_row(x) {
                 return None;
             }
             let mut qual: Option<String> = None;
@@ -2550,6 +2604,9 @@ impl Builder<'_, '_> {
                     return None;
                 }
                 qual = Some(q.to_string());
+            }
+            if rt.oid == 0 && qual.as_ref().is_none_or(|q| whole_vars.get(q) != Some(&items.len())) {
+                return None;
             }
             qual
         };
@@ -2563,10 +2620,23 @@ impl Builder<'_, '_> {
                 }
                 e.map_children(&mut |c| Ok(top_down(c, f))).expect("top_down")
             }
+            // (A partitioned table's whole row is its partition's converted to the parent's
+            // row type, a ConvertRowtypeExpr: `(t.*)::parent`.)
+            let converted = |ty: &DataType| -> Option<String> {
+                let DataType::Row(rt) = ty else { return None };
+                let cat = self.ctx.catalog();
+                cat.tables
+                    .values()
+                    .any(|t| t.rowtype == rt.oid && rt.oid != 0 && t.partkey.is_some())
+                    .then(|| cat.format_type(ty, None, &self.ctx.search_path))
+            };
             let mut more: Vec<Name> = cols.to_vec();
             let e = top_down(e.clone(), &mut |x| {
                 let q = whole_row_of(x)?;
-                more.push(Name::same(format!("{q}.*")));
+                more.push(Name::same(match converted(&x.ty()) {
+                    Some(tn) => format!("({q}.*)::{tn}"),
+                    None => format!("{q}.*"),
+                }));
                 Some(Expr::Col(more.len() - 1, x.ty()))
             });
             return self.name(&e, &more, aggs);
@@ -2957,6 +3027,7 @@ impl Builder<'_, '_> {
         node.relationship = Some(if init { "InitPlan" } else { "SubPlan" });
         node.subplan_name = Some(name);
         node.minmax_init = init && s.id >= crate::sql::paths::PLANNER_SUBQUERY_BASE;
+        node.exists_init = init && s.kind == SubqueryKind::Exists;
         if init {
             self.inits.last_mut().expect("query level").push(node);
         } else {
@@ -2986,7 +3057,7 @@ impl Builder<'_, '_> {
         }
         let mut inits = self.inits.pop().unwrap_or_default();
         // SS_charge_for_initplans: the level's top node pays for its InitPlans.
-        let cost: f64 = inits.iter().filter(|i| !i.charged).map(|i| i.total_cost).sum();
+        let cost: f64 = inits.iter().filter(|i| !i.charged).map(|i| i.init_charge()).sum();
         node.startup_cost += cost;
         node.total_cost += cost;
         inits.append(&mut node.initplans);
@@ -3135,7 +3206,7 @@ impl Builder<'_, '_> {
             && level.len() > inits_before
         {
             let mut moved: Vec<ExNode> = level.drain(inits_before..).collect();
-            let cost: f64 = moved.iter().filter(|i| !i.charged).map(|i| i.total_cost).sum();
+            let cost: f64 = moved.iter().filter(|i| !i.charged).map(|i| i.init_charge()).sum();
             for i in &mut moved {
                 i.charged = true;
             }
@@ -3383,6 +3454,17 @@ impl Builder<'_, '_> {
                         .and_then(|d| d.rels.get(i).cloned().flatten())
                         .filter(|r| named || target.as_deref() == Some(r.as_str()))
                 };
+                if let Some(d) = info
+                    && let Some(c) = cols
+                {
+                    for (x, r) in c.iter().zip(&d.rels) {
+                        if let Some(r) = r
+                            && d.unplanned.iter().any(|u| u.0 == *r)
+                        {
+                            self.unplanned_cols.insert(format!("{}.{}", quote_ident(r), x));
+                        }
+                    }
+                }
                 let names = match cols {
                     Some(c) if c.len() == *ncols => {
                         let rels: Vec<Option<String>> = (0..c.len()).map(rel).collect();
@@ -3640,12 +3722,20 @@ impl Builder<'_, '_> {
                     &refname,
                 );
                 let names: Vec<Name> = cols.iter().map(|c| Name::col(&refname, c)).collect();
-                if self.o.verbose {
-                    for c in calls {
-                        let call = Expr::Call(c.func.clone(), c.args.clone(), c.ty.clone());
-                        let t = self.show(&call, &[], Cx::Scan);
-                        n.details.push(Detail::Text("Function Call", t));
-                    }
+                // (A row of several columns: its whole row is the function RTE's Var.)
+                if cols.len() > 1 {
+                    self.whole_vars.insert(quote_ident(&refname), cols.len());
+                }
+                // (ROWS FROM's calls in one list.)
+                if self.o.verbose && !calls.is_empty() {
+                    let t: Vec<String> = calls
+                        .iter()
+                        .map(|c| {
+                            let call = Expr::Call(c.func.clone(), c.args.clone(), c.ty.clone());
+                            self.show(&call, &[], Cx::Scan)
+                        })
+                        .collect();
+                    n.details.push(Detail::Text("Function Call", t.join(", ")));
                 }
                 // cost_functionscan: the calls once, then a tuple per row.
                 n.rows = calls
@@ -4182,6 +4272,30 @@ impl Builder<'_, '_> {
                     for pt in c.node.partials_mut() {
                         pt.output = out.clone();
                     }
+                    // The statement's target list carries the GROUP BY keys its select list
+                    // doesn't name as resjunk entries (in their order).
+                    if addr(p) == self.top
+                        && c.node.node_type == "Aggregate"
+                        && let Some(ng) = match &**input {
+                            Plan::Agg { groups, .. } => Some(groups.len()),
+                            Plan::Filter { input: fi, .. } => match &**fi {
+                                Plan::Agg { groups, .. } => Some(groups.len()),
+                                _ => None,
+                            },
+                            _ => None,
+                        }
+                    {
+                        for j in 0..ng {
+                            if !exprs.iter().any(|x| matches!(x, Expr::Col(i, _) if *i == j))
+                                && let Some(n) = c.internal.get(j)
+                            {
+                                let shown = self.pick(n, Cx::Output);
+                                if !c.node.output.contains(&shown) {
+                                    c.node.output.push(shown);
+                                }
+                            }
+                        }
+                    }
                     // The statement's target list carries its windows' PARTITION BY / ORDER
                     // BY columns as resjunk entries.
                     if addr(p) == self.top
@@ -4400,6 +4514,7 @@ impl Builder<'_, '_> {
                 WINDOW_ORDER.with(|w| *w.borrow_mut() = win_keys);
                 // An aggregation below may group in this order (its keys by position).
                 self.group_order = sort_group_order(input, keys);
+                self.group_named = sort_group_named(input, keys);
                 self.group_order_full = self.group_order.as_ref().is_some_and(|g| g.len() == keys.len());
                 let mut c = {
                     let merged = merge_appended(input);
@@ -4483,6 +4598,7 @@ impl Builder<'_, '_> {
                 }
                 self.group_order = None;
                 self.group_order_full = false;
+                self.group_named.clear();
                 // (A scan sorted as is returns the columns read above and the keys: the
                 // sort's input target.)
                 if self.o.verbose
@@ -5116,6 +5232,7 @@ impl Builder<'_, '_> {
                         .collect();
                     ord.extend(rest);
                     let g = crate::sql::paths::Gucs::read(self.ctx);
+                    let merged_none = merged.is_none();
                     let mut input_node = merged.unwrap_or_else(|| c.node.clone());
                     if physical {
                         input_node.output = exact_out.clone();
@@ -5158,6 +5275,12 @@ impl Builder<'_, '_> {
                         sn.key = input_node.key;
                         if self.o.verbose {
                             sn.output = input_node.output.clone();
+                            // (Its input's target list computed there: the Sort refers to
+                            // each value, a computed one parenthesized, `((a + 1))`.)
+                            let computed: Vec<String> = c.internal.iter().map(|n| self.pick(n, Cx::Output)).collect();
+                            if !physical && merged_none && computed == sn.output && c.exported.len() == computed.len() {
+                                sn.output = c.exported.iter().map(|n| self.pick(n, Cx::Output)).collect();
+                            }
                         }
                         sn.order = ord.clone();
                         sn.children.push(input_node.child("Outer"));
@@ -5497,7 +5620,31 @@ impl Builder<'_, '_> {
             Plan::Append {
                 inputs,
                 inh: Some(_),
-            } if inputs.len() == 1 => self.node(&inputs[0]),
+            } if inputs.len() == 1 => {
+                let mut c = self.node(&inputs[0]);
+                // (Its columns are still the partitioned table's: its inherited statistics.)
+                if let Some(parent) = pwagg::member_scan_of(&inputs[0])
+                    .and_then(|s| s.part.as_ref())
+                    .and_then(|l| l.last())
+                    .map(|l| l.parent.clone())
+                {
+                    for (k, col) in c.node.cols.iter_mut().enumerate() {
+                        if parent.columns.get(k).is_none_or(|pc| pc.dropped) {
+                            continue;
+                        }
+                        if let Some(v) = col.var.as_mut()
+                            && v.expr.is_none()
+                            && !v.inh
+                            && v.table.columns.get(v.col).map(|c| &c.name) == parent.columns.get(k).map(|c| &c.name)
+                        {
+                            v.table = parent.clone();
+                            v.col = k;
+                            v.inh = true;
+                        }
+                    }
+                }
+                c
+            }
             Plan::Append { inputs, inh } => {
                 let mut direct = Vec::new();
                 for i in inputs.iter() {
@@ -5838,6 +5985,7 @@ impl Builder<'_, '_> {
                 }
                 n.total_cost = n.rows * 2.0 * costs::CPU_TUPLE_COST;
                 let names: Vec<Name> = cols.iter().map(|c| Name::col(&refname, c)).collect();
+                self.whole_vars.insert(quote_ident(&refname), cols.len());
                 if matches!(&**p, Plan::CteScan { .. }) {
                     n.order = cte_order(name)
                         .iter()
@@ -5861,8 +6009,8 @@ impl Builder<'_, '_> {
                         for i in &mut moved {
                             if !i.charged {
                                 i.charged = true;
-                                b.node.startup_cost += i.total_cost;
-                                b.node.total_cost += i.total_cost;
+                                b.node.startup_cost += i.init_charge();
+                                b.node.total_cost += i.init_charge();
                             }
                         }
                         moved.append(&mut b.node.initplans);
@@ -5972,11 +6120,33 @@ impl Builder<'_, '_> {
                 let mut c = self.node(&ip.source);
                 let refname = self.refname(p);
                 let t = &ip.rules.table;
+                // A FROM subquery not pulled up whose row isn't the new row as it is (columns
+                // left to their defaults, or in another order): the Subquery Scan computes
+                // the new row (trivial_subqueryscan).
+                if let Plan::Barrier { alias, cols, secure: false, .. } = &*ip.source
+                    && !alias.is_empty()
+                    && c.node.node_type != "Subquery Scan"
+                    && ip.route.is_none()
+                    && ip.copy.is_none()
+                    && cols.len() == c.exported.len()
+                    && cols.len() == ip.target.len()
+                    && {
+                        let live: Vec<usize> = t.columns.iter().enumerate().filter(|(_, c)| !c.dropped).map(|(i, _)| i).collect();
+                        ip.target != live
+                    }
+                {
+                    let names: Vec<Name> = cols.iter().map(|col| Name::col(alias, col)).collect();
+                    let saved = self.sub_alias.replace(Arc::new((alias.clone(), cols.clone())));
+                    c = self.subquery_scan(c, addr(&ip.source));
+                    self.sub_alias = saved;
+                    c.internal = names.clone();
+                    c.exported = names;
+                }
                 // VERBOSE: the source computes the whole new row, defaults included.
                 if self.o.verbose
                     && ip.route.is_none()
                     && ip.copy.is_none()
-                    && matches!(c.node.node_type, "Result" | "Values Scan")
+                    && matches!(c.node.node_type, "Result" | "Values Scan" | "Subquery Scan")
                     && c.internal.len() == ip.target.len()
                 {
                     let mut out = Vec::new();
@@ -8959,6 +9129,7 @@ impl Builder<'_, '_> {
         // (An ORDER BY above: the GROUP BY's keys in its order first, preprocess_groupclause.)
         let hint = self.group_order.take();
         let hint_full = self.group_order_full;
+        let named = std::mem::take(&mut self.group_named);
         let saved_input = self.agg_input.replace(addr(input));
         let mut c = self.node(input);
         self.agg_input = saved_input;
@@ -9007,9 +9178,18 @@ impl Builder<'_, '_> {
             c.node.partial = Some(pi.clone());
             self.settle(&mut c.node);
         }
+        // (Over a Result computing a row of values, a pulled-up VALUES list's: a key
+        // computed there is over its values, as they are.)
+        let values_row = c.node.node_type == "Result" && c.node.children.is_empty() && c.internal.len() == c.exported.len();
         let gnames: Vec<Name> = groups
             .iter()
-            .map(|g| self.name(g, &c.exported, &[]))
+            .map(|g| {
+                if values_row && !matches!(g, Expr::Col(..)) && !g.columns().is_empty() {
+                    self.name(g, &c.internal, &[])
+                } else {
+                    self.name(g, &c.exported, &[])
+                }
+            })
             .collect();
         let ng = groups.len();
         // make_group_input_target: a GROUP BY expression is computed below the
@@ -9027,7 +9207,7 @@ impl Builder<'_, '_> {
         let computed: Vec<bool> = groups
             .iter()
             .map(|g| {
-                (!plain_col(g) && !g.columns().is_empty() && sets.is_none())
+                (!plain_col(g) && !g.columns().is_empty())
                     || (sets.is_some() && matches!(g, Expr::Const(..)))
             })
             .collect();
@@ -9052,10 +9232,15 @@ impl Builder<'_, '_> {
         };
         // (A scan computing them returns that target list, no physical one: the group
         // keys, then the columns the aggregates read.)
-        if self.o.verbose && computed.iter().any(|k| *k) && c.node.is_scan() {
+        if self.o.verbose && computed.iter().any(|k| *k) && (c.node.is_scan() || values_row) {
             let mut out: Vec<String> = Vec::new();
-            for g in &gnames {
-                let t = self.pick(g, Cx::Output);
+            for (g, n) in groups.iter().zip(&gnames) {
+                // (A column the scan computes, a virtual generated one's: its expression.)
+                let n = match g {
+                    Expr::Col(j, _) => c.internal.get(*j).unwrap_or(n),
+                    _ => n,
+                };
+                let t = self.pick(n, Cx::Output);
                 if !out.contains(&t) {
                     out.push(t);
                 }
@@ -9067,7 +9252,7 @@ impl Builder<'_, '_> {
                 }
             }
             for j in cols {
-                if let Some(n) = c.exported.get(j) {
+                if let Some(n) = if values_row { c.internal.get(j) } else { c.exported.get(j) } {
                     let t = self.pick(n, Cx::Output);
                     if !out.contains(&t) {
                         out.push(t);
@@ -9194,6 +9379,22 @@ impl Builder<'_, '_> {
         // the group keys, for the DISTINCT / ORDER BY order that suits the most aggregates;
         // the grouping is by sorting then.
         let ordered = aggs.iter().any(|a| a.distinct || !a.order_by.is_empty());
+        // (The group pathkeys: the keys the ORDER BY starts with first, each key in the
+        // direction the ORDER BY gives it.)
+        let presort_order: Vec<(usize, String)> = {
+            let mut o: Vec<(usize, String)> = Vec::new();
+            for (i, sfx) in hint.iter().flatten() {
+                if *i < groups.len() && !o.iter().any(|x| x.0 == *i) {
+                    o.push((*i, sfx.clone()));
+                }
+            }
+            for i in 0..groups.len() {
+                if !o.iter().any(|x| x.0 == i) {
+                    o.push((i, named.iter().find(|n| n.0 == i).map_or_else(String::new, |n| n.1.clone())));
+                }
+            }
+            o
+        };
         let presort: Option<Vec<String>> = if !ordered || sets.is_some() {
             None
         } else {
@@ -9204,7 +9405,11 @@ impl Builder<'_, '_> {
                 .borrow()
                 .get_raw("enable_presorted_aggregate")
                 .is_none_or(|v| v != "off" && v != "false");
-            let group_keys = keys_ref(self, &(0..groups.len()).collect::<Vec<_>>());
+            let group_keys: Vec<String> = presort_order
+                .iter()
+                .filter(|(i, _)| !redundant.get(*i).copied().unwrap_or(false))
+                .filter_map(|(i, sfx)| gref.get(*i).map(|g| self.pick(g, Cx::Upper) + sfx))
+                .collect();
             let mut best: Vec<String> = Vec::new();
             if enabled {
                 // (Each distinct aggregate's pathkeys; none for ones that can't presort.)
@@ -9297,11 +9502,50 @@ impl Builder<'_, '_> {
             Some(if best.is_empty() { group_keys } else { best })
         };
         if let Some(sort_keys) = presort {
-            if !sort_keys.is_empty() {
-                let mut sn = ExNode::new("Sort");
-                sn.details.push(Detail::List("Sort Key", sort_keys));
-                sn.details.push(Detail::SortInfo);
-                self.sort_costs(&mut sn, &c.node);
+            // (The input's order, as far as it goes: sorted incrementally after it.)
+            let common = sort_keys
+                .iter()
+                .zip(&c.node.order)
+                .enumerate()
+                .take_while(|(oi, (a, b))| *a == *b || c.node.order_eq.get(*oi).is_some_and(|e| e.contains(a)))
+                .count();
+            let incremental = common > 0 && crate::sql::paths::Gucs::read(self.ctx).incremental_sort;
+            if !sort_keys.is_empty() && common < sort_keys.len() {
+                let mut sn = ExNode::new(if incremental { "Incremental Sort" } else { "Sort" });
+                sn.details.push(Detail::List("Sort Key", sort_keys.clone()));
+                if incremental {
+                    sn.details.push(Detail::List(
+                        "Presorted Key",
+                        sort_keys[..common].iter().map(|k| presorted_name(k)).collect(),
+                    ));
+                    let pre_cols: Vec<ColInfo> = presort_order[..common.min(presort_order.len())]
+                        .iter()
+                        .map(|(i, _)| match &groups[*i] {
+                            Expr::Col(j, _) => c.node.cols.get(*j).cloned().unwrap_or_default(),
+                            _ => ColInfo::default(),
+                        })
+                        .collect();
+                    let ng = if pre_cols.len() < common || pre_cols.iter().any(|x| x.var.is_none()) {
+                        c.node.rows.clamp(1.0, costs::DEFAULT_NUM_DISTINCT)
+                    } else {
+                        self.num_groups(&pre_cols, c.node.rows)
+                    };
+                    (sn.startup_cost, sn.total_cost) = costs::incremental_sort_cost(
+                        c.node.startup_cost,
+                        c.node.total_cost,
+                        c.node.rows,
+                        c.node.width,
+                        ng,
+                        None,
+                    );
+                    sn.rows = c.node.rows;
+                    sn.width = c.node.width;
+                    sn.cols = c.node.cols.clone();
+                } else {
+                    sn.details.push(Detail::SortInfo);
+                    self.sort_costs(&mut sn, &c.node);
+                }
+                sn.order = sort_keys.clone();
                 sn.key = c.node.key;
                 if self.o.verbose {
                     sn.output = c.node.output.iter().map(&sort_out).collect();
@@ -9313,10 +9557,14 @@ impl Builder<'_, '_> {
             if !groups.is_empty() {
                 n.strategy = Some("Sorted");
                 n.title = "GroupAggregate".into();
-                let all: Vec<usize> = (0..groups.len()).collect();
+                let all: Vec<usize> = presort_order.iter().map(|o| o.0).collect();
                 n.details.push(Detail::List("Group Key", keys_ref(self, &all)));
                 // (Its groups come out in the keys' order.)
-                n.order = keys_ref(self, &all);
+                n.order = presort_order
+                    .iter()
+                    .filter(|(i, _)| !redundant.get(*i).copied().unwrap_or(false))
+                    .filter_map(|(i, sfx)| gref.get(*i).map(|g| self.pick(g, Cx::Upper) + sfx))
+                    .collect();
                 n.rows = (c.node.rows * 0.2).clamp(1.0, 200.0);
             }
         }
@@ -9665,11 +9913,16 @@ impl Builder<'_, '_> {
             // (Orders of the keys: per key its position and direction, as a sort key's
             // suffix.)
             // (A key sorted under a collation other than the default shows it.)
+            // (A key ORDER BY names sorts in its direction.)
             let coll_sfx: Vec<String> = groups
                 .iter()
-                .map(|g| match group_key_collation(input, g) {
-                    Some(n) => format!(" COLLATE {}", crate::catalog::quote_ident(&n)),
-                    None => String::new(),
+                .enumerate()
+                .map(|(i, g)| match named.iter().find(|n| n.0 == i) {
+                    Some((_, sfx)) => sfx.clone(),
+                    None => match group_key_collation(input, g) {
+                        Some(n) => format!(" COLLATE {}", crate::catalog::quote_ident(&n)),
+                        None => String::new(),
+                    },
                 })
                 .collect();
             let mut orders: Vec<Vec<(usize, String)>> =
@@ -11315,7 +11568,27 @@ impl Builder<'_, '_> {
                 hash_subplans.extend(self.pending.drain(before..));
             }
             merge_names.push((a.clone(), b.clone()));
-            keys_text.push(format!("({a} = {b})"));
+            // (The built-in `=`, qualified when a user `=` of the same types comes first on
+            // the search path: generate_operator_name.)
+            let eq = {
+                let (ta, tb) = (
+                    crate::sql::binder::hash_key_operand(oa).0.ty(),
+                    crate::sql::binder::hash_key_operand(ib).0.ty(),
+                );
+                let cat = self.ctx.catalog();
+                let path = cat.routine_path(&self.ctx.search_path);
+                let pc = path.iter().position(|&s| s == crate::catalog::PG_CATALOG_OID);
+                let hidden = pc.is_some_and(|pc| {
+                    cat.operators.values().any(|o| {
+                        o.name == "="
+                            && path.iter().position(|&s| s == o.schema).is_some_and(|i| i < pc)
+                            && o.left.as_ref().is_some_and(|t| t.same_base(&ta))
+                            && o.right.same_base(&tb)
+                    })
+                });
+                if hidden { "OPERATOR(pg_catalog.=)" } else { "=" }
+            };
+            keys_text.push(format!("({a} {eq} {b})"));
         }
         let mut join_filter = Vec::new();
         match method {
@@ -13826,6 +14099,9 @@ pub fn setop_shape(left: &Arc<Plan>, right: &Arc<Plan>, intersect: bool, ctx: &E
             member_scan: false,
             group_order: None,
         group_order_full: false,
+        group_named: Vec::new(),
+        whole_vars: HashMap::new(),
+        unplanned_cols: Default::default(),
         sub_alias: None,
         json_casts: Vec::new(),
         proj_depth: 0,
@@ -13902,6 +14178,9 @@ pub fn set_group_estimates(
         member_scan: false,
         group_order: None,
         group_order_full: false,
+        group_named: Vec::new(),
+        whole_vars: HashMap::new(),
+        unplanned_cols: Default::default(),
         sub_alias: None,
         json_casts: Vec::new(),
         proj_depth: 0,
@@ -13987,6 +14266,9 @@ pub fn agg_redundant_keys(
         member_scan: false,
         group_order: None,
         group_order_full: false,
+        group_named: Vec::new(),
+        whole_vars: HashMap::new(),
+        unplanned_cols: Default::default(),
         sub_alias: None,
         json_casts: Vec::new(),
         proj_depth: 0,
@@ -14052,6 +14334,9 @@ pub fn sets_sorted(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
         member_scan: false,
         group_order: None,
         group_order_full: false,
+        group_named: Vec::new(),
+        whole_vars: HashMap::new(),
+        unplanned_cols: Default::default(),
         sub_alias: None,
         json_casts: Vec::new(),
         proj_depth: 0,
@@ -14122,6 +14407,9 @@ pub fn distinct_order(plan: &Arc<Plan>, ctx: &ExecCtx) -> Option<Vec<usize>> {
         member_scan: false,
         group_order: None,
         group_order_full: false,
+        group_named: Vec::new(),
+        whole_vars: HashMap::new(),
+        unplanned_cols: Default::default(),
         sub_alias: None,
         json_casts: Vec::new(),
         proj_depth: 0,
@@ -14184,6 +14472,9 @@ pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
         member_scan: false,
         group_order: None,
         group_order_full: false,
+        group_named: Vec::new(),
+        whole_vars: HashMap::new(),
+        unplanned_cols: Default::default(),
         sub_alias: None,
         json_casts: Vec::new(),
         proj_depth: 0,
@@ -14551,6 +14842,9 @@ pub fn explain(
         member_scan: false,
         group_order: None,
         group_order_full: false,
+        group_named: Vec::new(),
+        whole_vars: HashMap::new(),
+        unplanned_cols: Default::default(),
         sub_alias: None,
         json_casts: Vec::new(),
         proj_depth: 0,
@@ -14763,6 +15057,22 @@ fn sort_group_order(input: &Plan, keys: &[SortKey]) -> Option<Vec<(usize, String
     (!out.is_empty()).then_some(out)
 }
 
+/// Every group key the ORDER BY over a grouping names (by position), with the first
+/// naming item's direction: `sort_group_order`'s keys, wherever they are in the list.
+fn sort_group_named(input: &Plan, keys: &[SortKey]) -> Vec<(usize, String)> {
+    let mut out: Vec<(usize, String)> = Vec::new();
+    for k in keys {
+        // (Each key on its own: its position among the group keys, if it is one.)
+        if let Some(v) = sort_group_order(input, std::slice::from_ref(k))
+            && let Some((j, sfx)) = v.into_iter().next()
+            && !out.iter().any(|o| o.0 == j)
+        {
+            out.push((j, sfx));
+        }
+    }
+    out
+}
+
 /// A DISTINCT's input (through a projection) whose every output column that isn't a
 /// constant is a scan column its filter equates with a constant.
 pub(crate) fn distinct_keys_fixed(input: &Plan) -> bool {
@@ -14865,8 +15175,10 @@ fn limit_over(mut c: ExNode, count: f64, off: f64) -> ExNode {
 /// column (or already a reference to a value computed further down), parenthesized when
 /// it is a value the input computes.
 fn refer_to(o: &str) -> String {
-    let column = !o.is_empty()
-        && o.split('.').all(|p| {
+    // (A whole-row Var, `r.*`, is a column too.)
+    let o_col = o.strip_suffix(".*").unwrap_or(o);
+    let column = !o_col.is_empty()
+        && o_col.split('.').all(|p| {
             !p.is_empty()
                 && (p.starts_with('"') && p.ends_with('"')
                     || p.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$'))

@@ -91,6 +91,8 @@ impl ViewBase {
             sc.expr = vc.expr.clone();
             sc.attnum = i as i16 + 1;
         }
+        // Its whole row (RETURNING `v`, `old`, `new`) has the view's row type.
+        rel.rel = Some(self.view.oid);
         rel
     }
 

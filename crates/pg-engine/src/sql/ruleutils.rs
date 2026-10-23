@@ -183,6 +183,44 @@ fn cross_type_arg<'e>(op: &str, e: &'e Expr) -> &'e Expr {
     }
 }
 
+impl Deparser<'_, '_> {
+    fn builtin_op_name(&self, def: &crate::sql::func::FuncDef) -> &'static str {
+        let name = def.name;
+        if name.starts_with("OPERATOR(") || self.cat.operators.is_empty() || !(1..=2).contains(&def.args.len()) {
+            return name;
+        }
+        // (Only the built-in itself: a CREATE OPERATOR over a built-in function keeps its name.)
+        let res = match def.args.as_slice() {
+            [l, r] => crate::sql::func::resolve_binop(name, l, r),
+            [t] => crate::sql::func::resolve_prefix(name, t),
+            _ => return name,
+        };
+        if !res.is_ok_and(|r| r.def.oid == def.oid) {
+            return name;
+        }
+        let path = self.cat.routine_path(&self.ctx.search_path);
+        let Some(pc) = path.iter().position(|&s| s == crate::catalog::PG_CATALOG_OID) else {
+            return name;
+        };
+        let (left, right) = match def.args.as_slice() {
+            [l, r] => (Some(l), r),
+            [r] => (None, r),
+            _ => return name,
+        };
+        let hidden = self.cat.operators.values().any(|o| {
+            o.name == name
+                && path.iter().position(|&s| s == o.schema).is_some_and(|i| i < pc)
+                && o.left.as_ref().map(|t| t.oid()) == left.map(|t| t.oid())
+                && o.right.same_base(right)
+        });
+        if hidden {
+            crate::sql::func::intern(&format!("OPERATOR(pg_catalog.{name})"))
+        } else {
+            name
+        }
+    }
+}
+
 fn is_operator(name: &str) -> bool {
     !name.starts_with(|c: char| c.is_alphabetic() || c == '_') || name.starts_with("OPERATOR(")
 }
@@ -1075,6 +1113,11 @@ impl Deparser<'_, '_> {
             }
             Expr::Call(def, args, _) => {
                 if is_operator(def.name) {
+                    // generate_operator_name: a built-in one the search path wouldn't find
+                    // by its name (a user operator of the same name and types earlier on
+                    // the path) is qualified.
+                    let shown = self.builtin_op_name(def);
+                    let def = &std::sync::Arc::new(crate::sql::func::FuncDef { name: shown, ..(**def).clone() });
                     match args.as_slice() {
                         [a] => {
                             self.open();

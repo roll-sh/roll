@@ -363,10 +363,12 @@ them all with the "Fixed in round N" sections describing what was already tried.
 7. **partition_aggregate**: done (137/137).
 8. The 18 plan-choice units listed in STATUS.md ("Plan choice visible in results").
 
-Smaller known difference that doesn't fail a unit today: `SELECT DISTINCT a + 1` by sorting
-shows the Unique's output as `(a + 1)` where Postgres refers to the Sort's (`((a + 1))`). (The
-two listed before round 14 are fixed: a plain DISTINCT's column lists, and unread subquery
-outputs as NULLs in the subquery's select list, shown as constants above.)
+Smaller known differences that don't fail a unit today (round 14, agent 11 fixed the DISTINCT
+`((a + 1))` Sort output listed here before): a pulled-up one-row VALUES' constants aren't
+folded into the expressions over them (`SELECT a + b FROM (VALUES (1, 2)) t(a, b)`: Postgres
+shows `3`); a whole-row Var isn't passed up through a join or sort as one value (Postgres's scan
+returns `r.*, r.a`, the engine the columns); a FROM subquery not pulled up keeps a ROW() of its
+columns where Postgres shows `ss.*`, and its `IS NULL` expanded.
 
 Not started and lower priority: `roll_pk_clustered` adds a primary key's duplicate check by raw
 key bytes, so duplicates that are only equal under a nondeterministic collation aren't caught

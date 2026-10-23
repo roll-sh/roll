@@ -777,6 +777,24 @@ fn lift(
                 Vec::new(),
             )
         }
+        // A FROM subquery over one function scan (pull_up_simple_subquery): its computed
+        // outputs evaluated where they're read, the function's row the group's relation
+        // (a LATERAL function over them reads its expressions).
+        Plan::Project { input, exprs }
+            if matches!(&**input, Plan::FunctionScan { .. })
+                && lateral.is_none()
+                && nulled == 0
+                && virtual_proj(p).is_none()
+                && !reads_outer(input)
+                && exprs.iter().any(|e| !matches!(e, Expr::Col(..)))
+                && exprs.iter().all(|e| matches!(e, Expr::Col(..)) || movable(e) && outer_refs(e).is_empty()) =>
+        {
+            cx.lifted = true;
+            cx.nrel += 1;
+            let plan = (**input).clone();
+            let w = crate::sql::binder::plan_width(&plan);
+            (plan, exprs.clone(), vec![(nulled, rel); w])
+        }
         _ => {
             if lateral.is_none()
                 && let Some(r) = flatten_join_subquery(p, nulled, anulled, cx)
