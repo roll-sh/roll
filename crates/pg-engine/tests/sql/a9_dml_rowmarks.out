@@ -1,0 +1,200 @@
+> CREATE TABLE a9p (f1 int, f2 text, f3 int, f4 int8)
+-- CREATE TABLE
+
+> CREATE TABLE a9c (f5 int) INHERITS (a9p)
+-- CREATE TABLE
+
+> INSERT INTO a9p VALUES (1, 'one', 10, 100), (4, 'four', 40, 400)
+-- INSERT 0 2
+
+> INSERT INTO a9c VALUES (4, 'kid', 41, 401, 5), (7, 'seven', 70, 700, 8)
+-- INSERT 0 2
+
+> CREATE TABLE a9j (f2j text, other int)
+-- CREATE TABLE
+
+> INSERT INTO a9j VALUES ('one', 11), ('kid', 22), ('seven', 33)
+-- INSERT 0 3
+
+> CREATE RULE a9p_del AS ON DELETE TO a9p DO INSTEAD
+>   UPDATE a9p SET f2 = f2 || ' (deleted)', f3 = -1, f4 = -1 WHERE f1 = OLD.f1
+>   RETURNING *
+-- CREATE RULE
+
+> DELETE FROM a9p WHERE f1 = 4 RETURNING old.*, new.*, *
+f1:int4 | f2:text | f3:int4 | f4:int8 | f1:int4 | f2:text | f3:int4 | f4:int8 | f1:int4 | f2:text | f3:int4 | f4:int8
+4 | four | 40 | 400 | 4 | four (deleted) | -1 | -1 | 4 | four (deleted) | -1 | -1
+4 | kid | 41 | 401 | 4 | kid (deleted) | -1 | -1 | 4 | kid (deleted) | -1 | -1
+-- DELETE 0
+
+> SELECT tableoid::regclass, * FROM a9p ORDER BY f1, f2
+tableoid:regclass | f1:int4 | f2:text | f3:int4 | f4:int8
+a9p | 1 | one | 10 | 100
+a9p | 4 | four (deleted) | -1 | -1
+a9c | 4 | kid (deleted) | -1 | -1
+a9c | 7 | seven | 70 | 700
+-- SELECT 4
+
+> DROP RULE a9p_del ON a9p
+-- DROP RULE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT p.f1, s.c FROM a9p p, (SELECT f2j, count(*) c FROM a9j GROUP BY f2j) s
+>   WHERE p.f2 = s.f2j FOR UPDATE OF p
+QUERY PLAN:text
+LockRows
+  Output: p.f1, s.c, p.ctid, s.*, p.tableoid
+  ->  Hash Join
+        Output: p.f1, s.c, p.ctid, s.*, p.tableoid
+        Inner Unique: true
+        Hash Cond: (p.f2 = s.f2j)
+        ->  Append
+              ->  Seq Scan on public.a9p p_1
+                    Output: p_1.f1, p_1.ctid, p_1.f2, p_1.tableoid
+              ->  Seq Scan on public.a9c p_2
+                    Output: p_2.f1, p_2.ctid, p_2.f2, p_2.tableoid
+        ->  Hash
+              Output: s.c, s.*, s.f2j
+              ->  Subquery Scan on s
+                    Output: s.c, s.*, s.f2j
+                    ->  HashAggregate
+                          Output: a9j.f2j, count(*)
+                          Group Key: a9j.f2j
+                          ->  Seq Scan on public.a9j
+                                Output: a9j.f2j, a9j.other
+-- EXPLAIN
+
+> SELECT p.f1, s.c FROM a9p p, (SELECT f2j, count(*) c FROM a9j GROUP BY f2j) s
+>   WHERE p.f2 = s.f2j ORDER BY 1 FOR UPDATE OF p
+f1:int4 | c:int8
+1 | 1
+7 | 1
+-- SELECT 2
+
+> SELECT p.f1, s.f2j FROM a9p p, (SELECT * FROM a9j OFFSET 0) s WHERE p.f2 = s.f2j ORDER BY 1 FOR SHARE
+f1:int4 | f2j:text
+1 | one
+7 | seven
+-- SELECT 2
+
+> SELECT * FROM (SELECT count(*) FROM a9j) s FOR UPDATE
+ERROR 0A000: FOR UPDATE is not allowed with aggregate functions
+
+> SELECT * FROM (SELECT f2j FROM a9j UNION SELECT 'x') s FOR SHARE
+ERROR 0A000: FOR SHARE is not allowed with UNION/INTERSECT/EXCEPT
+
+> SELECT * FROM (SELECT * FROM (SELECT count(*) c FROM a9j) a) b FOR UPDATE OF b
+ERROR 0A000: FOR UPDATE is not allowed with aggregate functions
+
+> SELECT * FROM (SELECT * FROM (SELECT count(*) c FROM a9j) a) b, a9j j WHERE j.other = 11 FOR UPDATE OF j
+c:int8 | f2j:text | other:int4
+3 | one | 11
+-- SELECT 1
+
+> UPDATE a9p SET f3 = f3 + j.other FROM a9j j, (SELECT f2j FROM a9j OFFSET 0) s
+>   WHERE a9p.f2 = j.f2j AND j.f2j = s.f2j RETURNING a9p.f1, j.other
+f1:int4 | other:int4
+1 | 11
+7 | 33
+-- UPDATE 2
+
+> CREATE TABLE a9src (a int, b int, c int, d int)
+-- CREATE TABLE
+
+> CREATE TABLE a9tgt (a int, b int, c int, d int)
+-- CREATE TABLE
+
+> CREATE TABLE a9ref (ab int, cd int)
+-- CREATE TABLE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> MERGE INTO a9tgt t
+> USING (SELECT *, (SELECT count(*) FROM a9ref r
+>                    WHERE r.ab = s.a + s.b AND r.cd = s.c - s.d) cnt
+>          FROM a9src s) s
+> ON t.a = s.a AND t.b < s.cnt
+> WHEN MATCHED AND t.c > s.cnt THEN
+>   UPDATE SET (b, c) = (SELECT s.b, s.cnt)
+QUERY PLAN:text
+Merge on public.a9tgt t
+  ->  Hash Join
+        Output: t.ctid, s.a, s.b, s.c, s.d, s.ctid
+        Hash Cond: (t.a = s.a)
+        Join Filter: (t.b < (SubPlan 1))
+        ->  Seq Scan on public.a9tgt t
+              Output: t.ctid, t.a, t.b
+        ->  Hash
+              Output: s.a, s.b, s.c, s.d, s.ctid
+              ->  Seq Scan on public.a9src s
+                    Output: s.a, s.b, s.c, s.d, s.ctid
+        SubPlan 1
+          ->  Aggregate
+                Output: count(*)
+                ->  Seq Scan on public.a9ref r
+                      Output: r.ab, r.cd
+                      Filter: ((r.ab = (s.a + s.b)) AND (r.cd = (s.c - s.d)))
+  SubPlan 4
+    ->  Aggregate
+          Output: count(*)
+          ->  Seq Scan on public.a9ref r_2
+                Output: r_2.ab, r_2.cd
+                Filter: ((r_2.ab = (s.a + s.b)) AND (r_2.cd = (s.c - s.d)))
+  SubPlan 3
+    ->  Result
+          Output: s.b, (InitPlan 2).col1
+          InitPlan 2
+            ->  Aggregate
+                  Output: count(*)
+                  ->  Seq Scan on public.a9ref r_1
+                        Output: r_1.ab, r_1.cd
+                        Filter: ((r_1.ab = (s.a + s.b)) AND (r_1.cd = (s.c - s.d)))
+-- EXPLAIN
+
+> INSERT INTO a9src VALUES (1, 2, 3, 4), (2, 3, 4, 5), (3, 4, 5, 6)
+-- INSERT 0 3
+
+> INSERT INTO a9tgt VALUES (1, 0, 9, 0), (2, 0, 9, 0), (3, 5, 0, 0)
+-- INSERT 0 3
+
+> INSERT INTO a9ref VALUES (3, -1), (3, -1), (5, -1)
+-- INSERT 0 3
+
+> MERGE INTO a9tgt t
+> USING (SELECT *, (SELECT count(*) FROM a9ref r
+>                    WHERE r.ab = s.a + s.b AND r.cd = s.c - s.d) cnt
+>          FROM a9src s) s
+> ON t.a = s.a AND t.b < s.cnt
+> WHEN MATCHED AND t.c > s.cnt THEN
+>   UPDATE SET (b, c) = (SELECT s.b, s.cnt)
+> WHEN NOT MATCHED THEN INSERT VALUES (s.a + 10, s.cnt, s.cnt, 0)
+-- MERGE 3
+
+> SELECT * FROM a9tgt ORDER BY a, b
+a:int4 | b:int4 | c:int4 | d:int4
+1 | 2 | 2 | 0
+2 | 3 | 1 | 0
+3 | 5 | 0 | 0
+13 | 0 | 0 | 0
+-- SELECT 4
+
+> MERGE INTO a9tgt t
+> USING (SELECT *, (SELECT count(*) FROM a9ref r WHERE r.ab = s.a + s.b) cnt FROM a9src s) s
+> ON t.a = s.a
+> WHEN NOT MATCHED BY SOURCE THEN DELETE
+> WHEN MATCHED AND s.cnt > 1 THEN UPDATE SET d = s.cnt
+> RETURNING merge_action(), t.*, s.cnt
+merge_action:text | a:int4 | b:int4 | c:int4 | d:int4 | cnt:int8
+DELETE | 13 | 0 | 0 | 0 | NULL
+UPDATE | 1 | 2 | 2 | 2 | 2
+-- MERGE 2
+
+> SELECT * FROM a9tgt ORDER BY a, b
+a:int4 | b:int4 | c:int4 | d:int4
+1 | 2 | 2 | 2
+2 | 3 | 1 | 0
+3 | 5 | 0 | 0
+-- SELECT 3
+
+> DROP TABLE a9src, a9tgt, a9ref, a9j, a9c, a9p
+-- DROP TABLE
+
