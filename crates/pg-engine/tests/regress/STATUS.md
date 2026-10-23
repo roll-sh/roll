@@ -35,35 +35,34 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51064 (**99.83%**) |
-| units differing | 86 |
-| files fully matching | 221 |
-| engine output == expected/*.out (pg_regress "ok") | 183 files |
+| units matching | 51069 (**99.84%**) |
+| units differing | 81 |
+| files fully matching | 222 |
+| engine output == expected/*.out (pg_regress "ok") | 184 files |
 | engine crashes / panics | none |
 
 ## Remaining differences, classified
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 85 | 98.8% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 1 | 1.2% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 81 | 100% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 85 units
-join (53), partition_join (16), partition_prune (2), groupingsets (7), with (3), aggregates (1), join_hash (2), returning (1)
+### EXPLAIN (group C1) — 81 units
+join (50), partition_join (15), partition_prune (2), groupingsets (7), with (3), aggregates (1), join_hash (2), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
 
-### Plan choice visible in results (C1 area) — 1 unit
-sqljson_jsontable (1)
+### Plan choice visible in results (C1 area) — 0 units
 
-- sqljson_jsontable: the join order (a join with an unsatisfied LATERAL reference, see round 16,
-  agent 11). (join's FULL JOIN row order units 77, 85 and 459 match now; join_hash's batch
+- sqljson_jsontable 101 (the join order: a join with an unsatisfied LATERAL reference) matches
+  since round 16, agent 17. (join's FULL JOIN row order units 77, 85 and 459 match now; join_hash's batch
   counts 72 / 237 since round 16, agent 14.)
 
 ### Name resolution — 0 units
@@ -107,6 +106,118 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 17 (join relations parameterized by LATERAL references, partitionwise topmost relations)
+
+Measured in subset runs of the planner-heavy files (test_setup, create_misc, create_index,
+create_view, select, union, subselect, join, aggregates, inherit, partition_join,
+partition_prune, partition_aggregate, equivclass, memoize, with, rowsecurity, updatable_views,
+select_distinct, groupingsets, incremental_sort, merge, returning, rules, insert_conflict,
+join_hash, select_parallel, rangefuncs, tsrf, limit, window, stats_ext, sqljson_jsontable),
+unit by unit against a baseline run of the same subset on 9509532, then again after rebasing
+onto f8c1317, 77bc60e, 58f4c06 and 5cfa72a (+5, none broken; crate tests and clippy on each;
+select_parallel 112 differed once from the reference's side, a worker of its Gather starting
+late under load: `loops=42`, the engine's output unchanged);
+plus the other files with LATERAL references (create_table, collate.icu.utf8,
+create_table_like, gin, gist, indexing, jsonpath, numeric, tablesample, plpgsql,
+stats_import, tidrangescan, arrays, json, jsonb, sqljson, xml): every unit as before, all
+matching.
+
+| file | fixed units |
+|---|---|
+| sqljson_jsontable | 101 (**row order**) |
+| join | 414, 744, 775 |
+| partition_join | 21 |
+
+What changed (`sql/paths/joinpath.rs`, `joinpath/outerjoins.rs`, `binder/optimize.rs`):
+
+- **Join relations with LATERAL references left** (joinrels.c, relnode.c): a LATERAL item may
+  join an item it doesn't read before the items it reads; the join relation's
+  `lateral_relids` (min_join_parameterization over create_lateral_join_info's transitive
+  closure) are the items it still reads, and it has only paths parameterized by them (a
+  LATERAL item's own path is parameterized by its whole closure). join_is_legal's LATERAL
+  checks replace the old rule (the item alone on a nested loop's inner side): no references
+  both ways, one way only as a nested loop with the referencing side inside (not against an
+  outer join's order, a unique-ified semi join or a FULL JOIN), only through a direct
+  reference, and never with a remaining reference inside an outer join's right side with
+  the join (join_plus_rhs). has_join_restriction is lateral_relids / lateral_referencers
+  (base relations only); param_source_rels takes the join's lateral_relids. So
+  `x, y, JSON_TABLE(... PASSING x, y)` joins `x ⋈ jt` parameterized by `y` and never `x ⋈ y`
+  clauselessly (sqljson_jsontable 101's row order).
+- **Parameterized hash and merge joins** (try_hashjoin_path, try_mergejoin_path): inputs
+  parameterized by relations outside the join give a join path parameterized by all of them
+  (calc_non_nestloop_required_outer) when param_source_rels allow it; hash_inner_and_outer
+  tries each of the inputs' cheapest_parameterized_paths, and a relation with only
+  parameterized paths has its least parameterized one as cheapest_total_path (set_cheapest).
+  Such a path checks the join clauses movable into it (get_joinrel_parampathinfo, shared with
+  the nested loop's as `param_clauses`); at an outer join one needing relations outside it is
+  the join's Filter (RINFO_IS_PUSHED_DOWN). join 414: `Hash Right Join ... Filter:` under the
+  nested loop.
+- Building such plans: a parameterized scan, Append or LATERAL item that isn't the inner side
+  of the nested loop passing its values (a hash or merge join's input, a nested loop's outer
+  side) reads them from the nested loop above the join, through a one-row join passing them
+  in (shown as nothing); a hash or merge join passes no parameters itself (the executor ran
+  one with parameters as a nested loop, dropping its hash keys: wrong rows the comparison
+  caught while developing join 744).
+- An outer join's minimal left side no longer takes the LATERAL references of its right side
+  (make_outerjoininfo has no such rule; join_is_legal's LATERAL checks keep the order), and a
+  LATERAL right side takes into its scan only the join clauses over the relations it reads
+  (its parameterized path's clauses, get_baserel_parampathinfo; it took every clause over
+  both sides): join 744 (the hash join under `a`'s nested loop), 775 (the join filter's
+  order).
+- Parameterized join paths are kept by add_path among those of their parameterization (fuzzy
+  costs and pathkeys; their rows are Postgres's ParamPathInfo's, so not compared), not only
+  the cheapest.
+- unnest of a non-constant array: 10 rows (estimate_array_length's default; it said 100).
+- EXPLAIN costs a single-batch hash join under a nested loop as rescanned without rebuilding
+  its table (cost_rescan), as the planner did.
+- **The topmost scan/join relation** of a query level, when it is joined partitionwise, keeps
+  only its partitionwise paths (apply_scanjoin_target_to_paths drops the others), where they
+  competed with the plain join by cost: the Append (sorted) or a Merge Append of the child
+  joins.
+- A merge join input sorted on a class with two of its columns sorts by the one the target
+  list needs (prepare_sort_from_pathkeys: the first member in the input's target list, which
+  lists the columns needed above before those only the join clauses read): partition_join 21
+  (`Sort Key: t2_1.b`).
+
+Goldens: `tests/sql/a17_lateral_join_rels.sql`, `a17_sort_key_member.sql`.
+
+Looked at and left (why):
+
+- partition_prune 410 (the cross-partition UPDATE's moved row counted by a later Bitmap Index
+  Scan, `Heap Blocks: exact=1`): not the pipelining, which UpdateNode already does (each
+  source row is updated before the next is read). Postgres's index has an entry for every
+  tuple version, the heap fetch deciding visibility, so the moved row's new entry is counted
+  (and its heap page read) although the tuple is invisible to the command; the engine's index
+  entries are MVCC-versioned like its rows and read at the command's snapshot. Counting them
+  faithfully needs index entries kept apart from tuple visibility (dead ones counted until
+  vacuumed too), a storage-model change, not done.
+- partition_join 74: the expression `(t3.a + t3.b) / 2` is no equivalence class member here
+  (classes are of columns), so no clause `t2.b = (t3.a + t3.b) / 2` is derived and the index
+  scan is parameterized by `t1` only (5 loops, not 84: 2.56 a scan, not 0.30). Needs
+  expression members in the join search's classes.
+- partition_join 86 / 88 / 92: the IN subquery is planned (partitionwise) at bind time, before
+  the WHERE's sublinks are pulled up, and `sublink::sub_join` takes neither an inheritance
+  Append nor a partitionwise Append; even pulled up, Postgres's plan needs a semi join whose
+  unique-ified right side is a join of two relations (create_unique_path over a join rel;
+  `unique_rel` takes one item).
+- join 502 / 503: the subquery's sorted path (Group over an index scan) kept beside its
+  cheapest (HashAggregate) for a merge join: a subquery here is one plan, and EXPLAIN picks
+  its grouping strategy itself.
+- join 123: Postgres's `sum(i4b) = (sum(i4a) + 1)` is a derived class clause first made by
+  get_joinrel_parampathinfo's dropped-class step for `t`'s index scan parameterized by both
+  (b first), then reused by the join of the two; the engine orients class clauses by fixed
+  rules.
+- join 410: the parameterized join's rows (Postgres's ParamPathInfo rows come from the first
+  input pair, `b` parameterized by `i2` joined to `i1`: 1 row; here 5); keeping the first
+  pair's estimate (tried) changed other plans for the worse, the engine's input order not
+  being Postgres's.
+- join 442: the outer join clause dropped once `tt4.f1 = 'foo'` is derived (only in the
+  order joining tt3 and tt4 first), the subquery's derived filter and a Memoize over it.
+- partition_prune 265: an AlternativeSubPlan copied into each partition's index condition,
+  chosen per copy by its executions (the plain SubPlan there); not attempted.
+- unnest over an analyzed array column: Postgres takes its element-count histogram's average
+  (STATISTIC_KIND_DECHIST), the engine the default 10.
 
 ## Round 16, agent 15 (full-run timeouts: catalog rescans; view whole rows; locking levels' marks)
 
@@ -2610,7 +2721,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 872 | 94% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (53) |
+| join | 925 | 875 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (50) |
 | aggregates | 556 | 555 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
@@ -2701,7 +2812,7 @@ produces no units on Linux (skipped by the file itself).
 | jsonb_jsonpath | 836 | 836 | 100% | yes | yes |  |
 | sqljson | 242 | 242 | 100% | yes | yes |  |
 | sqljson_queryfuncs | 318 | 318 | 100% | yes | yes |  |
-| sqljson_jsontable | 131 | 130 | 99% | yes | no | wrong result `SELECT: row order differs` (1) |
+| sqljson_jsontable | 131 | 131 | 100% | yes | yes |  |
 | plancache | 97 | 97 | 100% | yes | yes |  |
 | limit | 85 | 85 | 100% | yes | yes |  |
 | plpgsql | 941 | 941 | 100% | yes | yes |  |
@@ -2720,7 +2831,7 @@ produces no units on Linux (skipped by the file itself).
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 304 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
 | xml | 281 | 281 | 100% | yes | yes |  |
-| partition_join | 614 | 598 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (16) |
+| partition_join | 614 | 599 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (15) |
 | partition_prune | 771 | 769 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |

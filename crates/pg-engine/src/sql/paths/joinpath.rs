@@ -5081,7 +5081,17 @@ impl Search<'_, '_, '_> {
                     let keys = ks
                         .iter()
                         .filter_map(|k| {
-                            let Some(g) = (0..self.ec.len()).find(|&g| self.ec[g] == k.ec && pos(layout, g).is_some()) else {
+                            // (prepare_sort_from_pathkeys: the first member of the class in
+                            // the input's target list, whose reltarget lists what is needed
+                            // above before what only the join clauses read.)
+                            let member = |above: bool| {
+                                (0..self.ec.len()).find(|&g| {
+                                    self.ec[g] == k.ec
+                                        && pos(layout, g).is_some()
+                                        && (!above || self.needed.get(g).copied().unwrap_or(false))
+                                })
+                            };
+                            let Some(g) = member(true).or_else(|| member(false)) else {
                                 // (Sorted by an expression of the class: a merge clause's.)
                                 let e = self.ec_expr_in(k.ec, layout)?;
                                 return Some(SortKey {

@@ -17,10 +17,10 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,064 of 51,150 statements match (99.83%).** 86 differ. The full
+- **Regression suite: 51,069 of 51,150 statements match (99.84%).** 81 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 85 are `EXPLAIN` plan text (99%). Query results already match.
-  - 1 is a plan choice that shows up in results (sqljson_jsontable's join order).
+  - All 81 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
+    order since round 16, agent 17: join relations parameterized by LATERAL references).
   - None differs by design any more (aggregates `balk` matches since round 16, agent 14: a
     Finalize Aggregate runs the user-defined combine functions).
 - No engine crashes or panics in a full run. A full run of 286306f measured 50,792: STATUS's
@@ -325,21 +325,22 @@ All remaining work is planner/EXPLAIN (`src/sql/paths*`, `src/sql/binder/optimiz
 numbers refer to the regress harness's per-file unit counter; `tests/regress/STATUS.md` lists
 them all with the "Fixed in round N" sections describing what was already tried.
 
-1. **PlaceHolderVars evaluated at joins** (join 345, 360, 362/363, 368, 744;
+1. **PlaceHolderVars evaluated at joins** (join 345, 360, 362/363, 368;
    partition_join 41). Round 14 (agent 8) evaluates them at joins: a pulled-up subquery's
    outputs an outer join nulls (as written) are PlaceHolderVars the join group computes at the
    lowest relation of their ph_eval_at (`lift.rs` `flatten_join_subquery`, `plan::phv_projection`,
    `joinpath.rs` `Phv` / `with_phvs`), so 328/343/388 match. Left: remove_useless_result_rtes
    moving PlaceHolderVars of RESULT relations onto their join partner (347, 366: done), one computed
    in a LATERAL subquery scan (345) or over a parameterized appendrel (360), PlaceHolderVars
-   with sub-selects (362/363), a dummy Result showing a view's expressions (368), a hash join
-   parameterized by a LATERAL inner side (744: the executor runs a parameterized hash join as
-   a nested loop, so it needs executor work first), a partitionwise join with a LATERAL
-   PlaceHolderVar (partition_join 41).
-2. **Remaining join / partition_join / partition_prune plan shapes** (join 53, partition_join 16,
+   with sub-selects (362/363), a dummy Result showing a view's expressions (368), a
+   partitionwise join with a LATERAL PlaceHolderVar (partition_join 41). (744, a hash join
+   parameterized by a LATERAL inner side: done in round 16, agent 17.)
+2. **Remaining join / partition_join / partition_prune plan shapes** (join 50, partition_join 15,
    partition_prune 2 units; round 14's agent 5 and round 16's agent 12 sections in STATUS.md have
-   what changed and why the rest is open): cost-driven choices (join 123/410/424/450/543,
-   partition_join 21/74),
+   what changed and why the rest is open; round 16's agent 17 section has join relations
+   parameterized by LATERAL references and why 123/410/442/502/503, partition_join 74/86/88/92
+   and partition_prune 265/410 stay open): cost-driven choices (join 123/410/424/450/543,
+   partition_join 74),
    partitionwise LATERAL joins left (partition_join 48/207 done in round 16, agent 19; 204:
    a PlaceHolderVar), IN over a partitioned subquery as a semi join (partition_join 86/88/92: the
    subquery is planned before the WHERE's sublinks are pulled up), partition_prune 265 / 410.
