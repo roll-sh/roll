@@ -720,13 +720,8 @@ impl Planner<'_, '_> {
     }
 }
 
-/// The bare names of a plan's columns (as EXPLAIN would show them unqualified), when they
-/// are plain columns.
-fn plain_names(p: &Plan) -> Option<Vec<String>> {
-    plain_cols(p).map(|v| v.into_iter().map(|(n, _)| n).collect())
-}
-
-/// `plain_names`, with the relation each column is read from.
+/// The names of a plan's columns (as EXPLAIN would show them unqualified), when they are
+/// plain columns, with the relation each is read from.
 fn plain_cols(p: &Plan) -> Option<Vec<(String, Option<String>)>> {
     match p {
         Plan::Scan(s) => {
@@ -747,6 +742,17 @@ fn plain_cols(p: &Plan) -> Option<Vec<(String, Option<String>)>> {
                     _ => None,
                 })
                 .collect()
+        }
+        // (A system catalog's columns by its reference's name.)
+        Plan::SysScan { table, alias, .. } => {
+            let rel = alias.clone().unwrap_or_else(|| table.name().to_string());
+            Some(
+                table
+                    .columns()
+                    .iter()
+                    .map(|(n, _)| (crate::catalog::quote_ident(n), Some(rel.clone())))
+                    .collect(),
+            )
         }
         // (A CTE's columns by its reference's name.)
         Plan::CteScan { alias, cols, ncols, .. } if cols.len() == *ncols => Some(
@@ -816,9 +822,14 @@ fn dummy(p: &Plan) -> Plan {
         let (names, exprs) = dummy_outputs(p);
         if exprs.iter().any(|e| !matches!(e, Expr::Col(..))) {
             let ncols = names.len();
-            let cols = names.into_iter().collect::<Option<Vec<_>>>().map(Arc::new);
+            // (Each column by its relation's name, as EXPLAIN qualifies it.)
+            let rels: Vec<Option<String>> = names.iter().map(|n| n.as_ref().and_then(|x| x.1.clone())).collect();
+            let cols = names.into_iter().map(|n| n.map(|x| x.0)).collect::<Option<Vec<_>>>().map(Arc::new);
+            let info = cols
+                .is_some()
+                .then(|| Arc::new(crate::sql::plan::DummyInfo { rels, ..Default::default() }));
             return Plan::Project {
-                input: Arc::new(Plan::Empty { ncols, cols, info: None }),
+                input: Arc::new(Plan::Empty { ncols, cols, info }),
                 exprs,
             };
         }
@@ -866,7 +877,7 @@ fn unplanned_subqueries(p: &Plan, out: &mut Vec<(String, usize)>) {
 
 /// A plan's outputs as expressions over the relations below its projections and joins
 /// (each column's name, when a plain column has one).
-fn dummy_outputs(p: &Plan) -> (Vec<Option<String>>, Vec<Expr>) {
+fn dummy_outputs(p: &Plan) -> (Vec<Option<(String, Option<String>)>>, Vec<Expr>) {
     match p {
         Plan::Project { input, exprs } => {
             let (names, inner) = dummy_outputs(input);
@@ -884,7 +895,7 @@ fn dummy_outputs(p: &Plan) -> (Vec<Option<String>>, Vec<Expr>) {
         }
         _ => {
             let types = col_types(p);
-            let names = plain_names(p).filter(|c| c.len() == types.len());
+            let names = plain_cols(p).filter(|c| c.len() == types.len());
             (
                 (0..types.len()).map(|i| names.as_ref().map(|n| n[i].clone())).collect(),
                 types.into_iter().enumerate().map(|(i, t)| Expr::Col(i, t)).collect(),

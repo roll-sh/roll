@@ -1,0 +1,36 @@
+> create temp table dn_i4 (f1 int)
+-- CREATE TABLE
+
+> create temp table dn_i8 (q1 bigint, q2 bigint)
+-- CREATE TABLE
+
+> explain (verbose, costs off)
+> select c.relname, t2.q1 from dn_i8 t2 left join pg_class c on null where false
+QUERY PLAN:text
+Result
+  Output: c.relname, t2.q1
+  One-Time Filter: false
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select v.n, t2.q1 from dn_i8 t2 left join (select relname::text || 'x' as n from pg_class) v on null where false
+QUERY PLAN:text
+Result
+  Output: ((pg_class.relname)::text || 'x'::text), t2.q1
+  One-Time Filter: false
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select v.n, t2.q1
+> from dn_i4 t1 inner join (dn_i8 t2 left join (select relname::text || 'x' as n from pg_class) v on null) on null
+QUERY PLAN:text
+Result
+  Output: ((pg_class.relname)::text || 'x'::text), t2.q1
+  One-Time Filter: false
+-- EXPLAIN
+
+> select v.n, t2.q1
+> from dn_i4 t1 inner join (dn_i8 t2 left join (select relname::text || 'x' as n from pg_class) v on null) on null
+n:text | q1:int8
+-- SELECT 0
+

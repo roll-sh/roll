@@ -781,17 +781,29 @@ What changed:
     keeping one row per value, the columns it reads coming out
     (`Unique -> Sort Key: (("*VALUES*".column1 * "*VALUES*".column1))`); no hashed form for
     those.
+- Fifth batch (no unit; the 64-file subset unchanged): a join proven empty names the
+  columns of the relations it removed, system catalogs' too, each by its relation, so its
+  Result shows the target list over them (`Output: c.relname, t2.q1`,
+  `((pg_class.relname)::text || 'x'::text)`) where it showed `NULL`.
 
 Goldens added: `tests/sql/a8_phv_join.sql`, `a8_sublink_lateral.sql`, `a8_dummy_unique.sql`,
-`a8_catalog_lateral.sql`, `a8_result_merge.sql`, `a8_lateral_any.sql`, `a8_ec_relabel_unique.sql`.
+`a8_catalog_lateral.sql`, `a8_result_merge.sql`, `a8_lateral_any.sql`, `a8_ec_relabel_unique.sql`,
+`a8_dummy_names.sql`.
 
 Still open from this list, and why:
 
-- join 366: a semi join over a full join of RESULT relations, all removed by Postgres. 345 (a
-  PlaceHolderVar computed in a LATERAL subquery scan), 360 (one computed over a parameterized
-  appendrel), 362/363 (PlaceHolderVars with sub-selects, copied per place), 368 (a dummy
-  Result showing a view's expressions), 744 (a hash join parameterized by a LATERAL inner side,
-  under a nested loop: the executor runs a parameterized hash join as a nested loop).
+- join 366: a semi join over a full join of RESULT relations, all removed by Postgres. Here
+  the IN's sub-select (a join) stays a Barrier ("ANY_subquery") planned as a level of its own
+  during the outer level's walk, after the outer join group was lifted, so the semi join's
+  FROM-less right side can't be removed with it: it needs the sub-select pulled up into the
+  group first. 345 (a PlaceHolderVar computed in a LATERAL subquery scan: the join order), 360
+  (one computed over a parameterized appendrel), 362/363 (PlaceHolderVars with sub-selects,
+  copied per place, InitPlan 2 a copy), 368 (the dummy Result's target list is
+  information_schema.column_udt_usage's expressions; the engine reads that view as a virtual
+  catalog, so it has no expressions to show: the fifth batch names other relations'
+  columns), 744 (`x left join lateral (select a.q1 from y)` under a nested loop over `a`:
+  Postgres hashes the left join with the LATERAL value as a key, a join rel parameterized by
+  `a`; the search here has no parameterized join rels).
 - partition_join 41: a partitionwise join with a LATERAL PlaceHolderVar.
 - Found with 328: a hash join on `name = text` isn't costed here (Postgres hashes both as
   text), and an equivalence class doesn't carry a constant across `name = text`
@@ -811,7 +823,13 @@ Still open from this list, and why:
   without keys for a pseudoconstant key and `(select grouping(v1))` as a SubPlan (the engine
   folds GROUPING to 0 without grouping sets, making it an InitPlan). 195/197 also need the
   key's SubPlan attached to the scan computing it (make_group_input_target) and the GROUP BY
-  column `t1.v` in the Agg's target list. 55/57, 215: not started.
+  column `t1.v` in the Agg's target list. 215: three EXPLAIN target-list gaps, each general:
+  the grouping-set mask column shows as `GROUPING` in a MixedAggregate's Output under a
+  ProjectSet; a scan computing the group keys returns them in the target list's order (the
+  `a + b` entry before the resjunk `a`); and the GROUP BY keys the select list doesn't name
+  stay resjunk entries of the nodes above the aggregation (Sort, ProjectSet:
+  `Output: (count(*)), q1`), which here only the level's top projection carries. 55/57: not
+  started (a LATERAL subquery's sub-select output under GROUPING).
 
 ## Fixed in round 14, agent 3 (strict-NULL folding, semi joins unique-ified early, EXISTS with sublinks)
 
