@@ -17,9 +17,9 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,037 of 51,150 statements match (99.78%).** 113 differ. The full
+- **Regression suite: 51,044 of 51,150 statements match (99.79%).** 106 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 109 are `EXPLAIN` plan text (96%). Query results already match.
+  - 102 are `EXPLAIN` plan text (96%). Query results already match.
   - 3 are plan choices that show up in results (mostly which side a hash join builds on,
     grouping-set output order).
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
@@ -367,8 +367,7 @@ them all with the "Fixed in round N" sections describing what was already tried.
    output order), **with** (10; 52/55/58/76/77 need a materialized CTE's sort order offered to a
    merge join), **memoize**, **privileges** (8 each), then the long tail in
    STATUS.md.
-6. **equivclass** and **inherit**: done (round 15, agent 10). collate.icu.utf8's last unit
-   (334: EXISTS over a DISTINCT subquery) is in STATUS.md's agent 10 section.
+6. **equivclass**, **inherit** and **collate.icu.utf8**: done (round 15, agent 10).
 7. **partition_aggregate**: done (137/137).
 8. The 18 plan-choice units listed in STATUS.md ("Plan choice visible in results").
 

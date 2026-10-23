@@ -264,6 +264,25 @@ fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bo
             false,
         ));
     }
+    // A FROM subquery planned as a level of its own (DISTINCT): the correlated clauses the
+    // binder pushed down into it come back out over its outputs, the semi join's own
+    // (convert_EXISTS_sublink_to_join keeps the subquery an RTE, its WHERE the join's).
+    if let Plan::Barrier { input, secure: false, .. } = p
+        && EXISTS_SUBLINKS.with(|c| c.get())
+        && let Some((corr, inner)) = barrier_corr(input)
+        && !corr.is_empty()
+    {
+        let Plan::Barrier { alias, cols, secure, sorted, .. } = p else { unreachable!() };
+        let types = vec![crate::types::DataType::Unknown; width(p)];
+        let rhs = Plan::Barrier {
+            input: Arc::new(inner),
+            alias: alias.clone(),
+            cols: cols.clone(),
+            secure: *secure,
+            sorted: *sorted,
+        };
+        return Some((corr, rhs, types, false));
+    }
     // A materialized CTE's scan: uncorrelated rows of its own.
     if let Plan::CteScan { ncols, .. } = p {
         return Some((Vec::new(), p.clone(), vec![crate::types::DataType::Unknown; *ncols], false));
@@ -362,6 +381,61 @@ fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bo
         types,
         limited,
     ))
+}
+
+/// A subquery level's correlated clauses pushed into its scan (through a DISTINCT, sorts and
+/// projections of columns): the clauses over the level's outputs, and the level without
+/// them. None when something else in it reads the outer query, or a clause reads a column
+/// the level doesn't return.
+fn barrier_corr(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
+    match p {
+        Plan::Distinct { input, on: None, order } => {
+            let (c, i) = barrier_corr(input)?;
+            Some((c, Plan::Distinct { input: Arc::new(i), on: None, order: *order }))
+        }
+        Plan::Sort { input, keys } if keys.iter().all(|k| !reads_outer(&k.expr)) => {
+            let (c, i) = barrier_corr(input)?;
+            Some((c, Plan::Sort { input: Arc::new(i), keys: keys.clone() }))
+        }
+        Plan::Project { input, exprs } if !exprs.iter().any(reads_outer) => {
+            let (c, i) = barrier_corr(input)?;
+            // (Over the projection's outputs: a column it returns as it is.)
+            let up: Option<Vec<Expr>> = c
+                .into_iter()
+                .map(|e| {
+                    let mut ok = true;
+                    let e = e
+                        .transform(&mut |x| {
+                            Ok(match x {
+                                Expr::Col(j, t) => match exprs.iter().position(|y| matches!(y, Expr::Col(k, _) if *k == j)) {
+                                    Some(pos) => Expr::Col(pos, t),
+                                    None => {
+                                        ok = false;
+                                        Expr::Col(j, t)
+                                    }
+                                },
+                                x => x,
+                            })
+                        })
+                        .ok()?;
+                    ok.then_some(e)
+                })
+                .collect();
+            Some((up?, Plan::Project { input: Arc::new(i), exprs: exprs.clone() }))
+        }
+        Plan::Scan(s) if s.sample.is_none() && s.current_of.is_none() => {
+            let mut parts = Vec::new();
+            if let Some(f) = &s.filter {
+                conjuncts(f.clone(), &mut parts);
+            }
+            if parts.iter().any(|e| has_sublink(e) || deep_outer(e)) {
+                return None;
+            }
+            let (corr, local): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(reads_outer);
+            Some((corr, rhs_scan(s, and_all(local))))
+        }
+        _ => None,
+    }
 }
 
 /// A subquery whose FROM list joins tables: its WHERE clauses that read the outer query
