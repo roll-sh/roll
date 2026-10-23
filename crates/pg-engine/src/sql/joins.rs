@@ -345,8 +345,34 @@ pub fn nestloop(
     }
 }
 
+/// ExecChooseHashTableSize for a Parallel Hash (try_combined_hash_mem): the combined
+/// hash_mem of `workers` workers and the leader when the whole table fits in it, else the
+/// plain sizing with one process's hash_mem. `ntuples`: all the participants' rows.
+pub fn parallel_hash_table_size(ntuples: f64, width: u32, g: &JoinGucs, workers: usize) -> (u32, u32) {
+    let (nb, nbatch, _) = parallel_hash_table_space(ntuples, width, g, workers);
+    (nb, nbatch)
+}
+
+/// `parallel_hash_table_size`, with the memory the table may use (space_allowed).
+pub fn parallel_hash_table_space(ntuples: f64, width: u32, g: &JoinGucs, workers: usize) -> (u32, u32, f64) {
+    let mut combined = *g;
+    combined.work_mem *= workers as f64 + 1.0;
+    let (nb, nbatch, space) = hash_table_space(ntuples, width, &combined);
+    if nbatch > 1 {
+        return hash_table_space(ntuples, width, g);
+    }
+    (nb, nbatch, space)
+}
+
 /// ExecChooseHashTableSize: (buckets, batches).
 pub fn hash_table_size(ntuples: f64, width: u32, g: &JoinGucs) -> (u32, u32) {
+    let (nb, nbatch, _) = hash_table_space(ntuples, width, g);
+    (nb, nbatch)
+}
+
+/// ExecChooseHashTableSize: (buckets, batches, space_allowed: the bytes the table may use,
+/// doubled with each halving of the batches).
+pub fn hash_table_space(ntuples: f64, width: u32, g: &JoinGucs) -> (u32, u32, f64) {
     let ntuples = if ntuples <= 0.0 { 1000.0 } else { ntuples };
     let maxalign = |n: usize| n.div_ceil(8) * 8;
     // HJTUPLE_OVERHEAD + MAXALIGN(SizeofMinimalTupleHeader) + MAXALIGN(width).
@@ -389,15 +415,20 @@ pub fn hash_table_size(ntuples: f64, width: u32, g: &JoinGucs) -> (u32, u32) {
             .min(max_pointers);
         nbatch = nextpow2((dbatch as u64).max(2));
     }
+    // Halving the batches (doubling the table) while that uses less memory, the batch
+    // files' buffers counted: (S + 2 * nbatch * BLCKSZ) < (2 * S + nbatch * BLCKSZ) stops it.
     while nbatch > 1 {
-        if nbatch as f64 >= space_allowed / BLCKSZ {
+        if nbuckets as f64 > max_alloc_pointers / 2.0 {
+            break;
+        }
+        if (nbatch as f64) < (space_allowed / BLCKSZ).floor() {
             break;
         }
         nbuckets *= 2;
         space_allowed *= 2.0;
         nbatch /= 2;
     }
-    (nbuckets as u32, nbatch as u32)
+    (nbuckets as u32, nbatch as u32, space_allowed)
 }
 
 /// estimate_hash_bucket_stats: (mcv frequency, bucket size fraction) of the inner key.
@@ -445,6 +476,10 @@ pub struct HashInfo {
     pub bucket: Option<(f64, f64)>,
     /// approx_tuple_count of the hash clauses.
     pub hash_tuples: f64,
+    /// A Parallel Hash: the inner side's rows over all the participants (its partial
+    /// rows times its parallel divisor) and the outer side's workers, which size the
+    /// shared table (initial_cost_hashjoin's inner_path_rows_total).
+    pub parallel: Option<(f64, usize)>,
 }
 
 /// initial_cost_hashjoin + final_cost_hashjoin: the cost and the batch count.
@@ -466,7 +501,10 @@ pub fn hashjoin(
     startup += inner.total;
     startup = CPU_OPERATOR_COST.mul_add(n, CPU_TUPLE_COST).mul_add(inner_rows, startup);
     run = (CPU_OPERATOR_COST * n).mul_add(outer_rows, run);
-    let (nbuckets, nbatch) = hash_table_size(inner_rows, inner.width, g);
+    let (nbuckets, nbatch) = match h.parallel {
+        Some((rows_total, workers)) => parallel_hash_table_size(rows_total, inner.width, g, workers),
+        None => hash_table_size(inner_rows, inner.width, g),
+    };
     if nbatch > 1 {
         let outerpages = page_size(outer_rows, outer.width);
         let innerpages = page_size(inner_rows, inner.width);

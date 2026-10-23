@@ -176,6 +176,10 @@ pub struct NodeStats {
     pub total: f64,
     /// A hash join's inner side: the most rows sharing one key (what no batching splits).
     pub hash_max_group: u64,
+    /// And the rows it hashed, with each column's bytes over them (the first 32 columns'):
+    /// what the values the table keeps take, which decides a batch's size.
+    pub hash_rows: u64,
+    pub hash_col_bytes: [u64; 32],
     /// A MERGE's source (counted under its key): rows inserted, updated and deleted.
     pub merged: [u64; 3],
     /// An Incremental Sort's sorts.

@@ -3957,6 +3957,7 @@ impl Search<'_, '_, '_> {
             // (A unique-ified inner side: one row per bucket.)
             bucket: (!matches!(ip.node, JNode::Unique { .. })).then_some(bucket),
             hash_tuples: costs::clamp_rows(inner_sel * op.rows * ip.rows),
+            parallel: None,
         };
         let (c, batches) = joins::hashjoin(
             ex.jt,

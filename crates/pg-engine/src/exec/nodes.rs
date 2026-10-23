@@ -2238,8 +2238,37 @@ impl HashJoinNode {
                 *counts.entry(format!("{k:?}")).or_default() += 1;
             }
             let max = counts.values().copied().max().unwrap_or(0);
+            // (Each column's values as a tuple stores them: what the ones the table keeps
+            // take decides a batch's size.)
+            let types = crate::sql::paths::analyzejoins::col_types(&self.right_plan);
+            let text = |v: &Value, ty: &crate::types::DataType| crate::types::text::format_value(v, ty, ctx.fmt());
+            let mut bytes = [0u64; 32];
+            for r in &rows {
+                for ((v, ty), b) in r.iter().zip(&types).zip(bytes.iter_mut()) {
+                    if !v.is_null() {
+                        *b += crate::catalog::relsize::datum_bytes(0, v, ty, &text) as u64;
+                    }
+                }
+            }
             let key = Arc::as_ptr(&self.right_plan) as usize;
-            instr.update(key, |s| s.hash_max_group = s.hash_max_group.max(max));
+            // (The bunching and the values' sizes under the inner relation's own nodes too, below a merge
+            // join's Sort and the projection over its scan: EXPLAIN's plan may hash that
+            // relation where this one merges, its node keyed by the scan.)
+            let mut keys = vec![key];
+            let mut p: &Plan = &self.right_plan;
+            while let Plan::Sort { input, .. } | Plan::Project { input, .. } = p {
+                keys.push(Arc::as_ptr(input) as usize);
+                p = input;
+            }
+            for k in keys {
+                instr.update(k, |s| {
+                    s.hash_max_group = s.hash_max_group.max(max);
+                    s.hash_rows += rows.len() as u64;
+                    for (a, b) in s.hash_col_bytes.iter_mut().zip(bytes) {
+                        *a += b;
+                    }
+                });
+            }
         }
         let keep = matches!(self.kind, JoinKind::Right | JoinKind::Full);
         let mut built = build_hash(rows, &self.rkeys, self.nbuckets, keep, ctx)?;

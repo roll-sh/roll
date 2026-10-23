@@ -17,13 +17,12 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,046 of 51,150 statements match (99.80%).** 104 differ. The full
+- **Regression suite: 51,053 of 51,150 statements match (99.81%).** 97 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 100 are `EXPLAIN` plan text (96%). Query results already match.
-  - 3 are plan choices that show up in results (mostly which side a hash join builds on,
-    grouping-set output order).
-  - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
-    work), so the ceiling is about 99.998%.
+  - 96 are `EXPLAIN` plan text (99%). Query results already match.
+  - 1 is a plan choice that shows up in results (sqljson_jsontable's join order).
+  - None differs by design any more (aggregates `balk` matches since round 16, agent 14: a
+    Finalize Aggregate runs the user-defined combine functions).
 - No engine crashes or panics in a full run. A full run of 286306f measured 50,792: STATUS's
   per-file counts hold except that run's artifacts (see STATUS.md). The "stalls" in full runs
   (`ALTER TABLE tt7 DROP q` in alter_table, fast_default 177–179) were no hang: every ALTER TABLE
@@ -360,13 +359,13 @@ them all with the "Fixed in round N" sections describing what was already tried.
    `rule_statements`). Left (STATUS.md, round 16 agent 9): merge 462 (Inner Unique over an
    empty partitioned target), returning 105 (the view's NEW values computed below the join),
    `FOR UPDATE OF s` with no locked relation at the level, a whole-row mark's subquery keeping
-   all its columns, VERBOSE lists of an UPDATE joined with an inherited target, a unique-ified
-   semi join under FOR UPDATE.
-5. **select_parallel** (1),
-   **groupingsets** (12, including the sorted-vs-hashed choice and
-   output order), **with** (10; 52/55/58/76/77 need a materialized CTE's sort order offered to a
-   merge join), **memoize**, **privileges** (8 each), then the long tail in
-   STATUS.md.
+   all its columns, a unique-ified semi join under FOR UPDATE. (VERBOSE lists of UPDATE /
+   DELETE joined with an inherited target of several members, and a CTE's / VALUES' /
+   function's whole-row mark there: round 16, agent 14.)
+5. **groupingsets** (12, including the sorted-vs-hashed choice and output order), **with** (3:
+   MERGE whose actions read sub-selects, see round 16 agent 14), **join_hash** (2: SubPlan
+   numbering), then the long tail in STATUS.md. (select_parallel, select_distinct and
+   join_hash's batch counts match since round 16, agent 14.)
 6. **equivclass**, **inherit** and **collate.icu.utf8**: done (round 15, agent 10).
 7. **partition_aggregate**: done (137/137).
 8. The 18 plan-choice units listed in STATUS.md ("Plan choice visible in results").

@@ -499,6 +499,14 @@ struct ExNode {
     /// their order (a scan's parallel index scans): what a Gather Merge above may run as
     /// it is, or sorted incrementally (generate_useful_gather_paths).
     partials: Vec<ExNode>,
+    /// A Sort's input as its relation gives it, with its partial plans (`partial`,
+    /// `partials`), when it has some: a merge join's sorted inputs are one of the join
+    /// relation's paths; its partial paths (hashing, a nested loop) read the inputs
+    /// unsorted. With the input's own names (`Built::internal`).
+    presort: Option<Box<(ExNode, Vec<Name>)>>,
+    /// A Hash: the columns of its input's rows the table keeps (those the join returns or
+    /// checks), whose sizes EXPLAIN ANALYZE's batch counts go by.
+    hash_cols: Vec<usize>,
     /// A scan reading an index in the order the query's ORDER BY wants (the planner
     /// took it for the Sort): per wanted key, the column it reads. A plain Gather of its
     /// partial plan would lose that order (`settle` gathers it only in order).
@@ -1714,6 +1722,34 @@ fn junk_layout(
     };
     n.output.sort_by_key(|o| rank(o));
     junk
+}
+
+/// A node (a Sort, a Hash, a Materialize) over an inheritance tree's Append of `members`
+/// returns what the members' scans do, under the tree's name `parent` (the Append's
+/// target list is its first member's, set_dummy_tlist_references).
+fn append_passthrough(n: &mut ExNode, parent: &str, members: &[String]) {
+    for c in &mut n.children {
+        append_passthrough(c, parent, members);
+    }
+    if n.is_join() || n.output.is_empty() || n.children.len() != 1 {
+        return;
+    }
+    let c = &n.children[0];
+    if c.node_type != "Append" {
+        return;
+    }
+    let Some(first) = c.children.first().filter(|f| f.is_scan()) else { return };
+    let renamed: Vec<String> = first
+        .output
+        .iter()
+        .map(|o| {
+            members
+                .iter()
+                .find_map(|m| o.strip_prefix(&format!("{m}.")).map(|col| format!("{parent}.{col}")))
+                .unwrap_or_else(|| o.clone())
+        })
+        .collect();
+    n.output = renamed;
 }
 
 /// A correlated EXISTS's two plans: the plain one and its hashed ANY form, with what each
@@ -3746,9 +3782,16 @@ impl Builder<'_, '_> {
             // aggregation reads, and its calls.)
             let srf_target = b.node.node_type == "ProjectSet" && self.agg_input == Some(addr(p));
             // (A row-marked scan returns its ctid: no physical target list either.)
+            // (Nor does a scan whose system columns are read, an UPDATE / DELETE target's
+            // ctid above a join: use_physical_tlist refuses.)
+            let sys_read = |s: &ScanPlan| {
+                self.needed
+                    .get(&addr(p))
+                    .is_some_and(|m| m.iter().skip(s.table.columns.len()).any(|x| *x))
+            };
             let marked = b.node.is_scan()
                 && (self.rowmarks.contains(&addr(p))
-                    || matches!(&**p, Plan::Scan(s) if s.with_key && UNDER_LOCK_ROWS.with(|u| u.get() > 0)));
+                    || matches!(&**p, Plan::Scan(s) if s.with_key && (UNDER_LOCK_ROWS.with(|u| u.get() > 0) || sys_read(s))));
             let mut mask = (b.node.is_join() || b.node.node_type == "Index Only Scan" || b.node.node_type == "WindowAgg" || dummy || member || sorted_join || srf_target || marked)
                 .then(|| self.needed.get(&addr(p)).cloned())
                 .flatten();
@@ -5135,6 +5178,11 @@ impl Builder<'_, '_> {
                 let part = c.node.partial.clone();
                 let others = c.node.partials.clone();
                 let rel_rows = c.node.rows;
+                let presort = part.is_some().then(|| {
+                    let mut u = c.node.clone();
+                    u.presort = None;
+                    Box::new((u, c.internal.clone()))
+                });
                 self.settle(&mut c.node);
                 // (A member's sort key expressions its scan computes: references to them.)
                 let list: Vec<String> = keys
@@ -5593,7 +5641,9 @@ impl Builder<'_, '_> {
                         n.alt = Some(Box::new(gm));
                     }
                 }
-                Built::passthrough(with_alts(n, extra), c.exported)
+                let mut n = with_alts(n, extra);
+                n.presort = presort;
+                Built::passthrough(n, c.exported)
             }
             // limit_needed: no count and a constant zero (or NULL) offset make no Limit
             // node (OFFSET 0 only keeps the subquery from being flattened).
@@ -5678,6 +5728,8 @@ impl Builder<'_, '_> {
                 self.plain_distinct = saved_plain;
                 // (Its partial plan: a DISTINCT in the workers first, create_partial_distinct_paths.)
                 let part = c.node.partial.clone();
+                // (The relation's other partial paths, kept for their order.)
+                let part_others = c.node.partials.clone();
                 self.settle(&mut c.node);
                 let in_alt = c.node.alt.take();
                 // A hashed DISTINCT reads a plain scan's physical target list (its select
@@ -5856,6 +5908,8 @@ impl Builder<'_, '_> {
                 }
                 // Or (create_distinct_paths) a Unique over the input sorted on the keys, in
                 // the order the input already has as far as it goes.
+                // (The DISTINCT's keys as written, distinct_pathkeys: column, name.)
+                let mut distinct_named: Vec<(usize, String)> = Vec::new();
                 let sorted = if on.is_none() && !keys.is_empty() {
                     let named: Vec<(usize, String)> = c
                         .exported
@@ -5870,6 +5924,7 @@ impl Builder<'_, '_> {
                             v
                         });
                     let names: Vec<String> = named.iter().map(|x| x.1.clone()).collect();
+                    distinct_named = named.clone();
                     let mut ord: Vec<String> = Vec::new();
                     // (In either direction: a backward scan's order serves as well.)
                     for o in &c.node.order {
@@ -6039,7 +6094,7 @@ impl Builder<'_, '_> {
                     && let Some(pt) = part.as_deref()
                     && self.par.is_some()
                     && !keys.is_empty()
-                    && let Some(best) = self.parallel_distinct(&n, u, pt, &keys, key_ops, match &**input {
+                    && let Some(best) = self.parallel_distinct(&n, u, pt, &part_others, &distinct_named, &keys, key_ops, match &**input {
                         // (create_agg_path: the computed keys per group.)
                         Plan::Project { exprs, .. } => exprs
                             .iter()
@@ -6978,6 +7033,7 @@ impl Builder<'_, '_> {
                 // no physical target list.)
                 let joined = !matches!(&*up.source, Plan::Scan(_));
                 UNDER_LOCK_ROWS.with(|u| u.set(u.get() + joined as usize));
+                self.dml_copy_marks(&up.source);
                 let mut c = self.node(&up.source);
                 UNDER_LOCK_ROWS.with(|u| u.set(u.get() - joined as usize));
                 let t = &up.rules.table;
@@ -7166,6 +7222,7 @@ impl Builder<'_, '_> {
                 let returning = shown_returning(&dp.returning);
                 let joined = !matches!(&*dp.source, Plan::Scan(_));
                 UNDER_LOCK_ROWS.with(|u| u.set(u.get() + joined as usize));
+                self.dml_copy_marks(&dp.source);
                 let mut c = self.node(&dp.source);
                 UNDER_LOCK_ROWS.with(|u| u.set(u.get() - joined as usize));
                 let t = &dp.table;
@@ -7181,7 +7238,6 @@ impl Builder<'_, '_> {
                     c.node.output = vec![self.pick(k, Cx::Output)];
                 } else if self.o.verbose
                     && !dp.inh
-                    && self.ctx.catalog().children(t.oid).is_empty()
                     && c.node.is_join()
                     && let Some(k) = c.exported.get(t.columns.len())
                 {
@@ -7235,6 +7291,7 @@ impl Builder<'_, '_> {
                 // (The target's scan returns its ctid: no physical target list.)
                 let joined = !matches!(&*mp.source, Plan::Scan(_));
                 UNDER_LOCK_ROWS.with(|u| u.set(u.get() + joined as usize));
+                self.dml_copy_marks(&mp.source);
                 let mut c = self.node(&mp.source);
                 UNDER_LOCK_ROWS.with(|u| u.set(u.get() - joined as usize));
                 if self.o.verbose && !mp.members.is_empty() {
@@ -7588,6 +7645,22 @@ impl Builder<'_, '_> {
     /// (the members its source reads, in order), over the source: the members' Append, or a
     /// join over it.
     #[allow(clippy::too_many_arguments)]
+    /// VERBOSE: an UPDATE / DELETE / MERGE's other relations that are no table (a CTE, a
+    /// function, VALUES) have a ROW_MARK_COPY row mark (preprocess_rowmarks): their whole
+    /// row goes up the plan as junk, for EvalPlanQual.
+    fn dml_copy_marks(&mut self, source: &Arc<Plan>) {
+        if !self.o.verbose {
+            return;
+        }
+        let (mut semi, mut copies) = (Vec::new(), Vec::new());
+        lock_level_marks(source, false, &mut semi, &mut copies);
+        // (A FROM subquery keeps its Subquery Scan for its mark, `shown_subqueries`.)
+        for (a, p) in copies.into_iter().filter(|(_, p)| !matches!(p, Plan::Barrier { .. })) {
+            let name = format!("{}.*", quote_ident(&self.refname(p)));
+            self.rowmark_junk.insert(a, vec![((2, super::plan::Rti(usize::MAX)), name)]);
+        }
+    }
+
     fn inherited_dml(
         &mut self,
         key: usize,
@@ -7656,6 +7729,7 @@ impl Builder<'_, '_> {
         .unwrap_or_else(|| pt.name.clone());
         let joined = has_join(source);
         UNDER_LOCK_ROWS.with(|u| u.set(u.get() + joined as usize));
+        self.dml_copy_marks(source);
         let mut app = self.node(source);
         UNDER_LOCK_ROWS.with(|u| u.set(u.get() - joined as usize));
         // VERBOSE, one member read over a join: the join computes the new values, then the
@@ -7777,6 +7851,34 @@ impl Builder<'_, '_> {
                     at.subplans.append(&mut self.pending);
                 }
             }
+        }
+        // VERBOSE, several members read over a join: the processed target list
+        // (preprocess_targetlist): the new values, the other relations' row marks, then the
+        // tree's row identity (add_row_identity_columns, after them: its tableoid and ctid),
+        // which each member's scan returns last.
+        if self.o.verbose
+            && joined
+            && all.len() > 1
+            && app.node.is_join()
+            && let Some(ctid) = app.exported.get(pt.columns.len()).map(|k| self.pick(k, Cx::Output))
+            && let Some(parent) = ctid.strip_suffix(".ctid").map(str::to_string)
+        {
+            let mut top: Vec<String> = sorted.iter().map(|(_, e)| self.set_value(e, &app.exported)).collect();
+            top.extend(self.rescans(&sorted));
+            top.extend(junk_in(&app.node, &self.rowmark_junk));
+            let members: Vec<String> = all.iter().map(|(_, r)| quote_ident(r)).collect();
+            add_tableoid(&mut app.node, &parent, &members);
+            top.push(format!("{parent}.tableoid"));
+            top.push(ctid);
+            let last: Vec<String> = members
+                .iter()
+                .flat_map(|m| [format!("{m}.tableoid"), format!("{m}.ctid")])
+                .collect();
+            for ch in &mut app.node.children {
+                junk_layout(ch, &top, &last, &self.rowmark_junk);
+                append_passthrough(ch, &parent, &members);
+            }
+            app.node.output = top;
         }
         let child = if above_scans {
             let mut r = self.result(app.node.rows);
@@ -8139,30 +8241,66 @@ impl Builder<'_, '_> {
     }
 
     /// create_partial_distinct_paths: the DISTINCT (serial: hashed `n`, sorted `u`) done in
-    /// the workers over partial plan `pt`, then over what a Gather (Merge) of them sends,
-    /// when such a plan survives add_path and is the cheapest.
+    /// the workers over the input's partial plans (`pt` the cheapest, `others` the ones
+    /// kept for their order), then over what a Gather (Merge) of them sends
+    /// (create_final_distinct_paths), when such a plan survives add_path and is the
+    /// cheapest; the other plans that survive go beside it (`alt`), for a LIMIT above.
+    /// `needed`: the DISTINCT's keys (distinct_pathkeys: column, name); each sorted path
+    /// is also tried in the order of a path's own leading keys among them
+    /// (get_useful_pathkeys_for_distinct).
+    #[allow(clippy::too_many_arguments)]
     fn parallel_distinct(
         &self,
         n: &ExNode,
         u: &ExNode,
         pt: &ExNode,
+        others: &[ExNode],
+        needed: &[(usize, String)],
         keys: &[ColInfo],
         key_ops: f64,
         per_group: f64,
         every_row: bool,
     ) -> Option<ExNode> {
         let g = crate::sql::paths::Gucs::read(self.ctx);
-        let ord = u.order.clone();
+        let need_names: Vec<String> = needed.iter().map(|x| x.1.clone()).collect();
+        let col_of = |name: &str| needed.iter().find(|x| x.1 == name).map(|x| x.0);
+        // get_useful_pathkeys_for_distinct: the keys as they are, and reordered to lead
+        // with the path's own leading keys among them.
+        let useful = |order: &[String]| -> Vec<Vec<String>> {
+            let mut out = vec![need_names.clone()];
+            if !g.distinct_reordering {
+                return out;
+            }
+            let mut lead: Vec<String> = Vec::new();
+            for o in order {
+                if !need_names.contains(o) || lead.contains(o) {
+                    break;
+                }
+                lead.push(o.clone());
+            }
+            if lead.is_empty() {
+                return out;
+            }
+            for k in &need_names {
+                if !lead.contains(k) {
+                    lead.push(k.clone());
+                }
+            }
+            if lead != need_names {
+                out.push(lead);
+            }
+            out
+        };
         let pd_rows = if every_row { pt.rows } else { self.num_groups(keys, pt.rows) };
-        let unique_over = |child: ExNode, rows: f64| -> ExNode {
+        let unique_over = |child: ExNode, rows: f64, ord: &[String]| -> ExNode {
             let mut x = ExNode::new("Unique");
-            x.unique_keys = u.unique_keys.clone();
+            x.unique_keys = Some(ord.iter().filter_map(|k| col_of(k)).collect());
             x.rows = rows;
             x.width = n.width;
             x.cols = n.cols.clone();
             x.startup_cost = child.startup_cost;
             x.total_cost = child.total_cost + child.rows * key_ops;
-            x.order = ord.clone();
+            x.order = ord.to_vec();
             x.workers = child.workers;
             x.output = child.output.clone();
             x.children.push(child.child("Outer"));
@@ -8186,30 +8324,63 @@ impl Builder<'_, '_> {
             x.children.push(child.child("Outer"));
             x
         };
-        let sort_of = |child: ExNode| -> ExNode {
-            let mut sn = ExNode::new("Sort");
-            sn.details.push(Detail::List("Sort Key", ord.clone()));
-            sn.details.push(Detail::SortInfo);
-            self.sort_costs(&mut sn, &child);
-            sn.disabled = !g.sort;
-            sn.order = ord.clone();
-            sn.workers = child.workers;
-            sn.key = child.key;
-            sn.output = child.output.clone();
-            sn.children.push(child.child("Outer"));
-            sn
+        // make_ordered_path: `p` already in `ord`, or sorted on it: incrementally when it
+        // has a leading part of it, else fully but only the cheapest path (`cheapest`).
+        let ordered = |p: &ExNode, ord: &[String], cheapest: bool| -> Option<ExNode> {
+            let common = ord.iter().zip(&p.order).take_while(|(a, b)| a == b).count();
+            if common == ord.len() {
+                return Some(p.clone());
+            }
+            if !cheapest && (common == 0 || !g.incremental_sort) {
+                return None;
+            }
+            let cols: Vec<Option<usize>> = ord.iter().map(|k| col_of(k)).collect();
+            let mut sn = self.sorted_partial(p, ord, &cols, g.incremental_sort, p.key);
+            sn.output = p.output.clone();
+            Some(sn)
         };
-        // The partial DISTINCTs: hashed, and sorted (with its sort).
-        let p_hash = hash_over(pt.clone(), pd_rows);
-        let p_sorted = unique_over(sort_of(pt.clone()), pd_rows);
-        let cheapest_partial = if parallel::cheaper(&p_sorted, &p_hash) { &p_sorted } else { &p_hash };
-        // generate_useful_gather_paths: a Gather of the cheapest, Gather Merges of the
-        // sorted ones (and of the cheapest sorted).
-        let mut gathered = vec![self.gather_of(cheapest_partial), self.gather_merge_of(&p_sorted)];
-        if std::ptr::eq(cheapest_partial, &p_hash) {
-            gathered.push(self.gather_merge_of(&sort_of(p_hash.clone())));
+        let same = |a: &ExNode, b: &ExNode| {
+            a.title == b.title && a.total_cost == b.total_cost && a.startup_cost == b.startup_cost && a.order == b.order
+        };
+        // The partial DISTINCTs (add_partial_path): sorted ones over each partial plan, and
+        // the hashed one over the cheapest.
+        let mut partials: Vec<ExNode> = Vec::new();
+        for (i, p) in std::iter::once(pt).chain(others).enumerate() {
+            for ord in useful(&p.order) {
+                if let Some(sp) = ordered(p, &ord, i == 0) {
+                    parallel::add_partial_path(&mut partials, unique_over(sp, pd_rows, &ord));
+                }
+            }
         }
-        let gathered = pwagg::add_path_survivors(gathered, &ord);
+        parallel::add_partial_path(&mut partials, hash_over(pt.clone(), pd_rows));
+        let cheapest_partial = partials
+            .iter()
+            .fold(None::<&ExNode>, |b, x| match b {
+                Some(b) if !parallel::cheaper(x, b) => Some(b),
+                _ => Some(x),
+            })?
+            .clone();
+        // generate_useful_gather_paths: a Gather of the cheapest, a Gather Merge of each
+        // sorted one, and for the query's order (the keys) one over the cheapest sorted
+        // and over each other one sorted incrementally.
+        let mut gathered = vec![self.gather_of(&cheapest_partial)];
+        for p in &partials {
+            if !p.order.is_empty() {
+                gathered.push(self.gather_merge_of(p));
+            }
+        }
+        if self.par.as_ref().is_some_and(|c| c.gather_merge) {
+            for p in &partials {
+                let common = need_names.iter().zip(&p.order).take_while(|(a, b)| a == b).count();
+                if common == need_names.len() {
+                    continue;
+                }
+                if let Some(sp) = ordered(p, &need_names, same(p, &cheapest_partial)) {
+                    gathered.push(self.gather_merge_of(&sp));
+                }
+            }
+        }
+        let gathered = parallel::add_paths(gathered);
         let cheapest_total = gathered
             .iter()
             .fold(None::<&ExNode>, |b, x| match b {
@@ -8217,28 +8388,37 @@ impl Builder<'_, '_> {
                 _ => Some(x),
             })
             .cloned()?;
-        // create_final_distinct_paths over them.
-        let sorted_by = |x: &ExNode| x.order.len() >= ord.len() && x.order[..ord.len()] == ord[..];
+        // create_final_distinct_paths over them: each in a useful order of its own (the
+        // cheapest sorted when it isn't), and the cheapest hashed.
         let mut finals: Vec<ExNode> = Vec::new();
         for x in &gathered {
-            if sorted_by(x) {
-                finals.push(unique_over(x.clone(), n.rows));
+            for ord in useful(&x.order) {
+                if let Some(sp) = ordered(x, &ord, same(x, &cheapest_total)) {
+                    finals.push(unique_over(sp, n.rows, &ord));
+                }
             }
-        }
-        if !sorted_by(&cheapest_total) {
-            finals.push(unique_over(sort_of(cheapest_total.clone()), n.rows));
         }
         finals.push(hash_over(cheapest_total, n.rows));
         let mut all = vec![n.clone(), u.clone()];
         all.extend(finals);
-        let kept = pwagg::add_path_survivors(all, &ord);
-        let best = kept.into_iter().fold(None::<ExNode>, |b, x| match b {
-            Some(b) if !parallel::cheaper(&x, &b) => Some(b),
-            _ => Some(x),
+        let mut kept = parallel::add_paths(all);
+        let best_at = kept.iter().enumerate().fold(None::<usize>, |b, (i, x)| match b {
+            Some(b) if !parallel::cheaper(x, &kept[b]) => Some(b),
+            _ => Some(i),
         })?;
         // (Only a plan of the workers' DISTINCT: the serial ones go as before.)
-        let serial = |s: &ExNode| s.title == best.title && s.total_cost == best.total_cost && s.startup_cost == best.startup_cost;
-        (!serial(n) && !serial(u)).then_some(best)
+        if same(n, &kept[best_at]) || same(u, &kept[best_at]) {
+            return None;
+        }
+        let mut best = kept.remove(best_at);
+        // (The others beside it, in the order add_path kept them.)
+        let mut tail: Option<Box<ExNode>> = None;
+        for mut x in kept.into_iter().rev() {
+            x.alt = tail;
+            tail = Some(Box::new(x));
+        }
+        best.alt = tail;
+        Some(best)
     }
 
     /// consider_groupingsets_paths over sorted input: the rollups after the first (whose
@@ -12012,13 +12192,36 @@ impl Builder<'_, '_> {
             exported: b.exported.clone(),
         };
         let parts = l.node.partial.is_some() || r.node.partial.is_some();
+        // (A merge join's inputs sorted for it: the join's other partial paths read its
+        // sides as their relations give them, with their partial plans.)
+        let unsorted = |b: &Built| -> Built {
+            match &b.node.presort {
+                Some(p) if meta.method == Some(super::plan::JoinMethod::Merge) && b.node.node_type == "Sort" => Built {
+                    node: p.0.clone(),
+                    internal: p.1.clone(),
+                    exported: b.exported.clone(),
+                },
+                _ => copy(b),
+            }
+        };
+        let (lu, ru) = (unsorted(&l), unsorted(&r));
+        let unsorted_parts = lu.node.partial.is_some() || ru.node.partial.is_some();
         let (mut lg, mut rg) = (copy(&l), copy(&r));
+        let mut lateral_gathered = false;
         if parts && !lateral {
             // (A join's inputs gathered as their relations' cheapest paths: in no order.)
             lg.node.wanted_order.clear();
             rg.node.wanted_order.clear();
             self.settle(&mut lg.node);
             self.settle(&mut rg.node);
+        } else if lateral && l.node.partial.is_some() {
+            // (A LATERAL join's outer relation has its Gather path too
+            // (generate_useful_gather_paths at the base relation): a serial nested loop may
+            // read it. The inner side, parameterized by the outer, has no partial paths to
+            // gather.)
+            lg.node.wanted_order.clear();
+            self.settle(&mut lg.node);
+            lateral_gathered = parallel::has_gather(&lg.node) && !parallel::has_gather(&l.node);
         }
         // (A partial nested loop takes the inner side's cheapest path, which a Gather
         // can't run under.)
@@ -12045,12 +12248,15 @@ impl Builder<'_, '_> {
             .then(|| (copy(&l), copy(&r)));
         // (The join's other partial paths: by hashing or a nested loop, either side
         // outside for an inner join, add_paths_to_joinrel's partial candidates.)
-        let others_in = (parts
+        let others_in = (unsorted_parts
             && !lateral
             && self.par.is_some()
             && meta.from_call.is_none()
-            && matches!(kind, JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti))
-        .then(|| (copy(&l), copy(&r)));
+            && matches!(
+                kind,
+                JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Semi | JoinKind::Anti
+            ))
+        .then_some((lu, ru));
         // (A nested loop keeps its outer side's order: that side's partial plan sorted in
         // the query's order under a Gather Merge, generate_useful_gather_paths at its
         // relation, makes a path in that order; either side outside for an inner join.)
@@ -12180,8 +12386,11 @@ impl Builder<'_, '_> {
             m2.hash_buckets = None;
             // (In the order Postgres builds them, a tie keeping the first: the side earlier in
             // the FROM list outside first (make_join_rel's rel1), nested loops before
-            // hashing; the serial join's own partial path with its sides as they are.)
+            // hashing; the serial join's own partial path with its sides as they are. An
+            // outer join as a LEFT join first, then the other way round as a RIGHT one
+            // (populate_joinrel_with_paths): a RIGHT join's sides swapped first.)
             let first_sw = match (min_rti(left), min_rti(right)) {
+                _ if kind == JoinKind::Right => true,
                 (Some(a), Some(b)) => b < a && kind == JoinKind::Inner,
                 _ => false,
             };
@@ -12201,7 +12410,15 @@ impl Builder<'_, '_> {
                     consider(own.take().flatten(), &mut best);
                 }
                 for m in [JoinMethod::NestLoop, JoinMethod::Hash] {
-                    if (m == JoinMethod::Hash && hash.is_none()) || (sw && kind != JoinKind::Inner) {
+                    // (An outer join either way round by hashing (as a RIGHT join only with a
+                    // Parallel Hash), by a nested loop only as a LEFT join.)
+                    let turnable = match kind {
+                        JoinKind::Inner | JoinKind::Right => true,
+                        JoinKind::Left => m == JoinMethod::Hash,
+                        _ => false,
+                    };
+                    let nl_right = m == JoinMethod::NestLoop && kind == JoinKind::Right && !sw;
+                    if (m == JoinMethod::Hash && hash.is_none()) || (sw && !turnable) || nl_right {
                         continue;
                     }
                     self.join_force = Some((m, sw));
@@ -12215,7 +12432,7 @@ impl Builder<'_, '_> {
             b1.node.partial = best;
         }
         // Or over its inputs gathered from workers (their Gather paths, when cheaper).
-        if parts && !lateral {
+        if parts && (!lateral || lateral_gathered) {
             if b1.node.partial.as_deref().is_some_and(nl_inner_gathered) {
                 b1.node.partial = None;
             }
@@ -12477,7 +12694,15 @@ impl Builder<'_, '_> {
         match method {
             JoinMethod::Hash => {
                 let hash_cost = |outer: &ExNode, inner: &ExNode, sw: bool, uniq: bool| {
-                    let (nb, nbatch) = joins::hash_table_size(inner.rows, inner.width, &g);
+                    // (A Parallel Hash, over the inner side's partial plan: the shared
+                    // table sized for all the participants' rows, initial_cost_hashjoin.)
+                    let parallel = (inner.workers > 0 && !parallel::has_gather(inner))
+                        .then(|| self.par.as_ref().map(|c| (inner.rows * c.divisor(inner.workers), outer.workers)))
+                        .flatten();
+                    let (nb, nbatch) = match parallel {
+                        Some((rows, w)) => joins::parallel_hash_table_size(rows, inner.width, &g, w),
+                        None => joins::hash_table_size(inner.rows, inner.width, &g),
+                    };
                     let vb = nb as f64 * nbatch as f64;
                     let mut bucket = (1.0_f64, 1.0_f64);
                     for (a, b) in &pairs {
@@ -12507,6 +12732,7 @@ impl Builder<'_, '_> {
                         },
                         bucket: (!meta.unique_inner).then_some(bucket),
                         hash_tuples: costs::clamp_rows(inner_sel * outer.rows * inner.rows),
+                        parallel,
                     };
                     let sf = (matches!(jt, Jt::Semi | Jt::Anti) || uniq)
                         .then(|| factors(outer.rows, inner.rows, sw));
@@ -12527,9 +12753,10 @@ impl Builder<'_, '_> {
                         inner_unique = lunique;
                     }
                 }
-                // (A partial path of another orientation, `join_force`.)
+                // (A partial path of another orientation, `join_force`: an outer join's the
+                // other way round.)
                 if let Some((_, sw)) = force
-                    && kind == JoinKind::Inner
+                    && matches!(kind, JoinKind::Inner | JoinKind::Left | JoinKind::Right)
                     && sw != swapped
                 {
                     swapped = sw;
@@ -12667,9 +12894,10 @@ impl Builder<'_, '_> {
                         inner_unique = lunique;
                     }
                 }
-                // (A partial path of another orientation, `join_force`.)
+                // (A partial path of another orientation, `join_force`: a RIGHT join's as a
+                // LEFT one.)
                 if let Some((_, sw)) = force
-                    && kind == JoinKind::Inner
+                    && (kind == JoinKind::Inner || (kind == JoinKind::Right && sw))
                     && !lateral
                     && sw != swapped
                 {
@@ -12727,12 +12955,18 @@ impl Builder<'_, '_> {
             JoinMethod::Merge => !g.mergejoin,
             JoinMethod::Hash => !g.hashjoin,
         };
+        // (An outer join turned round: LEFT for RIGHT and back.)
+        let shown_kind = match (swapped, kind) {
+            (true, JoinKind::Left) => JoinKind::Right,
+            (true, JoinKind::Right) => JoinKind::Left,
+            (_, k) => k,
+        };
         let jname = if right_variant {
             format!("Right {}", join_type(kind))
         } else {
-            join_type(kind).to_string()
+            join_type(shown_kind).to_string()
         };
-        n.title = match (method, kind) {
+        n.title = match (method, shown_kind) {
             (JoinMethod::Hash, _) if right_variant => format!("Hash {jname} Join"),
             (JoinMethod::Merge, _) if right_variant => format!("Merge {jname} Join"),
             (JoinMethod::Hash, JoinKind::Inner) => "Hash Join".into(),
@@ -13072,6 +13306,35 @@ impl Builder<'_, '_> {
             h.width = r.node.width;
             h.startup_cost = r.node.total_cost;
             h.total_cost = r.node.total_cost;
+            // (The inner columns the table keeps: those used above, the keys' and the
+            // quals'.)
+            if self.o.analyze {
+                let nleft = if swapped { r.exported.len() } else { l.exported.len() };
+                let inner_off = if swapped { 0 } else { nleft };
+                let width = r.exported.len();
+                let mut cols: Vec<usize> = Vec::new();
+                let need = self.needed.get(&at).filter(|_| !matches!(kind, JoinKind::Semi | JoinKind::Anti));
+                for i in 0..width {
+                    if need.is_some_and(|m| m.get(inner_off + i).copied().unwrap_or(true)) {
+                        cols.push(i);
+                    }
+                }
+                for (a, b) in &keys {
+                    for c in (if swapped { a } else { b }).columns() {
+                        if c < width && !cols.contains(&c) {
+                            cols.push(c);
+                        }
+                    }
+                }
+                for q in &others {
+                    for c in q.columns() {
+                        if c >= inner_off && (swapped || c >= nleft) && c - inner_off < width && !cols.contains(&(c - inner_off)) {
+                            cols.push(c - inner_off);
+                        }
+                    }
+                }
+                h.hash_cols = cols;
+            }
             if self.o.verbose {
                 // (A Hash returns its input's values: a computed one by reference.)
                 // (An inheritance tree's Append returns the parent's columns.)
@@ -13166,7 +13429,7 @@ impl Builder<'_, '_> {
         if let (Some(c), Some(po)) = (pcost, outer_part)
             && gating.is_empty()
             && (parallel_hash
-                || matches!(kind, JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti))
+                || matches!(shown_kind, JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti))
             && (parallel_hash || n.children.get(1).is_some_and(parallel::safe_tree))
             && let Some(cfg) = self.par.clone()
         {
@@ -14683,44 +14946,71 @@ impl Render<'_> {
                     // processes' rows, in their combined memory), then the batches the
                     // rows it got needed (ExecHashIncreaseNumBatches: doubling while the
                     // first batch's share is over the memory, until a split moves none).
-                    let mut g = self.jg;
-                    let mut est = n.rows;
-                    if n.parallel_aware {
-                        let w = n.children.first().map_or(0, |c| c.workers) as f64;
-                        let procs = w + if self.leader { 1.0 } else { 0.0 };
-                        est *= procs.max(1.0);
-                        g.work_mem *= w + 1.0;
-                    }
-                    let (mut nb0, mut nbatch0) = super::joins::hash_table_size(est, n.width, &g);
-                    // (Not fitting the combined memory, it plans with its own.)
-                    if n.parallel_aware && nbatch0 > 1 {
-                        g = self.jg;
-                        (nb0, nbatch0) = super::joins::hash_table_size(est, n.width, &g);
-                    }
-                    let tupsize = (32 + (n.width as u64).div_ceil(8) * 8) as f64;
-                    let space = (g.work_mem * g.hash_mem_multiplier * 1024.0).floor();
+                    // (Its space_allowed: hash_mem, doubled with each halving of the batches
+                    // ExecChooseHashTableSize makes.)
+                    let (nb0, nbatch0, space) = if n.parallel_aware {
+                        // (The plan's rows_total: the partial rows times the parallel
+                        // divisor (get_parallel_divisor), as the planner costed it; the
+                        // combined hash_mem of the participants when the table fits it.)
+                        let w = n.children.first().map_or(0, |c| c.workers);
+                        let wf = w as f64;
+                        let lead = if self.leader { (1.0 - 0.3 * wf).max(0.0) } else { 0.0 };
+                        let est = n.rows * (wf + lead).max(1.0);
+                        super::joins::parallel_hash_table_space(est, n.width, &self.jg, w)
+                    } else {
+                        super::joins::hash_table_space(n.rows, n.width, &self.jg)
+                    };
+                    // (The rows' size in the table: as the executor hashed them, else the
+                    // planner's width.)
+                    // (HJTUPLE_OVERHEAD, then the MinimalTuple: its header and the values,
+                    // MAXALIGNed.)
+                    let tupsize = if raw.hash_rows > 0 && !n.hash_cols.is_empty() {
+                        let data: f64 = n
+                            .hash_cols
+                            .iter()
+                            .map(|&c| raw.hash_col_bytes.get(c).copied().unwrap_or(0) as f64 / raw.hash_rows as f64)
+                            .sum();
+                        16.0 + ((16.0 + data) / 8.0).ceil() * 8.0
+                    } else {
+                        (32 + (n.width as u64).div_ceil(8) * 8) as f64
+                    };
                     let max_group = (st.hash_max_group / loops).max(1) as f64;
                     let mut nbatch = nbatch0 as u64;
                     let mut in_mem = (rows as f64 / nbatch as f64).max(max_group.min(rows as f64));
-                    let mut grew_stuck = false;
-                    while in_mem * tupsize + nb0 as f64 * 8.0 > space {
-                        let next = nbatch * 2;
+                    let mut space = space;
+                    // (A Parallel Hash's participants: the Gather's workers and the leader.)
+                    let participants = n.children.first().map_or(0, |c| c.workers) as u64 + 1;
+                    let mut regrown_buckets: Option<u64> = None;
+                    // (A Parallel Hash lets each participant allocate one chunk whatever its
+                    // size: a batch of no more tuples than participants never grows.)
+                    while in_mem * tupsize + nb0 as f64 * 8.0 > space
+                        && !(n.parallel_aware && nbatch > 1 && in_mem <= participants as f64)
+                    {
+                        // ExecParallelHashIncreaseNumBatches: from one batch (the combined
+                        // hash_mem wasn't enough) to two per participant, with one
+                        // participant's hash_mem and a bucket array for the tuples expected
+                        // per batch; else doubling.
+                        let next = if n.parallel_aware && nbatch == 1 {
+                            space = (self.jg.work_mem * self.jg.hash_mem_multiplier * 1024.0).floor();
+                            let next = (participants * 2).next_power_of_two();
+                            let dbuckets = (rows as f64 * 2.0 / next as f64).ceil() as u64;
+                            regrown_buckets = Some(dbuckets.max(1024).next_power_of_two());
+                            next
+                        } else {
+                            nbatch * 2
+                        };
                         let now = (rows as f64 / next as f64).max(max_group.min(rows as f64));
                         nbatch = next;
+                        // (A split that moves no tuple out of the batch disables growth.)
                         if now >= in_mem {
-                            grew_stuck = true;
                             break;
                         }
                         in_mem = now;
                     }
-                    // (A Parallel Hash splits its first batch once more before it gives up.)
-                    if grew_stuck && n.parallel_aware {
-                        nbatch *= 2;
-                    }
                     let nb = if nbatch == 1 {
                         (nb0 as u64).max(rows.next_power_of_two())
                     } else {
-                        nb0 as u64
+                        regrown_buckets.unwrap_or(nb0 as u64)
                     };
                     let kb = self.memory_kb(n, 9);
                     if text {
@@ -15719,6 +16009,24 @@ pub fn sets_sorted(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
 /// A DISTINCT (`plan`) EXPLAIN shows as a Unique over its input sorted (rather than a
 /// HashAggregate): the columns its rows come out sorted on.
 pub fn distinct_order(plan: &Arc<Plan>, ctx: &ExecCtx) -> Option<Vec<usize>> {
+    level_node(plan, ctx).unique_keys
+}
+
+/// An aggregation (`plan`) EXPLAIN shows split in two, a Partial Aggregate in the workers
+/// under a Finalize Aggregate (create_partial_grouping_paths): its aggregates' states are
+/// combined (the combine function runs) before their results are made.
+pub fn agg_split(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
+    fn find(n: &ExNode) -> Option<bool> {
+        if n.node_type == "Aggregate" {
+            return Some(n.partial_mode == Some("Finalize"));
+        }
+        n.children.iter().find_map(find)
+    }
+    find(&level_node(plan, ctx)).unwrap_or(false)
+}
+
+/// The EXPLAIN node of `plan` (a query level's top), with costs.
+fn level_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> ExNode {
     let o = Options {
         analyze: false,
         verbose: false,
@@ -15780,8 +16088,7 @@ pub fn distinct_order(plan: &Arc<Plan>, ctx: &ExecCtx) -> Option<Vec<usize>> {
         alts: Default::default(),
         dummy_target: None,
     };
-    let n = b.level(plan);
-    n.unique_keys
+    b.level(plan)
 }
 
 pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {

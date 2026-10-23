@@ -526,6 +526,9 @@ pub struct UserAgg {
     /// In a moving implementation: the inverse transition, over `[state, args…]`, and
     /// whether it is strict.
     pub inverse: Option<(Expr, bool)>,
+    /// The combine function (COMBINEFUNC), over `[state, state]`, and whether it is strict:
+    /// what a Finalize Aggregate runs over the partial aggregations' states.
+    pub combine: Option<(Expr, bool)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

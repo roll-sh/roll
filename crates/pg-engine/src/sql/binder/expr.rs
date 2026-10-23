@@ -5340,7 +5340,16 @@ impl Binder<'_, '_> {
                 init,
                 moving: None,
                 inverse: Some(inverse),
+                combine: None,
             }))
+        } else {
+            None
+        };
+        // The combine function, for a state other than `internal` (whose partial states
+        // travel serialized).
+        let combine = if spec.combinefn != 0 && spec.transtype.oid() != 2281 {
+            let row = vec![Expr::Col(0, stype.clone()), Expr::Col(1, stype.clone())];
+            self.agg_support_call(spec.combinefn, row, &stype, loc).ok()
         } else {
             None
         };
@@ -5352,6 +5361,7 @@ impl Binder<'_, '_> {
             init,
             moving,
             inverse: None,
+            combine,
         })
     }
 

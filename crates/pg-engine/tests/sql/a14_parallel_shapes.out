@@ -1,0 +1,356 @@
+> CREATE TABLE a14_l1 AS SELECT i AS unique1, i % 2 AS two, repeat('x', 200) AS pad FROM generate_series(1, 10000) i
+-- SELECT 10000
+
+> CREATE TABLE a14_l2 AS SELECT i AS unique1, i % 2 AS two, repeat('y', 200) AS pad FROM generate_series(1, 10000) i
+-- SELECT 10000
+
+> ANALYZE a14_l1
+-- ANALYZE
+
+> ANALYZE a14_l2
+-- ANALYZE
+
+> SET parallel_setup_cost = 0
+-- SET
+
+> SET parallel_tuple_cost = 0
+-- SET
+
+> SET min_parallel_table_scan_size = 0
+-- SET
+
+> SET max_parallel_workers_per_gather = 4
+-- SET
+
+> ALTER TABLE a14_l2 SET (parallel_workers = 0)
+-- ALTER TABLE
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM a14_l1 t1 LEFT JOIN LATERAL (SELECT t1.unique1 AS x, * FROM a14_l2 t2 ORDER BY 1) t2 ON true
+> WHERE t1.two > t2.two
+QUERY PLAN:text
+Nested Loop
+  ->  Gather
+        Workers Planned: 4
+        ->  Parallel Seq Scan on a14_l1 t1
+  ->  Subquery Scan on t2
+        Filter: (t1.two > t2.two)
+        ->  Seq Scan on a14_l2 t2_1
+-- EXPLAIN
+
+> ALTER TABLE a14_l2 RESET (parallel_workers)
+-- ALTER TABLE
+
+> RESET max_parallel_workers_per_gather
+-- RESET
+
+> RESET min_parallel_table_scan_size
+-- RESET
+
+> RESET parallel_tuple_cost
+-- RESET
+
+> RESET parallel_setup_cost
+-- RESET
+
+> CREATE TABLE a14_distinct (x int, y int)
+-- CREATE TABLE
+
+> INSERT INTO a14_distinct SELECT i % 10, i % 10 FROM generate_series(1, 1000) AS i
+-- INSERT 0 1000
+
+> CREATE INDEX a14_distinct_x_y ON a14_distinct (x, y)
+-- CREATE INDEX
+
+> ANALYZE a14_distinct
+-- ANALYZE
+
+> SET enable_hashagg = off
+-- SET
+
+> SET parallel_tuple_cost = 0
+-- SET
+
+> SET parallel_setup_cost = 0
+-- SET
+
+> SET min_parallel_table_scan_size = 0
+-- SET
+
+> SET min_parallel_index_scan_size = 0
+-- SET
+
+> SET max_parallel_workers_per_gather = 2
+-- SET
+
+> EXPLAIN SELECT DISTINCT y, x FROM a14_distinct LIMIT 10
+QUERY PLAN:text
+Limit  (cost=0.16..4.55 rows=10 width=8)
+  ->  Unique  (cost=0.16..44.03 rows=100 width=8)
+        ->  Gather Merge  (cost=0.16..43.18 rows=170 width=8)
+              Workers Planned: 1
+              ->  Unique  (cost=0.15..41.90 rows=100 width=8)
+                    ->  Parallel Index Only Scan using a14_distinct_x_y on a14_distinct  (cost=0.15..38.96 rows=588 width=8)
+-- EXPLAIN
+
+> SELECT DISTINCT y, x FROM a14_distinct LIMIT 10
+y:int4 | x:int4
+0 | 0
+1 | 1
+2 | 2
+3 | 3
+4 | 4
+5 | 5
+6 | 6
+7 | 7
+8 | 8
+9 | 9
+-- SELECT 10
+
+> EXPLAIN SELECT DISTINCT y, x FROM a14_distinct
+QUERY PLAN:text
+Unique  (cost=27.34..34.17 rows=100 width=8)
+  ->  Gather Merge  (cost=27.34..32.97 rows=240 width=8)
+        Workers Planned: 2
+        ->  Unique  (cost=27.31..30.44 rows=100 width=8)
+              ->  Sort  (cost=27.31..28.36 rows=417 width=8)
+                    Sort Key: y, x
+                    ->  Parallel Seq Scan on a14_distinct  (cost=0.00..9.17 rows=417 width=8)
+-- EXPLAIN
+
+> SET enable_seqscan = off
+-- SET
+
+> EXPLAIN SELECT DISTINCT y, x FROM a14_distinct LIMIT 10
+QUERY PLAN:text
+Limit  (cost=0.16..4.55 rows=10 width=8)
+  ->  Unique  (cost=0.16..44.03 rows=100 width=8)
+        ->  Gather Merge  (cost=0.16..43.18 rows=170 width=8)
+              Workers Planned: 1
+              ->  Unique  (cost=0.15..41.90 rows=100 width=8)
+                    ->  Parallel Index Only Scan using a14_distinct_x_y on a14_distinct  (cost=0.15..38.96 rows=588 width=8)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET max_parallel_workers_per_gather
+-- RESET
+
+> RESET min_parallel_index_scan_size
+-- RESET
+
+> RESET min_parallel_table_scan_size
+-- RESET
+
+> RESET parallel_setup_cost
+-- RESET
+
+> RESET parallel_tuple_cost
+-- RESET
+
+> RESET enable_hashagg
+-- RESET
+
+> CREATE FUNCTION a14_find_hash(node json) RETURNS json LANGUAGE plpgsql AS $$
+> DECLARE x json; child json;
+> BEGIN
+>   IF node->>'Node Type' = 'Hash' THEN RETURN node; END IF;
+>   FOR child IN SELECT json_array_elements(node->'Plans') LOOP
+>     x := a14_find_hash(child);
+>     IF x IS NOT NULL THEN RETURN x; END IF;
+>   END LOOP;
+>   RETURN NULL;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION a14_batches(query text) RETURNS TABLE (original int, final int) LANGUAGE plpgsql AS $$
+> DECLARE whole_plan json; hash_node json;
+> BEGIN
+>   FOR whole_plan IN EXECUTE 'explain (analyze, format ''json'') ' || query LOOP
+>     hash_node := a14_find_hash(json_extract_path(whole_plan, '0', 'Plan'));
+>     original := hash_node->>'Original Hash Batches';
+>     final := hash_node->>'Hash Batches';
+>     RETURN NEXT;
+>   END LOOP;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TABLE a14_simple AS SELECT generate_series(1, 20000) AS id, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+-- SELECT 20000
+
+> ALTER TABLE a14_simple SET (parallel_workers = 2)
+-- ALTER TABLE
+
+> ANALYZE a14_simple
+-- ANALYZE
+
+> CREATE TABLE a14_wide AS SELECT generate_series(1, 2) AS id, rpad('', 320000, 'x') AS t
+-- SELECT 2
+
+> ALTER TABLE a14_wide SET (parallel_workers = 2)
+-- ALTER TABLE
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL min_parallel_table_scan_size = 0
+-- SET
+
+> SET LOCAL parallel_setup_cost = 0
+-- SET
+
+> SET LOCAL max_parallel_workers_per_gather = 0
+-- SET
+
+> SET LOCAL work_mem = '128kB'
+-- SET
+
+> SET LOCAL hash_mem_multiplier = 1.0
+-- SET
+
+> EXPLAIN SELECT count(*) FROM a14_simple r JOIN a14_simple s USING (id)
+QUERY PLAN:text
+Aggregate  (cost=1675.00..1675.01 rows=1 width=8)
+  ->  Hash Join  (cost=721.00..1625.00 rows=20000 width=0)
+        Hash Cond: (r.id = s.id)
+        ->  Seq Scan on a14_simple r  (cost=0.00..392.00 rows=20000 width=4)
+        ->  Hash  (cost=392.00..392.00 rows=20000 width=4)
+              ->  Seq Scan on a14_simple s  (cost=0.00..392.00 rows=20000 width=4)
+-- EXPLAIN
+
+> SELECT * FROM a14_batches($$ SELECT count(*) FROM a14_simple r JOIN a14_simple s USING (id) $$)
+original:int4 | final:int4
+8 | 8
+-- SELECT 1
+
+> SET LOCAL max_parallel_workers_per_gather = 2
+-- SET
+
+> SET LOCAL enable_parallel_hash = off
+-- SET
+
+> SELECT * FROM a14_batches($$ SELECT count(*) FROM a14_simple r JOIN a14_simple s USING (id) $$)
+original:int4 | final:int4
+8 | 8
+-- SELECT 1
+
+> SET LOCAL work_mem = '192kB'
+-- SET
+
+> SET LOCAL enable_parallel_hash = on
+-- SET
+
+> EXPLAIN SELECT count(*) FROM a14_simple r JOIN a14_simple s USING (id)
+QUERY PLAN:text
+Finalize Aggregate  (cost=873.85..873.86 rows=1 width=8)
+  ->  Gather  (cost=873.63..873.84 rows=2 width=8)
+        Workers Planned: 2
+        ->  Partial Aggregate  (cost=873.63..873.64 rows=1 width=8)
+              ->  Parallel Hash Join  (cost=412.50..852.80 rows=8333 width=0)
+                    Hash Cond: (r.id = s.id)
+                    ->  Parallel Seq Scan on a14_simple r  (cost=0.00..275.33 rows=8333 width=4)
+                    ->  Parallel Hash  (cost=275.33..275.33 rows=8333 width=4)
+                          ->  Parallel Seq Scan on a14_simple s  (cost=0.00..275.33 rows=8333 width=4)
+-- EXPLAIN
+
+> SELECT * FROM a14_batches($$ SELECT count(*) FROM a14_simple r JOIN a14_simple s USING (id) $$)
+original:int4 | final:int4
+8 | 8
+-- SELECT 1
+
+> SET LOCAL work_mem = '4MB'
+-- SET
+
+> EXPLAIN SELECT count(*) FROM a14_simple r JOIN a14_simple s USING (id)
+QUERY PLAN:text
+Finalize Aggregate  (cost=741.85..741.86 rows=1 width=8)
+  ->  Gather  (cost=741.63..741.84 rows=2 width=8)
+        Workers Planned: 2
+        ->  Partial Aggregate  (cost=741.63..741.64 rows=1 width=8)
+              ->  Parallel Hash Join  (cost=379.50..720.80 rows=8333 width=0)
+                    Hash Cond: (r.id = s.id)
+                    ->  Parallel Seq Scan on a14_simple r  (cost=0.00..275.33 rows=8333 width=4)
+                    ->  Parallel Hash  (cost=275.33..275.33 rows=8333 width=4)
+                          ->  Parallel Seq Scan on a14_simple s  (cost=0.00..275.33 rows=8333 width=4)
+-- EXPLAIN
+
+> SELECT * FROM a14_batches($$ SELECT count(*) FROM a14_simple r JOIN a14_simple s USING (id) $$)
+original:int4 | final:int4
+1 | 1
+-- SELECT 1
+
+> SET LOCAL work_mem = '128kB'
+-- SET
+
+> EXPLAIN (COSTS OFF)
+>   SELECT length(max(s.t)) FROM a14_wide LEFT JOIN (SELECT id, coalesce(t, '') || '' AS t FROM a14_wide) s USING (id)
+QUERY PLAN:text
+Finalize Aggregate
+  ->  Gather
+        Workers Planned: 2
+        ->  Partial Aggregate
+              ->  Parallel Hash Left Join
+                    Hash Cond: (a14_wide.id = a14_wide_1.id)
+                    ->  Parallel Seq Scan on a14_wide
+                    ->  Parallel Hash
+                          ->  Parallel Seq Scan on a14_wide a14_wide_1
+-- EXPLAIN
+
+> SELECT length(max(s.t)) FROM a14_wide LEFT JOIN (SELECT id, coalesce(t, '') || '' AS t FROM a14_wide) s USING (id)
+length:int4
+320000
+-- SELECT 1
+
+> SELECT final > 1 AS multibatch FROM a14_batches($$
+>   SELECT length(max(s.t)) FROM a14_wide LEFT JOIN (SELECT id, coalesce(t, '') || '' AS t FROM a14_wide) s USING (id) $$)
+multibatch:bool
+t
+-- SELECT 1
+
+> SET LOCAL enable_mergejoin = off
+-- SET
+
+> EXPLAIN (COSTS OFF)
+>   SELECT length(max(s.t)) FROM a14_wide LEFT JOIN (SELECT id, coalesce(t, '') || '' AS t FROM a14_wide) s USING (id)
+QUERY PLAN:text
+Finalize Aggregate
+  ->  Gather
+        Workers Planned: 2
+        ->  Partial Aggregate
+              ->  Parallel Hash Left Join
+                    Hash Cond: (a14_wide.id = a14_wide_1.id)
+                    ->  Parallel Seq Scan on a14_wide
+                    ->  Parallel Hash
+                          ->  Parallel Seq Scan on a14_wide a14_wide_1
+-- EXPLAIN
+
+> SET LOCAL enable_parallel_hash = off
+-- SET
+
+> EXPLAIN (COSTS OFF)
+>   SELECT length(max(s.t)) FROM a14_wide LEFT JOIN (SELECT id, coalesce(t, '') || '' AS t FROM a14_wide) s USING (id)
+QUERY PLAN:text
+Finalize Aggregate
+  ->  Gather
+        Workers Planned: 2
+        ->  Partial Aggregate
+              ->  Hash Left Join
+                    Hash Cond: (a14_wide.id = a14_wide_1.id)
+                    ->  Parallel Seq Scan on a14_wide
+                    ->  Hash
+                          ->  Seq Scan on a14_wide a14_wide_1
+-- EXPLAIN
+
+> ROLLBACK
+-- ROLLBACK
+
+> DROP TABLE a14_l1, a14_l2, a14_distinct, a14_simple, a14_wide
+-- DROP TABLE
+
+> DROP FUNCTION a14_batches(text)
+-- DROP FUNCTION
+
+> DROP FUNCTION a14_find_hash(json)
+-- DROP FUNCTION
+

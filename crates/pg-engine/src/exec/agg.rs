@@ -37,6 +37,10 @@ pub trait Accum {
         None
     }
     fn set_user_state(&mut self, _state: (Option<Value>, bool)) {}
+    /// The aggregation is split: this state is a partial aggregation's, which a Finalize
+    /// Aggregate combines into its own before making the result (a user-defined
+    /// aggregate's combine function).
+    fn split(&mut self) {}
 }
 
 pub type MakeAccum = fn(&AggInit) -> Result<Box<dyn Accum>>;
@@ -1978,6 +1982,7 @@ pub fn user_accum(init: &AggInit) -> Result<Box<dyn Accum>> {
         u,
         state: None,
         no_value: false,
+        split: false,
     }))
 }
 
@@ -1987,6 +1992,8 @@ struct UserAccum {
     state: Option<Value>,
     /// Strict transition without an initial value: no row has given the state yet.
     no_value: bool,
+    /// The state is a partial aggregation's, combined into the Finalize Aggregate's.
+    split: bool,
 }
 
 impl UserAccum {
@@ -2030,11 +2037,34 @@ impl Accum for UserAccum {
     fn set_user_state(&mut self, state: (Option<Value>, bool)) {
         (self.state, self.no_value) = state;
     }
+    fn split(&mut self) {
+        self.split = self.u.combine.is_some();
+    }
     fn result(&self, ctx: &ExecCtx) -> Result<Value> {
-        let st = match &self.state {
+        let mut st = match &self.state {
             Some(v) => v.clone(),
             None => self.initial(ctx)?,
         };
+        // A Finalize Aggregate: its own state (the initial value) combined with the
+        // partial aggregation's (advance_combine_function: a strict combine function
+        // skips a NULL partial state, takes the first as the state when there is no
+        // initial value, and keeps a state that became NULL).
+        if self.split
+            && let Some((combine, strict)) = &self.u.combine
+        {
+            let partial = st;
+            let mut fin = self.initial(ctx)?;
+            if !*strict {
+                fin = eval(combine, &[fin, partial], ctx)?;
+            } else if !partial.is_null() {
+                if self.u.init.is_none() {
+                    fin = partial;
+                } else if !fin.is_null() {
+                    fin = eval(combine, &[fin, partial], ctx)?;
+                }
+            }
+            st = fin;
+        }
         match &self.u.final_ {
             Some(_) if self.u.final_strict && st.is_null() => Ok(Value::Null),
             Some(f) => eval(f, &[st], ctx),
@@ -2312,6 +2342,8 @@ pub struct AggNode {
     out: std::vec::IntoIter<Row>,
     /// The plan node (its estimated group count sizes the hash table).
     plan: Option<Arc<crate::sql::plan::Plan>>,
+    /// Planned as a Finalize Aggregate over partial ones (decided at the first group).
+    split: std::cell::OnceCell<bool>,
 }
 
 impl AggNode {
@@ -2328,7 +2360,20 @@ impl AggNode {
             aggs,
             out: Vec::new().into_iter(),
             plan: None,
+            split: std::cell::OnceCell::new(),
         }
+    }
+
+    /// Whether the plan splits the aggregation into partial ones (in the workers) and a
+    /// Finalize Aggregate combining their states, as EXPLAIN shows it: asked only when a
+    /// user-defined aggregate's combine function could tell (a built-in's combining one
+    /// partial state gives the serial result).
+    fn split(&self, ctx: &ExecCtx) -> bool {
+        *self.split.get_or_init(|| {
+            self.aggs.iter().any(|a| a.user.as_ref().is_some_and(|u| u.combine.is_some()))
+                && self.sets.is_none()
+                && self.plan.as_ref().is_some_and(|p| crate::sql::explain::agg_split(p, ctx))
+        })
     }
 
     /// The keys that group nothing more (EXPLAIN's redundant keys), per key.
@@ -2403,9 +2448,16 @@ impl AggNode {
 
     /// A new group's aggregate states; direct arguments see the group's key.
     fn states(&self, key: &[Value], ctx: &ExecCtx) -> Result<Vec<AggState>> {
+        let split = self.split(ctx);
         self.aggs
             .iter()
-            .map(|a| new_state(a, eval_all(&a.direct, key, ctx)?))
+            .map(|a| {
+                let mut st = new_state(a, eval_all(&a.direct, key, ctx)?)?;
+                if split {
+                    st.acc.split();
+                }
+                Ok(st)
+            })
             .collect()
     }
 

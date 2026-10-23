@@ -35,48 +35,44 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51046 (**99.80%**) |
-| units differing | 104 |
-| files fully matching | 219 |
-| engine output == expected/*.out (pg_regress "ok") | 181 files |
+| units matching | 51053 (**99.81%**) |
+| units differing | 97 |
+| files fully matching | 221 |
+| engine output == expected/*.out (pg_regress "ok") | 183 files |
 | engine crashes / panics | none |
 
 ## Remaining differences, classified
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 100 | 96.2% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.9% |
-| by design (a parallel plan's combine function) | 1 | 1.0% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 96 | 99.0% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 1 | 1.0% |
+| by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 100 units
-join (62), partition_join (18), partition_prune (2), select_parallel (1), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (1), select_distinct (1)
+### EXPLAIN (group C1) — 96 units
+join (62), partition_join (18), partition_prune (2), groupingsets (7), with (3), aggregates (1), join_hash (2), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
 
-### Plan choice visible in results (C1 area) — 3 units
-join_hash (2), sqljson_jsontable (1)
+### Plan choice visible in results (C1 area) — 1 unit
+sqljson_jsontable (1)
 
 - sqljson_jsontable: the join order (a join with an unsatisfied LATERAL reference, see round 16,
-  agent 11). (join's FULL JOIN row order units 77, 85 and 459 match now.)
-  join_hash: values of EXPLAIN ANALYZE-style helpers over plans
-  that differ.
+  agent 11). (join's FULL JOIN row order units 77, 85 and 459 match now; join_hash's batch
+  counts 72 / 237 since round 16, agent 14.)
 
 ### Name resolution — 0 units
 Fixed in round 12: join 740–743, 745 and 791 match; 744 now runs and differs only in its plan
 (counted under C1).
 
-### By design — 1 unit
-aggregates (1)
-
-- aggregates `balk` (1): a combine function returning NULL shows only under a parallel
-  partial aggregation (Finalize / Partial Aggregate over Gather); the engine aggregates
-  serially and its planner (C1) doesn't choose that plan here.
+### By design — 0 units
+aggregates `balk` matches since round 16, agent 14: an aggregation planned as a Finalize
+Aggregate over partial ones runs the user-defined aggregates' combine functions.
 
 ### Server-side files — 0 units (were 28 by design)
 misc_functions (14), largeobject (13) and copy (1) match now. Server-side file access stays
@@ -111,6 +107,101 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 14 (parallel join inputs, partial DISTINCT orders, hash table sizing, inherited DML row marks, combine functions)
+
+Measured in subset runs of 45 files (test_setup, create_misc, create_index, create_view,
+create_aggregate, create_function_sql, create_table, inherit, select, aggregates,
+select_distinct, select_distinct_on, with, join_hash, select_parallel, write_parallel, union,
+subselect, join, groupingsets, incremental_sort, partition_aggregate, partition_join,
+partition_prune, memoize, window, limit, update, delete, merge, returning, rules,
+updatable_views, insert_conflict, equivclass, rowsecurity, stats_ext, tsrf, rangefuncs,
+triggers, foreign_key, explain, generated_virtual, sqljson_jsontable, collate), against the
+same subset run with 357ae27's engine (after rebasing onto agent 9's row-mark work): 17002 ->
+17009 of 17106, 7 units fixed, none broken. No other agent's units changed.
+
+| file | fixed units |
+|---|---|
+| join_hash | 72, 235, 237 |
+| select_distinct | 90 |
+| select_parallel | 132 |
+| with | 283 |
+| aggregates | 489 (`balk`, was "by design") |
+
+What changed:
+
+- ExecChooseHashTableSize's batch halving had its test inverted: Postgres halves the batches
+  (doubling the buckets and space_allowed) while `nbatch >= space_allowed / BLCKSZ`, i.e. while
+  that uses less memory with the batch files' buffers counted; the engine halved while it
+  didn't, so a hash join estimated 8 batches costed and ran as 1 (`joins::hash_table_space`).
+  A Parallel Hash is sized for all the participants' rows (the partial rows times the
+  parallel divisor, initial_cost_hashjoin's inner_path_rows_total) in their combined hash_mem,
+  falling back to one process's when the table doesn't fit (`parallel_hash_table_size`, used by
+  the costs and by EXPLAIN ANALYZE): join_hash 72's 8 planned batches, and the parallel hash
+  join costs (412.50 where the engine had 379.50).
+- EXPLAIN ANALYZE's batch growth goes by the hashed values' real sizes: the executor counts
+  each inner column's bytes as a tuple stores them (`NodeStats::hash_col_bytes`, also under the
+  inner relation's scan below a merge join's Sort, which EXPLAIN may show hashed), and the
+  Hash node knows the columns its table keeps (those returned above, the keys', the quals'),
+  so a MinimalTuple of a 320 kB value is that big, not the planner's width; growth checks the
+  table against space_allowed as ExecChooseHashTableSize left it (doubled with each halving);
+  a Parallel Hash growing from one batch goes to two per participant with one process's
+  hash_mem and a bucket array for the tuples expected per batch
+  (ExecParallelHashIncreaseNumBatches), each participant may hold one chunk whatever its size
+  (join_hash 237: `Batches: 8 (originally 1)`, `Buckets: 1024 (originally 2048)`).
+- An outer join's partial paths are built either way round (populate_joinrel_with_paths: the
+  LEFT join first, then the RIGHT one with the sides swapped; a RIGHT one by hashing only with a
+  Parallel Hash, a nested loop only as a LEFT join), shown as the join type they run as; a merge
+  join's sorted inputs keep their relations' unsorted paths and partial plans (`presort`), so
+  the join relation's partial hash and nested loop paths are there however the serial plan
+  joins (join_hash 235: Parallel Hash Left Join under a Finalize Aggregate, where the serial
+  plan was a Merge Left Join).
+- A LATERAL join's outer relation has its Gather path too (generate_useful_gather_paths at the
+  base relation): a serial nested loop reads it when cheaper (select_parallel 132; the inner
+  side, parameterized by the outer, has no partial paths).
+- create_partial_distinct_paths in full: a sorted partial DISTINCT over every partial path of
+  the input (an ordered parallel index scan included), in the DISTINCT's own key order and
+  reordered to lead with the path's own keys (get_useful_pathkeys_for_distinct, under
+  enable_distinct_reordering), each made ordered as make_ordered_path does (sorted fully only
+  the cheapest; incrementally the others); add_partial_path / add_path with compare_pathkeys
+  over the plans' orders; Gather Merges of each sorted partial DISTINCT; the final DISTINCT over
+  each gathered path in its useful orders; the survivors beside the cheapest (`alt`), so a
+  LIMIT above takes the one cheapest for its fraction (select_distinct 90: Unique over a
+  Gather Merge of a Unique over a Parallel Index Only Scan, `Workers Planned: 1`).
+- UPDATE / DELETE over joins, EXPLAIN VERBOSE: the other relations' whole-row row marks
+  (ROW_MARK_COPY) of a CTE, VALUES or a function (`wcte.*`); an inheritance tree's target list
+  is the new values, the other relations' row marks, then its row identity
+  (add_row_identity_columns: `tableoid`, `ctid`), which each member's scan returns last, a
+  Sort / Hash over its Append returning the members' columns under the tree's name; a target's
+  scan that reads its ctid above a join builds no physical target list (use_physical_tlist
+  refuses system columns), an ONLY target whose table has children included (with 283). Agent
+  9's one-member case is kept as it is; this covers trees of several members, and the whole-row
+  marks of everything but FROM subqueries (whose Subquery Scans agent 9 keeps).
+- An aggregation EXPLAIN shows as a Finalize Aggregate over partial ones runs a user-defined
+  aggregate's combine function as Postgres's executor does (advance_combine_function's
+  strictness rules) over the one partial state the engine's single process makes: the
+  aggregate's COMBINEFUNC is bound with it (`UserAgg::combine`), and the executor asks EXPLAIN's
+  plan whether the aggregation is split (`explain::agg_split`, only for aggregates with a user
+  combine function: a built-in's combining one partial state gives the serial result). So
+  aggregates `balk` returns NULL as in Postgres; it was the last unit classed "by design".
+
+Goldens added: `tests/sql/a14_parallel_shapes.sql`, `a14_dml_rowmarks.sql`,
+`a14_combine_split.sql`.
+
+Still open in these files, and why:
+
+- with 235, 238, 241: since agent 9's MERGE sub-select copies, two things are left. An
+  untyped literal in a SELECT's (a CTE's, a FROM subquery's) target list is resolved to text
+  (resolveTargetListUnknowns) and shows `'cte_basic val'::text`; the engine keeps the constant
+  `unknown` and shows `'cte_basic val'` (top-level `EXPLAIN VERBOSE SELECT 'lit'` too). And a
+  MERGE's / UPDATE's joined FROM subquery returns its whole-row mark `o.*` up the plan
+  (ROW_MARK_COPY); a DELETE ... USING a subquery marks the subquery's own table (`m_1.ctid`)
+  instead. (241's `merge_source_cte.*` row mark is in now.)
+- join_hash 269 / 271: SubPlan numbering (agent 11's analysis above), and a scan reading
+  `tableoid` returns its reltarget (no physical target list) in reltarget order.
+- Costs only, not failing a unit: a LATERAL nested loop's rows are the outer rows times the
+  parameterized inner path's (Postgres: the join relation's size from the join clause's
+  selectivity, 33333333 vs 33330000).
 
 ## Round 16, agent 9 (rule-rewritten statements' plans, MERGE sub-select copies, row marks, locks pushed into subqueries)
 
@@ -2332,7 +2423,7 @@ produces no units on Linux (skipped by the file itself).
 | infinite_recurse | 8 | 8 | 100% | yes | yes |  |
 | sanity_check | 3 | 3 | 100% | yes | yes |  |
 | select_into | 67 | 67 | 100% | yes | yes |  |
-| select_distinct | 101 | 100 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| select_distinct | 101 | 101 | 100% | yes | yes |  |
 | select_distinct_on | 23 | 23 | 100% | yes | yes |  |
 | select_implicit | 44 | 44 | 100% | yes | yes |  |
 | select_having | 23 | 23 | 100% | yes | yes |  |
@@ -2340,7 +2431,7 @@ produces no units on Linux (skipped by the file itself).
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
 | join | 925 | 863 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (62) |
-| aggregates | 556 | 554 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| aggregates | 556 | 555 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
 | portals | 354 | 354 | 100% | yes | yes |  |
@@ -2370,7 +2461,7 @@ produces no units on Linux (skipped by the file itself).
 | password | 53 | 53 | 100% | yes | yes |  |
 | identity | 288 | 288 | 100% | yes | yes |  |
 | generated_stored | 468 | 468 | 100% | yes | yes |  |
-| join_hash | 279 | 274 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
+| join_hash | 279 | 277 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | brin_bloom | 40 | 40 | 100% | yes | yes |  |
 | brin_multi | 172 | 172 | 100% | yes | yes |  |
 | create_table_like | 191 | 191 | 100% | yes | yes |  |
@@ -2399,7 +2490,7 @@ produces no units on Linux (skipped by the file itself).
 | amutils | 10 | 10 | 100% | yes | yes |  |
 | stats_ext | 878 | 878 | 100% | yes | no |  |
 | collate.linux.utf8 | 2 | 2 | 100% | yes | yes |  |
-| select_parallel | 250 | 249 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| select_parallel | 250 | 250 | 100% | yes | yes |  |
 | write_parallel | 22 | 22 | 100% | yes | yes |  |
 | vacuum_parallel | 14 | 14 | 100% | yes | yes |  |
 | maintain_every | 16 | 16 | 100% | yes | yes |  |
@@ -2447,7 +2538,7 @@ produces no units on Linux (skipped by the file itself).
 | rowtypes | 237 | 237 | 100% | yes | no |  |
 | returning | 145 | 144 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | largeobject | 151 | 151 | 100% | yes | yes |  |
-| with | 307 | 303 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (4) |
+| with | 307 | 304 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
 | xml | 281 | 281 | 100% | yes | yes |  |
 | partition_join | 614 | 596 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (18) |
 | partition_prune | 771 | 769 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |

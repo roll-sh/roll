@@ -149,6 +149,148 @@ pub(super) fn parallel_wins(par: &ExNode, ser: &ExNode) -> bool {
     ser.startup_cost > par.startup_cost * FUZZ && par.total_cost < ser.total_cost
 }
 
+/// compare_pathkeys over two plans' orders: 0 the same, 1 `a`'s is better (`b`'s is a
+/// leading part of it), 2 `b`'s is, 3 they differ.
+fn compare_orders(a: &[String], b: &[String]) -> u8 {
+    if a.iter().zip(b).any(|(x, y)| x != y) {
+        return 3;
+    }
+    match a.len().cmp(&b.len()) {
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+        std::cmp::Ordering::Less => 2,
+    }
+}
+
+/// add_partial_path over partial plans: `new` kept in `list` unless one in a compatible
+/// order dominates it (fewer disabled nodes, or fuzzily cheaper in total with an order at
+/// least as good), dropping the ones it dominates; the list stays in total-cost order.
+pub(super) fn add_partial_path(list: &mut Vec<ExNode>, new: ExNode) {
+    const FUZZ: f64 = 1.01;
+    let mut insert_at = 0;
+    let mut i = 0;
+    while i < list.len() {
+        let old = &list[i];
+        let mut remove_old = false;
+        let mut accept = true;
+        let kc = compare_orders(&new.order, &old.order);
+        if kc != 3 {
+            let (dn, d_old) = (disabled_nodes(&new), disabled_nodes(old));
+            if dn != d_old {
+                if dn > d_old {
+                    accept = false;
+                } else {
+                    remove_old = true;
+                }
+            } else if new.total_cost > old.total_cost * FUZZ {
+                accept = kc == 1;
+            } else if old.total_cost > new.total_cost * FUZZ {
+                remove_old = kc != 2;
+            } else if kc == 1 {
+                remove_old = true;
+            } else if kc == 2 {
+                accept = false;
+            } else if old.total_cost > new.total_cost * 1.000_000_000_1 {
+                remove_old = true;
+            } else {
+                accept = false;
+            }
+        }
+        if !accept {
+            return;
+        }
+        if remove_old {
+            list.remove(i);
+        } else {
+            if new.total_cost >= list[i].total_cost {
+                insert_at = i + 1;
+            }
+            i += 1;
+        }
+    }
+    list.insert(insert_at, new);
+}
+
+/// add_path over `paths` in turn (compare_path_costs_fuzzily, compare_pathkeys over their
+/// orders, then rows and parallel safety: a plan with a Gather in it isn't parallel safe,
+/// so it never drops a serial one): the ones left, in the order add_path keeps them.
+pub(super) fn add_paths(paths: Vec<ExNode>) -> Vec<ExNode> {
+    const FUZZ: f64 = 1.01;
+    // (1: `a` better, 2: `b` better, 0: the same, 3: each better in one cost.)
+    let costs = |a: &ExNode, b: &ExNode, f: f64| -> u8 {
+        let (da, db) = (disabled_nodes(a), disabled_nodes(b));
+        if da != db {
+            return if da < db { 1 } else { 2 };
+        }
+        if a.total_cost > b.total_cost * f {
+            return if b.startup_cost > a.startup_cost * f { 3 } else { 2 };
+        }
+        if b.total_cost > a.total_cost * f {
+            return if a.startup_cost > b.startup_cost * f { 3 } else { 1 };
+        }
+        if a.startup_cost > b.startup_cost * f {
+            return 2;
+        }
+        if b.startup_cost > a.startup_cost * f {
+            return 1;
+        }
+        0
+    };
+    let safe = |n: &ExNode| !has_gather(n);
+    let mut kept: Vec<ExNode> = Vec::new();
+    for new in paths {
+        let mut accept = true;
+        let mut i = 0;
+        while i < kept.len() {
+            let old = &kept[i];
+            let mut remove_old = false;
+            let cc = costs(&new, old, FUZZ);
+            let kc = compare_orders(&new.order, &old.order);
+            if cc != 3 && kc != 3 {
+                let new_dominates = new.rows <= old.rows && safe(&new) >= safe(old);
+                let old_dominates = new.rows >= old.rows && safe(&new) <= safe(old);
+                match cc {
+                    0 => {
+                        if kc == 1 {
+                            remove_old = new_dominates;
+                        } else if kc == 2 {
+                            accept = !old_dominates;
+                        } else if safe(&new) != safe(old) {
+                            if safe(&new) {
+                                remove_old = true;
+                            } else {
+                                accept = false;
+                            }
+                        } else if new.rows < old.rows {
+                            remove_old = true;
+                        } else if new.rows > old.rows {
+                            accept = false;
+                        } else if costs(&new, old, 1.000_000_000_1) == 1 {
+                            remove_old = true;
+                        } else {
+                            accept = false;
+                        }
+                    }
+                    1 => remove_old = kc != 2 && new_dominates,
+                    _ => accept = !(kc != 1 && old_dominates),
+                }
+            }
+            if remove_old {
+                kept.remove(i);
+            } else {
+                i += 1;
+            }
+            if !accept {
+                break;
+            }
+        }
+        if accept {
+            kept.push(new);
+        }
+    }
+    kept
+}
+
 impl Builder<'_, '_> {
     /// A Gather over partial plan `part` (cost_gather).
     pub(super) fn gather_of(&self, part: &ExNode) -> ExNode {

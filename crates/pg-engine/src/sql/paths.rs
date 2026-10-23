@@ -68,6 +68,8 @@ pub struct Gucs {
     pub sort: bool,
     pub hashagg: bool,
     pub incremental_sort: bool,
+    /// enable_distinct_reordering.
+    pub distinct_reordering: bool,
     pub random_page_cost: f64,
     pub seq_page_cost: f64,
     /// effective_cache_size, in pages.
@@ -95,6 +97,7 @@ impl Gucs {
             sort: on("enable_sort"),
             hashagg: on("enable_hashagg"),
             incremental_sort: on("enable_incremental_sort"),
+            distinct_reordering: on("enable_distinct_reordering"),
             random_page_cost: num("random_page_cost", 4.0),
             seq_page_cost: num("seq_page_cost", 1.0),
             cache_pages: num("effective_cache_size", 524288.0),
