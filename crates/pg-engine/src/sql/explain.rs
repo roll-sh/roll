@@ -81,6 +81,40 @@ fn ec_relabel(e: &Expr) -> Expr {
     }
 }
 
+/// An inner (or semi) join clause `name = text` as it comes out of its equivalence class:
+/// the comparison's collation is the `name` side's C (a non-default implicit collation beats
+/// the default), so canonicalize_ec_expression relabels the other operand, a text-family
+/// expression reading columns, to it, which shows as a cast. (An outer join's clause keeps
+/// its form; a sub-select's value, a parameter, or a constant shows as it is.)
+fn name_text_relabel(e: &Expr) -> Expr {
+    match e {
+        Expr::And(list) => Expr::And(list.iter().map(name_text_relabel).collect()),
+        Expr::Call(d, args, ty) if d.name == "=" && args.len() == 2 => {
+            let texty = |a: &Expr| {
+                matches!(a.ty(), DataType::Text | DataType::Varchar(_))
+                    && !matches!(a, Expr::Const(..) | Expr::Cast(..) | Expr::Collate(..))
+                    && (!a.columns().is_empty() || a.has_outer_refs())
+                    && {
+                        let mut sub = false;
+                        a.walk(&mut |x| sub |= matches!(x, Expr::Subquery(_) | Expr::Param(..)));
+                        !sub
+                    }
+            };
+            let name = |a: &Expr| matches!(a.ty(), DataType::Name);
+            let (a, b) = (&args[0], &args[1]);
+            let args = if name(a) && texty(b) {
+                vec![a.clone(), Expr::Collate(Box::new(b.clone()), String::new(), -1)]
+            } else if name(b) && texty(a) {
+                vec![Expr::Collate(Box::new(a.clone()), String::new(), -1), b.clone()]
+            } else {
+                return e.clone();
+            };
+            Expr::Call(d.clone(), args, ty.clone())
+        }
+        e => e.clone(),
+    }
+}
+
 /// The parameters marked GUC_EXPLAIN, by name.
 const EXPLAIN_GUCS: &[&str] = &[
     "cpu_index_tuple_cost",
@@ -2964,6 +2998,13 @@ impl Builder<'_, '_> {
         let e = if cx == Cx::Scan {
             relabeled = ec_relabel(e);
             &relabeled
+        } else {
+            e
+        };
+        let relabeled2;
+        let e = if cx != Cx::Output && !OUTER_JOIN_SIDE.with(|o| o.get()) {
+            relabeled2 = name_text_relabel(e);
+            &relabeled2
         } else {
             e
         };
@@ -6303,16 +6344,21 @@ impl Builder<'_, '_> {
                 params,
                 meta,
                 ..
-            } => self.join(
-                key,
-                *kind,
-                left,
-                right,
-                cond.as_ref(),
-                hash.as_ref(),
-                params,
-                meta,
-            ),
+            } => {
+                let saved = OUTER_JOIN_SIDE.with(|o| o.get());
+                let b = self.join(
+                    key,
+                    *kind,
+                    left,
+                    right,
+                    cond.as_ref(),
+                    hash.as_ref(),
+                    params,
+                    meta,
+                );
+                OUTER_JOIN_SIDE.with(|o| o.set(saved));
+                b
+            }
             // A statement a rule made of another command (a DELETE done as an UPDATE) that
             // returns the statement's RETURNING rows: Postgres runs it as the query (its count
             // isn't the statement's: the engine reads it as a CTE for that).
@@ -11492,7 +11538,14 @@ impl Builder<'_, '_> {
                 self.unique_sides.insert(addr(side));
             }
         }
+        // (An outer join's nullable sides and clauses: `OUTER_JOIN_SIDE`; the caller restores.)
+        // (An inner join's own clauses come out of classes again, under an outer join too.)
+        let outer = !matches!(kind, JoinKind::Inner | JoinKind::Semi);
+        OUTER_JOIN_SIDE.with(|o| o.set(matches!(kind, JoinKind::Right | JoinKind::Full)));
         let mut l = self.node(left);
+        if outer {
+            OUTER_JOIN_SIDE.with(|o| o.set(true));
+        }
         let lateral = !params.is_empty();
         // A scan whose row the right side reads whole, and nothing of it else: its target
         // list is that whole-row Var (use_physical_tlist doesn't build one then).
@@ -13154,6 +13207,9 @@ thread_local! {
     /// A merge join's inner input (its address): sorted in full, an incremental sort can't
     /// mark and restore (initial_cost_mergejoin).
     static MERGE_INNER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Explaining an outer (or anti) join's nullable side or its own clauses: they don't
+    /// come out of equivalence classes (`name_text_relabel`).
+    static OUTER_JOIN_SIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The scans that are an inheritance Append's members as they are (the parent's own
     /// rows): an appendrel member's target list is what is needed above, no physical one.
     static INH_SCANS: std::cell::RefCell<std::collections::HashSet<usize>> =

@@ -35,26 +35,26 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51035 (**99.78%**) |
-| units differing | 115 |
-| files fully matching | 214 |
-| engine output == expected/*.out (pg_regress "ok") | 177 files |
+| units matching | 51037 (**99.78%**) |
+| units differing | 113 |
+| files fully matching | 215 |
+| engine output == expected/*.out (pg_regress "ok") | 178 files |
 | engine crashes / panics | none |
 
 ## Remaining differences, classified
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 111 | 96.5% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.6% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 109 | 96.5% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.7% |
 | by design (a parallel plan's combine function) | 1 | 0.9% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 111 units
-join (64), partition_join (18), partition_prune (2), subselect (2), collate.icu.utf8 (1), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
+### EXPLAIN (group C1) — 109 units
+join (64), partition_join (18), partition_prune (2), collate.icu.utf8 (1), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -592,7 +592,7 @@ display, not this batch).
 | file | fixed units |
 |---|---|
 | join | 328, 343, 388; second batch: 347 |
-| subselect | 218, 221, 288, 350; third batch: 327 |
+| subselect | 218, 221, 288, 350; third batch: 327; fourth: 328, 332 |
 | memoize | 11 |
 | merge | 462 |
 
@@ -681,9 +681,26 @@ What changed:
   into, so the join became a plain inner join and the search put the subquery on the outer
   side. A LATERAL subquery's Memoize keys are the values of the join clauses pushed into it
   first, then its own references (paraminfo_get_equal_hashops).
+- Fourth batch (a 53-file subset: the 35 above plus collate, collate.icu.utf8, privileges,
+  foreign_key, stats_ext, misc_functions, alter_table, indexing, tuplesort, generated_virtual,
+  sqljson_jsontable, rowtypes, explain, update, hash_index, stats, select_distinct_on,
+  partition_info; every file at its count here, alter_table 953 aside, the whole-row display
+  that differs without this batch too): subselect 328 and 332.
+  - 328: an inner or semi join's `name = text` clause comes out of its equivalence class with
+    the comparison's collation, name's C (a non-default implicit collation beats the
+    default). canonicalize_ec_expression relabels the text-family side (a column, an
+    expression of columns) to it, and EXPLAIN shows that as a cast:
+    `Index Cond: (stringu1 = ("*VALUES*".column1)::text)`. An outer or anti join's clause
+    keeps its form, as do a constant and a sub-select's value (`name_text_relabel`, by the
+    join being explained).
+  - 332: a semi join's side is unique-ified on an expression of its columns
+    (create_unique_path over semi_rhs_exprs that aren't Vars), sorted on it, a Unique
+    keeping one row per value, the columns it reads coming out
+    (`Unique -> Sort Key: (("*VALUES*".column1 * "*VALUES*".column1))`); no hashed form for
+    those.
 
 Goldens added: `tests/sql/a8_phv_join.sql`, `a8_sublink_lateral.sql`, `a8_dummy_unique.sql`,
-`a8_catalog_lateral.sql`, `a8_result_merge.sql`, `a8_lateral_any.sql`.
+`a8_catalog_lateral.sql`, `a8_result_merge.sql`, `a8_lateral_any.sql`, `a8_ec_relabel_unique.sql`.
 
 Still open from this list, and why:
 
@@ -693,8 +710,9 @@ Still open from this list, and why:
   Result showing a view's expressions), 744 (a hash join parameterized by a LATERAL inner side,
   under a nested loop: the executor runs a parameterized hash join as a nested loop).
 - partition_join 41: a partitionwise join with a LATERAL PlaceHolderVar.
-- subselect 328 (an equivalence class member relabeled to the class's collation), 332 (a semi
-  join's side unique-ified on a computed expression).
+- Found with 328: a hash join on `name = text` isn't costed here (Postgres hashes both as
+  text), and an equivalence class doesn't carry a constant across `name = text`
+  (`nk.s = tx.i and nk.s = 'A5'` gives tx `Filter: ((i)::text = 'A5'::name)` in Postgres).
 - A one-row VALUES under a left join that stays one (`i left join (select v.x, 5 as c from
   (values (0, 1)) v(x, y)) s on s.x = i.f1`): Postgres's join clause reads `0` itself
   (`Join Filter: (0 = i.f1)`, a Nested Loop over the Result); here `x` is a PlaceHolderVar of
@@ -2217,7 +2235,7 @@ produces no units on Linux (skipped by the file itself).
 | select_distinct_on | 23 | 23 | 100% | yes | yes |  |
 | select_implicit | 44 | 44 | 100% | yes | yes |  |
 | select_having | 23 | 23 | 100% | yes | yes |  |
-| subselect | 356 | 354 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
+| subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
 | join | 925 | 861 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (64) |

@@ -166,6 +166,9 @@ enum JNode {
         input: Rc<JP>,
         hashed: bool,
         cols: Vec<usize>,
+        /// Expressions (over the group's columns) it is also made unique on, sorted: the
+        /// columns `cols` are then what they read (semi_rhs_exprs that aren't Vars).
+        exprs: Vec<Expr>,
     },
     Join {
         method: JoinMethod,
@@ -2620,6 +2623,7 @@ impl Search<'_, '_, '_> {
         }
         let l = rset.trailing_zeros() as usize;
         let mut cols = Vec::new();
+        let mut exprs: Vec<Expr> = Vec::new();
         let (mut can_btree, mut can_hash) = (true, true);
         for &c in restrict {
             let cl = &self.clauses[c];
@@ -2631,9 +2635,24 @@ impl Search<'_, '_, '_> {
             } else {
                 return None;
             };
-            let g = key_col(rhs).filter(|&g| self.phv(g).is_none())?;
             can_btree &= cl.mergeable;
             can_hash &= cl.hashable;
+            // (An expression of the side's columns: unique-ified on it by sorting, a
+            // Unique keeping a row per value.)
+            let Some(g) = key_col(rhs).filter(|&g| self.phv(g).is_none()) else {
+                let ok = !rhs.columns().is_empty()
+                    && rhs.columns().iter().all(|&g| self.leaf_of.get(g) == Some(&l) && self.phv(g).is_none())
+                    && !rhs.is_volatile()
+                    && !rhs.has_outer_refs();
+                if !ok {
+                    return None;
+                }
+                can_hash = false;
+                if !exprs.iter().any(|x| x.same_as(rhs)) {
+                    exprs.push(rhs.clone());
+                }
+                continue;
+            };
             // (A column equated to a constant needs no unique-ifying.)
             let constant = match &self.leaves[l].scan {
                 Some((_, rel)) => rel.quals.iter().any(|q| const_equality(q, g - self.leaves[l].off)),
@@ -2643,19 +2662,38 @@ impl Search<'_, '_, '_> {
                 cols.push(g);
             }
         }
-        if cols.is_empty() || !(can_btree || can_hash) {
+        if (cols.is_empty() && exprs.is_empty()) || !(can_btree || can_hash) {
             return None;
+        }
+        // (With an expression among the keys, every key is one: the plain columns too.)
+        if !exprs.is_empty() {
+            let mut all: Vec<Expr> = cols.iter().map(|&g| Expr::Col(g, self.col_type(g))).collect();
+            all.append(&mut exprs);
+            exprs = all;
+        }
+        // (The columns the expressions read come out too: the join clause computes them
+        // again over them.)
+        let nkeys = if exprs.is_empty() { cols.len() } else { exprs.len() };
+        let mut out_cols = cols.clone();
+        for e in &exprs {
+            for g in e.columns() {
+                if !out_cols.contains(&g) {
+                    out_cols.push(g);
+                }
+            }
         }
         let rel = &self.rels[r];
         let input = cheapest_of(&rel.paths, false)?.clone();
         let rows_in = rel.rows;
         let groups = match &self.leaves[l].scan {
             Some((_, lr)) => {
-                let exprs: Vec<Expr> = cols
-                    .iter()
-                    .map(|&g| Expr::Col(g - self.leaves[l].off, DataType::Unknown))
-                    .collect();
-                let refs: Vec<&Expr> = exprs.iter().collect();
+                let off = self.leaves[l].off;
+                let keyx: Vec<Expr> = if exprs.is_empty() {
+                    cols.iter().map(|&g| Expr::Col(g - off, DataType::Unknown)).collect()
+                } else {
+                    exprs.iter().map(|e| e.clone().remap_cols(&|g| g - off)).collect()
+                };
+                let refs: Vec<&Expr> = keyx.iter().collect();
                 self.pl.num_groups(lr, &refs, rows_in)
             }
             // (Columns with statistics of their own, as a CTE's of a table: their distinct
@@ -2664,7 +2702,7 @@ impl Search<'_, '_, '_> {
             None => {
                 let leaf = &self.leaves[l];
                 let mut prod = 1.0;
-                for &g in cols.iter() {
+                for &g in out_cols.iter() {
                     match leaf.cols.get(g - leaf.off) {
                         Some((_, Some(v), _)) => prod *= v.ndistinct(&self.pl.cat).0,
                         Some((_, None, Some(d))) => prod *= *d,
@@ -2674,7 +2712,7 @@ impl Search<'_, '_, '_> {
                 costs::clamp_rows(prod.min(rows_in))
             }
         };
-        let n = cols.len() as f64;
+        let n = nkeys as f64;
         let width = input.width;
         // Sort + Unique.
         let sort = can_btree.then(|| {
@@ -2723,7 +2761,8 @@ impl Search<'_, '_, '_> {
                 node: JNode::Unique {
                     input: Rc::new(input),
                     hashed,
-                    cols,
+                    cols: out_cols,
+                    exprs,
                 },
             }],
             param: Vec::new(),
@@ -4640,6 +4679,55 @@ impl Search<'_, '_, '_> {
                 input,
                 hashed,
                 cols,
+                exprs: keyx,
+            } if !keyx.is_empty() => {
+                // (Sorted on the expressions too, a Unique on them all, then the columns.)
+                let (p, layout) = self.build(input);
+                let pos = |g: usize| layout.iter().position(|&x| x == g).unwrap_or(g);
+                let _ = hashed;
+                let mut exprs: Vec<Expr> = cols
+                    .iter()
+                    .map(|&g| Expr::Col(pos(g), self.col_type(g)))
+                    .collect();
+                let ncols = cols.len();
+                exprs.extend(keyx.iter().map(|e| e.clone().remap_cols(&pos)));
+                let proj = Plan::Project {
+                    input: Arc::new(p),
+                    exprs,
+                };
+                let key_pos: Vec<usize> = (ncols..ncols + keyx.len()).collect();
+                let ty = |i: usize| -> DataType {
+                    if i < ncols { self.col_type(cols[i]) } else { keyx[i - ncols].ty() }
+                };
+                let keys: Vec<SortKey> = key_pos
+                    .iter()
+                    .map(|&i| SortKey {
+                        expr: Expr::Col(i, ty(i)),
+                        desc: false,
+                        nulls_first: false,
+                        using: None,
+                    })
+                    .collect();
+                let on = keys.iter().map(|k| k.expr.clone()).collect();
+                let uniq = Plan::Distinct {
+                    input: Arc::new(Plan::Sort {
+                        input: Arc::new(proj),
+                        keys,
+                    }),
+                    on: Some(on),
+                    order: 0,
+                };
+                let plan = Plan::Project {
+                    input: Arc::new(uniq),
+                    exprs: (0..ncols).map(|i| Expr::Col(i, self.col_type(cols[i]))).collect(),
+                };
+                (plan, cols.clone())
+            }
+            JNode::Unique {
+                input,
+                hashed,
+                cols,
+                ..
             } => {
                 let (p, layout) = self.build(input);
                 let pos = |g: usize| layout.iter().position(|&x| x == g).unwrap_or(g);
