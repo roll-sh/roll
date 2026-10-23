@@ -519,6 +519,8 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             if let Some(c) = cond {
                 conjuncts(c, &mut cond_parts);
             }
+            let mut parts = parts;
+            let places = if kind == JoinKind::Inner { ec_const_order(&mut parts) } else { Vec::new() };
             // (A left join's: the WHERE's conjuncts in their order, for the classes above it.)
             let all_parts = if kind == JoinKind::Left { parts.clone() } else { Vec::new() };
             for p in parts {
@@ -580,6 +582,9 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 &mut kept,
                 (&lhave, &rhave),
             );
+            // (The constants' clauses derived for the other side too, in class order.)
+            order_by_places(&mut lpush, &places, 0);
+            order_by_places(&mut rpush, &places, nleft);
             let saved = BROKEN_DUPS.with(|b| b.replace(broken));
             let mut l = Arc::try_unwrap(left).unwrap_or_else(|a| (*a).clone());
             let mut r = Arc::try_unwrap(right).unwrap_or_else(|a| (*a).clone());
@@ -2346,6 +2351,147 @@ fn leaf_ranges(p: &Plan, off: usize) -> Vec<(usize, usize)> {
 /// Clauses onto a join's right side; a LATERAL subquery planned apart takes none reading
 /// the left side's values (qual_is_pushdown_safe refuses lateral references): they stay its
 /// Subquery Scan's filter.
+/// generate_base_implied_equalities_const over an inner join's conjuncts: an equivalence
+/// class with a constant and more than one other member (or more than one source clause)
+/// gives each member `member = constant`, the classes in the order they were made (by the
+/// clauses in order, a merged class keeping its left operand's place); a class of one
+/// clause gives that clause back as written, at its class's place. The `column = constant`
+/// conjuncts are reoriented so and put in that order (in the places they had).
+/// Returns each column member's class place.
+fn ec_const_order(parts: &mut [Expr]) -> Vec<(usize, usize)> {
+    // Members: columns and non-null constants of `=` clauses of one type family.
+    let operands = |e: &Expr| -> Option<(Expr, Expr)> {
+        let Expr::Call(def, args, _) = e else { return None };
+        if def.name != "=" || args.len() != 2 || !ec_clause(e) || !def.strict {
+            return None;
+        }
+        let ok = |x: &Expr| matches!(x, Expr::Col(..)) || matches!(x, Expr::Const(v, _) if !v.is_null());
+        (ok(&args[0]) && ok(&args[1]) && args[0].ty().without_typmod() == args[1].ty().without_typmod())
+            .then(|| (args[0].clone(), args[1].clone()))
+    };
+    let mut members: Vec<Expr> = Vec::new();
+    let mut class: Vec<usize> = Vec::new();
+    // Per class: its place (creation order) and how many source clauses it has.
+    let mut place: Vec<usize> = Vec::new();
+    let mut sources: Vec<usize> = Vec::new();
+    let member = |e: &Expr, members: &mut Vec<Expr>, class: &mut Vec<usize>| -> usize {
+        members.iter().position(|m| m.same_as(e)).unwrap_or_else(|| {
+            members.push(e.clone());
+            class.push(usize::MAX);
+            members.len() - 1
+        })
+    };
+    let mut classed: Vec<bool> = vec![false; parts.len()];
+    let mut next_place = 0;
+    for (i, p) in parts.iter().enumerate() {
+        let Some((a, b)) = operands(p) else { continue };
+        if matches!(a, Expr::Const(..)) && matches!(b, Expr::Const(..)) {
+            continue;
+        }
+        let ia = member(&a, &mut members, &mut class);
+        let ib = member(&b, &mut members, &mut class);
+        let (ca, cb) = (class[ia], class[ib]);
+        let c = match (ca, cb) {
+            (usize::MAX, usize::MAX) => {
+                place.push(next_place);
+                sources.push(0);
+                next_place += 1;
+                let c = place.len() - 1;
+                class[ia] = c;
+                class[ib] = c;
+                c
+            }
+            (x, usize::MAX) => {
+                class[ib] = x;
+                x
+            }
+            (usize::MAX, y) => {
+                class[ia] = y;
+                y
+            }
+            (x, y) => {
+                // (The left operand's class absorbs the other.)
+                for k in class.iter_mut() {
+                    if *k == y {
+                        *k = x;
+                    }
+                }
+                sources[x] += sources[y];
+                x
+            }
+        };
+        sources[c] += 1;
+        classed[i] = true;
+    }
+    let size = |c: usize| class.iter().filter(|k| **k == c).count();
+    // The `column = constant` conjuncts: their classes' places, oriented member first when
+    // the class's clauses are generated.
+    let mut slots: Vec<usize> = Vec::new();
+    let mut items: Vec<(usize, usize, Expr)> = Vec::new();
+    for (i, p) in parts.iter().enumerate() {
+        let Some((a, b)) = operands(p) else { continue };
+        if !classed[i] {
+            continue;
+        }
+        // (Its class now: after any merge.)
+        let Some(c) = members.iter().position(|m| m.same_as(&a)).map(|k| class[k]) else { continue };
+        let (col, k, flipped) = match (&a, &b) {
+            (Expr::Col(..), Expr::Const(..)) => (a.clone(), b.clone(), false),
+            (Expr::Const(..), Expr::Col(..)) => (b.clone(), a.clone(), true),
+            _ => continue,
+        };
+        let generated = size(c) > 2 || sources[c] > 1;
+        let e = if generated && flipped {
+            let Expr::Call(def, _, ty) = p else { continue };
+            Expr::Call(def.clone(), vec![col, k], ty.clone())
+        } else {
+            p.clone()
+        };
+        slots.push(i);
+        items.push((place[c], i, e));
+    }
+    items.sort_by_key(|(pl, i, _)| (*pl, *i));
+    for (slot, (_, _, e)) in slots.into_iter().zip(items) {
+        parts[slot] = e;
+    }
+    members
+        .iter()
+        .zip(&class)
+        .filter_map(|(m, &c)| match m {
+            Expr::Col(i, _) if c != usize::MAX => Some((*i, place[c])),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A side's `column = constant` clauses put in their classes' order (`places`, over the
+/// join's row; the side's columns from `off`), in the places they have.
+fn order_by_places(list: &mut [Expr], places: &[(usize, usize)], off: usize) {
+    let place_of = |e: &Expr| -> Option<usize> {
+        let Expr::Call(def, args, _) = e else { return None };
+        if def.name != "=" || args.len() != 2 {
+            return None;
+        }
+        let col = match (&args[0], &args[1]) {
+            (Expr::Col(i, _), Expr::Const(..)) | (Expr::Const(..), Expr::Col(i, _)) => *i,
+            _ => return None,
+        };
+        places.iter().find(|(c, _)| *c == col + off).map(|(_, p)| *p)
+    };
+    let mut slots = Vec::new();
+    let mut items = Vec::new();
+    for (i, e) in list.iter().enumerate() {
+        if let Some(p) = place_of(e) {
+            slots.push(i);
+            items.push((p, i, e.clone()));
+        }
+    }
+    items.sort_by_key(|(p, i, _)| (*p, *i));
+    for (slot, (_, _, e)) in slots.into_iter().zip(items) {
+        list[slot] = e;
+    }
+}
+
 /// `nonnull`: per LATERAL parameter, whether it is a NOT NULL column no outer join nulls.
 fn push_lateral(cat: &Catalog, right: Plan, parts: Vec<Expr>, params: &[Expr], nonnull: &[bool]) -> Plan {
     let lateral = !params.is_empty();

@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51034 (**99.77%**) |
-| units differing | 116 |
+| units matching | 51035 (**99.78%**) |
+| units differing | 115 |
 | files fully matching | 214 |
 | engine output == expected/*.out (pg_regress "ok") | 177 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 112 | 96.6% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 111 | 96.5% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.6% |
 | by design (a parallel plan's combine function) | 1 | 0.9% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 112 units
-join (65), partition_join (18), partition_prune (2), subselect (2), collate.icu.utf8 (1), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
+### EXPLAIN (group C1) — 111 units
+join (64), partition_join (18), partition_prune (2), subselect (2), collate.icu.utf8 (1), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -172,8 +172,16 @@ What changed:
   `*SELECT* 1`); a numbered inheritance Append is named after its first member only under a
   partitionwise join (a UNION ALL arm's took its member's name).
 
+- Third batch (subset run on c3f5839: join 643 fixed, none broken): an inner join's WHERE
+  equalities with constants as generate_base_implied_equalities_const makes them: a class
+  with a constant and more than one other member (or source) gives `member = constant` for
+  each member, however written (`3 = j2.c` shows `c = 3`), and a scan's constant clauses come
+  in the order their classes were made (a merged class keeping its left operand's place),
+  the ones derived across the join (`ec_constants`) among them (`ec_const_order`,
+  `order_by_places`).
+
 Goldens added: `tests/sql/a12_union_appendrel.sql`, `a12_lateral_pw.sql`,
-`a12_ordered_append_pruning.sql`.
+`a12_ordered_append_pruning.sql`, `a12_ec_const_order.sql`.
 
 Still open from agent 5's list, and why:
 
@@ -196,9 +204,14 @@ Still open from agent 5's list, and why:
   Memoize), 502 / 503 (a grouped subquery's sorted path kept beside the cheapest for a merge
   join), 123 (the class clause's first derivation fixes its orientation), 410 / 414 (join
   orders: parameterized join relations for LATERAL items aren't built), 609 / 610 (the class
-  with scan-level members picks the first members for the join clause), 643 (class clause
-  order and orientation: generated in class order, `member = constant` for classes of three
-  or more members).
+  with scan-level members picks the first members for the join clause); 643 fixed in the third
+  batch. sqljson_jsontable 101 (agent 11's): JSON_TABLE is a call joined to the row it reads
+  (`from_call`), no item of the join search, so the search never makes `x ⋈ jt` parameterized
+  by `y`; join 414 needs the same parameterized join relations for a LATERAL item, inside an
+  outer join (and a hash join under the nested loop). partition_join 48 / 207: the clause
+  equating the LATERAL output (a PlaceHolderVar evaluated at the scan) with a column is a
+  restriction Postgres generates from the class (`b = t1_1.b`, first); here the output is the
+  outer row's value and the clause stays as written.
 
 ## Fixed in round 15, agent 10 (equivalence classes: broken classes, made operators, nondeterministic collations, Merge Appends as join inputs, GROUP BY reordering)
 
@@ -2207,7 +2220,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 354 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 860 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (65) |
+| join | 925 | 861 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (64) |
 | aggregates | 556 | 554 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
