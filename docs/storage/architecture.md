@@ -44,9 +44,11 @@ Design goal, in order:
 | `s3-server` | The S3 HTTP API: routing (path and virtual-host style), auth, identities and policy evaluation, handlers, streaming to and from the backend, CORS and public buckets; the STS and IAM query APIs on the same listener. |
 | `s3-select` | S3 Select, no I/O: the request XML, the SQL dialect (parser and evaluator), CSV and JSON input (GZIP, BZIP2) and output, fed the object's bytes as they stream, with bounded memory. |
 | `s3-control` | Control-plane API `/v1/storage/...` (merged into rolld's API): accounts, buckets, branches, keys, roles, browsing/upload/download for the dashboard, presigning, trash, usage and pricing. |
+| `s3-api` | The developer API: a Supabase-Storage-compatible REST API (`/storage/v1`) over the same store and evaluator, with signed URLs, TUS resumable uploads and roll's extras (see [api.md](api.md)). |
 
-`rolld` runs all of it in one process (`--s3`, default `127.0.0.1:59000`), the CLI has
-`roll storage` (alias `s3`), and the dashboard has `/dashboard/storage`.
+`rolld` runs all of it in one process (the S3 API on `--s3`, default `127.0.0.1:59000`; the
+developer API on `--storage-api`, default `127.0.0.1:59001`), the CLI has `roll storage` (alias
+`s3`), and the dashboard has `/dashboard/storage`.
 
 ## Object storage layout
 
@@ -105,6 +107,7 @@ objects (bucket_id, key TEXT, blob_id TEXT,  -- the key's current version
          delete_marker INTEGER,         -- blob_id NULL + delete_marker = a delete marker;
                                         -- blob_id NULL alone = a tombstone (branches only)
          lock_mode TEXT, lock_until INTEGER /* ms */, legal_hold INTEGER /* NULL = never set */,
+         owner TEXT,                    -- the developer API uploader's sub (migration 12)
          PRIMARY KEY (bucket_id, key)) WITHOUT ROWID
 
 versions (bucket_id, key, noncurrent_at INTEGER /* ms */, <same columns as objects>,
@@ -118,13 +121,14 @@ blobs   (id TEXT PRIMARY KEY, size INTEGER, crc32c INTEGER, refs INTEGER NOT NUL
 
 uploads (id TEXT PRIMARY KEY /* customer UploadId */, bucket_id, key, blob_id,
          backend_upload_id TEXT, <object header columns>, created_at, acl, website_redirect,
-         lock_mode, lock_until, legal_hold)          -- Object Lock from CreateMultipartUpload
+         lock_mode, lock_until, legal_hold,          -- Object Lock from CreateMultipartUpload
+         owner)                                      -- migration 12
 
 
 bucket_config (bucket_id, kind TEXT, id TEXT /* '' = one per bucket */, value TEXT,
          PRIMARY KEY (bucket_id, kind, id)) WITHOUT ROWID
          -- kind: tagging, policy, public_access_block, ownership, acl, encryption, website,
-         -- logging, accelerate, notification, replication, webhook_secret (one per bucket);
+         -- logging, accelerate, notification, replication, webhook_secret, limits (one per bucket);
          -- analytics, metrics, inventory, intelligent_tiering (by id). Branches copy their
          -- parent's, except the policy (its resources name the parent), notifications,
          -- replication and the webhook secret; deleted buckets drop theirs.
@@ -194,11 +198,19 @@ accounts (id TEXT PRIMARY KEY /* 12 digits */, canonical TEXT UNIQUE /* 64 hex *
 iam     (account_id, kind TEXT /* user | group | policy | mfa | oidc */,
          name TEXT /* lowercase: IAM names are case-insensitive */, value TEXT /* JSON */,
          PRIMARY KEY (account_id, kind, name)) WITHOUT ROWID  -- migration 8
+
+api_projects (account_id TEXT PRIMARY KEY, value TEXT /* JSON: generation, issued_at, anon_key and
+         service_key (sealed), jwt_secret (sealed), jwt_issuer, jwt_audience, oidc */,
+         updated_at) WITHOUT ROWID                            -- the developer API, migration 12
+api_uploads (id TEXT PRIMARY KEY /* = uploads.id */, account_id, length INTEGER /* NULL = deferred */,
+         part_size INTEGER, value TEXT /* JSON { upsert, metadata, signed } */, created_at,
+         expires_at) WITHOUT ROWID                             -- TUS uploads, migration 12; index on expires_at
 ```
 
-Object ACLs and website redirects live in the row, so every row copy carries them: branch
-push-down, the trash and restores, in-place updates (tagging), and multipart uploads from
-Create to Complete. `CopyObject` sets them from the request, as S3 does.
+Object ACLs, website redirects and the developer API's `owner` live in the row, so every row
+copy carries them: branch push-down, the trash and restores, in-place updates (tagging), and
+multipart uploads from Create to Complete. `CopyObject` sets the ACL and redirect from the
+request, as S3 does; a copy keeps the source's `owner` unless the developer API names a new one.
 
 The deployment's **canonical owner id** (64 hex chars) is random, created on the first start
 and kept in `state`, so it survives restarts, recovery and moving hosts. It's the canonical id
@@ -246,6 +258,11 @@ Migration 11 indexes `iam` by `(kind, name)` (account aliases are unique across 
 and sign-in finds an account by its alias); login profiles, SSH keys, certificates, SAML
 providers, password policies, credential reports and the throttle counts are rows of `iam`, so
 it adds no tables.
+Migration 12 added the developer API's state: an `owner` column on `objects`, `versions`, `trash`
+and `uploads` (the `sub` of the app user that wrote the object, Supabase's `owner_id`; `NULL` for
+every existing row and for writes through the S3 API), `api_projects` (an account's API keys and
+auth providers) and `api_uploads` (resumable uploads). Bucket limits are `bucket_config` rows of
+kind `limits`, so they need no table.
 
 A blob's encryption is fixed when it's written, so `blob_sse` is keyed by blob: every row that
 shares the blob (copies, branches, the trash) shares its encryption, and no row of `objects`,
@@ -1061,6 +1078,63 @@ Peer-sent lengths never size an allocation: bodies are streamed, and XML bodies 
 **Consistency.** Strong read-after-write and list-after-write, as on S3 today: all metadata
 goes through one SQLite database.
 
+## Developer API (`s3-api`)
+
+A Supabase-Storage-compatible REST API (`/storage/v1`) on its own listener (`--storage-api`,
+default `127.0.0.1:59001`), over the same `Store` and `Server` as the S3 API. The reference,
+the rules, the migration guide and the differences from Supabase are in [api.md](api.md).
+
+- **Callers** (`s3-server/src/app.rs`): `apikey` and `Authorization: Bearer`.
+  - The service key is the account's root user.
+  - The anon key and user tokens are `Kind::App` identities with no identity policies, so in their
+    account only resource grants (the bucket policy, the `public` flag) let them in.
+  - Anonymous requests are the S3 API's anonymous requester.
+- **Keys** (`s3-store/src/api.rs`): the anon and service keys are HS256 JWTs (`iss: roll`, `ref`,
+  `role`, `gen`).
+  - They're signed with a key derived by HMAC-SHA256 from the deployment's API key, which is 32
+    random bytes kept in `state.storage_api_key`. Signed URLs use another derived key.
+  - The keys and the project's JWT secret are AES-256-GCM-sealed (the session tokens' scheme)
+    under a third derived key in `api_projects`, so they're shown again but never stored in the
+    clear.
+  - Rotation bumps the project's generation, which the keys carry.
+  - User tokens are HS256 with the project's secret (optional `iss`/`aud`), or RS256/ES256 from
+    its OIDC issuers through the same JWKS verifier as `AssumeRoleWithWebIdentity`.
+- **Authorization** goes through the S3 API's one evaluator (`access::authorize_as`), with S3
+  actions (`s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:ListBucket`).
+  - Bucket policies name callers with `{"App": "<role>"}` principals (`Requester::app_role`).
+  - The JWT's claims are `jwt:*` condition keys and policy variables (`Identity::condition`).
+  - `roll:ObjectOwner` is the current object's `owner`, read on first use (`access.rs`).
+  - A `Checker` caches each bucket's access rules for one request, so filtering a listing costs
+    one policy parse.
+  - Rule presets are bucket policies generated by `app::preset_policy`, and set through
+    `app::put_bucket_policy` with `PutBucketPolicy`'s checks.
+- **Writes** take the S3 API's write path: `s3_server::put_object` and the store's multipart
+  uploads. Moves within a bucket are `rename_object`, and copies share the blob.
+- **Bucket limits** (`file_size_limit`, `allowed_mime_types`) are a `bucket_config` row of kind
+  `limits`.
+  - `versioning::put_key` checks them in the transaction that writes any new version, so every
+    write path honours them, the S3 API's included.
+  - The handlers check them early too, before any bytes move.
+  - A refused write is `StoreError::Refused` with the code `EntityTooLarge` or `InvalidMimeType`.
+    The S3 API answers `EntityTooLarge` or `InvalidRequest`.
+- **Owner.** `ObjectHeaders::owner` is the writer's `sub`, a row column (migration 12), so branch
+  push-down, versions, the trash and uploads carry it.
+- **Resumable uploads (TUS).** Each one is a multipart upload plus an `api_uploads` row with the
+  same id.
+  - The row is written with the upload and removed in the transaction that completes or aborts
+    it.
+  - Bytes are buffered on local disk in `<spool>/tus/<id>.<part number>` until a part (at least
+    5 MiB) is full. The part is then uploaded and recorded, and its buffer deleted.
+  - The offset is the recorded parts plus the buffer. After a restart an upload resumes from
+    there, and on another node from its last recorded part.
+  - Uploads expire after 24 h, and a sweeper aborts them.
+  - An upload completes into one blob like any multipart upload.
+- **Metering** is the S3 API's `Meter`:
+  - class A: uploads, lists, copies and bucket writes
+  - class B: reads and signing
+  - free: deletes
+  - plus bytes in and egress (internal or internet by the peer)
+
 ## Control-plane API (`s3-control`, `/v1/storage`)
 
 All JSON. Errors are `{"error": "..."}` with 400/404/409/500. Times are Unix milliseconds.
@@ -1114,7 +1188,9 @@ PATCH  /v1/storage/buckets/{name}  { public?, recover_days?, cors?: [CorsRule], 
                                      replication?: { rules: [ReplicationRuleInput] } | null /* replaces them; null or [] removes */,
                                      website?: { index_document, error_document?: string | null } | null /* null removes */,
                                      policy?: IamPolicy (with Principal) | string | null /* the bucket policy; null removes */,
-                                     public_access_block?: PublicAccessBlock | null /* the bucket's own; null removes */ } → Bucket
+                                     public_access_block?: PublicAccessBlock | null /* the bucket's own; null removes */,
+                                     file_size_limit?: number | string /* "20MB" */ | null,
+                                     allowed_mime_types?: [string] /* "image/*" wildcards */ | null /* developer API limits; null removes */ } → Bucket
 DELETE /v1/storage/buckets/{name}?force=true     → { deleted }   (force: delete all objects first)
 POST   /v1/storage/buckets/{name}/branches  { name }  → Bucket
 
@@ -1133,6 +1209,14 @@ POST   /v1/storage/buckets/{name}/presign  { key, method: "GET"|"PUT", expires_s
 GET    /v1/storage/buckets/{name}/trash?prefix=&cursor=&limit=
   → { objects: [TrashEntry], next_cursor }
 POST   /v1/storage/buckets/{name}/trash/restore  { key, deleted_at } → ObjectInfo
+
+GET    /v1/storage/api                          → { account_id, endpoint, anon_key, service_key, key_generation, keys_issued_at,
+                                                     auth: { jwt_secret_set, jwt_issuer, jwt_audience, oidc }, presets }
+POST   /v1/storage/api/keys/rotate              → the same (new keys; the old ones stop working at once)
+PUT    /v1/storage/api/auth  { jwt_secret?, jwt_issuer?, jwt_audience?, oidc? }  → the same (omitted: unchanged, null: removed)
+GET    /v1/storage/buckets/{name}/rules/{preset}  → { preset, policy }
+POST   /v1/storage/buckets/{name}/rules  { preset }  → Bucket   (sets the preset's bucket policy)
+       the developer API's project, auth providers and rule presets: see api.md
 
 GET    /v1/storage/buckets/{name}/usage?days=30  → Usage
 GET    /v1/storage/usage?days=30&accounts=false  → { days, account, cost: Cost /* the account's bill */,

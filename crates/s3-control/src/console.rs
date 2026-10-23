@@ -232,6 +232,9 @@ pub(crate) fn checks(method: &Method, route: &str, path: &str, query: &[(String,
             vec![check(action, b, Some(field("key").unwrap_or_default()))]
         }
         ("POST", "/v1/storage/buckets/{name}/trash/restore") => vec![check("s3:PutObject", b, Some(field("key").unwrap_or_default()))],
+        // Rule presets of the developer API: a bucket policy.
+        ("GET", "/v1/storage/buckets/{name}/rules/{preset}") => vec![check("s3:GetBucketPolicy", b, None)],
+        ("POST", "/v1/storage/buckets/{name}/rules") => vec![check("s3:PutBucketPolicy", b, None)],
         // Accounts, keys, roles, replication targets, session keys, everyone's usage.
         _ => return None,
     })

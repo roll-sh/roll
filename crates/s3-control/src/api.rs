@@ -115,6 +115,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .merge(crate::roles::routes())
         .merge(crate::targets::routes())
         .merge(crate::console::routes())
+        .merge(crate::devapi::routes())
         // A signed-in dashboard user's requests act as that IAM user (`console.rs`).
         .route_layer(axum::middleware::from_fn_with_state(control.clone(), crate::console::guard))
         // The dashboard calls it from the browser, like the other control-plane APIs.

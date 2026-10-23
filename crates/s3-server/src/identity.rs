@@ -48,6 +48,9 @@ pub(crate) enum Kind {
     User { name: String, id: String, arn: String },
     Role { name: String, id: String, session: String, arn: String },
     Federated { name: String },
+    /// A storage developer API caller (`app.rs`): the anon role, or a user of the project's
+    /// auth providers, with its JWT's role and subject.
+    App { role: String, sub: Option<String> },
 }
 
 pub(crate) struct Identity {
@@ -75,6 +78,8 @@ pub(crate) struct Identity {
     pub session: Option<Arc<Session>>,
     /// The session may do nothing at all (see `Session::dead`), or the user is gone.
     pub dead: bool,
+    /// A developer API caller's JWT claims (`jwt:*` condition keys, `${jwt:sub}`).
+    pub app: Option<Arc<crate::app::Claims>>,
 }
 
 /// What a requester's own (identity) side says about a request.
@@ -281,6 +286,7 @@ pub(crate) fn resolve(store: &Store, k: &AccessKey) -> Result<Identity, s3_store
         session_policies: Vec::new(),
         session: k.session.clone(),
         dead: k.session.as_ref().is_some_and(|s| s.dead) || gone,
+        app: None,
     };
     let mut req = Requester { account: acct.clone(), account_canonical: account.canonical.clone(), ..Default::default() };
     // The permanent key acting (itself, or the one behind a GetSessionToken/GetFederationToken
@@ -419,6 +425,11 @@ impl Identity {
     /// `Some(None)`: absent for this requester.
     pub fn condition(&self, key: &str, now_ms: i64) -> Option<Option<Vec<String>>> {
         let one = |v: Option<String>| Some(v.map(|v| vec![v]));
+        if let Some(claims) = &self.app
+            && let Some(name) = key.strip_prefix("jwt:")
+        {
+            return Some(claims.values(name));
+        }
         if let Some(name) = key.strip_prefix("aws:principaltag/") {
             return one(self.tags.iter().find(|(t, _)| t.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone()));
         }
@@ -434,6 +445,7 @@ impl Identity {
                         Kind::Key | Kind::User { .. } => "User",
                         Kind::Role { .. } => "AssumedRole",
                         Kind::Federated { .. } => "FederatedUser",
+                        Kind::App { .. } => "WebIdentityUser",
                     }
                     .into(),
                 ));

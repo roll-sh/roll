@@ -156,6 +156,7 @@ s3-store = { path = "crates/s3-store" }
 s3-server = { path = "crates/s3-server" }
 s3-control = { path = "crates/s3-control" }
 s3-select = { path = "crates/s3-select" }
+s3-api = { path = "crates/s3-api" }
 # S3 Select: BZIP2 input (pure Rust, libbz2-rs-sys).
 bzip2 = "0.6"
 

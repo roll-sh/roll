@@ -18,7 +18,7 @@ import {
 } from "@/lib/storage-api";
 import { AppShell } from "../app-shell";
 import { btn, Connecting, EmptyPanel, ErrorNote, input, Offline, panel, primary, Stats } from "../ui";
-import { ACCOUNTS_HREF, IAM_HREF, StorageIdentity, useConsoleSession, useScope } from "./console";
+import { ACCOUNTS_HREF, API_HREF, IAM_HREF, StorageIdentity, useConsoleSession, useScope } from "./console";
 import { KeysTab } from "./keys";
 import { RolesTab } from "./roles";
 import { Field, PublicBadge, Segmented, TabNav, useAction, useHashTab, useStorage } from "./shared";
@@ -118,7 +118,15 @@ export function StorageHome() {
             onChange={setTab}
             label="Storage sections"
             counts={{ buckets: buckets.length }}
-            links={session ? [{ href: IAM_HREF, label: "IAM" }] : [{ href: IAM_HREF, label: "IAM" }, { href: ACCOUNTS_HREF, label: "Accounts" }]}
+            links={
+              session
+                ? [{ href: IAM_HREF, label: "IAM" }]
+                : [
+                    { href: IAM_HREF, label: "IAM" },
+                    { href: API_HREF, label: "API" },
+                    { href: ACCOUNTS_HREF, label: "Accounts" },
+                  ]
+            }
           />
           <ErrorNote error={error ?? (tab === "buckets" ? denied : null)} />
           <div className="mt-6" key={scope}>

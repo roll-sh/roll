@@ -53,6 +53,15 @@ import {
   type ObjectInfo,
   type TrashEntry,
   type VersionList,
+  apiOidcError,
+  devApiSnippet,
+  formatSizeLimit,
+  jwtSecretError,
+  mimeTypeError,
+  normalizeMimeType,
+  sizeLimitBytes,
+  splitSize,
+  type StorageApiView,
 } from "../src/lib/storage-api";
 
 interface Call {
@@ -896,6 +905,8 @@ describe("contract shapes (docs/storage/architecture.md)", () => {
       policy: { Version: "2012-10-17", Statement: [] },
       policy_public: false,
       public_access_block: { block_public_acls: true, ignore_public_acls: true, block_public_policy: true, restrict_public_buckets: true },
+      file_size_limit: 20_000_000,
+      allowed_mime_types: ["image/*", "application/pdf"],
     };
     assert.equal(JSON.parse(JSON.stringify(b)).version_bytes, 3);
     const o: ObjectInfo = {
@@ -1341,5 +1352,101 @@ describe("replication, access, website and role helpers", () => {
       updated_at: 1,
     };
     assert.equal(r.trust.oidc.length, 0);
+  });
+});
+
+describe("developer API and upload limits", () => {
+  const view: StorageApiView = {
+    account_id: "acct_1",
+    endpoint: "http://127.0.0.1:59001/storage/v1",
+    anon_key: "anon.jwt",
+    service_key: "service.jwt",
+    key_generation: 1,
+    keys_issued_at: 1,
+    auth: { jwt_secret_set: false, jwt_issuer: null, jwt_audience: null, oidc: [] },
+    presets: [{ id: "public-read", name: "Public read", description: "d" }],
+  };
+
+  it("requests", async () => {
+    await expectRequest(() => storageApi.devApi(), "GET", "/v1/storage/api", "");
+    calls = [];
+    await expectRequest(() => storageApi.rotateApiKeys(), "POST", "/v1/storage/api/keys/rotate", "");
+    calls = [];
+    const patch = { jwt_secret: null, jwt_issuer: "https://auth.example.com", oidc: [{ issuer: "https://idp.example.com", audiences: ["app"] }] };
+    await expectRequest(() => storageApi.setApiAuth(patch), "PUT", "/v1/storage/api/auth", "", patch);
+    calls = [];
+    await expectRequest(() => storageApi.rulePreview("my bucket", "user-folders"), "GET", "/v1/storage/buckets/my%20bucket/rules/user-folders", "");
+    calls = [];
+    await expectRequest(() => storageApi.applyRule("b", "owner-only"), "POST", "/v1/storage/buckets/b/rules", "", { preset: "owner-only" });
+    calls = [];
+    await expectRequest(
+      () => storageApi.setUploadLimits("b", { file_size_limit: 20_000_000, allowed_mime_types: ["image/*"] }),
+      "PATCH",
+      "/v1/storage/buckets/b",
+      "",
+      { file_size_limit: 20_000_000, allowed_mime_types: ["image/*"] },
+    );
+    calls = [];
+    await expectRequest(() => storageApi.setUploadLimits("b", { file_size_limit: null, allowed_mime_types: null }), "PATCH", "/v1/storage/buckets/b", "", {
+      file_size_limit: null,
+      allowed_mime_types: null,
+    });
+    reply = () => json(view);
+    assert.equal((await storageApi.devApi()).anon_key, "anon.jwt");
+  });
+
+  it("sizes in decimal units, as crates/s3-store/src/api.rs parse_size", () => {
+    assert.deepEqual(splitSize(20_000_000), { value: "20", unit: "MB" });
+    assert.deepEqual(splitSize(1_500_000_000), { value: "1.5", unit: "GB" });
+    assert.deepEqual(splitSize(30_000), { value: "30", unit: "KB" });
+    assert.deepEqual(splitSize(1234), { value: "1.234", unit: "KB" });
+    assert.deepEqual(splitSize(3), { value: "3", unit: "B" });
+    assert.deepEqual(splitSize(0), { value: "0", unit: "B" });
+    assert.equal(formatSizeLimit(null), "no limit");
+    assert.equal(formatSizeLimit(20_000_000), "20 MB");
+    assert.deepEqual(sizeLimitBytes("", "MB"), { bytes: null, error: null });
+    assert.deepEqual(sizeLimitBytes(" 20 ", "MB"), { bytes: 20_000_000, error: null });
+    assert.deepEqual(sizeLimitBytes("1.5", "GB"), { bytes: 1_500_000_000, error: null });
+    assert.ok(sizeLimitBytes("-1", "MB").error);
+    assert.ok(sizeLimitBytes("1.", "MB").error);
+    assert.ok(sizeLimitBytes("abc", "B").error);
+    assert.ok(sizeLimitBytes("1e30", "GB").error);
+    for (const n of [1, 999, 1001, 20_000_000, 1_500_000_000, 123_456_789]) {
+      const { value, unit } = splitSize(n);
+      assert.equal(sizeLimitBytes(value, unit).bytes, n, `${n}`);
+    }
+  });
+
+  it("media types, as crates/s3-store/src/api.rs media_type", () => {
+    for (const ok of ["image/png", "image/*", "Application/PDF", "text/plain; charset=utf-8", 'text/plain;charset="utf-8"', "image/png;"]) {
+      assert.equal(mimeTypeError(ok), null, ok);
+    }
+    for (const bad of ["image", "*/*", "image/png; x", "ima ge/png", "image/pn*", "/png", "image/"]) {
+      assert.ok(mimeTypeError(bad), bad);
+    }
+    assert.equal(normalizeMimeType(" Image/PNG; charset=x "), "image/png");
+  });
+
+  it("auth provider checks, as crates/s3-store/src/api.rs", () => {
+    assert.ok(jwtSecretError("x".repeat(31)));
+    assert.equal(jwtSecretError("x".repeat(32)), null);
+    assert.equal(jwtSecretError("x".repeat(512)), null);
+    assert.ok(jwtSecretError("x".repeat(513)));
+    assert.equal(apiOidcError({ issuer: "https://idp.example.com", audiences: ["app"] }), null);
+    assert.equal(apiOidcError({ issuer: "https://idp.example.com", audiences: ["app"], jwks_uri: "https://idp.example.com/jwks" }), null);
+    assert.ok(apiOidcError({ issuer: "", audiences: ["app"] }));
+    assert.ok(apiOidcError({ issuer: "idp", audiences: ["app"] }));
+    assert.ok(apiOidcError({ issuer: "https://idp.example.com", audiences: [] }));
+    assert.ok(apiOidcError({ issuer: "https://idp.example.com", audiences: ["app"], jwks_uri: "nope" }));
+  });
+
+  it("snippets name the endpoint and the anon key", () => {
+    const roll = devApiSnippet("@roll/storage", "http://h/storage/v1", "ANON");
+    assert.match(roll, /import \{ createClient \} from '@roll\/storage'/);
+    assert.match(roll, /createClient\('http:\/\/h\/storage\/v1', 'ANON'\)/);
+    const supa = devApiSnippet("@supabase/storage-js", "http://h/storage/v1", "ANON");
+    assert.match(supa, /new StorageClient\('http:\/\/h\/storage\/v1', \{/);
+    assert.match(supa, /apikey: 'ANON'/);
+    assert.match(supa, /Authorization: 'Bearer ANON'/);
   });
 });

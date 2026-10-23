@@ -204,7 +204,7 @@ impl Store {
             if c.prepare_cached("SELECT 1 FROM buckets WHERE account_id = ?1 LIMIT 1")?.exists([id])? {
                 return Err(StoreError::DeleteConflict(format!("account {id} still owns buckets; delete them first")));
             }
-            for table in ["keys", "roles", "iam"] {
+            for table in ["keys", "roles", "iam", "api_projects"] {
                 c.execute(&format!("DELETE FROM {table} WHERE account_id = ?1"), [id])?;
             }
             c.execute("DELETE FROM accounts WHERE id = ?1", [id])?;

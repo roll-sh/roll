@@ -40,6 +40,12 @@ pub(crate) struct SettingsPatch {
     /// The bucket's own public access block; `null` removes it.
     #[serde(default, deserialize_with = "present")]
     pub public_access_block: Option<Option<PublicAccessBlock>>,
+    /// The developer API's size limit: bytes, or `"20MB"`-style text; `null` removes it.
+    #[serde(default, deserialize_with = "present_value")]
+    pub file_size_limit: Option<Value>,
+    /// Allowed media types (`image/*` wildcards); `null` (or `[]`) removes them.
+    #[serde(default, deserialize_with = "present_value")]
+    pub allowed_mime_types: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -91,6 +97,8 @@ pub(crate) struct Prepared {
     /// The document and the principals it names.
     policy: Option<Option<(String, String)>>,
     public_access_block: Option<Option<PublicAccessBlock>>,
+    /// The bucket's limits after this PATCH, when it changes them.
+    limits: Option<s3_store::BucketLimits>,
 }
 
 fn invalid(m: impl Into<String>) -> ControlError {
@@ -233,6 +241,26 @@ impl Control {
     /// the same PATCH's).
     pub(crate) fn prepare_settings(&self, b: &Bucket, versioning: Option<&str>, public: Option<bool>, p: SettingsPatch) -> Result<Prepared> {
         let mut out = Prepared { public_access_block: p.public_access_block, ..Default::default() };
+
+        // Upload limits.
+        if p.file_size_limit.is_some() || p.allowed_mime_types.is_some() {
+            let mut l = self.store.bucket_limits(&b.name)?;
+            if let Some(v) = &p.file_size_limit {
+                l.file_size_limit = s3_store::api::parse_size(v).map_err(|m| invalid(format!("file_size_limit: {m}")))?;
+            }
+            if let Some(v) = &p.allowed_mime_types {
+                l.allowed_mime_types = match v {
+                    Value::Null => None,
+                    Value::Array(a) => {
+                        let list: Vec<String> = a.iter().map(|x| x.as_str().map(str::to_string).ok_or_else(|| invalid("allowed_mime_types must be an array of strings"))).collect::<Result<_>>()?;
+                        let n = s3_store::api::normalize_mime_types(&list).map_err(|bad| invalid(format!("allowed_mime_types: {bad} isn't a media type (type/subtype or type/*)")))?;
+                        Some(n).filter(|n| !n.is_empty())
+                    }
+                    _ => return Err(invalid("allowed_mime_types must be an array of strings")),
+                };
+            }
+            out.limits = Some(l);
+        }
 
         // The public access block in force once this PATCH is applied.
         let (own, _) = self.store.public_access_block(&b.id)?;
@@ -386,6 +414,9 @@ impl Control {
         }
         if let Some(r) = &p.replication {
             self.store.set_replication(bucket, r.as_ref()).await?;
+        }
+        if let Some(l) = &p.limits {
+            self.store.set_bucket_limits(bucket, l).await?;
         }
         Ok(())
     }

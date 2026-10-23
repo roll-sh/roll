@@ -105,7 +105,7 @@ impl Row {
 /// `noncurrent_at`).
 pub(crate) const COLS: &str = "key, blob_id, size, etag, content_type, cache_control, content_disposition, content_encoding, \
      content_language, expires, metadata, tags, checksum_algorithm, checksum_type, checksum, parts, part_sizes, modified_at, \
-     acl, website_redirect, vid, is_null, delete_marker, lock_mode, lock_until, legal_hold";
+     acl, website_redirect, vid, is_null, delete_marker, lock_mode, lock_until, legal_hold, owner";
 
 fn json_col<T: serde::de::DeserializeOwned>(r: &rusqlite::Row, i: usize) -> rusqlite::Result<T> {
     let s: String = r.get(i)?;
@@ -145,7 +145,7 @@ fn parts_text(r: &Row) -> serde_json::Result<String> {
 
 /// A row from `SELECT {COLS}` starting at column `o`.
 /// How many columns [`COLS`] has: the first extra column after them is at this index.
-pub(crate) const COLS_LEN: usize = 26;
+pub(crate) const COLS_LEN: usize = 27;
 
 pub(crate) fn row_at(r: &rusqlite::Row, o: usize) -> rusqlite::Result<Row> {
     let algorithm: Option<String> = r.get(o + 12)?;
@@ -168,6 +168,7 @@ pub(crate) fn row_at(r: &rusqlite::Row, o: usize) -> rusqlite::Result<Row> {
             tags: json_col(r, o + 11)?,
             acl: r.get(o + 18)?,
             website_redirect: r.get(o + 19)?,
+            owner: r.get(o + 26)?,
         },
         checksum: match (algorithm, kind, value) {
             (Some(algorithm), Some(kind), Some(value)) => Some(Checksum { algorithm, kind, value }),
@@ -221,6 +222,7 @@ fn row_values(r: &Row) -> Result<Vec<rusqlite::types::Value>> {
         opt(&r.lock.mode),
         r.lock.retain_until.map_or(Null, Integer),
         r.lock.legal_hold.map_or(Null, |h| Integer(h as i64)),
+        opt(&r.headers.owner),
     ])
 }
 
