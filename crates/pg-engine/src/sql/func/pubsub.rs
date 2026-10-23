@@ -145,20 +145,31 @@ fn publication_tables(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
 }
 
 /// When each subscription's statistics were last reset (pg_stat_reset_subscription_stats);
-/// like Postgres's statistics, not transactional.
-static RESETS: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<u32, i64>>> =
-    std::sync::LazyLock::new(Default::default);
+/// like Postgres's statistics, not transactional. By cluster too: subscription oids repeat
+/// across the engines (and stores) of a process; a cluster is its oid counter, held by a
+/// `Weak` so no later counter takes its address.
+type Resets = std::collections::HashMap<(usize, u32), (std::sync::Weak<crate::catalog::shared::OidGen>, i64)>;
+static RESETS: std::sync::LazyLock<parking_lot::Mutex<Resets>> = std::sync::LazyLock::new(Default::default);
+
+/// The cluster of the running statement (`RESETS`'s key) and a `Weak` holding it.
+fn cluster(c: &FnCtx) -> (usize, std::sync::Weak<crate::catalog::shared::OidGen>) {
+    match &c.exec.catalog().oids {
+        Some(g) => (std::sync::Arc::as_ptr(g) as usize, std::sync::Arc::downgrade(g)),
+        None => (0, std::sync::Weak::new()),
+    }
+}
 
 /// pg_stat_get_subscription_stats(subid): no errors or conflicts counted; when it was last
 /// reset.
-fn subscription_stats(a: &[Value], _: &FnCtx) -> Result<SrfIter> {
+fn subscription_stats(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
     let Some(oid) = a[0].as_i64().map(|o| o as u32) else {
         return Ok(Box::new(std::iter::empty()));
     };
+    let (k, _) = cluster(c);
     let reset = RESETS
         .lock()
-        .get(&oid)
-        .map_or(Value::Null, |t| Value::Timestamptz(*t));
+        .get(&(k, oid))
+        .map_or(Value::Null, |t| Value::Timestamptz(t.1));
     let mut row = vec![Value::Oid(oid)];
     row.extend((0..9).map(|_| Value::Int8(0)));
     row.push(reset);
@@ -169,14 +180,15 @@ fn subscription_stats(a: &[Value], _: &FnCtx) -> Result<SrfIter> {
 /// subscription's for NULL).
 pub fn reset_subscription_stats(a: &[Value], c: &FnCtx) -> Result<Value> {
     let now = crate::types::datetime::Clock::system().now;
+    let (k, w) = cluster(c);
     let mut r = RESETS.lock();
     match a[0].as_i64() {
         Some(o) => {
-            r.insert(o as u32, now);
+            r.insert((k, o as u32), (w, now));
         }
         None => {
             for s in c.exec.catalog().subscriptions.keys() {
-                r.insert(*s, now);
+                r.insert((k, *s), (w.clone(), now));
             }
         }
     }

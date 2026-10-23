@@ -224,7 +224,8 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
   - `exec::sizing::METHODS` (a stored datum's compression method, process-wide): by
     `Database::instance`, table, column and value.
   - `func::range::user_constructors` (process-wide): by the whole range type and its
-    constructors' oids. `types::collation::get`: by the whole definition. `regex::compile`: by
+    constructors' oids. `func::pubsub::RESETS` (subscription statistics' reset times): by the
+    cluster (its `OidGen`, held by a `Weak`) and the subscription. `types::collation::get`: by the whole definition. `regex::compile`: by
     pattern, flags and strategy. Interners (`func::intern`), the built-in registries and the
     `include_str!` tables are pure.
   - Subquery / CTE ids (`Binder::fresh_id`) are unique in the process: `ExecCtx`'s

@@ -185,6 +185,13 @@ Second batch (state an engine panic leaves, the last binder's catalog):
   enable_partition_pruning, only decides which partitions run-time pruning skips, never rows:
   left as it is.)
 
+- **Flaky golden: subscription statistics' reset time leaked between engines.**
+  `pg_stat_reset_subscription_stats` kept its times in a process-wide map by subscription oid;
+  `golden` and `golden_wire` (two engines in one process, handing out the same oids) ran
+  subscription_ddl at the same time and one saw the other's reset (`stats_reset is null`
+  false). Keyed by the cluster (its oid counter) now. Test:
+  `session_state::subscription_stats_reset_per_cluster`.
+
 Open, found on the way:
 
 - `SET search_path = s, pg_catalog` with `CREATE OPERATOR s.= (int, int)`: `SELECT 1 = 2` errors

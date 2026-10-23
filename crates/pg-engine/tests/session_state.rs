@@ -160,6 +160,23 @@ fn range_constructors_per_database() {
     );
 }
 
+/// A subscription's statistics reset time is its own cluster's (subscription oids repeat in
+/// another engine or store of the process: `golden` and `golden_wire` raced on it). (Within
+/// one engine the statistics view shows every database's subscriptions: `b` looks at its own.)
+#[test]
+fn subscription_stats_reset_per_cluster() {
+    check(
+        "CREATE SUBSCRIPTION s CONNECTION 'dbname=nowhere' PUBLICATION p WITH (connect = false);
+         SELECT pg_stat_reset_subscription_stats(oid) FROM pg_subscription WHERE subname = 's';",
+        "CREATE SUBSCRIPTION s CONNECTION 'dbname=nowhere' PUBLICATION p WITH (connect = false);
+         SELECT subname, stats_reset IS NULL AS never FROM pg_stat_subscription_stats
+           WHERE subid IN (SELECT s.oid FROM pg_subscription s JOIN pg_database d ON d.oid = s.subdbid
+                           WHERE d.datname = current_database());",
+        false,
+        &["s | t"],
+    );
+}
+
 /// Objects the panic cases below use.
 const PANIC_SETUP: &str = "
 CREATE TABLE t (a int, b text);
