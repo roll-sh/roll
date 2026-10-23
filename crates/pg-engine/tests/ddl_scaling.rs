@@ -80,3 +80,41 @@ fn ddl_copies_of_the_catalog_dont_grow_with_it() {
     }
     engine.shutdown();
 }
+
+/// The system relations a query generates.
+fn generated(s: &mut Session, q: &str) -> u64 {
+    let before = pg_engine::catalog::system::generated_rows_count();
+    run(s, q);
+    pg_engine::catalog::system::generated_rows_count() - before
+}
+
+/// A catalog scanned once per outer row (a nested loop's parameterized inner side, a
+/// correlated sub-select) is generated once per statement, as Postgres reads it through its
+/// index: information_schema.column_domain_usage and oidjoins' checks over a full run's
+/// catalogs took minutes when each outer row generated pg_type again.
+#[test]
+fn catalog_rescans_dont_grow_with_the_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    run(&mut s, "CREATE DOMAIN d AS int;\nCREATE TABLE dt (x d)");
+    let queries = [
+        "SELECT * FROM information_schema.column_domain_usage WHERE domain_name = 'd'",
+        "SELECT a.attname, (SELECT t.typname FROM pg_type t WHERE t.oid = a.atttypid) FROM pg_attribute a",
+        "SELECT count(*) FROM pg_attribute a WHERE NOT EXISTS (SELECT 1 FROM pg_type t WHERE t.oid = a.atttypid)",
+    ];
+    let count = |s: &mut Session| -> Vec<u64> {
+        run(s, "SET enable_hashjoin = off;\nSET enable_mergejoin = off");
+        let n = queries.iter().map(|q| generated(s, q)).collect();
+        run(s, "RESET enable_hashjoin;\nRESET enable_mergejoin");
+        n
+    };
+    add_objects(&mut s, 0, 3);
+    let small = count(&mut s);
+    add_objects(&mut s, 3, 40);
+    let large = count(&mut s);
+    for ((q, a), b) in queries.iter().zip(&small).zip(&large) {
+        assert!(b <= a, "{q}: {a} system relations generated with 3 other tables, {b} with 40");
+    }
+    engine.shutdown();
+}

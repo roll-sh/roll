@@ -1,0 +1,129 @@
+> CREATE TABLE a15_base (id int, stuff text)
+-- CREATE TABLE
+
+> INSERT INTO a15_base VALUES (23, 'skidoo')
+-- INSERT 0 1
+
+> CREATE VIEW a15_v1 AS SELECT * FROM a15_base bt
+-- CREATE VIEW
+
+> CREATE VIEW a15_v2 AS SELECT *, to_json(v1) AS j FROM a15_v1 v1
+-- CREATE VIEW
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM a15_v2
+QUERY PLAN:text
+Seq Scan on public.a15_base bt
+  Output: bt.id, bt.stuff, to_json(ROW(bt.id, bt.stuff))
+-- EXPLAIN
+
+> SELECT * FROM a15_v2
+id:int4 | stuff:text | j:json
+23 | skidoo | {"id":23,"stuff":"skidoo"}
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT v1 FROM a15_v1 v1
+QUERY PLAN:text
+Seq Scan on public.a15_base bt
+  Output: ROW(bt.id, bt.stuff)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT bt, to_json(bt) FROM a15_base bt
+QUERY PLAN:text
+Seq Scan on public.a15_base bt
+  Output: bt.*, to_json(bt.*)
+-- EXPLAIN
+
+> CREATE OR REPLACE VIEW a15_v1 AS SELECT *, 2 + 2 AS more FROM a15_base bt
+-- CREATE VIEW
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM a15_v2
+QUERY PLAN:text
+Seq Scan on public.a15_base bt
+  Output: bt.id, bt.stuff, to_json(ROW(bt.id, bt.stuff, 4))
+-- EXPLAIN
+
+> SELECT * FROM a15_v2
+id:int4 | stuff:text | j:json
+23 | skidoo | {"id":23,"stuff":"skidoo","more":4}
+-- SELECT 1
+
+> CREATE TYPE a15_comp AS (id int, stuff text)
+-- CREATE TYPE
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT ROW(bt.id, bt.stuff)::a15_comp FROM a15_base bt
+QUERY PLAN:text
+Seq Scan on public.a15_base bt
+  Output: ROW(id, stuff)::a15_comp
+-- EXPLAIN
+
+> CREATE MATERIALIZED VIEW a15_mv AS SELECT * FROM a15_base
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT m FROM a15_mv m
+QUERY PLAN:text
+Seq Scan on public.a15_mv m
+  Output: m.*
+-- EXPLAIN
+
+> SELECT a.attname, (SELECT t.typname FROM pg_type t WHERE t.oid = a.atttypid) AS typ
+>   FROM pg_attribute a WHERE a.attrelid = 'a15_base'::regclass AND a.attnum > 0 ORDER BY a.attnum
+attname:name | typ:name
+id | int4
+stuff | text
+-- SELECT 2
+
+> SELECT c.relname, a.attname, t.typname
+>   FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid JOIN pg_type t ON t.oid = a.atttypid
+>   WHERE c.relname IN ('a15_base', 'a15_mv') AND a.attnum > 0 ORDER BY 1, 2
+relname:name | attname:name | typname:name
+a15_base | id | int4
+a15_base | stuff | text
+a15_mv | id | int4
+a15_mv | stuff | text
+-- SELECT 4
+
+> SELECT * FROM information_schema.column_domain_usage WHERE table_name LIKE 'a15%'
+domain_catalog:name | domain_schema:name | domain_name:name | table_catalog:name | table_schema:name | table_name:name | column_name:name
+-- SELECT 0
+
+> CREATE DOMAIN a15_dom AS int CHECK (VALUE > 0)
+-- CREATE DOMAIN
+
+> CREATE TABLE a15_dt (d a15_dom, e a15_dom)
+-- CREATE TABLE
+
+> SELECT domain_name, table_name, column_name FROM information_schema.column_domain_usage
+>   WHERE table_name LIKE 'a15%' ORDER BY column_name
+domain_name:name | table_name:name | column_name:name
+a15_dom | a15_dt | d
+a15_dom | a15_dt | e
+-- SELECT 2
+
+> SELECT n.nspname, (SELECT count(*) FROM pg_class c WHERE c.relnamespace = n.oid AND c.relname LIKE 'a15%') AS n
+>   FROM pg_namespace n WHERE n.nspname IN ('public', 'pg_catalog') ORDER BY 1
+nspname:name | n:int8
+pg_catalog | 0
+public | 6
+-- SELECT 2
+
+> DROP TABLE a15_dt
+-- DROP TABLE
+
+> DROP DOMAIN a15_dom
+-- DROP DOMAIN
+
+> DROP MATERIALIZED VIEW a15_mv
+-- DROP MATERIALIZED VIEW
+
+> DROP TYPE a15_comp
+-- DROP TYPE
+
+> DROP VIEW a15_v2
+-- DROP VIEW
+
+> DROP VIEW a15_v1
+-- DROP VIEW
+
+> DROP TABLE a15_base
+-- DROP TABLE
+

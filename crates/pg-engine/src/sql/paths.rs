@@ -44,7 +44,7 @@ mod mergeappend;
 pub use mergeappend::{PartOrder, count_members, partition_order, plan_ordered_append};
 mod rowmarks;
 pub use rowmarks::level_scans;
-pub(crate) use rowmarks::PUSHED_LEVEL;
+pub(crate) use rowmarks::{OWN_LOCK, PUSHED_LEVEL};
 mod sublinkcopy;
 mod syscat;
 pub use syscat::{sys_index_order, sys_size, sys_table};

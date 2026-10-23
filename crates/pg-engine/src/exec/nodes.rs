@@ -32,6 +32,9 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
         }),
         Plan::Scan(s) => super::scan::open_scan(s, ctx)?,
         Plan::SysScan { table, filter, path, .. } => {
+            if let Some(rows) = sys_rescan(*table, filter.as_ref(), path.as_deref(), ctx)? {
+                return Ok(Box::new(VecNode::new(rows)));
+            }
             let rows = crate::catalog::system::rows(*table, ctx)?;
             let mut deferred = crate::catalog::system::deferred_errors(*table, ctx, &rows);
             // An index path a sort relies on: the rows in that index's order.
@@ -572,6 +575,150 @@ impl Node for ValuesNode {
 /// Postgres computes a view column only for the rows it returns and when the query reads it,
 /// an error is raised when its row passes the filter and the column is read (or when the
 /// filter reads it).
+/// A catalog's rows as one statement scans it again and again (`sys_rescan`).
+pub struct SysRescan {
+    /// The catalog and the role they were generated for.
+    cat: Arc<crate::catalog::Catalog>,
+    role: u32,
+    /// None: the catalog has errors deferred until a column is read (it is scanned whole
+    /// each time, as before).
+    rows: Option<Rc<Vec<Row>>>,
+    /// Per column: the rows holding each value.
+    by_col: RefCell<HashMap<usize, Rc<HashMap<Value, Vec<usize>>>>>,
+}
+
+/// The rows of a catalog scan run once per outer row (a nested loop's parameterized inner
+/// side, a correlated sub-select): None when the scan reads no outer value, or reads a
+/// system view.
+///
+/// Postgres reads such a scan through the catalog's index (an index scan per outer row, or a
+/// syscache lookup), never the whole catalog each time; the engine generates a catalog's rows
+/// whole, which per outer row made a join over a full run's catalogs quadratic
+/// (information_schema.column_domain_usage, oidjoins' checks: minutes). So a catalog's rows
+/// are generated once per statement (for its catalog and role: the rows as of the statement's
+/// start, which is what its snapshot gives Postgres's scans), and an equality between a column
+/// and an outer value (`pk.oid = fk.atttypid`) finds the rows it matches through a hash on
+/// that column, as the index would; the whole filter is still checked on each.
+fn sys_rescan(
+    table: crate::catalog::system::SysTable,
+    filter: Option<&Expr>,
+    path: Option<&crate::sql::plan::SysPath>,
+    ctx: &ExecCtx,
+) -> Result<Option<Vec<Row>>> {
+    // (A view's rows may change within a statement, as pg_settings after set_config:
+    // Postgres runs its function again on a rescan with new parameters.)
+    let Some(f) = filter else { return Ok(None) };
+    if table.is_view() || !f.has_outer_refs() {
+        return Ok(None);
+    }
+    let cat = ctx.catalog();
+    let role = ctx.current_user();
+    let cached = ctx
+        .sys_rescans
+        .borrow()
+        .get(&table.oid())
+        .filter(|e| Arc::ptr_eq(&e.cat, &cat) && e.role == role)
+        .cloned();
+    let entry = match cached {
+        Some(e) => e,
+        None => {
+            let rows = crate::catalog::system::rows(table, ctx)?;
+            let deferred = crate::catalog::system::deferred_errors(table, ctx, &rows);
+            let e = Rc::new(SysRescan {
+                cat,
+                role,
+                rows: deferred.is_empty().then(|| Rc::new(rows)),
+                by_col: RefCell::default(),
+            });
+            ctx.sys_rescans.borrow_mut().insert(table.oid(), e.clone());
+            e
+        }
+    };
+    let Some(all) = &entry.rows else { return Ok(None) };
+    // The first `column = outer value` the hash can serve: a built-in `=` over an integer,
+    // oid or "char" column, or a name / text column under a deterministic collation (whose
+    // equality is the bytes'), the value of the column's own type.
+    fn split<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+        match e {
+            Expr::And(items) => items.iter().for_each(|i| split(i, out)),
+            e => out.push(e),
+        }
+    }
+    let mut conj = Vec::new();
+    split(f, &mut conj);
+    let mut picked: Option<Vec<usize>> = None;
+    for c in conj {
+        let Expr::Call(d, args, _) = c else { continue };
+        if d.name != "=" || args.len() != 2 || d.oid >= crate::catalog::FIRST_USER_OID {
+            continue;
+        }
+        if d.coll.as_ref().is_some_and(|c| !c.deterministic) {
+            continue;
+        }
+        let (k, other) = match (&args[0], &args[1]) {
+            (Expr::Col(k, _), o) | (o, Expr::Col(k, _)) => (*k, o),
+            _ => continue,
+        };
+        let mut sub = false;
+        other.walk(&mut |e| sub |= matches!(e, Expr::Subquery(_)));
+        if sub || !other.columns().is_empty() || other.is_volatile() {
+            continue;
+        }
+        let v = crate::sql::expr::eval(other, &[], ctx)?;
+        if v.is_null() {
+            // (A strict `=`: no row matches.)
+            return Ok(Some(Vec::new()));
+        }
+        let same = |x: &Value| {
+            matches!(
+                (x, &v),
+                (Value::Oid(_), Value::Oid(_))
+                    | (Value::Int2(_), Value::Int2(_))
+                    | (Value::Int4(_), Value::Int4(_))
+                    | (Value::Int8(_), Value::Int8(_))
+                    | (Value::Char(_), Value::Char(_))
+                    | (Value::Text(_), Value::Text(_))
+            )
+        };
+        if !all.iter().all(|r| r.get(k).is_some_and(|x| x.is_null() || same(x))) {
+            continue;
+        }
+        let map = entry
+            .by_col
+            .borrow_mut()
+            .entry(k)
+            .or_insert_with(|| {
+                let mut m: HashMap<Value, Vec<usize>> = HashMap::new();
+                for (i, r) in all.iter().enumerate() {
+                    if !r[k].is_null() {
+                        m.entry(r[k].clone()).or_default().push(i);
+                    }
+                }
+                Rc::new(m)
+            })
+            .clone();
+        picked = Some(map.get(&v).cloned().unwrap_or_default());
+        break;
+    }
+    let mut out = Vec::new();
+    let mut check = |r: &Row| -> Result<()> {
+        ctx.check()?;
+        if eval_bool(f, r, ctx)? {
+            out.push(r.clone());
+        }
+        Ok(())
+    };
+    match &picked {
+        Some(ix) => ix.iter().try_for_each(|&i| check(&all[i]))?,
+        None => all.iter().try_for_each(&mut check)?,
+    }
+    // An index path a sort relies on: the rows in that index's order.
+    if let Some(sp) = path.filter(|sp| sp.ordered) {
+        out = crate::sql::paths::sys_index_order(out, &sp.scan, ctx)?.0;
+    }
+    Ok(Some(out))
+}
+
 struct SysScanNode {
     rows: std::iter::Enumerate<std::vec::IntoIter<Row>>,
     /// (row, column, error).

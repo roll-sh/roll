@@ -133,6 +133,9 @@ pub struct ExecCtx<'a> {
     /// row each of its level's scans returns instead of reading its table (by the scan's
     /// address; None: no row).
     pub epq: RefCell<Option<Rc<EpqRows>>>,
+    /// Catalogs a statement scans again and again (`nodes::sys_rescan`): each one's rows,
+    /// generated once, by catalog oid.
+    pub sys_rescans: RefCell<HashMap<u32, Rc<nodes::SysRescan>>>,
 }
 
 /// EvalPlanQual's test rows (`ExecCtx::epq`): per scan, its row's key and stored data.
@@ -409,6 +412,7 @@ impl<'a> ExecCtx<'a> {
             scalar_hash: RefCell::default(),
             sys_cols: RefCell::default(),
             epq: RefCell::new(None),
+            sys_rescans: RefCell::default(),
         }
     }
 
@@ -477,6 +481,7 @@ impl<'a> ExecCtx<'a> {
             scalar_hash: RefCell::default(),
             sys_cols: RefCell::default(),
             epq: RefCell::new(None),
+            sys_rescans: RefCell::default(),
         }
     }
 

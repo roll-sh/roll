@@ -1388,9 +1388,21 @@ pub fn deferred_errors(
         .collect()
 }
 
+thread_local! {
+    static GENERATED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many system relations' rows this thread has generated so far: each costs as much as
+/// the relation is big, so a statement's count mustn't grow with the catalog (a nested loop
+/// over catalogs once generated its inner catalog for every outer row).
+pub fn generated_rows_count() -> u64 {
+    GENERATED.with(|c| c.get())
+}
+
 /// Rows of a system relation, as the current transaction sees the catalog.
 pub fn rows(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
     use SysTable::*;
+    GENERATED.with(|c| c.set(c.get() + 1));
     let schema = if table.schema() == PGC {
         "pg_catalog"
     } else {

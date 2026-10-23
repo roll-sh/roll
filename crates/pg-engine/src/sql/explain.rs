@@ -911,7 +911,7 @@ fn rowmark_scans(root: &Arc<Plan>) -> std::collections::HashSet<usize> {
 /// The row marks of a LockRows's query level that have no key column in the plan: the
 /// table scans on a semi / anti join's inner side (their ctids, `semi`), and the sources of
 /// no table's rows (functions, VALUES, CTEs: their whole rows, `copies`), by address.
-fn lock_level_marks<'p>(p: &'p Plan, inner: bool, semi: &mut Vec<usize>, copies: &mut Vec<(usize, &'p Plan)>) {
+pub(crate) fn lock_level_marks<'p>(p: &'p Plan, inner: bool, semi: &mut Vec<usize>, copies: &mut Vec<(usize, &'p Plan)>) {
     match p {
         Plan::Scan(_) => {
             if inner {
@@ -1236,7 +1236,20 @@ fn needed_masks(root: &Arc<Plan>) -> HashMap<usize, Vec<bool>> {
 }
 
 fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
-    fn go(p: &Plan, needed: Vec<bool>, out: &mut HashMap<usize, Vec<bool>>) {
+    // The FROM subqueries a locking level marks by their whole row (ROW_MARK_COPY, `s.*`):
+    // the Var reads every output, so none is removed (remove_unused_subquery_outputs keeps
+    // them all when attrs_used has the whole row).
+    fn whole_marked(p: &Plan, out: &mut std::collections::HashSet<usize>) {
+        if let Plan::LockRows { input, .. } = p {
+            let (mut semi, mut copies) = (Vec::new(), Vec::new());
+            lock_level_marks(input, false, &mut semi, &mut copies);
+            out.extend(copies.into_iter().filter(|(_, c)| matches!(c, Plan::Barrier { .. })).map(|(a, _)| a));
+        }
+        plan_inputs(p).into_iter().for_each(|c| whole_marked(c, out));
+    }
+    let mut whole = std::collections::HashSet::new();
+    whole_marked(root, &mut whole);
+    fn go(p: &Plan, needed: Vec<bool>, whole: &std::collections::HashSet<usize>, out: &mut HashMap<usize, Vec<bool>>) {
         let needs = match p {
             // (A MERGE's source as its target list shows it: what the actions read, the
             // target row's ctid, and its tableoid for an inheritance tree.)
@@ -1267,7 +1280,11 @@ fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
                 let mask: Vec<bool> = needed
                     .iter()
                     .enumerate()
-                    .map(|(i, n)| *n || keys.get(i).copied().unwrap_or(false) || volatile.get(i).copied().unwrap_or(false))
+                    .map(|(i, n)| {
+                        *n || keys.get(i).copied().unwrap_or(false)
+                            || volatile.get(i).copied().unwrap_or(false)
+                            || whole.contains(&addr(p))
+                    })
                     .collect();
                 if let Some((pin, _)) = barrier_junk(input, *sorted) {
                     let mut inner = super::paths::child_needs(input, &mask).pop().unwrap_or_default();
@@ -1277,7 +1294,7 @@ fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
                     }
                     out.insert(addr(p), needed.clone());
                     out.insert(addr(input), mask);
-                    go(pin, inner, out);
+                    go(pin, inner, whole, out);
                     return;
                 }
                 vec![mask]
@@ -1321,21 +1338,21 @@ fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
         }
         for s in sq {
             let w = super::binder::plan_width(&s.plan);
-            go(&s.plan, vec![true; w], out);
+            go(&s.plan, vec![true; w], whole, out);
         }
         if let Plan::With { ctes, .. } = p {
             for (_, c) in ctes {
                 let w = super::binder::plan_width(c);
-                go(c, vec![true; w], out);
+                go(c, vec![true; w], whole, out);
             }
         }
         for (c, n) in plan_inputs(p).into_iter().zip(needs) {
-            go(c, n, out);
+            go(c, n, whole, out);
         }
     }
     let mut out = HashMap::new();
     let w = super::binder::plan_width(root);
-    go(root, vec![true; w], &mut out);
+    go(root, vec![true; w], &whole, &mut out);
     out
 }
 
@@ -3100,6 +3117,7 @@ impl Builder<'_, '_> {
         // A relation's whole row (`ROW(...)` of all its columns, of its row type): the
         // whole-row Var `rel.*`, which ruleutils always qualifies.
         let whole_vars = &self.whole_vars;
+        let whole_cat = self.ctx.catalog();
         let whole_row_of = |x: &Expr| -> Option<String> {
             // (Null-extended above an outer join: the same Var.)
             let x = crate::sql::binder::nullable_whole_row(x).unwrap_or(x);
@@ -3120,6 +3138,15 @@ impl Builder<'_, '_> {
                 qual = Some(q.to_string());
             }
             if rt.oid == 0 && qual.as_ref().is_none_or(|q| whole_vars.get(q) != Some(&items.len())) {
+                return None;
+            }
+            // (A view's row, or a composite type's, is no relation scanned: the view's
+            // subquery is pulled up, and its whole-row Var becomes a ROW() of the subquery's
+            // outputs (pullup_replace_vars), typed as the view's row.)
+            if rt.oid != 0
+                && (whole_cat.composites.contains_key(&rt.oid)
+                    || whole_cat.views.values().any(|v| v.rowtype == rt.oid && !v.materialized))
+            {
                 return None;
             }
             qual
@@ -3566,15 +3593,9 @@ impl Builder<'_, '_> {
         self.settle(&mut node);
         if self.o.verbose {
             tlist_layout(&mut node);
-            // (A LockRows at the level's top returns its rows' marks too, resjunk.)
-            if node.node_type == "LockRows" {
-                let junk: Vec<String> = node
-                    .children
-                    .first()
-                    .map(|c| c.output.iter().filter(|o| o.ends_with("ctid") && !node.output.contains(o)).cloned().collect())
-                    .unwrap_or_default();
-                node.output.extend(junk);
-            }
+            // (A LockRows at the level's top returns its rows' marks too, resjunk, and so
+            // do the Limits over it, which return their input's target list.)
+            lock_junk(&mut node);
         }
         let mut inits = self.inits.pop().unwrap_or_default();
         // SS_charge_for_initplans: the level's top node pays for its InitPlans.
@@ -4819,14 +4840,9 @@ impl Builder<'_, '_> {
                         })
                         .map(|(_, n)| self.pick(n, Cx::Output))
                         .collect();
-                    // (A LockRows computing it returns its rows' marks too, resjunk.)
-                    if c.node.node_type == "LockRows"
-                        && let Some(ch) = c.node.children.first()
-                    {
-                        let junk: Vec<String> =
-                            ch.output.iter().filter(|o| o.ends_with("ctid") && !c.node.output.contains(o)).cloned().collect();
-                        c.node.output.extend(junk);
-                    }
+                    // (A LockRows computing it returns its rows' marks too, resjunk, as do
+                    // the Limits over it.)
+                    lock_junk(&mut c.node);
                     let out = c.node.output.clone();
                     for pt in c.node.partials_mut() {
                         pt.output = out.clone();
@@ -16809,6 +16825,26 @@ pub(crate) fn distinct_keys_fixed(input: &Plan) -> bool {
 /// A Limit over `c` (adjust_limit_rows_costs): `count` / `off` are the constant LIMIT and
 /// OFFSET (0: none, -1: not constant). A Sort under a constant LIMIT keeps only the rows it
 /// needs.
+/// A LockRows's rows' marks (their ctids), resjunk in its output, and in the output of the
+/// Limits over it, which return their input's target list: the marks it added.
+fn lock_junk(node: &mut ExNode) -> Vec<String> {
+    let junk: Vec<String> = match node.node_type {
+        "LockRows" => node
+            .children
+            .first()
+            .map(|c| c.output.iter().filter(|o| o.ends_with("ctid")).cloned().collect())
+            .unwrap_or_default(),
+        "Limit" if node.children.len() == 1 => lock_junk(&mut node.children[0]),
+        _ => Vec::new(),
+    };
+    for j in &junk {
+        if !node.output.contains(j) {
+            node.output.push(j.clone());
+        }
+    }
+    junk
+}
+
 fn limit_over(mut c: ExNode, count: f64, off: f64) -> ExNode {
     let mut n = ExNode::new("Limit");
     // ExecSetTupleBound: the sort below (through a subquery's scan without quals) keeps

@@ -31,12 +31,20 @@ thread_local! {
     /// (no hasForUpdate): its row marks are that level's (pulled up) or locked when that
     /// level plans it as a subquery apart, not here.
     pub(crate) static PUSHED_LEVEL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Planning a query level with a locking clause of its own (hasForUpdate): it has row
+    /// marks however its locks went (into FROM subqueries planned apart, whose whole rows it
+    /// then marks), so it gets a LockRows (grouping_planner's `if (parse->rowMarks)`).
+    pub(crate) static OWN_LOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The level's plan with a LockRows at its top (below its LIMITs) when its scans have row
 /// marks and the plan's shape lets the keys go up; else as it is (each locked scan then
 /// locks the rows it returns).
 pub(super) fn hoist(plan: &mut Plan) {
+    hoist_with(plan, OWN_LOCK.get());
+}
+
+fn hoist_with(plan: &mut Plan, own: bool) {
     if PUSHED_LEVEL.get() {
         return;
     }
@@ -52,7 +60,7 @@ pub(super) fn hoist(plan: &mut Plan) {
     }
     fn apart(p: &mut Plan) {
         match p {
-            Plan::Barrier { input, .. } => hoist(Arc::make_mut(input)),
+            Plan::Barrier { input, .. } => hoist_with(Arc::make_mut(input), false),
             _ => {
                 for c in crate::sql::explain::plan_inputs_mut(p) {
                     if wants(c) {
@@ -65,12 +73,13 @@ pub(super) fn hoist(plan: &mut Plan) {
     if wants(plan) {
         apart(plan);
     }
-    hoist_level(plan);
+    hoist_level(plan, own);
 }
 
-fn hoist_level(plan: &mut Plan) {
+/// `own`: the level has a locking clause of its own (`OWN_LOCK`).
+fn hoist_level(plan: &mut Plan, own: bool) {
     if let Plan::Limit { input, .. } = plan {
-        return hoist_level(Arc::make_mut(input));
+        return hoist_level(Arc::make_mut(input), own);
     }
     // (The projection dropping the resjunk columns the level carries, its sort keys, isn't
     // a plan node: the LockRows below it returns them too.)
@@ -78,15 +87,23 @@ fn hoist_level(plan: &mut Plan) {
         && exprs.len() < crate::sql::binder::plan_width(input)
         && exprs.iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i))
     {
-        return hoist_level(Arc::make_mut(input));
+        return hoist_level(Arc::make_mut(input), own);
     }
-    if !has_marks(plan) {
+    // (A level locking only FROM subqueries planned apart, which lock their own rows: its
+    // LockRows locks nothing, its marks those subqueries' whole rows and its tables' ctids,
+    // preprocess_rowmarks's ROW_MARK_COPY / ROW_MARK_REFERENCE.)
+    let copies = own && {
+        let (mut semi, mut copies) = (Vec::new(), Vec::new());
+        crate::sql::explain::lock_level_marks(plan, false, &mut semi, &mut copies);
+        copies.iter().any(|(_, c)| matches!(c, Plan::Barrier { .. }))
+    };
+    if !has_marks(plan) && !copies {
         return;
     }
     let Some((keyed, map, keys)) = key(plan) else {
         return;
     };
-    if keys.iter().all(|k| k.lock.is_none()) {
+    if keys.iter().all(|k| k.lock.is_none()) && !copies {
         return;
     }
     let w = crate::sql::binder::plan_width(plan);

@@ -271,6 +271,7 @@ fn panic_leaves_no_state() {
         ("explain::MERGE_MEMBERS", "SET enable_seqscan = off", "EXPLAIN (COSTS OFF) SELECT * FROM inh_p ORDER BY a"),
         ("explain::INH_SCANS", "", "EXPLAIN SELECT * FROM inh_p"),
         ("explain::UNDER_LOCK_ROWS", "", "EXPLAIN SELECT * FROM t FOR UPDATE"),
+        ("rowmarks::OWN_LOCK", "", "SELECT * FROM (SELECT * FROM t OFFSET 0) s FOR UPDATE OF s"),
         ("explain::CTE_ESTIMATES", "", "WITH c AS MATERIALIZED (SELECT a FROM t) SELECT * FROM c WHERE a = 1"),
         ("session::definer", "", "CLUSTER ct USING ct_i"),
         ("session::in_use", "", "UPDATE pt SET a = 2 WHERE a = 1"),

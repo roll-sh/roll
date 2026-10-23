@@ -2632,7 +2632,10 @@ impl Binder<'_, '_> {
             let pushed = s.locking_clause.is_empty()
                 && self.pushed_lock.as_ref().is_some_and(|(l, _)| *l == self.levels.len());
             let _pushed = crate::scoped::set(&crate::sql::paths::PUSHED_LEVEL, pushed, "rowmarks::PUSHED_LEVEL");
+            let own = !s.locking_clause.is_empty();
+            let _own = crate::scoped::set(&crate::sql::paths::OWN_LOCK, own, "rowmarks::OWN_LOCK");
             self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut plan, lim);
+            drop(_own);
             drop(_pushed);
             if !self.unplanned {
                 super::check_merge_keys(self.ctx, &mut plan)?;
@@ -3583,6 +3586,7 @@ impl Binder<'_, '_> {
                     union_alias(&mut plan, &name);
                     let lim = self.arm_limit.filter(|a| a.0 == sub_level).map(|a| (a.1, a.2));
                     let _pushed = crate::scoped::set(&crate::sql::paths::PUSHED_LEVEL, pushed, "rowmarks::PUSHED_LEVEL");
+                    let _own = crate::scoped::set(&crate::sql::paths::OWN_LOCK, false, "rowmarks::OWN_LOCK");
                     self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut plan, lim);
                     drop(_pushed);
                     super::check_merge_keys(self.ctx, &mut plan)?;
