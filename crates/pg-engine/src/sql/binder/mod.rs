@@ -585,6 +585,9 @@ pub struct Binder<'b, 'a> {
     pub(crate) rule_validate: bool,
     /// Binding the query of a view locked FOR UPDATE / SHARE: its relations need UPDATE.
     pub(crate) view_lock: bool,
+    /// A FOR UPDATE / SHARE pushed into a FROM subquery or a view's query (applyLockingClause,
+    /// pushedDown): the binder level of the query it locks every relation of.
+    pub(crate) pushed_lock: Option<(usize, select::Locking)>,
     /// The events (trigger type bits) a write through an updatable view does: a view under
     /// it with INSTEAD OF triggers for them takes the write.
     pub(crate) view_events: u16,
@@ -678,6 +681,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             rule_target: None,
             rule_validate: false,
             view_lock: false,
+            pushed_lock: None,
             view_events: 0,
             refs: None,
             next_id: 1,

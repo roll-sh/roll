@@ -86,6 +86,11 @@ impl Binder<'_, '_> {
             pb::SetOperation::SetopNone | pb::SetOperation::Undefined
         ) {
             self.keep_unknown = false;
+            // (A view's set operation locked from the query above locks nothing:
+            // markQueryForLocking finds no relation in its empty jointree.)
+            if self.pushed_lock.as_ref().is_some_and(|(l, _)| *l == self.levels.len()) {
+                self.pushed_lock = None;
+            }
             // (UNION ALL under a constant LIMIT and no ORDER BY: the arms planned for it;
             // nested UNION ALLs keep the outer one's.)
             let union_all = op == pb::SetOperation::SetopUnion && s.all;
@@ -1869,7 +1874,13 @@ impl Binder<'_, '_> {
                             _ => "FOR UPDATE",
                         }
                     }
-                    _ => "FOR UPDATE",
+                    // (Pushed down from the query above: its clause's.)
+                    _ => match locking.as_ref().map(|l| l.mark) {
+                        Some(RowMark::KeyShare) => "FOR KEY SHARE",
+                        Some(RowMark::Share) => "FOR SHARE",
+                        Some(RowMark::NoKeyUpdate) => "FOR NO KEY UPDATE",
+                        _ => "FOR UPDATE",
+                    },
                 };
                 return Err(Error::new(
                     code::FEATURE_NOT_SUPPORTED,
@@ -2618,7 +2629,11 @@ impl Binder<'_, '_> {
                 .arm_limit
                 .filter(|a| a.0 == self.levels.len())
                 .map(|a| (a.1, a.2));
+            let pushed = s.locking_clause.is_empty()
+                && self.pushed_lock.as_ref().is_some_and(|(l, _)| *l == self.levels.len());
+            let _pushed = crate::scoped::set(&crate::sql::paths::PUSHED_LEVEL, pushed, "rowmarks::PUSHED_LEVEL");
             self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut plan, lim);
+            drop(_pushed);
             if !self.unplanned {
                 super::check_merge_keys(self.ctx, &mut plan)?;
             }
@@ -3276,7 +3291,41 @@ impl Binder<'_, '_> {
                 wait,
             });
         }
+        // (A lock pushed down from the query above: every relation of this one, the
+        // stronger strength where it has its own clause too.)
+        if let Some((level, p)) = &self.pushed_lock
+            && *level == self.levels.len()
+        {
+            let strength = |m: RowMark| match m {
+                RowMark::KeyShare => 0,
+                RowMark::Share => 1,
+                RowMark::NoKeyUpdate => 2,
+                RowMark::Update => 3,
+            };
+            let mut p = p.clone();
+            if let Some(o) = &out
+                && strength(o.mark) > strength(p.mark)
+            {
+                p.mark = o.mark;
+            }
+            out = Some(p);
+        }
         Ok(out)
+    }
+
+    /// The FOR UPDATE / SHARE of the query above pushed into a FROM subquery or a view's
+    /// query named `name` (transformLockingClause): with no relation list, or naming it.
+    pub(crate) fn push_lock(&self, locking: Option<&Locking>, name: &str) -> Option<(usize, Locking)> {
+        let l = locking.filter(|l| l.rels.is_empty() || l.rels.iter().any(|r| r == name))?;
+        Some((
+            self.levels.len() + 1,
+            Locking {
+                rels: Vec::new(),
+                locs: Vec::new(),
+                mark: l.mark,
+                wait: l.wait,
+            },
+        ))
     }
 
     /// Bind the FROM list: sets the level's scope and returns the plan.
@@ -3445,7 +3494,32 @@ impl Binder<'_, '_> {
                     self.defer_level = Some(self.levels.len() + 1);
                 }
                 let sub_level = self.levels.len() + 1;
+                // FOR UPDATE / SHARE of this level reaching the subquery locks its relations
+                // too (a VALUES list's none; a set operation's can't be).
+                let alias_name = rs.alias.as_ref().map(|a| a.aliasname.as_str()).unwrap_or("");
+                let mut push = if self.deparse { None } else { self.push_lock(locking, alias_name) };
+                if let Some(NodeEnum::SelectStmt(sub)) = inner(rs.subquery.as_deref().unwrap())
+                    && push.is_some()
+                {
+                    if !sub.values_lists.is_empty() {
+                        push = None;
+                    } else if !simple_select {
+                        let what = match push.as_ref().map(|p| p.1.mark) {
+                            Some(RowMark::KeyShare) => "FOR KEY SHARE",
+                            Some(RowMark::Share) => "FOR SHARE",
+                            Some(RowMark::NoKeyUpdate) => "FOR NO KEY UPDATE",
+                            _ => "FOR UPDATE",
+                        };
+                        return Err(Error::new(
+                            code::FEATURE_NOT_SUPPORTED,
+                            format!("{what} is not allowed with UNION/INTERSECT/EXCEPT"),
+                        ));
+                    }
+                }
+                let pushed = push.is_some();
+                let saved_push = std::mem::replace(&mut self.pushed_lock, push);
                 let r = self.bind_subquery(rs.subquery.as_deref().unwrap());
+                self.pushed_lock = saved_push;
                 let deferred = std::mem::take(&mut self.deferred);
                 (self.defer_level, self.deferred) = saved_defer;
                 self.level().clause = clause;
@@ -3508,7 +3582,9 @@ impl Binder<'_, '_> {
                     let mut plan = plan;
                     union_alias(&mut plan, &name);
                     let lim = self.arm_limit.filter(|a| a.0 == sub_level).map(|a| (a.1, a.2));
+                    let _pushed = crate::scoped::set(&crate::sql::paths::PUSHED_LEVEL, pushed, "rowmarks::PUSHED_LEVEL");
                     self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut plan, lim);
+                    drop(_pushed);
                     super::check_merge_keys(self.ctx, &mut plan)?;
                     plan
                 } else {
@@ -4178,7 +4254,10 @@ impl Binder<'_, '_> {
                         crate::stack::check()?;
                         self.view_stack.push(v.oid);
                         let saved_lock = std::mem::replace(&mut self.view_lock, locked);
+                        let push = if self.deparse { None } else { self.push_lock(locking, &name) };
+                        let saved_push = std::mem::replace(&mut self.pushed_lock, push);
                         let r = self.bind_view_query(&v);
+                        self.pushed_lock = saved_push;
                         self.view_lock = saved_lock;
                         self.view_stack.pop();
                         let (plan, vcols) = r?;

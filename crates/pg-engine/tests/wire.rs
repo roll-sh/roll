@@ -1126,3 +1126,66 @@ fn row_locks_at_the_query_level_top() {
     });
     s.engine.shutdown();
 }
+
+/// FOR UPDATE / SHARE with no relation list, or naming a FROM subquery or a view, reaches
+/// the relations inside it (transformLockingClause's pushed-down marks): a subquery planned
+/// apart locks every row it returns (its own LockRows), one pulled up only the rows the
+/// statement returns; a set operation can't be locked, a VALUES list has nothing to lock.
+#[test]
+fn row_locks_pushed_into_subqueries_and_views() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        a.batch_execute(
+            "CREATE TABLE pp (f1 int, f2 text);
+             CREATE TABLE pj (f2j text, other int);
+             INSERT INTO pp VALUES (1, 'one');
+             INSERT INTO pj VALUES ('one', 1), ('two', 2);
+             CREATE VIEW pv AS SELECT * FROM pj WHERE other > 1;
+             CREATE VIEW pva AS SELECT f2j, count(*) FROM pj GROUP BY f2j;",
+        )
+        .await
+        .unwrap();
+        let held = |row: &'static str| format!("SELECT f2j FROM pj WHERE f2j = '{row}' FOR UPDATE NOWAIT");
+        // (Each case: what session a's statement leaves locked, of pj's two rows.)
+        let cases: [(&str, [bool; 2]); 6] = [
+            ("SELECT p.f1 FROM pp p, (SELECT * FROM pj OFFSET 0) s WHERE p.f2 = s.f2j FOR SHARE", [true, true]),
+            ("SELECT p.f1 FROM pp p, (SELECT * FROM pj OFFSET 0) s WHERE p.f2 = s.f2j FOR SHARE OF p", [false, false]),
+            ("SELECT * FROM (SELECT * FROM pj OFFSET 0) s FOR UPDATE OF s", [true, true]),
+            ("SELECT * FROM (SELECT * FROM pj) s WHERE f2j = 'two' FOR UPDATE", [false, true]),
+            ("SELECT * FROM pv FOR UPDATE", [false, true]),
+            ("SELECT * FROM pp p, pv v FOR UPDATE OF p", [false, false]),
+        ];
+        for (q, locked) in cases {
+            a.batch_execute("BEGIN").await.unwrap();
+            lines(&a, q).await.unwrap();
+            for (row, want) in ["one", "two"].into_iter().zip(locked) {
+                let r = lines(&b, &held(row)).await;
+                match r {
+                    Ok(_) => assert!(!want, "{q}: row {row} not locked"),
+                    Err(e) => {
+                        assert!(want, "{q}: row {row} locked");
+                        assert_eq!(e.code().map(|c| c.code()), Some("55P03"));
+                    }
+                }
+            }
+            a.batch_execute("ROLLBACK").await.unwrap();
+        }
+        for (q, msg) in [
+            ("SELECT * FROM (SELECT count(*) FROM pj) s FOR UPDATE", "FOR UPDATE is not allowed with aggregate functions"),
+            ("SELECT * FROM (SELECT f2j FROM pj UNION SELECT 'x') s FOR SHARE", "FOR SHARE is not allowed with UNION/INTERSECT/EXCEPT"),
+            ("SELECT * FROM pva FOR UPDATE", "FOR UPDATE is not allowed with GROUP BY clause"),
+            ("SELECT * FROM (SELECT * FROM (SELECT count(*) c FROM pj) a) b FOR UPDATE OF b", "FOR UPDATE is not allowed with aggregate functions"),
+        ] {
+            let e = lines(&a, q).await.unwrap_err();
+            assert_eq!(e.as_db_error().map(|d| d.message()), Some(msg), "{q}");
+        }
+        assert_eq!(lines(&a, "SELECT v.column1, f1 FROM (VALUES (1)) v, pp FOR UPDATE").await.unwrap(), ["1|1"]);
+        assert_eq!(
+            lines(&a, "SELECT * FROM (SELECT f2j FROM pj UNION SELECT 'x') s, pp p WHERE p.f2 = s.f2j FOR SHARE OF p").await.unwrap(),
+            ["one|1|one"]
+        );
+    });
+    s.engine.shutdown();
+}
