@@ -423,6 +423,34 @@ impl Catalog {
         out
     }
 
+    /// A sort of made type `ty` (FinishSortSupportFunction): its ordering operator's btree
+    /// family must have a comparison function (FUNCTION 1) for (`ty`, `ty`), which the sort
+    /// calls. The family of `ty`'s `<` / `>` (strategy 1 / 5) whose comparison is missing,
+    /// when no family with such an operator has one (None: none is missing, or `ty` has no
+    /// made ordering operator).
+    pub fn sort_support_missing(&self, ty: u32) -> Option<u32> {
+        let btree = |fam: u32| {
+            self.opfamilies.get(&fam).map(|f| f.method).or_else(|| {
+                crate::catalog::system::OPFAMILIES.iter().find(|x| x.0 == fam).map(|x| x.1)
+            }) == Some(403)
+        };
+        let mut missing = None;
+        for m in self.opmembers.values() {
+            if m.func || m.left != ty || m.right != ty || !matches!(m.number, 1 | 5) || !btree(m.family) {
+                continue;
+            }
+            let cmp = self
+                .opmembers
+                .values()
+                .any(|f| f.func && f.family == m.family && f.number == 1 && f.left == ty && f.right == ty);
+            if cmp {
+                return None;
+            }
+            missing.get_or_insert(m.family);
+        }
+        missing
+    }
+
     pub fn opclass_info(&self, oid: u32) -> Option<ClassInfo> {
         if let Some(c) = self.opclasses.get(&oid) {
             return Some(class_info(c));

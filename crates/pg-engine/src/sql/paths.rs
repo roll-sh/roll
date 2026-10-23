@@ -24,6 +24,7 @@ use std::sync::Arc;
 pub(crate) mod analyzejoins;
 mod reducejoins;
 pub(crate) use reducejoins::strict_cols;
+pub(crate) use joinpath::user_eq_props;
 mod pullup;
 mod pathkeys;
 pub use pathkeys::{column_classes, constant_columns};
@@ -6295,9 +6296,14 @@ fn values_row(p: &Plan) -> Option<Vec<Expr>> {
 /// (paraminfo_get_equal_hashops), each once.
 pub(crate) fn lateral_memo_keys(right: &Plan, params: &[Expr]) -> Vec<Expr> {
     let mut first: Vec<usize> = Vec::new();
-    if let Plan::Filter { input, pred } = right
-        && matches!(&**input, Plan::Barrier { .. })
-    {
+    // (A pulled-up scan's filter reading them: the join clauses its parameterized path
+    // checks, ppi_clauses; a TABLESAMPLE's arguments are lateral_vars.)
+    let quals = match right {
+        Plan::Filter { input, pred } if matches!(&**input, Plan::Barrier { .. }) => Some(pred),
+        Plan::Scan(s) => s.filter.as_ref(),
+        _ => None,
+    };
+    if let Some(pred) = quals {
         pred.walk(&mut |x| {
             if let Expr::Outer(1, i, _) = x
                 && !first.contains(i)

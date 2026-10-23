@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51056 (**99.82%**) |
-| units differing | 94 |
+| units matching | 51064 (**99.83%**) |
+| units differing | 86 |
 | files fully matching | 221 |
 | engine output == expected/*.out (pg_regress "ok") | 183 files |
 | engine crashes / panics | none |
@@ -45,16 +45,16 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 93 | 98.9% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 1 | 1.1% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 85 | 98.8% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 1 | 1.2% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 93 units
-join (61), partition_join (16), partition_prune (2), groupingsets (7), with (3), aggregates (1), join_hash (2), returning (1)
+### EXPLAIN (group C1) — 85 units
+join (53), partition_join (16), partition_prune (2), groupingsets (7), with (3), aggregates (1), join_hash (2), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -108,6 +108,83 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
 
+## Round 16, agent 16 (FULL JOIN without merge / hash plans, made-type sort support, semi join quals, SJE with LATERAL items)
+
+Measured in subset runs of 37 files (test_setup, create_misc, create_table, create_index,
+create_view, create_function_sql, select, inherit, select_distinct, select_distinct_on,
+subselect, union, join, aggregates, groupingsets, join_hash, tsrf, window, equivclass, limit,
+rangefuncs, with, partition_join, tuplesort, memoize, incremental_sort, select_parallel,
+partition_prune, partition_aggregate, merge, explain, updatable_views, rules, returning,
+stats_ext, insert_conflict, sqljson_jsontable), the base binary (f8c1317, again on 77bc60e) and this round's
+side by side, unit by unit: 8 units fixed, none broken.
+
+| file | fixed units |
+|---|---|
+| join | 576, 606, 617, 618, 619, 876, 878, 880 |
+
+What changed:
+
+- **Wrong results: a FULL JOIN no merge or hash join can run returned rows**
+  (populate_joinrel_with_paths: Postgres errors "FULL JOIN is only supported with
+  merge-joinable or hash-joinable join conditions", 0A000). The engine ran such a join (`ON
+  a.x < b.y`, `ON a.x = 1`, `ON ... OR ...`, `IS NOT DISTINCT FROM`, a made `=` without HASHES
+  beside another clause) as a nested loop. `optimize::full_join_supported` takes
+  select_mergejoin_clauses' and hash_inner_and_outer's rules: either input as the outer one,
+  every clause but constants a merge-joinable `=` across the sides (an operator without a
+  commutator only with the outer side on its left), or one hash-joinable `=`; a constant
+  false clause makes the join a dummy one. Built-in `=` of the geometric types, `xid = int4`
+  (neither), `xid` / `cid` / `aclitem` (hash only), money, bit, tsvector, cross-type datetime
+  (merge only) follow pg_operator; a clause it doesn't recognise counts as both, so it never
+  errors where Postgres might not. Checked on the final plan (`check_merge_keys`), so EXPLAIN
+  errors too.
+- **Wrong results: a sort by a made type's ordering operator whose btree family has no
+  comparison function for it sorted** (agent 10's equivclass made types: the merge join's
+  `Sort Key: t1.b USING <` over `int8alias1`, whose family has `<` but no FUNCTION 1
+  (alias, alias)). FinishSortSupportFunction errors "missing support function 1(T,T) in
+  opfamily F" (XX000) as the sort starts, before any row is read: the Sort node checks
+  `Catalog::sort_support_missing` for each key of a made type. A FULL / LEFT / RIGHT merge
+  join over it, and `ORDER BY b USING <`, now error as Postgres does; with FUNCTION 1 added
+  they run.
+- cost_sort: a merge join's explicit sorts count as disabled nodes under enable_sort = off
+  (`JoinGucs::sort`), so presorted index scans merging on the leading key win (join
+  876 / 878 / 880).
+- A semi join's clauses are distributed as an inner join's (deconstruct_jointree: ojscope
+  NULL for JOIN_SEMI): one over its left side alone is that side's restriction, not a join
+  filter, and an equality with a constant reaches the other side through its class
+  (`ec_constants`), the join clause then implied (join 576: both sides of the partitioned
+  semi join pruned to `p1`). An anti join's stay join clauses.
+- Self-join elimination in a join group with LATERAL items (remove_self_join_rel replaces
+  the removed relation in lateral_vars): the items' references to the removed scan read the
+  kept one (join 617 / 618 / 619).
+- paraminfo_get_equal_hashops: a Memoize over a LATERAL scan keys the values of the join
+  clauses its parameterized path checks (its filter) first, then its own LATERAL references
+  (a TABLESAMPLE's arguments) (join 606).
+
+Goldens: `tests/sql/a16_sort_support.sql` (both errors, with the type oids masked),
+`a16_join_parity.sql`.
+
+aggregates 116 is still open: a sub-select's grouping keeps its GROUP BY key that the select
+list doesn't name (`y.y`, resjunk) in its output and its Sort's, as the statement's top
+level does (agent 11); in an ARRAY() sub-select the engine drops it.
+
+Looked at and left (why):
+
+- join 612: a SubPlan's `a = t1.a AND a = t2.a` is one class with two Params,
+  generate_base_implied_equalities_const giving `a = $2` and the gating `$1 = $2`. Doing this
+  when the subquery is bound or planned changed EXISTS pull-ups (the semi join takes the
+  rewritten clauses, a different join clause: `sj.a = t1.b` for `t1.a = sj.a`); it needs to run
+  only once a sub-select stays a SubPlan.
+- join 620 / 654 / 655: after self-join elimination Postgres keeps both relations' reltargets
+  (the kept scan still returns a column only the removed join clause read, `t3.c`), and a
+  physical target list for the kept scan; 632: Postgres removes the relation with the lower
+  range table index, which for a pulled-up subquery's relations isn't the earlier leaf here.
+- join 775: a pulled-up LATERAL subquery's WHERE goes in front of the ON clause
+  (remove_useless_results_recurse), here after it (in `lift.rs`, agent 8's PlaceHolderVar
+  code).
+- join 428–432, 424, 426, 548 (PlaceHolderVars: a pulled-up subquery's constant output wrapped
+  only where an outer join nulls it, pullup_replace_vars_callback with varnullingrels; 429 /
+  431 are their row order), 332, 440, 450, 771, 774 (nested PlaceHolderVars): agent 8's area.
+- join 499, 543, 560, 715, 819, 888: cost-driven join orders and unique-ification choices.
 ## Round 16, agent 19 (PlaceHolderVar class order, semi joins over FROM-less relations)
 
 Measured in subset runs (test_setup, create_misc, create_index, create_view, select, union,
@@ -2463,7 +2540,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 864 | 93% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (61) |
+| join | 925 | 872 | 94% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (53) |
 | aggregates | 556 | 555 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |

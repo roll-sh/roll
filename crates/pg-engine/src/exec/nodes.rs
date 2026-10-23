@@ -995,6 +995,19 @@ fn incremental_sort_rows(
     Ok(out.into_iter().map(|(_, r)| r).collect())
 }
 
+/// FinishSortSupportFunction's error for a sort key of made type `ty` whose ordering
+/// operator's btree family has no comparison function (FUNCTION 1) for it.
+fn missing_sort_support(ty: &crate::types::DataType, ctx: &ExecCtx) -> Option<Error> {
+    let crate::types::DataType::Base(b) = ty else {
+        return None;
+    };
+    let fam = ctx.catalog().sort_support_missing(b.oid)?;
+    Some(crate::error::internal(format!(
+        "missing support function 1({},{}) in opfamily {fam}",
+        b.oid, b.oid
+    )))
+}
+
 struct SortNode {
     input: Option<BoxNode>,
     keys: Vec<SortKey>,
@@ -1022,6 +1035,11 @@ impl Node for SortNode {
                     "could not determine which collation to use for string comparison",
                 )
                 .hint("Use the COLLATE clause to set the collation explicitly."));
+            }
+            // PrepareSortSupportFromOrderingOp: a made type's key needs its family's
+            // comparison function, looked up as the sort starts.
+            if let Some(e) = self.keys.iter().find_map(|k| missing_sort_support(&k.expr.ty(), ctx)) {
+                return Err(e);
             }
             self.out = if self.presorted > 0 {
                 incremental_sort_rows(&mut input, &self.keys, self.presorted, self.bound, self.key, ctx)?

@@ -19,6 +19,7 @@ pub struct JoinGucs {
     pub mergejoin: bool,
     pub material: bool,
     pub incremental_sort: bool,
+    pub sort: bool,
     pub memoize: bool,
     pub seq_page_cost: f64,
     /// work_mem, in kB.
@@ -41,6 +42,7 @@ impl JoinGucs {
             mergejoin: on("enable_mergejoin"),
             material: on("enable_material"),
             incremental_sort: on("enable_incremental_sort"),
+            sort: on("enable_sort"),
             memoize: on("enable_memoize"),
             seq_page_cost: num("seq_page_cost", 1.0),
             work_mem: num("work_mem", 4096.0),
@@ -640,7 +642,13 @@ pub fn mergejoin(
     let mut inner_sorted = None;
     let (ost, otot) = match m.outer_sort {
         Some(sk) => {
-            let c = if g.incremental_sort && sk.presorted > 0 {
+            // (cost_sort counts the sort as disabled under enable_sort = off; an incremental
+            // sort is only made when enabled.)
+            let incremental = g.incremental_sort && sk.presorted > 0;
+            if !incremental && !g.sort {
+                disabled += 1;
+            }
+            let c = if incremental {
                 costs::incremental_sort_cost(
                     outer.startup,
                     outer.total,
@@ -665,6 +673,7 @@ pub fn mergejoin(
     startup = (otot - ost).mul_add(os, startup);
     run = (otot - ost).mul_add(oe - os, run);
     let (ist, itot) = if m.inner_sort {
+        disabled += (!g.sort) as u32;
         let c = costs::sort_cost(inner.total, inner.rows, inner.width, None);
         inner_sorted = Some(c);
         c

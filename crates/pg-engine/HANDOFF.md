@@ -17,9 +17,9 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,056 of 51,150 statements match (99.82%).** 94 differ. The full
+- **Regression suite: 51,064 of 51,150 statements match (99.83%).** 86 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 93 are `EXPLAIN` plan text (99%). Query results already match.
+  - 85 are `EXPLAIN` plan text (99%). Query results already match.
   - 1 is a plan choice that shows up in results (sqljson_jsontable's join order).
   - None differs by design any more (aggregates `balk` matches since round 16, agent 14: a
     Finalize Aggregate runs the user-defined combine functions).
@@ -331,7 +331,7 @@ them all with the "Fixed in round N" sections describing what was already tried.
    parameterized by a LATERAL inner side (744: the executor runs a parameterized hash join as
    a nested loop, so it needs executor work first), a partitionwise join with a LATERAL
    PlaceHolderVar (partition_join 41).
-2. **Remaining join / partition_join / partition_prune plan shapes** (join 61, partition_join 16,
+2. **Remaining join / partition_join / partition_prune plan shapes** (join 53, partition_join 16,
    partition_prune 2 units; round 14's agent 5 and round 16's agent 12 sections in STATUS.md have
    what changed and why the rest is open): cost-driven choices (join 123/410/424/450/543,
    partition_join 21/74),

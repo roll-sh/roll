@@ -8429,6 +8429,16 @@ fn indeterminate_hash(args: &[Value], _: &func::FnCtx) -> Result<Value> {
 /// a nested loop compares (and fails comparing two values); a hash join fails hashing one.
 pub(crate) fn check_merge_keys(ctx: &crate::exec::ExecCtx, plan: &mut Plan) -> Result<()> {
     let bad = |k: &Expr| matches!(k, Expr::Call(d, ..) if d.name == INDETERMINATE_HASH);
+    // populate_joinrel_with_paths: a FULL JOIN no merge or hash join can run.
+    if let Plan::Join { kind: crate::sql::plan::JoinKind::Full, cond, hash, nleft, params, .. } = &*plan
+        && params.is_empty()
+        && !super::optimize::full_join_supported(&ctx.catalog(), cond.as_ref(), hash.is_some(), *nleft)
+    {
+        return Err(Error::new(
+            code::FEATURE_NOT_SUPPORTED,
+            "FULL JOIN is only supported with merge-joinable or hash-joinable join conditions",
+        ));
+    }
     match plan {
         Plan::Join {
             left,

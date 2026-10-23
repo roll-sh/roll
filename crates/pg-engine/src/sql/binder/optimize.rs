@@ -2360,6 +2360,81 @@ fn side(e: &Expr, nleft: usize) -> Side {
     }
 }
 
+/// Whether a FULL JOIN on these clauses has a path (populate_joinrel_with_paths: "FULL JOIN
+/// is only supported with merge-joinable or hash-joinable join conditions"). `has_keys`: it
+/// has hash keys (built-in, hashable `=` across the sides); `cond`: its other ON clauses.
+/// Taking either input as the outer one, a merge join needs every clause but constants to be
+/// a merge-joinable `=` across the sides (select_mergejoin_clauses), a hash join one
+/// hash-joinable `=` (hash_inner_and_outer); an operator without a commutator only with the
+/// outer side on its left. A constant false clause makes the join a dummy one. Clauses not
+/// recognised count as both (no error Postgres might not raise).
+pub(crate) fn full_join_supported(cat: &Catalog, cond: Option<&Expr>, has_keys: bool, nleft: usize) -> bool {
+    if has_keys {
+        return true;
+    }
+    let parts: Vec<&Expr> = match cond {
+        None => return true,
+        Some(Expr::And(ps)) => ps.iter().collect(),
+        Some(e) => vec![e],
+    };
+    // (mergeable, hashable, the `=`'s left operand's side: Some(true) the join's left input,
+    // None when the operator commutes).
+    let mut clauses: Vec<(bool, bool, Option<bool>)> = Vec::new();
+    for p in parts {
+        let info = match p {
+            Expr::Const(Value::Bool(false) | Value::Null, _) => return true,
+            Expr::Const(..) => continue,
+            Expr::Call(d, args, _) if d.name == "=" && args.len() == 2 => {
+                let (a, b) = (&args[0], &args[1]);
+                let left = match (side(a, nleft), side(b, nleft)) {
+                    (Side::Left, Side::Right) => true,
+                    (Side::Right, Side::Left) => false,
+                    _ => {
+                        clauses.push((false, false, None));
+                        continue;
+                    }
+                };
+                if p.is_volatile() {
+                    (false, false, None)
+                } else if let Some((m, h, comm)) = crate::sql::paths::user_eq_props(cat, d) {
+                    (m, h, (!comm).then_some(left))
+                } else {
+                    use DataType as T;
+                    let (ta, tb) = (a.ty(), b.ty());
+                    let geo = |t: &DataType| matches!(t, T::Lseg | T::Path | T::GBox | T::Line | T::Circle);
+                    let datetime = |t: &DataType| matches!(t, T::Date | T::Timestamp(_) | T::Timestamptz(_));
+                    if geo(&ta) || (matches!(ta, T::Xid) && !matches!(tb, T::Xid)) {
+                        (false, false, None)
+                    } else if matches!(ta, T::Xid | T::Cid | T::Aclitem) {
+                        (false, true, None)
+                    } else if matches!(ta, T::Money | T::Bit(_) | T::Varbit(_) | T::TsVector | T::TsQuery)
+                        || (datetime(&ta) && datetime(&tb) && ta.without_typmod() != tb.without_typmod())
+                    {
+                        (true, false, None)
+                    } else {
+                        (true, true, None)
+                    }
+                }
+            }
+            Expr::Call(..)
+            | Expr::Or(_)
+            | Expr::Not(_)
+            | Expr::IsNull(..)
+            | Expr::BoolTest(..)
+            | Expr::IsDistinct(..)
+            | Expr::InList(..)
+            | Expr::ArrayOp { .. }
+            | Expr::Col(..) => (false, false, None),
+            _ => (true, true, None),
+        };
+        clauses.push(info);
+    }
+    [true, false].into_iter().any(|outer_left| {
+        let usable = |c: &(bool, bool, Option<bool>)| c.2.is_none_or(|l| l == outer_left);
+        clauses.iter().all(|c| c.0 && usable(c)) || clauses.iter().any(|c| c.1 && usable(c))
+    })
+}
+
 /// `COALESCE(l, r) = c` (either way round) with `l = r` the full join's `i`th key (`l` over
 /// its left side, `r` over its right) and `c` a non-null constant of their type: `i`, `c`
 /// and the `=`.
@@ -2831,8 +2906,10 @@ pub fn join(
             continue;
         }
         match side(&p, nleft) {
-            // ON conditions on the preserved side of an outer join filter nothing.
-            Side::Left if matches!(kind, JoinKind::Inner | JoinKind::Right) => lpush.push(p),
+            // ON conditions on the preserved side of an outer join filter nothing. A semi
+            // join's conditions are pushed down as an inner join's (deconstruct_jointree:
+            // ojscope NULL for JOIN_SEMI): its left side's restrictions.
+            Side::Left if matches!(kind, JoinKind::Inner | JoinKind::Right | JoinKind::Semi) => lpush.push(p),
             Side::Right
                 if matches!(
                     kind,
@@ -2900,7 +2977,7 @@ pub fn join(
     // give each side the constants the other side's are equated with.
     let mut kept: Vec<usize> = Vec::new();
     let mut broken = Vec::new();
-    if kind == JoinKind::Inner && params.is_empty() {
+    if matches!(kind, JoinKind::Inner | JoinKind::Semi) && params.is_empty() {
         let mut no_hash = None;
         let (lhave, rhave) = (input_restrictions(&left), input_restrictions(&right));
         broken = ec_constants(cat, &mut lpush, &mut rpush, &mut no_hash, &mut rest, nleft, (true, true), &mut kept, (&lhave, &rhave));

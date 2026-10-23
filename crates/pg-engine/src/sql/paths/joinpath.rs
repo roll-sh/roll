@@ -501,7 +501,7 @@ pub(super) fn made_type_order(cat: &crate::catalog::Catalog, t: &DataType) -> Op
 /// A made `=` (CREATE OPERATOR): whether it merges (MERGES, and an equality of a btree
 /// family), hashes (HASHES, and an equality of a hash family), and has a commutator
 /// (get_switched_clauses needs one to put a clause's outer side on the left).
-pub(super) fn user_eq_props(cat: &crate::catalog::Catalog, d: &FuncDef) -> Option<(bool, bool, bool)> {
+pub(crate) fn user_eq_props(cat: &crate::catalog::Catalog, d: &FuncDef) -> Option<(bool, bool, bool)> {
     let op = crate::sql::costs::user_operator(cat, d)?;
     let (l, r) = (op.left.as_ref()?.oid(), op.right.oid());
     let method = |fam: u32| {
@@ -6310,7 +6310,7 @@ impl Planner<'_, '_> {
         // Self-join elimination: a leaf merged into another reads its columns
         // (`alias`).
         let mut alias: Vec<usize> = (0..gw).collect();
-        if laterals.is_empty() && group_phvs.is_empty() {
+        if group_phvs.is_empty() {
             let mut sides: Vec<(u32, u32)> = sjs.iter().map(|s| (s.syn_l, s.syn_r)).collect();
             let merges = self.self_joins(
                 &mut kind,
@@ -6320,6 +6320,25 @@ impl Planner<'_, '_> {
                 &mut sides,
                 &mut clause_meta,
             );
+            // (remove_self_join_rel: LATERAL items' references to the removed relation read
+            // the kept one, ChangeVarNodes over lateral_vars.)
+            for (li, ps) in laterals.iter_mut() {
+                for &(r, _) in &merges {
+                    if *li > r {
+                        *li -= 1;
+                    }
+                }
+                for e in ps.iter_mut() {
+                    *e = std::mem::replace(e, Expr::Const(Value::Null, DataType::Unknown))
+                        .transform(&mut |x| {
+                            Ok(match x {
+                                Expr::Col(g, t) if g < alias.len() => Expr::Col(alias[g], t),
+                                x => x,
+                            })
+                        })
+                        .expect("remapping a LATERAL reference");
+                }
+            }
             for (r, k) in merges {
                 let remap = |m: u32| {
                     let m = if m >> r & 1 == 1 { (m | 1 << k) & !(1 << r) } else { m };

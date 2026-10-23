@@ -1,0 +1,358 @@
+> create type a16_int8alias1
+-- CREATE TYPE
+
+> create function a16_int8alias1in(cstring) returns a16_int8alias1
+>   strict immutable language internal as 'int8in'
+NOTICE 42809: return type a16_int8alias1 is only a shell
+-- CREATE FUNCTION
+
+> create function a16_int8alias1out(a16_int8alias1) returns cstring
+>   strict immutable language internal as 'int8out'
+NOTICE 42809: argument type a16_int8alias1 is only a shell (at 35)
+-- CREATE FUNCTION
+
+> create type a16_int8alias1 (
+>     input = a16_int8alias1in,
+>     output = a16_int8alias1out,
+>     like = int8
+> )
+-- CREATE TYPE
+
+> create cast (int8 as a16_int8alias1) without function
+-- CREATE CAST
+
+> create cast (a16_int8alias1 as int8) without function
+-- CREATE CAST
+
+> create function a16_int8alias1eq(a16_int8alias1, a16_int8alias1) returns bool
+>   strict immutable language internal as 'int8eq'
+-- CREATE FUNCTION
+
+> create operator = (
+>     procedure = a16_int8alias1eq,
+>     leftarg = a16_int8alias1, rightarg = a16_int8alias1,
+>     commutator = =,
+>     restrict = eqsel, join = eqjoinsel,
+>     merges
+> )
+-- CREATE OPERATOR
+
+> alter operator family integer_ops using btree add
+>   operator 3 = (a16_int8alias1, a16_int8alias1)
+-- ALTER OPERATOR FAMILY
+
+> create function a16_int8alias1eq(int8, a16_int8alias1) returns bool
+>   strict immutable language internal as 'int8eq'
+-- CREATE FUNCTION
+
+> create operator = (
+>     procedure = a16_int8alias1eq,
+>     leftarg = int8, rightarg = a16_int8alias1,
+>     restrict = eqsel, join = eqjoinsel,
+>     merges
+> )
+-- CREATE OPERATOR
+
+> alter operator family integer_ops using btree add
+>   operator 3 = (int8, a16_int8alias1)
+-- ALTER OPERATOR FAMILY
+
+> create function a16_int8alias1lt(a16_int8alias1, a16_int8alias1) returns bool
+>   strict immutable language internal as 'int8lt'
+-- CREATE FUNCTION
+
+> create operator < (
+>     procedure = a16_int8alias1lt,
+>     leftarg = a16_int8alias1, rightarg = a16_int8alias1
+> )
+-- CREATE OPERATOR
+
+> alter operator family integer_ops using btree add
+>   operator 1 < (a16_int8alias1, a16_int8alias1)
+-- ALTER OPERATOR FAMILY
+
+> create function a16_int8alias1cmp(int8, a16_int8alias1) returns int
+>   strict immutable language internal as 'btint8cmp'
+-- CREATE FUNCTION
+
+> alter operator family integer_ops using btree add
+>   function 1 a16_int8alias1cmp (int8, a16_int8alias1)
+-- ALTER OPERATOR FAMILY
+
+> create table a16_nocom (a int8, b a16_int8alias1)
+-- CREATE TABLE
+
+> insert into a16_nocom select i, (i % 7)::int8::a16_int8alias1 from generate_series(1, 20) i
+-- INSERT 0 20
+
+> insert into a16_nocom values (null, null), (100, null), (null, '3')
+-- INSERT 0 3
+
+> create function a16_try(q text) returns text language plpgsql as $$
+> declare n bigint;
+> begin
+>   execute q into n;
+>   return n::text;
+> exception when others then
+>   return sqlstate || ': ' || regexp_replace(sqlerrm, '\(\d+,\d+\)', '(T,T)');
+> end $$
+-- CREATE FUNCTION
+
+> set enable_hashjoin to off
+-- SET
+
+> set enable_mergejoin to on
+-- SET
+
+> explain (costs off)
+> select * from a16_nocom t1 full join a16_nocom t2 on t2.a = t1.b
+QUERY PLAN:text
+Merge Full Join
+  Merge Cond: (t2.a = t1.b)
+  ->  Sort
+        Sort Key: t2.a
+        ->  Seq Scan on a16_nocom t2
+  ->  Sort
+        Sort Key: t1.b USING <
+        ->  Seq Scan on a16_nocom t1
+-- EXPLAIN
+
+> select a16_try('select count(*) from a16_nocom t1 full join a16_nocom t2 on t2.a = t1.b')
+a16_try:text
+XX000: missing support function 1(T,T) in opfamily 1976
+-- SELECT 1
+
+> select a16_try('select count(*) from a16_nocom t1 left join a16_nocom t2 on t2.a = t1.b')
+a16_try:text
+XX000: missing support function 1(T,T) in opfamily 1976
+-- SELECT 1
+
+> select a16_try('select count(*) from a16_nocom t1 right join a16_nocom t2 on t2.a = t1.b')
+a16_try:text
+XX000: missing support function 1(T,T) in opfamily 1976
+-- SELECT 1
+
+> select * from a16_nocom t1 full join a16_nocom t2 on t1.b = t2.a
+ERROR 42883: operator does not exist: a16_int8alias1 = bigint (at 59)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> select a16_try('select count(*) from (select b from a16_nocom order by b using <) s')
+a16_try:text
+XX000: missing support function 1(T,T) in opfamily 1976
+-- SELECT 1
+
+> select b::int8 from a16_nocom order by b using < limit 3
+b:int8
+0
+0
+1
+-- SELECT 3
+
+> set enable_mergejoin to off
+-- SET
+
+> select count(*) from a16_nocom t1 full join a16_nocom t2 on t2.a = t1.b and t1.a < 5
+ERROR 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+
+> select count(*) from a16_nocom t1 left join a16_nocom t2 on t2.a = t1.b
+count:int8
+23
+-- SELECT 1
+
+> create function a16_int8alias1cmp(a16_int8alias1, a16_int8alias1) returns int
+>   strict immutable language internal as 'btint8cmp'
+-- CREATE FUNCTION
+
+> alter operator family integer_ops using btree add
+>   function 1 a16_int8alias1cmp (a16_int8alias1, a16_int8alias1)
+-- ALTER OPERATOR FAMILY
+
+> set enable_mergejoin to on
+-- SET
+
+> select a16_try('select count(*) from a16_nocom t1 full join a16_nocom t2 on t2.a = t1.b')
+a16_try:text
+40
+-- SELECT 1
+
+> select t1.a, t1.b::int8, t2.a, t2.b::int8 from a16_nocom t1 full join a16_nocom t2 on t2.a = t1.b
+>   order by 1, 2, 3, 4
+a:int8 | b:int8 | a:int8 | b:int8
+1 | 1 | 1 | 1
+2 | 2 | 2 | 2
+3 | 3 | 3 | 3
+4 | 4 | 4 | 4
+5 | 5 | 5 | 5
+6 | 6 | 6 | 6
+7 | 0 | NULL | NULL
+8 | 1 | 1 | 1
+9 | 2 | 2 | 2
+10 | 3 | 3 | 3
+11 | 4 | 4 | 4
+12 | 5 | 5 | 5
+13 | 6 | 6 | 6
+14 | 0 | NULL | NULL
+15 | 1 | 1 | 1
+16 | 2 | 2 | 2
+17 | 3 | 3 | 3
+18 | 4 | 4 | 4
+19 | 5 | 5 | 5
+20 | 6 | 6 | 6
+100 | NULL | NULL | NULL
+NULL | 3 | 3 | 3
+NULL | NULL | 7 | 0
+NULL | NULL | 8 | 1
+NULL | NULL | 9 | 2
+NULL | NULL | 10 | 3
+NULL | NULL | 11 | 4
+NULL | NULL | 12 | 5
+NULL | NULL | 13 | 6
+NULL | NULL | 14 | 0
+NULL | NULL | 15 | 1
+NULL | NULL | 16 | 2
+NULL | NULL | 17 | 3
+NULL | NULL | 18 | 4
+NULL | NULL | 19 | 5
+NULL | NULL | 20 | 6
+NULL | NULL | 100 | NULL
+NULL | NULL | NULL | 3
+NULL | NULL | NULL | NULL
+NULL | NULL | NULL | NULL
+-- SELECT 40
+
+> reset enable_mergejoin
+-- RESET
+
+> reset enable_hashjoin
+-- RESET
+
+> drop table a16_nocom
+-- DROP TABLE
+
+> drop function a16_try(text)
+-- DROP FUNCTION
+
+> create table a16_fj (a int, b int)
+-- CREATE TABLE
+
+> insert into a16_fj select i, i % 3 from generate_series(1, 10) i
+-- INSERT 0 10
+
+> explain (costs off) select count(*) from a16_fj x full join a16_fj y on x.a < y.a
+ERROR 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+
+> select count(*) from a16_fj x full join a16_fj y on x.a < y.a
+ERROR 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+
+> explain (costs off) select count(*) from a16_fj x full join a16_fj y on x.a = y.a and x.b < y.b
+QUERY PLAN:text
+Aggregate
+  ->  Hash Full Join
+        Hash Cond: (x.a = y.a)
+        Join Filter: (x.b < y.b)
+        ->  Seq Scan on a16_fj x
+        ->  Hash
+              ->  Seq Scan on a16_fj y
+-- EXPLAIN
+
+> explain (costs off) select count(*) from a16_fj x full join a16_fj y on x.a = y.a and x.b < 2
+QUERY PLAN:text
+Aggregate
+  ->  Hash Full Join
+        Hash Cond: (x.a = y.a)
+        Join Filter: (x.b < 2)
+        ->  Seq Scan on a16_fj x
+        ->  Hash
+              ->  Seq Scan on a16_fj y
+-- EXPLAIN
+
+> explain (costs off) select count(*) from a16_fj x full join a16_fj y on x.a = y.a or x.b = y.b
+ERROR 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+
+> explain (costs off) select count(*) from a16_fj x full join a16_fj y on x.a + y.a = 3
+ERROR 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+
+> explain (costs off) select count(*) from a16_fj x full join a16_fj y on true
+QUERY PLAN:text
+Aggregate
+  ->  Merge Full Join
+        ->  Seq Scan on a16_fj x
+        ->  Materialize
+              ->  Seq Scan on a16_fj y
+-- EXPLAIN
+
+> explain (costs off) select count(*) from a16_fj x full join a16_fj y on false
+QUERY PLAN:text
+Aggregate
+  ->  Merge Full Join
+        Join Filter: false
+        ->  Seq Scan on a16_fj x
+        ->  Materialize
+              ->  Seq Scan on a16_fj y
+-- EXPLAIN
+
+> explain (costs off) select count(*) from a16_fj x full join a16_fj y on x.a = 1
+ERROR 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+
+> explain (costs off) select count(*) from a16_fj x full join a16_fj y on x.a = y.a and random() > 0.5
+QUERY PLAN:text
+Aggregate
+  ->  Hash Full Join
+        Hash Cond: (x.a = y.a)
+        Join Filter: (random() > '0.5'::double precision)
+        ->  Seq Scan on a16_fj x
+        ->  Hash
+              ->  Seq Scan on a16_fj y
+-- EXPLAIN
+
+> explain (costs off) select count(*) from a16_fj x full join (select a, 1 as c from a16_fj) y on x.a = y.c
+QUERY PLAN:text
+Aggregate
+  ->  Merge Full Join
+        Merge Cond: (x.a = (1))
+        ->  Sort
+              Sort Key: x.a
+              ->  Seq Scan on a16_fj x
+        ->  Sort
+              Sort Key: (1)
+              ->  Seq Scan on a16_fj
+-- EXPLAIN
+
+> explain (costs off) select count(*) from a16_fj x full join lateral (select x.a as c) y on true
+ERROR 42P10: invalid reference to FROM-clause entry for table "x" (at 77)
+DETAIL: The combining JOIN type must be INNER or LEFT for a LATERAL reference.
+
+> explain (costs off) select count(*) from a16_fj x full join a16_fj y on (x.a, x.b) = (y.a, y.b)
+QUERY PLAN:text
+Aggregate
+  ->  Merge Full Join
+        Merge Cond: ((x.a = y.a) AND (x.b = y.b))
+        ->  Sort
+              Sort Key: x.a, x.b
+              ->  Seq Scan on a16_fj x
+        ->  Sort
+              Sort Key: y.a, y.b
+              ->  Seq Scan on a16_fj y
+-- EXPLAIN
+
+> explain (costs off) select count(*) from a16_fj x full join a16_fj y on x.a is not distinct from y.a
+ERROR 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+
+> explain (costs off) select count(*) from a16_fj x full join a16_fj y on x.a < y.a and false
+QUERY PLAN:text
+Aggregate
+  ->  Merge Full Join
+        Join Filter: false
+        ->  Seq Scan on a16_fj x
+        ->  Materialize
+              ->  Seq Scan on a16_fj y
+-- EXPLAIN
+
+> select count(*) from a16_fj x full join a16_fj y on x.a = y.a and x.b < y.b
+count:int8
+20
+-- SELECT 1
+
+> drop table a16_fj
+-- DROP TABLE
+
