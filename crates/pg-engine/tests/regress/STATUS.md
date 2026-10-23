@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51029 (**99.76%**) |
-| units differing | 121 |
+| units matching | 51030 (**99.77%**) |
+| units differing | 120 |
 | files fully matching | 214 |
 | engine output == expected/*.out (pg_regress "ok") | 177 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 117 | 96.7% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 116 | 96.7% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.5% |
 | by design (a parallel plan's combine function) | 1 | 0.8% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 117 units
-join (65), partition_join (18), partition_prune (4), subselect (2), collate.icu.utf8 (4), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
+### EXPLAIN (group C1) — 116 units
+join (65), partition_join (18), partition_prune (3), subselect (2), collate.icu.utf8 (4), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -159,7 +159,21 @@ What changed:
   `PGREGRESS_ENGINE_BIN` (an engine binary copied aside, so the source can change while a run
   waits for a heavy slot).
 
-Goldens added: `tests/sql/a12_union_appendrel.sql`, `a12_lateral_pw.sql`.
+- Second batch (subset run of the same files on 23e447c: partition_prune 746 fixed, none
+  broken): an ordered Append under run-time pruning shows the members pruned as the executor
+  starts as each level's own `Subplans Removed` (it fell back to one Merge Append when the
+  shown members didn't count as many as the plan's), a nested Merge Append whose first member
+  went names its keys unqualified, and a sub-partitioned level is named after its first member
+  kept; an ordered Append wins over sorting all the members when their totals are fuzzily
+  equal and it starts sooner (add_path's STD_FUZZ_FACTOR); a window over an inheritance tree
+  reads it in the window's order when that costs less (it always sorted); a window's
+  PARTITION BY / ORDER BY keys missing from a subquery's select list are resjunk, so its
+  Subquery Scan shows, under its unique name (`*SELECT* 1_1` beside the appendrel's
+  `*SELECT* 1`); a numbered inheritance Append is named after its first member only under a
+  partitionwise join (a UNION ALL arm's took its member's name).
+
+Goldens added: `tests/sql/a12_union_appendrel.sql`, `a12_lateral_pw.sql`,
+`a12_ordered_append_pruning.sql`.
 
 Still open from agent 5's list, and why:
 
@@ -169,7 +183,7 @@ Still open from agent 5's list, and why:
   invisible tuple counted, `Heap Blocks: exact=1`), 746 (window functions over ordered
   partitions: an ordered Append with a nested Merge Append isn't chosen when run-time pruning
   removes members, `count_members` against the shown members; and the arms' Subquery Scans
-  on `"*SELECT* 1_1"` / `"*SELECT* 2"` aren't shown).
+  on `"*SELECT* 1_1"` / `"*SELECT* 2"` aren't shown): fixed in the second batch.
 - partition_join 48 / 207: partitionwise now, the clause equating the LATERAL output with a
   class member is generated `column = output` by Postgres (a new member equated to an old
   one), written order here; 204 needs the PlaceHolderVar `least(...)` (agent 8's area); 21
@@ -2282,7 +2296,7 @@ produces no units on Linux (skipped by the file itself).
 | with | 307 | 303 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (4) |
 | xml | 281 | 281 | 100% | yes | yes |  |
 | partition_join | 614 | 596 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (18) |
-| partition_prune | 771 | 767 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (4) |
+| partition_prune | 771 | 768 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |
 | indexing | 645 | 645 | 100% | yes | yes |  |

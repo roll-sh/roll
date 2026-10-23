@@ -259,6 +259,14 @@ impl Planner<'_, '_> {
         };
         let better = if merged.disabled != sorted.disabled {
             merged.disabled < sorted.disabled
+        } else if lim.is_none() && order.is_some() && fuzzily_equal(merged.total, sorted.total) {
+            // (add_path: totals fuzzily equal, the one starting sooner dominates: an
+            // ordered Append over a sort of all the members.)
+            if fuzzily_equal(merged.startup, sorted.startup) {
+                merged.total < sorted.total
+            } else {
+                merged.startup < sorted.startup
+            }
         } else {
             fraction(&merged) < fraction(&sorted)
         };
@@ -667,4 +675,9 @@ pub fn count_members(o: &[PartOrder]) -> usize {
             PartOrder::Merge(v) => v.len(),
         })
         .sum()
+}
+
+/// compare_path_costs_fuzzily's STD_FUZZ_FACTOR: costs within 1% of each other.
+fn fuzzily_equal(a: f64, b: f64) -> bool {
+    a <= b * 1.01 && b <= a * 1.01
 }

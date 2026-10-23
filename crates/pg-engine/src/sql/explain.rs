@@ -1204,6 +1204,16 @@ fn level_keys(p: &Plan, sorted: Option<usize>) -> Vec<bool> {
                 *o = true;
             }
         }
+        // (A window's PARTITION BY / ORDER BY keys: resjunk entries when the select list
+        // doesn't have them.)
+        Plan::Window { input, calls } => {
+            out = level_keys(input, sorted);
+            out.resize(w, false);
+            for c in calls {
+                c.partition_by.iter().for_each(|e| mark(&mut out, e));
+                c.order_by.iter().for_each(|k| mark(&mut out, &k.expr));
+            }
+        }
         Plan::Scan(_) => {
             if let Some(n) = sorted {
                 for c in super::paths::plan_order_cols(p).into_iter().take(n) {
@@ -1791,19 +1801,29 @@ fn assign_refnames_skip(
                 if let Plan::Append { inh: Some(n), inputs, .. } = a
                     && let Some(order) = crate::sql::paths::partition_order(input, &exprs, &dirs)
                 {
+                    // (A member run-time pruning removes as the executor starts isn't
+                    // named: its level's name goes on its first member kept.)
                     fn mark(
                         o: &[crate::sql::paths::PartOrder],
                         members: &[&Arc<Plan>],
+                        kept: &[bool],
                         n: &str,
                         out: &mut HashMap<usize, Vec<String>>,
                     ) -> usize {
                         use crate::sql::paths::PartOrder;
+                        let on = |i: usize| kept.get(i).copied().unwrap_or(true);
                         let mut low = usize::MAX;
                         for m in o {
                             let first = match m {
-                                PartOrder::Leaf(i) => *i,
+                                PartOrder::Leaf(i) => {
+                                    if on(*i) {
+                                        *i
+                                    } else {
+                                        usize::MAX
+                                    }
+                                }
                                 PartOrder::Merge(v) => {
-                                    let f = v.iter().copied().min().unwrap_or(usize::MAX);
+                                    let f = v.iter().copied().filter(|i| on(*i)).min().unwrap_or(usize::MAX);
                                     if let Some(x) = members.get(f) {
                                         out.entry(addr(x)).or_default().push(n.to_string());
                                     }
@@ -1812,7 +1832,7 @@ fn assign_refnames_skip(
                                 PartOrder::Append(sub) => {
                                     // (Its name before its own sub-partitions'.)
                                     let mut inner = HashMap::new();
-                                    let f = mark(sub, members, n, &mut inner);
+                                    let f = mark(sub, members, kept, n, &mut inner);
                                     if let Some(x) = members.get(f) {
                                         out.entry(addr(x)).or_default().push(n.to_string());
                                     }
@@ -1830,14 +1850,25 @@ fn assign_refnames_skip(
                         inputs.iter().filter(|m| !matches!(&***m, Plan::Empty { .. })).collect();
                     // (A single partition read: its plan replaces the Append, named as
                     // the parent's.)
+                    let kept: Vec<bool> = match ctx {
+                        Some(ctx) => {
+                            let k = crate::exec::nodes::runtime_pruned(
+                                inputs,
+                                crate::sql::binder::partition::Known::Start,
+                                ctx,
+                            );
+                            members.iter().map(|m| k.iter().any(|x| Arc::ptr_eq(x, m))).collect()
+                        }
+                        None => vec![true; members.len()],
+                    };
                     if crate::sql::paths::count_members(&order) == members.len() {
                         match order.as_slice() {
                             [crate::sql::paths::PartOrder::Merge(_)] => {}
                             [crate::sql::paths::PartOrder::Append(sub)] => {
-                                mark(sub, &members, n, &mut mid_first);
+                                mark(sub, &members, &kept, n, &mut mid_first);
                             }
                             o => {
-                                mark(o, &members, n, &mut mid_first);
+                                mark(o, &members, &kept, n, &mut mid_first);
                             }
                         }
                     }
@@ -3485,6 +3516,9 @@ impl Builder<'_, '_> {
                     return b;
                 };
                 let needed = self.needed.get(&key).cloned();
+                // (Its reference name: the alias made unique, `*SELECT* 1_1` under a UNION
+                // ALL whose parent entry is `*SELECT* 1`.)
+                let alias = &self.refnames.get(&key).cloned().unwrap_or_else(|| alias.clone());
                 let c = match junk {
                     Some((pin, _)) => self.node(pin),
                     None => self.node(input),
@@ -4973,10 +5007,16 @@ impl Builder<'_, '_> {
                     // ones in theirs, or merged).
                     let exprs: Vec<Expr> = keys.iter().map(|k| k.expr.clone()).collect();
                     let dirs: Vec<(bool, bool)> = keys.iter().map(|k| (k.desc, k.nulls_first)).collect();
+                    // (Members run-time pruning removed as the executor starts: their
+                    // places left empty, each level counting its own.)
+                    let kept = startup_kept(input, self.ctx);
                     if let Some(order) = crate::sql::paths::partition_order(input, &exprs, &dirs)
-                        && crate::sql::paths::count_members(&order) == kids.len()
+                        && let Some(mask) = kept.filter(|m| {
+                            m.len() == crate::sql::paths::count_members(&order) && m.iter().filter(|k| **k).count() == kids.len()
+                        })
                     {
-                        let mut slots: Vec<Option<ExNode>> = kids.into_iter().map(Some).collect();
+                        let mut it = kids.into_iter();
+                        let mut slots: Vec<Option<ExNode>> = mask.iter().map(|k| if *k { it.next() } else { None }).collect();
                         let mut a = ordered_append(&order, &mut slots, &list);
                         a.width = c.node.width;
                         a.cols = c.node.cols.clone();
@@ -5975,7 +6015,9 @@ impl Builder<'_, '_> {
                 }
                 c
             }
-            Plan::Append { inputs, inh, .. } => {
+            Plan::Append { inputs, inh, pw, .. } => {
+                // (Below a partitionwise join's Append: its child joins.)
+                let _pw = pw.map(|_| crate::scoped::set(&UNDER_PW, true, "explain::UNDER_PW.set"));
                 let mut direct = Vec::new();
                 for i in inputs.iter() {
                     let mut x = &**i;
@@ -6071,6 +6113,7 @@ impl Builder<'_, '_> {
                     matches!(first, Some(Plan::Scan(sc)) if sc.part.as_ref().is_some_and(|l| l.len() >= 2))
                 };
                 let sub_partition = deep_member
+                    && UNDER_PW.get()
                     && inh.as_ref().is_some_and(|base| {
                         self.refnames.get(&key).is_some_and(|r| {
                             r.strip_prefix(&format!("{}_", base)).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
@@ -12857,6 +12900,7 @@ pub(crate) fn pop_cte_estimates(n: usize) {
 pub(crate) fn reset_scratch() {
     FILTER_OVER_WINDOW.set(false);
     MERGE_MEMBERS.set(false);
+    UNDER_PW.set(false);
     UNDER_LOCK_ROWS.set(0);
     RULE_RETURNING.with_borrow_mut(|r| *r = None);
     WINDOW_TLIST.with_borrow_mut(|w| w.clear());
@@ -12876,6 +12920,7 @@ pub(crate) fn unsettled(out: &mut Vec<&'static str>) {
         ("explain::CTE_ORDERS", CTE_ORDERS.with_borrow(|m| !m.is_empty())),
         ("explain::FILTER_OVER_WINDOW", FILTER_OVER_WINDOW.get()),
         ("explain::MERGE_MEMBERS", MERGE_MEMBERS.get()),
+        ("explain::UNDER_PW", UNDER_PW.get()),
         ("explain::INH_SCANS", INH_SCANS.with_borrow(|m| !m.is_empty())),
     ] {
         if set {
@@ -12956,6 +13001,9 @@ thread_local! {
     static FILTER_OVER_WINDOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Converting the members of a Merge Append (`merge_appended`).
     static MERGE_MEMBERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Explaining a partitionwise join's child joins (a sub-partitioned partition's own
+    /// Append among them is named as that partition).
+    static UNDER_PW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// A merge join's inner input (its address): sorted in full, an incremental sort can't
     /// mark and restore (initial_cost_mergejoin).
     static MERGE_INNER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -12970,12 +13018,22 @@ thread_local! {
 fn ordered_append(order: &[crate::sql::paths::PartOrder], slots: &mut [Option<ExNode>], list: &[String]) -> ExNode {
     use crate::sql::paths::PartOrder;
     let mut a = ExNode::new("Append");
+    // (Members pruned as the executor starts: empty places.)
+    let mut removed = 0;
     for m in order {
         let k = match m {
-            PartOrder::Leaf(i) => slots[*i].take().unwrap_or_default(),
+            PartOrder::Leaf(i) => match slots[*i].take() {
+                Some(k) => k,
+                None => {
+                    removed += 1;
+                    continue;
+                }
+            },
             PartOrder::Append(sub) => ordered_append(sub, slots, list),
             PartOrder::Merge(v) => {
-                let kids: Vec<ExNode> = v.iter().map(|i| slots[*i].take().unwrap_or_default()).collect();
+                let first_pruned = v.first().is_some_and(|i| slots[*i].is_none());
+                let kids: Vec<ExNode> = v.iter().filter_map(|i| slots[*i].take()).collect();
+                let gone = v.len() - kids.len();
                 let n = kids.len() as f64;
                 let cmp = 2.0 * costs::CPU_OPERATOR_COST;
                 let logn = n.log2();
@@ -12984,10 +13042,16 @@ fn ordered_append(order: &[crate::sql::paths::PartOrder], slots: &mut [Option<Ex
                 let alias = kids.first().and_then(member_alias);
                 let parent = kids.first().and_then(member_parent_alias);
                 let keys: Vec<String> = match (alias, parent) {
+                    // (Its first member pruned: Postgres resolves the keys through that
+                    // member, which has no name then.)
+                    (Some(_), Some(_)) if first_pruned => list.iter().map(|k| unqualified(k)).collect(),
                     (Some(al), Some(pa)) => list.iter().map(|k| k.replace(&format!("{pa}."), &format!("{al}."))).collect(),
                     _ => list.to_vec(),
                 };
                 ma.details.push(Detail::List("Sort Key", keys.clone()));
+                if gone > 0 {
+                    ma.details.push(Detail::Text("Subplans Removed", gone.to_string()));
+                }
                 ma.rows = kids.iter().map(|k| k.rows).sum();
                 ma.width = kids.iter().map(|k| k.width).max().unwrap_or(0);
                 ma.startup_cost = kids.iter().map(|k| k.startup_cost).sum::<f64>() + cmp * n * logn;
@@ -13002,8 +13066,11 @@ fn ordered_append(order: &[crate::sql::paths::PartOrder], slots: &mut [Option<Ex
         };
         a.children.push(k.child("Member"));
     }
+    if removed > 0 {
+        add_removed(&mut a.details, removed);
+    }
     // (One member: no Append.)
-    if a.children.len() == 1 {
+    if a.children.len() == 1 && removed == 0 {
         let mut k = a.children.pop().expect("one member");
         k.relationship = None;
         return k;
@@ -13014,6 +13081,32 @@ fn ordered_append(order: &[crate::sql::paths::PartOrder], slots: &mut [Option<Ex
     a.total_cost = a.children.iter().map(|k| k.total_cost).sum::<f64>() + costs::CPU_TUPLE_COST * 0.5 * a.rows;
     a.order = list.to_vec();
     a
+}
+
+/// A plain column reference `rel.col` without its qualifier.
+fn unqualified(k: &str) -> String {
+    match k.split_once('.') {
+        Some((q, c)) if !q.contains(['(', ' ', ')']) && !c.contains(['(', ' ', '.']) => c.to_string(),
+        _ => k.to_string(),
+    }
+}
+
+/// Of the partitions an ordered Append under `p` (through projections) reads, in the
+/// order of its members: whether run-time pruning keeps each as the executor starts.
+fn startup_kept(p: &Plan, ctx: &ExecCtx) -> Option<Vec<bool>> {
+    let mut x = p;
+    while let Plan::Project { input, .. } = x {
+        x = input;
+    }
+    let Plan::Append { inputs, inh: Some(_), .. } = x else { return None };
+    let kept = crate::exec::nodes::runtime_pruned(inputs, crate::sql::binder::partition::Known::Start, ctx);
+    Some(
+        inputs
+            .iter()
+            .filter(|i| !matches!(&***i, Plan::Empty { .. }))
+            .map(|i| kept.iter().any(|k| Arc::ptr_eq(k, i)))
+            .collect(),
+    )
 }
 
 /// `k` more members pruned as the executor starts, on an Append's details (first).

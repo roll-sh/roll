@@ -4764,6 +4764,58 @@ impl Planner<'_, '_> {
             }
             let _ = calls;
         }
+        // A window over an inheritance tree: its members read in the window's order (an
+        // ordered Append, or a Merge Append) when that costs less than sorting them all
+        // (generate_orderedappend_paths for the window's pathkeys).
+        if let Plan::Window { input, calls } = p
+            && let Some(first) = calls.first()
+            && calls.iter().all(|c| {
+                c.partition_by.len() == first.partition_by.len()
+                    && c.order_by.len() == first.order_by.len()
+                    && c.partition_by.iter().zip(&first.partition_by).all(|(a, b)| a.same_as(b))
+                    && c.order_by.iter().zip(&first.order_by).all(|(a, b)| {
+                        a.expr.same_as(&b.expr) && a.desc == b.desc && a.nulls_first == b.nulls_first
+                    })
+            })
+            && !(first.partition_by.is_empty() && first.order_by.is_empty())
+            && first.order_by.iter().all(|k| k.using.is_none())
+            && {
+                let mut q: &Plan = input;
+                while let Plan::Project { input, .. } = q {
+                    q = input;
+                }
+                matches!(q, Plan::Append { inh: Some(_), .. })
+            }
+        {
+            let keys: Vec<SortKey> = first
+                .partition_by
+                .iter()
+                .map(|e| SortKey {
+                    expr: e.clone(),
+                    desc: false,
+                    nulls_first: false,
+                    using: None,
+                })
+                .chain(first.order_by.iter().cloned())
+                .fold(Vec::new(), |mut v: Vec<SortKey>, k| {
+                    // (A key already sorted on: redundant, as a pathkey.)
+                    if !v.iter().any(|x| x.expr.same_as(&k.expr)) {
+                        v.push(k);
+                    }
+                    v
+                });
+            let n = child_needs(p, needed).pop().unwrap_or_default();
+            let Plan::Window { input, .. } = p else { unreachable!() };
+            let mut tmp = Plan::Sort {
+                input: input.clone(),
+                keys,
+            };
+            // (The Sort stays: the members come in its order, EXPLAIN shows no sort.)
+            if self.merge_append(&mut tmp, &n, None) {
+                *input = Arc::new(tmp);
+                return;
+            }
+        }
         // A window over a join: the join planned for the window's order (query_pathkeys
         // are the window's), presorted paths competing with sorting the cheapest; under a
         // LIMIT, for the rows read before its first output when its frame doesn't need them
