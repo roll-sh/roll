@@ -6491,7 +6491,11 @@ impl Planner<'_, '_> {
             };
             // (A PlaceHolderVar is no member of an equivalence class here: no merge key.)
             let mergeable_ = mergeable_ && !e.columns().iter().any(|&g| s.phv(g).is_some());
-            let cost = costs::qual_cost(&e);
+            // (A correlated SubPlan in it costs a run of its plan each time: cost_qual_eval.)
+            let mut sub = false;
+            e.walk(&mut |x| sub |= matches!(x, Expr::Subquery(q) if !q.params.is_empty()));
+            let cost = costs::qual_cost(&e)
+                + if sub { crate::sql::explain::subplan_costs(std::slice::from_ref(&e), self.ctx).1 } else { 0.0 };
             s.clauses.push(Clause {
                 expr: e,
                 leaves: leaves_mask,

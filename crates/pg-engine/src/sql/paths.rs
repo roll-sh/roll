@@ -43,6 +43,8 @@ mod mergeappend;
 pub use mergeappend::{PartOrder, count_members, partition_order, plan_ordered_append};
 mod rowmarks;
 pub use rowmarks::level_scans;
+pub(crate) use rowmarks::PUSHED_LEVEL;
+mod sublinkcopy;
 mod syscat;
 pub use syscat::{sys_index_order, sys_size, sys_table};
 pub(crate) use syscat::sys_unique_col;
@@ -4529,7 +4531,53 @@ pub fn child_needs(p: &Plan, needed: &[bool]) -> Vec<Vec<bool>> {
             }
             vec![n]
         }
-        Plan::Merge(m) => vec![vec![true; pw(&m.source)]],
+        // A MERGE reads the source columns its actions, join condition and RETURNING read,
+        // and all of the target's (its actions read the target row from the join); a computed
+        // source column nothing reads (a sub-select its readers took copies of) goes.
+        Plan::Merge(m) => {
+            let w = pw(&m.source);
+            let mut n = vec![false; w];
+            let ncols = m.rules.table.columns.len();
+            let sys = if m.sys { crate::exec::scan::NUM_SYS_COLS } else { 0 };
+            for x in n.iter_mut().skip(m.target).take(ncols + 1 + sys) {
+                *x = true;
+            }
+            if let Some(x) = m.source_flag.and_then(|f| n.get_mut(f)) {
+                *x = true;
+            }
+            for a in &m.actions {
+                if let Some(c) = &a.cond {
+                    mark(&mut n, c);
+                }
+                match &a.cmd {
+                    crate::sql::plan::MergeCmd::Update { sets, .. } => sets.iter().for_each(|(_, e)| mark(&mut n, e)),
+                    crate::sql::plan::MergeCmd::Insert { values, .. } => values.iter().for_each(|e| mark(&mut n, e)),
+                    _ => {}
+                }
+            }
+            if let Some(c) = &m.join_cond {
+                mark(&mut n, c);
+            }
+            for e in &m.returning {
+                for c in e.columns() {
+                    if let Some(x) = n.get_mut(c) {
+                        *x = true;
+                    }
+                }
+            }
+            // (Members' own target lists: theirs over the same row; row-level security
+            // checks over it.)
+            let rls = m.actions.iter().any(|a| match &a.cmd {
+                crate::sql::plan::MergeCmd::Update { rls_existing, rls_new, .. } => !rls_existing.is_empty() || !rls_new.is_empty(),
+                crate::sql::plan::MergeCmd::Delete { rls_existing } => !rls_existing.is_empty(),
+                crate::sql::plan::MergeCmd::Insert { rls_new, .. } => !rls_new.is_empty(),
+                crate::sql::plan::MergeCmd::Nothing => false,
+            });
+            if !m.members.is_empty() || m.route.is_some() || rls || !m.rules.rls_checks.is_empty() {
+                n.iter_mut().for_each(|x| *x = true);
+            }
+            vec![n]
+        }
         _ => Vec::new(),
     }
 }
@@ -5842,6 +5890,7 @@ fn plan_level_ordered(
 ) -> usize {
     let p = Planner::new(ctx);
     p.group_dirs.replace(dirs);
+    sublinkcopy::copy_into_merge(plan);
     p.pull_up_consts(plan);
     p.reduce_outer_joins(plan);
     p.remove_useless_joins(plan, needed);

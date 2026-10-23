@@ -26,12 +26,51 @@ struct Key {
 /// the keys (in the level's order: left to right).
 type Keyed = (Plan, Vec<usize>, Vec<Key>);
 
+thread_local! {
+    /// Planning a query level whose only lock is one pushed down from the level above
+    /// (no hasForUpdate): its row marks are that level's (pulled up) or locked when that
+    /// level plans it as a subquery apart, not here.
+    pub(crate) static PUSHED_LEVEL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// The level's plan with a LockRows at its top (below its LIMITs) when its scans have row
 /// marks and the plan's shape lets the keys go up; else as it is (each locked scan then
 /// locks the rows it returns).
 pub(super) fn hoist(plan: &mut Plan) {
+    if PUSHED_LEVEL.get() {
+        return;
+    }
+    // (A subquery planned apart, locked by its own clause or one pushed into it, is a level
+    // of its own: its LockRows at its top, under the Subquery Scan.)
+    // (Only down to such a subquery: the nodes on the way are made the plan's own.)
+    fn wants(p: &Plan) -> bool {
+        match p {
+            Plan::Barrier { input, .. } => has_marks(input) || wants(input),
+            Plan::LockRows { .. } => false,
+            _ => crate::sql::explain::plan_inputs(p).into_iter().any(|c| wants(c)),
+        }
+    }
+    fn apart(p: &mut Plan) {
+        match p {
+            Plan::Barrier { input, .. } => hoist(Arc::make_mut(input)),
+            _ => {
+                for c in crate::sql::explain::plan_inputs_mut(p) {
+                    if wants(&**c) {
+                        apart(Arc::make_mut(c));
+                    }
+                }
+            }
+        }
+    }
+    if wants(plan) {
+        apart(plan);
+    }
+    hoist_level(plan);
+}
+
+fn hoist_level(plan: &mut Plan) {
     if let Plan::Limit { input, .. } = plan {
-        return hoist(Arc::make_mut(input));
+        return hoist_level(Arc::make_mut(input));
     }
     // (The projection dropping the resjunk columns the level carries, its sort keys, isn't
     // a plan node: the LockRows below it returns them too.)
@@ -39,7 +78,7 @@ pub(super) fn hoist(plan: &mut Plan) {
         && exprs.len() < crate::sql::binder::plan_width(input)
         && exprs.iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i))
     {
-        return hoist(Arc::make_mut(input));
+        return hoist_level(Arc::make_mut(input));
     }
     if !has_marks(plan) {
         return;

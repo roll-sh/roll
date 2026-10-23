@@ -232,6 +232,8 @@ impl Planner<'_, '_> {
                 }
             }
             Plan::With { body, .. } => visit(body),
+            // (A MERGE's source: what its actions read of it, `child_needs`.)
+            Plan::Merge(m) => visit(&mut m.source),
             _ => {}
         }
     }

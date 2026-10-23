@@ -887,6 +887,8 @@ fn rowmark_scans(root: &Arc<Plan>) -> std::collections::HashSet<usize> {
             Plan::Update(u) if !matches!(&*u.source, Plan::Scan(_)) => marks(&u.source, out),
             Plan::Delete(d) if !matches!(&*d.source, Plan::Scan(_)) => marks(&d.source, out),
             Plan::Merge(m) => marks(&m.source, out),
+            // (A rule's action read as a CTE: a DELETE done as an UPDATE.)
+            Plan::With { ctes, .. } => ctes.iter().for_each(|(_, c)| go(c, out)),
             _ => {}
         }
         for c in plan_inputs(p) {
@@ -908,7 +910,7 @@ fn lock_level_marks<'p>(p: &'p Plan, inner: bool, semi: &mut Vec<usize>, copies:
                 semi.push(addr(p));
             }
         }
-        Plan::FunctionScan { .. } | Plan::Values { .. } | Plan::CteScan { .. } => {
+        Plan::FunctionScan { .. } | Plan::Values { .. } | Plan::CteScan { .. } | Plan::Barrier { .. } => {
             if !inner {
                 copies.push((addr(p), p));
             }
@@ -938,6 +940,94 @@ thread_local! {
 /// The RETURNING list a data-modifying node shows: `own`, or the one `rule_returning` left.
 fn shown_returning(own: &[Expr]) -> Vec<Expr> {
     RULE_RETURNING.with(|r| r.borrow_mut().take()).unwrap_or_else(|| own.to_vec())
+}
+
+/// The sub-select copies a MERGE's source subquery output was replaced by
+/// (`paths::sublinkcopy`, ids from SUBLINK_COPY_IDS on): their relations take range table
+/// entries in the order the planner meets the copies (the join's, then each action's target
+/// list, then its qual), which their ids follow; the names given them in plan order are
+/// handed out again in that order.
+fn copy_names_in_order(root: &Plan, out: &mut HashMap<usize, String>) {
+    const FIRST: usize = (1 << 39) + (1 << 38);
+    fn copies<'p>(p: &'p Plan, found: &mut Vec<(usize, &'p Plan)>) {
+        let mut es = Vec::new();
+        node_exprs(p, &mut es);
+        let mut sq = Vec::new();
+        for e in es {
+            subqueries_in(e, &mut sq);
+        }
+        for s in sq {
+            if (FIRST..1 << 40).contains(&s.id) && !found.iter().any(|f| f.0 == s.id) {
+                found.push((s.id, &s.plan));
+            }
+            copies(&s.plan, found);
+        }
+        if let Plan::With { ctes, .. } = p {
+            ctes.iter().for_each(|(_, c)| copies(c, found));
+        }
+        plan_inputs(p).into_iter().for_each(|c| copies(c, found));
+    }
+    fn scans<'p>(p: &'p Plan, found: &mut Vec<&'p Plan>) {
+        if let Plan::Scan(_) = p {
+            found.push(p);
+        }
+        plan_inputs(p).into_iter().for_each(|c| scans(c, found));
+    }
+    let mut found = Vec::new();
+    copies(root, &mut found);
+    if found.len() < 2 {
+        return;
+    }
+    found.sort_by_key(|f| f.0);
+    let mut by_base: Vec<(String, Vec<usize>)> = Vec::new();
+    for (_, plan) in &found {
+        let mut ss = Vec::new();
+        scans(plan, &mut ss);
+        for s in ss {
+            let Plan::Scan(sp) = s else { continue };
+            if !out.contains_key(&addr(s)) {
+                continue;
+            }
+            let base = sp.alias.clone().unwrap_or_else(|| sp.table.name.clone());
+            match by_base.iter_mut().find(|b| b.0 == base) {
+                Some(b) => b.1.push(addr(s)),
+                None => by_base.push((base, vec![addr(s)])),
+            }
+        }
+    }
+    // (A name's suffix: `r` 0, `r_1` 1, ….)
+    let rank = |n: &str, base: &str| -> usize {
+        n.strip_prefix(base)
+            .and_then(|r| r.strip_prefix('_'))
+            .and_then(|r| r.parse::<usize>().ok())
+            .unwrap_or(0)
+    };
+    for (base, addrs) in by_base {
+        let mut names: Vec<String> = addrs.iter().filter_map(|a| out.get(a).cloned()).collect();
+        names.sort_by_key(|n| rank(n, &base));
+        for (a, n) in addrs.into_iter().zip(names) {
+            out.insert(a, n);
+        }
+    }
+}
+
+/// The data-modifying statement a rule's action is, computing the statement's RETURNING
+/// (`rule_returning`), possibly read as a CTE (a DELETE done as an UPDATE): the plan's root.
+fn rule_action_dml(root: &Plan) -> Option<&Plan> {
+    let mut q = root;
+    if let Plan::With { ctes, body, names } = q
+        && names.len() == 1
+        && names[0] == "*RULE*"
+        && matches!(&**body, Plan::CteScan { id, .. } if ctes.first().is_some_and(|c| c.0 == *id))
+    {
+        q = &ctes[0].1;
+    }
+    let mut projected = false;
+    while let Plan::Project { input, .. } = q {
+        projected = true;
+        q = input;
+    }
+    (projected && matches!(q, Plan::Update(_) | Plan::Delete(_))).then_some(q)
 }
 
 /// Projections over a data-modifying statement's RETURNING rows (a rule's action computing
@@ -1421,6 +1511,24 @@ fn shown_subqueries(root: &Plan, needed: &HashMap<usize, Vec<bool>>) -> HashMap<
     }
     let mut out = HashMap::new();
     level(root, true, needed, &mut out);
+    // (A FROM subquery of a level locking rows returns its whole row, its row mark
+    // (ROW_MARK_COPY): its Subquery Scan isn't trivial.)
+    fn locked_levels(p: &Plan, out: &mut HashMap<usize, bool>) {
+        if let Plan::LockRows { input, .. } = p {
+            let (mut semi, mut copies) = (Vec::new(), Vec::new());
+            lock_level_marks(input, false, &mut semi, &mut copies);
+            for (a, q) in copies {
+                if matches!(q, Plan::Barrier { secure: false, alias, .. } if !alias.is_empty()) {
+                    out.insert(a, true);
+                }
+            }
+        }
+        if let Plan::With { ctes, .. } = p {
+            ctes.iter().for_each(|(_, c)| locked_levels(c, out));
+        }
+        plan_inputs(p).into_iter().for_each(|c| locked_levels(c, out));
+    }
+    locked_levels(root, &mut out);
     out
 }
 
@@ -1447,6 +1555,13 @@ fn merge_needs(m: &super::plan::MergePlan) -> Vec<bool> {
         }
     }
     m.returning.iter().for_each(&mut mark);
+    // (The target's own columns the actions read are the target tuple's, fetched by its
+    // ctid (ExecMergeMatched): not the join's.)
+    for c in m.target..m.target + m.rules.table.columns.len() {
+        if let Some(x) = n.get_mut(c) {
+            *x = false;
+        }
+    }
     let key = m.target + m.rules.table.columns.len();
     if let Some(x) = n.get_mut(key) {
         *x = true;
@@ -1483,7 +1598,7 @@ fn junk_layout(
     for c in &mut n.children {
         junk.extend(junk_layout(c, top, last, junk_of));
     }
-    if n.is_scan()
+    if (n.is_scan() || n.node_type == "Subquery Scan")
         && let Some(js) = n.key.and_then(|k| junk_of.get(&k))
     {
         junk.extend(js.iter().map(|j| j.1.clone()));
@@ -1496,13 +1611,18 @@ fn junk_layout(
             n.output.push(j.clone());
         }
     }
-    let rank: Box<dyn Fn(&String) -> usize> = if n.children.is_empty() {
-        // (An inheritance member's row identity comes after its reltarget's columns.)
+    // (A Subquery Scan returns its reltarget; an inheritance tree's Append its parent's.)
+    let rank: Box<dyn Fn(&String) -> usize> = if n.children.is_empty()
+        || n.node_type == "Subquery Scan"
+        || (n.node_type == "Append" && last.iter().any(|l| n.output.contains(l)))
+    {
+        // (An inheritance member's row identity comes after its reltarget's columns, in
+        // `last`'s order.)
         Box::new(|o: &String| {
-            if last.contains(o) {
-                usize::MAX
+            if let Some(i) = last.iter().position(|l| l == o) {
+                usize::MAX - last.len() + i
             } else {
-                top.iter().position(|t| mentions(t, o)).unwrap_or(usize::MAX - 1)
+                top.iter().position(|t| mentions(t, o)).unwrap_or(usize::MAX - last.len() - 1)
             }
         })
     } else {
@@ -1669,7 +1789,7 @@ fn junk_in(n: &ExNode, junk_of: &HashMap<usize, Vec<((u8, super::plan::Rti), Str
         for c in &n.children {
             go(c, junk_of, out);
         }
-        if n.is_scan()
+        if (n.is_scan() || n.node_type == "Subquery Scan")
             && let Some(js) = n.key.and_then(|k| junk_of.get(&k))
         {
             out.extend(js.iter().cloned());
@@ -1793,6 +1913,65 @@ fn assign_refnames_skip(
         if !used.contains_key(&base) {
             used.insert(base.clone(), 0);
             out.insert(addr(target.expect("checked")), base);
+        }
+    }
+    // (A statement a rule's action computes the RETURNING of: rewriteRuleAction puts the
+    // statement's range table before the action's, so the statement's own relations, bound
+    // first, are named before the action's target and FROM items.)
+    if let Some(dml) = rule_action_dml(root) {
+        fn scans<'p>(p: &'p Plan, out: &mut Vec<(&'p Plan, usize)>) {
+            match p {
+                Plan::Scan(s) => out.push((p, s.rti.0)),
+                // (A one-member inheritance Append is its member.)
+                Plan::Append { inputs, inh: Some(_) } if inputs.len() == 1 => scans(&inputs[0], out),
+                Plan::Barrier { .. } | Plan::Append { .. } | Plan::With { .. } => {}
+                p => plan_inputs(p).into_iter().for_each(|c| scans(c, out)),
+            }
+        }
+        // (An inheritance tree's parent is the nominal relation, the first of the action's
+        // entries, named first; its member scans come after the statement's relations, as
+        // expand_inherited_rtentry appends them.)
+        let (source, parent) = match dml {
+            Plan::Update(u) => (
+                Some(&u.source),
+                (u.inh && !multi_target_append(&u.source))
+                    .then(|| dml_tree_name(&u.source, &u.rules.table, u.alias.as_deref())),
+            ),
+            Plan::Delete(d) => (
+                Some(&d.source),
+                (d.inh && !multi_target_append(&d.source))
+                    .then(|| dml_tree_name(&d.source, &d.table, d.alias.as_deref())),
+            ),
+            _ => (None, None),
+        };
+        if let Some(p) = parent
+            && !used.contains_key(&p)
+        {
+            used.insert(p.clone(), 0);
+            out.insert(addr(dml), p);
+        }
+        let mut found = Vec::new();
+        if let Some(s) = source {
+            scans(s, &mut found);
+        }
+        if found.iter().all(|(_, r)| *r > 0) {
+            found.sort_by_key(|(_, r)| *r);
+            for (p, _) in found {
+                let Plan::Scan(s) = p else { continue };
+                let base = s.alias.clone().unwrap_or_else(|| s.table.name.clone());
+                let name = match used.get_mut(&base) {
+                    Some(n) => loop {
+                        *n += 1;
+                        let cand = crate::catalog::suffixed_name(&base, &format!("_{n}"));
+                        if !out.values().any(|v| *v == cand) {
+                            break cand;
+                        }
+                    },
+                    None => base,
+                };
+                used.entry(name.clone()).or_insert(0);
+                out.insert(addr(p), name);
+            }
         }
     }
     let shown = shown_subqueries(root, &needed_masks_of(root));
@@ -2179,6 +2358,7 @@ fn assign_refnames_skip(
         queue.extend(later_sub);
         queue.extend(later);
     }
+    copy_names_in_order(root, &mut out);
     // Partitions joined partitionwise are numbered as their parent expands them (bound
     // order), not as the child joins (in merged-bounds order) list them.
     let mut scans = Vec::new();
@@ -6562,6 +6742,7 @@ impl Builder<'_, '_> {
                 };
                 // An inheritance tree's row mark has its tableoid too (expand_inherited_rtentry
                 // adds it after the target list's other junk), from each member's scan up.
+                let mut inh: Vec<(String, Vec<String>)> = Vec::new();
                 if self.o.verbose {
                     let mut trees = Vec::new();
                     inherited_marks(input, &mut trees);
@@ -6569,18 +6750,40 @@ impl Builder<'_, '_> {
                         let members: Vec<String> =
                             members.into_iter().map(|m| quote_ident(&self.refname(m))).collect();
                         add_tableoid(&mut c.node, &quote_ident(&parent), &members);
+                        inh.push((quote_ident(&parent), members));
                     }
                 }
                 if self.o.verbose && (!semi.is_empty() || !copies.is_empty()) {
+                    // (preprocess_rowmarks: the locked relations' marks, then the other
+                    // relations' whole rows; the inheritance parents' tableoids after all.)
                     for (a, p) in copies {
                         let name = format!("{}.*", quote_ident(&self.refname(p)));
-                        self.rowmark_junk.insert(a, vec![((2, super::plan::Rti(usize::MAX)), name)]);
+                        self.rowmark_junk.insert(a, vec![((0, super::plan::Rti(usize::MAX)), name)]);
                     }
                     let junk = junk_in(&c.node, &self.rowmark_junk);
                     let mut top = c.node.output.clone();
                     top.extend(junk.iter().filter(|j| !c.node.output.contains(j)).cloned());
+                    let tableoids: Vec<String> = inh.iter().map(|(p, _)| format!("{p}.tableoid")).collect();
+                    top.sort_by_key(|o| tableoids.iter().position(|t| t == o).map_or(0, |i| i + 1));
+                    // (A member's scan returns its parent's reltarget, the tableoid last.)
+                    let mut ranks = Vec::new();
+                    for t in &top {
+                        ranks.push(t.clone());
+                        for (parent, members) in &inh {
+                            if let Some(col) = t.strip_prefix(&format!("{parent}."))
+                                && !tableoids.contains(t)
+                            {
+                                ranks.extend(members.iter().map(|m| format!("{m}.{col}")));
+                            }
+                        }
+                    }
+                    let mut last = Vec::new();
+                    for (parent, members) in &inh {
+                        last.extend(members.iter().map(|m| format!("{m}.tableoid")));
+                        last.push(format!("{parent}.tableoid"));
+                    }
                     for ch in &mut c.node.children {
-                        junk_layout(ch, &top, &[], &self.rowmark_junk);
+                        junk_layout(ch, &ranks, &last, &self.rowmark_junk);
                     }
                     c.node.output = top;
                 }
@@ -6683,7 +6886,12 @@ impl Builder<'_, '_> {
             }
             Plan::Update(up) => {
                 let returning = shown_returning(&up.returning);
+                // (Over a join the target's scan returns what is read of it and its ctid:
+                // no physical target list.)
+                let joined = !matches!(&*up.source, Plan::Scan(_));
+                UNDER_LOCK_ROWS.with(|u| u.set(u.get() + joined as usize));
                 let mut c = self.node(&up.source);
+                UNDER_LOCK_ROWS.with(|u| u.set(u.get() - joined as usize));
                 let t = &up.rules.table;
                 // (No row of it read: the name the statement gives it.)
                 let refname = target_scan(&up.source, t.oid)
@@ -6755,20 +6963,25 @@ impl Builder<'_, '_> {
                     c.node.subplans.append(&mut self.pending);
                 } else if self.o.verbose
                     && up.route.is_none()
-                    && !up.inh
+                    && up.members.is_empty()
                     && self.ctx.catalog().children(t.oid).is_empty()
                     && c.node.is_join()
                     && let Some(k) = c.exported.get(t.columns.len())
                 {
                     // A join computes them: the new values (in column order), the target
                     // row's ctid, then the other relations' row marks.
+                    // (An inheritance parent without members left, relhassubclass still set:
+                    // its row identity is a tableoid and the ctid, after the other row
+                    // marks, as expand_inherited_rtentry adds them; each scan returns it last.)
+                    let parent = up.inh || self.ctx.catalog().class_has_subclass.contains(&t.oid);
+                    let mut last: Vec<String> = Vec::new();
                     let mut sets: Vec<&(usize, Expr)> = up.sets.iter().collect();
                     sets.sort_by_key(|x| x.0);
                     let mut top: Vec<String> =
                         sets.iter().map(|(_, e)| self.set_value(e, &c.exported)).collect();
                     top.extend(self.rescans(&sets));
                     // (A view's row identity, for its INSTEAD OF triggers: the whole row.)
-                    top.push(if up.rules.view {
+                    let ident = if up.rules.view {
                         let cols: Vec<String> = c.exported[..t.columns.len()]
                             .iter()
                             .map(|n| self.pick(n, Cx::Output))
@@ -6776,10 +6989,39 @@ impl Builder<'_, '_> {
                         format!("ROW({})", cols.join(", "))
                     } else {
                         self.pick(k, Cx::Output)
-                    });
-                    top.extend(junk_in(&c.node, &self.rowmark_junk));
+                    };
+                    if parent && let Some(ts) = target_scan(&up.source, t.oid) {
+                        let Plan::Scan(s) = ts else { unreachable!() };
+                        let tableoid = format!("{}.tableoid", quote_ident(&self.refname(ts)));
+                        self.rowmark_junk.insert(addr(ts), vec![((1, s.rti), tableoid.clone())]);
+                        let junk = junk_in(&c.node, &self.rowmark_junk);
+                        last.extend(junk.iter().filter(|j| j.ends_with(".tableoid") && **j != tableoid).cloned());
+                        top.extend(junk.into_iter().filter(|j| *j != tableoid));
+                        top.push(tableoid.clone());
+                        top.push(ident.clone());
+                        last.push(tableoid);
+                        last.push(ident);
+                    } else {
+                        top.push(ident);
+                        top.extend(junk_in(&c.node, &self.rowmark_junk));
+                    }
+                    // (Then what RETURNING reads of the other relations: resjunk entries
+                    // preprocess_targetlist adds for its Vars.)
+                    let ncols = t.columns.len();
+                    for e in &returning {
+                        for col in e.columns() {
+                            if col > ncols
+                                && let Some(n) = c.exported.get(col)
+                            {
+                                let s = self.pick(n, Cx::Output);
+                                if !top.contains(&s) {
+                                    top.push(s);
+                                }
+                            }
+                        }
+                    }
                     for ch in &mut c.node.children {
-                        junk_layout(ch, &top, &[], &self.rowmark_junk);
+                        junk_layout(ch, &top, &last, &self.rowmark_junk);
                     }
                     c.node.output = top;
                 }
@@ -6819,7 +7061,9 @@ impl Builder<'_, '_> {
                     if inherited {
                         names = names.into_iter().map(|n| Name::same(n.full)).collect();
                     }
-                    names.extend(c.exported.iter().skip(t.columns.len() + 1).cloned());
+                    // (The new row, then the source row's own from its key on: its key slot,
+                    // the other relations' columns.)
+                    names.extend(c.exported.iter().skip(t.columns.len()).cloned());
                     let names = old_new_names(names, up.old_new.as_ref(), t);
                     let cx = if up.old_new.is_some() { Cx::Upper } else { Cx::Output };
                     n.output = returning
@@ -6832,7 +7076,10 @@ impl Builder<'_, '_> {
             }
             Plan::Delete(dp) => {
                 let returning = shown_returning(&dp.returning);
+                let joined = !matches!(&*dp.source, Plan::Scan(_));
+                UNDER_LOCK_ROWS.with(|u| u.set(u.get() + joined as usize));
                 let mut c = self.node(&dp.source);
+                UNDER_LOCK_ROWS.with(|u| u.set(u.get() - joined as usize));
                 let t = &dp.table;
                 let refname = target_scan(&dp.source, t.oid)
                     .map(|s| self.refname(s))
@@ -6897,7 +7144,11 @@ impl Builder<'_, '_> {
                 Built::passthrough(n, Vec::new())
             }
             Plan::Merge(mp) => {
+                // (The target's scan returns its ctid: no physical target list.)
+                let joined = !matches!(&*mp.source, Plan::Scan(_));
+                UNDER_LOCK_ROWS.with(|u| u.set(u.get() + joined as usize));
                 let mut c = self.node(&mp.source);
+                UNDER_LOCK_ROWS.with(|u| u.set(u.get() - joined as usize));
                 if self.o.verbose && !mp.members.is_empty() {
                     tableoid_first(&mut c.node);
                 }
@@ -7029,6 +7280,37 @@ impl Builder<'_, '_> {
                     n.details.push(Detail::Targets(targets));
                     n
                 };
+                // The sub-selects the actions run are the ModifyTable's SubPlans: numbered as
+                // the planner preprocesses each action (its target list, then its qual), shown
+                // the quals' first.
+                {
+                    let mut quals = Vec::new();
+                    let mut tlists = Vec::new();
+                    let sub = |e: &Expr| {
+                        let mut sq = Vec::new();
+                        subqueries_in(e, &mut sq);
+                        !sq.is_empty()
+                    };
+                    for a in &mp.actions {
+                        let start = self.pending.len();
+                        let exprs: Vec<&Expr> = match &a.cmd {
+                            MergeCmd::Update { sets, .. } => sets.iter().map(|(_, e)| e).collect(),
+                            MergeCmd::Insert { values, .. } => values.iter().collect(),
+                            _ => Vec::new(),
+                        };
+                        for e in exprs.into_iter().filter(|e| sub(e)) {
+                            let _ = self.show(e, &c.exported, Cx::Upper);
+                        }
+                        tlists.extend(self.pending.drain(start..));
+                        if let Some(q) = a.cond.as_ref().filter(|q| sub(q)) {
+                            let start = self.pending.len();
+                            let _ = self.show(q, &c.exported, Cx::Upper);
+                            quals.extend(self.pending.drain(start..));
+                        }
+                    }
+                    n.subplans.extend(quals);
+                    n.subplans.extend(tlists);
+                }
                 n.details.push(Detail::MergeTuples(addr(&mp.source)));
                 n.children.push(c.node.child("Outer"));
                 Built::passthrough(n, Vec::new())
@@ -7285,7 +7567,42 @@ impl Builder<'_, '_> {
         }
         .unwrap_or_else(|| pt.name.clone());
         let joined = has_join(source);
+        UNDER_LOCK_ROWS.with(|u| u.set(u.get() + joined as usize));
         let mut app = self.node(source);
+        UNDER_LOCK_ROWS.with(|u| u.set(u.get() - joined as usize));
+        // VERBOSE, one member read over a join: the join computes the new values, then the
+        // other relations' row marks, then the member's row identity (tableoid, ctid), which
+        // each scan returns last.
+        if self.o.verbose
+            && joined
+            && all.len() == 1
+            && app.node.is_join()
+            && let Some(ts) = target_scan(source, all[0].0.oid)
+            && let Plan::Scan(s) = ts
+            && let Some(k) = app.exported.get(pt.columns.len())
+        {
+            let tref = quote_ident(&self.refname(ts));
+            let tableoid = format!("{tref}.tableoid");
+            let ident = self.pick(k, Cx::Output);
+            self.rowmark_junk.insert(addr(ts), vec![((1, s.rti), tableoid.clone())]);
+            let mut sorted: Vec<&(usize, Expr)> = sets.iter().collect();
+            sorted.sort_by_key(|x| x.0);
+            let mut top: Vec<String> =
+                sorted.iter().map(|(_, e)| self.set_value(e, &app.exported)).collect();
+            top.extend(self.rescans(&sorted));
+            let junk = junk_in(&app.node, &self.rowmark_junk);
+            let mut last: Vec<String> =
+                junk.iter().filter(|j| j.ends_with(".tableoid") && **j != tableoid).cloned().collect();
+            top.extend(junk.into_iter().filter(|j| *j != tableoid));
+            top.push(tableoid.clone());
+            top.push(ident.clone());
+            last.push(tableoid);
+            last.push(ident);
+            for ch in &mut app.node.children {
+                junk_layout(ch, &top, &last, &self.rowmark_junk);
+            }
+            app.node.output = top;
+        }
         let partitioned = pt.partkey.is_some();
         // (One member: no Append, the plan's own.)
         let single = all.len() == 1;
@@ -12561,6 +12878,13 @@ impl Builder<'_, '_> {
                         }
                     }
                 }
+                // (And the columns of an equivalence class the join's clause was implied
+                // by: Postgres still carries them up to the join.)
+                for &c in &meta.kept {
+                    if c >= nleft {
+                        add(c - nleft, &mut order);
+                    }
+                }
                 order.sort_unstable();
                 if order.len() < width {
                     r.node.output = order.iter().map(|&i| self.pick(&r.internal[i], Cx::Output)).collect();
@@ -14527,7 +14851,7 @@ pub struct PlanEstimate {
 
 /// cost_subplan for the sub-selects in `exprs`: (startup, per evaluation). A hashed one
 /// builds its table once; a correlated one runs each time (an EXISTS to its first row).
-fn subplan_costs(exprs: &[Expr], ctx: &ExecCtx) -> (f64, f64) {
+pub(crate) fn subplan_costs(exprs: &[Expr], ctx: &ExecCtx) -> (f64, f64) {
     use crate::sql::expr::SubqueryKind as K;
     let (mut startup, mut per) = (0.0, 0.0);
     for x in exprs {
