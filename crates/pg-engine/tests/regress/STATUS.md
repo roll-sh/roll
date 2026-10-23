@@ -35,9 +35,9 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51021 (**99.75%**) |
-| units differing | 129 |
-| files fully matching | 213 |
+| units matching | 51027 (**99.76%**) |
+| units differing | 123 |
+| files fully matching | 214 |
 | engine output == expected/*.out (pg_regress "ok") | 177 files |
 | engine crashes / panics | none |
 
@@ -45,16 +45,16 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 125 | 96.9% |
-| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.3% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 119 | 96.7% |
+| plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 3 | 2.4% |
 | by design (a parallel plan's combine function) | 1 | 0.8% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 125 units
-join (65), partition_join (18), partition_prune (4), subselect (3), collate.icu.utf8 (5), incremental_sort (6), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
+### EXPLAIN (group C1) — 119 units
+join (65), partition_join (18), partition_prune (4), subselect (3), collate.icu.utf8 (5), select_parallel (1), updatable_views (3), groupingsets (7), with (5), aggregates (1), join_hash (3), returning (2), merge (1), select_distinct (1), foreign_key (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -899,8 +899,8 @@ Goldens added: `tests/sql/a6_dummy_rel_keys.sql`, `a6_parallel_plans.sql`,
 
 Still open in these files, and why:
 
-- incremental_sort 87, 89, 99–107 and select_parallel 191, 205, 207, 208: see "Fixed in round
-  14, agent 7" (all but incremental_sort 99–102, 106, 107 fixed there).
+- incremental_sort 87, 89, 99–107 and select_parallel 191, 205, 207, 208: fixed, see "Fixed
+  in round 14, agent 7".
 - select_parallel 132 (a LATERAL subquery with ORDER BY pulled up: it stays a Subquery Scan in
   Postgres). Also seen while probing: a security-barrier view read without quals loses its
   Subquery Scan here, and its unread outputs aren't NULLs in the scan's target list.
@@ -925,6 +925,7 @@ none broken (test_setup 7 differs in some runs: the shared reference cluster's t
 | memoize | 67 |
 | partition_prune | 377, 378, 380, 381, 383 |
 | aggregates | second batch: 342, 505, 507 |
+| incremental_sort | third batch: 99, 100, 101, 102, 106, 107 |
 
 What changed:
 
@@ -986,17 +987,25 @@ What changed:
   carrying them too (SS_charge_for_initplans), so a UNION ALL of such arms is one Parallel
   Append of the arms' Parallel Appends (partition_prune 652's shape).
 
+- Third batch (incremental_sort 99–102, 106, 107): a FROM subquery whose
+  select list over a function scan only reads the other side (`LATERAL (SELECT
+  tenk1.unique1 FROM generate_series(...))`) is pulled up (`lift.rs`): the function scan is
+  the leaf, its outputs plain Vars of the other relation, and the join isn't LATERAL any
+  more. A nested loop's outer side then can be a Gather Merge of a partial path sorted in the
+  order the node above wants (generate_useful_gather_paths with relation_can_be_sorted_early:
+  the Sort's or a DISTINCT's keys, `order_hint`, expression keys computed at the relation, none
+  volatile), kept beside the cheapest join as its ordered alternative; an ORDER BY sorts it no
+  further and a DISTINCT (now also planned through the grouped join like a grouping) takes
+  it with a bare Unique when cheaper. A text key computed from a `name` column sorts under
+  `COLLATE "C"` (the name's collation wins over the default) and shows it. Measured in the
+  subset above plus returning, merge, insert_conflict and rangefuncs, rebased onto 27da13f:
+  6 units fixed, none broken (rangefuncs 422 too, already fixed upstream by then).
+
 Goldens added: `tests/sql/a7_partial_paths.sql`, `a7_partial_joins.sql`; second batch:
-`a7_parallel_aggs.sql`.
+`a7_parallel_aggs.sql`; third batch: `a7_lateral_gather.sql`.
 
 Still open in these files, and why:
 
-- incremental_sort 99–102, 106, 107: `LATERAL (SELECT tenk1.unique1 FROM generate_series(...))`
-  isn't pulled up here. Postgres pulls the subquery up and its output is a plain Var of tenk1,
-  so the join isn't LATERAL and its outer side can be a Gather Merge of a sorted partial path
-  (the sort keys showing bare, `COLLATE "C"` for the keys over `name` cast to text). The engine
-  keeps the projection on the function scan side as a LATERAL reference, so the join stays
-  parameterized (subquery pull-up, `lift.rs`).
 - select_parallel 132 (a LATERAL subquery with ORDER BY).
 - partition_prune 652: the shape matches; the two arms' order and names differ. Postgres
   appends the UNION ALL's leftmost arm as the last range table entry (flatten_simple_union_all),
@@ -2191,7 +2200,7 @@ produces no units on Linux (skipped by the file itself).
 | tidrangescan | 45 | 45 | 100% | yes | yes |  |
 | collate.utf8 | 61 | 61 | 100% | yes | yes |  |
 | collate.icu.utf8 | 681 | 676 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (5) |
-| incremental_sort | 120 | 114 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (6) |
+| incremental_sort | 120 | 120 | 100% | yes | no |  |
 | create_role | 144 | 144 | 100% | yes | yes |  |
 | without_overlaps | 674 | 674 | 100% | yes | yes |  |
 | generated_virtual | 489 | 489 | 100% | yes | no |  |

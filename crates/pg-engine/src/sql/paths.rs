@@ -4684,8 +4684,9 @@ impl Planner<'_, '_> {
                 self.group_dirs.replace(Some(d));
             }
         }
-        // A grouping over a join group: the joins planned for the GROUP BY's order.
-        if matches!(p, Plan::Agg { .. }) {
+        // A grouping (or DISTINCT) over a join group: the joins planned for the GROUP BY's
+        // order.
+        if matches!(p, Plan::Agg { .. } | Plan::Distinct { on: None, .. }) {
             let dirs = self.group_dirs.take().unwrap_or_default();
             // (Partitionwise aggregation needs the join partitionwise: Postgres keeps
             // that path for it and costs them together.)

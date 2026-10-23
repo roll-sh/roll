@@ -853,6 +853,36 @@ fn lift(
             {
                 return r;
             }
+            // A FROM subquery over a function call (a LATERAL one's select list reading the
+            // left side, say): the function scan is the leaf, its outputs evaluated where
+            // they're read, as for a table's; a LATERAL reference only its select list read
+            // leaves the join without one (the scan doesn't read the left row).
+            if let Plan::Project { input, exprs } = p
+                && matches!(&**input, Plan::FunctionScan { .. })
+                && exprs.iter().any(|e| !matches!(e, Expr::Col(..)))
+                && exprs.iter().all(movable)
+                && (lateral.is_some() || exprs.iter().all(|e| outer_refs(e).is_empty()))
+            {
+                let same_level = |i: &usize| {
+                    lateral.is_some_and(|(_, pn)| pn.get(*i).is_some_and(|n| nulled & !n.0 == 0))
+                };
+                let up = exprs.iter().all(|e| {
+                    if matches!(e, Expr::Col(..)) || nulled == 0 {
+                        return true;
+                    }
+                    if let Expr::Outer(1, i, _) = e {
+                        return same_level(i) || anulled == 0;
+                    }
+                    (!e.columns().is_empty() || outer_refs(e).iter().any(same_level)) && !nonstrict(e)
+                });
+                if up {
+                    cx.lifted = true;
+                    cx.nrel += 1;
+                    let scan = (**input).clone();
+                    let w = crate::sql::binder::plan_width(&scan);
+                    return (scan, exprs.clone(), vec![(nulled, rel); w]);
+                }
+            }
             let Some((sp, exprs)) = subquery_leaf(p) else {
                 return identity(p, cx);
             };

@@ -654,6 +654,10 @@ struct Builder<'c, 'a> {
     /// The method and orientation (outer side the right input) of the join being built
     /// for another partial path of it (`join`'s add_partial_path candidates).
     join_force: Option<(super::plan::JoinMethod, bool)>,
+    /// The order the node above wants of a plan's rows (an ORDER BY's or a DISTINCT's
+    /// keys over that plan's row, by its address): a join below it may gather a side's
+    /// partial plan sorted in it (generate_useful_gather_paths' query_pathkeys).
+    order_hint: Option<(usize, Vec<SortKey>)>,
     /// The aggregation node being converted's key.
     agg_key: Option<usize>,
     /// The input of the aggregation being converted.
@@ -2445,6 +2449,30 @@ fn and_text(parts: Vec<String>) -> Option<String> {
 
 /// A sort key as an Incremental Sort's presorted keys show it: without its direction
 /// (show_sort_group_keys lists the bare expressions).
+/// A text value computed from a `name` column (through casts and calls) takes that
+/// column's collation, "C", implicitly (a non-default implicit collation beats the
+/// default, parse_collate.c): a sort on it is under "C", which isn't the text type's own.
+fn name_derived_c(e: &Expr) -> bool {
+    fn text(t: &DataType) -> bool {
+        matches!(t, DataType::Text | DataType::Varchar(_) | DataType::Bpchar(_))
+    }
+    fn from_name(e: &Expr) -> bool {
+        match e {
+            Expr::Col(_, DataType::Name) => true,
+            Expr::Cast(x, _, to, _) => text(to) && from_name(x),
+            Expr::Call(_, args, ty) => text(ty) && args.iter().any(from_name),
+            Expr::Relabel(x, _) => from_name(x),
+            _ => false,
+        }
+    }
+    !matches!(e, Expr::Col(..)) && text(&e.ty()) && from_name(e)
+}
+
+/// A sort key's text without the collation a `name`-derived value shows (`name_derived_c`).
+fn uncollated(k: &str) -> String {
+    k.strip_suffix(" COLLATE \"C\"").unwrap_or(k).to_string()
+}
+
 fn presorted_name(k: &str) -> String {
     let mut s = k;
     for sfx in [" NULLS FIRST", " NULLS LAST"] {
@@ -4004,7 +4032,31 @@ impl Builder<'_, '_> {
                 if !junk_only {
                     self.proj_depth += 1;
                 }
+                // (The order wanted of its rows, over its input's.)
+                let saved_hint = self.order_hint.take();
+                if let Some((a, hk)) = &saved_hint
+                    && *a == addr(p)
+                {
+                    let through: Vec<SortKey> = hk
+                        .iter()
+                        .map(|k| SortKey {
+                            expr: k
+                                .expr
+                                .clone()
+                                .transform(&mut |x| {
+                                    Ok(match x {
+                                        Expr::Col(i, t) => exprs.get(i).cloned().unwrap_or(Expr::Col(i, t)),
+                                        x => x,
+                                    })
+                                })
+                                .unwrap_or_else(|_| k.expr.clone()),
+                            ..k.clone()
+                        })
+                        .collect();
+                    self.order_hint = Some((addr(input), through));
+                }
                 let mut c = self.node(input);
+                self.order_hint = saved_hint;
                 if !junk_only {
                     self.proj_depth -= 1;
                 }
@@ -4602,6 +4654,7 @@ impl Builder<'_, '_> {
                 self.group_order = sort_group_order(input, keys);
                 self.group_named = sort_group_named(input, keys);
                 self.group_order_full = self.group_order.as_ref().is_some_and(|g| g.len() == keys.len());
+                let saved_hint = self.order_hint.replace((addr(input), keys.clone()));
                 let mut c = {
                     let merged = merge_appended(input);
                     let _g = crate::scoped::set(&MERGE_MEMBERS, merged, "explain::MERGE_MEMBERS.set");
@@ -4610,6 +4663,7 @@ impl Builder<'_, '_> {
                     }
                     self.node(input)
                 };
+                self.order_hint = saved_hint;
                 // (VERBOSE: a projection over an inheritance tree merged in order is its
                 // members' to compute, each over its own columns; a Result above returns
                 // the query's columns when those aren't the members'.)
@@ -4759,6 +4813,15 @@ impl Builder<'_, '_> {
                                 .filter(|n| n != "default" && !(*ty == DataType::Name && n == "C")),
                             _ => None,
                         };
+                        // (So does a value computed from a `name` column, "C" derived.)
+                        let declared = declared.or_else(|| match (&k.expr, &**input) {
+                            (Expr::Col(j, _), Plan::Project { exprs: pe, .. })
+                                if k.using.is_none() && pe.get(*j).is_some_and(name_derived_c) =>
+                            {
+                                Some("C".to_string())
+                            }
+                            _ => None,
+                        });
                         let t = match declared {
                             Some(n) => format!("{t} COLLATE {}", quote_ident(&n)),
                             None => t,
@@ -5203,11 +5266,23 @@ impl Builder<'_, '_> {
                                 matches!(e, Expr::Col(..)) && !exprs[..i].iter().any(|x| x.same_as(e))
                             }));
                 let saved_plain = std::mem::replace(&mut self.plain_distinct, plain.then(|| addr(input)));
+                // (Its keys are the query's order below: distinct_pathkeys.)
+                let dkeys: Vec<SortKey> = (0..super::binder::plan_width(input))
+                    .map(|i| SortKey {
+                        expr: Expr::Col(i, DataType::Unknown),
+                        desc: false,
+                        nulls_first: false,
+                        using: None,
+                    })
+                    .collect();
+                let saved_hint = std::mem::replace(&mut self.order_hint, on.is_none().then(|| (addr(input), dkeys)));
                 let mut c = self.node(input);
+                self.order_hint = saved_hint;
                 self.plain_distinct = saved_plain;
                 // (Its partial plan: a DISTINCT in the workers first, create_partial_distinct_paths.)
                 let part = c.node.partial.clone();
                 self.settle(&mut c.node);
+                let in_alt = c.node.alt.take();
                 // A hashed DISTINCT reads a plain scan's physical target list (its select
                 // list of columns is the aggregate's).
                 // (A semi join's side made unique reads just the compared values.)
@@ -5453,7 +5528,23 @@ impl Builder<'_, '_> {
                     if common < ord.len() {
                         let incremental = common > 0 && g.incremental_sort;
                         let mut sn = ExNode::new(if incremental { "Incremental Sort" } else { "Sort" });
-                        sn.details.push(Detail::List("Sort Key", ord.clone()));
+                        // (A value computed from a `name` column sorts under "C".)
+                        let shown: Vec<String> = ord
+                            .iter()
+                            .map(|k| {
+                                let derived = named
+                                    .iter()
+                                    .find(|x| x.1 == presorted_name(k))
+                                    .is_some_and(|x| matches!(&**input, Plan::Project { exprs, .. } if exprs.get(x.0).is_some_and(name_derived_c)));
+                                if derived {
+                                    let base = presorted_name(k);
+                                    format!("{base} COLLATE \"C\"{}", &k[base.len()..])
+                                } else {
+                                    k.clone()
+                                }
+                            })
+                            .collect();
+                        sn.details.push(Detail::List("Sort Key", shown));
                         if incremental {
                             sn.details.push(Detail::List(
                                 "Presorted Key",
@@ -5515,6 +5606,30 @@ impl Builder<'_, '_> {
                     u.total_cost = input_node.total_cost + input_node.rows * key_ops;
                     u.order = ord;
                     u.children.push(input_node.child("Outer"));
+                    // (Or the input's other path, already in an order of the keys: a nested
+                    // loop over a Gather Merge, say.)
+                    if let Some(a) = in_alt.as_deref()
+                        && a.order.len() >= names.len()
+                        && names.iter().all(|nm| a.order[..names.len()].iter().any(|o| uncollated(&presorted_name(o)) == *nm))
+                    {
+                        let aord: Vec<String> = a.order[..names.len()].to_vec();
+                        let mut ua = ExNode::new("Unique");
+                        ua.unique_keys = Some(
+                            aord.iter()
+                                .filter_map(|k| named.iter().find(|x| x.1 == uncollated(&presorted_name(k))).map(|x| x.0))
+                                .collect(),
+                        );
+                        ua.rows = n.rows;
+                        ua.width = n.width;
+                        ua.cols = n.cols.clone();
+                        ua.startup_cost = a.startup_cost;
+                        ua.total_cost = a.total_cost + a.rows * key_ops;
+                        ua.order = aord;
+                        ua.children.push(a.clone().child("Outer"));
+                        if parallel::cheaper(&ua, &u) {
+                            u = ua;
+                        }
+                    }
                     n.disabled = !g.hashagg;
                     Some(u)
                 } else {
@@ -11294,7 +11409,111 @@ impl Builder<'_, '_> {
             && meta.from_call.is_none()
             && matches!(kind, JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti))
         .then(|| (copy(&l), copy(&r)));
+        // (A nested loop keeps its outer side's order: that side's partial plan sorted in
+        // the query's order under a Gather Merge, generate_useful_gather_paths at its
+        // relation, makes a path in that order; either side outside for an inner join.)
+        let ordered_outer = 'oo: {
+            if !(matches!(meta.method, Some(super::plan::JoinMethod::NestLoop) | None)
+                && !lateral
+                && !meta.swapped
+                && meta.memoize.is_none()
+                && matches!(kind, JoinKind::Inner | JoinKind::Left)
+                && self.par.as_ref().is_some_and(|c| c.gather_merge))
+            {
+                break 'oo None;
+            }
+            // (The keys: the order the node above wants, as far as this side computes them
+            // early (relation_can_be_sorted_early: no volatile key), else the orderings
+            // the planner found useful for its scan.)
+            let hint = self.order_hint.as_ref().filter(|(a, _)| *a == at).map(|(_, k)| k.clone());
+            let side = |this: &mut Self, p: &Arc<Plan>, b: &Built, off: usize| -> Option<(Vec<String>, Vec<Option<usize>>)> {
+                let Plan::Scan(s) = &**p else { return None };
+                b.node.partial.as_ref()?;
+                let w = b.exported.len();
+                let mut list = Vec::new();
+                let mut cols = Vec::new();
+                if let Some(hk) = &hint {
+                    for k in hk {
+                        let cs = k.expr.columns();
+                        if cs.is_empty() || !cs.iter().all(|&c| c >= off && c < off + w) || k.expr.is_volatile() {
+                            break;
+                        }
+                        let e = k.expr.clone().shift_cols(-(off as isize));
+                        let t = match &e {
+                            Expr::Col(j, _) => this.pick(b.exported.get(*j)?, Cx::Upper),
+                            _ => {
+                                let t = format!("({})", this.show(&e, &b.exported, Cx::Upper));
+                                if name_derived_c(&e) { t + " COLLATE \"C\"" } else { t }
+                            }
+                        };
+                        list.push(t + &sort_suffix(k));
+                        cols.push(match &e {
+                            Expr::Col(j, _) => Some(*j),
+                            _ => None,
+                        });
+                    }
+                } else {
+                    let u = s.useful.0.as_ref()?;
+                    for k in &u.0 {
+                        let Expr::Col(j, _) = &k.expr else { break };
+                        let name = b.exported.get(*j)?;
+                        let sk = SortKey {
+                            expr: k.expr.clone(),
+                            desc: k.desc,
+                            nulls_first: k.nulls_first,
+                            using: None,
+                        };
+                        list.push(this.pick(name, Cx::Upper) + &sort_suffix(&sk));
+                        cols.push(Some(*j));
+                    }
+                }
+                (!list.is_empty()).then_some((list, cols))
+            };
+            let nl = l.exported.len();
+            if let Some((list, cols)) = side(self, left, &l, 0) {
+                break 'oo Some((false, copy(&l), copy(&r), list, cols));
+            }
+            if kind == JoinKind::Inner
+                && let Some((list, cols)) = side(self, right, &r, nl)
+            {
+                break 'oo Some((true, copy(&l), copy(&r), list, cols));
+            }
+            None
+        };
         let mut b1 = self.join_built(at, kind, left, right, l, r, cond, hash, params, meta);
+        if let Some((sw, mut lo, mut ro, list, cols)) = ordered_outer {
+            let outer = if sw { &mut ro } else { &mut lo };
+            if let Some(pt) = outer.node.partial.take() {
+                let others = std::mem::take(&mut outer.node.partials);
+                let gm = self
+                    .useful_gathers(&pt, &others, &list, &cols, Some(outer.node.rows), outer.node.key, true)
+                    .into_iter()
+                    .reduce(|a, b| if parallel::cheaper(&b, &a) { b } else { a });
+                if let Some(gm) = gm {
+                    outer.node = gm;
+                    let mut m2 = meta.clone();
+                    m2.method = None;
+                    m2.material = false;
+                    m2.indexed = false;
+                    m2.scansel = None;
+                    m2.unique_outer = false;
+                    m2.unique_inner = false;
+                    m2.hash_buckets = None;
+                    let saved = std::mem::take(&mut self.pending);
+                    self.join_force = Some((super::plan::JoinMethod::NestLoop, sw));
+                    let mut bg = self.join_built(at, kind, left, right, lo, ro, cond, hash, params, &m2);
+                    self.join_force = None;
+                    self.pending = saved;
+                    bg.node.partial = None;
+                    if bg.node.subplans.is_empty() {
+                        bg.node.subplans = b1.node.subplans.clone();
+                    }
+                    if !bg.node.order.is_empty() && b1.node.alt.is_none() {
+                        b1.node.alt = Some(Box::new(bg.node));
+                    }
+                }
+            }
+        }
         if let Some((l3, r3)) = unswapped
             && b1.node.partial.is_none()
         {
@@ -11372,6 +11591,9 @@ impl Builder<'_, '_> {
                     || (b1.node.node_type != "Merge Join" && !ordered_input && !b1_clearly)
                 {
                     b2.node.partial = b1.node.partial;
+                    if b2.node.alt.is_none() {
+                        b2.node.alt = b1.node.alt;
+                    }
                     return b2;
                 }
             }
@@ -14499,6 +14721,7 @@ pub fn setop_shape(left: &Arc<Plan>, right: &Arc<Plan>, intersect: bool, ctx: &E
         pw_aggs: Vec::new(),
         pw_partial: false,
         join_force: None,
+        order_hint: None,
         agg_key: None,
         agg_input: None,
         unique_sides: Default::default(),
@@ -14578,6 +14801,7 @@ pub fn set_group_estimates(
         pw_aggs: Vec::new(),
         pw_partial: false,
         join_force: None,
+        order_hint: None,
         agg_key: None,
         agg_input: None,
         unique_sides: Default::default(),
@@ -14666,6 +14890,7 @@ pub fn agg_redundant_keys(
         pw_aggs: Vec::new(),
         pw_partial: false,
         join_force: None,
+        order_hint: None,
         agg_key: None,
         agg_input: None,
         unique_sides: Default::default(),
@@ -14734,6 +14959,7 @@ pub fn sets_sorted(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
         pw_aggs: Vec::new(),
         pw_partial: false,
         join_force: None,
+        order_hint: None,
         agg_key: None,
         agg_input: None,
         unique_sides: Default::default(),
@@ -14807,6 +15033,7 @@ pub fn distinct_order(plan: &Arc<Plan>, ctx: &ExecCtx) -> Option<Vec<usize>> {
         pw_aggs: Vec::new(),
         pw_partial: false,
         join_force: None,
+        order_hint: None,
         agg_key: None,
         agg_input: None,
         unique_sides: Default::default(),
@@ -14872,6 +15099,7 @@ pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
         pw_aggs: Vec::new(),
         pw_partial: false,
         join_force: None,
+        order_hint: None,
         agg_key: None,
         agg_input: None,
         unique_sides: Default::default(),
@@ -15244,6 +15472,7 @@ pub fn explain(
         pw_aggs: Vec::new(),
         pw_partial: false,
         join_force: None,
+        order_hint: None,
         agg_key: None,
         agg_input: None,
         unique_sides: Default::default(),

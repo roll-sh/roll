@@ -17,9 +17,9 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,021 of 51,150 statements match (99.75%).** 129 differ. The full
+- **Regression suite: 51,027 of 51,150 statements match (99.76%).** 123 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - 125 are `EXPLAIN` plan text (97%). Query results already match.
+  - 119 are `EXPLAIN` plan text (97%). Query results already match.
   - 3 are plan choices that show up in results (mostly which side a hash join builds on,
     grouping-set output order).
   - 1 differs **by design** (aggregates `balk`, a parallel plan's combine function: planner
@@ -360,8 +360,7 @@ them all with the "Fixed in round N" sections describing what was already tried.
    relation takes the plain name, the target's restriction from the equivalence class with the
    statement's rows, the non-target rows' ctids), a FROM subquery's whole-row mark under a
    locking level (`s.*`, PG keeps its Subquery Scan), inherited UPDATE / DELETE targets.
-5. **collate.icu.utf8** (5), **incremental_sort** (6: a LATERAL subquery over a function
-   scan not pulled up, see STATUS.md's round 14 agent 7), **select_parallel** (1),
+5. **collate.icu.utf8** (5), **select_parallel** (1),
    **updatable_views** (3), **groupingsets** (12, including the sorted-vs-hashed choice and
    output order), **with** (10; 52/55/58/76/77 need a materialized CTE's sort order offered to a
    merge join), **memoize**, **privileges** (8 each), then the long tail in

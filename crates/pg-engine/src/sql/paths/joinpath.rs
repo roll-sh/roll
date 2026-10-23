@@ -5491,14 +5491,22 @@ impl Planner<'_, '_> {
     pub(super) fn grouped_join(&self, p: &mut Plan, needed: &[bool], dirs: &super::GroupDirs) -> bool {
         let (dirs, named) = (&dirs.0, &dirs.1);
         let mut need = super::child_needs(p, needed).pop().unwrap_or_default();
-        let Plan::Agg {
-            input,
-            groups,
-            sets: None,
-            ..
-        } = p
-        else {
-            return false;
+        // (A DISTINCT's keys are its columns: standard_qp_callback's distinct_pathkeys.)
+        let (input, groups): (&mut Arc<Plan>, Vec<Expr>) = match p {
+            Plan::Agg {
+                input,
+                groups,
+                sets: None,
+                ..
+            } => {
+                let g = groups.clone();
+                (input, g)
+            }
+            Plan::Distinct { input, on: None, .. } => {
+                let w = crate::sql::binder::plan_width(input);
+                (input, (0..w).map(|i| Expr::Col(i, DataType::Unknown)).collect())
+            }
+            _ => return false,
         };
         if groups.is_empty() {
             return false;

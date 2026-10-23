@@ -253,6 +253,8 @@ impl Builder<'_, '_> {
             g.total_cost = part.total_cost + cfg.setup_cost + cfg.tuple_cost * g.rows;
         }
         if parallel_wins(&g, n) {
+            // (The relation's other paths, in an order, stay beside it.)
+            g.alt = n.alt.take();
             *n = g;
         }
     }
