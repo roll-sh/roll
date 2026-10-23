@@ -106,6 +106,30 @@ pg_catalog | 0
 public | 6
 -- SELECT 2
 
+> CREATE TABLE a15_cust (cid int PRIMARY KEY, name text NOT NULL, passwd text)
+-- CREATE TABLE
+
+> CREATE VIEW a15_cust_v AS SELECT * FROM a15_cust WHERE name = current_user
+-- CREATE VIEW
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a15_cust_v WHERE passwd = 'x'
+QUERY PLAN:text
+Seq Scan on a15_cust
+  Filter: ((passwd = 'x'::text) AND (name = CURRENT_USER))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a15_cust WHERE name = current_user
+QUERY PLAN:text
+Seq Scan on a15_cust
+  Filter: (name = CURRENT_USER)
+-- EXPLAIN
+
+> DROP VIEW a15_cust_v
+-- DROP VIEW
+
+> DROP TABLE a15_cust
+-- DROP TABLE
+
 > DROP TABLE a15_dt
 -- DROP TABLE
 

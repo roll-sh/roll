@@ -30,6 +30,14 @@ SELECT domain_name, table_name, column_name FROM information_schema.column_domai
   WHERE table_name LIKE 'a15%' ORDER BY column_name;
 SELECT n.nspname, (SELECT count(*) FROM pg_class c WHERE c.relnamespace = n.oid AND c.relname LIKE 'a15%') AS n
   FROM pg_namespace n WHERE n.nspname IN ('public', 'pg_catalog') ORDER BY 1;
+-- A text column compared with a name pseudoconstant (texteqname) is its class's one source
+-- clause, used as written.
+CREATE TABLE a15_cust (cid int PRIMARY KEY, name text NOT NULL, passwd text);
+CREATE VIEW a15_cust_v AS SELECT * FROM a15_cust WHERE name = current_user;
+EXPLAIN (COSTS OFF) SELECT * FROM a15_cust_v WHERE passwd = 'x';
+EXPLAIN (COSTS OFF) SELECT * FROM a15_cust WHERE name = current_user;
+DROP VIEW a15_cust_v;
+DROP TABLE a15_cust;
 DROP TABLE a15_dt;
 DROP DOMAIN a15_dom;
 DROP MATERIALIZED VIEW a15_mv;

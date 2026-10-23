@@ -108,6 +108,76 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
 
+## Round 16, agent 15 (full-run timeouts: catalog rescans; view whole rows; locking levels' marks)
+
+A full run of the whole schedule in one database (`PGREGRESS_TIMEOUT=300`) on this round's
+commit over f8c1317 measured **51053**, every file's count as the table below has it: the
+first full run to reach the table's total. A full run of ede51fc before it measured 51035:
+domain, oidjoins and alter_table matched there too after the first fix below, and select_views
+lost 8 units to 6245681 (fixed here, below). No timeout, no engine restart: domain ran in 33 s,
+oidjoins in 14 s, alter_table in 216 s.
+
+- **domain 482 / oidjoins timeouts** (`exec/nodes.rs` `sys_rescan`): no hang and nothing that
+  built up but the catalog itself. Sampled with gdb in a grown catalog (400 tables, 1600 types,
+  14000 attributes): the stalled statements were nested loops whose inner side is a catalog
+  scan parameterized by the outer row (`Index Scan using pg_type_oid_index ... Index Cond: (oid
+  = a.atttypid)`, chosen since round 14's catalog index paths in joins), and correlated
+  sub-selects over catalogs. The engine generates a catalog's rows whole, so every outer row
+  generated pg_type (and pg_class, pg_attribute) again: O(outer rows x catalog), 48 ms per
+  pg_type in a full run's catalog times 14000 attributes for column_domain_usage, minutes for
+  oidjoins' 200 checks. Postgres reads such scans through the catalog's index (or the
+  syscache), once per outer row and never the whole catalog. Now a catalog scan that reads an
+  outer value generates the catalog once per statement (for its catalog and role, kept in the
+  statement's `ExecCtx`: the rows as of the statement's start, as its snapshot gives Postgres),
+  and a `column = outer value` equality (a built-in `=` on an integer, oid, "char" column, or
+  a name / text one under a deterministic collation, the value of the column's type) finds its
+  rows through a hash on that column; the whole filter is still checked on each. System views
+  are generated again on each rescan, as Postgres runs their functions again. In the grown
+  catalog: column_domain_usage > 500 s -> 1.8 s, oidjoins 127 s -> 6.6 s. Test:
+  `tests/ddl_scaling.rs` `catalog_rescans_dont_grow_with_the_catalog` (the catalogs a query
+  generates, `system::generated_rows_count`, with 3 and with 40 other tables; it fails with
+  thousands before the fix).
+- **alter_table 953** (`explain.rs` `name`): 1a2f31a shows a relation's whole row as `rel.*`;
+  a view's whole row (`to_json(v1)` over a view of `bt`) is no relation's: the view's subquery
+  is pulled up and its whole-row Var becomes a ROW() of the subquery's outputs typed as the
+  view's row (pullup_replace_vars), `to_json(ROW(bt.id, bt.stuff))`. A ROW() of a view's or a
+  composite type's row type is now shown as a ROW(); a table's, a materialized view's and a
+  catalog's stay `rel.*` (1a2f31a's goldens unchanged).
+- **select_views 25-39** (8 units, from 6245681, `explain.rs` `name_text_relabel`): a text column
+  compared with a `name` pseudoconstant (`name = current_user`, texteqname) was shown relabelled
+  as a join clause out of its equivalence class is (`(name)::text = CURRENT_USER`). A class of
+  the column and a pseudoconstant with that one source clause uses the clause as written
+  (generate_base_implied_equalities_const); only a clause whose `name` side reads another
+  relation's columns comes out relabelled (6245681's subselect units unchanged).
+- **Row marks** (`paths/rowmarks.rs`, `explain.rs`): a level with a locking clause of its own
+  whose locks all went into FROM subqueries planned apart (`FOR UPDATE OF s`, `s` not pulled
+  up) still gets its LockRows, locking nothing, marking `s.*` (grouping_planner's
+  `if (parse->rowMarks)`, ROW_MARK_COPY), over a Subquery Scan (`rowmarks::OWN_LOCK`, set per
+  level by the binder). A FROM subquery marked by its whole row keeps every output
+  (remove_unused_subquery_outputs keeps them all for a whole-row Var: `s.other` was missing
+  under a FOR SHARE subquery). The Limits over a level's LockRows return its marks' ctids
+  (their input's target list).
+
+Goldens: `a15_whole_row_views` (views' and composite types' rows, catalog rescans in joins and
+sub-selects, text = name restrictions), `a15_lock_marks`.
+
+Left, and why:
+- returning 105: besides agent 9's notes, the target and the view's `foo` take each other's
+  names (`foo_2` / `foo_1`) and the join order differs; rewriteRuleAction's range table order
+  and the rule action's join planning, a larger change than a name.
+- A unique-ified semi join under FOR UPDATE (`rowmarks::key` has no Distinct case): Postgres's
+  HashAggregate carries the inner relation's ctid through, ungrouped; the engine's hashed
+  Distinct compares every column it returns, so it needs a pass-through column (Plan::Distinct,
+  its executor, EXPLAIN and costs), not a key case. Until then the outer scan locks its rows.
+- A whole-row-marked subquery's width in the planner: Postgres costs `s.*` (24 bytes plus its
+  columns' widths), which can swap a hash join's sides; the engine's paths don't see the mark.
+  Also the join's row estimate over a locked subquery's key (500 for Postgres's 1000).
+- A LIMIT subquery with a pushed-down lock is locked by its scan (no LockRows under the
+  Limit), so the Limit's output lacks the ctid.
+- MERGE per-row SubPlan costs: not attempted (no regress unit, and the source of Postgres's
+  higher ModifyTable total isn't established).
+- name = text joins aren't hashed (a Nested Loop for Postgres's Hash Join), seen while testing.
+
 ## Round 16, agent 16 (FULL JOIN without merge / hash plans, made-type sort support, semi join quals, SJE with LATERAL items)
 
 Measured in subset runs of 37 files (test_setup, create_misc, create_table, create_index,

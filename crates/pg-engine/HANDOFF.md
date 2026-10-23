@@ -29,6 +29,11 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   copied the whole catalog once per table (`column_using`), seconds per statement over a full
   run's catalog, so those files ran past the per-file timeout. Fixed in round 15;
   `tests/ddl_scaling.rs` counts the catalog copies DDL makes.
+  The domain / oidjoins timeouts of round 16's full runs were the same kind: a catalog scan
+  per outer row of a nested loop regenerated the whole catalog; a statement now generates a
+  catalog once and looks rows up by the equality (`exec/nodes.rs` `sys_rescan`, round 16
+  agent 15), and `ddl_scaling.rs` also counts the catalogs a query generates. A full run of
+  that commit measured the table's 51,053 with no timeout.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
@@ -358,8 +363,9 @@ them all with the "Fixed in round N" sections describing what was already tried.
    rule-rewritten statements explained as Postgres's list of plans (`explain.rs`
    `rule_statements`). Left (STATUS.md, round 16 agent 9): merge 462 (Inner Unique over an
    empty partitioned target), returning 105 (the view's NEW values computed below the join),
-   `FOR UPDATE OF s` with no locked relation at the level, a whole-row mark's subquery keeping
-   all its columns, a unique-ified semi join under FOR UPDATE. (VERBOSE lists of UPDATE /
+   a unique-ified semi join under FOR UPDATE, a whole-row-marked subquery's width in the
+   planner's costs, a locked LIMIT subquery's scan-level lock (round 16, agent 15: the level
+   with only `s.*` marks gets its LockRows, a whole-row-marked subquery keeps every column). (VERBOSE lists of UPDATE /
    DELETE joined with an inherited target of several members, and a CTE's / VALUES' /
    function's whole-row mark there: round 16, agent 14.)
 5. **groupingsets** (12, including the sorted-vs-hashed choice and output order), **with** (3:

@@ -100,7 +100,10 @@ fn name_text_relabel(e: &Expr) -> Expr {
                         !sub
                     }
             };
-            let name = |a: &Expr| matches!(a.ty(), DataType::Name);
+            // (The name side another relation's column: a restriction against a
+            // pseudoconstant, `text_col = CURRENT_USER`, is its class's one source clause,
+            // which generate_base_implied_equalities_const uses as written.)
+            let name = |a: &Expr| matches!(a.ty(), DataType::Name) && (!a.columns().is_empty() || a.has_outer_refs());
             let (a, b) = (&args[0], &args[1]);
             let args = if name(a) && texty(b) {
                 vec![a.clone(), Expr::Collate(Box::new(b.clone()), String::new(), -1)]
