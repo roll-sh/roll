@@ -408,6 +408,9 @@ function ConnectTab({ bucket, info }: { bucket: Bucket; info: StorageInfo }) {
     { label: "Endpoint", value: info.endpoint, hint: "AWS_ENDPOINT_URL; use path-style addressing" },
     { label: "Bucket URL (path style)", value: bucket.url },
     ...(bucket.virtual_host_url ? [{ label: "Bucket URL (virtual host)", value: bucket.virtual_host_url }] : []),
+    ...(bucket.cdn?.enabled && bucket.public_url
+      ? [{ label: "Public URL (CDN)", value: bucket.public_url, hint: `served by Cloudflare, ${bucket.cdn.mode === "immutable" ? "by version" : "purged on change"}` }]
+      : []),
     { label: "Region", value: info.region, hint: "any region name is accepted when signing" },
   ];
   return (

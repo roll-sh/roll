@@ -40,6 +40,9 @@ pub(crate) struct SettingsPatch {
     /// The bucket's own public access block; `null` removes it.
     #[serde(default, deserialize_with = "present")]
     pub public_access_block: Option<Option<PublicAccessBlock>>,
+    /// The CDN (`{"enabled": true, "mode": "mutable"}`); `null` turns it off.
+    #[serde(default, deserialize_with = "present")]
+    pub cdn: Option<Option<s3_store::cdn::BucketCdn>>,
 }
 
 #[derive(Deserialize)]
@@ -91,6 +94,7 @@ pub(crate) struct Prepared {
     /// The document and the principals it names.
     policy: Option<Option<(String, String)>>,
     public_access_block: Option<Option<PublicAccessBlock>>,
+    cdn: Option<Option<s3_store::cdn::BucketCdn>>,
 }
 
 fn invalid(m: impl Into<String>) -> ControlError {
@@ -232,7 +236,7 @@ impl Control {
     /// Check a PATCH's settings against the bucket as it will be (`versioning` and `public`:
     /// the same PATCH's).
     pub(crate) fn prepare_settings(&self, b: &Bucket, versioning: Option<&str>, public: Option<bool>, p: SettingsPatch) -> Result<Prepared> {
-        let mut out = Prepared { public_access_block: p.public_access_block, ..Default::default() };
+        let mut out = Prepared { public_access_block: p.public_access_block, cdn: p.cdn, ..Default::default() };
 
         // The public access block in force once this PATCH is applied.
         let (own, _) = self.store.public_access_block(&b.id)?;
@@ -386,6 +390,9 @@ impl Control {
         }
         if let Some(r) = &p.replication {
             self.store.set_replication(bucket, r.as_ref()).await?;
+        }
+        if let Some(cdn) = &p.cdn {
+            self.store.set_bucket_cdn(bucket, cdn.as_ref().filter(|c| c.enabled)).await?;
         }
         Ok(())
     }

@@ -52,6 +52,15 @@ Other settings:
   example a MinIO with auto-encryption, or a local directory on an encrypted disk). The default
   is on for AWS S3 without `ROLL_S3_ENDPOINT` (which encrypts every object since 2023) and off
   otherwise.
+- `ROLL_S3_CACHE_MEMORY` (256MiB), `ROLL_S3_CACHE_DISK` (10GiB), `ROLL_S3_CACHE_DIR`
+  (`<home>/storage/cache`), `ROLL_S3_CACHE_MAX_OBJECT` (256MiB), `ROLL_S3_CACHE_KMS` (off):
+  the gateway's hot-object cache. `0` turns a tier off. Entries are keyed by blob, so they're
+  never stale; see [architecture](architecture.md#gateway-cache-s3-serversrccachers).
+- `ROLL_CDN_ORIGIN_SECRET`: the secret the Cloudflare Worker (`apps/cdn-worker`) sends in
+  `X-Roll-CDN-Auth`; without it CDN requests are refused. The rest of the CDN (hostname, zone,
+  API token, routes) is set with `roll storage cdn` or `PATCH /v1/storage/cdn`, a bucket's
+  with `roll storage update <bucket> --cdn mutable|immutable|off`; see
+  [architecture](architecture.md#cdn-cloudflare).
 - `ROLL_S3_BUCKET`, `ROLL_S3_PREFIX`, `ROLL_S3_ENDPOINT`: the backing store, shared with the
   other roll products. Without a bucket, a directory under `.roll/` stands in.
 - `ROLL_S3_NOTIFY_AWS`: deliver event notifications to real AWS destinations (SQS, SNS, Lambda,

@@ -35,7 +35,7 @@ jobs:
           match postgres '^(crates/(pg-proxy|pg-storage|pg-control|rolld|roll-cli)/|Cargo\.(toml|lock)$|scripts/test-postgres\.sh$|\.github/workflows/(postgres|ci)\.yml$)'
           match queues '^(crates/(mq-[a-z0-9-]+|rolld|roll-cli)/|tests/queues/|deploy/queues/|Cargo\.(toml|lock)$|scripts/test-queues(-clients)?\.sh$|\.github/workflows/(queues|ci)\.yml$)'
           match redis '^(crates/(redis-[a-z]+|rolld|roll-cli)/|Cargo\.(toml|lock)$|scripts/test-redis\.sh$|\.github/workflows/(redis|ci)\.yml$)'
-          match storage '^(crates/(s3-[a-z]+|pg-storage|rolld|roll-cli)/|Cargo\.(toml|lock)$|scripts/test-(storage|s3-conformance)\.sh$|tests/s3-conformance/|\.github/workflows/(storage|ci)\.yml$)'
+          match storage '^(crates/(s3-[a-z]+|pg-storage|rolld|roll-cli)/|Cargo\.(toml|lock)$|apps/cdn-worker/|scripts/test-(storage|storage-cdn|s3-conformance)\.sh$|tests/s3-conformance/|\.github/workflows/(storage|ci)\.yml$)'
           match stream '^(crates/(stream-log|stream-broker|pg-storage|rolld|roll-cli)/|vendor/kafka-protocol/|Cargo\.(toml|lock)$|scripts/test-stream\.sh$|\.github/workflows/(stream|ci)\.yml$)'
           match tasks '^(crates/(tasks|rolld|roll-cli)/|deploy/aws/|Cargo\.(toml|lock)$|scripts/test-tasks\.sh$|\.github/workflows/(tasks|ci)\.yml$)'
           match web '^(apps/|packages/|package\.json$|pnpm-(lock|workspace)\.yaml$|\.github/workflows/(web|ci)\.yml$)'

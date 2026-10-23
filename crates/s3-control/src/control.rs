@@ -66,11 +66,13 @@ pub struct Pricing {
     pub usd_per_gb_egress_internet: f64,
     /// Inside roll (same region): free.
     pub usd_per_gb_egress_internal: f64,
+    /// Served by the CDN (Cloudflare); its origin pulls aren't billed as egress.
+    pub usd_per_gb_egress_cached: f64,
 }
 
 impl Default for Pricing {
     fn default() -> Self {
-        Self { usd_per_gb_month: 0.023, usd_per_million_class_a: 5.0, usd_per_million_class_b: 0.4, usd_per_gb_egress_internet: 0.09, usd_per_gb_egress_internal: 0.0 }
+        Self { usd_per_gb_month: 0.023, usd_per_million_class_a: 5.0, usd_per_million_class_b: 0.4, usd_per_gb_egress_internet: 0.09, usd_per_gb_egress_internal: 0.0, usd_per_gb_egress_cached: 0.03 }
     }
 }
 
@@ -155,7 +157,10 @@ pub struct DailyUsage {
     pub day: String,
     pub class_a: u64,
     pub class_b: u64,
+    /// Everything sent to clients: internet, inside roll and through the CDN.
     pub egress_bytes: u64,
+    /// The part the CDN served.
+    pub egress_cached_bytes: u64,
     /// Average bytes stored over the day (so far, for today).
     pub storage_bytes: u64,
     pub usd: f64,
@@ -167,6 +172,8 @@ pub struct Cost {
     pub class_a_usd: f64,
     pub class_b_usd: f64,
     pub egress_usd: f64,
+    /// Bytes the CDN served.
+    pub egress_cached_usd: f64,
     pub total_usd: f64,
     /// Requests and egress at this window's daily rate for 30 days, plus what's stored now for a
     /// month.
@@ -182,6 +189,10 @@ pub struct Usage {
     pub bytes_in: u64,
     pub egress_internet_bytes: u64,
     pub egress_internal_bytes: u64,
+    /// Bytes the CDN served (billed at the cached rate).
+    pub egress_cached_bytes: u64,
+    /// Bytes sent to the CDN on its cache misses: not billed (roll's cost; the margin view).
+    pub egress_cdn_origin_bytes: u64,
     pub gb_months: f64,
     /// Stored now (own objects plus the trash).
     pub storage_bytes: u64,
@@ -301,6 +312,9 @@ impl Control {
             "bytes": mine.iter().map(|b| b.bytes).sum::<u64>(),
             "deployment": { "accounts": self.store.accounts()?.len(), "buckets": st.buckets, "objects": st.objects, "bytes": st.bytes },
             "scrub": { "last_at": st.scrub.last_at, "missing": st.scrub.missing, "mismatched": st.scrub.mismatched },
+            // The gateway's hot-object cache (hits, bytes and S3 GETs saved) and the CDN.
+            "cache": self.server.get().map(|s| json!(s.cache_stats())),
+            "cdn": self.server.get().map(|s| json!({ "base_url": self.store.cdn_routing().ok().and_then(|c| c.base().map(str::to_string)), "stats": s.cdn.stats() })),
         }))
     }
 
@@ -325,6 +339,8 @@ impl Control {
         v["endpoint"] = json!(endpoint);
         v["url"] = json!(format!("{endpoint}/{}", b.name));
         v["virtual_host_url"] = json!(self.virtual_host_url(&b.name));
+        // With the CDN on, the bucket's public URL is the CDN's.
+        self.cdn_bucket_view(b, &mut v);
         v
     }
 
@@ -484,7 +500,7 @@ impl Control {
 
     /// An account's keys as the API shows them (the control plane's own key is hidden).
     pub fn keys(&self, account: &str) -> Result<Vec<AccessKey>> {
-        Ok(self.store.keys_of(account)?.into_iter().filter(|k| k.id != CONTROL_KEY_ID).collect())
+        Ok(self.store.keys_of(account)?.into_iter().filter(|k| k.id != CONTROL_KEY_ID && k.id != s3_server::cdn::CDN_KEY_ID).collect())
     }
 
     pub async fn create_key(&self, account: &str, name: &str, permission: &str, buckets: Option<Vec<String>>) -> Result<AccessKey> {
@@ -502,7 +518,7 @@ impl Control {
 
     pub async fn delete_key(&self, account: &str, id: &str) -> Result<()> {
         let mine = self.store.access_key(id)?.is_some_and(|k| k.account == account);
-        if id == CONTROL_KEY_ID || !mine {
+        if id == CONTROL_KEY_ID || id == s3_server::cdn::CDN_KEY_ID || !mine {
             return Err(ControlError::NotFound(format!("no access key {id}")));
         }
         Ok(self.store.delete_key(id).await?)
@@ -513,7 +529,7 @@ impl Control {
     }
 
     /// Price one bucket's (or several buckets') metered days.
-    fn price(&self, rows: &[&UsageDay], days: i64, storage_bytes: u64) -> (Vec<DailyUsage>, Cost, [u64; 5], f64) {
+    fn price(&self, rows: &[&UsageDay], days: i64, storage_bytes: u64) -> (Vec<DailyUsage>, Cost, [u64; 7], f64) {
         let p = &self.cfg.pricing;
         let now = self.store.now();
         let today = s3_store::day_of(now);
@@ -521,21 +537,26 @@ impl Control {
         let mut by_day: BTreeMap<&str, DailyUsage> = BTreeMap::new();
         let mut byte_ms_day: BTreeMap<&str, f64> = BTreeMap::new();
         let (mut a, mut b, mut bin, mut ei, mut en, mut byte_ms) = (0u64, 0u64, 0u64, 0u64, 0u64, 0f64);
+        let (mut ec, mut eo) = (0u64, 0u64);
         for r in rows {
             a += r.class_a;
             b += r.class_b;
             bin += r.bytes_in;
             ei += r.egress_internet;
             en += r.egress_internal;
+            ec += r.egress_cached;
+            eo += r.egress_cdn_origin;
             byte_ms += r.byte_ms;
             let d = by_day.entry(r.day.as_str()).or_insert_with(|| DailyUsage { day: r.day.clone(), ..Default::default() });
             d.class_a += r.class_a;
             d.class_b += r.class_b;
-            d.egress_bytes += r.egress_internet + r.egress_internal;
+            d.egress_bytes += r.egress_internet + r.egress_internal + r.egress_cached;
+            d.egress_cached_bytes += r.egress_cached;
             d.usd += r.class_a as f64 / 1e6 * p.usd_per_million_class_a
                 + r.class_b as f64 / 1e6 * p.usd_per_million_class_b
                 + r.egress_internet as f64 / GB * p.usd_per_gb_egress_internet
                 + r.egress_internal as f64 / GB * p.usd_per_gb_egress_internal
+                + r.egress_cached as f64 / GB * p.usd_per_gb_egress_cached
                 + r.byte_ms / (GB * MONTH_MS) * p.usd_per_gb_month;
             *byte_ms_day.entry(r.day.as_str()).or_default() += r.byte_ms;
         }
@@ -553,22 +574,24 @@ impl Control {
         let class_a_usd = a as f64 / 1e6 * p.usd_per_million_class_a;
         let class_b_usd = b as f64 / 1e6 * p.usd_per_million_class_b;
         let egress_usd = ei as f64 / GB * p.usd_per_gb_egress_internet + en as f64 / GB * p.usd_per_gb_egress_internal;
-        let traffic = class_a_usd + class_b_usd + egress_usd;
+        let egress_cached_usd = ec as f64 / GB * p.usd_per_gb_egress_cached;
+        let traffic = class_a_usd + class_b_usd + egress_usd + egress_cached_usd;
         let projected = traffic * 30.0 / days as f64 + storage_bytes as f64 / GB * p.usd_per_gb_month;
         let cost = Cost {
             storage_usd: round(storage_usd),
             class_a_usd: round(class_a_usd),
             class_b_usd: round(class_b_usd),
             egress_usd: round(egress_usd),
+            egress_cached_usd: round(egress_cached_usd),
             total_usd: round(storage_usd + traffic),
             projected_month_usd: round(projected),
         };
-        (daily, cost, [a, b, bin, ei, en], gb_months)
+        (daily, cost, [a, b, bin, ei, en, ec, eo], gb_months)
     }
 
     fn bucket_usage(&self, b: &Bucket, rows: &[&UsageDay], days: i64) -> Usage {
         let storage_bytes = b.bytes + b.trash_bytes + b.version_bytes;
-        let (daily, cost, [a, bb, bin, ei, en], gb_months) = self.price(rows, days, storage_bytes);
+        let (daily, cost, [a, bb, bin, ei, en, ec, eo], gb_months) = self.price(rows, days, storage_bytes);
         Usage {
             bucket: b.name.clone(),
             days,
@@ -577,6 +600,8 @@ impl Control {
             bytes_in: bin,
             egress_internet_bytes: ei,
             egress_internal_bytes: en,
+            egress_cached_bytes: ec,
+            egress_cdn_origin_bytes: eo,
             gb_months,
             storage_bytes,
             objects: b.objects,
@@ -602,7 +627,7 @@ impl Control {
             .iter()
             .map(|r| UsageDay { bucket_id: r.bucket_id.clone(), day: r.day.clone(), class_a: r.class_a, class_b: r.class_b, egress_internet: r.egress_internet, egress_internal: r.egress_internal, ..Default::default() })
             .collect();
-        let (_, cost, [a, b, _, ei, en], _) = self.price(&as_usage.iter().collect::<Vec<_>>(), days, 0);
+        let (_, cost, [a, b, _, ei, en, _, _], _) = self.price(&as_usage.iter().collect::<Vec<_>>(), days, 0);
         let mut accounts: Vec<String> = rows.iter().map(|r| r.payer.clone()).collect();
         accounts.sort();
         accounts.dedup();

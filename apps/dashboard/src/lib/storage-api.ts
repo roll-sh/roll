@@ -13,6 +13,25 @@ export interface StoragePricing {
   usd_per_million_class_b: number;
   usd_per_gb_egress_internet: number;
   usd_per_gb_egress_internal: number;
+  /** Bytes the CDN (Cloudflare) served. */
+  usd_per_gb_egress_cached: number;
+}
+
+/** The gateway's hot-object cache (`GET /v1/storage` `cache`). */
+export interface StorageCacheStats {
+  enabled: boolean;
+  memory_hits: number;
+  disk_hits: number;
+  coalesced: number;
+  misses: number;
+  requests: number;
+  gets_avoided: number;
+  s3_gets: number;
+  bytes_saved: number;
+  memory_bytes: number;
+  memory_capacity: number;
+  disk_bytes: number;
+  disk_capacity: number;
 }
 
 export interface StorageInfo {
@@ -24,6 +43,8 @@ export interface StorageInfo {
   storage_class: string;
   recover_days_default: number;
   pricing: StoragePricing;
+  cache?: StorageCacheStats | null;
+  cdn?: { base_url: string | null } | null;
   buckets: number;
   objects: number;
   bytes: number;
@@ -228,6 +249,10 @@ export interface Bucket {
   /** Path-style URL of the bucket. */
   url: string;
   virtual_host_url: string | null;
+  /** The CDN (Cloudflare): off unless `enabled`; `mutable` URLs by key, `immutable` by version. */
+  cdn?: { enabled: boolean; mode: "mutable" | "immutable" };
+  /** Where the bucket's objects are public: the CDN's base when it's on, else `url`. */
+  public_url?: string;
   tags: Record<string, string>;
   website: WebsiteConfig | null;
   /** `<scheme>://<bucket>.<website domain>`, when the deployment has one and the bucket a website. */
@@ -438,6 +463,7 @@ export interface StorageCost {
   class_a_usd: number;
   class_b_usd: number;
   egress_usd: number;
+  egress_cached_usd: number;
   total_usd: number;
   projected_month_usd: number;
 }
@@ -450,10 +476,14 @@ export interface StorageUsage {
   bytes_in: number;
   egress_internet_bytes: number;
   egress_internal_bytes: number;
+  /** Served by the CDN. */
+  egress_cached_bytes: number;
+  /** Pulled by the CDN on its misses (not billed). */
+  egress_cdn_origin_bytes: number;
   gb_months: number;
   storage_bytes: number;
   objects: number;
-  daily: { day: string; class_a: number; class_b: number; egress_bytes: number; storage_bytes: number; usd: number }[];
+  daily: { day: string; class_a: number; class_b: number; egress_bytes: number; egress_cached_bytes: number; storage_bytes: number; usd: number }[];
   cost: StorageCost;
 }
 

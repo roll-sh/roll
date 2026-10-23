@@ -330,7 +330,7 @@ async fn update_settings() {
 
     // Nothing to change: refused before calling the API.
     let e = t.fail(&["update", "site"]).await;
-    assert!(e.contains("nothing to change: pass --public, --private, --recover-days, --cors-origin, --no-cors, --tag, --no-tags or --versioning"), "{e}");
+    assert!(e.contains("nothing to change: pass --public, --private, --recover-days, --cors-origin, --no-cors, --tag, --no-tags, --versioning or --cdn"), "{e}");
 
     // Bucket tags: replaced whole, shown, removed.
     let v = t.json(&["update", "site", "--tag", "team=web", "--tag", "env=prod"]).await;

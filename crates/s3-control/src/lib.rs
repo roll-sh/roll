@@ -6,6 +6,7 @@
 //! The contract is in `docs/storage/architecture.md`.
 
 pub mod api;
+mod cdn;
 mod console;
 pub mod control;
 pub mod roles;

@@ -240,8 +240,13 @@ impl Store {
     /// Set (`Some`) or remove (`None`) a configuration value, durably. With `max`, adding a new
     /// id fails once the bucket has that many of `kind` (`StoreError::InvalidArgument`).
     pub async fn set_bucket_config(&self, bucket: &str, kind: &str, id: &str, value: Option<&str>, max: Option<usize>) -> Result<()> {
+        let now = self.now();
         self.write(|c| {
             let b = find_bucket(c, bucket)?;
+            // What the CDN has of the bucket may no longer be allowed out.
+            if crate::cdn::guards_access(kind) {
+                crate::cdn::purge_bucket(c, &b, now)?;
+            }
             match value {
                 Some(v) => {
                     if let Some(max) = max
@@ -269,8 +274,10 @@ impl Store {
     /// Set (`Some((policy, principals))`) or remove (`None`) a bucket's policy, with the IAM
     /// principals it named ([`kind::POLICY_PRINCIPALS`]), in one transaction.
     pub async fn set_bucket_policy(&self, bucket: &str, policy: Option<(&str, &str)>) -> Result<()> {
+        let now = self.now();
         self.write(|c| {
             let b = find_bucket(c, bucket)?;
+            crate::cdn::purge_bucket(c, &b, now)?;
             c.execute("DELETE FROM bucket_config WHERE bucket_id = ?1 AND kind IN (?2, ?3) AND id = ''", params![b.id, kind::POLICY, kind::POLICY_PRINCIPALS])?;
             if let Some((doc, principals)) = policy {
                 let put = "INSERT INTO bucket_config (bucket_id, kind, id, value) VALUES (?1, ?2, '', ?3)";

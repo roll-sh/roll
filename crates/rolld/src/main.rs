@@ -174,6 +174,28 @@ struct Args {
     /// Let storage webhooks reach loopback and private addresses (single-tenant installs).
     #[arg(long, env = "ROLL_S3_WEBHOOK_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     s3_webhook_allow_private: bool,
+    /// Storage's hot-object cache in memory (`256MiB`, `1GiB`; `0` turns the cache off).
+    #[arg(long, env = "ROLL_S3_CACHE_MEMORY", default_value = "256MiB")]
+    s3_cache_memory: String,
+    /// Its disk tier (`10GiB`; `0`: memory only), under ROLL_S3_CACHE_DIR.
+    #[arg(long, env = "ROLL_S3_CACHE_DISK", default_value = "10GiB")]
+    s3_cache_disk: String,
+    /// Where the disk tier lives (default: <home>/storage/cache). Local NVMe is best.
+    #[arg(long, env = "ROLL_S3_CACHE_DIR")]
+    s3_cache_dir: Option<PathBuf>,
+    /// Objects larger than this bypass the cache.
+    #[arg(long, env = "ROLL_S3_CACHE_MAX_OBJECT", default_value = "256MiB")]
+    s3_cache_max_object: String,
+    /// Cache SSE-KMS objects too (S3 would check KMS access on every read; off by default).
+    #[arg(long, env = "ROLL_S3_CACHE_KMS", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    s3_cache_kms: bool,
+    /// The secret the CDN Worker sends in `X-Roll-CDN-Auth` (set the Worker's
+    /// ROLL_CDN_ORIGIN_SECRET to the same). Without it, CDN requests are refused.
+    #[arg(long, env = "ROLL_CDN_ORIGIN_SECRET", hide_env_values = true)]
+    cdn_origin_secret: Option<String>,
+    /// Cloudflare's API, for purges (tests point it at a mock).
+    #[arg(long, env = "ROLL_CDN_CLOUDFLARE_API", default_value = "https://api.cloudflare.com/client/v4")]
+    cdn_cloudflare_api: String,
     /// Don't run roll storage (the S3 API).
     #[arg(long, env = "ROLL_NO_STORAGE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     no_storage: bool,
@@ -386,6 +408,13 @@ struct StorageOpts {
     s3_public_endpoint: Option<String>,
     s3_saml_audiences: Option<String>,
     s3_webhook_allow_private: bool,
+    s3_cache_memory: String,
+    s3_cache_disk: String,
+    s3_cache_dir: Option<PathBuf>,
+    s3_cache_max_object: String,
+    s3_cache_kms: bool,
+    cdn_origin_secret: Option<String>,
+    cdn_cloudflare_api: String,
 }
 
 impl From<&Args> for StorageOpts {
@@ -410,6 +439,13 @@ impl From<&Args> for StorageOpts {
             s3_public_endpoint: a.s3_public_endpoint.clone(),
             s3_saml_audiences: a.s3_saml_audiences.clone(),
             s3_webhook_allow_private: a.s3_webhook_allow_private,
+            s3_cache_memory: a.s3_cache_memory.clone(),
+            s3_cache_disk: a.s3_cache_disk.clone(),
+            s3_cache_dir: a.s3_cache_dir.clone(),
+            s3_cache_max_object: a.s3_cache_max_object.clone(),
+            s3_cache_kms: a.s3_cache_kms,
+            cdn_origin_secret: a.cdn_origin_secret.clone().filter(|s| !s.is_empty()),
+            cdn_cloudflare_api: a.cdn_cloudflare_api.clone(),
         }
     }
 }
@@ -435,6 +471,17 @@ async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &Sto
         scfg.notify.replication_metrics_interval = Some(std::time::Duration::from_secs(60));
     }
     scfg.notify.webhook_allow_private = args.s3_webhook_allow_private;
+    let size = |name: &str, v: &str| s3_server::cache::parse_size(v).map_err(|e| anyhow::anyhow!("{name}: {e}"));
+    scfg.cache = s3_server::CacheConfig {
+        memory_bytes: size("ROLL_S3_CACHE_MEMORY", &args.s3_cache_memory)?,
+        disk_bytes: size("ROLL_S3_CACHE_DISK", &args.s3_cache_disk)?,
+        dir: Some(args.s3_cache_dir.clone().unwrap_or_else(|| home.join("storage").join("cache"))),
+        max_object_bytes: size("ROLL_S3_CACHE_MAX_OBJECT", &args.s3_cache_max_object)?,
+        kms: args.s3_cache_kms,
+        ..Default::default()
+    };
+    scfg.cdn.origin_secret = args.cdn_origin_secret.clone();
+    scfg.cdn.cloudflare_api = args.cdn_cloudflare_api.clone();
     scfg.notify.aws_endpoint = args.s3_notify_aws_endpoint.clone().filter(|e| !e.is_empty());
     for pair in args.s3_notify_aws_endpoints.as_deref().unwrap_or_default().split(',').map(str::trim).filter(|p| !p.is_empty()) {
         let (service, url) = pair.split_once('=').ok_or_else(|| anyhow::anyhow!("ROLL_S3_NOTIFY_AWS_ENDPOINTS: {pair} isn't <service>=<url>"))?;

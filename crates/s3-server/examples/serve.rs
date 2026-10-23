@@ -96,7 +96,9 @@ async fn main() -> anyhow::Result<()> {
     }
     let spool = a.dir.join("spool");
     std::fs::create_dir_all(&spool)?;
-    let cfg = Config { spool_dir: spool, website_domain: a.website_domain.clone(), ..Config::default() };
+    // The hot-object cache is on, as in rolld: the conformance suite reads through it.
+    let cache = s3_server::CacheConfig { memory_bytes: 64 << 20, disk_bytes: 256 << 20, dir: Some(a.dir.join("cache")), ..Default::default() };
+    let cfg = Config { spool_dir: spool, website_domain: a.website_domain.clone(), cache, ..Config::default() };
     let listener = tokio::net::TcpListener::bind((a.host.as_str(), a.port)).await?;
     let server = Server::new(store.clone(), cfg);
     eprintln!("roll storage listening on http://{}:{} (main key {MAIN_KEY})", a.host, a.port);

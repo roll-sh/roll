@@ -93,6 +93,7 @@ fn request(server: &Arc<Server>, peer: Option<IpAddr>, user_agent: Option<&str>,
         started: std::time::Instant::now(),
         access_point: None,
         payers: Default::default(),
+        cdn: None,
     }
 }
 

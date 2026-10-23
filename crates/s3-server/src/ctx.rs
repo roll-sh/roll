@@ -36,6 +36,8 @@ pub(crate) struct Ctx {
     /// Requester Pays: buckets whose charges for this request go to the requester's account
     /// (bucket id, payer account).
     pub(crate) payers: std::sync::Mutex<Vec<(String, String)>>,
+    /// The request came from the CDN (`cdn.rs`).
+    pub(crate) cdn: Option<crate::cdn::CdnRequest>,
 }
 
 impl Ctx {
@@ -147,15 +149,26 @@ fn address(server: &Server, headers: &HeaderMap, raw_path: &str) -> Result<(Opti
 }
 
 pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Request) -> Response {
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
     let raw_path = parts.uri.path().to_string();
-    let raw_query = parts.uri.query().unwrap_or_default().to_string();
+    let mut raw_query = parts.uri.query().unwrap_or_default().to_string();
+    // The CDN's usage reports.
+    let body = match crate::cdn::intercept(&server, &parts.method, &raw_path, &parts.headers, body).await {
+        Ok(r) => return r,
+        Err(body) => body,
+    };
     let head = parts.method == Method::HEAD;
     // Whether the request has a body an error answer may leave unread (see below).
     let has_body = parts.headers.contains_key("transfer-encoding")
         || parts.headers.get("content-length").and_then(|v| v.to_str().ok()).is_some_and(|v| v.trim() != "0");
     let request_id = request_id();
-    let addressed = address(&server, &parts.headers, &raw_path);
+    // A request from the CDN: checked, and addressed by its path without an immutable URL's
+    // token (signatures still cover the path as it came).
+    let (cdn, addressed) = match server.cdn.prepare(&server.store, &parts.method, &mut parts.headers, &mut raw_query, &raw_path) {
+        Ok(Some((path, c))) => (Some(c), address(&server, &parts.headers, &path)),
+        Ok(None) => (None, address(&server, &parts.headers, &raw_path)),
+        Err(e) => (None, Err(e)),
+    };
     let website = crate::website::host_bucket(&server, &parts.headers).is_some();
     let mut ctx = Ctx {
         server,
@@ -174,6 +187,7 @@ pub(crate) async fn dispatch(server: Arc<Server>, peer: Option<IpAddr>, req: Req
         started: std::time::Instant::now(),
         access_point: None,
         payers: Default::default(),
+        cdn,
     };
     let result = match addressed {
         Ok((b, k, vhost)) => {

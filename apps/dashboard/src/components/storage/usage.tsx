@@ -74,6 +74,7 @@ export function UsageTab({ info }: { info: StorageInfo }) {
         stored={sum((b) => b.storage_bytes)}
         egressInternet={sum((b) => b.egress_internet_bytes)}
         egressInternal={sum((b) => b.egress_internal_bytes)}
+        egressCached={sum((b) => b.egress_cached_bytes ?? 0)}
         loaded={!!u}
       />
       <div className="grid gap-4 lg:grid-cols-5">
@@ -139,6 +140,7 @@ export function BucketUsage({ info, bucket }: { info: StorageInfo; bucket: strin
         stored={u?.storage_bytes ?? 0}
         egressInternet={u?.egress_internet_bytes ?? 0}
         egressInternal={u?.egress_internal_bytes ?? 0}
+        egressCached={u?.egress_cached_bytes ?? 0}
         loaded={!!u}
       />
       <div className="grid gap-4 lg:grid-cols-5">
@@ -170,6 +172,7 @@ function UsageStats({
   stored,
   egressInternet,
   egressInternal,
+  egressCached,
   loaded,
 }: {
   cost: StorageCost | null;
@@ -179,6 +182,7 @@ function UsageStats({
   stored: number;
   egressInternet: number;
   egressInternal: number;
+  egressCached: number;
   loaded: boolean;
 }) {
   return (
@@ -196,8 +200,10 @@ function UsageStats({
         },
         {
           label: "Egress",
-          value: loaded ? formatBytes(egressInternet) : "—",
-          hint: loaded ? `${formatBytes(egressInternal)} inside roll, free` : undefined,
+          value: loaded ? formatBytes(egressInternet + egressCached) : "—",
+          hint: loaded
+            ? `${formatBytes(egressCached)} via CDN · ${formatBytes(egressInternal)} inside roll, free`
+            : undefined,
         },
         {
           label: "Cost",
@@ -262,6 +268,7 @@ function PricingPanel({ info, className = "" }: { info: StorageInfo; className?:
         <PriceRow label="per million writes (class A)" value={usd(p.usd_per_million_class_a)} />
         <PriceRow label="per million reads (class B)" value={usd(p.usd_per_million_class_b)} />
         <PriceRow label="per GB egress to the internet" value={usd(p.usd_per_gb_egress_internet)} />
+        <PriceRow label="per GB through the CDN" value={usd(p.usd_per_gb_egress_cached ?? 0)} />
         <PriceRow label="per GB inside roll" value={usd(p.usd_per_gb_egress_internal)} />
       </dl>
       <p className="mt-auto border-t border-line px-5 py-3 text-[12px] text-subtle">
@@ -289,6 +296,7 @@ function CostPanel({ info, cost, days, className = "" }: { info: StorageInfo; co
         { label: "Writes", detail: `${usd(p.usd_per_million_class_a)} / million`, usd: cost.class_a_usd },
         { label: "Reads", detail: `${usd(p.usd_per_million_class_b)} / million`, usd: cost.class_b_usd },
         { label: "Egress", detail: `${usd(p.usd_per_gb_egress_internet)} / GB to the internet`, usd: cost.egress_usd },
+        { label: "CDN egress", detail: `${usd(p.usd_per_gb_egress_cached ?? 0)} / GB served by the CDN`, usd: cost.egress_cached_usd ?? 0 },
       ]
     : [];
   const max = Math.max(1e-9, ...rows.map((r) => r.usd));

@@ -22,6 +22,7 @@ pub mod access_points;
 pub mod accounts;
 mod append;
 pub mod backend;
+pub mod cdn;
 pub mod config;
 mod db;
 mod error;

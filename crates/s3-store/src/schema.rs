@@ -283,6 +283,16 @@ CREATE TABLE blob_torrent (
 r#"
 CREATE INDEX iam_by_kind ON iam (kind, name);
 "#,
+// The CDN (`cdn.rs`): bytes Cloudflare served for a bucket (cached egress, reported by the edge
+// Worker) and bytes roll sent the CDN on cache misses (origin pulls: our cost, not billed as
+// internet egress), per day; and the Worker's usage batches already counted, so a retried
+// batch counts once.
+r#"
+ALTER TABLE usage ADD COLUMN egress_cached INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE usage ADD COLUMN egress_cdn_origin INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE cdn_batches (id TEXT PRIMARY KEY, received_at INTEGER NOT NULL);
+CREATE INDEX cdn_batches_by_time ON cdn_batches (received_at);
+"#,
 ];
 
 pub(crate) const LATEST: u32 = MIGRATIONS.len() as u32;

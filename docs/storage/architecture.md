@@ -142,7 +142,9 @@ keys    (id TEXT PRIMARY KEY /* access key id, 20 chars: RK + 18 upper base32 */
 usage   (bucket_id, day TEXT /* YYYY-MM-DD UTC */, class_a, class_b, bytes_in,
          egress_internet, egress_internal,
          byte_ms REAL /* stored bytes × ms; a float, since a PB-day overflows i64 */,
-         PRIMARY KEY (bucket_id, day))
+         egress_cached /* bytes the CDN served */, egress_cdn_origin /* bytes it pulled */,
+         PRIMARY KEY (bucket_id, day))                  -- the last two: migration 12
+cdn_batches (id TEXT PRIMARY KEY, received_at)          -- CDN usage batches counted (7 days)
 usage_payer (account_id /* the requester who paid */, bucket_id, day, class_a, class_b,
          egress_internet, egress_internal,
          PRIMARY KEY (account_id, bucket_id, day))      -- Requester Pays, migration 7
@@ -246,6 +248,11 @@ Migration 11 indexes `iam` by `(kind, name)` (account aliases are unique across 
 and sign-in finds an account by its alias); login profiles, SSH keys, certificates, SAML
 providers, password policies, credential reports and the throttle counts are rows of `iam`, so
 it adds no tables.
+Migration 12 added the CDN's columns to `usage` (`egress_cached`, `egress_cdn_origin`, both
+defaulting to 0, so existing rows are unchanged) and `cdn_batches`. A bucket's CDN setting is a
+`bucket_config` row (`cdn`), the deployment's CDN settings a `state` row (`cdn_settings`, the
+Cloudflare API token sealed like replication targets' secrets), and purges are outbox rows
+(`cdn_purge`): no other tables.
 
 A blob's encryption is fixed when it's written, so `blob_sse` is keyed by blob: every row that
 shares the blob (copies, branches, the trash) shares its encryption, and no row of `objects`,
@@ -635,6 +642,94 @@ Every 60 s the meter flushes into `usage` (and `usage_payer`). It also adds
 GB-months, so restorable trash and noncurrent versions are billed as storage (as S3 bills
 noncurrent versions).
 Usage writes are relaxed: they ride the next group commit without waiting.
+
+Through the CDN (see [CDN](#cdn-cloudflare)): bytes the edge serves are **cached egress**
+(`usage.egress_cached`), reported by the Worker in batches and written durably once per batch
+id. A GET from the CDN to roll (a miss at the edge) is a class B request like any other, but its
+bytes are an **origin pull** (`egress_cdn_origin`), not internet egress: the customer pays for
+the cached egress instead, and origin pulls are our cost (the margin view). Gateway cache hits
+are metered exactly like misses.
+
+### Gateway cache (`s3-server/src/cache.rs`)
+
+GETs read object bytes through a two-tier hot-object cache (memory, then local disk), so a hot
+object is served without an S3 GET.
+
+- **Keyed by blob id and chunk.** Blobs are immutable and every write gets a new blob, so an
+  entry can't be stale and is never invalidated: a deleted or overwritten object's chunks are
+  simply never asked for again and age out. Correctness never depends on a TTL.
+- **Aligned chunks** (1 MiB) serve any range: a whole-object read fills the chunks a later
+  range uses, and a range over a cached object hits. A miss fetches its run of missing chunks
+  (up to 8) with one ranged GET; concurrent misses of a chunk share one fetch (single flight).
+- **Admission.** Both tiers are `moka` caches with TinyLFU admission, weighted by bytes: a new
+  chunk only displaces one that's asked for less often, so a one-off scan can't flush what's hot.
+  A chunk reaches disk on its second fetch, or when memory evicts it after it was served from
+  memory, so scans don't churn the disk either. Objects over `ROLL_S3_CACHE_MAX_OBJECT`
+  (256 MiB) bypass the cache.
+- **Checked disk entries.** A disk entry is `<dir>/<2 chars>/<blob>-<chunk>-<generation>`: a
+  header with its CRC32C and length, then the bytes. Every read verifies it; a mismatch drops
+  the entry (and the file) and the read falls through to S3: bad bytes are never served. What
+  a previous run left is indexed at startup (blobs never change, so it's still good).
+- **Never cached:** SSE-C objects (the key comes with each request), and SSE-KMS objects unless
+  `ROLL_S3_CACHE_KMS` (S3 would check KMS permission on every read).
+- **Sizes:** `ROLL_S3_CACHE_MEMORY` (256 MiB), `ROLL_S3_CACHE_DISK` (10 GiB) under
+  `ROLL_S3_CACHE_DIR` (`<home>/storage/cache`); `0` turns a tier off.
+- **Metrics** (`cache` in `GET /v1/storage`): memory and disk hits, joined fetches, misses,
+  S3 GETs made and avoided, bytes saved, corrupt disk entries, bypassed reads, what's held.
+
+### CDN (Cloudflare)
+
+Cloudflare serves public reads at the edge; a Worker (`apps/cdn-worker`, deployed with
+`wrangler`) sits in front of roll's public read endpoints. roll's side is `s3-server/src/cdn.rs`
+and `s3-store/src/cdn.rs`.
+
+- **Routes by path prefix** (the Worker's `ROLL_ROUTES`, the same list as the deployment's
+  `routes`): `s3` (`/<bucket>/<key>`, S3 GET semantics), `immutable`
+  (`/v/<token>/<bucket>/<key>`), `bucket-key` (`<prefix><bucket>/<key>` of another API, e.g. the
+  storage REST API's `/storage/v1/object/public/`), and `website` (`<prefix><key>` of one
+  bucket's website endpoint). Each route can have its own origin, so new public read APIs plug
+  in by adding a route.
+- **Edge checks.** Public objects pass. Signed URLs are verified at the edge, so a cached
+  private object is never served without a valid one: SigV4 presigned URLs made with the CDN
+  presigning key (`RKROLLCDNPRESIGN0000`, its secret published to the Worker as
+  `ROLL_CDN_PRESIGN_SECRET`), and `?token=` JWTs (HS256 `ROLL_CDN_JWT_SECRET` or ES256
+  `ROLL_CDN_JWT_ES256_JWK`, claims `url` = `<bucket>/<key>` and `exp`). Invalid or expired ones
+  get 403 at the edge; header-signed requests and other keys' presigned URLs are refused there
+  too. Cache keys never include credentials; credentialed copies live in their own namespace
+  (`?roll-cdn-ns=private`, never accepted from clients) and are only served to requests with a
+  valid credential for that object.
+- **Origin.** The Worker reaches roll with `X-Roll-CDN-Auth: <ROLL_CDN_ORIGIN_SECRET>`; roll
+  refuses CDN requests without the right secret, buckets without the CDN on, and anything but
+  GET, HEAD and OPTIONS. A presigned URL the edge verified comes as `X-Roll-CDN-Presigned` (its
+  query) and `X-Roll-CDN-Host` and is verified again by the S3 API's own authentication and
+  access checks. Mutable responses get `CDN-Cache-Control: public, max-age=<mutable_ttl_s>`
+  (60 s; `no-store` if the object's own `Cache-Control` is `private` or `no-store`); the
+  object's `Cache-Control` still goes to browsers.
+- **Immutable URLs** (`/v/<token>/…`, token = 20 hex digits of SHA-256 of the blob id) only
+  serve the object whose current blob the token names, with
+  `Cache-Control: public, max-age=31536000, immutable`. Overwriting or deleting the object makes
+  the URL 404 at the origin; copies already at the edge go with a tag purge, but browsers keep
+  them for a year, so they're for content that never needs unpublishing quickly.
+- **Purge on change** ("Smart CDN"). A change to an object of a bucket with the CDN on (a new
+  version, a delete or delete marker, an ACL change, lifecycle expiration, a trash restore)
+  queues a `cdn_purge` row in the outbox in the same transaction (`events::emit`); so do changes
+  that can make a whole bucket more private (its policy, ACL, public access block, ownership,
+  public flag, CDN setting, deleting it). The dispatcher sends them to
+  `POST /zones/{zone}/purge_cache` in batches (`purge_batch`, 30), at most `purge_per_minute`
+  calls, and failed rows retry with the outbox's backoff (they're dropped past its retention).
+  `purge: files` purges every mutable URL form of the object (each `s3`, `bucket-key` and
+  matching `website` route, public and credentialed namespaces); `purge: tags` purges its
+  `rk-<hash>` cache tag, which covers immutable URLs too. A bucket-wide purge sends its
+  `rb-<hash>` tag and route prefixes.
+- **Usage.** The Worker counts bytes served per bucket and posts them to
+  `POST /_roll/cdn/usage` (on the S3 port, with the shared secret) as
+  `{"batch": <uuid>, "entries": [{"bucket", "bytes", "requests", "hits"}]}`; a failed batch is
+  resent with the same id and counted once.
+- **Settings.** Per bucket, `cdn: {enabled, mode}` (`mutable` or `immutable`: which URL the
+  control plane hands out). Per deployment, `PATCH /v1/storage/cdn`: `base_url`, `zone_id`,
+  `api_token` (sealed, never shown), `purge`, `routes`, `mutable_ttl_s`, `purge_batch`,
+  `purge_per_minute`. With the CDN on, a bucket's `public_url` and its objects' URLs are the
+  CDN's.
 
 ## S3 API (`s3-server`, `s3-proto`)
 
@@ -1129,6 +1224,15 @@ GET    /v1/storage/buckets/{name}/download?key=&version_id=  → the bytes (Cont
 PUT    /v1/storage/buckets/{name}/upload?key=    (raw body, Content-Type) → ObjectInfo
 POST   /v1/storage/buckets/{name}/presign  { key, method: "GET"|"PUT", expires_s? (default 3600) }
   → { url, method, expires_at }
+POST   /v1/storage/buckets/{name}/url  { key, version_id?, immutable?, expires_s? }
+  → { url, cdn: bool, immutable: bool, expires_at|null }   (the CDN's URL when the bucket has
+     the CDN on, immutable by the bucket's mode; presigned unless the bucket is public)
+
+GET    /v1/storage/cdn   → { base_url, zone_id, api_token_set, purge, routes, mutable_ttl_s,
+                             purge_batch, purge_per_minute, worker, margin, stats, cache }
+PATCH  /v1/storage/cdn   { base_url?, zone_id?, api_token?, purge?: "files"|"tags", routes?,
+                           mutable_ttl_s?, purge_batch?, purge_per_minute? }
+GET    /v1/storage/cdn/worker?secrets=   → { vars: {ROLL_ORIGIN, ROLL_ROUTES, …}, secrets: [names] }
 
 GET    /v1/storage/buckets/{name}/trash?prefix=&cursor=&limit=
   → { objects: [TrashEntry], next_cursor }
@@ -1348,6 +1452,7 @@ Customers pay **S3 Standard list prices** (us-east-1):
 | DELETE, Abort | free |
 | egress to the internet | $0.09 / GB |
 | egress inside roll (same region) | free |
+| egress through the CDN (Cloudflare) | $0.03 / GB |
 
 Where the margin comes from (see the [pricing notes](pricing.md)):
 

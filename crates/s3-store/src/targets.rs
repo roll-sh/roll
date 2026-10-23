@@ -203,6 +203,16 @@ impl Store {
         self.read(read_key)?.ok_or_else(|| StoreError::internal("the replication target key vanished"))
     }
 
+    /// Seal a secret the way target secrets are (the CDN's API token is kept so too).
+    pub(crate) async fn seal_target_secret(&self, plain: &str) -> Result<String> {
+        let master = self.ensure_target_key().await?;
+        Ok(crate::sts::seal(KEY_ID, &master, plain.as_bytes()))
+    }
+
+    pub(crate) fn open_target_secret(&self, sealed: &str) -> Result<Secret> {
+        self.open_secret(sealed)
+    }
+
     fn open_secret(&self, sealed: &str) -> Result<Secret> {
         let key = self.read(read_key)?.ok_or_else(|| StoreError::internal("a sealed target secret without the target key"))?;
         let mut plain = crate::sts::open(&[(KEY_ID, key)], sealed).ok_or_else(|| StoreError::internal("a replication target's secret doesn't open"))?;
