@@ -14,7 +14,7 @@ use common::*;
 use futures::future::BoxFuture;
 use s3_server::{Delivery, EventSink, RollDestination, Server};
 use serde_json::Value;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -62,8 +62,13 @@ fn queue(name: &str) -> RollDestination {
 }
 
 async fn setup(tweak: impl FnOnce(&mut s3_server::Config)) -> (TestServer, Arc<Server>, Arc<TestSink>) {
+    setup_full(|_| {}, tweak).await
+}
+
+/// [`setup`] with the store's configuration tweaked too (its clock).
+async fn setup_full(store_tweak: impl FnOnce(&mut s3_store::StoreConfig), tweak: impl FnOnce(&mut s3_server::Config)) -> (TestServer, Arc<Server>, Arc<TestSink>) {
     let (t, server) = start_full(
-        |_| {},
+        store_tweak,
         |c| {
             c.notify.dispatch_interval = None;
             c.notify.inventory_interval = None;
@@ -220,7 +225,20 @@ async fn destinations_are_validated_like_s3() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_deliveries_are_retried_in_order_then_dropped() {
-    let (t, server, sink) = setup(|c| c.notify.retention = Duration::from_millis(400)).await;
+    // The store's clock is moved by hand: backoff and retention are measured on it, so neither
+    // depends on how fast the machine runs the test.
+    let offset = Arc::new(AtomicI64::new(0));
+    let clock_offset = offset.clone();
+    let (t, server, sink) = setup_full(
+        move |c| {
+            let sys = s3_store::system_clock();
+            c.clock = Arc::new(move || sys() + clock_offset.load(Ordering::SeqCst));
+        },
+        |c| c.notify.retention = Duration::from_secs(60),
+    )
+    .await;
+    // Past any backoff (at most 20 ms plus jitter), well within the retention.
+    let step = || offset.fetch_add(100, Ordering::SeqCst);
     bucket(&t, "retry").await;
     let cfg = NotificationConfiguration::builder().queue_configurations(queue_config("q", "arn:roll:queues:/:orders", &["s3:ObjectCreated:*"], None, None)).build();
     t.client.put_bucket_notification_configuration().bucket("retry").notification_configuration(cfg).send().await.unwrap();
@@ -230,27 +248,33 @@ async fn failed_deliveries_are_retried_in_order_then_dropped() {
     sink.fail.store(2, Ordering::SeqCst);
     server.dispatch_events().await.unwrap();
     assert!(sink.take().is_empty(), "the first event failed, and the second waits behind it");
-    for _ in 0..50 {
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while t.store.events_backlog().unwrap() > 0 {
+        assert!(std::time::Instant::now() < deadline, "not delivered within 30 s");
+        step();
         server.dispatch_events().await.unwrap();
-        if t.store.events_backlog().unwrap() == 0 {
-            break;
-        }
     }
     let got = sink.take();
     let sizes: Vec<i64> = got.iter().map(|(_, v)| v["Records"][0]["s3"]["object"]["size"].as_i64().unwrap()).collect();
     assert_eq!(sizes, [1, 2], "delivered after retries, in order");
     assert!(server.notifier.stats().retried >= 2);
-    // A destination that never works: dropped after the retention window, and counted.
+    assert_eq!(server.notifier.stats().dropped, 0);
+    // A destination that never works: kept within the retention window …
     sink.fail.store(u32::MAX, Ordering::SeqCst);
     put(&t, "retry", "doomed", b"x").await;
-    server.dispatch_events().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(450)).await;
-    for _ in 0..10 {
+    for _ in 0..5 {
+        step();
         server.dispatch_events().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert_eq!(t.store.events_backlog().unwrap(), 0);
+    assert_eq!(t.store.events_backlog().unwrap(), 1);
+    // … then dropped once past it, and counted.
+    offset.fetch_add(61_000, Ordering::SeqCst);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while t.store.events_backlog().unwrap() > 0 {
+        assert!(std::time::Instant::now() < deadline, "not dropped within 30 s");
+        step();
+        server.dispatch_events().await.unwrap();
+    }
     assert_eq!(server.notifier.stats().dropped, 1);
 }
 
