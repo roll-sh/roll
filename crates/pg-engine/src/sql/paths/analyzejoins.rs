@@ -568,11 +568,13 @@ impl Planner<'_, '_> {
                 .collect::<Vec<_>>()
         };
         // Equivalence classes (their members in the order they came in) of the
-        // equalities: the removed scan's own, the join's, the kept scan's own.
+        // equalities: the removed scan's own, the join's, the kept scan's own. (Not an outer
+        // join's ON clauses: they don't equate the columns of its sides' rows, which
+        // `t7 CROSS JOIN t8 LEFT JOIN t9 ON t8.id = t9.a AND t7.id = t9.a` keeps unequal.)
         let mut ecs: Vec<Vec<Expr>> = Vec::new();
         let quals = filter(rs, ro)
             .into_iter()
-            .chain(clauses.iter().map(|(e, _)| e.clone()))
+            .chain(clauses.iter().filter(|(_, outer)| !outer).map(|(e, _)| e.clone()))
             .chain(filter(ks, ko));
         for q in quals {
             let Some((a, b)) = equality(&q) else { continue };

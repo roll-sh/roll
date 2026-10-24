@@ -1,0 +1,58 @@
+> CREATE TABLE t0 (a int4, d timestamptz)
+-- CREATE TABLE
+
+> CREATE TABLE t2 (id int4 PRIMARY KEY, c text)
+-- CREATE TABLE
+
+> INSERT INTO t2 VALUES (1, NULL), (55, 'A')
+-- INSERT 0 2
+
+> INSERT INTO t0 VALUES (1, NULL)
+-- INSERT 0 1
+
+> SELECT t7.id, t8.id FROM (t2 t7 CROSS JOIN t2 t8) LEFT JOIN t0 t9 ON t8.id = t9.a AND t7.id = t9.a ORDER BY 1, 2
+id:int4 | id:int4
+1 | 1
+1 | 55
+55 | 1
+55 | 55
+-- SELECT 4
+
+> SELECT count(*) FROM (t2 t7 CROSS JOIN t2 t8 LEFT JOIN t0 t9 ON t8.id = t9.a AND t7.id = t9.a)
+count:int8
+4
+-- SELECT 1
+
+> SELECT t7.id, t8.id, t9.a FROM t0 t9 RIGHT JOIN (t2 t7 CROSS JOIN t2 t8) ON t8.id = t9.a AND t7.id = t9.a ORDER BY 1, 2
+id:int4 | id:int4 | a:int4
+1 | 1 | 1
+1 | 55 | NULL
+55 | 1 | NULL
+55 | 55 | NULL
+-- SELECT 4
+
+> SELECT t7.id, t8.id FROM t2 t7 JOIN t2 t8 ON t7.id = t8.id LEFT JOIN t0 t9 ON t8.id = t9.a ORDER BY 1
+id:int4 | id:int4
+1 | 1
+55 | 55
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF) SELECT t7.id, t8.id FROM t2 t7 JOIN t2 t8 ON t7.id = t8.id LEFT JOIN t0 t9 ON t8.id = t9.a
+QUERY PLAN:text
+Hash Right Join
+  Hash Cond: (t9.a = t8.id)
+  ->  Seq Scan on t0 t9
+  ->  Hash
+        ->  Seq Scan on t2 t8
+-- EXPLAIN
+
+> SELECT t7.id, t8.id FROM t0 t9 LEFT JOIN (t2 t7 JOIN t2 t8 ON t7.id = t8.id) ON t8.id = t9.a ORDER BY 1
+id:int4 | id:int4
+1 | 1
+-- SELECT 1
+
+> SELECT t7.id, t8.id FROM t0 t9 LEFT JOIN (t2 t7 CROSS JOIN t2 t8) ON t8.id = t9.a AND t7.id = t9.a ORDER BY 1, 2
+id:int4 | id:int4
+1 | 1
+-- SELECT 1
+

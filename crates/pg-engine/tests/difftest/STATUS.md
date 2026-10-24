@@ -151,14 +151,31 @@ Batch 3 (`a35_equal_values`):
   (`SELECT * FROM ca JOIN cb ON x = y`), `SELECT x FROM ca UNION SELECT y FROM cb` kept both
   `'a '` and `'a   '`.
 
+Batch 4 (`a35_sje_outer_join`):
+
+- **Wrong rows**: self-join elimination took an outer join's ON clauses as equalities between
+  the scans it compares: `SELECT t7.id, t8.id FROM (t2 t7 CROSS JOIN t2 t8) LEFT JOIN t0 t9 ON
+  t8.id = t9.a AND t7.id = t9.a` (t2's key `id`) merged t7 into t8 and returned 2 of 4 rows
+  (`paths/analyzejoins.rs` `self_join_pair`).
+
 ## Open
 
-- **Wrong rows**: a pseudoconstant qual (an uncorrelated sub-select, an InitPlan) of an
-  inner join on the nullable side of an outer join gates the whole outer join instead of the
-  inner join: `SELECT * FROM c LEFT JOIN (a JOIN b ON (SELECT false)) ON a.x = c.z` returns no
-  rows (PostgreSQL: c's rows null-extended). Same with `NOT EXISTS (SELECT 1 FROM t)`.
-- More wrong_rows / wrong_state cases of the round 2 sweep are recorded but not yet reduced
-  (seeds 134, 152, 163, 176, 198, 205; DML seeds 116, 179, 211, 216).
+- **Wrong rows**: a pseudoconstant qual (an uncorrelated sub-select, an InitPlan) or a
+  volatile one without columns, of an inner join on the nullable side of an outer join,
+  gates the whole outer join instead of the inner join:
+  `SELECT * FROM c LEFT JOIN (a a1 JOIN a a2 ON (SELECT false)) ON a1.x = c.z` returns no
+  rows (PostgreSQL: c's rows null-extended); also `ON random() > 2`, `NOT EXISTS (SELECT 1
+  FROM t)`, a RIGHT JOIN with the inner join on its left. EXPLAIN shows the One-Time Filter
+  above the outer join. It happens while binding the join tree (`join_collapse_limit = 1`
+  doesn't avoid it, `OFFSET 0` around the inner join does), not in the join search.
+- **Wrong rows (executor artifact)**: with no input rows (an empty table, `WHERE false`), the
+  empty grouping set's row has a select-list constant equal to a grouping key NULL in
+  PostgreSQL (`SELECT 1 AS c0, 1 AS c2 FROM t WHERE false GROUP BY ROLLUP (t.b, 1)`: `NULL |
+  NULL`; with input rows `c2` stays 1, as the engine has it). Seeds 134, 163, 205.
+- **Wrong rows (row order)**: DISTINCT ON keeping another of two equal values
+  (`'24:00:00'` / `'1 day'`) whose input order comes from a different join order (seed 176).
+- wrong_state cases of the round 2 sweep not reduced yet (seeds 116, 179, 211, 216): DML
+  after earlier statements; some are physical row order after UPDATE (below).
 - FROM sub-selects' unused outputs, unreferenced CTEs and `false AND ...` arguments: PostgreSQL
   drops them before it folds constants (left to right in AND / OR), the engine folds while
   binding and reports the error (`SELECT 1 FROM (SELECT 1 / 0 AS c FROM t) s`,
