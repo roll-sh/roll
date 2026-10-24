@@ -343,3 +343,63 @@ fn read_committed_writes_still_compare_and_swap() {
         assert_eq!(wins.load(Ordering::SeqCst), 1, "exactly one compare-and-swap wins");
     }
 }
+
+/// Connections killed every 100 ms under concurrent writes: every write that returned Ok
+/// happened exactly once, and with the server up none fails or ends up unknown.
+#[test]
+fn killed_connections_never_lose_or_repeat_acknowledged_writes() {
+    let Some(url) = pg_url() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open_or_test(&Target::Sqlite(dir.path().join("t.db")), "chaos").unwrap();
+    db.ensure_schema(SCHEMA).unwrap();
+    db.execute("INSERT INTO kv (k, v) VALUES ('n', 0)", ()).unwrap();
+    let admin = Db::connect(&url, "public", Default::default()).unwrap();
+    let app = format!("roll-code {}", db.pg_schema().unwrap());
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (ok, unknown, failed, killed) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            while !stop.load(Ordering::Relaxed) {
+                let n: i64 = admin
+                    .query_row("SELECT COUNT(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE application_name = ?", [&app], |r| r.get(0))
+                    .unwrap();
+                killed.fetch_add(n as usize, Ordering::Relaxed);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
+        let writers: Vec<_> = (0..8)
+            .map(|_| {
+                s.spawn(|| {
+                    for _ in 0..40 {
+                        match db.write(|c| {
+                            let v: i64 = c.query_row("SELECT v FROM kv WHERE k = 'n'", (), |r| r.get(0))?;
+                            c.execute("UPDATE kv SET v = ? WHERE k = 'n'", [v + 1])
+                        }) {
+                            Ok(_) => ok.fetch_add(1, Ordering::Relaxed),
+                            Err(Error::CommitUnknown(_)) => unknown.fetch_add(1, Ordering::Relaxed),
+                            Err(e) => {
+                                if failed.fetch_add(1, Ordering::Relaxed) < 3 {
+                                    eprintln!("failed: {e}");
+                                }
+                                1
+                            }
+                        };
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+    });
+    let v = db.query_row("SELECT v FROM kv WHERE k = 'n'", (), |r| r.get::<_, i64>(0)).unwrap() as usize;
+    let (ok, unknown, failed, killed) = (ok.into_inner(), unknown.into_inner(), failed.into_inner(), killed.into_inner());
+    eprintln!("killed {killed} connections: {ok} ok, {unknown} unknown, {failed} failed; counter {v}");
+    assert!(killed > 0);
+    assert!(v >= ok && v <= ok + unknown, "counter {v} with {ok} acknowledged and {unknown} unknown");
+    assert!(ok + unknown + failed == 320);
+    // The server stayed up, so every write rides out its connection dying: re-run before the
+    // commit, and looked up (pg_xact_status) when the commit got no answer.
+    assert_eq!((ok, unknown, failed, v), (320, 0, 0, 320));
+}
