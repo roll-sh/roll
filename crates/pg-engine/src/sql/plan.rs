@@ -92,6 +92,9 @@ pub struct LockMark {
     pub col: usize,
     pub tables: Vec<Arc<Table>>,
     pub lock: Option<(RowMark, Wait)>,
+    /// The relation's place in the range table (its first member's): where EXPLAIN puts
+    /// its junk column among the level's other marks.
+    pub rti: Rti,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,6 +127,10 @@ pub struct ScanPlan {
     pub with_key: bool,
     pub reverse: bool,
     pub mark: Option<(RowMark, Wait)>,
+    /// A locked scan's place in its level's list of locks (parse->rowMarks, in the order the
+    /// locking clauses name the relations: the clause first naming it, then its place in
+    /// that clause's list; a clause naming none, the range table's order).
+    pub lock_order: u32,
     /// Stop after this many rows (pushed-down LIMIT without ORDER BY).
     pub limit: Option<usize>,
     /// Append the system columns (ctid, xmin, cmin, xmax, cmax) after the key.
@@ -1017,6 +1024,9 @@ pub enum Plan {
     Values {
         rows: Vec<Vec<Expr>>,
         ncols: usize,
+        /// Its place in the range table, as a scan's (`ScanPlan::rti`; 0: not a FROM item):
+        /// the order of the level's row marks (preprocess_rowmarks) puts its whole row by it.
+        rti: Rti,
     },
     Scan(Box<ScanPlan>),
     /// A pg_catalog / information_schema virtual table.
@@ -1035,6 +1045,9 @@ pub enum Plan {
         ordinality: bool,
         alias: String,
         cols: Vec<String>,
+        /// Its place in the range table, as a scan's (`ScanPlan::rti`; 0: not a FROM item):
+        /// the order of the level's row marks (preprocess_rowmarks) puts its whole row by it.
+        rti: Rti,
     },
     /// A PL/pgSQL function call; `args` are evaluated against the outer row.
     PlCall {
@@ -1063,6 +1076,9 @@ pub enum Plan {
         /// (set_subquery_pathlist makes a Subquery Scan path of each of its final paths;
         /// the join search picks one): its rows come in that path's order.
         path: Option<Arc<SubPath>>,
+        /// Its place in the range table, as a scan's (`ScanPlan::rti`; 0: not a FROM item):
+        /// the order of the level's row marks (preprocess_rowmarks) puts its whole row by it.
+        rti: Rti,
     },
     /// `input` runs inside `frame` (a SQL function's statement), which errors and notices
     /// name in their CONTEXT, once it has the privileges `perms`.
@@ -1174,6 +1190,9 @@ pub enum Plan {
         name: String,
         alias: String,
         cols: Vec<String>,
+        /// Its place in the range table, as a scan's (`ScanPlan::rti`; 0: not a FROM item):
+        /// the order of the level's row marks (preprocess_rowmarks) puts its whole row by it.
+        rti: Rti,
     },
     /// WITH RECURSIVE: base, then iterate `recursive` (reading WorkScan{id}) until no new rows.
     Recursive {

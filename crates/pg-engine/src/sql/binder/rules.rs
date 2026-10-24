@@ -624,6 +624,7 @@ impl Binder<'_, '_> {
                         name: RULE_RTE.into(),
                         alias: RULE_RTE.into(),
                         cols: vec![String::new(); ncols],
+                        rti: Default::default(),
                     }),
                     names: vec![RULE_RTE.into()],
                 }));
@@ -651,6 +652,7 @@ impl Binder<'_, '_> {
                     name: RULE_RTE.into(),
                     alias: RULE_RTE.into(),
                     cols: vec![String::new(); ncols],
+                    rti: Default::default(),
                 }),
                 pred: Expr::bool(false),
             }),
@@ -1861,7 +1863,7 @@ impl Binder<'_, '_> {
         let join = Plan::Join {
             kind: JoinKind::Inner,
             left: Arc::new(plan),
-            right: Arc::new(Plan::Values { rows, ncols }),
+            right: Arc::new(Plan::Values { rows, ncols, rti: Default::default() }),
             cond: None,
             hash: None,
             params,

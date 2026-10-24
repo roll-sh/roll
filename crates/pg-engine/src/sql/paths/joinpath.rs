@@ -49,6 +49,9 @@ struct Leaf {
     /// A system catalog's scan planned as its stand-in table's (`syscat`): the catalog and
     /// its FROM alias, the scan put back as one of it.
     sys: Option<(crate::catalog::system::SysTable, Option<String>)>,
+    /// A whole-row mark's width (ROW_MARK_COPY, `Planner::copy_marks`): set_rel_width's
+    /// whole-row Var, part of the relation's reltarget and every join's above it.
+    whole: u32,
 }
 
 /// A FROM item that is a table scan computing virtual generated columns in their slots
@@ -1141,6 +1144,7 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
                     w += leaf.cols[k].0;
                 }
             }
+            w += leaf.whole;
         }
         // (The PlaceHolderVars it computes that are needed above it: build_joinrel_tlist.)
         for p in &self.phvs {
@@ -1559,7 +1563,7 @@ impl Search<'_, '_, '_> {
                         using: None,
                     })
                     .collect();
-                let Plan::Barrier { input, alias, cols, secure, sorted, .. } = &*v else { continue };
+                let Plan::Barrier { input, alias, cols, secure, sorted, rti, .. } = &*v else { continue };
                 let plan = Plan::Barrier {
                     input: input.clone(),
                     alias: alias.clone(),
@@ -1567,6 +1571,7 @@ impl Search<'_, '_, '_> {
                     secure: *secure,
                     sorted: *sorted,
                     path: Some(Arc::new(crate::sql::plan::SubPath { keys: sort_keys, fast })),
+                    rti: *rti,
                 };
                 out.push(JP {
                     node: JNode::Opaque {
@@ -7488,6 +7493,32 @@ impl Planner<'_, '_> {
                     }
                 }
             }
+            // A whole-row-marked source (`Planner::copy_marks`): its reltarget has its whole
+            // row too, 24 bytes of tuple header plus the widths it knows of its columns (a
+            // subquery's plain column outputs, else those read: set_rel_width), and a
+            // subquery's scan returning it is no trivial one (cost_subqueryscan's per-row
+            // cpu_tuple_cost).
+            let mut est = est;
+            let whole = match &plan {
+                Plan::Barrier { rti, .. }
+                | Plan::FunctionScan { rti, .. }
+                | Plan::Values { rti, .. }
+                | Plan::CteScan { rti, .. }
+                    if rti.0 != 0 && self.copy_marks.borrow().contains(&rti.0) =>
+                {
+                    let sub = matches!(plan, Plan::Barrier { .. });
+                    if sub && est.node_type != "Subquery Scan" {
+                        est.total += CPU_TUPLE_COST * rows;
+                    }
+                    24 + cols
+                        .iter()
+                        .enumerate()
+                        .filter(|(k, c)| (sub && c.1.is_some()) || lneed.get(*k).copied().unwrap_or(true))
+                        .map(|(_, c)| c.0)
+                        .sum::<u32>()
+                }
+                _ => 0,
+            };
             let kind = match est.node_type {
                 "Function Scan" => InKind::FunctionScan,
                 "CTE Scan" => InKind::CteScan,
@@ -7514,6 +7545,7 @@ impl Planner<'_, '_> {
                     .map(|(_, ps)| (ps.clone(), ps.iter().fold(0u32, |m, e| m | s.leaves_of(e)))),
                 proj,
                 sys,
+                whole,
             });
         }
         // generate_join_implied_equalities: in a group of inner joins, each pair of an

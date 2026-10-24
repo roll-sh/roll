@@ -1242,7 +1242,7 @@ impl Session {
             }
             let plan = Plan::Insert(Box::new(InsertPlan {
                 rules,
-                source: Arc::new(Plan::Values { rows, ncols }),
+                source: Arc::new(Plan::Values { rows, ncols, rti: Default::default() }),
                 target,
                 on_conflict: None,
                 returning: Vec::new(),

@@ -272,7 +272,7 @@ fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bo
         && let Some((corr, inner)) = barrier_corr(input)
         && !corr.is_empty()
     {
-        let Plan::Barrier { alias, cols, secure, sorted, .. } = p else { unreachable!() };
+        let Plan::Barrier { alias, cols, secure, sorted, rti, .. } = p else { unreachable!() };
         let types = vec![crate::types::DataType::Unknown; width(p)];
         let rhs = Plan::Barrier {
             input: Arc::new(inner),
@@ -281,6 +281,7 @@ fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bo
             secure: *secure,
             path: None,
             sorted: *sorted,
+            rti: *rti,
         };
         return Some((corr, rhs, types, false));
     }
@@ -1050,6 +1051,7 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
                     // (Its ORDER BY's order is of no use to the semi join above:
                     // truncate_useless_pathkeys.)
                     sorted: matches!(p, Plan::Sort { .. }).then_some(0),
+                    rti: Default::default(),
                 },
             };
             (Vec::new(), rhs, types, false)
@@ -1057,7 +1059,7 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
         // A VALUES list reading the outer row: a LATERAL one (its values over the row as
         // the join's parameters); reading only queries further up, their values in place.
         None if !sub.params.is_empty() && values_outer(p) => {
-            let Plan::Values { rows, ncols } = p else { unreachable!() };
+            let Plan::Values { rows, ncols, rti } = p else { unreachable!() };
             let level_only = sub.params.iter().all(|e| e.columns().is_empty() && !e.is_volatile() && !has_sublink(e));
             let rows = if level_only {
                 rows.iter()
@@ -1068,7 +1070,7 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
                 rows.clone()
             };
             let types = rows[0].iter().map(Expr::ty).collect();
-            (Vec::new(), Plan::Values { rows, ncols: *ncols }, types, false)
+            (Vec::new(), Plan::Values { rows, ncols: *ncols, rti: *rti }, types, false)
         }
         None => return None,
     };
@@ -1209,6 +1211,7 @@ fn any_join_srf(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
         secure: false,
         path: None,
         sorted: None,
+        rti: Default::default(),
     };
     let nleft = width(plan);
     let types: Vec<crate::types::DataType> = sub
@@ -1283,6 +1286,7 @@ fn any_join_lateral(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> 
         secure: false,
         path: None,
         sorted: None,
+        rti: Default::default(),
     };
     let nleft = width(plan);
     let cond: Vec<Expr> = sub

@@ -238,6 +238,7 @@ impl Binder<'_, '_> {
                 ordinality: false,
                 alias: name,
                 cols: names,
+                rti: self.next_rti(),
             },
             super::Scope { rels: vec![rel] },
             params,

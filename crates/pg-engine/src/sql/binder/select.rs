@@ -28,14 +28,66 @@ pub(crate) struct Target {
     pub domain: Option<u32>,
 }
 
-/// Row locking requested by FOR UPDATE / FOR SHARE.
+/// Row locking requested by a query level's FOR UPDATE / FOR SHARE clauses, in order (and a
+/// lock pushed down from the level above, last).
 #[derive(Clone, Debug)]
 pub(crate) struct Locking {
+    pub clauses: Vec<LockClause>,
+}
+
+/// One FOR UPDATE / SHARE clause.
+#[derive(Clone, Debug)]
+pub(crate) struct LockClause {
+    /// The relations it names (none: every relation of the level).
     pub rels: Vec<String>,
     /// Where each of `rels` is named (for errors).
     pub locs: Vec<i32>,
     pub mark: RowMark,
     pub wait: Wait,
+}
+
+impl Locking {
+    /// The lock the relation `name` takes (applyLockingClause over every clause naming it,
+    /// or naming none: the strongest strength, the strictest wait policy), and its place in
+    /// the level's rowMarks list (the clause first naming it, then its place in that
+    /// clause's list; a clause naming none leaves the range table's order).
+    pub(crate) fn mark_for(&self, name: &str) -> Option<(RowMark, Wait, u32)> {
+        let strength = |m: RowMark| match m {
+            RowMark::KeyShare => 0,
+            RowMark::Share => 1,
+            RowMark::NoKeyUpdate => 2,
+            RowMark::Update => 3,
+        };
+        // (LockWaitPolicy's order: block, skip locked, error.)
+        let strict = |w: Wait| match w {
+            Wait::Block => 0,
+            Wait::SkipLocked => 1,
+            Wait::NoWait => 2,
+        };
+        let mut out: Option<(RowMark, Wait, u32)> = None;
+        for (i, c) in self.clauses.iter().enumerate() {
+            let pos = if c.rels.is_empty() {
+                Some(0)
+            } else {
+                c.rels.iter().position(|r| r == name)
+            };
+            let Some(pos) = pos else { continue };
+            out = Some(match out {
+                None => (c.mark, c.wait, ((i as u32) << 16) | (pos as u32).min(0xffff)),
+                Some((m, w, o)) => (
+                    if strength(c.mark) > strength(m) { c.mark } else { m },
+                    if strict(c.wait) > strict(w) { c.wait } else { w },
+                    o,
+                ),
+            });
+        }
+        out
+    }
+
+    /// The strength of the first clause (LCS_asString in CheckSelectLocking's errors).
+    pub(crate) fn first_mark(&self) -> RowMark {
+        self.clauses.first().map_or(RowMark::Update, |c| c.mark)
+    }
 }
 
 impl Binder<'_, '_> {
@@ -1043,6 +1095,7 @@ impl Binder<'_, '_> {
                         secure: false,
                         path: None,
                         sorted: (!n.sort_clause.is_empty()).then_some(n.sort_clause.len()),
+                        rti: Default::default(),
                     }
                 }
                 _ => plan,
@@ -1399,7 +1452,8 @@ impl Binder<'_, '_> {
                 m => m,
             });
         }
-        Ok((Plan::Values { rows, ncols }, cols))
+        let rti = self.next_rti();
+        Ok((Plan::Values { rows, ncols, rti }, cols))
     }
 
     /// ORDER BY / LIMIT over a set operation or VALUES: keys are output columns.
@@ -1876,7 +1930,7 @@ impl Binder<'_, '_> {
                         }
                     }
                     // (Pushed down from the query above: its clause's.)
-                    _ => match locking.as_ref().map(|l| l.mark) {
+                    _ => match locking.as_ref().map(|l| l.first_mark()) {
                         Some(RowMark::KeyShare) => "FOR KEY SHARE",
                         Some(RowMark::Share) => "FOR SHARE",
                         Some(RowMark::NoKeyUpdate) => "FOR NO KEY UPDATE",
@@ -3281,7 +3335,7 @@ impl Binder<'_, '_> {
     // ── FROM ──
 
     fn locking_spec(&mut self, clauses: &[Node]) -> Result<Option<Locking>> {
-        let mut out: Option<Locking> = None;
+        let mut out = Locking { clauses: Vec::new() };
         for c in clauses {
             let Some(NodeEnum::LockingClause(lc)) = inner(c) else {
                 continue;
@@ -3309,46 +3363,37 @@ impl Binder<'_, '_> {
                     _ => None,
                 })
                 .unzip();
-            out = Some(Locking {
+            out.clauses.push(LockClause {
                 rels,
                 locs,
                 mark,
                 wait,
             });
         }
-        // (A lock pushed down from the query above: every relation of this one, the
-        // stronger strength where it has its own clause too.)
+        // (A lock pushed down from the query above: every relation of this one, after the
+        // level's own clauses (transformLockingClause of the level above runs after this
+        // level's); the stronger strength where it has its own clause too.)
         if let Some((level, p)) = &self.pushed_lock
             && *level == self.levels.len()
         {
-            let strength = |m: RowMark| match m {
-                RowMark::KeyShare => 0,
-                RowMark::Share => 1,
-                RowMark::NoKeyUpdate => 2,
-                RowMark::Update => 3,
-            };
-            let mut p = p.clone();
-            if let Some(o) = &out
-                && strength(o.mark) > strength(p.mark)
-            {
-                p.mark = o.mark;
-            }
-            out = Some(p);
+            out.clauses.extend(p.clauses.iter().cloned());
         }
-        Ok(out)
+        Ok((!out.clauses.is_empty()).then_some(out))
     }
 
     /// The FOR UPDATE / SHARE of the query above pushed into a FROM subquery or a view's
     /// query named `name` (transformLockingClause): with no relation list, or naming it.
     pub(crate) fn push_lock(&self, locking: Option<&Locking>, name: &str) -> Option<(usize, Locking)> {
-        let l = locking.filter(|l| l.rels.is_empty() || l.rels.iter().any(|r| r == name))?;
+        let (mark, wait, _) = locking?.mark_for(name)?;
         Some((
             self.levels.len() + 1,
             Locking {
-                rels: Vec::new(),
-                locs: Vec::new(),
-                mark: l.mark,
-                wait: l.wait,
+                clauses: vec![LockClause {
+                    rels: Vec::new(),
+                    locs: Vec::new(),
+                    mark,
+                    wait,
+                }],
             },
         ))
     }
@@ -3427,7 +3472,7 @@ impl Binder<'_, '_> {
             });
         }
         let plan = plan.unwrap();
-        if let Some(l) = locking {
+        for l in locking.iter().flat_map(|l| &l.clauses) {
             for (i, r) in l.rels.iter().enumerate() {
                 // (A join's alias names no table to lock.)
                 if self
@@ -3529,7 +3574,7 @@ impl Binder<'_, '_> {
                     if !sub.values_lists.is_empty() {
                         push = None;
                     } else if !simple_select {
-                        let what = match push.as_ref().map(|p| p.1.mark) {
+                        let what = match push.as_ref().map(|p| p.1.first_mark()) {
                             Some(RowMark::KeyShare) => "FOR KEY SHARE",
                             Some(RowMark::Share) => "FOR SHARE",
                             Some(RowMark::NoKeyUpdate) => "FOR NO KEY UPDATE",
@@ -3602,6 +3647,7 @@ impl Binder<'_, '_> {
                             Some(NodeEnum::SelectStmt(s)) if !s.sort_clause.is_empty() => Some(s.sort_clause.len()),
                             _ => None,
                         },
+                        rti: self.next_rti(),
                     }
                 } else if deferred {
                     // (Not one: its level planned now, as any.)
@@ -3772,6 +3818,7 @@ impl Binder<'_, '_> {
                 secure: true,
                 path: None,
                 sorted: None,
+                rti: Default::default(),
             };
         }
         let Ok(node) = ast::parse_stmt(&v.query) else {
@@ -3789,6 +3836,7 @@ impl Binder<'_, '_> {
                 secure: false,
                 path: None,
                 sorted,
+                rti: Default::default(),
             };
         }
         plan
@@ -3921,6 +3969,7 @@ impl Binder<'_, '_> {
                             name,
                             alias: refname,
                             cols: names,
+                            rti: Default::default(),
                         }
                     };
                     let mut rel = derived_rel(alias.as_deref().unwrap_or(&rv.relname), &cols, 0);
@@ -3932,6 +3981,10 @@ impl Binder<'_, '_> {
                     }
                     if working {
                         self.level().st.self_ref = true;
+                    }
+                    let mut plan = plan;
+                    if let Plan::CteScan { rti, .. } = &mut plan {
+                        *rti = self.next_rti();
                     }
                     return Ok((plan, rel));
                 }
@@ -4095,13 +4148,8 @@ impl Binder<'_, '_> {
                         ),
                     ));
                 }
-                let mark = locking.and_then(|l| {
-                    if l.rels.is_empty() || l.rels.contains(&name) {
-                        Some((l.mark, l.wait))
-                    } else {
-                        None
-                    }
-                });
+                let mark = locking.and_then(|l| l.mark_for(&name));
+                let (mark, lock_order) = (mark.map(|(m, w, _)| (m, w)), mark.map_or(0, |(_, _, o)| o));
                 // FOR UPDATE / SHARE needs UPDATE too (of a view's tables, when the view is
                 // locked).
                 self.require_rel(
@@ -4126,6 +4174,7 @@ impl Binder<'_, '_> {
                     with_key: false,
                     reverse: false,
                     mark,
+                    lock_order,
                     limit: None,
                     sys: self.want_sys,
                     alias: written.clone(),
@@ -4198,7 +4247,7 @@ impl Binder<'_, '_> {
                 // A view locked FOR UPDATE / SHARE needs UPDATE, and so do the relations its
                 // query reads (`markQueryForLocking`).
                 let locked = self.view_lock
-                    || locking.is_some_and(|l| l.rels.is_empty() || l.rels.contains(&name));
+                    || locking.is_some_and(|l| l.mark_for(&name).is_some());
                 self.require_rel(
                     v.oid,
                     crate::catalog::acl::SELECT
@@ -4220,13 +4269,8 @@ impl Binder<'_, '_> {
                                 c.collation = Some(super::Coll::Implicit(n.clone()));
                             }
                         }
-                        let mark = locking.and_then(|l| {
-                            if l.rels.is_empty() || l.rels.contains(&name) {
-                                Some((l.mark, l.wait))
-                            } else {
-                                None
-                            }
-                        });
+                        let mark = locking.and_then(|l| l.mark_for(&name));
+                        let (mark, lock_order) = (mark.map(|(m, w, _)| (m, w)), mark.map_or(0, |(_, _, o)| o));
                         // (CheckValidRowMarkRel, when the query runs.)
                         if mark.is_some() && !self.deparse {
                             return Err(Error::new(
@@ -4241,6 +4285,7 @@ impl Binder<'_, '_> {
                             with_key: false,
                             reverse: false,
                             mark,
+                            lock_order,
                             limit: None,
                             sys: false,
                             alias: written.clone(),
@@ -4355,6 +4400,7 @@ impl Binder<'_, '_> {
                         secure: true,
                         path: None,
                         sorted: None,
+                        rti: self.next_rti(),
                     }
                 } else if v.storage.is_none()
                     && self.deps.is_none()
@@ -4377,6 +4423,7 @@ impl Binder<'_, '_> {
                         secure: false,
                         path: None,
                         sorted,
+                        rti: self.next_rti(),
                     }
                 } else {
                     plan
@@ -4402,6 +4449,7 @@ impl Binder<'_, '_> {
                     Plan::Values {
                         rows: vec![row],
                         ncols: 3,
+                        rti: self.next_rti(),
                     },
                     rel,
                 ))
@@ -4489,6 +4537,7 @@ impl Binder<'_, '_> {
                 ordinality: false,
                 alias: refname,
                 cols: cols.iter().map(|c| c.name.clone()).collect(),
+                rti: self.next_rti(),
             },
             rel,
         )))
@@ -4641,6 +4690,7 @@ impl Binder<'_, '_> {
                 ordinality: rf.ordinality,
                 alias: name.clone(),
                 cols: names,
+                rti: self.next_rti(),
             },
             Scope { rels: vec![rel] },
             params,

@@ -1189,3 +1189,80 @@ fn row_locks_pushed_into_subqueries_and_views() {
     });
     s.engine.shutdown();
 }
+
+/// Several locking clauses of one level (transformLockingClause per clause,
+/// applyLockingClause): each relation takes the strongest strength and the strictest wait
+/// policy of the clauses naming it (or naming none), not only the last clause's.
+#[test]
+fn several_locking_clauses() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        a.batch_execute(
+            "CREATE TABLE lc1 (a int, b text);
+             CREATE TABLE lc3 (p int, q int);
+             INSERT INTO lc1 VALUES (1, 'x'), (2, 'y');
+             INSERT INTO lc3 VALUES (1, 1), (2, 2);",
+        )
+        .await
+        .unwrap();
+        // (Each case: session a's statement, then b's NOWAIT probes and whether each fails.)
+        let cases: [(&str, [(&str, bool); 3]); 3] = [
+            (
+                "SELECT * FROM lc1, lc3 WHERE lc3.p = lc1.a FOR UPDATE OF lc1 FOR SHARE OF lc3",
+                [
+                    ("SELECT * FROM lc1 WHERE a = 1 FOR UPDATE NOWAIT", true),
+                    ("SELECT * FROM lc3 WHERE p = 1 FOR UPDATE NOWAIT", true),
+                    ("SELECT * FROM lc3 WHERE p = 1 FOR SHARE NOWAIT", false),
+                ],
+            ),
+            (
+                "SELECT * FROM lc1, lc3 WHERE lc3.p = lc1.a FOR SHARE OF lc1 FOR UPDATE OF lc1",
+                [
+                    ("SELECT * FROM lc1 WHERE a = 1 FOR KEY SHARE NOWAIT", true),
+                    ("SELECT * FROM lc3 WHERE p = 1 FOR UPDATE NOWAIT", false),
+                    ("SELECT * FROM lc1 WHERE a = 2 FOR KEY SHARE NOWAIT", true),
+                ],
+            ),
+            (
+                "SELECT * FROM lc1, lc3 WHERE lc3.p = lc1.a FOR SHARE FOR UPDATE OF lc3",
+                [
+                    ("SELECT * FROM lc1 WHERE a = 1 FOR SHARE NOWAIT", false),
+                    ("SELECT * FROM lc1 WHERE a = 1 FOR UPDATE NOWAIT", true),
+                    ("SELECT * FROM lc3 WHERE p = 1 FOR KEY SHARE NOWAIT", true),
+                ],
+            ),
+        ];
+        for (q, probes) in cases {
+            a.batch_execute("BEGIN").await.unwrap();
+            lines(&a, q).await.unwrap();
+            for (probe, fails) in probes {
+                b.batch_execute("BEGIN").await.unwrap();
+                match lines(&b, probe).await {
+                    Ok(_) => assert!(!fails, "{q}: {probe} got the lock"),
+                    Err(e) => {
+                        assert!(fails, "{q}: {probe}: {e}");
+                        assert_eq!(e.code().map(|c| c.code()), Some("55P03"));
+                    }
+                }
+                b.batch_execute("ROLLBACK").await.unwrap();
+            }
+            a.batch_execute("ROLLBACK").await.unwrap();
+        }
+        // The strictest wait policy: NOWAIT over SKIP LOCKED, of one clause or of one pushed
+        // down from the level above.
+        b.batch_execute("BEGIN").await.unwrap();
+        lines(&b, "SELECT * FROM lc1 WHERE a = 1 FOR UPDATE").await.unwrap();
+        assert_eq!(lines(&a, "SELECT count(*) FROM (SELECT * FROM lc1 FOR UPDATE SKIP LOCKED) z").await.unwrap(), ["1"]);
+        for q in [
+            "SELECT count(*) FROM (SELECT * FROM lc1 FOR UPDATE SKIP LOCKED FOR UPDATE NOWAIT) z",
+            "SELECT count(*) FROM (SELECT * FROM (SELECT * FROM lc1 FOR UPDATE SKIP LOCKED) s FOR UPDATE OF s NOWAIT) z",
+        ] {
+            let e = lines(&a, q).await.unwrap_err();
+            assert_eq!(e.code().map(|c| c.code()), Some("55P03"), "{q}");
+        }
+        b.batch_execute("ROLLBACK").await.unwrap();
+    });
+    s.engine.shutdown();
+}

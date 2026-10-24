@@ -671,6 +671,13 @@ struct Builder<'c, 'a> {
     rowmarks: std::collections::HashSet<usize>,
     /// Those scans' row mark columns as their target lists show them (`ref.ctid`).
     rowmark_junk: HashMap<usize, Vec<((u8, super::plan::Rti), String)>>,
+    /// The sources of no table's rows with a whole-row mark (ROW_MARK_COPY: a FROM
+    /// subquery, a function, VALUES, a CTE of a locking level or a data-modifying
+    /// statement), by address, and once built, their whole-row Var's width.
+    copy_marks: HashMap<usize, Option<u32>>,
+    /// The query levels' select-list projections whose constants no node above refers to
+    /// (`plain_const_lists`).
+    plain_consts: std::collections::HashSet<usize>,
     /// Correlated EXISTS sub-selects with a hashed alternative (AlternativeSubPlan), by
     /// subquery id: each place reading one picks the alternative for how often it runs
     /// there (fix_alternative_subplan), an inheritance tree's members each their own.
@@ -1107,6 +1114,12 @@ fn rowmark_scans(root: &Arc<Plan>) -> std::collections::HashSet<usize> {
             Plan::Merge(m) => marks(&m.source, out),
             // (A rule's action read as a CTE: a DELETE done as an UPDATE.)
             Plan::With { ctes, .. } => ctes.iter().for_each(|(_, c)| go(c, out)),
+            // (A locking level's relations on a semi join's inner side: their ctids.)
+            Plan::LockRows { input, .. } => {
+                let (mut semi, mut copies) = (Vec::new(), Vec::new());
+                lock_level_marks(input, false, &mut semi, &mut copies);
+                out.extend(semi);
+            }
             _ => {}
         }
         for c in plan_inputs(p) {
@@ -1116,6 +1129,52 @@ fn rowmark_scans(root: &Arc<Plan>) -> std::collections::HashSet<usize> {
     let mut out = std::collections::HashSet::new();
     go(root, &mut out);
     out
+}
+
+/// The whole-row-marked sources of a plan (`Explainer::copy_marks`): a locking level's
+/// (`lock_level_marks`), a data-modifying statement's other FROM items that are no table
+/// (`dml_copy_marks`).
+fn copy_mark_leaves(root: &Arc<Plan>) -> HashMap<usize, Option<u32>> {
+    fn go(p: &Plan, out: &mut HashMap<usize, Option<u32>>) {
+        let (mut semi, mut copies) = (Vec::new(), Vec::new());
+        match p {
+            Plan::LockRows { input, .. } => lock_level_marks(input, false, &mut semi, &mut copies),
+            Plan::Update(u) => dml_copies(&u.source, &mut copies),
+            Plan::Delete(d) => dml_copies(&d.source, &mut copies),
+            Plan::Merge(m) => dml_copies(&m.source, &mut copies),
+            _ => {}
+        }
+        out.extend(copies.into_iter().map(|(a, _)| (a, None)));
+        for c in plan_inputs(p) {
+            go(c, out);
+        }
+    }
+    let mut out = HashMap::new();
+    go(root, &mut out);
+    out
+}
+
+/// An UPDATE / DELETE / MERGE's other FROM items that are no table: a CTE, a function,
+/// VALUES, a FROM subquery (not one holding the target: a view written through).
+fn dml_copies<'p>(source: &'p Plan, out: &mut Vec<(usize, &'p Plan)>) {
+    let (mut semi, mut copies) = (Vec::new(), Vec::new());
+    lock_level_marks(source, false, &mut semi, &mut copies);
+    fn holds(p: &Plan, a: usize) -> bool {
+        addr(p) == a || plan_inputs(p).into_iter().any(|c| holds(c, a))
+    }
+    let targets: Vec<usize> = target_scans(source).into_iter().map(addr).collect();
+    out.extend(copies.into_iter().filter(|(_, p)| match p {
+        Plan::Barrier { alias, .. } => !alias.is_empty() && !targets.iter().any(|&t| holds(p, t)),
+        _ => true,
+    }));
+}
+
+/// The widths of the whole-row marks at or under `p` (`Explainer::copy_marks`).
+fn copy_widths_under(p: &Plan, marks: &HashMap<usize, Option<u32>>) -> u32 {
+    if let Some(w) = marks.get(&addr(p)) {
+        return w.unwrap_or(0);
+    }
+    plan_inputs(p).into_iter().map(|c| copy_widths_under(c, marks)).sum()
 }
 
 /// The row marks of a LockRows's query level that have no key column in the plan: the
@@ -1506,11 +1565,17 @@ fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
     // the Var reads every output, so none is removed (remove_unused_subquery_outputs keeps
     // them all when attrs_used has the whole row).
     fn whole_marked(p: &Plan, out: &mut std::collections::HashSet<usize>) {
-        if let Plan::LockRows { input, .. } = p {
-            let (mut semi, mut copies) = (Vec::new(), Vec::new());
-            lock_level_marks(input, false, &mut semi, &mut copies);
-            out.extend(copies.into_iter().filter(|(_, c)| matches!(c, Plan::Barrier { .. })).map(|(a, _)| a));
+        let (mut semi, mut copies) = (Vec::new(), Vec::new());
+        match p {
+            Plan::LockRows { input, .. } => lock_level_marks(input, false, &mut semi, &mut copies),
+            // (And a data-modifying statement's FROM subqueries: preprocess_targetlist adds
+            // their whole rows to its target list.)
+            Plan::Update(u) => dml_copies(&u.source, &mut copies),
+            Plan::Delete(d) => dml_copies(&d.source, &mut copies),
+            Plan::Merge(m) => dml_copies(&m.source, &mut copies),
+            _ => {}
         }
+        out.extend(copies.into_iter().filter(|(_, c)| matches!(c, Plan::Barrier { .. })).map(|(a, _)| a));
         plan_inputs(p).into_iter().for_each(|c| whole_marked(c, out));
     }
     let mut whole = std::collections::HashSet::new();
@@ -1985,15 +2050,18 @@ fn shown_subqueries(root: &Plan, needed: &HashMap<usize, Vec<bool>>) -> HashMap<
                 // (A physical target list has the subquery's resjunk columns too:
                 // build_physical_tlist.)
                 // (A subquery locking its rows returns their row marks too, resjunk.)
+                // (Its LockRows is under its LIMIT, grouping_planner's.)
                 let locked = {
                     let mut q: &Plan = input;
-                    while let Plan::Project { input, .. } | Plan::Filter { input, .. } = q {
+                    while let Plan::Project { input, .. } | Plan::Filter { input, .. } | Plan::Limit { input, .. } = q {
                         q = input;
                     }
                     matches!(q, Plan::Scan(sc) if sc.mark.is_some()) || matches!(q, Plan::LockRows { .. })
                 };
-                if demand && (barrier_junk(input, *sorted).is_some() || partial || locked) {
-                    out.insert(addr(p), demand);
+                // (Its plan's row marks are resjunk entries of its target list, which the
+                // scan's (physical or not) lacks: trivial_subqueryscan's lengths differ.)
+                if (demand && (barrier_junk(input, *sorted).is_some() || partial)) || locked {
+                    out.insert(addr(p), true);
                 }
                 match barrier_junk(input, *sorted) {
                     Some((pin, _)) => go(pin, true, needed, out),
@@ -2177,6 +2245,15 @@ fn junk_layout(
         junk.extend(js.iter().map(|j| j.1.clone()));
     }
     if n.output.is_empty() {
+        return junk;
+    }
+    // (A Hash or a Materialize returns its input's target list: set_dummy_tlist_references.)
+    if matches!(n.node_type, "Hash" | "Materialize")
+        && let [c] = &n.children[..]
+        && c.is_join()
+        && !c.output.is_empty()
+    {
+        n.output = c.output.clone();
         return junk;
     }
     for j in &junk {
@@ -2434,6 +2511,28 @@ fn mentions(t: &str, o: &str) -> bool {
 
 /// The row mark columns of the scans at or under `n`, in range table order.
 fn junk_in(n: &ExNode, junk_of: &HashMap<usize, Vec<((u8, super::plan::Rti), String)>>) -> Vec<String> {
+    junk_in_keyed(n, junk_of).into_iter().map(|j| j.1).collect()
+}
+
+/// A source of no table's rows' place in the range table (a FROM subquery's, a function's,
+/// VALUES', a CTE's: their whole-row marks' order); not known: after every relation's.
+fn leaf_rti(p: &Plan) -> super::plan::Rti {
+    match p {
+        Plan::Barrier { rti, .. } | Plan::FunctionScan { rti, .. } | Plan::Values { rti, .. } | Plan::CteScan { rti, .. }
+            if rti.0 != 0 =>
+        {
+            *rti
+        }
+        _ => super::plan::Rti(usize::MAX),
+    }
+}
+
+/// `junk_in`, each column with its place: (0 a row mark's, 1 an inheritance parent's
+/// tableoid; the range table index).
+fn junk_in_keyed(
+    n: &ExNode,
+    junk_of: &HashMap<usize, Vec<((u8, super::plan::Rti), String)>>,
+) -> Vec<((u8, super::plan::Rti), String)> {
     fn go(
         n: &ExNode,
         junk_of: &HashMap<usize, Vec<((u8, super::plan::Rti), String)>>,
@@ -2451,7 +2550,7 @@ fn junk_in(n: &ExNode, junk_of: &HashMap<usize, Vec<((u8, super::plan::Rti), Str
     let mut out = Vec::new();
     go(n, junk_of, &mut out);
     out.sort_by_key(|j| j.0);
-    out.into_iter().map(|j| j.1).collect()
+    out
 }
 
 /// A MERGE's source target lists: a relation's tableoid before its ctid (the junk
@@ -4430,6 +4529,36 @@ impl Builder<'_, '_> {
                 pt.key = k;
             }
         }
+        // (A whole-row-marked source (ROW_MARK_COPY): set_rel_width counts its whole-row Var,
+        // a tuple header's 24 bytes plus the widths it knows of its columns (a subquery's
+        // plain column outputs, set_subquery_size_estimates; the columns read), on top of
+        // the columns read.)
+        if self.copy_marks.get(&addr(p)) == Some(&None)
+            && matches!(
+                b.node.node_type,
+                "Subquery Scan" | "Values Scan" | "Function Scan" | "CTE Scan" | "Table Function Scan"
+            )
+        {
+            let needed = self.needed.get(&addr(p));
+            let read = |i: usize| needed.is_none_or(|m| m.get(i).copied().unwrap_or(true));
+            let sub = b.node.node_type == "Subquery Scan";
+            let (reads, known) = if b.node.cols.len() >= b.exported.len() {
+                let cols = &b.node.cols[..b.exported.len()];
+                (
+                    cols.iter().enumerate().filter(|(i, _)| read(*i)).map(|(_, c)| c.width).sum::<u32>(),
+                    cols.iter()
+                        .enumerate()
+                        .filter(|(i, c)| read(*i) || (sub && c.var.is_some()))
+                        .map(|(_, c)| c.width)
+                        .sum::<u32>(),
+                )
+            } else {
+                (b.node.width, b.node.width)
+            };
+            let whole = 24 + known;
+            self.copy_marks.insert(addr(p), Some(whole));
+            b.node.width = reads + whole;
+        }
         // (A join whose columns nothing above reads is 0 wide; so is a scan of them.)
         let unread_scan = b.node.is_scan() && self.needed.get(&addr(p)).is_some_and(|m| m.iter().all(|x| !x));
         if b.node.width == 0 && !b.node.is_join() && !unread_scan {
@@ -4552,7 +4681,7 @@ impl Builder<'_, '_> {
             // computes but doesn't return (resjunk sort or group keys), or the node above
             // wants fewer columns than the subquery has (no physical target list then).
             // (A security barrier's too when a data-modifying statement's row mark keeps it.)
-            Plan::Barrier { input, alias, cols, secure, sorted, path }
+            Plan::Barrier { input, alias, cols, secure, sorted, path, .. }
                 if !alias.is_empty() && (!*secure || self.shown.get(&key) == Some(&true)) =>
             {
                 let junk = barrier_junk(input, *sorted);
@@ -4655,14 +4784,32 @@ impl Builder<'_, '_> {
                     n.children = vec![a.child("Subquery")];
                     b.node.alt = Some(Box::new(n));
                 }
+                // (Its columns: the subquery's outputs, not the row marks its plan returns
+                // after them.)
                 if child_cols.len() >= map.len() {
-                    b.node.cols = map.iter().map(|&j| child_cols.get(j).cloned().unwrap_or_default()).collect();
+                    b.node.cols = map
+                        .iter()
+                        .take(names.len())
+                        .map(|&j| child_cols.get(j).cloned().unwrap_or_default())
+                        .collect();
                     subquery_var_stats(input, &mut b.node.cols, b.node.rows);
                     if let Some(a) = &mut b.node.alt {
                         a.cols = b.node.cols.clone();
                     }
                 }
                 b.node.order = order;
+                // (Over a LockRows, whose target list has the row marks too: its own
+                // reltarget's columns.)
+                if b.node.children.first().is_some_and(|c| c.node_type == "LockRows") && b.node.cols.len() == names.len() {
+                    b.node.width = b
+                        .node
+                        .cols
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| needed.as_ref().is_none_or(|m| m.get(*i).copied().unwrap_or(true)))
+                        .map(|(_, c)| c.width)
+                        .sum();
+                }
                 if self.o.verbose {
                     b.node.output = names
                         .iter()
@@ -4740,7 +4887,7 @@ impl Builder<'_, '_> {
                     exported,
                 }
             }
-            Plan::Values { rows, ncols } => {
+            Plan::Values { rows, ncols, .. } => {
                 let refname = self.refname(p);
                 let mut n = ExNode::new("Values Scan");
                 self.target(&mut n, None, None, None, &refname);
@@ -5435,15 +5582,18 @@ impl Builder<'_, '_> {
                     })
                     .collect();
                 self.num_exec = saved;
+                let no_phvs = self.plain_consts.contains(&addr(p));
                 let exported = exprs
                     .iter()
                     .zip(&internal)
                     .map(|(e, n)| match e {
                         Expr::Col(j, _) => c.exported.get(*j).cloned().unwrap_or_else(|| n.clone()),
-                        // (A constant isn't referenced from above: fix_upper_expr leaves it.
-                        // Only a subquery's unread output NULLed in its select list is known
-                        // to be one here; others may stand for PlaceHolderVars, referenced.)
+                        // (A constant isn't referenced from above: fix_upper_expr leaves it,
+                        // search_indexed_tlist_for_non_var. A subquery's unread output NULLed
+                        // in its select list is one; others may stand for PlaceHolderVars,
+                        // referenced, unless none can be here.)
                         Expr::Const(Value::Null, _) if UNREAD_NULLS.with(|u| u.borrow().contains(&addr(p))) => n.clone(),
+                        Expr::Const(..) if no_phvs => n.clone(),
                         _ => n.wrapped(),
                     })
                     .collect();
@@ -5502,6 +5652,12 @@ impl Builder<'_, '_> {
                         .filter(|j| !exprs.iter().any(|e| matches!(e, Expr::Col(k, _) if k == j)))
                         .filter_map(|j| c.node.cols.get(j).map(|x| x.width))
                         .sum(),
+                    // (A level's LockRows returns its row marks too, resjunk entries of
+                    // the level's target list.)
+                    _ if junk_only => match &**input {
+                        Plan::LockRows { marks, .. } => 6 * marks.len() as u32,
+                        _ => 0,
+                    },
                     _ => 0,
                 };
                 c.node.width = cols
@@ -7702,7 +7858,7 @@ impl Builder<'_, '_> {
                 let names = cols.iter().map(|c| Name::col(&refname, c)).collect();
                 Built::passthrough(n, names)
             }
-            Plan::LockRows { input, .. } => {
+            Plan::LockRows { input, marks, width } => {
                 // The level's other row marks, which the engine needs no column for: a semi
                 // join's inner relation's ctid (ROW_MARK_REFERENCE), a function's, VALUES'
                 // or a CTE's whole row (ROW_MARK_COPY), resjunk up to the LockRows.
@@ -7731,15 +7887,47 @@ impl Builder<'_, '_> {
                     }
                 }
                 if self.o.verbose && (!semi.is_empty() || !copies.is_empty()) {
-                    // (preprocess_rowmarks: the locked relations' marks, then the other
-                    // relations' whole rows; the inheritance parents' tableoids after all.)
+                    // (preprocess_rowmarks: the locked relations' marks in the order the
+                    // locking clauses name them, then the other relations' ctids and whole
+                    // rows in range table order; the inheritance parents' tableoids after
+                    // all.)
                     for (a, p) in copies {
                         let name = format!("{}.*", quote_ident(&self.refname(p)));
-                        self.rowmark_junk.insert(a, vec![((0, super::plan::Rti(usize::MAX)), name)]);
+                        self.rowmark_junk.insert(a, vec![((0, leaf_rti(p)), name)]);
                     }
-                    let junk = junk_in(&c.node, &self.rowmark_junk);
+                    let junk = junk_in_keyed(&c.node, &self.rowmark_junk);
                     let mut top = c.node.output.clone();
-                    top.extend(junk.iter().filter(|j| !c.node.output.contains(j)).cloned());
+                    if top.len() == *width + marks.len() && marks.iter().all(|m| m.col < top.len()) {
+                        // (The level's columns, then its marks' keys as `rowmarks::hoist`
+                        // put them: the locked ones first.)
+                        let mut locked = Vec::new();
+                        let mut others = Vec::new();
+                        for m in marks.iter() {
+                            match m.lock {
+                                Some(_) => locked.push((m.col, top[m.col].clone())),
+                                None => others.push((m.rti, top[m.col].clone())),
+                            }
+                        }
+                        locked.sort_by_key(|l| l.0);
+                        let mut after = Vec::new();
+                        for ((kind, rti), j) in junk {
+                            if top.contains(&j) {
+                                continue;
+                            }
+                            if kind == 0 {
+                                others.push((rti, j));
+                            } else {
+                                after.push(j);
+                            }
+                        }
+                        others.sort_by_key(|o| o.0);
+                        top.truncate(*width);
+                        top.extend(locked.into_iter().map(|l| l.1));
+                        top.extend(others.into_iter().map(|o| o.1));
+                        top.extend(after);
+                    } else {
+                        top.extend(junk.into_iter().map(|j| j.1).filter(|j| !c.node.output.contains(j)));
+                    }
                     let tableoids: Vec<String> = inh.iter().map(|(p, _)| format!("{p}.tableoid")).collect();
                     top.sort_by_key(|o| tableoids.iter().position(|t| t == o).map_or(0, |i| i + 1));
                     // (A member's scan returns its parent's reltarget, the tableoid last.)
@@ -7891,6 +8079,46 @@ impl Builder<'_, '_> {
                     // (And for their operators, cost_qual_eval.)
                     let per: f64 = sets.iter().map(costs::qual_cost).sum();
                     c.node.total_cost += c.node.rows * per;
+                }
+                // A join computes the final target list (apply_scanjoin_target_to_paths): the
+                // new values (a column's width, else its type's), the target row's identity
+                // (its ctid; an inheritance tree's tableoid too), the other relations' row
+                // marks (ctids, whole rows) and what RETURNING reads of them.
+                if c.node.is_join() && up.route.is_none() && up.members.is_empty() {
+                    let cat = self.ctx.catalog();
+                    let ncols = t.columns.len();
+                    let col_w = |i: usize, ty: &DataType| -> u32 {
+                        if i < ncols {
+                            costs::col_width(&cat, t, i)
+                        } else {
+                            c.node.cols.get(i).map_or_else(|| type_width(ty), |x| x.width)
+                        }
+                    };
+                    let mut w: u32 = up
+                        .sets
+                        .iter()
+                        .map(|(_, e)| match e {
+                            Expr::Col(i, ty) => col_w(*i, ty),
+                            e => type_width(&e.ty()),
+                        })
+                        .sum();
+                    let inherited = up.inh || cat.class_has_subclass.contains(&t.oid);
+                    w += 6 + if inherited { 4 } else { 0 };
+                    w += 6 * rowmarks_under(&up.source, &self.rowmarks) as u32
+                        + copy_widths_under(&up.source, &self.copy_marks);
+                    let mut seen = Vec::new();
+                    for e in &returning {
+                        e.walk(&mut |x| {
+                            if let Expr::Col(i, ty) = x
+                                && *i > ncols
+                                && !seen.contains(i)
+                            {
+                                seen.push(*i);
+                                w += col_w(*i, ty);
+                            }
+                        });
+                    }
+                    c.node.width = w;
                 }
                 // A scan computes the new values, then the row's ctid.
                 if c.node.is_scan() {
@@ -8540,20 +8768,13 @@ impl Builder<'_, '_> {
         if !self.o.verbose {
             return;
         }
-        let (mut semi, mut copies) = (Vec::new(), Vec::new());
-        lock_level_marks(source, false, &mut semi, &mut copies);
         // (A FROM subquery's mark is its whole row too, which its Subquery Scan returns
         // (`shown_subqueries`); not a subquery holding the target, a view written through.)
-        fn holds(p: &Plan, a: usize) -> bool {
-            addr(p) == a || plan_inputs(p).into_iter().any(|c| holds(c, a))
-        }
-        let targets: Vec<usize> = target_scans(source).into_iter().map(addr).collect();
-        for (a, p) in copies.into_iter().filter(|(_, p)| match p {
-            Plan::Barrier { alias, .. } => !alias.is_empty() && !targets.iter().any(|&t| holds(p, t)),
-            _ => true,
-        }) {
+        let mut copies = Vec::new();
+        dml_copies(source, &mut copies);
+        for (a, p) in copies {
             let name = format!("{}.*", quote_ident(&self.refname(p)));
-            self.rowmark_junk.insert(a, vec![((2, super::plan::Rti(usize::MAX)), name)]);
+            self.rowmark_junk.insert(a, vec![((0, leaf_rti(p)), name)]);
         }
     }
 
@@ -13652,7 +13873,9 @@ impl Builder<'_, '_> {
             .map(|(_, c)| c.width)
             .sum::<u32>()
             + 6 * (rowmarks_under(left, &self.rowmarks) + rowmarks_under(right, &self.rowmarks))
-                as u32;
+                as u32
+            + copy_widths_under(left, &self.copy_marks)
+            + copy_widths_under(right, &self.copy_marks);
         // The quals' evaluation costs.
         let key_cost: f64 = keys
             .iter()
@@ -14824,6 +15047,10 @@ fn lock_rows(child: ExNode) -> ExNode {
         ..ExNode::new("LockRows")
     };
     n.output = child.output.clone();
+    // (Its rows are its input's, in their order: create_lockrows_path keeps the
+    // subpath's pathkeys, and its columns' statistics are theirs.)
+    n.cols = child.cols.clone();
+    n.order = child.order.clone();
     n.children.push(child.child("Outer"));
     n
 }
@@ -16450,6 +16677,8 @@ fn estimate_builder<'c, 'a>(plan: &Arc<Plan>, ctx: &'c ExecCtx<'a>, o: &'c Optio
         shown: shown_subqueries(plan, &needed_masks(plan)),
         rowmarks: Default::default(),
         rowmark_junk: Default::default(),
+        copy_marks: Default::default(),
+        plain_consts: Default::default(),
         alts: Default::default(),
         dummy_target: None,
     }
@@ -16995,6 +17224,8 @@ pub fn setop_shape(left: &Arc<Plan>, right: &Arc<Plan>, intersect: bool, ctx: &E
         shown: shown_subqueries(p, &needed_masks(p)),
             rowmarks: Default::default(),
             rowmark_junk: Default::default(),
+            copy_marks: Default::default(),
+            plain_consts: Default::default(),
         alts: Default::default(),
         dummy_target: None,
         };
@@ -17085,6 +17316,8 @@ pub fn set_group_estimates(
         shown: shown_subqueries(input, &needed_masks(input)),
         rowmarks: Default::default(),
         rowmark_junk: Default::default(),
+        copy_marks: Default::default(),
+        plain_consts: Default::default(),
         alts: Default::default(),
         dummy_target: None,
     };
@@ -17184,6 +17417,8 @@ pub fn agg_redundant_keys(
         shown: shown_subqueries(input, &needed_masks(input)),
         rowmarks: Default::default(),
         rowmark_junk: Default::default(),
+        copy_marks: Default::default(),
+        plain_consts: Default::default(),
         alts: Default::default(),
         dummy_target: None,
     };
@@ -17263,6 +17498,8 @@ pub fn sets_sorted(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
         shown: shown_subqueries(plan, &needed_masks(plan)),
         rowmarks: Default::default(),
         rowmark_junk: Default::default(),
+        copy_marks: Default::default(),
+        plain_consts: Default::default(),
         alts: Default::default(),
         dummy_target: None,
     };
@@ -17365,6 +17602,8 @@ fn level_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> ExNode {
         shown: shown_subqueries(plan, &needed_masks(plan)),
         rowmarks: Default::default(),
         rowmark_junk: Default::default(),
+        copy_marks: Default::default(),
+        plain_consts: Default::default(),
         alts: Default::default(),
         dummy_target: None,
     };
@@ -17601,6 +17840,42 @@ thread_local! {
     /// explained (remove_unused_subquery_outputs' NULLs are constants there).
     static UNREAD_NULLS: std::cell::RefCell<std::collections::HashSet<usize>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// The statement's select-list projection when only nodes with set_dummy_tlist_references'
+/// target lists read it (a Sort, a Limit, a LockRows) and nothing below it makes a pulled-up
+/// subquery's outputs PlaceHolderVars: its constants are plain Consts, which
+/// search_indexed_tlist_for_non_var never replaces with references. (A subquery's planned
+/// apart are read through its scan's Vars, or its plan's target list once that scan is
+/// removed: referenced.)
+fn plain_const_lists(root: &Plan) -> std::collections::HashSet<usize> {
+    fn top(p: &Plan, out: &mut std::collections::HashSet<usize>) {
+        match p {
+            Plan::Sort { input, .. } | Plan::Limit { input, .. } | Plan::LockRows { input, .. } | Plan::Context { input, .. } => {
+                top(input, out)
+            }
+            Plan::Project { input, .. } if !may_hold_phvs(input) => {
+                out.insert(addr(p));
+            }
+            _ => {}
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    top(root, &mut out);
+    out
+}
+
+/// Whether the query level under `p` has what makes a pulled-up subquery's outputs
+/// PlaceHolderVars (pull_up_simple_subquery: an outer join over it, an appendrel member, a
+/// grouping set): not looking into a subquery planned apart.
+fn may_hold_phvs(p: &Plan) -> bool {
+    match p {
+        Plan::Join { kind, .. } if !matches!(kind, JoinKind::Inner | JoinKind::Semi) => true,
+        Plan::Append { .. } | Plan::SetOp { .. } | Plan::Recursive { .. } => true,
+        Plan::Agg { sets: Some(_), .. } => true,
+        Plan::Barrier { .. } | Plan::CteScan { .. } => false,
+        p => plan_inputs(p).into_iter().any(|c| may_hold_phvs(c)),
+    }
 }
 
 /// The subquery levels' select-list projections under `p` (`UNREAD_NULLS`).
@@ -17846,6 +18121,8 @@ pub fn explain(
         shown: shown_subqueries(plan, &needed_masks(plan)),
         rowmarks: rowmark_scans(plan),
         rowmark_junk: Default::default(),
+        copy_marks: copy_mark_leaves(plan),
+        plain_consts: plain_const_lists(plan),
         alts: Default::default(),
         dummy_target: None,
     };

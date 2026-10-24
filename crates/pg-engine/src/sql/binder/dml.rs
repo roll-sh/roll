@@ -869,6 +869,7 @@ impl Binder<'_, '_> {
                     Plan::Values {
                         rows,
                         ncols: target.len(),
+                        rti: Default::default(),
                     }
                 } else {
                     let tx = |e: Expr| {
@@ -2244,6 +2245,7 @@ impl Binder<'_, '_> {
                     with_key: true,
                     reverse: false,
                     mark: None,
+                    lock_order: 0,
                     limit: None,
                     sys: self.want_sys,
                     // (Through an updatable view: its relation's alias in the view.)
@@ -2608,6 +2610,7 @@ impl Binder<'_, '_> {
                     with_key: true,
                     reverse: false,
                     mark: None,
+                    lock_order: 0,
                     limit: None,
                     sys: self.want_sys,
                     alias: (view.is_none() && alias != t.name).then(|| alias.to_string()),

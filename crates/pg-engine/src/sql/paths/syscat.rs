@@ -361,6 +361,7 @@ fn stand_in_scan(table: Arc<Table>, filter: Option<Expr>) -> ScanPlan {
         with_key: false,
         reverse: false,
         mark: None,
+        lock_order: 0,
         limit: None,
         sys: false,
         alias: None,

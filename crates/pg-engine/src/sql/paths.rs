@@ -1789,6 +1789,9 @@ struct Planner<'c, 'a> {
     /// data-modifying statement's other relations, a locking level's unlocked ones:
     /// ROW_MARK_REFERENCE): their ctid is needed, no index-only scan (`rowmarks::referenced`).
     ref_marks: std::cell::RefCell<std::collections::HashSet<usize>>,
+    /// The range table indexes of the level's sources of no table's rows with a whole-row
+    /// mark (ROW_MARK_COPY, `rowmarks::copied`): their whole row's width is in the paths'.
+    copy_marks: std::cell::RefCell<std::collections::HashSet<usize>>,
     /// Partitionwise joins made, by their first child's address: as FROM items of joins
     /// above (`joinpath::PwJoin`).
     /// Partitionwise joins' Appends (by their `pw` id) and how they are partitioned.
@@ -1846,6 +1849,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             removed: Default::default(),
             whole_rows: Default::default(),
             ref_marks: Default::default(),
+            copy_marks: Default::default(),
             pw_joins: Default::default(),
             absorbed: Default::default(),
             post_cost: Default::default(),
@@ -6023,6 +6027,7 @@ fn plan_level_ordered(
     p.group_dirs.replace(dirs);
     sublinkcopy::copy_into_merge(plan);
     p.ref_marks.replace(rowmarks::referenced(plan));
+    p.copy_marks.replace(rowmarks::copied(plan));
     p.pull_up_consts(plan);
     p.reduce_outer_joins(plan);
     p.remove_result_semijoins(plan);

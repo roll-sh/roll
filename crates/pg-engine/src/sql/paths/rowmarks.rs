@@ -20,6 +20,8 @@ struct Key {
     lock: Option<(RowMark, Wait)>,
     /// The relation's place in the range table (its first member's).
     rti: usize,
+    /// A locked relation's place in the level's locks (`ScanPlan::lock_order`).
+    order: u32,
 }
 
 /// A plan with its relations' keys added: the plan, its old output positions' new ones, and
@@ -108,9 +110,15 @@ fn hoist_level(plan: &mut Plan, own: bool) {
     }
     let w = crate::sql::binder::plan_width(plan);
     // The row marks' columns as preprocess_rowmarks orders them (the target list's resjunk
-    // ctids): the locked relations', then the others', each in range table order.
+    // ctids): the locked relations' in the order the locking clauses name them (the
+    // query's own, then a pulled-up subquery's, whose rowMarks pull_up_simple_subquery
+    // appends), then the others' in range table order.
     let mut order: Vec<usize> = (0..keys.len()).collect();
-    order.sort_by_key(|&j| (keys[j].lock.is_none(), keys[j].rti));
+    order.sort_by_key(|&j| {
+        let k = &keys[j];
+        let locked = k.lock.map(|_| (k.rti >> 40, k.order));
+        (k.lock.is_none(), locked, k.rti)
+    });
     // (The level's columns, then the keys in that order.)
     let out: Vec<usize> = (0..w)
         .map(|i| map.get(i).copied().unwrap_or(i))
@@ -142,6 +150,7 @@ fn hoist_level(plan: &mut Plan, own: bool) {
             col: w + order.iter().position(|&o| o == j).unwrap_or(j),
             tables: k.tables,
             lock: k.lock,
+            rti: crate::sql::plan::Rti(k.rti),
         })
         .collect();
     *plan = Plan::LockRows {
@@ -180,6 +189,57 @@ pub(super) fn referenced(plan: &Plan) -> std::collections::HashSet<usize> {
             Plan::Append { inputs, inh: None, .. } => inputs.iter().for_each(|i| go(i, out)),
             Plan::Limit { input, .. } | Plan::Project { input, .. } | Plan::Context { input, .. } => go(input, out),
             p if has_marks(p) => level(p, out),
+            _ => {}
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    go(plan, &mut out);
+    out
+}
+
+/// The range table indexes of the level's sources of no table's rows that get a whole-row
+/// mark (ROW_MARK_COPY, preprocess_rowmarks): a FROM subquery planned apart, a function,
+/// VALUES, a CTE, of an UPDATE / DELETE / MERGE (not a subquery holding the target: a view
+/// written through) or a locking level (not on a semi join's inner side). Their whole row
+/// goes up the plan (preprocess_targetlist), so the paths count its width
+/// (set_rel_width) and a subquery's scan of it is no trivial one.
+pub(super) fn copied(plan: &Plan) -> std::collections::HashSet<usize> {
+    fn level(p: &Plan, dml: bool, out: &mut std::collections::HashSet<usize>) {
+        match p {
+            Plan::Barrier { rti, alias, .. } => {
+                let holds_target = dml && crate::sql::explain::plan_inputs(p).into_iter().any(|c| has_key(c));
+                if rti.0 != 0 && !alias.is_empty() && !holds_target {
+                    out.insert(rti.0);
+                }
+            }
+            Plan::FunctionScan { rti, .. } | Plan::Values { rti, .. } | Plan::CteScan { rti, .. } => {
+                if rti.0 != 0 {
+                    out.insert(rti.0);
+                }
+            }
+            Plan::Scan(_) | Plan::LockRows { .. } => {}
+            Plan::Join { kind: JoinKind::Semi | JoinKind::Anti, left, .. } => level(left, dml, out),
+            p => crate::sql::explain::plan_inputs(p).into_iter().for_each(|c| level(c, dml, out)),
+        }
+    }
+    fn has_key(p: &Plan) -> bool {
+        match p {
+            Plan::Scan(s) => s.with_key,
+            p => crate::sql::explain::plan_inputs(p).into_iter().any(|c| has_key(c)),
+        }
+    }
+    fn go(p: &Plan, out: &mut std::collections::HashSet<usize>) {
+        match p {
+            Plan::Update(u) if !matches!(&*u.source, Plan::Scan(_)) => level(&u.source, true, out),
+            Plan::Delete(d) if !matches!(&*d.source, Plan::Scan(_)) => level(&d.source, true, out),
+            Plan::Merge(m) => level(&m.source, true, out),
+            Plan::With { ctes, body, .. } => {
+                ctes.iter().for_each(|(_, c)| go(c, out));
+                go(body, out);
+            }
+            Plan::Append { inputs, inh: None, .. } => inputs.iter().for_each(|i| go(i, out)),
+            Plan::Limit { input, .. } | Plan::Project { input, .. } | Plan::Context { input, .. } => go(input, out),
+            p if !PUSHED_LEVEL.get() && (OWN_LOCK.get() || has_marks(p)) => level(p, false, out),
             _ => {}
         }
     }
@@ -285,6 +345,7 @@ fn key(p: &Plan) -> Option<Keyed> {
                 tables: vec![s.table.clone()],
                 lock,
                 rti: s.rti.0,
+                order: s.lock_order,
             };
             (Plan::Scan(s), ident(n), vec![key])
         }

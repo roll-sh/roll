@@ -1553,9 +1553,10 @@ fn prune_params(r: Plan, params: Vec<Expr>) -> (Plan, Vec<Expr>) {
                 .unwrap()
         };
         let fix_values = |v: &Plan| match v {
-            Plan::Values { rows, ncols } => Plan::Values {
+            Plan::Values { rows, ncols, rti } => Plan::Values {
                 rows: rows.iter().map(|row| row.iter().map(&fix).collect()).collect(),
                 ncols: *ncols,
+                rti: *rti,
             },
             p => p.clone(),
         };

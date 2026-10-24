@@ -150,6 +150,48 @@ impl Planner<'_, '_> {
                 *pred = q;
             }
         }
+        // A projection over a one-row FROM item of constants (the item pulled up, an
+        // RTE_RESULT): its values put in for its columns, then folded as
+        // eval_const_expressions folds the pulled-up query's target list.
+        if let Plan::Project { input, exprs } = p
+            && !matches!(&**input, Plan::One)
+            && let Some(consts) = const_rel(input, self.ctx)
+        {
+            let put: Vec<Expr> = exprs
+                .iter()
+                .map(|e| {
+                    e.clone()
+                        .transform(&mut |x| {
+                            Ok(match x {
+                                Expr::Col(i, t) => consts.get(i).cloned().unwrap_or(Expr::Col(i, t)),
+                                x => x,
+                            })
+                        })
+                        .unwrap()
+                })
+                .collect();
+            let folded: Option<Vec<Expr>> = put
+                .into_iter()
+                .map(|e| {
+                    let mut plain = e.columns().is_empty() && !super::expr_volatile_deep(&e) && !e.has_outer_refs();
+                    e.walk(&mut |x| plain &= !matches!(x, Expr::Subquery(_) | Expr::Param(..) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..)));
+                    if !plain {
+                        return None;
+                    }
+                    if matches!(e, Expr::Const(..)) {
+                        return Some(e);
+                    }
+                    let ty = e.ty();
+                    crate::sql::expr::eval(&e, &[], self.ctx).ok().map(|v| Expr::Const(v, ty))
+                })
+                .collect();
+            if let Some(folded) = folded {
+                *p = Plan::Project {
+                    input: Arc::new(Plan::One),
+                    exprs: folded,
+                };
+            }
+        }
         if let Some(out) = lateral_one_row(p) {
             *p = out;
             // (Its range table entry stays: EXPLAIN qualifies the columns.)
