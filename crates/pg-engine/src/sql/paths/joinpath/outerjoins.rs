@@ -57,6 +57,53 @@ pub(super) struct Group {
     pub phvs: Vec<(usize, Expr, u32, u32)>,
     /// Per join of the tree with `JoinMeta::kept` columns: those (group) columns.
     pub kept: Vec<Vec<usize>>,
+    /// A LATERAL subquery pulled up into the tree (`JoinMeta::lateral_flat`): its
+    /// relations are items of the group.
+    pub flat: bool,
+}
+
+/// `e` (inside a LATERAL subquery pulled up, `frame` its join's values over the group's
+/// row) over the group's row: its lateral references the values they read.
+fn subst_frame(e: Expr, frame: &[Expr]) -> Expr {
+    if frame.is_empty() {
+        return e;
+    }
+    e.transform(&mut |x| {
+        Ok(match x {
+            Expr::Outer(1, k, t) => frame.get(k).cloned().unwrap_or(Expr::Outer(1, k, t)),
+            x => x,
+        })
+    })
+    .unwrap()
+}
+
+/// Whether a FROM item reads the values `Outer(1, …)` stands for (its own LATERAL joins'
+/// right sides and sub-selects with parameters a frame further in).
+fn reads_frame(p: &Plan) -> bool {
+    fn expr(e: &Expr, d: usize) -> bool {
+        let mut found = false;
+        e.walk(&mut |x| match x {
+            Expr::Outer(l, ..) if *l == d => found = true,
+            Expr::Subquery(s) => found |= plan(&s.plan, d + usize::from(!s.params.is_empty())),
+            _ => {}
+        });
+        found
+    }
+    fn plan(p: &Plan, d: usize) -> bool {
+        let mut es = Vec::new();
+        crate::sql::explain::node_exprs(p, &mut es);
+        if let Plan::Scan(sp) = p {
+            es.extend(sp.written.iter().chain(&sp.phv_quals).chain(&sp.current_of));
+        }
+        if es.iter().any(|e| expr(e, d)) {
+            return true;
+        }
+        match p {
+            Plan::Join { left, right, params, .. } if !params.is_empty() => plan(left, d) || plan(right, d + 1),
+            _ => crate::sql::explain::plan_inputs(p).into_iter().any(|c| plan(c, d)),
+        }
+    }
+    plan(p, 1)
 }
 
 fn rebuild_eq(a: Expr, b: Expr, bad: bool) -> Option<Expr> {
@@ -81,6 +128,9 @@ fn rebuild_eq(a: Expr, b: Expr, bad: bool) -> Option<Expr> {
 /// Phase one: the items (leaves) at their offsets in the group's row, and the joins
 /// bottom-up. Semi / anti joins' right sides get offsets past the row (`virt`): their
 /// columns don't come out. Returns (items, items joined by inner joins).
+/// `frame`: inside a LATERAL subquery pulled up, its join's values (over the group's row),
+/// which its lateral references (`Outer(1, k)`) read; else empty.
+#[allow(clippy::too_many_arguments)]
 fn walk(
     p: &Plan,
     off: usize,
@@ -89,6 +139,8 @@ fn walk(
     joins: &mut Vec<RawJoin>,
     laterals: &mut Vec<(usize, Vec<Expr>)>,
     phvs: &mut Vec<(usize, Expr, u32, u32)>,
+    frame: &[Expr],
+    flat: &mut bool,
 ) -> (u32, u32) {
     // A pulled-up subquery's join computing PlaceHolderVars: its items are the group's,
     // its PlaceHolderVars columns of the group's row.
@@ -96,9 +148,9 @@ fn walk(
         && leaves.len() < 32
     {
         let j0 = joins.len();
-        let (m, inner) = walk(input, off, virt, leaves, joins, laterals, phvs);
+        let (m, inner) = walk(input, off, virt, leaves, joins, laterals, phvs, frame, flat);
         for (i, e) in exprs.iter().enumerate() {
-            let e = e.clone().shift_cols(off as isize);
+            let e = subst_frame(e.clone().shift_cols(off as isize), frame);
             // (A column an outer join below nulls is read above that join: the
             // PlaceHolderVar is evaluated where the join is, its varnullingrels.)
             let mut force = 0u32;
@@ -133,7 +185,7 @@ fn walk(
         && leaves.len() < 32
     {
         let nl = *nleft;
-        let (l, li) = walk(left, off, virt, leaves, joins, laterals, phvs);
+        let (l, li) = walk(left, off, virt, leaves, joins, laterals, phvs, frame, flat);
         let roff = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
             let ro = *virt;
             *virt += crate::sql::binder::plan_width(right);
@@ -143,13 +195,20 @@ fn walk(
         };
         let map = |c: usize| if c < nl { off + c } else { roff + (c - nl) };
         let (r, ri) = if params.is_empty() {
-            walk(right, roff, virt, leaves, joins, laterals, phvs)
+            walk(right, roff, virt, leaves, joins, laterals, phvs, frame, flat)
+        } else if meta.lateral_flat {
+            // A LATERAL subquery pulled up: its relations are the group's, its lateral
+            // references the left side's values (create_lateral_join_info gives the items
+            // reading them their lateral_relids).
+            *flat = true;
+            let inner_frame: Vec<Expr> = params.iter().map(|e| subst_frame(e.clone().remap_cols(&map), frame)).collect();
+            walk(right, roff, virt, leaves, joins, laterals, phvs, &inner_frame, flat)
         } else {
             // A LATERAL item: its values from the left side, which it must be joined to
             // the inside of a nested loop of.
             let i = leaves.len();
             leaves.push(((**right).clone(), roff));
-            laterals.push((i, params.iter().map(|e| e.clone().remap_cols(&map)).collect()));
+            laterals.push((i, params.iter().map(|e| subst_frame(e.clone().remap_cols(&map), frame)).collect()));
             (1u32 << i.min(31), 0)
         };
         let mut conds = Vec::new();
@@ -157,7 +216,7 @@ fn walk(
             let mut parts = Vec::new();
             conjuncts(c.clone(), &mut parts);
             for e in parts {
-                conds.push(e.remap_cols(&map));
+                conds.push(subst_frame(e.remap_cols(&map), frame));
             }
         }
         let mut swapped = vec![false; conds.len()];
@@ -175,7 +234,7 @@ fn walk(
                 } else {
                     (a, b)
                 };
-                match rebuild_eq(a, b, bad) {
+                match rebuild_eq(subst_frame(a, frame), subst_frame(b, frame), bad) {
                     Some(e) => {
                         conds.push(crate::sql::binder::eq_under(e, coll));
                         swapped.push(*kind == JoinKind::Semi && meta.hash_swapped.get(i) == Some(&true));
@@ -214,7 +273,7 @@ fn walk(
             || crate::sql::plan::phv_projection(input).is_some())
         && absorbable(pred)
     {
-        let (m, inner) = walk(input, off, virt, leaves, joins, laterals, phvs);
+        let (m, inner) = walk(input, off, virt, leaves, joins, laterals, phvs, frame, flat);
         // (A pulled-up subquery's WHERE over outer joins of its own: its items are one
         // unit to an outer join above, which can't be commuted past the clauses.)
         let has_outer = joins.iter().any(|j| j.kind != JoinKind::Inner && j.r & m != 0);
@@ -225,7 +284,7 @@ fn walk(
             kind: JoinKind::Inner,
             l: 0,
             r: 0,
-            conds: conds.into_iter().map(|e| e.shift_cols(off as isize)).collect(),
+            conds: conds.into_iter().map(|e| subst_frame(e.shift_cols(off as isize), frame)).collect(),
             inner: 0,
             pushed: Vec::new(),
             kept: Vec::new(),
@@ -235,6 +294,12 @@ fn walk(
     }
     let i = leaves.len();
     leaves.push((p.clone(), off));
+    // (Inside a LATERAL subquery pulled up, an item still reading its lateral references
+    // (its scans' clauses over them are the tree's, `lift`): a LATERAL item of the group,
+    // reading the join's values.)
+    if !frame.is_empty() && reads_frame(p) {
+        laterals.push((i, frame.to_vec()));
+    }
     (1u32 << i.min(31), 0)
 }
 
@@ -304,7 +369,8 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
     let mut laterals = Vec::new();
     let mut phvs = Vec::new();
     super::GATHER_FAILED.with(|f| f.set(false));
-    walk(p, 0, &mut virt, &mut leaves, &mut joins, &mut laterals, &mut phvs);
+    let mut flat = false;
+    walk(p, 0, &mut virt, &mut leaves, &mut joins, &mut laterals, &mut phvs, &[], &mut flat);
     if leaves.len() < 2 || leaves.len() > COLLAPSE_LIMIT || super::GATHER_FAILED.with(|f| f.replace(false)) {
         return None;
     }
@@ -452,6 +518,7 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
         laterals,
         phvs,
         kept: joins.iter().filter(|j| !j.kept.is_empty()).map(|j| j.kept.clone()).collect(),
+        flat,
     })
 }
 
@@ -467,9 +534,32 @@ pub(super) fn phv_eval_at(phvs: &[(usize, Expr, u32, u32)], leaf_of: &[usize]) -
                 _ => m |= out.iter().find(|(x, _)| *x == g).map_or(0, |x| x.1),
             }
         }
+        // (find_placeholder_info: ph_eval_at is what it reads within its syntactic scope
+        // (phrels); what it reads outside, a LATERAL subquery's lateral references, is its
+        // ph_lateral.)
+        if *scope != 0 {
+            m &= *scope;
+        }
         out.push((*c, if m == 0 { *scope } else { m }));
     }
     out
+}
+
+/// Each PlaceHolderVar's ph_lateral: the items outside its syntactic scope it reads
+/// (directly, or through a PlaceHolderVar it reads).
+pub(super) fn phv_lateral(phvs: &[(usize, Expr, u32, u32)], leaf_of: &[usize]) -> Vec<u32> {
+    let mut out: Vec<(usize, u32)> = Vec::new();
+    for (c, e, scope, _) in phvs {
+        let mut m = 0u32;
+        for g in e.columns() {
+            match leaf_of.get(g) {
+                Some(&l) if l != usize::MAX && l < 32 => m |= (1u32 << l) & !*scope,
+                _ => m |= out.iter().find(|(x, _)| *x == g).map_or(0, |x| x.1),
+            }
+        }
+        out.push((*c, if *scope == 0 { 0 } else { m }));
+    }
+    out.into_iter().map(|x| x.1).collect()
 }
 
 impl Search<'_, '_, '_> {

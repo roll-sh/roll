@@ -25,6 +25,7 @@ pub(crate) mod analyzejoins;
 mod reducejoins;
 pub(crate) use reducejoins::strict_cols;
 pub(crate) use joinpath::user_eq_props;
+pub(crate) use joinpath::lateral_pullable;
 mod pullup;
 mod pathkeys;
 pub use pathkeys::{column_classes, constant_columns};
@@ -4804,6 +4805,10 @@ impl Planner<'_, '_> {
         // LIMIT, for the fraction it reads).
         if matches!(p, Plan::Join { .. }) && self.plan_joins_limited(p, needed, lim) {
             return;
+        }
+        // (A LATERAL subquery left to be pulled up that no group took in: planned apart.)
+        if matches!(p, Plan::Join { .. }) {
+            self.settle_laterals(p);
         }
         if matches!(p, Plan::Filter { .. }) && self.plan_filtered_join(p, needed) {
             return;
