@@ -44,8 +44,8 @@ is whatever the network provides; put the cluster on a private network.
 
 ## Repo ownership
 
-Every repo with activity has one owner node, held through a lease row in `code_repo_owners`
-(`repo_id, node_id, epoch, expires_at`). Leases last 10 s and are renewed every 2 s with one
+Every repo with activity has one owner node, held through a lease row in `code_leases`
+(`key, node_id, epoch, expires_at`; the key is the repo id). Leases last 10 s and are renewed every 2 s with one
 statement per node (`UPDATE … WHERE node_id = me`).
 
 - **Requests for a repo run on its owner.** Every route under `/v1/code/repos/{owner}/{repo}`,
