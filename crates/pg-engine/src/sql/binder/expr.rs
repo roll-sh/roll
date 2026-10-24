@@ -6722,7 +6722,11 @@ impl Binder<'_, '_> {
             ));
         }
         self.require_function(fdef.oid);
-        if fdef.language != "sql" && fdef.language != "plpgsql" && fdef.language != "internal" {
+        if fdef.language != "sql"
+            && fdef.language != "plpgsql"
+            && fdef.language != "internal"
+            && !(fdef.language == "c" && Self::native_def(&fdef).is_some())
+        {
             return Err(with_pos(
                 crate::error::unsupported(format!("functions in language {}", fdef.language)),
                 loc,
@@ -7167,6 +7171,69 @@ impl Binder<'_, '_> {
         self.user_call(fdef, coerced, f.location).map(Some)
     }
 
+    /// A C function's call target: the native code for its library and symbol
+    /// (`crate::ext::native`), over its declared argument and result types.
+    pub(crate) fn native_def(fdef: &crate::catalog::Function) -> Option<FuncDef> {
+        let n = crate::ext::native::lookup(fdef.probin.as_deref()?, &fdef.body)?;
+        let args: Vec<DataType> = fdef.args.iter().map(|a| a.1.clone()).collect();
+        Some(FuncDef {
+            oid: fdef.oid,
+            name: func::intern(&fdef.name),
+            min_args: args.len(),
+            args,
+            variadic: false,
+            spread: false,
+            ret: func::Ret::Fixed(fdef.ret.clone()),
+            strict: fdef.strict,
+            volatility: fdef.volatility,
+            imp: n.imp,
+            srf: n.srf,
+            out_cols: fdef
+                .out_cols
+                .iter()
+                .map(|(name, t)| (func::intern(name), t.clone()))
+                .collect(),
+            arg_names: vec![],
+            defaults: vec![],
+            coll: None,
+        })
+    }
+
+    /// A call of a C function: its native code (a set-returning one as the select list's
+    /// ProjectSet runs it).
+    fn native_call(
+        &mut self,
+        fdef: &crate::catalog::Function,
+        coerced: Vec<Expr>,
+        loc: i32,
+    ) -> Result<Expr> {
+        let Some(def) = Self::native_def(fdef) else {
+            return Err(with_pos(
+                crate::error::unsupported(format!("functions in language {}", fdef.language)),
+                loc,
+            ));
+        };
+        let def = self.input_collation_def(Arc::new(def), &coerced);
+        let ret = fdef.ret.clone();
+        if fdef.returns_set {
+            self.check_srf_placement(loc)?;
+            let ty = if fdef.out_cols.len() > 1 {
+                DataType::row(fdef.out_cols.clone())
+            } else {
+                ret
+            };
+            let i = self.push_srf(SrfCall {
+                func: def,
+                args: coerced,
+                ty: ty.clone(),
+                ncols: 1,
+                body: None,
+            });
+            return Ok(Expr::Srf(i, ty));
+        }
+        Ok(Expr::Call(def, coerced, ret))
+    }
+
     /// A call of an internal-language function (`AS 'int4eq'`): the built-in function its
     /// body names, over the declared argument and result types.
     fn internal_call(
@@ -7210,6 +7277,9 @@ impl Binder<'_, '_> {
         coerced: Vec<Expr>,
         loc: i32,
     ) -> Result<Expr> {
+        if fdef.language == "c" && !self.deparse {
+            return self.native_call(&fdef, coerced, loc);
+        }
         if fdef.language == "internal" && !self.deparse {
             // It runs the built-in, but plans show the function as called.
             return Ok(match self.internal_call(&fdef, coerced, loc)? {

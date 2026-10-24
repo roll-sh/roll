@@ -3326,6 +3326,8 @@ impl Ddl<'_, '_> {
         }
         let mut language = "sql".to_string();
         let mut body: Option<String> = None;
+        // A C function's `AS 'file', 'symbol'`: the symbol.
+        let mut link_symbol: Option<String> = None;
         let mut as_items = 0usize;
         let mut volatility = 'v';
         let mut strict = false;
@@ -3390,6 +3392,7 @@ impl Ddl<'_, '_> {
                 "as" => {
                     if let Some(NodeEnum::List(l)) = d.arg.as_deref().and_then(inner) {
                         body = l.items.first().and_then(const_str);
+                        link_symbol = l.items.get(1).and_then(const_str);
                         as_items = l.items.len();
                     }
                 }
@@ -3554,6 +3557,7 @@ impl Ddl<'_, '_> {
             ));
         }
         let mut shape = None;
+        let mut probin: Option<String> = None;
         let body = match language.as_str() {
             // As written (prosrc); a SQL-standard body as its statements' text.
             "sql" => body,
@@ -3597,7 +3601,24 @@ impl Ddl<'_, '_> {
                         format!("could not access file \"{body}\": No such file or directory"),
                     ));
                 }
-                body
+                // prosrc: the symbol, or the function's own name (`AS 'file'` / `'-'`).
+                let symbol = match link_symbol.take() {
+                    Some(sym) if sym != "-" => sym,
+                    _ => name.clone(),
+                };
+                // A library the engine has native code for: its symbols are looked up as
+                // `dlsym` would (load_external_function).
+                let lib = crate::ext::native::library(&body);
+                if crate::ext::native::has_library(lib) && crate::ext::native::lookup(&body, &symbol).is_none() {
+                    return Err(Error::new(
+                        code::UNDEFINED_FUNCTION,
+                        format!(
+                            "could not find function \"{symbol}\" in file \"/usr/local/lib/postgresql/{lib}.so\""
+                        ),
+                    ));
+                }
+                probin = Some(body);
+                symbol
             }
             other => {
                 return Err(Error::new(
@@ -3644,6 +3665,7 @@ impl Ddl<'_, '_> {
                 .as_deref()
                 .map(atomic_returns)
                 .unwrap_or_default(),
+            probin,
         };
         // A BEGIN ATOMIC body is analyzed as it is parsed; a string body by the language's
         // validator, once the function is in place (ProcedureCreate), so it may call itself.
@@ -4438,9 +4460,7 @@ impl Ddl<'_, '_> {
             ));
         }
         let Some((_, version, _)) = EXTENSIONS.iter().find(|(n, _, _)| *n == name) else {
-            return Err(Error::new(code::UNDEFINED_FILE, format!("extension \"{name}\" is not available"))
-                .detail(format!("Could not open extension control file \"/usr/share/postgresql/extension/{name}.control\": No such file or directory."))
-                .hint("The extension must first be installed on the system where PostgreSQL is running."));
+            return Err(crate::ext::not_available(&name));
         };
         let schema = match def_elems(&s.options)
             .find(|d| d.defname == "schema")
@@ -5115,6 +5135,14 @@ impl Ddl<'_, '_> {
                 O::ObjectExtension => {
                     let name = ast::sval(o).map(str::to_string).unwrap_or_default();
                     match self.cat.extensions.iter().position(|e| e.1 == name) {
+                        // One its script made: it and its members go as dependencies say.
+                        Some(i) if self.cat.extension_info.contains_key(&self.cat.extensions[i].0) => {
+                            let oid = self.cat.extensions[i].0;
+                            let owner = self.cat.extension_info[&oid].owner;
+                            self.require_owner(owner, "extension", &name)?;
+                            self.check_extension_drop(oid, &name)?;
+                            roots.push((crate::catalog::depend::EXTENSION, oid, 0));
+                        }
                         Some(i) => {
                             self.cat.extensions.remove(i);
                         }
@@ -6036,7 +6064,11 @@ impl Ddl<'_, '_> {
                     self.cat.operators.insert(x.oid, Arc::new(x));
                 }
             }
-            EXTENSION => self.cat.extensions.retain(|e| e.0 != oid),
+            EXTENSION => {
+                self.cat.extensions.retain(|e| e.0 != oid);
+                self.cat.extension_info.remove(&oid);
+                self.cat.comments.retain(|(o, _, _)| *o != oid);
+            }
             OPCLASS => {
                 self.cat.opclasses.remove(&oid);
                 self.cat.comments.retain(|(o, _, _)| *o != oid);

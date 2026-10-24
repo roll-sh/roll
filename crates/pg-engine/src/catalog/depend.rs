@@ -392,6 +392,15 @@ fn derived_depends(ctx: &ExecCtx, cat: &Arc<Catalog>) -> Vec<Depend> {
     );
     for (oid, _, schema, _) in &cat.extensions {
         out.add((EXTENSION, *oid, 0), (NAMESPACE, *schema, 0), 'n');
+        // What it requires, and its members (recordDependencyOnCurrentExtension).
+        if let Some(info) = cat.extension_info.get(oid) {
+            for r in &info.requires {
+                out.add((EXTENSION, *oid, 0), (EXTENSION, *r, 0), 'n');
+            }
+            for &(class, member) in &info.members {
+                out.add((class, member, 0), (EXTENSION, *oid, 0), 'e');
+            }
+        }
     }
     for e in cat.enums.values() {
         out.add((TYPE, e.oid, 0), (NAMESPACE, e.schema, 0), 'n');
@@ -1581,7 +1590,7 @@ pub fn describe(cat: &Catalog, sp: &[String], (class, oid, sub): Addr) -> Option
             cat.extensions
                 .iter()
                 .find(|e| e.0 == oid)
-                .map(|e| format!("extension {}", quote_ident(&e.1)))
+                .map(|e| format!("extension {}", e.1))
         }
         STATEXT => cat
             .statistics

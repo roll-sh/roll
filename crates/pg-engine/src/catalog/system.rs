@@ -3059,8 +3059,12 @@ pub fn rows(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                 row[4] = o(match lang {
                     "sql" => 14,
                     "plpgsql" => 13681,
+                    "c" => 13,
                     _ => 12,
                 });
+                if let Some(bin) = &f.probin {
+                    row[26] = Value::Text(Arc::from(bin.as_str()));
+                }
                 let all = f.all_params();
                 if !f.modes.is_empty() {
                     let (mut input, mut output) = (0, 0);
@@ -3981,26 +3985,32 @@ pub fn rows(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                 N,
             ]);
             for (oid, name, schema, version) in &cat.extensions {
+                let info = cat.extension_info.get(oid);
+                let config = info.filter(|i| !i.config.is_empty());
                 out.push(vec![
                     o(*oid),
                     nm(name),
-                    o(OWNER),
+                    o(info.map_or(OWNER, |i| i.owner)),
                     o(*schema),
-                    b(true),
+                    b(info.is_none_or(|i| i.relocatable)),
                     nm(version),
-                    N,
-                    N,
+                    config.map_or(N, |i| arr(DataType::Oid, i.config.iter().map(|c| o(c.0)).collect())),
+                    config.map_or(N, |i| arr(DataType::Text, i.config.iter().map(|c| nm(&c.1)).collect())),
                 ]);
             }
         }
         PgAvailableExtensions => {
-            for (name, version, comment) in crate::session::ddl::EXTENSIONS {
-                let installed = *name == "plpgsql" || cat.extensions.iter().any(|e| e.1 == *name);
+            for (name, version, comment) in crate::ext::available() {
+                let installed = if name == "plpgsql" {
+                    Some("1.0".to_string())
+                } else {
+                    cat.extensions.iter().find(|e| e.1 == name).map(|e| e.3.clone())
+                };
                 out.push(vec![
-                    nm(name),
-                    nm(version),
-                    if installed { nm(version) } else { N },
-                    nm(comment),
+                    nm(&name),
+                    nm(&version),
+                    installed.map_or(N, |v| nm(&v)),
+                    nm(&comment),
                 ]);
             }
         }
@@ -5858,8 +5868,10 @@ pub fn extension_descriptions(cat: &Catalog) -> Vec<(u32, u32, &'static str)> {
             .map(|e| e.2)
             .unwrap_or("")
     };
+    // (Those their scripts made have their control file's comment in pg_description.)
     cat.extensions
         .iter()
+        .filter(|(oid, ..)| !cat.extension_info.contains_key(oid))
         .map(|(oid, name, ..)| (*oid, 3079, comment(name)))
         .collect()
 }

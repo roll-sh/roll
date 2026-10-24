@@ -2972,13 +2972,13 @@ fn pg_notify(a: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(Value::Text(Arc::from("")))
 }
 fn pg_available_extensions(_: &[Value], _: &FnCtx) -> Result<super::SrfIter> {
-    let rows: Vec<Vec<Value>> = crate::session::ddl::EXTENSIONS
-        .iter()
+    let rows: Vec<Vec<Value>> = crate::ext::available()
+        .into_iter()
         .map(|(n, v, c)| {
             vec![
-                Value::Text(Arc::from(*n)),
-                Value::Text(Arc::from(*v)),
-                Value::Text(Arc::from(*c)),
+                Value::Text(Arc::from(n)),
+                Value::Text(Arc::from(v)),
+                Value::Text(Arc::from(c)),
             ]
         })
         .collect();

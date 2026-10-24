@@ -124,6 +124,52 @@ pub fn names() -> Vec<&'static str> {
     v
 }
 
+/// pg_available_extensions' rows: (name, default version, comment), in name order. Besides
+/// the extensions here, the older stand-ins CREATE EXTENSION still accepts without running a
+/// script (`session::ddl::EXTENSIONS`).
+pub fn available() -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = names()
+        .into_iter()
+        .filter_map(|n| {
+            let c = control(n)?;
+            Some((n.to_string(), c.default_version.clone()?, c.comment.clone().unwrap_or_default()))
+        })
+        .collect();
+    for (n, v, c) in crate::session::ddl::EXTENSIONS {
+        if control(n).is_none() {
+            out.push((n.to_string(), v.to_string(), c.to_string()));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// pg_available_extension_versions' rows: name, version, superuser, trusted, relocatable,
+/// schema, requires, comment.
+pub fn available_version_rows() -> Vec<(String, String, bool, bool, bool, Option<String>, Vec<String>, String)> {
+    let mut out = Vec::new();
+    for (n, v, comment) in available() {
+        match control(&n) {
+            Some(c) => {
+                for ver in available_versions(&n) {
+                    out.push((
+                        n.clone(),
+                        ver,
+                        c.superuser,
+                        c.trusted,
+                        c.relocatable,
+                        c.schema.clone(),
+                        c.requires.clone(),
+                        comment.clone(),
+                    ));
+                }
+            }
+            None => out.push((n, v, true, false, true, None, Vec::new(), comment)),
+        }
+    }
+    out
+}
+
 /// The script installing `version` (`name--version.sql`), or updating `from` to `version`:
 /// its file name and text.
 pub fn script(name: &str, from: Option<&str>, version: &str) -> Option<(String, &'static str)> {
@@ -340,11 +386,11 @@ pub fn check_extension_name(n: &str) -> crate::Result<()> {
     Ok(())
 }
 
-/// `read_extension_control_file`'s error for an extension that isn't installed here.
+/// `parse_extension_control_file`'s error for an extension that isn't installed here (no
+/// control file on `extension_control_path`).
 pub fn not_available(name: &str) -> crate::Error {
     use crate::error::code;
-    crate::Error::new(code::UNDEFINED_FILE, format!("extension \"{name}\" is not available"))
-        .detail(format!("Could not open extension control file \"/usr/local/share/postgresql/extension/{name}.control\": No such file or directory."))
+    crate::Error::new(code::FEATURE_NOT_SUPPORTED, format!("extension \"{name}\" is not available"))
         .hint("The extension must first be installed on the system where PostgreSQL is running.")
 }
 

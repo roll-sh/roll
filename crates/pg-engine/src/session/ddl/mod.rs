@@ -22,6 +22,7 @@ mod operator;
 mod policy;
 mod rule;
 pub(crate) mod event_trigger;
+pub(crate) mod extension;
 mod stats;
 pub(crate) mod stats_import;
 mod table;
@@ -69,6 +70,7 @@ pub(crate) fn run_nested<T>(f: impl FnOnce() -> T) -> T {
 
 /// The flags not at rest (`scoped::unsettled_for_test`).
 pub(crate) fn unsettled(out: &mut Vec<&'static str>) {
+    extension::unsettled(out);
     if TOP_LEVEL.get().is_some() {
         out.push("ddl::TOP_LEVEL");
     }
@@ -359,7 +361,12 @@ impl<'c, 'a> Ddl<'c, 'a> {
             N::CompositeTypeStmt(s) => self.create_composite(s)?,
             N::CreateRangeStmt(s) => self.create_range(s)?,
             N::CreateFunctionStmt(s) => self.create_function(s)?,
+            N::CreateExtensionStmt(s) if crate::ext::control(&s.extname).is_some() => {
+                self.create_extension_script(s)?
+            }
             N::CreateExtensionStmt(s) => self.create_extension(s)?,
+            N::AlterExtensionStmt(s) => self.alter_extension(s)?,
+            N::AlterExtensionContentsStmt(s) => self.alter_extension_contents(s)?,
             N::CommentStmt(s) => self.comment(s)?,
             N::DropStmt(s) => self.drop(s)?,
             N::TruncateStmt(s) => self.truncate(s)?,
@@ -599,6 +606,7 @@ impl<'c, 'a> Ddl<'c, 'a> {
     }
 
     fn prepare_save(&mut self) {
+        extension::prune_members(&mut self.cat);
         let before = self.ctx.catalog();
         self.add_toast_tables(&before);
         self.apply_default_privileges(&before);

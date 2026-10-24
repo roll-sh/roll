@@ -1364,6 +1364,9 @@ pub struct Function {
     /// The statements of a `BEGIN ATOMIC` body that are `RETURN expr` (kept as `SELECT expr`).
     #[serde(default)]
     pub atomic_returns: Vec<usize>,
+    /// A C function's library (probin); `body` is its symbol (prosrc).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probin: Option<String>,
 }
 
 fn parallel_unsafe() -> char {
@@ -1472,6 +1475,7 @@ impl Function {
             out_domains: Vec::new(),
             sql_body: None,
             atomic_returns: Vec::new(),
+            probin: None,
         }))
     }
 
@@ -1671,6 +1675,23 @@ pub mod trigger_type {
     pub const INSTEAD: u16 = 64;
 }
 
+/// An extension's pg_extension columns besides its name, schema and version, and what
+/// pg_depend records of it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ExtensionInfo {
+    pub owner: u32,
+    pub relocatable: bool,
+    /// pg_extension_config_dump: (table, condition), as extconfig / extcondition.
+    #[serde(default)]
+    pub config: Vec<(u32, String)>,
+    /// Member objects (pg_depend deptype 'e'): (class, oid), in the order they joined.
+    #[serde(default)]
+    pub members: Vec<(u32, u32)>,
+    /// The extensions it requires (deptype 'n').
+    #[serde(default)]
+    pub requires: Vec<u32>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Catalog {
     /// The index key format the database's indexes are in (`storage::keys::
@@ -1715,6 +1736,10 @@ pub struct Catalog {
     /// Installed extensions: (oid, name, schema, version).
     #[serde(default)]
     pub extensions: Vec<(u32, String, u32, String)>,
+    /// What the rest of an extension's pg_extension row and dependencies hold (extensions
+    /// made by running their scripts; the stand-ins made before have none).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extension_info: BTreeMap<u32, ExtensionInfo>,
     #[serde(default)]
     pub triggers: BTreeMap<u32, Arc<Trigger>>,
     #[serde(default)]

@@ -461,23 +461,25 @@ fn tz_abbrevs_zone(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
 /// The extensions that can be installed, at their one version.
 fn extension_versions(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
     rows(
-        crate::session::ddl::EXTENSIONS
-            .iter()
-            .map(|(n, v, comment)| {
-                let pl = *n == "plpgsql";
+        crate::ext::available_version_rows()
+            .into_iter()
+            .map(|(n, v, superuser, trusted, relocatable, schema, requires, comment)| {
                 vec![
-                    text(*n),
-                    text(*v),
-                    Value::Bool(true),
-                    Value::Bool(pl),
-                    Value::Bool(!pl),
-                    if pl {
-                        Value::Text(Arc::from("pg_catalog"))
-                    } else {
+                    text(n),
+                    text(v),
+                    Value::Bool(superuser),
+                    Value::Bool(trusted),
+                    Value::Bool(relocatable),
+                    schema.map_or(Value::Null, |s| Value::Text(Arc::from(s))),
+                    if requires.is_empty() {
                         Value::Null
+                    } else {
+                        Value::Array(Arc::new(crate::types::array::ArrayValue::from_vec(
+                            DataType::Name,
+                            requires.into_iter().map(|r| Value::Text(Arc::from(r))).collect(),
+                        )))
                     },
-                    Value::Null,
-                    text(*comment),
+                    text(comment),
                 ]
             })
             .collect(),

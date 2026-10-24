@@ -856,6 +856,7 @@ impl Ddl<'_, '_> {
             out_domains: Vec::new(),
             sql_body: None,
             atomic_returns: Vec::new(),
+            probin: None,
         };
         self.cat.functions.insert(oid, Arc::new(func));
         self.save()?;

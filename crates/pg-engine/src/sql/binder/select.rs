@@ -5526,6 +5526,46 @@ impl Binder<'_, '_> {
                 cols.push(OutCol::new(c.colname.clone(), t));
             }
         }
+        // A C function: its native code, as a built-in function in FROM runs.
+        if fdef.language == "c"
+            && let Some(def) = Self::native_def(fdef)
+        {
+            if !record {
+                if fdef.out_cols.len() > 1 {
+                    cols = fdef
+                        .out_cols
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (n, t))| OutCol::new(super::expr::out_col_name(n, i), t.clone()))
+                        .collect();
+                } else if let DataType::Row(r) = &fdef.ret {
+                    cols = r.fields.iter().map(|(n, t)| OutCol::new(n.clone(), t.clone())).collect();
+                } else {
+                    let n = fdef
+                        .out_cols
+                        .first()
+                        .map(|(n, _)| n.clone())
+                        .unwrap_or_else(|| fdef.name.clone());
+                    cols = vec![OutCol::new(n, fdef.ret.clone())];
+                }
+            }
+            let ty = if record || cols.len() > 1 {
+                DataType::row(cols.iter().map(|c| (c.name.clone(), c.ty.clone())).collect())
+            } else {
+                fdef.ret.clone()
+            };
+            let def = self.input_collation_def(Arc::new(def), &args);
+            return Ok((
+                SrfCall {
+                    func: def,
+                    args,
+                    ty,
+                    ncols: cols.len(),
+                    body: None,
+                },
+                cols,
+            ));
+        }
         let place = match (fdef.returns_set, alone) {
             (true, true) => super::expr::FnPlace::FromSet,
             (true, false) => super::expr::FnPlace::Run,
