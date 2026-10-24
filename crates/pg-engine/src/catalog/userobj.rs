@@ -325,34 +325,11 @@ impl Catalog {
     }
 
     pub fn access_method(&self, oid: u32) -> Option<AmInfo> {
-        self.access_method_where(|r| oid_at(r, 0) == oid, |a| a.oid == oid)
+        self.access_methods_all().into_iter().find(|a| a.oid == oid)
     }
 
     pub fn access_method_by_name(&self, name: &str) -> Option<AmInfo> {
-        self.access_method_where(|r| text_at(r, 1) == name, |a| a.name == name)
-    }
-
-    /// The first of `access_methods_all` a test picks, without listing them all (a built-in
-    /// one's pg_am row, else a made one).
-    fn access_method_where(
-        &self,
-        builtin: impl Fn(&[Value]) -> bool,
-        made: impl Fn(&AccessMethod) -> bool,
-    ) -> Option<AmInfo> {
-        if let Some(r) = rows(SysTable::PgAm).iter().find(|r| builtin(r)) {
-            return Some(AmInfo {
-                oid: oid_at(r, 0),
-                name: text_at(r, 1).to_string(),
-                handler: oid_at(r, 2),
-                kind: char_at(r, 3),
-            });
-        }
-        self.access_methods.values().find(|a| made(a)).map(|a| AmInfo {
-            oid: a.oid,
-            name: a.name.clone(),
-            handler: a.handler,
-            kind: a.kind,
-        })
+        self.access_methods_all().into_iter().find(|a| a.name == name)
     }
 
     /// get_index_am_oid: an index access method by name.
@@ -478,18 +455,7 @@ impl Catalog {
         if let Some(c) = self.opclasses.get(&oid) {
             return Some(class_info(c));
         }
-        // (The built-in ones by oid, read once: this runs for every index column of
-        // pg_attribute's rows.)
-        static BUILTIN: std::sync::OnceLock<std::collections::HashMap<u32, ClassInfo>> =
-            std::sync::OnceLock::new();
-        let builtin = BUILTIN.get_or_init(|| {
-            let mut m = std::collections::HashMap::new();
-            for c in Catalog::default().opclasses_all() {
-                m.entry(c.oid).or_insert(c);
-            }
-            m
-        });
-        builtin.get(&oid).cloned()
+        self.opclasses_all().into_iter().find(|c| c.oid == oid)
     }
 
     /// Every operator (`func` false) or support function of operator families.

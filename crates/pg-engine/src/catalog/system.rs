@@ -7,7 +7,6 @@ use super::{
     quote_ident,
 };
 use crate::error::Result;
-use crate::exec::fasthash::HashMap as FastMap;
 use crate::exec::{ExecCtx, Row};
 use crate::sql::func::system::index_def;
 use crate::sql::ruleutils::{Stored, stored_expr};
@@ -249,10 +248,7 @@ sys_tables! {
 
 impl SysTable {
     fn entry(self) -> &'static (SysTable, u32, &'static str, u32, &'static str) {
-        // (`ALL` lists them in the enum's order.)
-        let e = &ALL[self as usize];
-        debug_assert!(e.0 == self);
-        e
+        ALL.iter().find(|e| e.0 == self).expect("system table")
     }
 
     pub fn name(self) -> &'static str {
@@ -268,20 +264,11 @@ impl SysTable {
     }
 
     pub fn is_view(self) -> bool {
-        static VIEWS: OnceLock<std::collections::HashSet<SysTable>> = OnceLock::new();
-        VIEWS
-            .get_or_init(|| {
-                ALL.iter()
-                    .filter(|e| {
-                        super::sys_rels::SYS_RELS
-                            .iter()
-                            .find(|r| r.2 == e.3)
-                            .map_or(e.3 >= 12000, |r| r.5 == 'v')
-                    })
-                    .map(|e| e.0)
-                    .collect()
-            })
-            .contains(&self)
+        let oid = self.oid();
+        super::sys_rels::SYS_RELS
+            .iter()
+            .find(|r| r.2 == oid)
+            .map_or(oid >= 12000, |r| r.5 == 'v')
     }
 
     pub fn all() -> impl Iterator<Item = SysTable> {
@@ -289,18 +276,7 @@ impl SysTable {
     }
 
     pub fn by_oid(oid: u32) -> Option<SysTable> {
-        static BY_OID: OnceLock<std::collections::HashMap<u32, SysTable>> = OnceLock::new();
-        BY_OID
-            .get_or_init(|| {
-                let mut m = std::collections::HashMap::new();
-                for e in ALL {
-                    // (The first, as a scan finds it.)
-                    m.entry(e.3).or_insert(e.0);
-                }
-                m
-            })
-            .get(&oid)
-            .copied()
+        ALL.iter().find(|e| e.3 == oid).map(|e| e.0)
     }
 
     /// Find by name: an explicit schema, or pg_catalog (always searched) / information_schema
@@ -349,8 +325,8 @@ impl SysTable {
     pub fn columns(self) -> Arc<Vec<(String, DataType)>> {
         static COLS: OnceLock<Vec<Arc<Vec<(String, DataType)>>>> = OnceLock::new();
         let all = COLS.get_or_init(|| ALL.iter().map(|e| Arc::new(parse_cols(e.4))).collect());
-        // (`ALL` lists them in the enum's order.)
-        all[self as usize].clone()
+        let i = ALL.iter().position(|e| e.0 == self).unwrap();
+        all[i].clone()
     }
 
     /// The information_schema domain each column is declared as (the column's type is its base type).
@@ -373,8 +349,8 @@ impl SysTable {
                 })
                 .collect()
         });
-        // (`ALL` lists them in the enum's order.)
-        all[self as usize].clone()
+        let i = ALL.iter().position(|e| e.0 == self).unwrap();
+        all[i].clone()
     }
 }
 
@@ -805,23 +781,14 @@ fn col_type_oid(cat: &Catalog, col: &super::Column) -> u32 {
 /// and typanalyze of type `oid`.
 fn type_procs(cat: &Catalog, oid: u32) -> [u32; 8] {
     const ARRAY: [u32; 8] = [6179, 750, 751, 2400, 2401, 0, 0, 3816];
-    // (The built-in tables by type oid: this runs for every pg_type row.)
-    static BUILTIN: OnceLock<std::collections::HashMap<u32, [u32; 8]>> = OnceLock::new();
-    let builtin = BUILTIN.get_or_init(|| {
-        let mut m = std::collections::HashMap::new();
-        for (t, p) in super::type_procs::TYPE_PROCS {
-            m.entry(*t).or_insert(*p);
-        }
-        for r in super::sys_rels::SYS_RELS {
-            m.entry(r.3).or_insert([0, 2290, 2291, 2402, 2403, 0, 0, 0]);
-        }
-        for r in super::sys_rels::SYS_RELS {
-            m.entry(r.4).or_insert(ARRAY);
-        }
-        m
-    });
-    if let Some(p) = builtin.get(&oid) {
+    if let Some((_, p)) = super::type_procs::TYPE_PROCS.iter().find(|p| p.0 == oid) {
         return *p;
+    }
+    if super::sys_rels::SYS_RELS.iter().any(|r| r.3 == oid) {
+        return [0, 2290, 2291, 2402, 2403, 0, 0, 0];
+    }
+    if super::sys_rels::SYS_RELS.iter().any(|r| r.4 == oid) {
+        return ARRAY;
     }
     if let Some(d) = cat.base_types.get(&oid) {
         if d.is_shell() {
@@ -847,7 +814,10 @@ fn type_procs(cat: &Catalog, oid: u32) -> [u32; 8] {
     }
     if cat.enums.contains_key(&oid) {
         [0, 3506, 3507, 3532, 3533, 0, 0, 0]
-    } else if cat.composites.contains_key(&oid) || cat.rel_rowtype(oid) == Some(false) {
+    } else if cat.composites.contains_key(&oid)
+        || cat.tables.values().any(|t| t.rowtype == oid)
+        || cat.views.values().any(|v| v.rowtype == oid)
+    {
         [0, 2290, 2291, 2402, 2403, 0, 0, 0]
     } else if cat.ranges.values().any(|r| r.oid == oid) {
         [0, 3834, 3835, 3836, 3837, 0, 0, 3916]
@@ -863,7 +833,14 @@ fn type_procs(cat: &Catalog, oid: u32) -> [u32; 8] {
             .ranges
             .values()
             .any(|r| r.array_oid == oid || r.multi_array_oid == oid)
-        || cat.rel_rowtype(oid) == Some(true)
+        || cat
+            .tables
+            .values()
+            .any(|t| t.rowtype != 0 && t.array_type() == oid)
+        || cat
+            .views
+            .values()
+            .any(|v| v.rowtype != 0 && v.array_type() == oid)
     {
         ARRAY
     } else {
@@ -1206,7 +1183,7 @@ fn rel_columns(
             })
             .collect();
     }
-    if let Some(ct) = cat.composite_of_rel(oid) {
+    if let Some(ct) = cat.composites.values().find(|ct| ct.relid == oid) {
         return ct
             .fields
             .iter()
@@ -1423,102 +1400,29 @@ pub fn generated_rows_count() -> u64 {
 }
 
 /// What a cached catalog's rows depend on: the catalog (held by a `Weak`, compared by
-/// address), the current and session user (and the session's login name), the search path,
-/// the session's temporary schema (when it has one) and the settings' values (`Settings::values_key`: equal for
-/// sessions whose settings are equal). (The cache is its database's.)
+/// address), the current and session user, the search path and the settings' generation.
+/// (One session: its database.)
 struct SysRowsKey {
     table: u32,
     cat: std::sync::Weak<Catalog>,
     current_user: u32,
     session_user: u32,
-    login: String,
     search_path: Vec<String>,
-    temp_schema: Option<String>,
-    settings: Arc<crate::session::settings::ValuesKey>,
+    settings: u64,
 }
 
-/// A system catalog's generated rows, shared by the statements (and sessions) that read it
-/// under the same `SysRowsKey`, with hashes on the columns equalities looked up.
-pub struct SysRows {
-    pub rows: Vec<Row>,
-    /// Per column: the rows holding each value.
-    by_col: parking_lot::Mutex<FastMap<usize, Arc<FastMap<Value, Vec<u32>>>>>,
-    /// Per column and kind of value: whether every row's value is of that kind (or NULL),
-    /// so the hash serves an equality with it.
-    hashable: parking_lot::Mutex<FastMap<(usize, std::mem::Discriminant<Value>), bool>>,
-    /// Per column: the rows where it is NULL.
-    nulls: parking_lot::Mutex<FastMap<usize, Arc<Vec<u32>>>>,
-}
-
-impl SysRows {
-    pub fn new(rows: Vec<Row>) -> SysRows {
-        SysRows {
-            rows,
-            by_col: Default::default(),
-            hashable: Default::default(),
-            nulls: Default::default(),
-        }
-    }
-
-    /// The rows whose column `k` is NULL, in row order.
-    pub fn nulls(&self, k: usize) -> Arc<Vec<u32>> {
-        self.nulls
-            .lock()
-            .entry(k)
-            .or_insert_with(|| {
-                Arc::new(
-                    (0..self.rows.len() as u32)
-                        .filter(|&i| self.rows[i as usize].get(k).is_none_or(Value::is_null))
-                        .collect(),
-                )
-            })
-            .clone()
-    }
-
-    /// The rows whose column `k` equals `v` (in row order), when a hash on the column can
-    /// tell (every value of the column is of `v`'s kind or NULL); None otherwise.
-    pub fn lookup(&self, k: usize, v: &Value, same: &dyn Fn(&Value) -> bool) -> Option<Vec<u32>> {
-        let kind = (k, std::mem::discriminant(v));
-        let ok = *self.hashable.lock().entry(kind).or_insert_with(|| {
-            self.rows
-                .iter()
-                .all(|r| r.get(k).is_some_and(|x| x.is_null() || same(x)))
-        });
-        if !ok {
-            return None;
-        }
-        let map = self
-            .by_col
-            .lock()
-            .entry(k)
-            .or_insert_with(|| {
-                let mut m: FastMap<Value, Vec<u32>> = FastMap::default();
-                for (i, r) in self.rows.iter().enumerate() {
-                    if !r[k].is_null() {
-                        m.entry(r[k].clone()).or_default().push(i as u32);
-                    }
-                }
-                Arc::new(m)
-            })
-            .clone();
-        Some(map.get(v).cloned().unwrap_or_default())
-    }
-}
-
-/// `Database::sys_rows`: the catalogs generated last, for every session of the database.
+/// `SessionState::sys_rows`: the last few catalogs generated.
 #[derive(Default)]
 pub struct SysRowsCache {
-    entries: std::collections::VecDeque<(SysRowsKey, Arc<SysRows>)>,
+    entries: std::collections::VecDeque<(SysRowsKey, std::rc::Rc<Vec<Row>>)>,
 }
 
-/// How many generated catalogs a database keeps: every cacheable catalog under a couple of
-/// keys (sessions of other roles, paths or settings).
-const SYS_ROWS_CACHED: usize = 32;
+const SYS_ROWS_CACHED: usize = 16;
 
 /// The catalogs whose rows are a function of the catalog, the roles, the search path and
 /// the settings alone (no data, statistics, locks, other databases or large objects): what
 /// psql's `\d` and ORMs' introspection read again and again.
-pub fn rows_cacheable(table: SysTable) -> bool {
+fn rows_cacheable(table: SysTable) -> bool {
     use SysTable::*;
     matches!(
         table,
@@ -1533,12 +1437,8 @@ fn rows_key(table: SysTable, ctx: &ExecCtx) -> SysRowsKey {
         cat: Arc::downgrade(&cat),
         current_user: ctx.current_user(),
         session_user: ctx.session_user(),
-        login: ctx.sess.user.clone(),
         search_path: ctx.search_path.clone(),
-        // (Only when it exists: a session that made no temporary object has none, and what
-        // `pg_temp` names is then nothing, whatever its name would be.)
-        temp_schema: super::session_temp_schema().filter(|t| cat.schema_named(t).is_some()),
-        settings: ctx.sess.settings.borrow().values_key(),
+        settings: ctx.sess.settings.borrow().generation(),
     }
 }
 
@@ -1549,10 +1449,8 @@ impl SysRowsKey {
             && self.cat.strong_count() > 0
             && self.current_user == o.current_user
             && self.session_user == o.session_user
-            && self.login == o.login
             && self.search_path == o.search_path
-            && self.temp_schema == o.temp_schema
-            && (Arc::ptr_eq(&self.settings, &o.settings) || self.settings == o.settings)
+            && self.settings == o.settings
     }
 }
 
@@ -1561,33 +1459,25 @@ pub fn rows(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
     if !rows_cacheable(table) {
         return rows_generated(table, ctx);
     }
-    Ok(rows_shared(table, ctx)?.rows.clone())
-}
-
-/// `rows` of a cacheable catalog (`rows_cacheable`), shared: generated once per key for all
-/// the database's sessions.
-pub fn rows_shared(table: SysTable, ctx: &ExecCtx) -> Result<Arc<SysRows>> {
-    debug_assert!(rows_cacheable(table));
     let key = rows_key(table, ctx);
-    let cache = &ctx.sess.db.sys_rows;
-    let hit = cache
-        .lock()
+    let hit = ctx
+        .sess
+        .sys_rows
+        .borrow()
         .entries
         .iter()
         .find(|(k, _)| k.same(&key))
         .map(|(_, r)| r.clone());
     if let Some(r) = hit {
-        return Ok(r);
+        return Ok(r.as_ref().clone());
     }
-    // (Generated outside the lock: another session may generate the same rows meanwhile,
-    // and either copy serves.)
-    let rows = Arc::new(SysRows::new(rows_generated(table, ctx)?));
-    let mut c = cache.lock();
-    c.entries.retain(|(k, _)| k.cat.strong_count() > 0 && !k.same(&key));
+    let rows = rows_generated(table, ctx)?;
+    let mut c = ctx.sess.sys_rows.borrow_mut();
+    c.entries.retain(|(k, _)| k.cat.strong_count() > 0 && k.table != key.table);
     if c.entries.len() >= SYS_ROWS_CACHED {
         c.entries.pop_front();
     }
-    c.entries.push_back((key, rows.clone()));
+    c.entries.push_back((key, std::rc::Rc::new(rows.clone())));
     Ok(rows)
 }
 
@@ -1681,7 +1571,11 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                         .iter()
                         .find(|x| x.2 == r.oid)
                         .map_or(0, |x| x.3),
-                    'c' => cat.composite_of_rel(r.oid).map_or(0, |c| c.oid),
+                    'c' => cat
+                        .composites
+                        .values()
+                        .find(|c| c.relid == r.oid)
+                        .map_or(0, |c| c.oid),
                     'r' | 'p' | 'f' => cat.tables.get(&r.oid).map_or(0, |t| t.rowtype),
                     'v' | 'm' => cat.views.get(&r.oid).map_or(0, |v| v.rowtype),
                     _ => 0,
@@ -1845,6 +1739,12 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
             {
                 let mut r = r.clone();
                 r[21] = boot_acl(&r[21], &boot);
+                // Column privileges granted on a system catalog.
+                if let (Value::Oid(rel), Some(num)) = (&r[0], r[4].as_i64())
+                    && let Some(acl) = cat.acl(ObjKind::Table, *rel, num as i32)
+                {
+                    r[21] = acl_value(cat, Some(acl));
+                }
                 out.push(r);
             }
             for r in relations(cat)
@@ -1887,7 +1787,7 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                         (Some(a), _) => a.2,
                         (None, Some(c)) => c.attndims() as i64,
                         (None, None) => {
-                            match cat.composite_of_rel(r.oid) {
+                            match cat.composites.values().find(|ct| ct.relid == r.oid) {
                                 Some(ct) => ct.attndims(&name, &ty) as i64,
                                 None if cat.views.contains_key(&r.oid) => 0,
                                 None if ty.is_array()
@@ -1908,7 +1808,7 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                         i4(if sys_domain.is_some() {
                             -1
                         } else {
-                            ty.typmod() as i64
+                            ty.catalog_typmod() as i64
                         }),
                         i2(ndims),
                         b(ty.by_value()),
@@ -1921,7 +1821,11 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                         b(col.as_ref().is_some_and(|c| c.not_null) || sys.is_some_and(|a| a.0)),
                         b(col
                             .as_ref()
-                            .is_some_and(|c| c.default.is_some() || c.generated.is_some())),
+                            .is_some_and(|c| c.default.is_some() || c.generated.is_some())
+                            || (col.is_none() && sys.is_none()
+                                && cat.views.get(&r.oid).is_some_and(|v| {
+                                    v.defaults.get(num - 1).is_some_and(Option::is_some)
+                                }))),
                         b(col.as_ref().is_some_and(|c| c.missing.is_some())),
                         c(match col.as_ref().and_then(|c| c.identity.clone()) {
                             Some(super::Identity::Always) => 'a',
@@ -2215,7 +2119,7 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                     0,
                     d.array_oid,
                     base,
-                    d.base.typmod(),
+                    d.base.catalog_typmod(),
                     d.not_null,
                     0,
                 );
@@ -2467,8 +2371,18 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                     row[22] = c(align);
                     row[23] = c('p');
                 }
-                if let Some(def) = cat.domains.get(&oid).and_then(|d| d.default.as_ref()) {
-                    row[30] = nm(def);
+                if let Some(d) = cat.domains.get(&oid) {
+                    if let Some(def) = &d.default {
+                        let shown = crate::sql::ruleutils::domain_default(ctx, &d.base, def)
+                            .unwrap_or_else(|| def.clone());
+                        row[29] = nm(&shown);
+                        row[30] = nm(shown);
+                    }
+                    if let Some(coll) = &d.collation
+                        && type_collation(&d.base) != 0
+                    {
+                        row[28] = o(collation_oid(coll).unwrap_or(100));
+                    }
                 }
                 // A made base type's own attributes (its array's alignment follows it).
                 if let Some(d) = cat.base_types.get(&oid) {
@@ -3189,6 +3103,8 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                     'p'
                 } else if f.agg.is_some() {
                     'a'
+                } else if f.window {
+                    'w'
                 } else {
                     'f'
                 };
@@ -3249,6 +3165,10 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                     "c" => 13,
                     _ => 12,
                 });
+                row[8] = o(f.support);
+                if !f.trftypes.is_empty() {
+                    row[24] = arr(DataType::Oid, f.trftypes.iter().map(|t| o(*t)).collect());
+                }
                 if let Some(bin) = &f.probin {
                     row[26] = Value::Text(Arc::from(bin.as_str()));
                 }
@@ -3615,10 +3535,14 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                 .cloned()
                 .chain(cat.ranges.values().map(|r| r.range_type()))
             {
-                let subopc = default_opclass(403, &rt.subtype);
+                let subopc = match cat.ranges.values().find(|r| r.oid == rt.oid) {
+                    Some(r) if r.subtype_opc != 0 => r.subtype_opc,
+                    _ => default_opclass(403, &rt.subtype),
+                };
                 out.push(vec![
                     o(rt.oid),
-                    o(type_oid(cat, &rt.subtype)),
+                    // (A range over a domain: the domain.)
+                    o(rt.subtype_domain.unwrap_or_else(|| type_oid(cat, &rt.subtype))),
                     o(rt.multi_oid),
                     o(rt.collation),
                     o(subopc),
@@ -4112,6 +4036,20 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                     }
                 }
             }
+            // ALTER VIEW ... ALTER COLUMN ... SET DEFAULT.
+            for v in cat.views.values().filter(|v| v.defaults.iter().any(Option::is_some)) {
+                let t = v.as_table();
+                for (i, d) in v.defaults.iter().enumerate() {
+                    if let (Some(d), Some(col)) = (d, v.columns.get(i)) {
+                        out.push(vec![
+                            o(v.default_oids.get(i).copied().unwrap_or(0)),
+                            o(v.oid),
+                            i2(i as i64 + 1),
+                            nm(shown_default(ctx, &t, d, &col.1)),
+                        ]);
+                    }
+                }
+            }
         }
         PgSequence => {
             for s in cat.sequences.values() {
@@ -4128,10 +4066,8 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
             }
         }
         PgSequences => {
-            let rowid_seqs: std::collections::HashSet<u32> =
-                cat.tables.values().filter_map(|t| t.rowid_seq).collect();
             for s in cat.sequences.values() {
-                if rowid_seqs.contains(&s.oid) {
+                if cat.tables.values().any(|t| t.rowid_seq == Some(s.oid)) {
                     continue;
                 }
                 let (last, called) = ctx.sess.db.seq_state(s)?;
@@ -5108,10 +5044,8 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
             }
         }
         IsSequences => {
-            let rowid_seqs: std::collections::HashSet<u32> =
-                cat.tables.values().filter_map(|t| t.rowid_seq).collect();
             for s in cat.sequences.values() {
-                if rowid_seqs.contains(&s.oid) {
+                if cat.tables.values().any(|t| t.rowid_seq == Some(s.oid)) {
                     continue;
                 }
                 // An identity column's sequence depends on it internally: not shown.

@@ -546,7 +546,7 @@ impl Ddl<'_, '_> {
                 changed |= fix(&mut a.1, ty);
             }
             if changed {
-                std::sync::Arc::make_mut(&mut self.cat.functions).insert(oid, Arc::new(f));
+                self.cat.functions.insert(oid, Arc::new(f));
             }
         }
         let ops: Vec<u32> = self.cat.operators.keys().copied().collect();

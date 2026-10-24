@@ -16163,12 +16163,7 @@ pub(crate) fn sys_tuples(table: crate::catalog::system::SysTable, ctx: &ExecCtx)
     if let Some(n) = SYS_ROWS.with(|m| m.borrow().get(&key).map(|e| e.1)) {
         return n;
     }
-    let n = if crate::catalog::system::rows_cacheable(table) {
-        crate::catalog::system::rows_shared(table, ctx).map_or(1000.0, |r| r.rows.len() as f64)
-    } else {
-        crate::catalog::system::rows(table, ctx).map_or(1000.0, |r| r.len() as f64)
-    }
-    .max(1.0);
+    let n = crate::catalog::system::rows(table, ctx).map_or(1000.0, |r| r.len() as f64).max(1.0);
     SYS_ROWS.with(|m| {
         let mut m = m.borrow_mut();
         if m.len() > 256 {

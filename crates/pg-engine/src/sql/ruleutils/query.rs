@@ -2137,7 +2137,10 @@ impl Deparser<'_, '_> {
             .tables
             .get(&oid)
             .map(|t| (t.schema, t.name.clone()))
-            .or_else(|| self.cat.views.get(&oid).map(|v| (v.schema, v.name.clone())))?;
+            .or_else(|| self.cat.views.get(&oid).map(|v| (v.schema, v.name.clone())))
+            .or_else(|| {
+                crate::catalog::system::SysTable::by_oid(oid).map(|t| (t.schema(), t.name().to_string()))
+            })?;
         let mut shown = names.rel_name(oid)?;
         // A name a WITH query hides is qualified (`generate_relation_name`).
         if shown == quote_ident(&real) && self.nested.as_deref().is_some_and(|n| n.is_cte(&real)) {
@@ -2178,6 +2181,10 @@ impl Deparser<'_, '_> {
                     .views
                     .get(&oid)
                     .map(|v| v.columns.iter().map(|c| c.0.clone()).collect())
+            })
+            .or_else(|| {
+                crate::catalog::system::SysTable::by_oid(oid)
+                    .map(|t| t.columns().iter().map(|c| c.0.clone()).collect())
             })
     }
 

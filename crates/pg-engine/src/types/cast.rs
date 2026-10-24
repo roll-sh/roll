@@ -125,9 +125,13 @@ pub fn cast_context(from: &DataType, to: &DataType) -> Option<CastContext> {
             | T::Regclass
             | T::Regtype
             | T::Regproc
+            | T::Regprocedure
             | T::Regnamespace
             | T::Regrole
             | T::Regoper
+            | T::Regoperator
+            | T::Regconfig
+            | T::Regdictionary
             | T::Regcollation,
             T::Int8,
         ) => Assignment,
@@ -136,9 +140,13 @@ pub fn cast_context(from: &DataType, to: &DataType) -> Option<CastContext> {
             | T::Regclass
             | T::Regtype
             | T::Regproc
+            | T::Regprocedure
             | T::Regnamespace
             | T::Regrole
             | T::Regoper
+            | T::Regoperator
+            | T::Regconfig
+            | T::Regdictionary
             | T::Regcollation,
             T::Int4,
         ) => Assignment,
@@ -154,7 +162,8 @@ pub fn cast_context(from: &DataType, to: &DataType) -> Option<CastContext> {
         (T::Name, T::Text) => Implicit,
         (T::Name, T::Varchar(_) | T::Bpchar(_)) => Assignment,
         (T::Text | T::Varchar(_) | T::Bpchar(_), T::Char) => Assignment,
-        (T::Char, T::Text | T::Varchar(_) | T::Bpchar(_)) => Assignment,
+        (T::Char, T::Text) => Implicit,
+        (T::Char, T::Varchar(_) | T::Bpchar(_)) => Assignment,
         // date/time
         (T::Date, T::Timestamp(_) | T::Timestamptz(_)) => Implicit,
         (T::Timestamp(_), T::Timestamptz(_)) => Implicit,
@@ -979,6 +988,32 @@ mod tests {
             Some(CastContext::Explicit)
         );
         assert_eq!(cast_context(&DataType::Bool, &DataType::Int8), None);
+    }
+
+    /// Every built-in pg_cast row between types the engine models gets that row's context
+    /// (format_type / coercion follow `cast_context`, clients read pg_cast).
+    #[test]
+    fn contexts_match_pg_cast() {
+        let mut bad = Vec::new();
+        for line in include_str!("../catalog/data/pg_cast.tsv").lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            let (Ok(src), Ok(dst)) = (f[1].parse::<u32>(), f[2].parse::<u32>()) else {
+                continue;
+            };
+            let (Some(from), Some(to)) = (DataType::from_oid(src), DataType::from_oid(dst)) else {
+                continue;
+            };
+            let want = match f[4] {
+                "i" => CastContext::Implicit,
+                "a" => CastContext::Assignment,
+                _ => CastContext::Explicit,
+            };
+            let got = cast_context(&from, &to);
+            if got != Some(want) {
+                bad.push(format!("{from:?} -> {to:?}: pg_cast {want:?}, engine {got:?}"));
+            }
+        }
+        assert!(bad.is_empty(), "{} casts differ:\n{}", bad.len(), bad.join("\n"));
     }
 
     #[test]

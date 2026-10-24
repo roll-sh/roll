@@ -661,6 +661,9 @@ impl Engine {
                 .collect()
         };
         for (db, _closing) in closing {
+            if let Err(e) = db.persist_sequences() {
+                warn!(database = %db.name, error = %e, "saving sequence positions failed");
+            }
             match db.store.close() {
                 Ok(()) => info!(database = %db.name, "closed idle database"),
                 Err(e) => warn!(database = %db.name, error = %e, "closing idle database failed"),
@@ -1074,11 +1077,11 @@ impl Engine {
         Self::upgrade_batch(db, &mut |txn| {
             txn.delete(staged.clone())?;
             let mut c: Catalog = (*db.catalog()).clone();
-            std::sync::Arc::make_mut(&mut c.indexes).insert(pix.oid, Arc::new(pix.clone()));
+            c.indexes.insert(pix.oid, Arc::new(pix.clone()));
             for (_, moved) in &others {
-                std::sync::Arc::make_mut(&mut c.indexes).insert(moved.oid, Arc::new(moved.clone()));
+                c.indexes.insert(moved.oid, Arc::new(moved.clone()));
             }
-            std::sync::Arc::make_mut(&mut c.tables).insert(oid, Arc::new(nt.clone()));
+            c.tables.insert(oid, Arc::new(nt.clone()));
             txn.set_catalog(c)
         })?;
         // Its models were of the old keys: laid out again when next needed.
@@ -1112,40 +1115,6 @@ impl Engine {
             .ok_or_else(|| internal(format!("no database {dbname}")))?;
         let db = self.open_db(&entry)?;
         Self::set_storage_format(&db, 0)
-    }
-
-    /// Testing the catalog format upgrade: store `dbname`'s catalog as one value, as before
-    /// catalog format 1 (`catalog::persist`), and the number of records that took.
-    #[doc(hidden)]
-    pub fn downgrade_catalog_format_for_test(&self, dbname: &str) -> Result<usize> {
-        let entry = self
-            .entry(dbname)
-            .ok_or_else(|| internal(format!("no database {dbname}")))?;
-        let db = self.open_db(&entry)?;
-        let (from, to) = crate::catalog::persist::record_range();
-        let ts = db.store.visible_ts();
-        let records: Vec<Vec<u8>> = db
-            .store
-            .scan(from, to, ts)
-            .map(|r| r.map(|(k, _)| k))
-            .collect::<Result<_>>()?;
-        let n = records.len();
-        let writes = crate::catalog::persist::legacy_writes(&db.catalog(), records)?;
-        db.store.commit(writes, |_| Ok(()))?;
-        Ok(n)
-    }
-
-    /// Testing the catalog format upgrade: the number of catalog records `dbname` has
-    /// stored.
-    #[doc(hidden)]
-    pub fn catalog_records_for_test(&self, dbname: &str) -> Result<usize> {
-        let entry = self
-            .entry(dbname)
-            .ok_or_else(|| internal(format!("no database {dbname}")))?;
-        let db = self.open_db(&entry)?;
-        let (from, to) = crate::catalog::persist::record_range();
-        let ts = db.store.visible_ts();
-        Ok(db.store.scan(from, to, ts).count())
     }
 
     /// Testing the upgrade: `dbname`'s recorded storage format, and the number of its
@@ -1197,6 +1166,9 @@ impl Engine {
                 .collect()
         };
         for (db, _closing) in dbs {
+            if let Err(e) = db.persist_sequences() {
+                warn!(database = %db.name, error = %e, "saving sequence positions failed");
+            }
             if let Err(e) = db.store.close() {
                 warn!(database = %db.name, error = %e, "close failed");
             }

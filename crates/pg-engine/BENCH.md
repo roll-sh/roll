@@ -332,186 +332,6 @@ the runs between steps were on a busy machine, so read them as ratios, not absol
     per execution of a prepared range query did so each time); the last 64 parsed slots are
     kept (by settings generation, type and texts; plain scalar types only).
 
-## Catalog, DDL and sessions (round 17, agent 44)
-
-Measured on the same machine and harness as above (PostgreSQL in `a44-pg`, the pinned image
-and settings; both servers on cores 32–35, clients on 14–17), while other agents' builds and
-regression runs loaded the machine (load 20–30): read differences under ~30% as noise. Each
-cell is the median of the runs given; **pg** PostgreSQL 18.6, **before** the engine at this
-round's start (`ca0c077`, and `6dd2469` after the rebase), **after** this round's engine.
-New workloads: `ddl` gained `*_after_ddl` cases (a `COMMENT ON TABLE` before the query, so it
-reads a catalog version no statement has read yet) and `setup=0` / `keep=1` / `only=` for
-profiling; `scale` (many tables in many schemas, a partitioned table with many partitions,
-DDL timed per step as the catalog grows, catalog queries at the end); `startup-catalog`
-(in-process: a database's first connection and catalog query, then a second session's);
-`idle --settle-ms` (how long the sessions sit idle before memory is read).
-
-### DDL and catalogs, 500 tables (ms per statement; pg 3 runs, before 2, after 3)
-
-| case | pg | before | after | after / pg |
-|---|---|---|---|---|
-| CREATE TABLE (serial key, check, default) | 3.98 | 7.17 | 0.74 | 5.4x |
-| CREATE INDEX | 1.29 | 13.4 | 0.85 | 1.5x |
-| ALTER TABLE ADD COLUMN | 0.55 | 18.6 | 1.30 | 0.42x |
-| DROP TABLE | 7.17 | 24.6 | 10.3 | 0.70x |
-| information_schema.columns of a table | 6.33 | 25.6 | 17.4 | 0.36x |
-| information_schema.tables count | 3.84 | 0.73 | 0.73 | 5.3x |
-| psql `\d t`: lookup | 0.71 | 9.1 | 1.31 | 0.54x |
-| psql `\d t`: columns | 0.50 | 18.7 | 2.48 | 0.20x |
-| psql `\d t`: indexes | 0.94 | 11.5 | 1.33 | 0.71x |
-| `pg_class` × `pg_attribute` join | 7.04 | 43.7 | 20.0 | 0.35x |
-| ORM constraints query | 41.7 | 49.1 | 30.0 | 1.39x |
-| `'t'::regclass` | 0.20 | 0.16 | 0.09 | 2.2x |
-| psql `\d t` columns, after DDL | 0.90 | 64.3 | 27.5 | 0.03x |
-| psql `\d t` lookup, after DDL | 0.52 | 36.3 | 6.72 | 0.08x |
-
-(A catalog query's figure is the mean over 20 runs in one session, the first of which, after
-the setup's DDL, generates the catalog's rows: `psql \d t: columns` runs in 0.4–0.6 ms once
-generated, as PostgreSQL's does, `EXPLAIN ANALYZE` planning 0.41 ms and execution 0.56 ms.)
-
-### Many tables: 10,000 tables in 20 schemas and a table of 1,000 partitions (ms per statement)
-
-| case | pg | after | after / pg |
-|---|---|---|---|
-| CREATE TABLE, at 2,000 / 6,000 / 10,000 tables | 3.24 / 3.02 / 2.73 | 1.91 / 6.24 / 12.8 | 1.7x / 0.48x / 0.21x |
-| CREATE TABLE ... PARTITION OF (1,000) | 4.88 | 17.3 | 0.28x |
-| ALTER TABLE ADD COLUMN | 0.51 | 23.1 | 0.02x |
-| CREATE INDEX | 1.00 | 13.0 | 0.08x |
-| DROP TABLE | 4.75 | 77.3 | 0.06x |
-| DROP SCHEMA ... CASCADE, 20 schemas (s, total) | 15.8 | 3.03 | 5.2x |
-| psql `\d t`: lookup | 1.36 | 9.69 | 0.14x |
-| psql `\d t`: columns | 0.99 | 20.0 | 0.05x |
-| psql `\dt` of a schema | 9.34 | 24.0 | 0.39x |
-| information_schema.columns of a table | 3.23 | 65.4 | 0.05x |
-| `count(*)` of pg_class | 5.11 | 17.3 | 0.30x |
-| `'t'::regclass`, a point select | 0.18, 0.24 | 0.11, 0.14 | 1.6x, 1.7x |
-
-The engine before this round couldn't be run to 10,000 tables in reasonable time (every DDL
-wrote the whole catalog: 69 ms per CREATE TABLE at 5,000 tables and growing). At 5,000 tables
-(500 partitions; pg / before / after): CREATE TABLE 4.8 / 69.0 / 11.3, ALTER TABLE ADD COLUMN
-0.69 / 104 / 11.8, CREATE INDEX 1.78 / 101 / 21.6, DROP TABLE 9.0 / 103 / 34.4, psql `\d t`
-columns 1.07 / 105 / 15.3, the 10 schemas' DROP SCHEMA CASCADE 12.0 s / 312 s / 3.0 s. (The
-"after" at 5,000 tables is an earlier build of this round, before optimisations 2 and 6.)
-
-### Memory per idle session, startup
-
-| | pg | before | after |
-|---|---|---|---|
-| memory per idle session (100 sessions after a `pg_class` query; 3 s idle) | 1,544–1,554 kB | 1,925–3,138 kB | 533–543 kB |
-| the same, 0.5 s idle (before the idle trim) | | 3,138 kB | 769–810 kB |
-| connection setup (SCRAM) | 16.5 ms | 7.1 ms | 7.6 ms |
-| in-process, 2,000 tables: a database's first connection (its catalog loaded) | | 30–34 ms | 70–75 ms (231 ms once, rewriting a catalog of the old format) |
-| ... its first `count(*)` of pg_class | | 98–114 ms | 37–82 ms |
-| in-process, 10,000 tables: first connection; first `count(*)` of pg_class | | | 138–155 ms; 70 ms |
-
-`Engine::open` stays under 1 ms (databases open on first use). The per-database figure of the
-idle workload stays noise (mimalloc returns memory as databases close).
-
-### Optimisations
-
-1. **The catalog stored as a record per object** (`catalog/persist.rs`, catalog format 1): a
-   header record under the old key (scalar fields and lists) and one record per entry of each
-   per-object map and set (a tag for the map, the oid). A DDL commit writes the header and only
-   the records that changed (`persist::writes`: maps of `Arc`s compared by pointer, which a DDL
-   statement's copy shares for every object it didn't touch, the rest by value), computed at
-   commit against the catalog the transaction's DDL started from (the check that no other DDL
-   committed since is unchanged), in the commit's one WAL record, so header and records change
-   together and a crash leaves either version. Rollbacks and savepoints are unaffected (the
-   catalog under construction lives in the transaction as before; `Txn::writes` holds a
-   stand-in for it). `Database::open` loads the header and the records, and stores what
-   `reindex` brings up to date at once. The bytes a statement writes no longer grow with the
-   catalog (`tests/catalog_storage.rs` `ddl_writes_dont_grow_with_the_catalog`). Every DDL
-   statement had serialised the whole catalog as JSON (and zstd-compressed and checksummed it
-   in the WAL and SSTs): 500 tables, CREATE TABLE 6.85 → 3.44 ms, CREATE INDEX 13.4 → 7.2,
-   ALTER TABLE 18.6 → 13.0.
-2. **Copy-on-write catalog maps**: the maps with an entry per relation or function (`tables`,
-   `indexes`, `views`, `sequences`, `functions`, `relstats`, `frozen_xids`, `class_order`, and
-   the name and inheritance indexes) are `Arc`s a catalog's copies share until one changes them
-   (`Arc::make_mut`); a DDL statement copies the catalog a few times (binding defaults and
-   checks over the statement's catalog), each copy was as big as the catalog. The commit's diff
-   skips maps the two versions share.
-3. **System catalogs' rows shared by a database's sessions** (`catalog/system.rs`
-   `rows_shared`, `Database::sys_rows`): agent 36's per-session cache, keyed now by the
-   settings' values (`Settings::values_key`) instead of a per-session generation, and by the
-   session's temporary schema when it has one; a catalog's rows are generated once per catalog
-   version for all sessions, and each session no longer holds its own copies. A scan reads the
-   shared rows and copies only those it returns (it copied the whole catalog per statement).
-4. **Equalities served by a hash** (`SysRows::lookup`): a scan whose first conjunct is
-   `column = constant` (`attrelid = 'x'::regclass`, `oid = 16385`), or whose index path's
-   conditions are equalities (`Index Cond`), checks only the rows of that value (and, for the
-   first-conjunct rule, those where the column is NULL, so the conjunction's evaluation order is
-   as before), through a hash on the column kept with the shared rows; parameterised scans
-   (`sys_rescan`) use the shared rows and hashes too. A scan in an index's order sorts only its
-   candidates (it sorted the whole catalog).
-5. **Quadratic catalog generation and lookups** (each was a scan of a map per row or per
-   object): TOAST owners, composite types by relation, schemas by name, ACLs, tables' row
-   types, user type names, and the row-level-security tables by name every statement's
-   binding looked for (it scanned every table and view per statement) are hashed once per
-   frozen catalog (`Catalog::lookups`: a catalog published in an `Arc` no longer changes; a
-   copy DDL edits starts unfrozen and scans); the built-in tables read per row are hashed once
-   per process (`type_procs`, `SysTable::by_oid` / `columns` / `is_view`, built-in operator
-   classes and access methods, the catalogs' index list `sys_indexes.tsv`, which planning a
-   catalog query parsed per column).
-6. **DDL's whole-catalog passes made cheaper or linear**: ALTER TABLE's search for stored
-   expressions naming the table (`follow_renames`) copied every table and index (now only
-   those whose texts may name it, found without copying the texts); foreign keys' internal
-   triggers looked up every constraint by scanning all tables (`ri_triggers`), and every DDL
-   statement made all of them to learn which tables have triggers (`triggered_tables` now
-   lists the tables only, checked against the full list in debug builds); `depends` scanned
-   all tables per sequence; dropping cascaded objects searched the deleted list and all tables
-   per object (`delete_object`), and the dependency walk (`findDependentObjects`) scanned every
-   dependency and every target per visited object (now indexed by object): DROP SCHEMA ...
-   CASCADE of 10 schemas over 5,000 tables 312 s → 3 s.
-7. **Idle sessions** (`bin/roll-engine.rs`, `server::set_idle_hook`): transparent huge pages
-   off for the server process (with the system's `always` mode every connection thread's
-   first heap pages took a 2 MB page: 3.1 → 1.2 MB per idle session alone), and a connection
-   idle for 2 s returns its thread's free mimalloc pages and the stack its statements touched
-   to the system (`mi_collect`, `madvise(MADV_DONTNEED)` below the live frames,
-   `stack::unused_range`). Embedders keep their own allocator and settings.
-
-Also fixed on the way: `format_type(0, ...)` is `-` as in PostgreSQL (it was `???`).
-
-### Upgrade implications
-
-- Catalog format 1: a database whose catalog is one JSON value (every database before this
-  round) is rewritten as header and records the first time this version opens it, in one
-  commit (231 ms for 2,000 tables, once; `tests/catalog_storage.rs`
-  `legacy_catalog_is_rewritten_as_records`). `Engine::upgrade_storage` and the index-key
-  upgrade are unchanged and run after it.
-- No downgrade: an older binary reading the new header fails with "corrupt catalog" (the
-  header lacks the maps it requires) rather than seeing an empty catalog.
-- Nothing else in the storage format changed.
-
-### Where it is still slower (catalog, DDL, sessions), and why
-
-- **Every DDL statement still does O(objects) work**, with small constants now: copying the
-  maps it changes (`Arc::make_mut` of `tables` copies the map's nodes), the commit's diff over
-  a changed map (pointer comparisons), and whole-catalog passes run per statement:
-  `prepare_save` (TOAST tables, default privileges, ACL pruning, frozen xids, relhastriggers
-  bookkeeping), `dodge_array_type_names`, constraint name choice (scans the schema's tables),
-  ALTER TABLE's `follow_renames` (every stored text) and `column_using` (every column's type),
-  and DROP's dependency graph (`depends` binds every stored expression of the catalog; DROP
-  TABLE 77 ms at 10,000 tables). Linear per statement means quadratic for loading a schema of
-  N tables; PostgreSQL's per-statement cost is O(log N) through its catalog indexes. The fix
-  is persistent (structurally shared) maps for the catalog (O(log N) copies and edits) and
-  indexes for what these passes look for (dependents by object, constraint names by schema,
-  stored texts by the names they mention), so each pass touches only the objects involved.
-- **A new catalog version regenerates a system catalog's rows whole** the first time a
-  statement reads it (psql `\d` after DDL: 27 ms at 500 tables, PostgreSQL 0.9): rows are
-  shared and hashed per version, not maintained incrementally. The fix: generate per object
-  and reuse the rows of objects a DDL didn't change (pg_attribute's rows per relation keyed by
-  its `Arc`, with the catalog-wide inputs, ACLs and types, compared between versions), or
-  generate only the rows an equality asks for.
-- **Catalog joins and counts copy rows**: the executor's rows are `Vec<Value>`s, and a nested
-  loop concatenates whole rows (pg_class × pg_attribute: 60 columns per output row). Decoding /
-  copying only the columns a plan reads (the executor's projection mask, item 1 below) would
-  remove most of it.
-- **information_schema views** run their SQL over the catalogs per statement (12–65 ms):
-  their rows could be cached by catalog version like the base catalogs'.
-- **Opening a database with a big catalog** loads every record (JSON per object): about 2x
-  the old single value's parse (70 ms for 2,000 tables, 150 ms for 10,000), once per database
-  open. A binary encoding, or loading objects lazily, would cut it.
-
 ## Where it is still slower, and why
 
 In rough order of what it costs users:
@@ -540,13 +360,16 @@ In rough order of what it costs users:
    engine has no visibility map to skip it). The fixes: batch an index scan's fetches (sort
    a run of row keys, read them with one merging cursor, emit in index order), and answer
    index-only scans from the index entries when the plan reads only index columns.
-4. **DDL at scale.** Since round 17's agent 44 the catalog is stored per object and its maps
-   are shared between copies ("Catalog, DDL and sessions" above): at 500 tables CREATE TABLE
-   and CREATE INDEX are faster than PostgreSQL's, ALTER TABLE and DROP 1.4–2.4x slower; each
-   statement's work still grows with the catalog (0.02–0.3x at 10,000 tables).
-5. **Catalog introspection (`\d`, ORMs).** Rows are shared per catalog version and looked up
-   through hashes (above): 1.3–2.5 ms for psql's `\d` queries at 500 tables, ORM constraint
-   queries ahead of PostgreSQL; the first query after DDL regenerates a catalog whole.
+4. **DDL (3–28x slower).** Every DDL statement serialises the whole catalog to JSON and
+   writes it as one value (`Txn::set_catalog`), so a statement's cost grows with the number of
+   objects. The fix: store catalog objects under keys of their own (a storage-format change,
+   with an `upgrade_storage` step).
+5. **Catalog introspection (`\d`, ORMs: 6–40x slower).** System catalogs are generated as rows
+   from the catalog structures, whole, for the first statement that reads them; optimisation
+   12 reuses them within a session, but each new catalog version, session or setting change
+   regenerates them, and a statement still copies them. The fix: generate only the rows an
+   equality on the catalog's key asks for (as `sys_rescan` does for parameterised scans), and
+   share generated rows across sessions by catalog version.
 6. **Multi-client writes (0.6–0.8x at 8 clients over the wire, ahead in-process).** CPU per
    statement is about twice PostgreSQL's under concurrency: the remaining profile is flat
    (allocation, protocol, binding, lock-manager waits on hot rows).
@@ -558,9 +381,9 @@ In rough order of what it costs users:
    the planner thought empty, and 37–51 s now: the index-only scan of item 3. PostgreSQL
    plans a parallel index-only scan of `l_shipdate`'s index there; the engine's estimate of
    the big table's indexes picks the primary key's, so that EXPLAIN still differs.)
-8. **Memory per idle session**: 0.5 MB since round 17's agent 44 (PostgreSQL 1.5 MB; it was
-   2–3 MB: transparent huge pages under mimalloc's per-thread heaps, and per-session catalog
-   rows).
+8. **Memory per idle session (2–3 MB, PostgreSQL 1.5 MB).** mimalloc keeps per-thread heaps,
+   and a session keeps the catalogs it generated (optimisation 12) and its parse cache. Both
+   could be released after a session has been idle for a while.
 
 Where the engine is ahead: single-client latency everywhere in OLTP (no process per
 connection, no shared-buffer locking, statement plans cached), select-only and TPC-B pgbench
@@ -585,16 +408,3 @@ protocol: 2–27x PostgreSQL over the wire).
   their last record, which this version's replay stops at. (An older binary replaying a WAL
   this version left after a crash fails on the zeros: downgrades after a crash aren't
   supported.)
-- Round 17, agent 44: `cargo test -p pg-engine` and clippy (no new warnings) on the rebased
-  tree; the regression suite in full with its own reference containers for the base it was
-  rebased on (`6dd2469`) and for the change: **51,131 / 51,150 both, identical per file and
-  in every differing unit's hunk** (before the rebase, `ca0c077` and the change: 51,130 both,
-  identical); `difftest smoke` passes. New tests: `tests/catalog_storage.rs` (the catalog
-  after restarts, rollbacks and savepoints, after a crash replayed from the WAL, a catalog of
-  the old format rewritten, and the bytes DDL writes not growing with the catalog),
-  `tests/session_state.rs` `catalog_rows_shared_by_sessions_follow_their_state` (sessions of
-  other settings, roles, paths and temporary schemas reading the shared rows),
-  `tests/wire.rs` `idle_hook_runs_and_the_connection_goes_on`, golden `catalog_lookups`
-  (lookups by name and oid across DDL, rollbacks and savepoints, recorded from PostgreSQL),
-  and debug assertions (`SysTable`'s table order, `triggered_tables` against the full list
-  of internal triggers).

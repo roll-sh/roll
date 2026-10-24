@@ -2098,7 +2098,9 @@ pub fn stored_expr(
     kind: Stored,
     pretty: bool,
 ) -> Option<String> {
-    let cols = column_names(table);
+    // (System columns, `tableoid`, follow the table's: `bind_over_table`.)
+    let mut cols = column_names(table);
+    cols.extend(crate::exec::scan::SYS_COLS.iter().map(|(n, _)| n.to_string()));
     let mut out = Vec::new();
     // (Its whole-row reference shows as `table.*`.)
     let prev = STORED_TABLE.replace(Some((table.rowtype, table.name.clone())));
@@ -2155,6 +2157,17 @@ pub fn domain_check(
     let node = super::binder::ast::parse_expr(sql).ok()?;
     let e = b.bind_domain_check(&node, base).ok()?;
     deparse(&e, &["VALUE".to_string()], ctx, pretty)
+}
+
+/// A domain's DEFAULT as Postgres stores it (typdefault, and what `pg_get_expr` prints of
+/// typdefaultbin): the expression coerced to the base type, deparsed.
+pub fn domain_default(ctx: &ExecCtx, base: &crate::types::DataType, sql: &str) -> Option<String> {
+    let mut b = super::binder::Binder::new(ctx, vec![]);
+    b.deparse = true;
+    let node = super::binder::ast::parse_expr(sql).ok()?;
+    let e = b.bind_scalar(&node, super::binder::Clause::Default).ok()?;
+    let e = b.coerce_assign(e, base, "").ok()?;
+    deparse(&e, &[], ctx, false)
 }
 
 /// A trigger's WHEN condition as `pg_get_triggerdef` prints it (columns as `old.x` / `new.x`).

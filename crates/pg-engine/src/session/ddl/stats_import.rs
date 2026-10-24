@@ -406,7 +406,7 @@ impl Ddl<'_, '_> {
             st.allfrozen = int(v);
         }
         if self.cat.relstats.get(&oid) != Some(&st) {
-            std::sync::Arc::make_mut(&mut self.cat.relstats).insert(oid, st);
+            self.cat.relstats.insert(oid, st);
             self.save_inplace()?;
         }
         Ok(ok)

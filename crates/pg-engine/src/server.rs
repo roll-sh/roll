@@ -75,66 +75,10 @@ pub fn spawn(engine: Arc<Engine>, addr: &str, opts: ServerOptions) -> std::io::R
     Ok(local)
 }
 
-/// What a connection's thread runs once it has waited `IDLE_TRIM` for its client
-/// (`set_idle_hook`).
-static IDLE_HOOK: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
-
-/// How long a connection waits for its client before running the idle hook.
-const IDLE_TRIM: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Run `f` on a connection's thread once the connection has been idle for a while (once per
-/// idle period): the server binary returns the thread's free allocator memory to the
-/// system there, so idle sessions keep little. Set once, before serving.
-pub fn set_idle_hook(f: fn()) {
-    let _ = IDLE_HOOK.set(f);
-}
-
-/// A connection's reading side: a read that waits past `IDLE_TRIM` runs the idle hook (once
-/// until the client sends something again) and goes on waiting.
-struct IdleRead {
-    s: TcpStream,
-    armed: bool,
-}
-
-impl IdleRead {
-    fn new(s: TcpStream) -> std::io::Result<IdleRead> {
-        if IDLE_HOOK.get().is_some() {
-            s.set_read_timeout(Some(IDLE_TRIM))?;
-        }
-        Ok(IdleRead { s, armed: true })
-    }
-}
-
-impl Read for IdleRead {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        loop {
-            match self.s.read(buf) {
-                Ok(n) => {
-                    self.armed = true;
-                    return Ok(n);
-                }
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    if std::mem::take(&mut self.armed)
-                        && let Some(h) = IDLE_HOOK.get()
-                    {
-                        h();
-                    }
-                }
-                Err(e) => return Err(e),
-            }
-        }
-    }
-}
-
 // ── framing ──
 
 struct Conn {
-    rd: BufReader<IdleRead>,
+    rd: BufReader<TcpStream>,
     wr: TcpStream,
     out: BytesMut,
     /// Where the message being written starts (to drop it if a panic cuts it short).
@@ -430,7 +374,7 @@ fn handle(
     crate::stack::set_limit(THREAD_STACK - (2 << 20));
     stream.set_nodelay(true)?;
     let mut c = Conn {
-        rd: BufReader::with_capacity(16 << 10, IdleRead::new(stream.try_clone()?)?),
+        rd: BufReader::with_capacity(16 << 10, stream.try_clone()?),
         wr: stream.try_clone()?,
         out: BytesMut::with_capacity(8 << 10),
         partial: None,

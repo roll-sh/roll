@@ -3566,6 +3566,7 @@ impl Binder<'_, '_> {
                 {
                     self.level().scope = scope;
                     let nright = width(&p);
+                    let held = !params.is_empty() && crate::sql::plan::deferred_lateral(&p);
                     Plan::Join {
                         kind: JoinKind::Inner,
                         left: Arc::new(Plan::One),
@@ -3575,7 +3576,10 @@ impl Binder<'_, '_> {
                         params,
                         nleft: 0,
                         nright,
-                        meta: Default::default(),
+                        meta: Box::new(crate::sql::plan::JoinMeta {
+                            lateral_held: held,
+                            ..Default::default()
+                        }),
                     }
                 }
                 None => {
@@ -3606,6 +3610,7 @@ impl Binder<'_, '_> {
                         Ok(j) => j,
                         Err(b) => {
                             let (left, p, params) = *b;
+                            let held = !params.is_empty() && crate::sql::plan::deferred_lateral(&p);
                             Plan::Join {
                                 kind: JoinKind::Inner,
                                 left: Arc::new(left),
@@ -3615,7 +3620,10 @@ impl Binder<'_, '_> {
                                 params,
                                 nleft,
                                 nright,
-                                meta: Default::default(),
+                                meta: Box::new(crate::sql::plan::JoinMeta {
+                                    lateral_held: held,
+                                    ..Default::default()
+                                }),
                             }
                         }
                     }
@@ -3711,7 +3719,8 @@ impl Binder<'_, '_> {
                         pb::SetOperation::SetopNone | pb::SetOperation::Undefined
                     ) && s.values_lists.is_empty());
                 let saved_defer = (self.defer_level.take(), std::mem::take(&mut self.deferred));
-                if simple_select && rs.alias.is_some() && !self.deparse && !self.unplanned && self.deps.is_none() && self.refs.is_none() {
+                // (A LATERAL one without an alias too: it may be pulled up, below.)
+                if simple_select && (rs.alias.is_some() || rs.lateral) && !self.deparse && !self.unplanned && self.deps.is_none() && self.refs.is_none() {
                     self.defer_level = Some(self.levels.len() + 1);
                 }
                 let sub_level = self.levels.len() + 1;
@@ -3803,6 +3812,20 @@ impl Binder<'_, '_> {
                         },
                         rti: self.next_rti(),
                     }
+                } else if deferred
+                    && rs.lateral
+                    && !params.is_empty()
+                    && !pushed
+                    && crate::sql::paths::lateral_pullable(&plan)
+                {
+                    // A LATERAL subquery over a join Postgres pulls up
+                    // (pull_up_simple_subquery: is_simple_subquery with its LATERAL
+                    // restrictions): left unplanned, its relations the join group's above,
+                    // no clause pushed into it (`JoinMeta::lateral_sub`).
+                    let mut plan = plan;
+                    union_alias(&mut plan, &name);
+                    crate::sql::plan::mark_deferred_lateral(&mut plan);
+                    plan
                 } else if deferred {
                     // (Not one: its level planned now, as any.)
                     let mut plan = plan;
@@ -3921,9 +3944,10 @@ impl Binder<'_, '_> {
     }
 
     /// `restrict_nonsystem_relation_kind` with `view`: a query that is planned can't expand
-    /// a view users made (ApplyRetrieveRule, rewriteTargetView).
+    /// a view users made (ApplyRetrieveRule, rewriteTargetView). (Deparsing isn't planning:
+    /// pg_dump sets it and prints views over views.)
     pub(crate) fn check_view_restricted(&self, v: &crate::catalog::ViewDef) -> Result<()> {
-        if self.deps.is_some() || self.unplanned || v.oid < crate::catalog::FIRST_USER_OID {
+        if self.deps.is_some() || self.unplanned || self.deparse || v.oid < crate::catalog::FIRST_USER_OID {
             return Ok(());
         }
         if crate::session::settings::restricted_kinds(&self.ctx.sess.settings.borrow()).0 {
@@ -3937,7 +3961,7 @@ impl Binder<'_, '_> {
 
     /// `restrict_nonsystem_relation_kind` with `foreign-table`: no foreign table is planned.
     pub(crate) fn check_foreign_restricted(&self) -> Result<()> {
-        if self.deps.is_some() || self.unplanned {
+        if self.deps.is_some() || self.unplanned || self.deparse {
             return Ok(());
         }
         if crate::session::settings::restricted_kinds(&self.ctx.sess.settings.borrow()).1 {
@@ -6525,6 +6549,11 @@ impl Binder<'_, '_> {
             }
         }
         go(p, &all);
+        // (A FROM subquery's join tree kept as bound for this level's pull-up: its scans
+        // are this level's relations too.)
+        for b in self.ctx.bound_trees.borrow_mut().iter_mut() {
+            go(Arc::make_mut(&mut b.tree), &all);
+        }
     }
 }
 

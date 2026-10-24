@@ -873,11 +873,11 @@ impl<'b, 'a> Binder<'b, 'a> {
             // (A security barrier view too.)
             let applies = ne.nodes().into_iter().any(|(x, ..)| match x {
                 pg_query::NodeRef::RangeVar(rv) => {
-                    let (tables, barrier) = self.cat.rls_named(&rv.relname);
-                    barrier
-                        || tables
-                            .iter()
-                            .any(|t| self.rls_enabled(t).unwrap_or(false))
+                    self.cat.tables.values().any(|t| {
+                        t.rls && t.name == rv.relname && self.rls_enabled(t).unwrap_or(false)
+                    }) || self.cat.views.values().any(|v| {
+                        v.name == rv.relname && v.option("security_barrier")
+                    })
                 }
                 _ => false,
             });
@@ -984,8 +984,9 @@ impl<'b, 'a> Binder<'b, 'a> {
         clause: Clause,
     ) -> Result<Expr> {
         let mut rel = table_rel(t, &t.name, None);
-        // A policy may read the row's system columns (`USING (ctid IN ...)`).
-        if clause == Clause::Policy {
+        // A policy may read the row's system columns (`USING (ctid IN ...)`); deparsed, a
+        // generation expression's `tableoid` is the column, not the table's oid.
+        if clause == Clause::Policy || self.deparse {
             rel.sys_col = Some(t.columns.len());
         }
         let saved = std::mem::replace(&mut self.level().scope, Scope { rels: vec![rel] });

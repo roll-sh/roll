@@ -176,6 +176,8 @@ pub fn ctas_rel_exists(ctx: &ExecCtx, s: &pb::CreateTableAsStmt) -> Result<bool>
 pub(crate) struct Ddl<'c, 'a> {
     pub ctx: &'c ExecCtx<'a>,
     pub cat: Catalog,
+    /// The catalog `cat` was copied from (the base of the transaction's catalog change).
+    base: Arc<Catalog>,
     pub sql: &'c str,
     /// The types of `$n` in the statement (CREATE TABLE AS EXECUTE: the prepared one's).
     pub params: Vec<crate::types::DataType>,
@@ -222,9 +224,11 @@ pub(crate) struct Ddl<'c, 'a> {
 
 impl<'c, 'a> Ddl<'c, 'a> {
     fn new(ctx: &'c ExecCtx<'a>, sql: &'c str) -> Self {
+        let base = ctx.catalog();
         Ddl {
             ctx,
-            cat: (*ctx.catalog()).clone(),
+            cat: (*base).clone(),
+            base,
             sql,
             typed_cascade: false,
             seq_oids: Default::default(),
@@ -470,12 +474,18 @@ impl<'c, 'a> Ddl<'c, 'a> {
         })
     }
 
+    /// Start over from the transaction's catalog as it is now.
+    pub(super) fn reload_catalog(&mut self) {
+        self.base = self.ctx.catalog();
+        self.cat = (*self.base).clone();
+    }
+
     /// Store the edited catalog in the transaction.
     fn save(&mut self) -> Result<()> {
         self.prepare_save();
         self.cat.dodge_array_type_names();
         self.check_new_type_usage()?;
-        self.ctx.txn.borrow_mut().set_catalog(self.cat.clone())
+        self.ctx.txn.borrow_mut().set_catalog_from(self.cat.clone(), &self.base)
     }
 
     /// USAGE on a type a command stores (aclcheck_error_type): `ty`, or domain `domain`.
@@ -602,12 +612,13 @@ impl<'c, 'a> Ddl<'c, 'a> {
     /// id.
     fn save_inplace(&mut self) -> Result<()> {
         self.prepare_save();
-        self.ctx.txn.borrow_mut().set_catalog_inplace(self.cat.clone())
+        self.ctx.txn.borrow_mut().set_catalog_inplace(self.cat.clone(), &self.base)
     }
 
     fn prepare_save(&mut self) {
         extension::prune_members(&mut self.cat);
         let before = self.ctx.catalog();
+        self.qualify_new_exprs(&before);
         self.add_toast_tables(&before);
         self.apply_default_privileges(&before);
         self.prune_acls(&before);
@@ -646,7 +657,7 @@ impl<'c, 'a> Ddl<'c, 'a> {
         // Access methods of relations that are gone.
         if !self.cat.rel_am.is_empty() {
             let cat = &self.cat;
-            let live: std::collections::HashSet<u32> = cat
+            let live: Vec<u32> = cat
                 .rel_am
                 .keys()
                 .copied()
@@ -694,20 +705,20 @@ impl<'c, 'a> Ddl<'c, 'a> {
         for o in now.iter().flat_map(|(o, t)| [*o, *t]) {
             if o != 0 && !old.contains(&o) && !self.cat.frozen_xids.contains_key(&o) {
                 let x = *xmin.get_or_insert_with(|| self.recent_xmin());
-                std::sync::Arc::make_mut(&mut self.cat.frozen_xids).insert(o, x);
+                self.cat.frozen_xids.insert(o, x);
             }
         }
         let live: std::collections::HashSet<u32> =
             now.into_iter().flat_map(|(o, t)| [o, t]).collect();
-        std::sync::Arc::make_mut(&mut self.cat.frozen_xids).retain(|o, _| live.contains(o));
+        self.cat.frozen_xids.retain(|o, _| live.contains(o));
     }
 
     /// A relation's new storage (TRUNCATE, a rewrite) is frozen up to `xid`; a new TOAST
     /// table goes with it.
     pub(super) fn set_frozen_xid(&mut self, t: &Table, xid: u64) {
-        std::sync::Arc::make_mut(&mut self.cat.frozen_xids).insert(t.oid, xid);
+        self.cat.frozen_xids.insert(t.oid, xid);
         if t.toast != 0 {
-            std::sync::Arc::make_mut(&mut self.cat.frozen_xids).insert(t.toast, xid);
+            self.cat.frozen_xids.insert(t.toast, xid);
         }
     }
 

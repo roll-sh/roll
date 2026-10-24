@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51135 (**99.97%**) |
-| units differing | 15 |
+| units matching | 51142 (**99.98%**) |
+| units differing | 8 |
 | files fully matching | 227 |
 | engine output == expected/*.out (pg_regress "ok") | 188 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 15 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 8 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 15 units
-join (12), partition_join (2), partition_prune (1)
+### EXPLAIN (group C1) — 8 units
+join (6), partition_join (1), partition_prune (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -106,6 +106,186 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 33 (LATERAL subqueries over joins pulled up, PlaceHolderVars with ph_lateral, indirect lateral_relids)
+
+Measured in subset runs of the planner-heavy files and the other files with LATERAL references
+(test_setup, create_index, create_misc, create_view, select, union, subselect, join,
+aggregates, inherit, insert_conflict, limit, returning, updatable_views, merge, with, rules,
+rowsecurity, select_views, select_distinct, equivclass, partition_join, partition_prune,
+partition_aggregate, select_parallel, incremental_sort, memoize, join_hash, explain, stats_ext,
+groupingsets, window, tsrf, rangefuncs, sqljson_jsontable, collate, create_table,
+collate.icu.utf8, create_table_like, gin, gist, indexing, jsonpath, numeric, tablesample,
+plpgsql, stats_import, tidrangescan, arrays, json, jsonb, sqljson, xml, event_trigger), unit by
+unit against a run of the base: on b1917d6 (5 fixed, none broken), rebased onto f00b52a
+(20720 -> 20725 of 20745, the same 5, none broken; a full run of that state measured 51134, the
+table's 51129 plus these 5), onto add6169 (20725 -> 20730, the same 5; a full run measured
+51139, its 51134 plus these 5, no engine restart), onto 6dd2469 (20726 -> 20731, the same 5, none broken) and onto 5c6d2d3 (20728 -> 20733, the same 5, none broken). Crate tests and
+clippy on each state; no other agent's units moved.
+
+| file | fixed units |
+|---|---|
+| join | 332, 675, 676, 776 |
+| partition_join | 41 |
+
+What changed:
+
+- **A LATERAL subquery over a join is pulled up** (pull_up_simple_subquery with
+  is_simple_subquery's LATERAL rules). The binder leaves such a subquery unplanned
+  (`binder::select`, `JoinMeta::lateral_sub` on its join, `lateral_held` on the LATERAL join
+  over it) when `paths::lateral_pullable` says Postgres pulls it up: a select list (and WHERE)
+  over a plain join tree, nothing volatile or set-returning in the outputs, its lateral
+  references only of the query right above, none in or under an outer join of its own
+  (jointree_contains_lateral_outer_refs), none inside a sub-select; `SELECT *` of the join gets
+  a projection of its own. An outer join's ON clauses over it stay the join's
+  (`optimize::join_lateral`), as Postgres distributes them after pull-up; an inner join's are
+  pushed in as before. The join group's `lift` then flattens it (`flatten_join_subquery` with
+  `Cx::frame`, the LATERAL join's values and the outer joins nulling each one's relation): its
+  scans' clauses over the lateral references become WHERE clauses of the group
+  (`hoist_frame_quals`), its outputs PlaceHolderVars by pullup_replace_vars_callback's LATERAL
+  cases (a bare reference to a relation not under the same lowest nulling outer join, an
+  expression reading no Var of the subquery's nor of such a relation, or a non-strict one), and
+  the LATERAL join is marked `lateral_flat`. `outerjoins::walk` takes its relations in as items
+  of the group, the lateral references read through the join's values (`subst_frame`); an item
+  that still reads them (a function scan, a VALUES) is a LATERAL item of the group. A subquery
+  that isn't taken after all (a group that isn't planned, or the outputs reading the references
+  went unread) is planned apart as the binder would have (`Planner::settle_laterals`, the join's
+  clauses pushed into it then), and the group lifted again over it.
+- **PlaceHolderVars with ph_lateral** (`Phv::lateral`, `outerjoins::phv_lateral`): a
+  PlaceHolderVar's ph_eval_at is what it reads within its syntactic scope, what it reads outside
+  its ph_lateral. create_lateral_join_info's second pass: evaluated at one relation, ph_lateral
+  is that relation's direct lateral reference; at a join, every relation of the join gets it as
+  an indirect one (`Search::phv_lat`). `lateral_closure` / `lateral_relids` / `has_lat` take both;
+  a join relation's direct_lateral_relids take the ph_lateral of the PlaceHolderVars computable at
+  it, emitted or not (add_placeholders_to_joinrel), which join_is_legal and
+  have_join_order_restriction read.
+- **Relations with only indirect lateral dependencies**: every path of such a relation is
+  parameterized by its lateral_relids (set_plain_rel_pathlist's required_outer), its paths
+  checking the join clauses movable into it given them (get_baserel_parampathinfo:
+  `movable_into`, `lateral_param_rel`); its index paths' loop_count counts them
+  (build_index_paths' outer_relids start as lateral_relids); an inheritance Append of them has
+  parameterized member paths for them (sequential scans with the clauses as filters too). A
+  nested loop whose inner side is such a relation passes it the PlaceHolderVars' ph_lateral
+  values as parameters (`phv_outside`), and a relation's cheapest_total_path that is
+  parameterized by its lateral_relids may be materialized (match_unsorted_outer).
+- A PlaceHolderVar is transparent to examine_variable (strip_all_phvs_deep): join selectivity
+  over one reads the expression's statistics (`join_var`), and an `=` with one whose ph_eval_at
+  takes in the other side is eqjoinsel's.
+- A qual over a pulled-up subquery's variable-free output computed over a join stays above the
+  projection (`optimize::projectable`): it reads a PlaceHolderVar evaluated at the join of all the
+  subquery's relations, a join clause of them.
+- An unread PlaceHolderVar of a group is dropped (pullup_replace_vars makes one only where an
+  output is read); a function scan LATERAL item's outputs are its columns then its
+  PlaceHolderVars (join 675); a general group's partitionwise child joins compute its
+  PlaceHolderVars and take pulled-up LATERAL joins (`substitute_general`).
+
+Golden: `tests/sql/a33_lateral_pullup.sql` (rows against Postgres for LEFT / inner / FULL joins
+over pulled-up LATERAL subqueries, null-extended rows, constant and bare lateral-reference
+outputs, a WHERE reading the reference, a RIGHT JOIN inside, a volatile select list, aggregates
+over the outputs, nested LATERAL subqueries, SELECT *, a LATERAL function scan, unread outputs).
+No wrong results were found comparing rows while developing; the volatile select list keeps the
+subquery a LATERAL item as Postgres does.
+
+Still open, and why:
+
+- join 783 (and the pull-up of any LATERAL subquery whose join tree has a LATERAL item of its
+  own): Postgres pulls it up, but the engine plans a pulled-up subquery's level first and the
+  level above gathers that plan again, its parameterized nested loops then LATERAL items rather
+  than the relations they join, so a PlaceHolderVar above needing two of them (join 355's
+  `COALESCE(t2.q1 + t3.q1, 0)` at `t2 × t3`) can't be planned under it (355 broke when tried).
+  `lateral_pullable` refuses such subqueries; join 355 stays matching.
+- join 808: the plan's shape matches (the Hash Join parameterized by `t1`, the PlaceHolderVar
+  computed there, the Append members' filters); left are output lists: Postgres keeps `t2.a`
+  (the ON clause's Var, enforced below) in the Hash Join's and its Hash's target lists and the
+  query's resjunk `t1.a` last in the top Sort / Nested Loop target list, the engine prunes
+  columns no node above reads.
+- partition_join 204: the shape matches; the members' filters show `(t1_4.c = c)` for Postgres's
+  `((t1_4.c)::text = (c)::text)` (the varchar comparison's relabelings are lost when the join
+  clause is turned into a member's parameterized filter of a partitionwise child join).
+- join 360 (the FROM-less UNION ALL arm as a parameterized appendrel member) and join 362 / 363
+  (per-place SubPlan copies of a PlaceHolderVar): not reached in this round.
+
+## Round 16, agent 41 (semi joins of pulled-up subqueries in the parent's join problem, reltargets in check_index_only, nested loop parameters in pathkeys)
+
+Agent 28's leftovers. Measured in subset runs of the 36 planner-heavy files agent 28 used,
+unit by unit against a run of the base, the base run first and this batch's after it: on
+b1917d6 13420 -> 13422, rebased on 530923f 13425 -> 13427, on add6169 13425 -> 13427, on ecee8ea 13426 -> 13428 (exactly join 681 and 715; nothing
+lost). A full run of the whole schedule in one database on 530923f plus this batch: 51136, the
+differing units exactly the table's (join 332, 360, 362, 363, 368, 675, 676, 776, 783, 808,
+partition_join 41, 98, 204, partition_prune 410). Crate tests and clippy pass.
+
+| file | fixed units |
+|---|---|
+| join | 681, 715 |
+
+What changed:
+
+- **A FROM subquery's semi joins join the parent's join tree** (join 715; `paths.rs`
+  `bound_join_tree` / `note_bound_join_tree`, `lift.rs` `bound_form`, `flatten_tree` and the
+  `lift` arm for semi / anti joins). subquery_planner runs pull_up_sublinks before
+  pull_up_subqueries, so a subquery whose WHERE has an EXISTS / IN (or NOT EXISTS) is pulled
+  up with the semi / anti join that made: its relations and the semi join's are one join
+  problem with the parent's. The engine plans a FROM subquery at bind time; a level whose
+  plan is projections over a join tree with a semi or anti join now keeps that tree as it was
+  before planning (`ExecCtx::bound_trees`, by an id the planned tree's top join carries in
+  `JoinMeta::bound`, checked against the same relations and width), and the parent's
+  `lift_group` pulls the subquery up from it instead of from the planned tree (whose semi
+  join is unique-ified already). The semi join's own right side is lifted on its own (its
+  outputs read by its clauses only, no outer join above nulling them); the right side's
+  restrictions as written that read the query (pull_up_sublinks made them the join's
+  clauses) don't count as the subquery reading an enclosing query. `check_merge_keys` leaves
+  a plan it has nothing to change as it is, nodes included (it went through
+  `Arc::make_mut` everywhere). `reltarget`s are put on the kept tree's scans too.
+  With classes across both semi joins (agent 28's `semi_ec`), the seven-relation problem gets
+  Postgres's plan: the unique-ified first semi join, the second one a Nested Loop Semi Join
+  over the join path parameterized by `t3`.
+- **Class members in process_equivalence's order** (`outerjoins.rs` `gather_group`): in a
+  group whose outer joins are all semi joins, a semi join's equality rebuilt from its hash
+  keys has its operands as written (`JoinMeta::hash_swapped`), so a class it starts lists
+  them in that order (`sj_t3.id = sj_t1.id`, the class's first member `t3.id`), and
+  `put_orientation` orients its own clauses too (`sj_t2.id = sj_t3.id`).
+- **A class clause between the members each input returns**
+  (`Search::returned_members`, generate_join_implied_equalities_normal over the inputs' rows):
+  the search picks a relation's first member not on the right of a semi join made inside it
+  (`hidden`); once that relation is joined unique-ified the member comes out, as Postgres's
+  semi join relation's reltarget has it, and the join's clause equates it.
+- **A derived class clause shows its first making** (`joinpath.rs`, the pair's
+  build_joinrel_restrictlist): create_join_clause makes a clause the class implies (not
+  written) with the outer relation's member first, at the first make_join_rel of a pair it
+  joins; the engine noted it without applying it (`note_derived(.., false)`), so a clause made
+  of members in another order showed them that way (`a41_o3.id = a41_o1.id` for Postgres's
+  `a41_o1.id = a41_o3.id`).
+- **check_index_only reads the reltarget** (join 681; `Planner::rel`): a scan's columns that
+  join clauses read stay in its reltarget when the clause goes (self-join elimination giving
+  the kept scan the removed one's, a class with a constant), so after removing `tl` the kept
+  `tr` still needs `tr.y`: an Index Scan, not an Index Only Scan.
+- **Nested loop parameters aren't constants** (`pathkeys.rs` `classes_in`): a parameterized
+  inner side's `col = $param` is a join clause the side enforces, so it doesn't make `col` a
+  class with a constant. Before, an ORDER BY over such a column was dropped as redundant: a
+  FROM subquery over a join, planned at bind time with an index scan parameterized by the
+  other relation, lost the parent's Sort and returned its rows in scan order (wrong row
+  order with hash and merge joins off; seen while checking this batch's rows, present on
+  the base too).
+
+Golden: `tests/sql/a41_semi_pullup.sql` (the plans, and the rows of semi / anti joins of
+pulled-up subqueries under inner, left, right and full joins, inside views, under the
+query's own EXISTS, read by LATERAL, and correlated to the query).
+
+Looked at and left (why):
+
+- join 783: the order of the LATERAL nested loop. Forcing Postgres's order
+  (`join_collapse_limit = 1`) gives the engine its costs exactly (40.62) but 10 rows where
+  Postgres has 1: set_joinrel_size_estimates sizes the join relation once, from its first
+  pair, and a parameterized nested loop's rows are the relation's (or its ParamPathInfo's),
+  while the engine's are the outer rows times the inner path's. The engine then keeps the
+  VALUES-outer order (41.57; Postgres 41.49 for that order) over the 40.62 one, so the
+  enumeration doesn't reach or keep the parameterized `{v, ss2}` join with `t1` outside;
+  not traced further.
+- A whole-row-marked FROM subquery's Subquery Scan under a Sort or Materialize lists the
+  outputs nothing reads (`Output: s.x, s.*, s.y, s.z` for Postgres's `s.x, s.*`, the scan
+  itself right): the Sort's / Materialize's target list is the subquery's whole row plus
+  the mark; not started.
+- Semi joins' widths of class columns: not looked into.
 
 ## Round 16, agent 40 (partitionwise join relations inside outer-join groups, child joins of partitioned relations only, DML sublink pull-up over inheritance targets, whole-row Vars passed up)
 
@@ -4374,7 +4554,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 913 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (12) |
+| join | 925 | 919 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (6) |
 | aggregates | 556 | 556 | 100% | yes | no |  |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
@@ -4484,7 +4664,7 @@ produces no units on Linux (skipped by the file itself).
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 307 | 100% | yes | yes |  |
 | xml | 281 | 281 | 100% | yes | yes |  |
-| partition_join | 614 | 612 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
+| partition_join | 614 | 613 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | partition_prune | 771 | 770 | 100% | yes | no | wrong result `SELECT: row count differs` (1) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |

@@ -644,7 +644,7 @@ impl Session {
                 }
                 crate::sql::binder::ast::deparse_stmt(q)?
             }
-            (Some(rv), None) => {
+            (Some(rv), None) => 'rel: {
                 let cat = {
                     self.ensure_txn();
                     self.txn.as_ref().unwrap().borrow().catalog()
@@ -654,6 +654,36 @@ impl Session {
                 } else {
                     Some(rv.schemaname.as_str())
                 };
+                // A system catalog (pg_dump --schema=pg_catalog copies them all).
+                if cat.lookup(schema, &rv.relname, &self.state.search_path())?.is_none()
+                    && let Some(st) = crate::catalog::system::SysTable::lookup(
+                        schema,
+                        &rv.relname,
+                        &self.state.search_path(),
+                    )
+                {
+                    if st.is_view() {
+                        return Err(Error::new(
+                            code::WRONG_OBJECT_TYPE,
+                            format!("cannot copy from view \"{}\"", rv.relname),
+                        )
+                        .hint("Try the COPY (SELECT ...) TO variant."));
+                    }
+                    let all: Vec<String> = st.columns().iter().map(|c| c.0.clone()).collect();
+                    if let Some(c) = cols.iter().find(|c| !all.contains(c)) {
+                        return Err(Error::new(
+                            code::UNDEFINED_COLUMN,
+                            format!("column \"{c}\" of relation \"{}\" does not exist", rv.relname),
+                        ));
+                    }
+                    let list = if cols.is_empty() { &all } else { &cols };
+                    let list: Vec<String> = list.iter().map(|c| crate::catalog::quote_ident(c)).collect();
+                    break 'rel format!(
+                        "SELECT {} FROM pg_catalog.{}",
+                        list.join(", "),
+                        crate::catalog::quote_ident(st.name())
+                    );
+                }
                 let t = match cat.lookup(schema, &rv.relname, &self.state.search_path())? {
                     Some(Relation::Table(t)) if t.partkey.is_some() || t.is_foreign() => {
                         return Err(Error::new(

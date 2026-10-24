@@ -47,7 +47,6 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
-    idle::setup();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -69,49 +68,32 @@ fn main() -> anyhow::Result<()> {
         server_files: a.allow_server_files,
         ..EngineOptions::default()
     })?;
+    // SIGTERM / SIGINT: a clean shutdown (pg_ctl stop's smart / fast modes end sessions the
+    // same way here), so sequences keep their positions.
+    {
+        let engine = engine.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+            let Ok(rt) = rt else { return };
+            rt.block_on(async {
+                use tokio::signal::unix::{SignalKind, signal};
+                let (Ok(mut term), Ok(mut int)) =
+                    (signal(SignalKind::terminate()), signal(SignalKind::interrupt()))
+                else {
+                    return;
+                };
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = int.recv() => {}
+                }
+            });
+            tracing::info!("shutting down");
+            engine.shutdown();
+            std::process::exit(0);
+        });
+    }
     let listener = std::net::TcpListener::bind(&a.listen)?;
     tracing::info!(addr = %a.listen, ?auth, "listening");
     pg_engine::server::serve(engine, listener, ServerOptions { auth })?;
     Ok(())
-}
-
-/// Idle sessions keep little memory (each connection is a thread of its own). Transparent
-/// huge pages are off for the process: with the system's `always` mode every thread's first
-/// heap pages took a 2 MB page, 2-3 MB per idle session (BENCH.md). And a connection idle for
-/// a while (`server::set_idle_hook`) gives its thread's free heap pages and the stack its
-/// statements touched but no longer use back to the system.
-#[cfg(target_os = "linux")]
-mod idle {
-    use std::ffi::{c_int, c_ulong, c_void};
-
-    unsafe extern "C" {
-        fn prctl(option: c_int, ...) -> c_int;
-        fn madvise(addr: *mut c_void, len: usize, advice: c_int) -> c_int;
-        // (mimalloc's: the thread's free pages go back to the system.)
-        fn mi_collect(force: bool);
-    }
-
-    const PR_SET_THP_DISABLE: c_int = 41;
-    const MADV_DONTNEED: c_int = 4;
-
-    pub fn setup() {
-        // SAFETY: prctl with PR_SET_THP_DISABLE only sets a flag of this process.
-        unsafe { prctl(PR_SET_THP_DISABLE, 1 as c_ulong, 0 as c_ulong, 0 as c_ulong, 0 as c_ulong) };
-        pg_engine::server::set_idle_hook(trim);
-    }
-
-    fn trim() {
-        // SAFETY: mi_collect only returns free memory of the global allocator (mimalloc).
-        unsafe { mi_collect(true) };
-        if let Some((lo, hi)) = pg_engine::stack::unused_range() {
-            // SAFETY: the range is this thread's stack below every live frame (and a margin),
-            // which reads as zeros when touched again.
-            unsafe { madvise(lo as *mut c_void, hi - lo, MADV_DONTNEED) };
-        }
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-mod idle {
-    pub fn setup() {}
 }

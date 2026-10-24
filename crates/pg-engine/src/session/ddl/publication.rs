@@ -53,6 +53,10 @@ fn def_bool(d: &pb::DefElem) -> Result<bool> {
 /// SplitIdentifierString with ',' (lower-casing unquoted names).
 fn split_identifiers(s: &str) -> Option<Vec<String>> {
     let mut out = Vec::new();
+    // SplitIdentifierString: an empty (or all-blank) string is an empty list.
+    if s.trim().is_empty() {
+        return Some(out);
+    }
     let mut chars = s.chars().peekable();
     loop {
         while chars.peek().is_some_and(|c| c.is_whitespace()) {
