@@ -236,10 +236,19 @@ the columns with each other, not with that.
 
 The single SQLite writer is the limit. Agents creating changesets compete with the lander for it.
 
-On Postgres (2026-10-24, the same host at load 35–60, so all of these were slower than above;
-interleaved runs, 40,000 changes): SQLite tmpfs 383–420 merges/s (before the port: 400–419),
-SQLite on disk 572 (before: 461), Postgres 18 with fsync off 432, Postgres 18 durable (fsync on,
-in Docker on the same disk) 414–551.
+On Postgres there's no single writer: agents' changesets and the lander's batches commit in
+parallel. Measured on 2026-10-24 on the same host (load 17–30), 40,000 changes each, runs
+interleaved:
+
+| metadata in | merges per second | the same before the port to code-sql |
+| ----------- | ----------------- | ------------------------------------ |
+| SQLite, tmpfs | 708–781 | 735–778 |
+| SQLite, real disk | 639 | 672 |
+| Postgres 18, fsync off | 1,356 | |
+| Postgres 18, durable (fsync on, Docker on the same disk) | 1,234–1,297 | |
+
+Every landing was committed durably before it was acknowledged. At load 35–60 every
+configuration fell to 380–570 merges/s.
 
 Multi-node: the ref CAS keeps correctness, and a lease per `(repo, ref)` picks the node
 that runs the lander.
