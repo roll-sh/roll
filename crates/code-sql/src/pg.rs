@@ -709,6 +709,24 @@ impl PgConn {
         Ok(total)
     }
 
+    pub(crate) fn execute_pipeline(&self, steps: &[(&str, Vec<Vec<ValueRef<'_>>>)]) -> Result<Vec<u64>> {
+        // Prepared one by one (cached after a connection's first time), then sent together.
+        let stmts: Vec<Option<Statement>> =
+            steps.iter().map(|(sql, rows)| if rows.is_empty() { Ok(None) } else { self.statement(sql).map(Some) }).collect::<Result<_>>()?;
+        let calls: Vec<(usize, Vec<Param<'_>>)> =
+            steps.iter().enumerate().flat_map(|(i, (_, rows))| rows.iter().map(move |r| (i, r.iter().map(|v| Param(*v)).collect()))).collect();
+        let mut counts = vec![0u64; steps.len()];
+        for chunk in calls.chunks(PIPELINE) {
+            let refs: Vec<Vec<&(dyn ToSql + Sync)>> = chunk.iter().map(|(_, p)| p.iter().map(|p| p as &(dyn ToSql + Sync)).collect()).collect();
+            let futs = chunk.iter().zip(&refs).map(|((i, _), r)| self.client.execute(stmts[*i].as_ref().expect("prepared"), r));
+            let n = wait(futures::future::try_join_all(futs)).map_err(|e| self.note(e))?;
+            for ((i, _), n) in chunk.iter().zip(n) {
+                counts[*i] += n;
+            }
+        }
+        Ok(counts)
+    }
+
     pub(crate) fn query(&self, sql: &str, values: &[ValueRef<'_>]) -> Result<Vec<tokio_postgres::Row>> {
         let params: Vec<Param<'_>> = values.iter().map(|v| Param(*v)).collect();
         let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
