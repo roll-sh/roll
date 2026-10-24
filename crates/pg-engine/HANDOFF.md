@@ -37,9 +37,9 @@ harness and score in `tests/`:
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,134 of 51,150 statements match (99.97%).** 16 differ. The full
+- **Regression suite: 51,135 of 51,150 statements match (99.97%).** 15 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - All 21 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
+  - All 15 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
     order since round 16, agent 17: join relations parameterized by LATERAL references).
   - None differs by design any more (aggregates `balk` matches since round 16, agent 14: a
     Finalize Aggregate runs the user-defined combine functions).
@@ -403,7 +403,7 @@ them all with the "Fixed in round N" sections describing what was already tried.
    (join 332, partition_join 41 / 204; STATUS.md round 16, agent 30). (744, a hash join
    parameterized by a LATERAL inner side: done in round 16, agent 17; 426, a JOIN USING alias
    as a PlaceHolderVar at its join: round 16, agent 30.)
-2. **Remaining join / partition_join / partition_prune plan shapes** (join 12, partition_join 3,
+2. **Remaining join / partition_join / partition_prune plan shapes** (join 12, partition_join 2,
    partition_prune 1 unit; round 14's agent 5 and round 16's agent 12 sections in STATUS.md have
    what changed and why the rest is open; round 16's agent 17 section has join relations
    parameterized by LATERAL references and why partition_prune 410 stays open (265 and 442 done in
@@ -425,7 +425,8 @@ them all with the "Fixed in round N" sections describing what was already tried.
    partitionwise LATERAL joins left (partition_join 48/207 done in round 16, agent 19; 204:
    a PlaceHolderVar), partition_prune 410. (partition_join 86, a unique-ified side passing
    non-key columns through, done in round 16, agent 31: a hashed Distinct with pass-through
-   columns, semi joins' clauses in classes, child scans' loop counts.)
+   columns, semi joins' clauses in classes, child scans' loop counts; partition_join 98, a
+   merge clause between two expressions, in its second batch: classes of expressions only.)
 3. **subselect** (3 units; rounds 13–14 fixed the row comparisons with sub-selects, most of
    PostgreSQL 18's IN / VALUES pull-up, sub-select copies, per-member EXISTS alternatives,
    reltarget orders, strict-NULL folding, early unique-ified semi joins, IN over a

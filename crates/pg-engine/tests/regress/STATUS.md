@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51134 (**99.97%**) |
-| units differing | 16 |
+| units matching | 51135 (**99.97%**) |
+| units differing | 15 |
 | files fully matching | 227 |
 | engine output == expected/*.out (pg_regress "ok") | 188 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 16 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 15 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 16 units
-join (12), partition_join (3), partition_prune (1)
+### EXPLAIN (group C1) — 15 units
+join (12), partition_join (2), partition_prune (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -317,6 +317,49 @@ Looked at and left (why):
   Postgres keeps the Index Scan after self-join elimination, the scan filtering on the
   PlaceHolderVar `1 IS NOT NULL`) and 783 (a LATERAL nested loop's rows, agent 26's
   analysis) not looked into.
+
+## Round 16, agent 31, second batch (merge clauses between two expressions)
+
+A subset run of agent 30's list plus collate.icu.utf8 (14122 units) on b1917d6 and on
+b1917d6 plus this batch, compared unit by unit: 14101 -> 14102, and again rebased onto f00b52a
+(14101 -> 14102) fd64f30, 6d1f5b2 and add6169 (14106 -> 14107 each): partition_join 98 fixed,
+nothing broken. Crate tests and clippy on this state.
+
+| file | fixed units |
+|---|---|
+| partition_join | 98 |
+
+- **A class of expressions only** (`paths/joinpath.rs`, process_equivalence with neither
+  side a Var): an equality between two expressions, each of one FROM item's columns
+  (`t1::text = t2::text`, `a.x + a.y = b.y + b.x`), is a merge clause now (the engine merged
+  only when one side was a column), its two expressions expression members (`XMember`) of a
+  class of their own (`side_ec`, `ec_expr_in` find them), so each side sorts by its own
+  expression and the merge join takes it as a key beside the column ones.
+- **A Result under the Sort over an inheritance tree's Append** computing such a key
+  (prepare_sort_from_pathkeys: an Append can't project, inject_projection_plan puts a Result
+  with the subplan's costs in).
+- A partition's whole row converted to the parent's type under a cast shows in a second pair
+  of parentheses (get_coercion_expr's get_rule_expr_paren: `(((t1.*)::prt1))::text`).
+
+Goldens: `a31_expr_merge_keys`.
+
+Left open, from this round's scope:
+
+- **Class member order** (item 2): not fixed. Two parts are needed and the second moves the
+  join search. (1) Each clause's place in deconstruct_jointree's order: the binder pushes the
+  WHERE into the join tree (`optimize::add_filter`) and its `ec_const_order` already rewrites
+  a clause crossing a join between the sides' first members (`t3.p = t1.a` becomes
+  `t3.p = t2.x` when `t2.x = t1.a` comes first), so the written clause is gone by planning.
+  Tried: the WHERE's conjuncts kept on the join (`JoinMeta::where_order`), each gathered
+  clause matched to its conjunct as written or through that rewrite, positions carried
+  through self-join elimination, and `ec_members` as process_equivalence over them (left
+  member first, merges keeping the left member's class first). That gave Postgres's order
+  for every probe (`WHERE t2.x = t1.a AND t3.p = t1.a`, its reverse, explicit JOINs), but
+  changed join 123's and 374's join orders and returning 105's: the classes' derived clauses
+  and parameterized paths change with the member order, and the engine's costs there don't
+  tie-break as Postgres's do. Kept out; the patch is described here for whoever picks it up.
+- join 345 was fixed by agent 28 (scans' reltargets) while this batch was in progress; this
+  round's own reltarget-order attempt was dropped for theirs.
 
 ## Round 16, agent 31 (a unique-ified side's pass-through columns, semi joins' clauses in classes, nondeterministic constant classes)
 
@@ -1139,8 +1182,7 @@ Looked at and left (why):
   join relation's size (agent 14's note); here it decides the join order.
 - join 808: the PlaceHolderVar `least(t1.a, t2.a, t3.a)` of a LATERAL join subquery, the same
   shape as partition_join 204 (agent 25's).
-- partition_join 98: a merge clause between two expressions (`t1::text = t2::text`), sorted
-  on each side: expression members of equivalence classes (agent 21's area).
+- partition_join 98: done in round 16, agent 31's second batch.
 - partition_join 138: Postgres builds partitionwise paths for every join relation of the
   search (try_partitionwise_join in populate_joinrel_with_paths), so `t2 ⋈ t3` joins
   partitionwise below the LEFT JOIN with the empty subquery; the third batch's `pw_subset`
@@ -4442,7 +4484,7 @@ produces no units on Linux (skipped by the file itself).
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 307 | 100% | yes | yes |  |
 | xml | 281 | 281 | 100% | yes | yes |  |
-| partition_join | 614 | 611 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
+| partition_join | 614 | 612 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | partition_prune | 771 | 770 | 100% | yes | no | wrong result `SELECT: row count differs` (1) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |
