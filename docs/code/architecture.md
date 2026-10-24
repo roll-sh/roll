@@ -106,7 +106,10 @@ Every repository has a full name, `<owner>/<repo>`, exactly as on GitHub.
 - **Blob**: file content. Its id is the git blob id (SHA-1 of `blob <len>\0<content>`), so git
   imports dedupe and git serving needs no translation. Stored zstd-compressed in object storage
   at `code/<repo_id>/b/<id[0..2]>/<id>`. Blobs are uploaded when a changeset is created, never
-  during landing.
+  during landing. Opened with `pg_storage::Objects::new_durable`, a local directory fsyncs each
+  blob, and the directories it creates, before the write returns. That way a blob the metadata
+  references survives power loss. `Objects::new` doesn't fsync. S3 writes are durable when they
+  return, so S3 behaves the same either way.
 - **Changeset** (Bonsai): the canonical unit of history.
   ```
   Changeset {
@@ -548,3 +551,78 @@ agents land with `git push origin HEAD:refs/land/main` (`refs/land/<branch>` for
 That ref is never stored, so there's nothing to fetch first, and the push lands from whatever
 base the agent had. A push to any other branch updates that branch and creates or revises its
 change; deleting the branch closes the change.
+
+### git server memory
+
+The git server (`code-git`) never buffers a pack whole. A push's pack is parsed as it arrives
+(`pack::Parser`): only a few bytes of input are kept, and entries are inflated as their bytes
+come in. A fetch's pack is written and sent entry by entry, in frames of at most 64 KiB.
+
+All requests on a node share one memory budget (`code_git::MemoryBudget`). These
+`ServerConfig` fields set it:
+
+| field | default | meaning |
+| ----- | ------- | ------- |
+| `memory_budget_bytes` | 1 GiB | everything all requests hold together |
+| `max_request_memory_bytes` | ¾ of the budget | the most one request may hold |
+| `memory_wait` | 30 s | how long a request waits for memory before it's busy |
+| `memory_budget` | none | a shared `MemoryBudget` to use instead of the fields above |
+
+Each request takes a lease and charges it, as it goes, for what it actually holds:
+
+- **Push (receive-pack).**
+  - Each body chunk is charged as it's read (not the `Content-Length`) and released once the
+    parser has consumed it.
+  - Every inflated entry is charged before its buffer grows, plus 160 bytes of bookkeeping.
+  - Every delta result is charged as it grows, and each delta is released once applied.
+  - Thin-pack bases fetched from the backend are charged until resolving ends.
+  - The objects stay charged until `GitBackend::receive` returns.
+- **Fetch (upload-pack).**
+  - The request body (wants and haves) is charged as it's read.
+  - The plan is charged at 64 bytes per object.
+  - The frames in flight are charged at about 650 KiB.
+  - Objects are read in batches sized from the last batch's average object size (about 8 MiB
+    each, 1–256 objects). A batch is charged as soon as it's read. A batch too big for one
+    request's share is dropped and read again one object at a time.
+  - Each entry is charged at its worst-case compressed size while it's written.
+- **Advertisements and `ls-refs`** aren't charged beyond their request body.
+
+The lease is RAII. Everything is released when the request finishes, fails, or is dropped
+because the client went away. Dropping it also cancels any charge still waiting on a blocking
+thread.
+
+Big requests can't starve small ones. These rules apply:
+
+- A request that would hold more than `max_request_memory_bytes` fails at once, without
+  waiting.
+- Once a request holds more than a small allowance (a quarter of the remainder, up to 64 MiB),
+  it can only grow while the node's total stays under `max_request_memory_bytes`. The last
+  quarter of the budget is kept for small requests, so negotiation, `ls-refs` and small pushes
+  keep flowing while a large push holds most of it.
+- If every request that holds memory is waiting for more, none can finish. The youngest of
+  them fails at once (wait-die), so the older ones, which have done more, go on.
+
+A request that can't get memory fails cleanly and leaves nothing behind:
+
+- **Push.** The rest of the body is read and dropped without being held. The client then gets
+  report-status `unpack the git server is busy …` or `unpack this request needs more than N
+  bytes …`, with `ng` for every ref, and git prints `remote unpack failed`. Nothing reaches the
+  backend. Running out before the commands have been read also gives this report, because up to
+  64 KiB of commands are read uncharged. Past that the push gets a 503.
+- **Fetch.** Running out before the response starts gives `503` with `Retry-After: 5`. Once the
+  pack has started, the client gets a side-band error.
+
+With the defaults, a push can hold at most 768 MiB. That's less than `Limits::max_unpacked_bytes`
+(2 GiB), so a push that unpacks to more fails unless the budget is raised. In a cluster the
+budget is per node.
+
+Measured with 8 concurrent pushes, each 200 MiB of incompressible blobs. The load harness is
+`cargo run --release -p code-git --example push_load`:
+
+- Before the budget, the server peaked at 3.2 GiB RSS, and under a 2 GiB memory cap it was
+  OOM-killed in under a second.
+- With the budget, it peaks at about 820 MiB, cap or no cap. Four pushes land and four get the
+  busy report within about 4 s.
+
+With 8 concurrent 80 MiB pushes, all of them land: the peak is 1.32 GiB before and 678 MiB
+after.
