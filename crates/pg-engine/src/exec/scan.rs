@@ -566,6 +566,9 @@ fn predicate_locked(t: &Table, ctx: &ExecCtx) -> bool {
 /// A column's smallest and largest non-null value among the table's current rows (what
 /// get_actual_variable_range reads from an index's ends); None when it has none.
 pub fn column_range(t: &Table, col: usize, ctx: &ExecCtx) -> Result<Option<(Value, Value)>> {
+    if let Some(r) = column_range_by_index(t, col, ctx)? {
+        return Ok(r);
+    }
     let start = index_prefix(t.oid, 0);
     let end = prefix_end(&start);
     let rows: Vec<(Vec<u8>, bytes::Bytes)> = {
@@ -594,6 +597,104 @@ pub fn column_range(t: &Table, col: usize, ctx: &ExecCtx) -> Result<Option<(Valu
         });
     }
     Ok(out)
+}
+
+/// `column_range` from the ends of a btree index on the column, as get_actual_variable_range
+/// reads them, instead of every row: its entries are stored in the order of the values'
+/// encoding, which for these types is the order `cmp_total` gives. None (outer) when no
+/// index serves.
+fn column_range_by_index(
+    t: &Table,
+    col: usize,
+    ctx: &ExecCtx,
+) -> Result<Option<Option<(Value, Value)>>> {
+    use crate::types::DataType as T;
+    let Some(c) = t.columns.get(col) else {
+        return Ok(None);
+    };
+    if !matches!(
+        c.ty,
+        T::Int2
+            | T::Int4
+            | T::Int8
+            | T::Oid
+            | T::Float4
+            | T::Float8
+            | T::Numeric(_)
+            | T::Date
+            | T::Timestamp(_)
+            | T::Timestamptz(_)
+            | T::Text
+            | T::Varchar(_)
+    ) {
+        return Ok(None);
+    }
+    let cat = ctx.catalog();
+    let Some(ix) = cat
+        .table_indexes(t)
+        .iter()
+        .chain(t.pkey_index.and_then(|p| cat.index(p)))
+        .find(|ix| {
+            ix.valid
+                && ix.method == "btree"
+                && ix.predicate.is_none()
+                && reads_entries(ix)
+                && ix.columns.first().is_some_and(|c| {
+                    matches!(c.key, crate::catalog::IndexKey::Column(k) if k == col)
+                        && !matches!(c.opclass, 4217..=4219)
+                })
+        })
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let first = &ix.columns[0];
+    // A NULL's first byte in the entry key (`encode_index_value`); no other value's is.
+    let null_byte = if first.nulls_first { 0x00 } else { 0xFF };
+    let prefix = index_prefix(t.oid, ix.id);
+    let end = prefix_end(&prefix);
+    let snap = ctx.snapshot();
+    // The column's value in the row an entry points at (None: no row, or a NULL).
+    let value = |dkey: &[u8]| -> Result<Option<Value>> {
+        let txn = ctx.txn.borrow();
+        let row = match snap.as_deref() {
+            Some(s) => txn.get_snap(dkey, s)?,
+            None => txn.get(dkey)?,
+        };
+        drop(txn);
+        let Some(row) = row else { return Ok(None) };
+        Ok(decode_table_row(t, &row)?.into_iter().nth(col).filter(|v| !v.is_null()))
+    };
+    // The first and the last entry that isn't a NULL's.
+    let mut ends = [None, None];
+    for (i, rev) in [false, true].into_iter().enumerate() {
+        let txn = ctx.txn.borrow();
+        let entries: Box<dyn Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>>> = match (rev, snap.as_deref()) {
+            (true, s) => Box::new(txn.scan_rev(&prefix, &end, s)),
+            (false, Some(s)) => Box::new(txn.scan_snap(&prefix, &end, s)),
+            (false, None) => Box::new(txn.scan(&prefix, &end)),
+        };
+        for e in entries {
+            let (k, dkey) = e?;
+            if k.get(prefix.len()) == Some(&null_byte) {
+                continue;
+            }
+            match value(&dkey)? {
+                Some(v) => ends[i] = Some(v),
+                // (Not the entry's row as expected: every row is read instead.)
+                None => return Ok(None),
+            }
+            break;
+        }
+    }
+    let [Some(first_v), Some(last_v)] = ends else {
+        return Ok(Some(None));
+    };
+    Ok(Some(Some(if first.desc {
+        (last_v, first_v)
+    } else {
+        (first_v, last_v)
+    })))
 }
 
 /// Rows of an index scan in the order of the made operator classes of its columns.
@@ -953,27 +1054,24 @@ fn mix(mut x: u64) -> u64 {
 /// Put rows (by data key) in the order of their heap TIDs, rows the heap model doesn't
 /// place last (in key order); returns each row's block then. None when the table's heap
 /// isn't modelled.
-fn heap_order<T>(
+fn heap_order(
     t: &Table,
-    rows: &mut Vec<(Vec<u8>, T)>,
+    rows: &mut Vec<(Vec<u8>, bytes::Bytes)>,
     ctx: &ExecCtx,
 ) -> Option<Vec<Option<u32>>> {
-    let keys: Vec<Vec<u8>> = rows.iter().map(|r| r.0.clone()).collect();
-    let locs = super::sizing::row_locations(t, &keys, ctx)?;
-    let mut tagged: Vec<(Option<(u32, u16)>, usize)> = locs
-        .into_iter()
-        .map(|l| l.map(|x| x.0))
-        .zip(0..)
-        .collect();
-    tagged.sort_by(|a, b| match (a.0, b.0) {
-        (Some(x), Some(y)) => x.cmp(&y),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => a.1.cmp(&b.1),
-    });
-    let blocks = tagged.iter().map(|(t, _)| t.map(|x| x.0)).collect();
-    let mut slots: Vec<Option<(Vec<u8>, T)>> = rows.drain(..).map(Some).collect();
-    rows.extend(tagged.into_iter().filter_map(|(_, i)| slots[i].take()));
+    let tids = super::sizing::row_tids(t, rows, ctx)?;
+    // (Rows the model doesn't place go last, in storage order: `None` sorts after every
+    // TID, the index breaks ties.)
+    let rank = |i: usize| (tids[i].is_none(), tids[i], i);
+    // Rows mostly come in heap order already (a table only inserted into).
+    if (1..rows.len()).all(|i| rank(i - 1) < rank(i)) {
+        return Some(tids.iter().map(|t| t.map(|x| x.0)).collect());
+    }
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_unstable_by_key(|&i| rank(i));
+    let blocks = order.iter().map(|&i| tids[i].map(|x| x.0)).collect();
+    let mut slots: Vec<Option<(Vec<u8>, bytes::Bytes)>> = rows.drain(..).map(Some).collect();
+    rows.extend(order.into_iter().filter_map(|i| slots[i].take()));
     Some(blocks)
 }
 

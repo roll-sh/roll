@@ -9,6 +9,12 @@ use pg_engine::server::{AuthMethod, ServerOptions};
 use std::path::PathBuf;
 use std::time::Duration;
 
+// The engine allocates per row and per value; mimalloc does that markedly faster than the
+// system allocator, from many sessions' threads at once (BENCH.md). Embedders choose their
+// own global allocator.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser)]
 #[command(about = "roll's Postgres-compatible database server")]
 struct Args {

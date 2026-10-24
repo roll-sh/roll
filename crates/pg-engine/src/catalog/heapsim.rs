@@ -9,7 +9,7 @@
 //! Tuples are tracked by the row's storage key; transaction ids are the engine's.
 
 use crate::txn::xids::Xids;
-use std::collections::HashMap;
+use crate::exec::fasthash::HashMap;
 
 pub const BLCKSZ: usize = 8192;
 pub const PAGE_HEADER: usize = 24;
@@ -649,6 +649,9 @@ pub struct Heap {
     /// Pages pinned by something else while a scan reads them (an AFTER ROW trigger's
     /// tuple slot): pruning them needs a cleanup lock it can't get.
     pins: HashMap<u32, usize>,
+    /// Laid out afresh from rows whose stored TIDs it doesn't keep: where it has a row, not
+    /// the TID stored in the row, is its place (a scan's order).
+    pub unstamped: bool,
 }
 
 impl Heap {
@@ -678,6 +681,11 @@ impl Heap {
 
     pub fn fsm_blocks(&self) -> u32 {
         self.fsm.blocks
+    }
+
+    /// The free space of the last page (PageGetHeapFreeSpace; 0 without pages).
+    pub fn last_page_free(&self) -> usize {
+        self.pages.last().map_or(0, Page::heap_free)
     }
 
     pub fn vm_blocks(&self) -> u32 {
@@ -1423,7 +1431,7 @@ impl Heap {
 
     /// Rows stored under new keys (old, new); rows not listed are forgotten.
     pub fn rekey(&mut self, pairs: &[(Vec<u8>, Vec<u8>)]) {
-        let mut keys = HashMap::with_capacity(pairs.len());
+        let mut keys = HashMap::with_capacity_and_hasher(pairs.len(), Default::default());
         for (old, new) in pairs {
             if let Some(tid) = self.keys.get(old) {
                 keys.insert(new.clone(), *tid);

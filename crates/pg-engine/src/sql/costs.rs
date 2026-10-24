@@ -340,14 +340,75 @@ fn slot(
         .map(|n| n.iter().map(|x| *x as f64).collect())
         .unwrap_or_default();
     let values = match &sl.values {
-        Some((ty, vals)) => vals
-            .iter()
-            .map(|v| crate::types::text::parse_value(v, ty, fmt))
-            .collect::<crate::error::Result<Vec<_>>>()
-            .ok()?,
+        Some((ty, vals)) => slot_values(ty, vals, fmt)?,
         None => Vec::new(),
     };
     Some((values, numbers))
+}
+
+thread_local! {
+    /// Statistics slots' values parsed lately (every estimate of a clause over a column
+    /// parses its histogram or MCV list, which planning a custom plan per execution does
+    /// again and again): by the settings' generation, the type and the texts.
+    static SLOT_VALUES: std::cell::RefCell<std::collections::VecDeque<(u64, DataType, Vec<String>, std::rc::Rc<Vec<Value>>)>> =
+        Default::default();
+}
+
+const SLOT_VALUES_CACHED: usize = 64;
+
+/// A slot's values parsed as the column's type under `fmt` (None: one doesn't parse).
+fn slot_values(ty: &DataType, vals: &[String], fmt: &FormatCtx) -> Option<Vec<Value>> {
+    let parse = || {
+        vals.iter()
+            .map(|v| crate::types::text::parse_value(v, ty, fmt))
+            .collect::<crate::error::Result<Vec<_>>>()
+            .ok()
+    };
+    // (Types whose input reads nothing but the text and the settings: not enums, reg*
+    // types, domains or composites, whose input reads the catalog.)
+    use DataType as T;
+    let plain = matches!(
+        ty,
+        T::Bool
+            | T::Int2
+            | T::Int4
+            | T::Int8
+            | T::Float4
+            | T::Float8
+            | T::Numeric(_)
+            | T::Text
+            | T::Varchar(_)
+            | T::Bpchar(_)
+            | T::Name
+            | T::Date
+            | T::Time(_)
+            | T::Timestamp(_)
+            | T::Timestamptz(_)
+            | T::Interval(_)
+            | T::Uuid
+            | T::Oid
+    );
+    if fmt.settings == 0 || !plain {
+        return parse();
+    }
+    let hit = SLOT_VALUES.with(|c| {
+        c.borrow()
+            .iter()
+            .find(|(g, t, v, _)| *g == fmt.settings && t == ty && v.as_slice() == vals)
+            .map(|e| e.3.clone())
+    });
+    if let Some(v) = hit {
+        return Some(v.as_ref().clone());
+    }
+    let parsed = parse()?;
+    SLOT_VALUES.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= SLOT_VALUES_CACHED {
+            c.pop_front();
+        }
+        c.push_back((fmt.settings, ty.clone(), vals.to_vec(), std::rc::Rc::new(parsed.clone())));
+    });
+    Some(parsed)
 }
 
 /// Compare as the column's type does: bpchar ignores trailing spaces.

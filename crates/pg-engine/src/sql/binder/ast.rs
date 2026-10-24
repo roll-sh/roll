@@ -355,6 +355,11 @@ fn fix_xmlparse(tree: &pb::ParseResult, sql: String) -> String {
     out
 }
 
+/// `cached_parse` tags of the stored texts parsed through `pg_query::parse` (whose errors
+/// read differently from `sql::parse`'s): apart from every parser option bit.
+const STORED_EXPR: i32 = -1;
+const STORED_STMT: i32 = -2;
+
 /// Parse one SQL expression (stored defaults / checks).
 pub fn parse_expr(sql: &str) -> Result<Node> {
     parse_exprs(sql)?
@@ -365,11 +370,17 @@ pub fn parse_expr(sql: &str) -> Result<Node> {
 
 /// Parse a comma-separated list of SQL expressions.
 pub fn parse_exprs(sql: &str) -> Result<Vec<Node>> {
-    let r = pg_query::parse(&format!("SELECT {sql}"), 0)
-        .map_err(|e| crate::error::internal(format!("stored expression: {e}")))?;
-    let stmt = r
-        .protobuf
-        .stmts
+    let text = format!("SELECT {sql}");
+    let stmts = crate::sql::parse::cached_parse(
+        STORED_EXPR,
+        &text,
+        || {
+            pg_query::parse(&text, 0)
+                .map(|r| r.protobuf.stmts)
+                .map_err(|e| crate::error::internal(format!("stored expression: {e}")))
+        },
+    )?;
+    let stmt = stmts
         .into_iter()
         .next()
         .and_then(|s| s.stmt)
@@ -391,10 +402,16 @@ pub fn parse_exprs(sql: &str) -> Result<Vec<Node>> {
 
 /// Parse a statement (view bodies).
 pub fn parse_stmt(sql: &str) -> Result<Node> {
-    let r = pg_query::parse(sql, 0)
-        .map_err(|e| crate::error::internal(format!("stored query: {e}")))?;
-    r.protobuf
-        .stmts
+    let stmts = crate::sql::parse::cached_parse(
+        STORED_STMT,
+        sql,
+        || {
+            pg_query::parse(sql, 0)
+                .map(|r| r.protobuf.stmts)
+                .map_err(|e| crate::error::internal(format!("stored query: {e}")))
+        },
+    )?;
+    stmts
         .into_iter()
         .next()
         .and_then(|s| s.stmt)

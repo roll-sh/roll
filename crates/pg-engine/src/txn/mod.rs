@@ -194,8 +194,8 @@ impl Database {
         cancel: Arc<AtomicBool>,
     ) -> Txn {
         let id = self.next_txn.fetch_add(1, Ordering::Relaxed);
-        let ts = self.store.visible_ts();
-        let pin = self.store.pin(ts);
+        let pin = self.store.pin_visible();
+        let ts = pin.ts;
         Txn {
             id,
             xid: 0,
@@ -210,7 +210,6 @@ impl Database {
             rollbacks: 0,
             cid: 0,
             write_cid: 0,
-            written: HashMap::new(),
             pg_cid: 0,
             pg_cid_used: false,
             combos: Vec::new(),
@@ -545,7 +544,9 @@ pub struct Txn {
     snapshot_ts: u64,
     pub start_ts: u64,
     _pin: Option<SnapshotPin>,
-    writes: BTreeMap<Vec<u8>, Option<Bytes>>,
+    /// Buffered writes: the value (None: a delete) and the command id of the latest write of
+    /// the key (None: one that records none, `replace_catalog`'s).
+    writes: BTreeMap<Vec<u8>, (Option<Bytes>, Option<u32>)>,
     /// Undo log: (key, what the buffer held before, the command id of the write it
     /// replaced), for savepoints.
     journal: Vec<(Vec<u8>, Option<Option<Bytes>>, Option<u32>)>,
@@ -556,8 +557,6 @@ pub struct Txn {
     /// The command id this transaction's writes are stamped with now (the running
     /// statement's).
     write_cid: u32,
-    /// The command id of the latest buffered write of each key.
-    written: HashMap<Vec<u8>, u32>,
     /// Postgres's command counter as tuples' cmin / cmax show it (currentCommandId): it
     /// moves on only past a command that used it (currentCommandIdUsed), where `cid`
     /// moves on for every statement.
@@ -677,12 +676,10 @@ impl Txn {
 
     /// Start a statement: READ COMMITTED takes a fresh snapshot.
     pub fn begin_statement(&mut self) {
-        if !self.isolation.txn_snapshot() {
-            let ts = self.db.store.visible_ts();
-            if ts != self.snapshot_ts {
-                self._pin = Some(self.db.store.pin(ts));
-                self.snapshot_ts = ts;
-            }
+        if !self.isolation.txn_snapshot() && self.db.store.visible_ts() != self.snapshot_ts {
+            let pin = self.db.store.pin_visible();
+            self.snapshot_ts = pin.ts;
+            self._pin = Some(pin);
         }
     }
 
@@ -757,8 +754,9 @@ impl Txn {
             c.bump();
         }
         let blob = serde_json::to_vec(&c).map_err(|e| internal(e.to_string()))?;
+        let cid = self.writes.get(CATALOG_KEY).and_then(|w| w.1);
         self.writes
-            .insert(CATALOG_KEY.to_vec(), Some(Bytes::from(blob)));
+            .insert(CATALOG_KEY.to_vec(), (Some(Bytes::from(blob)), cid));
         self.catalog = Some(Arc::new(c));
         Ok(())
     }
@@ -771,8 +769,10 @@ impl Txn {
 
     /// Put a write in the buffer, stamped with the current command id, and journal it.
     fn record(&mut self, key: Vec<u8>, value: Option<Bytes>) {
-        let prev = self.writes.insert(key.clone(), value);
-        let prev_cid = self.written.insert(key.clone(), self.write_cid);
+        let (prev, prev_cid) = match self.writes.insert(key.clone(), (value, Some(self.write_cid))) {
+            Some((v, c)) => (Some(v), c),
+            None => (None, None),
+        };
         self.journal.push((key, prev, prev_cid));
     }
 
@@ -820,10 +820,7 @@ impl Txn {
     /// The command id of this transaction's latest write of `key` (None: it hasn't written
     /// it), as a tuple's cmin / cmax tells which command made it.
     pub fn written_by(&self, key: &[u8]) -> Option<u32> {
-        if !self.writes.contains_key(key) {
-            return None;
-        }
-        self.written.get(key).copied()
+        self.writes.get(key).and_then(|w| w.1)
     }
 
     /// This transaction's id, given it now if it has none (as writing or
@@ -940,7 +937,7 @@ impl Txn {
 
     /// Read through this transaction's own writes.
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        if let Some(v) = self.writes.get(key) {
+        if let Some((v, _)) = self.writes.get(key) {
             return Ok(v.clone());
         }
         self.db.store.get(key, self.snapshot_ts)
@@ -948,7 +945,7 @@ impl Txn {
 
     /// Newest committed version (ignoring our snapshot), for locking reads after a wait.
     pub fn get_latest(&self, key: &[u8]) -> Result<Option<(u64, Option<Bytes>)>> {
-        if let Some(v) = self.writes.get(key) {
+        if let Some((v, _)) = self.writes.get(key) {
             return Ok(Some((u64::MAX, v.clone())));
         }
         self.db.store.get_version(key, u64::MAX >> 1)
@@ -956,7 +953,7 @@ impl Txn {
 
     /// Read through this transaction's own writes over the data committed as of `ts`.
     pub fn get_at(&self, key: &[u8], ts: u64) -> Result<Option<Bytes>> {
-        if let Some(v) = self.writes.get(key) {
+        if let Some((v, _)) = self.writes.get(key) {
             return Ok(v.clone());
         }
         self.db.store.get(key, ts)
@@ -981,7 +978,7 @@ impl Txn {
     pub fn writes_in(&self, start: &[u8], end: &[u8]) -> BTreeMap<Vec<u8>, Option<Bytes>> {
         self.writes
             .range::<[u8], _>((Bound::Included(start), Bound::Excluded(end)))
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, (v, _))| (k.clone(), v.clone()))
             .collect()
     }
 
@@ -994,11 +991,18 @@ impl Txn {
         ts: u64,
         own: Option<&BTreeMap<Vec<u8>, Option<Bytes>>>,
     ) -> TxnScan {
-        let buffered: Vec<(Vec<u8>, Option<Bytes>)> = own
-            .unwrap_or(&self.writes)
-            .range::<[u8], _>((Bound::Included(start), Bound::Excluded(end)))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let range = (Bound::Included(start), Bound::Excluded(end));
+        let buffered: Vec<(Vec<u8>, Option<Bytes>)> = match own {
+            Some(own) => own
+                .range::<[u8], _>(range)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            None => self
+                .writes
+                .range::<[u8], _>(range)
+                .map(|(k, (v, _))| (k.clone(), v.clone()))
+                .collect(),
+        };
         TxnScan {
             store: self.db.store.scan(start, end, ts),
             store_head: None,
@@ -1077,6 +1081,35 @@ impl Txn {
             };
         }
         self.scan_overlay(start, end, st.ts, Some(&own))
+    }
+
+    /// Scan [start, end) in descending key order, as of the snapshot `s` (None: the
+    /// transaction's current one, with all its writes).
+    pub fn scan_rev(&self, start: &[u8], end: &[u8], s: Option<&Snap>) -> TxnRevScan {
+        let (ts, own) = match s {
+            Some(s) => {
+                self.catch_up(s);
+                let st = s.st.borrow();
+                let mut own = self.writes_in(start, end);
+                for (k, prev) in st
+                    .prev
+                    .range::<[u8], _>((Bound::Included(start), Bound::Excluded(end)))
+                {
+                    match prev {
+                        Some(v) => own.insert(k.clone(), v.clone()),
+                        None => own.remove(k),
+                    };
+                }
+                (st.ts, own)
+            }
+            None => (self.snapshot_ts, self.writes_in(start, end)),
+        };
+        TxnRevScan {
+            store: self.db.store.scan_rev(start, end, ts),
+            store_head: None,
+            buffered: own.into_iter().rev().collect::<Vec<_>>().into_iter().peekable(),
+            store_done: false,
+        }
     }
 
     /// Read `key` as of the snapshot `s`.
@@ -1191,17 +1224,9 @@ impl Txn {
         self.rollbacks += 1;
         while self.journal.len() > target {
             let (k, prev, prev_cid) = self.journal.pop().unwrap();
-            match prev_cid {
-                Some(c) => {
-                    self.written.insert(k.clone(), c);
-                }
-                None => {
-                    self.written.remove(&k);
-                }
-            }
             match prev {
                 Some(v) => {
-                    self.writes.insert(k, v);
+                    self.writes.insert(k, (v, prev_cid));
                 }
                 None => {
                     self.writes.remove(&k);
@@ -1330,8 +1355,10 @@ impl Txn {
     }
 
     pub fn commit(mut self) -> Result<u64> {
-        let writes: Vec<(Vec<u8>, Option<Bytes>)> =
-            std::mem::take(&mut self.writes).into_iter().collect();
+        let writes: Vec<(Vec<u8>, Option<Bytes>)> = std::mem::take(&mut self.writes)
+            .into_iter()
+            .map(|(k, (v, _))| (k, v))
+            .collect();
         let catalog = self.catalog.take();
         let base = self.catalog_base;
         let start = self.start_ts;
@@ -1371,14 +1398,16 @@ impl Txn {
         } else {
             let db2 = self.db.clone();
             let publish = self.publish;
-            self.db.store.commit_with(writes, check, move |_| {
-                if let Some(c) = catalog {
+            match catalog {
+                // A new catalog is published under the commit lock, with the data.
+                Some(c) => self.db.store.commit_with(writes, check, move |_| {
                     if !publish {
                         db2.last_local.store(c.version, Ordering::Release);
                     }
                     *db2.catalog.write() = c;
-                }
-            })
+                }),
+                None => self.db.store.commit(writes, check),
+            }
         };
         self.finish_xid(result.is_ok());
         self.release_locks();
@@ -1433,6 +1462,47 @@ struct SnapState {
     rollbacks: u64,
     /// Keys written since, with what the write buffer held for them then (None: nothing).
     prev: BTreeMap<Vec<u8>, Option<Option<Bytes>>>,
+}
+
+/// `TxnScan` in descending key order.
+pub struct TxnRevScan {
+    store: crate::storage::RevScan,
+    store_head: Option<(Vec<u8>, Bytes)>,
+    buffered: std::iter::Peekable<std::vec::IntoIter<(Vec<u8>, Option<Bytes>)>>,
+    store_done: bool,
+}
+
+impl Iterator for TxnRevScan {
+    type Item = Result<(Vec<u8>, Bytes)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.store_head.is_none() && !self.store_done {
+                match self.store.next() {
+                    Some(Ok(e)) => self.store_head = Some(e),
+                    Some(Err(e)) => return Some(Err(e)),
+                    None => self.store_done = true,
+                }
+            }
+            match (self.store_head.as_ref(), self.buffered.peek()) {
+                (None, None) => return None,
+                (Some(_), None) => return self.store_head.take().map(Ok),
+                (Some((sk, _)), Some((bk, _))) if sk > bk => {
+                    return self.store_head.take().map(Ok);
+                }
+                (s, Some(_)) => {
+                    if s.is_some_and(|(sk, _)| Some(sk) == self.buffered.peek().map(|b| &b.0)) {
+                        self.store_head = None;
+                    }
+                    let (k, v) = self.buffered.next().unwrap();
+                    match v {
+                        Some(v) => return Some(Ok((k, v))),
+                        None => continue,
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Merge of buffered writes over a store scan; buffered entries win.

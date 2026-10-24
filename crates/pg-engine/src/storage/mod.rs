@@ -123,6 +123,13 @@ pub struct Store {
     commit: Mutex<CommitState>,
     manifest: Mutex<Manifest>,
     visible: AtomicU64,
+    /// The last commit timestamp handed out (under the commit lock). Commits past `visible`
+    /// are in the WAL and the memtable, waiting for a WAL fsync (group commit).
+    assigned: AtomicU64,
+    /// Every commit up to this one is fsynced.
+    durable: AtomicU64,
+    /// Held by the commit fsyncing the WAL for every commit appended so far.
+    sync_lock: Mutex<()>,
     next_id: AtomicU64,
     snapshots: Mutex<BTreeMap<u64, usize>>,
     bg: Mutex<()>,
@@ -233,7 +240,7 @@ impl Store {
             })?;
             last_ts = last_ts.max(max);
         }
-        let wal = WalWriter::create(dir, replay_seq)?;
+        let wal = WalWriter::create(dir, replay_seq, if opts.sync { wal::PREALLOC } else { 0 })?;
         let store = Arc::new(Store {
             dir: dir.to_path_buf(),
             opts,
@@ -250,6 +257,9 @@ impl Store {
                 ..manifest
             }),
             visible: AtomicU64::new(last_ts),
+            assigned: AtomicU64::new(last_ts),
+            durable: AtomicU64::new(last_ts),
+            sync_lock: Mutex::new(()),
             next_id: AtomicU64::new(next_id),
             snapshots: Mutex::new(BTreeMap::new()),
             bg: Mutex::new(()),
@@ -289,6 +299,19 @@ impl Store {
         }
     }
 
+    /// A snapshot of every committed write, pinned: the timestamp is read under the lock
+    /// `gc_horizon` reads it under, so no pruning or compaction can take what it sees
+    /// between the two.
+    pub fn pin_visible(self: &Arc<Self>) -> SnapshotPin {
+        let mut s = self.snapshots.lock();
+        let ts = self.visible_ts();
+        *s.entry(ts).or_insert(0) += 1;
+        SnapshotPin {
+            store: self.clone(),
+            ts,
+        }
+    }
+
     /// Oldest timestamp any reader may still need.
     pub fn gc_horizon(&self) -> u64 {
         let s = self.snapshots.lock();
@@ -312,7 +335,10 @@ impl Store {
         let view = self.view();
         let seek = mvcc_key(key, ts);
         for m in std::iter::once(&view.mem).chain(view.imm.iter()) {
-            if let Some(e) = m.map.range(seek.clone()..).next()
+            if let Some(e) = m
+                .map
+                .range::<[u8], _>((Bound::Included(seek.as_slice()), Bound::Unbounded))
+                .next()
                 && user_key(e.key()) == key
             {
                 return Ok(Some((key_ts(e.key()), e.value().clone())));
@@ -341,17 +367,81 @@ impl Store {
 
     /// Ascending scan of user keys in [start, end) at snapshot `ts`.
     pub fn scan(&self, start: &[u8], end: &[u8], ts: u64) -> Scan {
-        Scan::new(self.view(), start.to_vec(), end.to_vec(), ts)
+        Scan::new(self.view(), start.to_vec(), end.to_vec(), ts, self.gc_horizon())
     }
 
     /// Atomically apply `writes` at a new commit timestamp. `check` runs under the commit lock
     /// (for conflict detection) and may veto the commit.
+    ///
+    /// Group commit: the commit's WAL record and memtable entries go in under the commit
+    /// lock, then it waits (without the lock) for an fsync covering it, which one waiting
+    /// commit does for all those appended so far. It becomes visible with that fsync (in
+    /// timestamp order: every earlier commit is in the memtable by then), before this
+    /// returns; snapshots taken meanwhile don't see it, as a transaction whose commit record
+    /// isn't flushed yet isn't seen in Postgres.
     pub fn commit(
         self: &Arc<Self>,
         writes: Vec<(Vec<u8>, Option<Bytes>)>,
         check: impl FnOnce(&Store) -> Result<()>,
     ) -> Result<u64> {
-        self.commit_with(writes, check, |_| {})
+        if !self.opts.sync {
+            return self.commit_with(writes, check, |_| {});
+        }
+        let rotate;
+        let ts;
+        {
+            let mut c = self.commit.lock();
+            if self.closed.load(Ordering::Acquire) {
+                return Err(internal("database is closed"));
+            }
+            check(self)?;
+            if writes.is_empty() {
+                return Ok(self.visible_ts());
+            }
+            ts = self.assigned.load(Ordering::Acquire) + 1;
+            c.wal.append(ts, &writes)?;
+            self.assigned.store(ts, Ordering::Release);
+            let mem = self.view.read().mem.clone();
+            for (k, v) in writes {
+                mem.insert(mvcc_key(&k, ts), v, ts);
+            }
+            rotate = mem.bytes() >= self.opts.memtable_bytes;
+        }
+        self.wait_durable(ts)?;
+        if rotate {
+            self.rotate()?;
+            self.schedule_background();
+        }
+        Ok(ts)
+    }
+
+    /// Wait until commit `ts` is fsynced (and so visible), fsyncing the WAL for every commit
+    /// appended so far when no other commit is doing it.
+    fn wait_durable(&self, ts: u64) -> Result<()> {
+        while self.durable.load(Ordering::Acquire) < ts {
+            let _g = self.sync_lock.lock();
+            if self.durable.load(Ordering::Acquire) >= ts {
+                break;
+            }
+            let (file, upto) = {
+                let c = self.commit.lock();
+                (c.wal.handle(), self.assigned.load(Ordering::Acquire))
+            };
+            if let Err(e) = file.sync_data() {
+                // The commits are in the memtable already and can't be taken back: the
+                // store stops (Postgres PANICs on a failed WAL fsync).
+                self.closed.store(true, Ordering::Release);
+                return Err(e.into());
+            }
+            self.made_durable(upto);
+        }
+        Ok(())
+    }
+
+    /// Every commit up to `upto` is fsynced: it is visible.
+    fn made_durable(&self, upto: u64) {
+        self.durable.fetch_max(upto, Ordering::AcqRel);
+        self.visible.fetch_max(upto, Ordering::AcqRel);
     }
 
     /// Like `commit`, and `after(ts)` runs under the commit lock once the writes are visible
@@ -375,16 +465,18 @@ impl Store {
             if writes.is_empty() {
                 return Ok(self.visible_ts());
             }
-            ts = self.visible.load(Ordering::Acquire) + 1;
+            ts = self.assigned.load(Ordering::Acquire) + 1;
             c.wal.append(ts, &writes)?;
             if self.opts.sync {
+                // (Also makes every group commit appended before this one durable.)
                 c.wal.sync()?;
             }
+            self.assigned.store(ts, Ordering::Release);
             let mem = self.view.read().mem.clone();
             for (k, v) in writes {
                 mem.insert(mvcc_key(&k, ts), v, ts);
             }
-            self.visible.store(ts, Ordering::Release);
+            self.made_durable(ts);
             after(ts);
             rotate = mem.bytes() >= self.opts.memtable_bytes;
         }
@@ -408,7 +500,17 @@ impl Store {
             return Ok(());
         }
         let seq = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let new_wal = WalWriter::create(&self.dir, seq)?;
+        let new_wal = WalWriter::create(
+            &self.dir,
+            seq,
+            if self.opts.sync { wal::PREALLOC } else { 0 },
+        )?;
+        // The memtable frozen here holds only durable commits (group commits waiting for an
+        // fsync of the old file get it now).
+        if self.opts.sync {
+            c.wal.sync()?;
+        }
+        self.made_durable(self.assigned.load(Ordering::Acquire));
         c.wal = new_wal;
         let mut v = self.view.write();
         if v.mem.is_empty() {
@@ -664,6 +766,7 @@ fn sst_get(sst: &SstReader, key: &[u8], seek: &[u8]) -> Result<Option<(u64, Opti
 type RawEntry = (Vec<u8>, Option<Bytes>);
 
 const BATCH: usize = 256;
+const MIN_BATCH: usize = 16;
 
 /// One ordered source of raw (storage key, value) entries.
 enum Cursor {
@@ -673,6 +776,9 @@ enum Cursor {
         from: Bound<Vec<u8>>,
         end: Vec<u8>,
         done: bool,
+        /// Entries read per batch: a few at first (and after a seek), more as the scan goes
+        /// on (a row updated many times has as many versions here, mostly skipped).
+        batch: usize,
     },
     Level {
         ssts: Vec<Arc<SstReader>>,
@@ -694,6 +800,7 @@ impl Cursor {
             from: Bound::Included(start.to_vec()),
             end: end.to_vec(),
             done: false,
+            batch: MIN_BATCH,
         }
     }
 
@@ -719,6 +826,7 @@ impl Cursor {
                 from,
                 end,
                 done,
+                batch,
             } => {
                 if buf.is_empty() && !*done {
                     let upper = if end.is_empty() {
@@ -731,12 +839,13 @@ impl Cursor {
                         Bound::Excluded(k) => Bound::Excluded(k.clone()),
                         Bound::Unbounded => Bound::Unbounded,
                     };
-                    for e in mem.map.range::<Vec<u8>, _>((lower, upper)).take(BATCH) {
+                    for e in mem.map.range::<Vec<u8>, _>((lower, upper)).take(*batch) {
                         buf.push_back((e.key().clone(), e.value().clone()));
                     }
-                    if buf.len() < BATCH {
+                    if buf.len() < *batch {
                         *done = true;
                     }
+                    *batch = (*batch * 2).min(BATCH);
                     if let Some((k, _)) = buf.back() {
                         *from = Bound::Excluded(k.clone());
                     }
@@ -835,6 +944,59 @@ impl Cursor {
             Cursor::Level { pos, .. } => *pos += 1,
         }
     }
+
+    /// Move to the first entry >= `target` (when not there already).
+    fn seek(&mut self, target: &[u8]) {
+        match self {
+            Cursor::Mem {
+                buf,
+                from,
+                done,
+                batch,
+                ..
+            } => {
+                while buf.front().is_some_and(|e| e.0.as_slice() < target) {
+                    buf.pop_front();
+                }
+                if buf.is_empty() && !*done {
+                    *from = Bound::Included(target.to_vec());
+                    *batch = MIN_BATCH;
+                }
+            }
+            Cursor::Level {
+                ssts,
+                file,
+                block,
+                pos,
+                start,
+                started,
+                ..
+            } => {
+                if !*started {
+                    if target > start.as_slice() {
+                        *start = target.to_vec();
+                    }
+                    return;
+                }
+                if *file >= ssts.len() {
+                    return;
+                }
+                if let Some(b) = block.as_ref() {
+                    if b.get(*pos).is_some_and(|e| e.0.as_slice() >= target) {
+                        return;
+                    }
+                    if b.last().is_some_and(|e| e.0.as_slice() >= target) {
+                        *pos = b.partition_point(|(k, _)| k.as_slice() < target);
+                        return;
+                    }
+                }
+                // Further on: positioned again as at the start (`peek`).
+                *start = target.to_vec();
+                *started = false;
+                *block = None;
+            }
+        }
+    }
 }
 
 struct Merge {
@@ -872,6 +1034,13 @@ impl Merge {
         }
         Ok(Some(e))
     }
+
+    /// Every source on to its first entry >= `target`.
+    fn seek(&mut self, target: &[u8]) {
+        for c in &mut self.sources {
+            c.seek(target);
+        }
+    }
 }
 
 /// Snapshot scan: yields (user key, value) for the newest visible, non-deleted version.
@@ -879,11 +1048,19 @@ pub struct Scan {
     merge: Merge,
     ts: u64,
     decided: Option<Vec<u8>>,
+    /// The commit ts of the version `decided` holds.
+    decided_ts: u64,
+    /// Versions of the decided key passed over so far.
+    skipped: u32,
+    /// The last key a version newer than the snapshot was passed over for.
+    newer: Option<Vec<u8>>,
+    /// No snapshot older than this can read (the store's gc horizon as the scan began).
+    horizon: u64,
     _view: Arc<View>,
 }
 
 impl Scan {
-    fn new(view: Arc<View>, start: Vec<u8>, end: Vec<u8>, ts: u64) -> Scan {
+    fn new(view: Arc<View>, start: Vec<u8>, end: Vec<u8>, ts: u64, horizon: u64) -> Scan {
         let mut sources = Vec::new();
         sources.push(Cursor::mem(view.mem.clone(), &start, &end));
         for m in &view.imm {
@@ -899,7 +1076,29 @@ impl Scan {
             merge: Merge::new(sources, end),
             ts,
             decided: None,
+            decided_ts: 0,
+            skipped: 0,
+            newer: None,
+            horizon,
             _view: view,
+        }
+    }
+
+    /// Drop the memtables' versions of `uk` older than the decided one, when that one is
+    /// at or before the horizon: no snapshot can read them (a row updated many times keeps
+    /// only what readers need, as heap pruning does in Postgres).
+    fn prune(&self, uk: &[u8]) {
+        if self.decided_ts > self.horizon {
+            return;
+        }
+        let from = mvcc_key(uk, self.decided_ts);
+        let mut to = uk.to_vec();
+        to.extend_from_slice(&[0xFF; 9]);
+        for m in std::iter::once(&self._view.mem).chain(self._view.imm.iter()) {
+            let range = (Bound::Excluded(from.as_slice()), Bound::Excluded(to.as_slice()));
+            for e in m.map.range::<[u8], _>(range) {
+                e.remove();
+            }
         }
     }
 }
@@ -909,29 +1108,407 @@ impl Iterator for Scan {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let (k, v) = match self.merge.next_raw() {
+            let (mut k, v) = match self.merge.next_raw() {
                 Ok(Some(e)) => e,
                 Ok(None) => return None,
                 Err(e) => return Some(Err(e)),
             };
             let uk = user_key(&k);
             if self.decided.as_deref() == Some(uk) {
+                // Another version of a key decided already. Past a second one, a seek past
+                // all of them (with the dead ones pruned): a row updated many times. (User
+                // keys are prefix-free, so no other key's entries lie before the target.)
+                self.skipped += 1;
+                if self.skipped >= 2 {
+                    self.prune(uk);
+                    let mut target = uk.to_vec();
+                    target.extend_from_slice(&[0xFF; 9]);
+                    self.merge.seek(&target);
+                }
                 continue;
             }
             if key_ts(&k) > self.ts {
+                // Versions newer than the snapshot: past a second one, a seek to the newest
+                // one it sees.
+                if self.newer.as_deref() == Some(uk) {
+                    let target = mvcc_key(uk, self.ts);
+                    self.merge.seek(&target);
+                } else {
+                    self.newer = Some(uk.to_vec());
+                }
                 continue;
             }
-            self.decided = Some(uk.to_vec());
+            self.skipped = 0;
+            // (The decided key's buffer is reused, and the entry's own key cut to the user
+            // key: one allocation per row.)
+            match &mut self.decided {
+                Some(d) => {
+                    d.clear();
+                    d.extend_from_slice(uk);
+                }
+                None => self.decided = Some(uk.to_vec()),
+            }
+            self.decided_ts = key_ts(&k);
             if let Some(v) = v {
-                return Some(Ok((uk.to_vec(), v)));
+                k.truncate(k.len().saturating_sub(8));
+                return Some(Ok((k, v)));
             }
         }
+    }
+}
+
+// ── descending iteration ──
+
+/// One source's raw entries below a bound, greatest first (a batch at a time).
+enum RevCursor {
+    Mem {
+        mem: Arc<Memtable>,
+        buf: VecDeque<RawEntry>,
+        start: Vec<u8>,
+        /// Exclusive upper bound of what's left (None: unbounded).
+        to: Option<Vec<u8>>,
+        done: bool,
+    },
+    Level {
+        ssts: Vec<Arc<SstReader>>,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        /// The next file to read is `file - 1` (0: none left); within the current block,
+        /// entries before `pos`.
+        file: usize,
+        block: Option<Arc<sst::Block>>,
+        block_idx: usize,
+        pos: usize,
+        started: bool,
+    },
+}
+
+impl RevCursor {
+    fn peek(&mut self) -> Result<Option<&RawEntry>> {
+        match self {
+            RevCursor::Mem {
+                mem,
+                buf,
+                start,
+                to,
+                done,
+            } => {
+                if buf.is_empty() && !*done {
+                    let upper = match to {
+                        Some(k) => Bound::Excluded(k.as_slice()),
+                        None => Bound::Unbounded,
+                    };
+                    let lower = Bound::Included(start.as_slice());
+                    for e in mem.map.range::<[u8], _>((lower, upper)).rev().take(BATCH) {
+                        buf.push_back((e.key().clone(), e.value().clone()));
+                    }
+                    if buf.len() < BATCH {
+                        *done = true;
+                    }
+                    if let Some((k, _)) = buf.back() {
+                        *to = Some(k.clone());
+                    }
+                }
+                Ok(buf.front())
+            }
+            RevCursor::Level {
+                ssts,
+                start,
+                end,
+                file,
+                block,
+                block_idx,
+                pos,
+                started,
+            } => loop {
+                if !*started {
+                    *started = true;
+                    // The last file holding a key below `end`, at its first block reaching
+                    // `end` (or its last).
+                    *file = if end.is_empty() {
+                        ssts.len()
+                    } else {
+                        ssts.partition_point(|s| s.meta.first_key.as_slice() < end.as_slice())
+                    };
+                    if *file == 0 {
+                        return Ok(None);
+                    }
+                    let sst = &ssts[*file - 1];
+                    let n = sst.block_count();
+                    *block_idx = if end.is_empty() {
+                        n.saturating_sub(1)
+                    } else {
+                        sst.find_block(end).min(n.saturating_sub(1))
+                    };
+                    if n == 0 {
+                        *file -= 1;
+                        *started = false;
+                        continue;
+                    }
+                    let b = sst.block(*block_idx)?;
+                    *pos = if end.is_empty() {
+                        b.len()
+                    } else {
+                        b.partition_point(|(k, _)| k.as_slice() < end.as_slice())
+                    };
+                    *block = Some(b);
+                }
+                if *file == 0 {
+                    return Ok(None);
+                }
+                if block.is_none() {
+                    if *block_idx == 0 {
+                        // On to the previous file's last block.
+                        *file -= 1;
+                        if *file == 0 {
+                            return Ok(None);
+                        }
+                        let sst = &ssts[*file - 1];
+                        if sst.block_count() == 0 {
+                            continue;
+                        }
+                        *block_idx = sst.block_count() - 1;
+                    } else {
+                        *block_idx -= 1;
+                    }
+                    let b = ssts[*file - 1].block(*block_idx)?;
+                    *pos = b.len();
+                    *block = Some(b);
+                }
+                if *pos == 0 {
+                    *block = None;
+                    continue;
+                }
+                let b: &sst::Block = block.as_ref().unwrap();
+                let entry = &b[*pos - 1];
+                if entry.0.as_slice() < start.as_slice() {
+                    *file = 0;
+                    return Ok(None);
+                }
+                return Ok(Some(entry));
+            },
+        }
+    }
+
+    fn head(&self) -> Option<&RawEntry> {
+        match self {
+            RevCursor::Mem { buf, .. } => buf.front(),
+            RevCursor::Level {
+                file,
+                block,
+                pos,
+                start,
+                ..
+            } => {
+                if *file == 0 || *pos == 0 {
+                    return None;
+                }
+                let e = block.as_ref()?.get(*pos - 1)?;
+                (e.0.as_slice() >= start.as_slice()).then_some(e)
+            }
+        }
+    }
+
+    fn advance(&mut self) {
+        match self {
+            RevCursor::Mem { buf, .. } => {
+                buf.pop_front();
+            }
+            RevCursor::Level { pos, .. } => *pos -= 1,
+        }
+    }
+}
+
+/// Snapshot scan in descending key order: (user key, value) of the newest visible,
+/// non-deleted version of each key in [start, end).
+pub struct RevScan {
+    sources: Vec<RevCursor>,
+    ts: u64,
+    /// The next user key's entries already read: its first (oldest) one is held here.
+    pending: Option<RawEntry>,
+    _view: Arc<View>,
+}
+
+impl RevScan {
+    fn new(view: Arc<View>, start: Vec<u8>, end: Vec<u8>, ts: u64) -> RevScan {
+        let mem = |m: &Arc<Memtable>| RevCursor::Mem {
+            mem: m.clone(),
+            buf: VecDeque::new(),
+            start: start.clone(),
+            to: (!end.is_empty()).then(|| end.clone()),
+            done: false,
+        };
+        let level = |ssts: Vec<Arc<SstReader>>| RevCursor::Level {
+            ssts,
+            start: start.clone(),
+            end: end.clone(),
+            file: 0,
+            block: None,
+            block_idx: 0,
+            pos: 0,
+            started: false,
+        };
+        let mut sources = vec![mem(&view.mem)];
+        sources.extend(view.imm.iter().map(mem));
+        sources.extend(view.l0.iter().map(|s| level(vec![s.clone()])));
+        if !view.l1.is_empty() {
+            sources.push(level(view.l1.clone()));
+        }
+        RevScan {
+            sources,
+            ts,
+            pending: None,
+            _view: view,
+        }
+    }
+
+    /// The greatest raw entry left across the sources.
+    fn next_raw(&mut self) -> Result<Option<RawEntry>> {
+        for c in &mut self.sources {
+            c.peek()?;
+        }
+        let mut best: Option<(usize, &RawEntry)> = None;
+        for (i, c) in self.sources.iter().enumerate() {
+            let Some(e) = c.head() else { continue };
+            if best.is_none_or(|(_, b)| e.0 > b.0) {
+                best = Some((i, e));
+            }
+        }
+        let Some((b, e)) = best else { return Ok(None) };
+        let e = e.clone();
+        self.sources[b].advance();
+        Ok(Some(e))
+    }
+}
+
+impl Iterator for RevScan {
+    type Item = Result<(Vec<u8>, Bytes)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let first = match self.pending.take() {
+                Some(e) => e,
+                None => match self.next_raw() {
+                    Ok(Some(e)) => e,
+                    Ok(None) => return None,
+                    Err(e) => return Some(Err(e)),
+                },
+            };
+            // A key's versions come oldest first: the newest one at or before `ts` wins.
+            let uk = user_key(&first.0).to_vec();
+            let mut chosen = (key_ts(&first.0) <= self.ts).then_some(first.1);
+            loop {
+                match self.next_raw() {
+                    Ok(Some(e)) if user_key(&e.0) == uk.as_slice() => {
+                        if key_ts(&e.0) <= self.ts {
+                            chosen = Some(e.1);
+                        }
+                    }
+                    Ok(Some(e)) => {
+                        self.pending = Some(e);
+                        break;
+                    }
+                    Ok(None) => break,
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            if let Some(Some(v)) = chosen {
+                return Some(Ok((uk, v)));
+            }
+        }
+    }
+}
+
+impl Store {
+    /// Descending scan of user keys in [start, end) at snapshot `ts`.
+    pub fn scan_rev(&self, start: &[u8], end: &[u8], ts: u64) -> RevScan {
+        RevScan::new(self.view(), start.to_vec(), end.to_vec(), ts)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reverse_scan_matches_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(
+            dir.path(),
+            StoreOptions {
+                memtable_bytes: 4 << 10,
+                sync: false,
+                ..StoreOptions::default()
+            },
+        )
+        .unwrap();
+        let mut snaps = Vec::new();
+        let mut pins = Vec::new();
+        // Every version written: key -> [(ts, value)].
+        let mut model: BTreeMap<Vec<u8>, Vec<(u64, Option<Bytes>)>> = BTreeMap::new();
+        for round in 0..6u32 {
+            // A few hot keys get many versions (each its own commit).
+            for i in 0..40u32 {
+                let k = format!("k{:05}", (i % 3) * 300 + 1).into_bytes();
+                let v = (i % 5 != 4).then(|| Bytes::from(format!("hot{round}-{i}")));
+                let ts = store.commit(vec![(k.clone(), v.clone())], |_| Ok(())).unwrap();
+                model.entry(k).or_default().push((ts, v));
+                if i % 13 == 0 {
+                    pins.push(store.pin(ts));
+                    snaps.push(ts);
+                }
+            }
+            let mut writes = Vec::new();
+            for i in 0..300u32 {
+                if (i + round) % 7 == 0 {
+                    writes.push((format!("k{:05}", i * 3).into_bytes(), None));
+                } else if (i * 5 + round) % 3 == 0 {
+                    writes.push((
+                        format!("k{:05}", i * 3).into_bytes(),
+                        Some(Bytes::from(format!("v{round}-{i}"))),
+                    ));
+                }
+            }
+            let ts = store.commit(writes.clone(), |_| Ok(())).unwrap();
+            for (k, v) in writes {
+                model.entry(k).or_default().push((ts, v));
+            }
+            pins.push(store.pin(ts));
+            snaps.push(ts);
+            if round % 2 == 1 {
+                store.rotate().unwrap();
+                store.flush_all().unwrap();
+            }
+            if round == 4 {
+                store.compact().unwrap();
+            }
+        }
+        // (The pinned snapshots keep their versions through compaction.)
+        snaps.push(store.visible_ts());
+        for &ts in &snaps {
+            let expect: Vec<(Vec<u8>, Bytes)> = model
+                .iter()
+                .filter_map(|(k, vs)| {
+                    let v = vs.iter().rev().find(|(t, _)| *t <= ts)?.1.clone()?;
+                    Some((k.clone(), v))
+                })
+                .collect();
+            let all: Vec<_> = store.scan(b"", b"", ts).map(|r| r.unwrap()).collect();
+            assert_eq!(all, expect, "ts {ts}");
+            for (k, _) in expect.iter().step_by(7) {
+                assert!(store.get(k, ts).unwrap().is_some());
+            }
+        }
+        drop(pins);
+        for &ts in &snaps {
+            for (a, b) in [(&b""[..], &b""[..]), (b"k00100", b"k00700"), (b"k00101", b"k00102")] {
+                let mut fwd: Vec<_> = store.scan(a, b, ts).map(|r| r.unwrap()).collect();
+                fwd.reverse();
+                let rev: Vec<_> = store.scan_rev(a, b, ts).map(|r| r.unwrap()).collect();
+                assert_eq!(fwd, rev, "ts {ts}, range {a:?}..{b:?}");
+            }
+        }
+    }
 
     fn opts() -> StoreOptions {
         StoreOptions {

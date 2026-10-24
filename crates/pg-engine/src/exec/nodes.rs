@@ -8,7 +8,7 @@ use crate::sql::plan::{JoinKind, Plan, SetOpKind, SortKey, SrfCall};
 use crate::types::Value;
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use super::fasthash::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -201,7 +201,7 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
         Plan::Distinct { input, on, hashed, .. } => Box::new(DistinctNode {
             input: open(input, ctx)?,
             on: on.clone(),
-            seen: HashMap::new(),
+            seen: HashMap::default(),
             prev: None,
             hashed: (on.is_none() || *hashed).then(|| plan.clone()),
             out: None,
@@ -315,7 +315,7 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
                     nl.memo = Some(Memoize {
                         keys: m.keys.clone(),
                         key: Arc::as_ptr(plan) as usize + 1,
-                        cache: HashMap::new(),
+                        cache: HashMap::default(),
                         binary: m.binary,
                         lru: Default::default(),
                         stamp: 0,
@@ -390,7 +390,7 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
             base: Some(open(base, ctx)?),
             recursive: recursive.clone(),
             all: *all,
-            seen: HashMap::new(),
+            seen: HashMap::default(),
             working: Vec::new(),
             produced: None,
         }),
@@ -457,7 +457,7 @@ impl LockRowsNode {
             return Err(crate::error::internal("LockRows: row marks and scans differ"));
         }
         let snap = ctx.snapshot();
-        let mut rows = super::EpqRows::new();
+        let mut rows = super::EpqRows::default();
         for (scans, test) in groups.iter().zip(tests) {
             let test = match test {
                 None => None,
@@ -595,6 +595,9 @@ pub struct SysRescan {
     rows: Option<Rc<Vec<Row>>>,
     /// Per column: the rows holding each value.
     by_col: RefCell<HashMap<usize, Rc<HashMap<Value, Vec<usize>>>>>,
+    /// Per column and kind of value: whether every row's value is of that kind (or NULL),
+    /// so the hash serves an equality with it (checked once, not per outer row).
+    hashable: RefCell<HashMap<(usize, std::mem::Discriminant<Value>), bool>>,
 }
 
 /// The rows of a catalog scan run once per outer row (a nested loop's parameterized inner
@@ -639,6 +642,7 @@ fn sys_rescan(
                 role,
                 rows: deferred.is_empty().then(|| Rc::new(rows)),
                 by_col: RefCell::default(),
+                hashable: RefCell::default(),
             });
             ctx.sys_rescans.borrow_mut().insert(table.oid(), e.clone());
             e
@@ -690,7 +694,14 @@ fn sys_rescan(
                     | (Value::Text(_), Value::Text(_))
             )
         };
-        if !all.iter().all(|r| r.get(k).is_some_and(|x| x.is_null() || same(x))) {
+        if !same(&v) {
+            continue;
+        }
+        let kind = (k, std::mem::discriminant(&v));
+        let ok = *entry.hashable.borrow_mut().entry(kind).or_insert_with(|| {
+            all.iter().all(|r| r.get(k).is_some_and(|x| x.is_null() || same(x)))
+        });
+        if !ok {
             continue;
         }
         let map = entry
@@ -698,7 +709,7 @@ fn sys_rescan(
             .borrow_mut()
             .entry(k)
             .or_insert_with(|| {
-                let mut m: HashMap<Value, Vec<usize>> = HashMap::new();
+                let mut m: HashMap<Value, Vec<usize>> = HashMap::default();
                 for (i, r) in all.iter().enumerate() {
                     if !r[k].is_null() {
                         m.entry(r[k].clone()).or_default().push(i);
@@ -1433,7 +1444,7 @@ fn hashed_distinct_keyed(
     plan: &Arc<Plan>,
     ctx: &ExecCtx,
 ) -> Result<Vec<Row>> {
-    let mut index: HashMap<Row, usize> = HashMap::new();
+    let mut index: HashMap<Row, usize> = HashMap::default();
     let mut firsts: Vec<Row> = Vec::new();
     let mut order = super::pghash::GroupOrder::new(types, ctx);
     for (k, r) in rows {
@@ -1528,7 +1539,7 @@ impl Node for DistinctNode {
                 hashed_distinct_keyed(keyed, types, &plan, ctx)?
             // (Shown as a Unique over its input sorted: the rows in that order.)
             } else if let Some(cols) = crate::sql::explain::distinct_order(&plan, ctx) {
-                let mut seen: HashMap<Row, ()> = HashMap::new();
+                let mut seen: HashMap<Row, ()> = HashMap::default();
                 let mut out: Vec<Row> = Vec::new();
                 for r in rows {
                     if seen.insert(r.clone(), ()).is_none() {
@@ -1670,7 +1681,7 @@ impl SetOpNode {
                 if let Some(plan) = &self.plan
                     && let Some(cols) = crate::sql::explain::distinct_order(plan, ctx)
                 {
-                    let mut seen: HashMap<Row, ()> = HashMap::new();
+                    let mut seen: HashMap<Row, ()> = HashMap::default();
                     for r in left.into_iter().chain(right) {
                         if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(key(&r)) {
                             e.insert(());
@@ -1683,7 +1694,7 @@ impl SetOpNode {
                 return match &self.plan {
                     Some(plan) => hashed_distinct(left.into_iter().chain(right), key, types, plan, ctx),
                     None => {
-                        let mut seen: HashMap<Row, ()> = HashMap::new();
+                        let mut seen: HashMap<Row, ()> = HashMap::default();
                         for r in left.into_iter().chain(right) {
                             if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(key(&r)) {
                                 e.insert(());
@@ -1703,11 +1714,11 @@ impl SetOpNode {
                 return self.hashed_setop(left, right, &key, ctx);
             }
             SetOpKind::Intersect | SetOpKind::Except => {
-                let mut counts: HashMap<Row, usize> = HashMap::new();
+                let mut counts: HashMap<Row, usize> = HashMap::default();
                 for r in right {
                     *counts.entry(key(&r)).or_insert(0) += 1;
                 }
-                let mut emitted: HashMap<Row, ()> = HashMap::new();
+                let mut emitted: HashMap<Row, ()> = HashMap::default();
                 for r in left {
                     let k = key(&r);
                     let c = counts.get(&k).copied().unwrap_or(0);
@@ -1770,7 +1781,7 @@ impl SetOpNode {
             (left, right, &self.left)
         };
         let types = output_types(lplan, left.first());
-        let mut index: HashMap<Row, usize> = HashMap::new();
+        let mut index: HashMap<Row, usize> = HashMap::default();
         let mut groups: Vec<(Row, usize, usize)> = Vec::new();
         let mut order = super::pghash::GroupOrder::new(types, ctx);
         for r in left {
@@ -2350,7 +2361,7 @@ fn build_hash(
     for (p, i) in table.scan().enumerate() {
         pos[i] = p;
     }
-    let mut map: HashMap<Vec<Value>, Vec<usize>> = HashMap::new();
+    let mut map: HashMap<Vec<Value>, Vec<usize>> = HashMap::default();
     for (k, i) in by_key {
         map.entry(k).or_default().push(i);
     }
@@ -2426,7 +2437,7 @@ impl HashJoinNode {
         let rows = collect(&self.right_plan, ctx, None)?;
         // (EXPLAIN ANALYZE: how the rows bunch on their keys, which batching can't split.)
         if let Some(instr) = ctx.instr.borrow().clone() {
-            let mut counts: HashMap<String, u64> = HashMap::new();
+            let mut counts: HashMap<String, u64> = HashMap::default();
             for r in &rows {
                 let k = eval_all(&self.rkeys, r, ctx)?;
                 *counts.entry(format!("{k:?}")).or_default() += 1;

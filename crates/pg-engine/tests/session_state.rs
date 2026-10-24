@@ -146,6 +146,47 @@ fn catalog_estimates_follow_ddl() {
     });
 }
 
+/// A session's statements reuse the system catalogs' rows an earlier one generated
+/// (`SessionState::sys_rows`) only under the same catalog, roles, search path and settings:
+/// DDL, a rolled-back DDL, SET ROLE, search_path and a setting each show their own rows.
+#[test]
+fn catalog_rows_follow_ddl_roles_and_settings() {
+    check(
+        "CREATE TABLE t0 (a int, b text DEFAULT 'x');
+         SELECT attname FROM pg_attribute WHERE attrelid = 't0'::regclass AND attnum > 0;
+         SELECT count(*) FROM pg_type WHERE typname = 'mood';
+         SELECT relacl FROM pg_class WHERE relname = 't0';",
+        "CREATE TABLE t (a int, b text DEFAULT 'x');
+         SELECT attname, atttypid::regtype FROM pg_attribute WHERE attrelid = 't'::regclass AND attnum > 0 ORDER BY 1;
+         ALTER TABLE t ADD COLUMN c numeric DEFAULT 1.5;
+         SELECT attname, atttypid::regtype FROM pg_attribute WHERE attrelid = 't'::regclass AND attnum > 0 ORDER BY 1;
+         SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef WHERE adrelid = 't'::regclass ORDER BY adnum;
+         BEGIN;
+         ALTER TABLE t DROP COLUMN b;
+         SELECT attname FROM pg_attribute WHERE attrelid = 't'::regclass AND attnum > 0 AND NOT attisdropped ORDER BY 1;
+         ROLLBACK;
+         SELECT attname FROM pg_attribute WHERE attrelid = 't'::regclass AND attnum > 0 AND NOT attisdropped ORDER BY 1;
+         CREATE SCHEMA s2;
+         CREATE TYPE s2.mood AS ENUM ('ok');
+         SELECT typname::regtype FROM pg_type WHERE typname = 'mood';
+         SET search_path = s2, public;
+         SELECT typname::regtype FROM pg_type WHERE typname = 'mood';
+         RESET search_path;
+         CREATE ROLE regress_sysrows_r;
+         GRANT SELECT ON t TO regress_sysrows_r;
+         SELECT relacl FROM pg_class WHERE relname = 't';
+         SET ROLE regress_sysrows_r;
+         SELECT relacl, has_table_privilege('t', 'SELECT') FROM pg_class WHERE relname = 't';
+         RESET ROLE;
+         REVOKE ALL ON t FROM regress_sysrows_r;
+         DROP ROLE regress_sysrows_r;
+         CREATE TABLE u (x int);
+         SELECT relname, relkind FROM pg_class WHERE relname IN ('t', 'u') ORDER BY 1;",
+        true,
+        &["numeric", "1.5", "s2.mood", "regress_sysrows_r=r/"],
+    );
+}
+
 /// A made range type's constructors are its own database's type's.
 #[test]
 fn range_constructors_per_database() {

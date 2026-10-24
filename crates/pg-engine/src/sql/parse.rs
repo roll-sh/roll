@@ -171,7 +171,59 @@ fn char_to_byte(s: &str, p: usize) -> usize {
         .map_or(s.len(), |(b, _)| b)
 }
 
+/// Parse trees of texts parsed lately on this thread, by (options, text): a parse is a pure
+/// function of them, and the same texts come again and again (a client's repeated simple
+/// queries, stored defaults, checks and view bodies deparsed for each catalog read).
+/// Cleared whole when full.
+struct ParseCache {
+    map: std::collections::HashMap<(c_int, Box<str>), Result<Vec<RawStmt>>>,
+    bytes: usize,
+}
+
+const PARSE_CACHE_ENTRIES: usize = 2048;
+const PARSE_CACHE_BYTES: usize = 8 << 20;
+/// Longer texts aren't kept.
+const PARSE_CACHE_MAX_TEXT: usize = 16 << 10;
+
+thread_local! {
+    static PARSED: std::cell::RefCell<ParseCache> = std::cell::RefCell::new(ParseCache {
+        map: std::collections::HashMap::new(),
+        bytes: 0,
+    });
+}
+
+/// `parse` through `PARSED` (a copy of the tree kept for `tag` and `sql`).
+pub fn cached_parse(
+    tag: c_int,
+    sql: &str,
+    parse: impl FnOnce() -> Result<Vec<RawStmt>>,
+) -> Result<Vec<RawStmt>> {
+    if sql.len() > PARSE_CACHE_MAX_TEXT {
+        return parse();
+    }
+    let key = (tag, Box::<str>::from(sql));
+    if let Some(r) = PARSED.with(|c| c.borrow().map.get(&key).cloned()) {
+        return r;
+    }
+    let r = parse();
+    PARSED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.map.len() >= PARSE_CACHE_ENTRIES || c.bytes >= PARSE_CACHE_BYTES {
+            c.map.clear();
+            c.bytes = 0;
+        }
+        // (Trees are a few times their text.)
+        c.bytes += sql.len() * 8;
+        c.map.insert(key, r.clone());
+    });
+    r
+}
+
 fn parse_opts(sql: &str, options: c_int) -> Result<Vec<RawStmt>> {
+    cached_parse(options, sql, || parse_uncached(sql, options))
+}
+
+fn parse_uncached(sql: &str, options: c_int) -> Result<Vec<RawStmt>> {
     let input = CString::new(sql).map_err(|_| {
         Error::new(
             code::SYNTAX_ERROR,

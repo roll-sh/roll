@@ -1399,8 +1399,89 @@ pub fn generated_rows_count() -> u64 {
     GENERATED.with(|c| c.get())
 }
 
+/// What a cached catalog's rows depend on: the catalog (held by a `Weak`, compared by
+/// address), the current and session user, the search path and the settings' generation.
+/// (One session: its database.)
+struct SysRowsKey {
+    table: u32,
+    cat: std::sync::Weak<Catalog>,
+    current_user: u32,
+    session_user: u32,
+    search_path: Vec<String>,
+    settings: u64,
+}
+
+/// `SessionState::sys_rows`: the last few catalogs generated.
+#[derive(Default)]
+pub struct SysRowsCache {
+    entries: std::collections::VecDeque<(SysRowsKey, std::rc::Rc<Vec<Row>>)>,
+}
+
+const SYS_ROWS_CACHED: usize = 16;
+
+/// The catalogs whose rows are a function of the catalog, the roles, the search path and
+/// the settings alone (no data, statistics, locks, other databases or large objects): what
+/// psql's `\d` and ORMs' introspection read again and again.
+fn rows_cacheable(table: SysTable) -> bool {
+    use SysTable::*;
+    matches!(
+        table,
+        PgClass | PgAttribute | PgAttrdef | PgType | PgNamespace | PgIndex | PgConstraint | PgProc
+    )
+}
+
+fn rows_key(table: SysTable, ctx: &ExecCtx) -> SysRowsKey {
+    let cat = ctx.catalog();
+    SysRowsKey {
+        table: table.oid(),
+        cat: Arc::downgrade(&cat),
+        current_user: ctx.current_user(),
+        session_user: ctx.session_user(),
+        search_path: ctx.search_path.clone(),
+        settings: ctx.sess.settings.borrow().generation(),
+    }
+}
+
+impl SysRowsKey {
+    fn same(&self, o: &SysRowsKey) -> bool {
+        self.table == o.table
+            && std::sync::Weak::ptr_eq(&self.cat, &o.cat)
+            && self.cat.strong_count() > 0
+            && self.current_user == o.current_user
+            && self.session_user == o.session_user
+            && self.search_path == o.search_path
+            && self.settings == o.settings
+    }
+}
+
 /// Rows of a system relation, as the current transaction sees the catalog.
 pub fn rows(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
+    if !rows_cacheable(table) {
+        return rows_generated(table, ctx);
+    }
+    let key = rows_key(table, ctx);
+    let hit = ctx
+        .sess
+        .sys_rows
+        .borrow()
+        .entries
+        .iter()
+        .find(|(k, _)| k.same(&key))
+        .map(|(_, r)| r.clone());
+    if let Some(r) = hit {
+        return Ok(r.as_ref().clone());
+    }
+    let rows = rows_generated(table, ctx)?;
+    let mut c = ctx.sess.sys_rows.borrow_mut();
+    c.entries.retain(|(k, _)| k.cat.strong_count() > 0 && k.table != key.table);
+    if c.entries.len() >= SYS_ROWS_CACHED {
+        c.entries.pop_front();
+    }
+    c.entries.push_back((key, std::rc::Rc::new(rows.clone())));
+    Ok(rows)
+}
+
+fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
     use SysTable::*;
     GENERATED.with(|c| c.set(c.get() + 1));
     let schema = if table.schema() == PGC {

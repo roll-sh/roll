@@ -316,6 +316,36 @@ fn extended_protocol_types() {
     s.engine.shutdown();
 }
 
+/// A text-format parameter of an object identifier type (libpq's PQexecParams, as pgbench -i
+/// sends `SELECT relkind FROM pg_class WHERE oid = $1::regclass`) is looked up by name in
+/// the transaction's catalog, as regclassin does.
+#[test]
+fn text_parameters_of_reg_types() {
+    let s = server(AuthMethod::ScramSha256);
+    let (pid, _, _) = s.engine.register_backend(None, None);
+    let mut c = s.engine.connect(pid, "postgres", "postgres", "t").unwrap();
+    let relkind = |c: &mut pg_engine::session::Session, name: &str| -> Result<String, String> {
+        c.parse_message("", "SELECT relkind FROM pg_catalog.pg_class WHERE oid = $1::pg_catalog.regclass", &[0])
+            .and_then(|_| c.bind_message("", "", vec![Some(name.as_bytes().to_vec())], &[], Vec::new()))
+            .and_then(|_| c.execute_portal("", 0))
+            .map(|(o, _)| match o {
+                pg_engine::session::Outcome::Done(r) => format!("{:?}", r.rows),
+                _ => String::new(),
+            })
+            .map_err(|e| format!("{}: {}", e.code, e.message))
+    };
+    c.query("CREATE TABLE before_txn (a int)").unwrap();
+    assert_eq!(relkind(&mut c, "before_txn").unwrap(), relkind(&mut c, "public.before_txn").unwrap());
+    c.sync().unwrap();
+    c.query("BEGIN; CREATE TABLE in_txn (a int)").unwrap();
+    assert!(relkind(&mut c, "in_txn").is_ok());
+    c.sync().unwrap();
+    assert_eq!(relkind(&mut c, "nope").unwrap_err(), "42P01: relation \"nope\" does not exist");
+    c.sync().unwrap();
+    c.query("ROLLBACK").unwrap();
+    s.engine.shutdown();
+}
+
 #[test]
 fn rows_before_an_error() {
     // A SELECT's rows go out as they are made: those before an error reach the client

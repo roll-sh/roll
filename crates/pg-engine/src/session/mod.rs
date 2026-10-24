@@ -1541,7 +1541,29 @@ impl Session {
                 ),
             ));
         }
-        let fmt = self.state.settings.borrow().format_ctx();
+        // An object identifier type's input (regclassin, ...) looks its name up in the
+        // transaction's catalog, through the search path.
+        use DataType as T;
+        let fmt = if p.param_types.iter().any(|t| {
+            matches!(
+                t,
+                T::Regclass
+                    | T::Regtype
+                    | T::Regproc
+                    | T::Regprocedure
+                    | T::Regnamespace
+                    | T::Regrole
+                    | T::Regconfig
+                    | T::Regdictionary
+                    | T::Regoper
+                    | T::Regoperator
+                    | T::Regcollation
+            )
+        }) {
+            self.format_ctx()
+        } else {
+            self.state.settings.borrow().format_ctx()
+        };
         let mut values = Vec::with_capacity(params.len());
         for (i, raw) in params.into_iter().enumerate() {
             let f = match formats.len() {

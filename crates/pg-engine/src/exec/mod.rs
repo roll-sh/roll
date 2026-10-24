@@ -2,6 +2,7 @@
 
 pub mod agg;
 pub mod dml;
+pub mod fasthash;
 pub mod merge;
 pub mod nodes;
 pub mod scan;
@@ -23,7 +24,7 @@ use crate::types::array::ArrayValue;
 use crate::types::text::FormatCtx;
 use crate::types::{DataType, Value};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use fasthash::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -381,9 +382,9 @@ impl<'a> ExecCtx<'a> {
             search_path,
             outer: RefCell::new(Vec::new()),
             case_vals: RefCell::new(Vec::new()),
-            subq_cache: RefCell::new(HashMap::new()),
-            ctes: RefCell::new(HashMap::new()),
-            work: RefCell::new(HashMap::new()),
+            subq_cache: RefCell::new(HashMap::default()),
+            ctes: RefCell::new(HashMap::default()),
+            work: RefCell::new(HashMap::default()),
             txn_time: Rc::new(Cell::new(txn_time)),
             stmt_time,
             processed: Cell::new(0),
@@ -454,9 +455,9 @@ impl<'a> ExecCtx<'a> {
             search_path: self.search_path.clone(),
             outer: RefCell::new(Vec::new()),
             case_vals: RefCell::new(Vec::new()),
-            subq_cache: RefCell::new(HashMap::new()),
-            ctes: RefCell::new(HashMap::new()),
-            work: RefCell::new(HashMap::new()),
+            subq_cache: RefCell::new(HashMap::default()),
+            ctes: RefCell::new(HashMap::default()),
+            work: RefCell::new(HashMap::default()),
             txn_time: self.txn_time.clone(),
             stmt_time: self.stmt_time,
             processed: Cell::new(0),
@@ -855,7 +856,7 @@ impl<'a> ExecCtx<'a> {
                 })
                 .collect();
             if let Some(params) = params.filter(|p| p.len() == nkeys) {
-                let mut rows: HashMap<Vec<Value>, Vec<Row>> = HashMap::new();
+                let mut rows: HashMap<Vec<Value>, Vec<Row>> = HashMap::default();
                 for r in collect(&Arc::new(plan), self, None)? {
                     if r[..nkeys].iter().any(Value::is_null) {
                         continue;

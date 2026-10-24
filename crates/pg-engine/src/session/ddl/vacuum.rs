@@ -1005,7 +1005,11 @@ impl Ddl<'_, '_> {
     }
 
     fn heap_pages(&self, t: &Table, rows: &[crate::exec::Row]) -> i32 {
-        if let Ok(Some(n)) = crate::exec::sizing::heap_blocks(t, self.ctx) {
+        let blocks = crate::exec::sizing::heap_blocks(t, self.ctx);
+        let db = &self.ctx.sess.db;
+        if !crate::exec::sizing::is_estimated(t.oid, db)
+            && let Ok(Some(n)) = blocks
+        {
             return n as i32;
         }
         let types: Vec<DataType> = t.columns.iter().map(|c| c.ty.clone()).collect();
@@ -1019,7 +1023,7 @@ impl Ddl<'_, '_> {
             .filter(|(_, c)| c.virtual_gen)
             .map(|(i, _)| i)
             .collect();
-        relsize::heap_pages(rows.iter().map(|r| {
+        let live = relsize::heap_pages(rows.iter().map(|r| {
             if virt.is_empty() {
                 return relsize::heap_tuple(&types, r, &text);
             }
@@ -1030,7 +1034,9 @@ impl Ddl<'_, '_> {
                 }
             }
             relsize::heap_tuple(&types, &r, &text)
-        }))
+        }));
+        // A table too big to model: its file keeps its estimated pages.
+        crate::exec::sizing::measured_live(t.oid, live.max(0) as u32, db).map_or(live, |p| p as i32)
     }
 
     /// pg_class stats of a table's indexes (or just `only`) over its rows.

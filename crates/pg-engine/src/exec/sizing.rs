@@ -37,6 +37,8 @@ pub struct RelFiles {
     toast: HashMap<u32, Toast>,
     /// Tables too big to model.
     untracked: HashSet<u32>,
+    /// Their heaps' estimated sizes.
+    estimated: HashMap<u32, EstHeap>,
     /// Bulk loads (COPY) in progress, by (table, transaction).
     bulk: HashMap<(u32, u64), Bulk>,
     /// Hash indexes: the heap's estimated tuples when each was built (its initial
@@ -63,6 +65,79 @@ impl BrinRanges {
         let built = self.built_blocks.max(1).div_ceil(ppr);
         self.added.contains(&range) || range < built && !self.removed.contains(&range)
     }
+}
+
+/// A table too big to model (`untracked`): its heap's size as Postgres's file would have
+/// it, estimated by putting every row version written after the last one (into the space a
+/// VACUUM found free first). What the planner's current page count, VACUUM's and ANALYZE's
+/// relpages and pg_relation_size read for it.
+#[derive(Clone, Copy, Default)]
+struct EstHeap {
+    pages: u32,
+    /// Free bytes in the last page.
+    room: usize,
+    /// Free bytes in the pages before it.
+    reusable: usize,
+}
+
+impl EstHeap {
+    fn from_heap(h: &Heap) -> EstHeap {
+        EstHeap {
+            pages: h.nblocks(),
+            room: h.last_page_free(),
+            reusable: 0,
+        }
+    }
+
+    /// A tuple of `len` bytes written (RelationGetBufferForTuple keeps a page's fillfactor
+    /// free for updates; a new page takes any tuple).
+    fn add(&mut self, len: usize, fillfactor: usize) {
+        let need = heapsim::maxalign(len) + heapsim::ITEM_ID;
+        if self.reusable >= need {
+            self.reusable -= need;
+            return;
+        }
+        let reserve = heapsim::BLCKSZ * (100 - fillfactor.min(100)) / 100;
+        if self.pages == 0 || need + reserve > self.room {
+            self.pages += 1;
+            self.room = heapsim::BLCKSZ - heapsim::PAGE_HEADER;
+        }
+        self.room = self.room.saturating_sub(need);
+    }
+}
+
+/// The estimate for rows written in one go (a load, a rewrite).
+fn estimate_rows<'a>(t: &Table, rows: impl Iterator<Item = &'a [Value]>, ctx: &ExecCtx) -> EstHeap {
+    let ff = heap_fillfactor(t);
+    let mut e = EstHeap::default();
+    for r in rows {
+        e.add(layout(t, r, ctx, &HashSet::new()).0, ff);
+    }
+    e
+}
+
+/// An untracked table's row version of `row` was written.
+fn estimate_grows(t: &Table, row: &[Value], ctx: &ExecCtx) {
+    let len = layout(t, row, ctx, &HashSet::new()).0;
+    if let Some(e) = ctx.sess.db.relfiles.lock().estimated.get_mut(&t.oid) {
+        e.add(len, heap_fillfactor(t));
+    }
+}
+
+/// Whether table `t` is too big to model (its sizes are estimates).
+pub fn is_estimated(t: u32, db: &Database) -> bool {
+    db.relfiles.lock().untracked.contains(&t)
+}
+
+/// VACUUM, ANALYZE or CREATE INDEX measured an untracked table's live rows at `live` pages
+/// packed afresh: the space beyond them is free for new row versions. Its estimated pages
+/// (the file doesn't shrink), None when it is modelled.
+pub fn measured_live(t: u32, live: u32, db: &Database) -> Option<u32> {
+    let mut rf = db.relfiles.lock();
+    let e = rf.estimated.get_mut(&t)?;
+    e.pages = e.pages.max(live);
+    e.reusable = (e.pages - live) as usize * (heapsim::BLCKSZ - heapsim::PAGE_HEADER);
+    Some(e.pages)
 }
 
 struct Bulk {
@@ -257,9 +332,54 @@ thread_local! {
         Default::default();
 }
 
+/// Tables (by database instance) that may hold compressed or out-of-line datums: only
+/// values read from them are worth remembering (`note_read`). Bumped generation on a new one.
+static TRACKED: std::sync::LazyLock<std::sync::Mutex<HashSet<(u64, u32)>>> =
+    std::sync::LazyLock::new(Default::default);
+static TRACKED_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+thread_local! {
+    /// The last answer of `tracked`: (generation, database, table, tracked).
+    static TRACKED_LAST: std::cell::Cell<(u64, u64, u32, bool)> =
+        const { std::cell::Cell::new((0, 0, 0, false)) };
+}
+
+/// Table `t` of database `db` may store values compressed or out of line from now on.
+fn mark_tracked(db: u64, t: u32) {
+    if let Ok(mut s) = TRACKED.lock()
+        && s.insert((db, t))
+    {
+        TRACKED_GEN.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// Whether values read from table `t` (of the running statement's database) may be
+/// compressed or out-of-line datums.
+fn tracked(t: u32) -> bool {
+    let generation = TRACKED_GEN.load(std::sync::atomic::Ordering::Acquire);
+    if generation == 0 {
+        return false;
+    }
+    let db = methods_db();
+    TRACKED_LAST.with(|c| {
+        let (g, d, tt, b) = c.get();
+        if g == generation && d == db && tt == t {
+            return b;
+        }
+        let b = TRACKED.lock().is_ok_and(|s| s.contains(&(db, t)));
+        c.set((generation, db, t, b));
+        b
+    })
+}
+
 /// A stored row of table `t`, the version `xmin` wrote (under `key`, when known), was read.
 pub fn note_read(t: u32, xmin: u64, key: Option<&[u8]>, row: &[Value]) {
-    let key: Option<Arc<[u8]>> = key.map(Arc::from);
+    // (Nothing in a table that never stored a datum compressed or out of line is.)
+    if !tracked(t) {
+        return;
+    }
+    // (The key is copied once, for the first value tracked.)
+    let mut shared: Option<Option<Arc<[u8]>>> = None;
     for (i, v) in row.iter().enumerate() {
         let r = match v {
             Value::Text(s) | Value::Json(s) if (READ_MIN..READ_MAX).contains(&s.len()) => {
@@ -270,12 +390,13 @@ pub fn note_read(t: u32, xmin: u64, key: Option<&[u8]>, row: &[Value]) {
             }
             _ => continue,
         };
+        let key = shared.get_or_insert_with(|| key.map(Arc::from)).clone();
         READ.with(|q| {
             let mut q = q.borrow_mut();
             if q.len() >= READ_CAP {
                 q.pop_front();
             }
-            q.push_back((r, t, i, (xmin, key.clone())));
+            q.push_back((r, t, i, (xmin, key)));
         });
     }
 }
@@ -328,6 +449,9 @@ pub fn note_compression(t: &Table, row: &[Value], key: Option<&[u8]>, ctx: &Exec
         .collect();
     let at: RowId = (ctx.txn.borrow_mut().cur_xid(), key.map(Arc::from));
     let db = ctx.sess.db.instance;
+    if !copied.is_empty() {
+        mark_tracked(db, t.oid);
+    }
     if !copied.is_empty()
         && let Ok(mut m) = METHODS.lock()
     {
@@ -347,6 +471,8 @@ pub fn note_compression(t: &Table, row: &[Value], key: Option<&[u8]>, ctx: &Exec
     if relsize::heap_tuple_len(&types, &row, &text) <= TOAST_THRESHOLD {
         return;
     }
+    // (Compressed or moved out of line.)
+    mark_tracked(db, t.oid);
     let lz4 = ctx
         .sess
         .settings
@@ -910,15 +1036,47 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     }
     let start = index_prefix(t.oid, 0);
     let end = prefix_end(&start);
-    let raw: Vec<(Vec<u8>, bytes::Bytes)> =
-        ctx.txn.borrow().scan(&start, &end).collect::<Result<_>>()?;
-    if raw.len() > MAX_VERSIONS {
-        untrack(db, t);
+    // (Read up to the limit; a bigger table's rest is only measured, a row at a time.)
+    let mut raw: Vec<(Vec<u8>, bytes::Bytes)> = Vec::new();
+    let mut est = None;
+    {
+        // (The scan holds no borrow of the transaction: `layout` may take one.)
+        let mut it = ctx.txn.borrow().scan(&start, &end);
+        for r in it.by_ref() {
+            raw.push(r?);
+            if raw.len() > MAX_VERSIONS {
+                break;
+            }
+        }
+        if raw.len() > MAX_VERSIONS {
+            // The rows read so far are laid out as stored; the rest (a big table's, read
+            // when its database opens) by their stored length, scaled as the first rows'
+            // tuples are to theirs: no decoding, nothing held.
+            let mut e = EstHeap::default();
+            let ff = heap_fillfactor(t);
+            let (mut tuple, mut stored) = (0usize, 0usize);
+            for (_, v) in raw.drain(..) {
+                let len = layout(t, &decode_table_row(t, &v)?, ctx, &HashSet::new()).0;
+                tuple += len;
+                stored += v.len();
+                e.add(len, ff);
+            }
+            let scale = tuple as f64 / stored.max(1) as f64;
+            for r in it {
+                let (_, v) = r?;
+                e.add((v.len() as f64 * scale).round() as usize, ff);
+            }
+            est = Some(e);
+        }
+    }
+    if let Some(est) = est {
+        untrack(db, t, Some(est));
         return Ok(false);
     }
     // Rows go back in the order of the heap TIDs they were written with (those without
     // one after them, in storage order), so a heap laid out afresh keeps their order.
     let mut raw = raw;
+    let mut stored: Vec<Option<Tid>> = Vec::new();
     if heap_missing {
         let mut tagged: Vec<(Option<Tid>, usize, (Vec<u8>, bytes::Bytes))> = raw
             .into_iter()
@@ -931,6 +1089,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => a.1.cmp(&b.1),
         });
+        stored = tagged.iter().map(|x| x.0).collect();
         raw = tagged.into_iter().map(|x| x.2).collect();
     }
     let mut rows = Vec::with_capacity(raw.len());
@@ -958,8 +1117,12 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     }
     let mut rf = db.relfiles.lock();
     let rf = &mut *rf;
+    if heap_missing && exts.iter().any(|(_, e)| !e.is_empty()) {
+        mark_tracked(db.instance, t.oid);
+    }
     if heap_missing && !rf.heaps.contains_key(&t.oid) {
-        let (h, _) = heapsim::rewritten(heap_fillfactor(t), lens);
+        let (mut h, tids) = heapsim::rewritten(heap_fillfactor(t), lens);
+        h.unstamped = stored.iter().zip(&tids).any(|(s, t)| s.is_some_and(|s| s != *t));
         rf.heaps.insert(t.oid, h);
         rebuild_toast(rf, t, exts);
     }
@@ -999,11 +1162,16 @@ fn forget(rf: &mut RelFiles, t: &Table) {
     rf.toast.remove(&t.oid);
 }
 
-/// Stop modelling a table that grew too big.
-fn untrack(db: &Database, t: &Table) {
+/// Stop modelling a table that grew too big; its size is estimated from here on (from its
+/// heap model's, or `est`).
+fn untrack(db: &Database, t: &Table, est: Option<EstHeap>) {
     let mut rf = db.relfiles.lock();
+    let est = est
+        .or_else(|| rf.heaps.get(&t.oid).map(EstHeap::from_heap))
+        .unwrap_or_default();
     rf.untracked.insert(t.oid);
     forget(&mut rf, t);
+    rf.estimated.insert(t.oid, est);
 }
 
 fn check_size(db: &Database, t: &Table) {
@@ -1014,7 +1182,7 @@ fn check_size(db: &Database, t: &Table) {
         .get(&t.oid)
         .is_some_and(|h| h.versions() > MAX_VERSIONS);
     if big {
-        untrack(db, t);
+        untrack(db, t, None);
     }
 }
 
@@ -1052,6 +1220,7 @@ pub fn inserted(
 ) -> Result<Option<Tid>> {
     note_compression(t, row, Some(key), ctx);
     if !ensure(t, indexes, ctx)? {
+        estimate_grows(t, row, ctx);
         return Ok(None);
     }
     let (len, exts) = layout(t, row, ctx, &HashSet::new());
@@ -1153,6 +1322,7 @@ pub fn updated(
 ) -> Result<Option<(Tid, bool)>> {
     note_compression(t, new, Some(new_key), ctx);
     if !ensure(t, indexes, ctx)? {
+        estimate_grows(t, new, ctx);
         return Ok(None);
     }
     let db = &ctx.sess.db;
@@ -1460,6 +1630,7 @@ pub fn modelled_blocks(table: u32, ctx: &ExecCtx) -> Option<u32> {
 pub fn truncated(t: &Table, db: &Database) {
     let mut rf = db.relfiles.lock();
     rf.untracked.remove(&t.oid);
+    rf.estimated.remove(&t.oid);
     forget(&mut rf, t);
     rf.heaps.insert(t.oid, Heap::new(heap_fillfactor(t)));
 }
@@ -1905,6 +2076,7 @@ pub fn dropped(oids: &[u32], db: &Database) {
         rf.heaps.remove(o);
         rf.btrees.remove(o);
         rf.untracked.remove(o);
+        rf.estimated.remove(o);
         rf.toast.remove(o);
         rf.hash_est.remove(o);
         rf.gin_built.remove(o);
@@ -1933,7 +2105,8 @@ pub fn loaded(
         note_compression(t, r, Some(k), ctx);
     }
     if rows.len() > MAX_VERSIONS {
-        untrack(&ctx.sess.db, t);
+        let est = estimate_rows(t, rows.iter().map(|(_, r)| r.as_slice()), ctx);
+        untrack(&ctx.sess.db, t, Some(est));
         return Vec::new();
     }
     let xid = if rows.is_empty() {
@@ -1948,6 +2121,7 @@ pub fn loaded(
     let xids = ctx.sess.db.xids();
     let mut rf = ctx.sess.db.relfiles.lock();
     rf.untracked.remove(&t.oid);
+    rf.estimated.remove(&t.oid);
     forget(&mut rf, t);
     let RelFiles {
         heaps,
@@ -2015,6 +2189,16 @@ pub fn stamp_tids(keys: &[Vec<u8>], tids: &[Tid], ctx: &ExecCtx) -> Result<()> {
 pub fn rewritten(t: &Table, order: Option<&[Vec<u8>]>, ctx: &ExecCtx) -> Result<()> {
     let indexes = crate::sql::binder::bound_indexes(&Arc::new(t.clone()), ctx)?;
     if !ensure(t, &indexes, ctx)? {
+        // Too big to model: the live rows packed afresh (measured a row at a time).
+        let start = index_prefix(t.oid, 0);
+        let mut est = EstHeap::default();
+        let ff = heap_fillfactor(t);
+        let it = ctx.txn.borrow().scan(&start, &prefix_end(&start));
+        for r in it {
+            let (_, v) = r?;
+            est.add(layout(t, &decode_table_row(t, &v)?, ctx, &HashSet::new()).0, ff);
+        }
+        ctx.sess.db.relfiles.lock().estimated.insert(t.oid, est);
         return Ok(());
     }
     let db = &ctx.sess.db;
@@ -2386,6 +2570,29 @@ pub fn row_locations(
     )
 }
 
+/// The heap TIDs of stored rows (data key, bytes) as a scan reads them: the TID each
+/// version was written at (what its ctid shows), else (a row stored before its heap was
+/// laid out afresh) where the model has it. None when the table's heap isn't modelled.
+pub fn row_tids(t: &Table, rows: &[(Vec<u8>, bytes::Bytes)], ctx: &ExecCtx) -> Option<Vec<Option<Tid>>> {
+    heap_blocks(t, ctx).ok().flatten()?;
+    let mut out: Vec<Option<Tid>> = rows
+        .iter()
+        .map(|(_, b)| super::scan::stored_tid(b))
+        .collect();
+    let rf = ctx.sess.db.relfiles.lock();
+    let h = rf.heaps.get(&t.oid)?;
+    if h.unstamped || out.iter().any(Option::is_none) {
+        let xids = ctx.sess.db.xids();
+        let v = Vis::new(&xids);
+        for (o, (k, _)) in out.iter_mut().zip(rows) {
+            if o.is_none() || h.unstamped {
+                *o = h.locate(k, &v);
+            }
+        }
+    }
+    Some(out)
+}
+
 /// The rows' locations as a bitmap heap scan reads them: their HOT chains' roots (what
 /// the indexes point to).
 pub fn row_roots(t: &Table, keys: &[Vec<u8>], ctx: &ExecCtx) -> Option<Vec<Option<Tid>>> {
@@ -2401,7 +2608,7 @@ pub fn row_roots(t: &Table, keys: &[Vec<u8>], ctx: &ExecCtx) -> Option<Vec<Optio
 pub fn heap_blocks(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
     let indexes = crate::sql::binder::bound_indexes(&Arc::new(t.clone()), ctx)?;
     if !ensure(t, &indexes, ctx)? {
-        return Ok(None);
+        return Ok(ctx.sess.db.relfiles.lock().estimated.get(&t.oid).map(|e| e.pages));
     }
     Ok(ctx
         .sess
@@ -2509,10 +2716,16 @@ impl CopyLoad {
         for tid in &tids {
             heap.set_raw_cid(*tid, cid);
         }
-        for (p, tid) in rows.into_iter().zip(tids) {
+        let mut keys = Vec::with_capacity(rows.len());
+        for (p, tid) in rows.into_iter().zip(&tids) {
             let entries = p.entries.into_iter().map(|(o, k)| (o, k, false)).collect();
-            index_insert(btrees, heap, &xids, entries, tid);
+            index_insert(btrees, heap, &xids, entries, *tid);
+            keys.push(p.key);
         }
+        drop(rf);
+        // The rows (stored already, as each line was read) get the TIDs their tuples went to,
+        // as single inserts' rows do (their ctid; scans read them in that order).
+        let _ = stamp_tids(&keys, &tids, ctx);
     }
 
     /// The COPY is done: the buffer goes in.
@@ -2650,8 +2863,12 @@ pub fn fork_blocks(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>> {
             }
             let indexes = crate::sql::binder::bound_indexes(&t, ctx)?;
             if !ensure(&t, &indexes, ctx)? {
+                let est = ctx.sess.db.relfiles.lock().estimated.get(&t.oid).map(|e| e.pages);
                 return Ok(Some(match fork {
-                    Fork::Main => estimated_heap(&t, ctx)? as u64,
+                    Fork::Main => match est {
+                        Some(p) => p as u64,
+                        None => estimated_heap(&t, ctx)? as u64,
+                    },
                     _ => 0,
                 }));
             }

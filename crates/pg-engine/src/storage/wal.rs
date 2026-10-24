@@ -6,7 +6,8 @@ use super::sst::{get_varint, put_varint};
 use crate::error::{Result, internal};
 use bytes::Bytes;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Read;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
@@ -15,27 +16,41 @@ pub fn wal_path(dir: &Path, seq: u64) -> PathBuf {
 }
 
 pub struct WalWriter {
-    file: File,
+    file: std::sync::Arc<File>,
     pub seq: u64,
     pub max_ts: u64,
     pub bytes: u64,
     buf: Vec<u8>,
+    /// The file is zero-filled up to here, ahead of the records (0: not at all).
+    zeroed: u64,
+    /// Zero-fill this much at a time (0: never, records extend the file).
+    prealloc: u64,
 }
+
+/// How far ahead a synced WAL is zero-filled: an fdatasync of records written into
+/// allocated, already-sized space has no file metadata to flush (Postgres zero-fills its WAL
+/// segments for the same reason), so most commits' fsyncs write just their data.
+pub const PREALLOC: u64 = 1 << 20;
 
 pub type Entry = (Vec<u8>, Option<Bytes>);
 
 impl WalWriter {
-    pub fn create(dir: &Path, seq: u64) -> Result<WalWriter> {
+    /// A new WAL file, zero-filled `prealloc` bytes at a time ahead of its records.
+    pub fn create(dir: &Path, seq: u64, prealloc: u64) -> Result<WalWriter> {
         let file = OpenOptions::new()
             .create(true)
-            .append(true)
+            .write(true)
+            .truncate(false)
             .open(wal_path(dir, seq))?;
+        let bytes = file.metadata()?.len();
         Ok(WalWriter {
-            file,
+            file: std::sync::Arc::new(file),
             seq,
             max_ts: 0,
-            bytes: 0,
+            bytes,
             buf: Vec::with_capacity(4096),
+            zeroed: bytes,
+            prealloc,
         })
     }
 
@@ -59,8 +74,17 @@ impl WalWriter {
         let crc = crc32fast::hash(&self.buf[8..]);
         self.buf[0..4].copy_from_slice(&len.to_le_bytes());
         self.buf[4..8].copy_from_slice(&crc.to_le_bytes());
-        self.file.write_all(&self.buf)?;
-        self.bytes += self.buf.len() as u64;
+        let end = self.bytes + self.buf.len() as u64;
+        if self.prealloc > 0 && end > self.zeroed {
+            // (A zero record length ends replay: the zeroes past the last record are no
+            // records.)
+            let to = end.max(self.zeroed + self.prealloc);
+            let zeros = vec![0u8; (to - self.zeroed) as usize];
+            self.file.write_all_at(&zeros, self.zeroed)?;
+            self.zeroed = to;
+        }
+        self.file.write_all_at(&self.buf, self.bytes)?;
+        self.bytes = end;
         self.max_ts = self.max_ts.max(ts);
         Ok(())
     }
@@ -68,6 +92,11 @@ impl WalWriter {
     pub fn sync(&mut self) -> Result<()> {
         self.file.sync_data()?;
         Ok(())
+    }
+
+    /// The file, to fsync without holding the writer (group commit).
+    pub fn handle(&self) -> std::sync::Arc<File> {
+        self.file.clone()
     }
 }
 
@@ -96,6 +125,10 @@ pub fn replay(path: &Path, mut f: impl FnMut(u64, Vec<Entry>)) -> Result<u64> {
     while pos + 8 <= data.len() {
         let len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         let crc = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap());
+        // The zero-filled space after the last record (`PREALLOC`).
+        if len == 0 {
+            break;
+        }
         if pos + 8 + len > data.len() {
             warn!(path = %path.display(), "torn WAL record at end of file; ignoring it");
             break;

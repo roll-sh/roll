@@ -86,6 +86,9 @@ pub struct FormatCtx {
     pub xml_binary_hex: bool,
     /// `timezone_abbreviations` (Default, Australia or India).
     pub tz_abbrevs: &'static str,
+    /// The generation of the session settings this was made from (`Settings::generation`;
+    /// 0: not made from a session's), which caches of what parsing under it gives compare.
+    pub settings: u64,
 }
 
 impl FormatCtx {
@@ -114,6 +117,7 @@ impl Default for FormatCtx {
             xml_document: false,
             xml_binary_hex: false,
             tz_abbrevs: "Default",
+            settings: 0,
         }
     }
 }

@@ -60,6 +60,15 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   with `pg_contrib` (`tests/pg_contrib.rs`). Per-module scores and how it works:
   `tests/contrib/STATUS.md`. uuid-ossp, citext and pgcrypto match their contrib suites fully;
   extension types the engine implements natively are `Value::Ext` (`src/ext/types.rs`).
+- **Performance** (round 17, agent 36): measured for the first time, `tools/bench/` against a
+  pinned PostgreSQL 18.6 on the same 4 cores; numbers, method and the optimisations made are
+  in `BENCH.md`. Over the wire the engine beats PostgreSQL on single-client OLTP (point
+  selects, inserts, updates, upserts, short transactions: 1.5–2x), pgbench select-only at every
+  client count and TPC-B at scale 1, and is about even on TPC-B at scale 10; it is slower on
+  multi-client OLTP that reads many rows (range scans, secondary lookups), on analytic queries
+  and TPC-H (5–20x: a row-at-a-time executor over decoded `Value` rows, no parallel query),
+  bulk loads and DDL. In-process (how roll embeds it) OLTP is 2–27x PostgreSQL's over the wire.
+  TPC-H SF1 takes 2.4x less disk. BENCH.md's "Where it is still slower" is the to-do list.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
@@ -95,6 +104,8 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     `tests/pg_contrib.rs`, the contrib modules' tests): the regression suite. `tests/regress/STATUS.md`: the
     classified list of every remaining difference. `tests/regress/REPORT.md`: last run report.
   - `tools/heavy.sh`: the one-heavy-job-at-a-time lock (see "Machine rules").
+  - `tools/bench/`: the benchmark harness against PostgreSQL (`run.sh`, `suite.sh`,
+    `perf.sh` for profiles, `report.py`); method and results in `BENCH.md`.
 - `crates/pg-icu`: ICU4C 78.1 built from source (exact collation behaviour; needs curl or
   wget, tar, make and a C++17 compiler, about 60 s, cached in `target/icu4c`).
 - `crates/pg-snowball`: Snowball stemmers for full-text search.
@@ -271,6 +282,21 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
     catalog and the search path, started over by every `remember_equalities`.
   - `SYS_ROWS` (`explain::sys_tuples`, a system catalog's row count): by the catalog's address
     with a `Weak` holding it.
+  - `SessionState::sys_rows` (`catalog::system::rows`, round 17 agent 36: the generated rows
+    of `pg_class`, `pg_attribute`, `pg_attrdef`, `pg_type`, `pg_namespace`, `pg_index`,
+    `pg_constraint`, `pg_proc`, the catalogs whose rows read nothing but the catalog, roles,
+    path and settings): by a `Weak` to the catalog, current and session user, search path and
+    `Settings::generation` (unique per set of setting values). Only catalogs generated from
+    those alone may join the list (`rows_cacheable`): not statistics, locks, sequences, large
+    objects or other databases.
+  - `sql::parse` `PARSED` (parse trees, per thread): by the text and the parser options (a
+    pure function); `ast::parse_exprs` / `parse_stmt` (stored texts) under tags of their own.
+  - `costs::SLOT_VALUES` (statistics slots' parsed values, per thread): by
+    `FormatCtx::settings` (the settings' generation; 0, a context not made from a session's
+    settings, isn't cached), the type and the texts; plain scalar types only.
+  - `sizing::TRACKED` (tables that ever stored a compressed or out-of-line datum, whose
+    values `note_read` remembers; process-wide): by `Database::instance` and table, only
+    ever added to.
   - `exec::sizing::METHODS` (a stored datum's compression method, process-wide): by
     `Database::instance`, table, column and value.
   - `func::range::user_constructors` (process-wide): by the whole range type and its

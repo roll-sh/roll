@@ -14,7 +14,7 @@ use crate::types::value::Interval;
 use crate::types::{DataType as T, Value};
 use crate::{bail, err};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use super::fasthash::HashMap;
 use std::sync::{Arc, OnceLock};
 
 /// What an accumulator is created with.
@@ -155,7 +155,7 @@ pub fn agg_registry() -> &'static AggRegistry {
     R.get_or_init(|| {
         let mut b = Builder {
             reg: Registry::default(),
-            out: HashMap::new(),
+            out: HashMap::default(),
         };
         register(&mut b);
         // Postgres's pg_proc oids, in registration order.
@@ -2466,7 +2466,7 @@ impl AggNode {
         let colls = nondeterministic_keys(&self.groups, ctx);
         let Some(sets) = self.sets.clone() else {
             // Plain GROUP BY (or none).
-            let mut index: HashMap<Vec<Value>, usize> = HashMap::new();
+            let mut index: HashMap<Vec<Value>, usize> = HashMap::default();
             let mut groups: Vec<(Vec<Value>, Vec<AggState>)> = Vec::new();
             // (Keys that group nothing more aren't in the hash table's key.)
             let red = self.redundant_keys(ctx);
@@ -2693,7 +2693,7 @@ impl AggNode {
             let hset: Vec<usize> = set.iter().copied().filter(|&i| !red[i]).collect();
             let types: Vec<T> = hset.iter().map(|&i| self.groups[i].ty()).collect();
             let mut hashed = super::pghash::GroupOrder::new(types, ctx);
-            let mut index: HashMap<Vec<Value>, usize> = HashMap::new();
+            let mut index: HashMap<Vec<Value>, usize> = HashMap::default();
             let mut groups: Vec<(Vec<Value>, Vec<AggState>)> = Vec::new();
             for (row, full) in rows.iter().zip(fulls) {
                 let key = self.set_key(set, full);

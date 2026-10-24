@@ -398,6 +398,9 @@ impl Default for Settings {
 /// that SETs nothing builds them once).
 #[derive(Clone)]
 struct Derived {
+    /// Unique in the process for this set of values: what was derived from other values has
+    /// another (caches of what the settings shape compare it).
+    generation: u64,
     /// `format_ctx` (without a clock or names).
     fmt: FormatCtx,
     lex: crate::sql::scs::LexOpts,
@@ -1141,10 +1144,21 @@ impl Settings {
         }
     }
 
+    /// Changes whenever a value that anything derived reads changes (see `touched`): equal
+    /// generations mean equal settings.
+    pub fn generation(&self) -> u64 {
+        self.derived().generation
+    }
+
     fn derived(&self) -> &Derived {
         self.derived.0.get_or_init(|| {
+            static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut fmt = self.build_format_ctx();
+            fmt.settings = generation;
             Box::new(Derived {
-                fmt: self.build_format_ctx(),
+                generation,
+                fmt,
                 lex: crate::sql::scs::LexOpts::from_settings(
                     self.bool("standard_conforming_strings"),
                     self.bool("escape_string_warning"),

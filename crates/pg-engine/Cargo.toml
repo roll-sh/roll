@@ -24,6 +24,7 @@ icu_locale_core = { workspace = true, optional = true }
 icu_provider = { workspace = true, optional = true }
 icu_segmenter = { workspace = true, optional = true }
 md-5.workspace = true
+mimalloc.workspace = true
 num-bigint.workspace = true
 num-traits.workspace = true
 parking_lot.workspace = true
@@ -62,3 +63,8 @@ postgres-protocol.workspace = true
 tempfile.workspace = true
 tokio-postgres.workspace = true
 tracing-subscriber.workspace = true
+
+# Benchmarks against PostgreSQL: tools/bench/run.sh, BENCH.md.
+[[example]]
+name = "bench"
+path = "tools/bench/bench.rs"

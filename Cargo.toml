@@ -63,6 +63,8 @@ base64 = "0.22"
 crc32fast = "1"
 parking_lot = "0.12"
 crossbeam-skiplist = "0.1"
+# The roll-engine server's allocator (pg-engine allocates per row and per value).
+mimalloc = { version = "0.1", default-features = false }
 tempfile = "3"
 # ICU4X: pg-engine's `icu4x` fallback where ICU4C 78.1 (crates/pg-icu) can't be built
 icu_collator = "2.3"
