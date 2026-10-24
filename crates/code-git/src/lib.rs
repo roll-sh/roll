@@ -4,6 +4,7 @@
 //! [`GitBackend`]; code-control implements it over code-store. See docs/code/architecture.md.
 
 pub mod backend;
+pub mod budget;
 pub mod client;
 pub mod object;
 pub mod pack;
@@ -15,6 +16,7 @@ pub use backend::{
     Access, Credentials, FetchPlan, FetchRequest, Filter, GitBackend, GitError, GitResult, ReceiveOutcome, ReceiveRequest, Ref,
     RefList, RefStatus, RefUpdate,
 };
+pub use budget::{BudgetError, Lease, MemoryBudget};
 pub use client::{Client, FetchArgs, Fetched, PushReport};
 pub use object::{CommitInfo, Kind, Object, ObjectId, TreeEntry, mode, parse_commit, parse_tag, tree_entries};
 pub use pack::Limits;

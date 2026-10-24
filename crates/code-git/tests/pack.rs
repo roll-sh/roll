@@ -1,16 +1,19 @@
-//! Pack reading: packs git writes (OFS and REF deltas, thin packs) and hostile input. A global
-//! allocator fails the test if anything allocates more than 256 MiB at once.
+//! Pack reading: packs git writes (OFS and REF deltas, thin packs) and hostile input, whole or
+//! streamed in chunks, with memory metered. A global allocator fails the test if anything
+//! allocates more than 256 MiB at once.
 
 mod common;
 
-use code_git::pack::{self, Limits, PackError, Resolver};
-use code_git::{Kind, Object, ObjectId};
+use code_git::pack::{self, Limits, Meter, PackError, Parser, Resolver};
+use code_git::{BudgetError, Kind, Object, ObjectId};
 use common::git;
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
 use sha1::{Digest, Sha1};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -266,4 +269,98 @@ fn written_packs_index_with_git() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let by_id: HashMap<_, _> = pack::read(&data, &Limits::default()).unwrap().into_iter().map(|o| (o.id, o)).collect();
     assert_eq!(by_id.len(), 50);
+}
+
+fn stream(data: &[u8], chunk: usize, meter: Box<dyn Meter>) -> Result<pack::Pack, PackError> {
+    let mut p = Parser::new(Limits::default(), meter);
+    for c in data.chunks(chunk.max(1)) {
+        p.feed(c)?;
+    }
+    p.finish()
+}
+
+#[test]
+fn streamed_packs_read_like_whole_ones() {
+    let tmp = tempfile::tempdir().unwrap();
+    repo_with_deltas(tmp.path());
+    let data = pack_objects(tmp.path(), &["--revs", "--all", "--delta-base-offset"], "");
+    let whole = pack::read(&data, &Limits::default()).unwrap();
+    // Chunk boundaries anywhere: inside headers, base offsets, zlib streams, the trailer.
+    for chunk in [1, 7, 20, 21, 4096, 65536, data.len()] {
+        let mut r = Resolver::new(stream(&data, chunk, Box::new(())).unwrap());
+        r.run().unwrap();
+        assert_eq!(r.finish().unwrap(), whole, "chunks of {chunk}");
+    }
+    for cut in (0..data.len()).step_by(97) {
+        assert!(stream(&data[..cut], 13, Box::new(())).is_err(), "cut at {cut}");
+    }
+    // A flipped byte anywhere is caught, by the parser or by the checksum.
+    for pos in (0..data.len()).step_by(211) {
+        let mut d = data.clone();
+        d[pos] ^= 0x5a;
+        assert!(stream(&d, 4096, Box::new(())).is_err(), "flip at {pos}");
+    }
+    let mut d = data.clone();
+    d.extend_from_slice(b"and then some more bytes after the trailer");
+    assert!(matches!(stream(&d, 4096, Box::new(())), Err(PackError::TrailingData)));
+    assert!(matches!(stream(b"GET / HTTP/1.1\r\n", 4, Box::new(())), Err(PackError::NotPack)));
+    // Too large is noticed as the bytes arrive, not at the end.
+    let mut p = Parser::new(Limits { max_pack_bytes: 1000, ..Limits::default() }, Box::new(()));
+    assert!(matches!(p.feed(&data[..1001]), Err(PackError::PackTooLarge(1000))));
+}
+
+/// Counts what's charged; refuses past `limit`.
+struct Counting {
+    held: Arc<AtomicU64>,
+    peak: Arc<AtomicU64>,
+    limit: u64,
+}
+
+impl Counting {
+    fn new(limit: u64) -> (Self, Arc<AtomicU64>, Arc<AtomicU64>) {
+        let (held, peak) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        (Counting { held: held.clone(), peak: peak.clone(), limit }, held, peak)
+    }
+}
+
+impl Meter for Counting {
+    fn charge(&mut self, bytes: u64) -> Result<(), PackError> {
+        let now = self.held.load(Ordering::SeqCst) + bytes;
+        if now > self.limit {
+            return Err(PackError::Memory(BudgetError::Busy));
+        }
+        self.held.store(now, Ordering::SeqCst);
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        Ok(())
+    }
+    fn release(&mut self, bytes: u64) {
+        self.held.fetch_sub(bytes, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn reading_charges_what_it_holds_and_stops_when_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    repo_with_deltas(tmp.path());
+    let data = pack_objects(tmp.path(), &["--revs", "--all", "--delta-base-offset"], "");
+    let (meter, held, peak) = Counting::new(u64::MAX);
+    let (objects, meter) = pack::resolve_with(stream(&data, 4096, Box::new(meter)).unwrap(), |_| Ok(None)).unwrap();
+    let total: u64 = objects.iter().map(|o| o.data.len() as u64).sum();
+    // Everything returned is still accounted for (deltas were released once applied), and the
+    // charge is about what is held, not a multiple of it.
+    let now = held.load(Ordering::SeqCst);
+    assert!(now >= total && now < total * 2 + (64 << 10), "held {now} for {total}");
+    assert!(peak.load(Ordering::SeqCst) >= now);
+    drop(meter);
+
+    // A meter that runs out stops the read where it refused.
+    let limit = total / 3;
+    let (meter, _, peak) = Counting::new(limit);
+    let r = stream(&data, 4096, Box::new(meter)).and_then(|p| {
+        let mut r = Resolver::new(p);
+        r.run()?;
+        r.finish()
+    });
+    assert!(matches!(r, Err(PackError::Memory(BudgetError::Busy))), "{r:?}");
+    assert!(peak.load(Ordering::SeqCst) <= limit);
 }

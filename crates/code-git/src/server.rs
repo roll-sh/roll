@@ -7,50 +7,93 @@
 //!   options. Rejections carry their reason to the user's terminal, and `remote:` lines carry
 //!   details.
 //!
-//! Packs are streamed undeltified as objects are read, in batches.
+//! Packs are streamed undeltified as objects are read, in batches. Pushed packs are unpacked as
+//! they arrive, never buffered whole.
+//!
+//! Every request charges one [`MemoryBudget`] shared by the server for what it holds (see
+//! [`crate::budget`]): request bodies as they're read, a push's inflated objects as unpacking
+//! produces them, a fetch's planned ids, the objects it has read and the entry being written. A
+//! push that can't get memory reads the rest of its body without holding it and gets
+//! `unpack <reason>` (git prints `remote unpack failed: …`). A fetch that can't get memory gets
+//! `503` with `Retry-After` if its response hasn't started, and a side-band error otherwise.
 
 use crate::backend::{
     Access, Credentials, FetchRequest, Filter, GitBackend, GitError, ReceiveOutcome, ReceiveRequest, RefList, RefStatus,
     RefUpdate,
 };
-use crate::object::ObjectId;
-use crate::pack::{self, Limits};
-use crate::pktline::{self, BAND_DATA, BAND_ERROR, BAND_PROGRESS, Pkt, Reader};
+use crate::budget::{BudgetError, CancelOnDrop, Charge, Lease, LeaseMeter, MemoryBudget};
+use crate::object::{Object, ObjectId};
+use crate::pack::{self, Limits, Meter};
+use crate::pktline::{self, BAND_DATA, BAND_ERROR, BAND_PROGRESS, Pkt, PktError, Reader};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
+use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
+use std::io::Write;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub limits: Limits,
-    /// Largest upload-pack request (wants and haves).
+    /// Largest upload-pack request (wants and haves), and largest list of ref updates in a push.
     pub max_request_bytes: u64,
     /// Sent as `agent=` in capability advertisements.
     pub agent: String,
+    /// Memory every request together may hold: request bodies, unpacked pushes, objects being
+    /// sent. Default 1 GiB.
+    pub memory_budget_bytes: u64,
+    /// Most one request may hold; more fails it at once. A request past a small allowance can
+    /// only grow while the total stays under this, so the rest of the budget is kept for small
+    /// requests. Default (`None`): three quarters of the budget.
+    pub max_request_memory_bytes: Option<u64>,
+    /// How long a request waits for memory before it fails as busy. Default 30 s.
+    pub memory_wait: Duration,
+    /// A budget to use instead of one built from the three fields above: to share one between
+    /// routers, or to watch it.
+    pub memory_budget: Option<MemoryBudget>,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        ServerConfig { limits: Limits::default(), max_request_bytes: 64 << 20, agent: concat!("roll-code/", env!("CARGO_PKG_VERSION")).into() }
+        ServerConfig {
+            limits: Limits::default(),
+            max_request_bytes: 64 << 20,
+            agent: concat!("roll-code/", env!("CARGO_PKG_VERSION")).into(),
+            memory_budget_bytes: 1 << 30,
+            max_request_memory_bytes: None,
+            memory_wait: Duration::from_secs(30),
+            memory_budget: None,
+        }
+    }
+}
+
+impl ServerConfig {
+    /// The budget the server charges.
+    pub fn budget(&self) -> MemoryBudget {
+        self.memory_budget.clone().unwrap_or_else(|| {
+            let per_request = self.max_request_memory_bytes.unwrap_or(self.memory_budget_bytes / 4 * 3);
+            MemoryBudget::new(self.memory_budget_bytes, per_request, self.memory_wait)
+        })
     }
 }
 
 struct Server {
     backend: Arc<dyn GitBackend>,
     config: ServerConfig,
+    budget: MemoryBudget,
 }
 
 /// The smart HTTP routes, under `/git/`.
 pub fn router(backend: Arc<dyn GitBackend>, config: ServerConfig) -> Router {
-    Router::new().route("/git/{*path}", get(get_handler).post(post_handler)).with_state(Arc::new(Server { backend, config }))
+    let budget = config.budget();
+    Router::new().route("/git/{*path}", get(get_handler).post(post_handler)).with_state(Arc::new(Server { backend, config, budget }))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -116,6 +159,19 @@ fn error_response(e: GitError) -> Response {
             tracing::error!(error = %e, "git request failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "internal error\n").into_response()
         }
+    }
+}
+
+/// No memory for a request whose response hasn't started.
+fn memory_response(e: &BudgetError) -> Response {
+    tracing::info!(error = %e, "git request refused: memory budget");
+    match e {
+        BudgetError::Busy => {
+            let mut r = (StatusCode::SERVICE_UNAVAILABLE, format!("{e}\n")).into_response();
+            r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+            r
+        }
+        BudgetError::TooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, format!("{e}\n")).into_response(),
     }
 }
 
@@ -203,23 +259,128 @@ fn advertise_v0(b: &mut BytesMut, refs: &RefList, caps: &str, upload: bool) {
     pktline::flush(b);
 }
 
-/// The request body, gunzipped if it says so; the error is the response to send.
-async fn read_body(headers: &HeaderMap, body: Body, max: u64) -> Result<Bytes, Box<Response>> {
-    let too_large = || Box::new((StatusCode::PAYLOAD_TOO_LARGE, format!("request larger than {max} bytes\n")).into_response());
-    let raw = axum::body::to_bytes(body, usize::try_from(max).unwrap_or(usize::MAX)).await.map_err(|_| too_large())?;
-    let gzip = headers.get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("gzip") || v.eq_ignore_ascii_case("x-gzip"));
-    if !gzip {
-        return Ok(raw);
+enum BodyError {
+    TooLarge(u64),
+    BadGzip,
+    /// The client went away or sent a broken body.
+    Io,
+    Memory(BudgetError),
+}
+
+impl BodyError {
+    fn response(&self) -> Response {
+        match self {
+            BodyError::TooLarge(max) => (StatusCode::PAYLOAD_TOO_LARGE, format!("request larger than {max} bytes\n")).into_response(),
+            BodyError::BadGzip => (StatusCode::BAD_REQUEST, "bad gzip body\n").into_response(),
+            BodyError::Io => (StatusCode::BAD_REQUEST, "error reading the request body\n").into_response(),
+            BodyError::Memory(e) => memory_response(e),
+        }
     }
-    let mut out = Vec::new();
-    flate2::read::GzDecoder::new(&raw[..])
-        .take(max + 1)
-        .read_to_end(&mut out)
-        .map_err(|_| Box::new((StatusCode::BAD_REQUEST, "bad gzip body\n").into_response()))?;
-    if out.len() as u64 > max {
-        return Err(too_large());
+}
+
+/// A request body, gunzipped if it says so, chunk by chunk as it arrives. At most `max` decoded
+/// bytes are accepted.
+struct BodyReader {
+    stream: axum::body::BodyDataStream,
+    gzip: Option<flate2::write::GzDecoder<Vec<u8>>>,
+    /// Compressed bytes not yet inflated.
+    compressed: Bytes,
+    ended: bool,
+    max: u64,
+    total: u64,
+    lease: Arc<Lease>,
+}
+
+impl BodyReader {
+    fn new(headers: &HeaderMap, body: Body, max: u64, lease: Arc<Lease>) -> Self {
+        let gzip = headers.get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("gzip") || v.eq_ignore_ascii_case("x-gzip"));
+        BodyReader {
+            stream: body.into_data_stream(),
+            gzip: gzip.then(|| flate2::write::GzDecoder::new(Vec::new())),
+            compressed: Bytes::new(),
+            ended: false,
+            max,
+            total: 0,
+            lease,
+        }
     }
-    Ok(out.into())
+
+    /// The next chunk, charged to the lease; `None` at the end.
+    async fn next(&mut self) -> Result<Option<(Bytes, Charge)>, BodyError> {
+        let Some(b) = self.next_raw().await? else { return Ok(None) };
+        let charge = Charge::new(&self.lease, b.len() as u64).await.map_err(BodyError::Memory)?;
+        Ok(Some((b, charge)))
+    }
+
+    /// Reads the rest of the body and drops it as it comes, holding nothing.
+    async fn discard(&mut self) -> Result<(), BodyError> {
+        while self.next_raw().await?.is_some() {}
+        Ok(())
+    }
+
+    /// The whole body (bounded by `max`), charged.
+    async fn read_all(&mut self) -> Result<(Bytes, Charge), BodyError> {
+        let mut chunks = Vec::new();
+        let mut charge = Charge::empty(&self.lease);
+        while let Some((b, c)) = self.next().await? {
+            chunks.push(b);
+            charge.absorb(c);
+        }
+        if chunks.len() <= 1 {
+            return Ok((chunks.pop().unwrap_or_default(), charge));
+        }
+        let len: usize = chunks.iter().map(Bytes::len).sum();
+        let whole = Charge::new(&self.lease, len as u64).await.map_err(BodyError::Memory)?;
+        let mut buf = BytesMut::with_capacity(len);
+        for c in chunks {
+            buf.extend_from_slice(&c);
+        }
+        Ok((buf.freeze(), whole))
+    }
+
+    async fn next_raw(&mut self) -> Result<Option<Bytes>, BodyError> {
+        loop {
+            if let Some(gz) = &mut self.gzip
+                && !self.compressed.is_empty()
+            {
+                // 8 KiB of deflate inflates to at most about 8 MiB, which bounds a chunk.
+                let n = self.compressed.len().min(8192);
+                gz.write_all(&self.compressed[..n]).map_err(|_| BodyError::BadGzip)?;
+                self.compressed.advance(n);
+                let out = std::mem::take(gz.get_mut());
+                if !out.is_empty() {
+                    return self.count(out.into());
+                }
+                continue;
+            }
+            if self.ended {
+                return Ok(None);
+            }
+            match self.stream.next().await {
+                Some(Ok(b)) if self.gzip.is_some() => self.compressed = b,
+                Some(Ok(b)) => return self.count(b),
+                Some(Err(_)) => return Err(BodyError::Io),
+                None => {
+                    self.ended = true;
+                    let Some(gz) = &mut self.gzip else { return Ok(None) };
+                    gz.try_finish().map_err(|_| BodyError::BadGzip)?;
+                    let out = std::mem::take(gz.get_mut());
+                    if !out.is_empty() {
+                        return self.count(out.into());
+                    }
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    fn count(&mut self, b: Bytes) -> Result<Option<Bytes>, BodyError> {
+        self.total += b.len() as u64;
+        if self.total > self.max {
+            return Err(BodyError::TooLarge(self.max));
+        }
+        Ok(Some(b))
+    }
 }
 
 async fn post_handler(State(s): State<Arc<Server>>, Path(path): Path<String>, headers: HeaderMap, body: Body) -> Response {
@@ -233,11 +394,13 @@ async fn post_handler(State(s): State<Arc<Server>>, Path(path): Path<String>, he
             if let Err(e) = s.backend.authorize(&repo, creds.as_ref(), Access::Read).await {
                 return error_response(e);
             }
-            let body = match read_body(&headers, body, s.config.max_request_bytes).await {
+            let lease = Arc::new(s.budget.lease());
+            let (body, charge) = match BodyReader::new(&headers, body, s.config.max_request_bytes, lease.clone()).read_all().await {
                 Ok(b) => b,
-                Err(r) => return *r,
+                Err(e) => return e.response(),
             };
-            let result = if wants_v2(&headers) { upload_v2(&s, repo, &body).await } else { upload_v0(&s, repo, &body).await };
+            let result = if wants_v2(&headers) { upload_v2(&s, repo, &body, &lease).await } else { upload_v0(&s, repo, &body, &lease).await };
+            drop(charge);
             match result {
                 Ok(body) => git_response("application/x-git-upload-pack-result", body),
                 Err(UploadError::Protocol(m)) => {
@@ -246,6 +409,7 @@ async fn post_handler(State(s): State<Arc<Server>>, Path(path): Path<String>, he
                     git_response("application/x-git-upload-pack-result", Body::from(b.freeze()))
                 }
                 Err(UploadError::Git(e)) => error_response(e),
+                Err(UploadError::Memory(e)) => memory_response(&e),
             }
         }
         Endpoint::ReceivePack => {
@@ -253,14 +417,7 @@ async fn post_handler(State(s): State<Arc<Server>>, Path(path): Path<String>, he
                 Ok(p) => p,
                 Err(e) => return error_response(e),
             };
-            let body = match read_body(&headers, body, s.config.limits.max_pack_bytes + (1 << 20)).await {
-                Ok(b) => b,
-                Err(r) => return *r,
-            };
-            match receive_pack(&s, &repo, body, pusher).await {
-                Ok(b) => git_response("application/x-git-receive-pack-result", Body::from(b)),
-                Err(e) => error_response(e),
-            }
+            receive_pack(&s, &repo, &headers, body, pusher).await
         }
     }
 }
@@ -269,6 +426,7 @@ enum UploadError {
     /// Sent to the client as an `ERR` packet.
     Protocol(String),
     Git(GitError),
+    Memory(BudgetError),
 }
 
 impl From<GitError> for UploadError {
@@ -332,7 +490,7 @@ impl FetchArgs {
     }
 }
 
-async fn upload_v2(s: &Arc<Server>, repo: String, body: &[u8]) -> Result<Body, UploadError> {
+async fn upload_v2(s: &Arc<Server>, repo: String, body: &[u8], lease: &Arc<Lease>) -> Result<Body, UploadError> {
     let mut r = Reader::new(body);
     let command = match r.next_pkt()? {
         Some(p) => text(p.text().ok_or_else(|| UploadError::Protocol("expected a command".into()))?)?.to_string(),
@@ -385,9 +543,10 @@ async fn upload_v2(s: &Arc<Server>, repo: String, body: &[u8]) -> Result<Body, U
                 pktline::write_line(&mut out, "ready");
                 pktline::delim(&mut out);
             }
-            let objects = plan(s, &repo, &mut f, &mut out, true).await?;
+            let (objects, planned) = plan(s, &repo, &mut f, &mut out, true, lease).await?;
             pktline::write_line(&mut out, "packfile");
-            Ok(stream_pack(s.clone(), repo, out, objects, true, !f.no_progress, true))
+            let opts = PackStream { sideband: true, progress: !f.no_progress, trailing_flush: true };
+            Ok(stream_pack(s.clone(), repo, out, objects, planned, lease.clone(), opts))
         }
         other => Err(UploadError::Protocol(format!("unknown command {other}"))),
     }
@@ -423,9 +582,21 @@ fn ls_refs(refs: &RefList, args: &[String]) -> Bytes {
     b.freeze()
 }
 
-/// Plans the pack, adds tags for `include-tag` and writes the shallow section.
-async fn plan(s: &Arc<Server>, repo: &str, f: &mut FetchArgs, out: &mut BytesMut, v2: bool) -> Result<Vec<ObjectId>, UploadError> {
+/// Memory charged per planned object: its id in the plan, and in the `include-tag` set.
+const PLANNED_OBJECT_BYTES: u64 = 64;
+
+/// Plans the pack, adds tags for `include-tag` and writes the shallow section. The plan is
+/// charged to `lease`.
+async fn plan(
+    s: &Arc<Server>,
+    repo: &str,
+    f: &mut FetchArgs,
+    out: &mut BytesMut,
+    v2: bool,
+    lease: &Arc<Lease>,
+) -> Result<(Vec<ObjectId>, Charge), UploadError> {
     let plan = s.backend.plan_fetch(repo, &f.req).await?;
+    let charge = Charge::new(lease, plan.objects.len() as u64 * PLANNED_OBJECT_BYTES).await.map_err(UploadError::Memory)?;
     let mut objects = plan.objects;
     if f.include_tag {
         let sent: HashSet<ObjectId> = objects.iter().copied().collect();
@@ -456,10 +627,10 @@ async fn plan(s: &Arc<Server>, repo: &str, f: &mut FetchArgs, out: &mut BytesMut
             pktline::flush(out);
         }
     }
-    Ok(objects)
+    Ok((objects, charge))
 }
 
-async fn upload_v0(s: &Arc<Server>, repo: String, body: &[u8]) -> Result<Body, UploadError> {
+async fn upload_v0(s: &Arc<Server>, repo: String, body: &[u8], lease: &Arc<Lease>) -> Result<Body, UploadError> {
     let mut r = Reader::new(body);
     let mut f = FetchArgs::default();
     let mut first_want = true;
@@ -495,32 +666,50 @@ async fn upload_v0(s: &Arc<Server>, repo: String, body: &[u8]) -> Result<Body, U
         // Without multi_ack the client keeps sending haves until it says `done`; the plan then
         // uses all of them.
         if f.deepen_requested || !f.req.client_shallow.is_empty() {
-            plan(s, &repo, &mut f, &mut out, false).await?;
+            plan(s, &repo, &mut f, &mut out, false, lease).await?;
         }
         if negotiating {
             pktline::write_line(&mut out, "NAK");
         }
         return Ok(Body::from(out.freeze()));
     }
-    let objects = plan(s, &repo, &mut f, &mut out, false).await?;
+    let (objects, planned) = plan(s, &repo, &mut f, &mut out, false, lease).await?;
     pktline::write_line(&mut out, "NAK");
     let sideband = f.sideband;
-    Ok(stream_pack(s.clone(), repo, out, objects, sideband, sideband && !f.no_progress, sideband))
+    let opts = PackStream { sideband, progress: sideband && !f.no_progress, trailing_flush: sideband };
+    Ok(stream_pack(s.clone(), repo, out, objects, planned, lease.clone(), opts))
+}
+
+struct PackStream {
+    /// Side-band-64k framing (otherwise the pack is sent raw).
+    sideband: bool,
+    progress: bool,
+    /// A flush after the pack.
+    trailing_flush: bool,
 }
 
 /// Streams `prefix`, then the pack (in side-band packets, or raw), then an optional flush.
+///
+/// Objects are read in batches sized from the previous batch's average object size (about
+/// `BATCH_BYTES`), each charged as soon as it's read and released object by object as entries
+/// are written. A batch too large for one request's share is dropped and read again one object
+/// at a time.
 fn stream_pack(
     s: Arc<Server>,
     repo: String,
     prefix: BytesMut,
     objects: Vec<ObjectId>,
-    sideband: bool,
-    progress: bool,
-    trailing_flush: bool,
+    planned: Charge,
+    lease: Arc<Lease>,
+    opts: PackStream,
 ) -> Body {
-    const BATCH: usize = 256;
+    const FIRST_BATCH: usize = 16;
+    const MAX_BATCH: usize = 256;
+    const BATCH_BYTES: u64 = 8 << 20;
     const CHUNK: usize = 1 << 16;
-    let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
+    const FRAMES: usize = 8;
+    let PackStream { sideband, progress, trailing_flush } = opts;
+    let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(FRAMES);
     let frame = move |data: &[u8], band: u8| -> Bytes {
         if sideband {
             let mut b = BytesMut::with_capacity(data.len() + data.len() / pktline::MAX_SIDEBAND_DATA * 5 + 5);
@@ -530,17 +719,37 @@ fn stream_pack(
             Bytes::copy_from_slice(data)
         }
     };
-    tokio::spawn(async move {
+    // If the client goes away, the work stops wherever it is (waiting for memory or objects
+    // included) and everything it holds is released.
+    let gone = tx.clone();
+    let work = async move {
+        let _planned = planned;
         if tx.send(Ok(prefix.freeze())).await.is_err() {
             return;
         }
+        let refused = |e: BudgetError| {
+            tracing::info!(error = %e, repo, "fetch stopped: memory budget");
+            fail(sideband, &e.to_string())
+        };
+        // Frames in the channel and being written, and the frame being filled.
+        let _frames = match Charge::new(&lease, ((FRAMES + 2) * (CHUNK + 64)) as u64).await {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send(Ok(refused(e))).await;
+                return;
+            }
+        };
         if progress && sideband {
             let msg = format!("roll: sending {} objects\n", objects.len());
             let _ = tx.send(Ok(frame(msg.as_bytes(), BAND_PROGRESS))).await;
         }
         let (mut w, header) = pack::Writer::new(objects.len() as u32);
-        let mut buf = header;
-        for batch in objects.chunks(BATCH) {
+        let mut buf = BytesMut::with_capacity(CHUNK);
+        buf.extend_from_slice(&header);
+        let mut next = 0;
+        let mut batch_len = FIRST_BATCH;
+        while next < objects.len() {
+            let batch = &objects[next..(next + batch_len).min(objects.len())];
             let read = match s.backend.read_objects(&repo, batch).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -549,18 +758,50 @@ fn stream_pack(
                     return;
                 }
             };
+            let bytes: u64 = read.iter().flatten().map(|o| o.data.len() as u64).sum();
+            let mut held = match Charge::new(&lease, bytes).await {
+                Ok(c) => c,
+                Err(BudgetError::TooLarge(_)) if batch.len() > 1 => {
+                    drop(read);
+                    batch_len = 1;
+                    continue;
+                }
+                Err(e) => {
+                    let _ = tx.send(Ok(refused(e))).await;
+                    return;
+                }
+            };
+            next += batch.len();
+            batch_len = (BATCH_BYTES / (bytes / batch.len() as u64).max(1)).clamp(1, MAX_BATCH as u64) as usize;
             for (id, o) in batch.iter().zip(read) {
                 let Some(o) = o else {
                     let _ = tx.send(Ok(fail(sideband, &format!("missing object {id}")))).await;
                     return;
                 };
-                buf.extend_from_slice(&w.entry(o.kind, &o.data));
-                if buf.len() >= CHUNK {
-                    if tx.send(Ok(frame(&buf, BAND_DATA))).await.is_err() {
+                let entry_charge = match Charge::new(&lease, pack::entry_bound(o.data.len()) as u64).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx.send(Ok(refused(e))).await;
                         return;
                     }
-                    buf.clear();
+                };
+                let entry = w.entry(o.kind, &o.data);
+                held.release(o.data.len() as u64);
+                drop(o);
+                let mut e = &entry[..];
+                while !e.is_empty() {
+                    let take = (CHUNK - buf.len()).min(e.len());
+                    buf.extend_from_slice(&e[..take]);
+                    e = &e[take..];
+                    if buf.len() == CHUNK {
+                        if tx.send(Ok(frame(&buf, BAND_DATA))).await.is_err() {
+                            return;
+                        }
+                        buf.clear();
+                    }
                 }
+                drop(entry);
+                drop(entry_charge);
             }
         }
         buf.extend_from_slice(&w.finish());
@@ -569,6 +810,12 @@ fn stream_pack(
             pktline::flush(&mut last);
         }
         let _ = tx.send(Ok(last.freeze())).await;
+    };
+    tokio::spawn(async move {
+        tokio::select! {
+            () = work => {}
+            () = gone.closed() => {}
+        }
     });
     Body::from_stream(futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) }))
 }
@@ -594,8 +841,49 @@ pub fn valid_ref_name(name: &str) -> bool {
         && name.bytes().all(|c| c > b' ' && c != 0x7f && !b"~^:?*[\\".contains(&c))
 }
 
-async fn receive_pack(s: &Arc<Server>, repo: &str, body: Bytes, pusher: Option<String>) -> Result<Bytes, GitError> {
-    let mut r = Reader::new(&body);
+/// Capabilities on a command line (after the NUL), if it has them.
+fn command_caps(d: &[u8]) -> Option<Vec<String>> {
+    let d = d.strip_suffix(b"\n").unwrap_or(d);
+    let i = d.iter().position(|&b| b == 0)?;
+    Some(String::from_utf8_lossy(&d[i + 1..]).split(' ').map(str::to_string).collect())
+}
+
+/// Where a push's commands (and push options) end in `buf`, if all of them are there.
+fn commands_end(buf: &[u8]) -> Result<Option<usize>, String> {
+    let mut r = Reader::new(buf);
+    let mut updates = false;
+    let mut options = false;
+    let mut in_options = false;
+    loop {
+        match r.next_pkt() {
+            Ok(None) | Err(PktError::Truncated) => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+            Ok(Some(Pkt::Flush)) => {
+                if in_options || !(updates && options) {
+                    return Ok(Some(buf.len() - r.rest().len()));
+                }
+                in_options = true;
+            }
+            Ok(Some(Pkt::Data(d))) if !in_options => {
+                if let Some(caps) = command_caps(d) {
+                    options = caps.iter().any(|c| c == "push-options");
+                }
+                updates |= !d.starts_with(b"shallow ");
+            }
+            Ok(Some(_)) if in_options => {}
+            Ok(Some(_)) => return Err("unexpected packet".into()),
+        }
+    }
+}
+
+struct Commands {
+    updates: Vec<RefUpdate>,
+    caps: Vec<String>,
+    options: Vec<String>,
+}
+
+fn parse_commands(buf: &[u8]) -> Result<Commands, GitError> {
+    let mut r = Reader::new(buf);
     let mut updates = Vec::new();
     let mut caps: Vec<String> = Vec::new();
     let bad = |m: &str| GitError::Invalid(m.to_string());
@@ -603,14 +891,11 @@ async fn receive_pack(s: &Arc<Server>, repo: &str, body: Bytes, pusher: Option<S
         match r.next_pkt().map_err(|e| bad(&e.to_string()))? {
             None | Some(Pkt::Flush) => break,
             Some(Pkt::Data(d)) => {
-                let d = d.strip_suffix(b"\n").unwrap_or(d);
-                let (line, cap) = match d.iter().position(|&b| b == 0) {
-                    Some(i) => (&d[..i], Some(&d[i + 1..])),
-                    None => (d, None),
-                };
-                if let Some(c) = cap {
-                    caps = String::from_utf8_lossy(c).split(' ').map(str::to_string).collect();
+                if let Some(c) = command_caps(d) {
+                    caps = c;
                 }
+                let d = d.strip_suffix(b"\n").unwrap_or(d);
+                let line = &d[..d.iter().position(|&b| b == 0).unwrap_or(d.len())];
                 if line.starts_with(b"shallow ") {
                     continue;
                 }
@@ -628,13 +913,8 @@ async fn receive_pack(s: &Arc<Server>, repo: &str, body: Bytes, pusher: Option<S
             Some(_) => return Err(bad("unexpected packet")),
         }
     }
-    if updates.is_empty() {
-        // e.g. git's probe request before a large chunked push
-        return Ok(Bytes::new());
-    }
-    let has = |c: &str| caps.iter().any(|x| x == c);
     let mut options = Vec::new();
-    if has("push-options") {
+    if !updates.is_empty() && caps.iter().any(|c| c == "push-options") {
         loop {
             match r.next_pkt().map_err(|e| bad(&e.to_string()))? {
                 None | Some(Pkt::Flush) => break,
@@ -642,10 +922,136 @@ async fn receive_pack(s: &Arc<Server>, repo: &str, body: Bytes, pusher: Option<S
             }
         }
     }
+    Ok(Commands { updates, caps, options })
+}
+
+/// Unpacks a pushed pack from `chunks` as they arrive (on a blocking thread). Returns the
+/// objects and the meter that still accounts for them; no chunks means no pack.
+fn unpack<F>(mut chunks: mpsc::Receiver<(Bytes, Charge)>, limits: Limits, meter: Box<dyn Meter>, lookup: F) -> anyhow::Result<(Vec<Object>, Box<dyn Meter>)>
+where
+    F: FnMut(ObjectId) -> anyhow::Result<Option<Object>>,
+{
+    let mut meter = Some(meter);
+    let mut parser = None;
+    while let Some((chunk, charge)) = chunks.blocking_recv() {
+        if chunk.is_empty() {
+            continue;
+        }
+        let p = parser.get_or_insert_with(|| pack::Parser::new(limits, meter.take().expect("meter")));
+        p.feed(&chunk)?;
+        drop(charge);
+    }
+    match parser {
+        None => Ok((Vec::new(), meter.expect("meter"))),
+        Some(p) => pack::resolve_with(p.finish()?, lookup),
+    }
+}
+
+async fn receive_pack(s: &Arc<Server>, repo: &str, headers: &HeaderMap, body: Body, pusher: Option<String>) -> Response {
+    let lease = Arc::new(s.budget.lease());
+    // If this request is dropped (the client went away), unpacking stops waiting for memory.
+    let _cancel = CancelOnDrop(lease.clone());
+    let mut body = BodyReader::new(headers, body, s.config.limits.max_pack_bytes + (1 << 20), lease.clone());
+
+    // The commands come first; the pack follows them. Without memory for them, up to
+    // `UNCHARGED_COMMANDS` are still read, so git gets a report saying why (it doesn't show the
+    // body of a failed POST); past that the push gets a 503.
+    const UNCHARGED_COMMANDS: usize = 64 << 10;
+    let mut head = BytesMut::new();
+    let mut head_charge = Charge::empty(&lease);
+    let mut refused: Option<BudgetError> = None;
+    let end = loop {
+        match commands_end(&head) {
+            Ok(Some(end)) => break end,
+            Ok(None) => {}
+            Err(m) => return error_response(GitError::Invalid(m)),
+        }
+        if head.len() as u64 > s.config.max_request_bytes {
+            return (StatusCode::PAYLOAD_TOO_LARGE, format!("ref updates larger than {} bytes\n", s.config.max_request_bytes)).into_response();
+        }
+        if let Some(e) = &refused
+            && head.len() > UNCHARGED_COMMANDS
+        {
+            return memory_response(e);
+        }
+        let chunk = match body.next_raw().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break head.len(),
+            Err(e) => return e.response(),
+        };
+        if refused.is_none() {
+            match Charge::new(&lease, chunk.len() as u64).await {
+                Ok(c) => head_charge.absorb(c),
+                Err(e) => refused = Some(e),
+            }
+        }
+        head.extend_from_slice(&chunk);
+    };
+    let Commands { mut updates, caps, options } = match parse_commands(&head[..end]) {
+        Ok(c) => c,
+        Err(e) => return error_response(e),
+    };
+    if updates.is_empty() {
+        // e.g. git's probe request before a large chunked push; nothing may follow it.
+        drop(head_charge);
+        return match body.discard().await {
+            Ok(()) => git_response("application/x-git-receive-pack-result", Body::empty()),
+            Err(e) => e.response(),
+        };
+    }
+    let has = |c: &str| caps.iter().any(|x| x == c);
     let sideband = has("side-band-64k");
     let atomic = has("atomic");
-    let pack_data = Bytes::copy_from_slice(r.rest());
-    drop(body);
+    let first = head.split_off(end).freeze();
+    drop(head);
+
+    // Unpack on a blocking thread as the pack arrives.
+    let (tx, rx) = mpsc::channel::<(Bytes, Charge)>(4);
+    let job = {
+        let handle = tokio::runtime::Handle::current();
+        let meter = Box::new(LeaseMeter::new(lease.clone(), handle.clone()));
+        let backend = s.backend.clone();
+        let repo = repo.to_string();
+        let limits = s.config.limits;
+        tokio::task::spawn_blocking(move || {
+            unpack(rx, limits, meter, |id| handle.block_on(backend.read_object(&repo, &id)).map_err(anyhow::Error::from))
+        })
+    };
+    let mut next = refused.is_none().then_some((first, head_charge));
+    while refused.is_none() {
+        let item = match next.take() {
+            Some(item) => item,
+            None => match body.next().await {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(BodyError::Memory(e)) => {
+                    refused = Some(e);
+                    break;
+                }
+                // The job ends when `tx` is dropped with this function.
+                Err(e) => return e.response(),
+            },
+        };
+        if tx.send(item).await.is_err() {
+            break; // unpacking failed
+        }
+    }
+    drop(tx);
+    // Read and drop whatever unpacking didn't take, so git reads the report rather than a
+    // connection closed under it.
+    if let Err(e) = body.discard().await {
+        return e.response();
+    }
+    let unpacked = match job.await {
+        Ok(r) => r,
+        Err(e) => Err(anyhow::anyhow!("unpacking failed: {e}")),
+    };
+    // The meter still accounts for the objects until the backend is done with them.
+    let (unpack, objects, meter) = match (refused, unpacked) {
+        (Some(e), _) => (Err(e.to_string()), Vec::new(), None),
+        (None, Ok((objects, meter))) => (Ok(()), objects, Some(meter)),
+        (None, Err(e)) => (Err(e.to_string()), Vec::new(), None),
+    };
 
     let mut outcome = ReceiveOutcome::default();
     let mut invalid = Vec::new();
@@ -656,21 +1062,6 @@ async fn receive_pack(s: &Arc<Server>, repo: &str, body: Bytes, pusher: Option<S
         }
         ok
     });
-    let mut unpack: Result<(), String> = Ok(());
-    let mut objects = Vec::new();
-    if !pack_data.is_empty() {
-        let backend = s.backend.clone();
-        let repo_owned = repo.to_string();
-        let lookup = move |id: ObjectId| {
-            let backend = backend.clone();
-            let repo = repo_owned.clone();
-            async move { backend.read_object(&repo, &id).await.map_err(anyhow::Error::from) }
-        };
-        match pack::read_with(pack_data, s.config.limits, lookup).await {
-            Ok(o) => objects = o,
-            Err(e) => unpack = Err(e.to_string()),
-        }
-    }
 
     let statuses: Vec<RefStatus> = if let Err(e) = &unpack {
         tracing::info!(repo, error = %e, "push rejected: unpack failed");
@@ -700,6 +1091,8 @@ async fn receive_pack(s: &Arc<Server>, repo: &str, body: Bytes, pusher: Option<S
             Err(e) => names.into_iter().map(|n| RefStatus { name: n, result: Err(e.to_string()) }).collect(),
         }
     };
+    // The objects are the backend's now (and dropped); stop accounting for them.
+    drop(meter);
     outcome.refs = invalid.into_iter().chain(statuses).collect();
 
     let mut report = BytesMut::new();
@@ -715,7 +1108,7 @@ async fn receive_pack(s: &Arc<Server>, repo: &str, body: Bytes, pusher: Option<S
     }
     pktline::flush(&mut report);
     if !sideband {
-        return Ok(report.freeze());
+        return git_response("application/x-git-receive-pack-result", Body::from(report.freeze()));
     }
     let mut out = BytesMut::new();
     for m in &outcome.messages {
@@ -725,7 +1118,7 @@ async fn receive_pack(s: &Arc<Server>, repo: &str, body: Bytes, pusher: Option<S
     }
     pktline::write_band(&mut out, BAND_DATA, &report);
     pktline::flush(&mut out);
-    Ok(out.freeze())
+    git_response("application/x-git-receive-pack-result", Body::from(out.freeze()))
 }
 
 fn one_line(s: &str) -> String {
@@ -757,5 +1150,25 @@ mod tests {
         assert!(!valid_ref_name("refs/heads/a b"));
         assert!(!valid_ref_name("refs/heads/.hidden"));
         assert!(!valid_ref_name("refs/heads/"));
+    }
+
+    #[test]
+    fn commands_end_waits_for_the_whole_section() {
+        let zero = ObjectId::ZERO;
+        let line = |caps: &str| {
+            let l = format!("{zero} {} refs/heads/main\0{caps}\n", "1".repeat(40));
+            format!("{:04x}{l}", l.len() + 4)
+        };
+        let plain = line("report-status") + "0000PACK";
+        assert_eq!(commands_end(plain.as_bytes()), Ok(Some(plain.len() - 4)));
+        assert_eq!(commands_end(&plain.as_bytes()[..20]), Ok(None));
+        // With push options, a second section follows.
+        let opts = line("report-status push-options") + "0000";
+        assert_eq!(commands_end(opts.as_bytes()), Ok(None));
+        let opts = opts + "000bci.skip0000PACK";
+        assert_eq!(commands_end(opts.as_bytes()), Ok(Some(opts.len() - 4)));
+        // A probe has no commands and no options.
+        assert_eq!(commands_end(b"0000"), Ok(Some(4)));
+        assert!(commands_end(b"zzzz").is_err());
     }
 }

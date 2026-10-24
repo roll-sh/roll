@@ -99,7 +99,7 @@ thing but not do it, 404 one who can't see it (docs/code/http-api.md).
 | `GET /v1/code/mcp` | 405 | `mcp.rs::transport_sessions_and_protocol`, `mcp.rs::protocol_edges` |
 | `DELETE /v1/code/mcp` | 204, 400, 404 | `mcp.rs::transport_sessions_and_protocol`, `mcp.rs::tools_follow_the_whole_auth_matrix`, `mcp.rs::invalid_tokens_and_foreign_sessions` |
 | `GET /git/{*path}` | 200, 401, 403, 404 | `git_more.rs::git_auth_matrix_over_smart_http`, `git.rs::git_private_repo_needs_token`, `code-git/tests/http.rs::advertisements` |
-| `POST /git/{*path}` | 200, 400, 401, 403, 404, 405, 413 | `git_more.rs::git_auth_matrix_over_smart_http`, `git.rs::git_clone_push_land_and_conflict`, `code-git/tests/http.rs::advertisements`, `code-git/tests/http.rs::gzip_bodies_and_protocol_errors`, `code-git/tests/http.rs::request_limits` |
+| `POST /git/{*path}` | 200, 400, 401, 403, 404, 405, 413, 503 | `git_more.rs::git_auth_matrix_over_smart_http`, `git.rs::git_clone_push_land_and_conflict`, `code-git/tests/http.rs::advertisements`, `code-git/tests/http.rs::gzip_bodies_and_protocol_errors`, `code-git/tests/http.rs::request_limits`, `code-git/tests/memory.rs::fetches_are_charged_and_requests_without_memory_fail_cleanly` |
 
 ### Reviews
 
@@ -739,6 +739,15 @@ Parsing (`code-github/tests`) and the effect in roll against a mock GitHub
 | push to main lands (fast-forward); `refs/land/<branch>` rebases a stale push; conflicts name paths in git's output | `code-control/tests/git.rs::git_clone_push_land_and_conflict` |
 | force push to main lands instead of rewriting history | `git_more.rs::force_push_to_main_lands_instead_of_rewriting` |
 | an oversize push is refused (413, or the connection closed under the client while it still sends) and the server keeps answering | `code-git/tests/http.rs::request_limits` |
+| memory budget: concurrent pushes over the budget stay within it (tracked peak), each lands or gets the busy `unpack` report, and the budget returns to zero | `code-git/tests/memory.rs::concurrent_pushes_stay_within_the_budget` |
+| memory budget: a client going away mid-push releases everything it held | `code-git/tests/memory.rs::a_client_going_away_mid_push_releases_its_memory` |
+| memory budget: a fetch whose client goes away while it waits for memory stops and releases at once | `code-git/tests/memory.rs::a_fetch_whose_client_goes_away_releases_its_memory` |
+| memory budget: small pushes flow while a large one holds most of the budget; a second large one waits, or fails as the younger | `code-git/tests/memory.rs::small_pushes_flow_while_a_large_one_holds_most_of_the_budget` |
+| memory budget: a push past one request's share is refused with an `unpack` report once its body is read | `code-git/tests/memory.rs::a_push_past_one_requests_share_fails_cleanly` |
+| memory budget: fetches are charged; with no memory, upload-pack answers 503 + `Retry-After`, a push gets a report git prints, a fetch that runs out mid-pack gets a side-band error | `code-git/tests/memory.rs::fetches_are_charged_and_requests_without_memory_fail_cleanly` |
+| memory budget rules: per-request share, the bytes kept for small requests, waiting, wait-die when every holder waits, cancellation | `code-git/src/budget.rs::grants_waits_and_releases`, `code-git/src/budget.rs::holders_that_would_all_wait_fail_instead`, `code-git/src/budget.rs::the_youngest_holder_fails_even_when_an_older_one_blocks_last`, `code-git/src/budget.rs::cancel_wakes_waiters` |
+| streamed pack parsing (any chunk boundaries, truncation, corruption, trailing data) and metering (what's held is charged, a refusing meter stops the read) | `code-git/tests/pack.rs::streamed_packs_read_like_whole_ones`, `code-git/tests/pack.rs::reading_charges_what_it_holds_and_stops_when_refused` |
+| local object storage opened durable fsyncs blobs and reads back the same; S3 unchanged | `pg-storage/src/objects.rs::durable_local_store_fsyncs_and_works_the_same`, `pg-storage/src/objects.rs::s3_is_durable_either_way` |
 | branch push opens a change, repush revises it, delete closes it, a push after landing opens a new one; merge commits fast-forward; other ref namespaces refused | `git.rs::git_clone_push_land_and_conflict`, `git_more.rs::tags_branches_and_merge_commits` |
 
 ## code-store
