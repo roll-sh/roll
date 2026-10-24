@@ -198,12 +198,12 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
             last: None,
             drain: input.writes(),
         }),
-        Plan::Distinct { input, on, .. } => Box::new(DistinctNode {
+        Plan::Distinct { input, on, hashed, .. } => Box::new(DistinctNode {
             input: open(input, ctx)?,
             on: on.clone(),
             seen: HashMap::new(),
             prev: None,
-            hashed: on.is_none().then(|| plan.clone()),
+            hashed: (on.is_none() || *hashed).then(|| plan.clone()),
             out: None,
         }),
         Plan::SetOp {
@@ -1423,12 +1423,21 @@ fn hashed_distinct(
     plan: &Arc<Plan>,
     ctx: &ExecCtx,
 ) -> Result<Vec<Row>> {
+    hashed_distinct_keyed(rows.into_iter().map(|r| (key(&r), r)), types, plan, ctx)
+}
+
+/// `hashed_distinct` over rows paired with their keys.
+fn hashed_distinct_keyed(
+    rows: impl IntoIterator<Item = (Row, Row)>,
+    types: Vec<crate::types::DataType>,
+    plan: &Arc<Plan>,
+    ctx: &ExecCtx,
+) -> Result<Vec<Row>> {
     let mut index: HashMap<Row, usize> = HashMap::new();
     let mut firsts: Vec<Row> = Vec::new();
     let mut order = super::pghash::GroupOrder::new(types, ctx);
-    for r in rows {
+    for (k, r) in rows {
         ctx.check()?;
-        let k = key(&r);
         let g = match index.get(&k) {
             Some(g) => *g,
             None => {
@@ -1507,8 +1516,18 @@ impl Node for DistinctNode {
                 Plan::Distinct { input, .. } => input.clone(),
                 _ => plan.clone(),
             };
+            // (Grouped on keys, the rest passed through: each group's first row whole.)
+            let out = if let Some(on) = &self.on {
+                let colls = super::agg::nondeterministic_keys(on, ctx);
+                let mut keyed = Vec::with_capacity(rows.len());
+                for r in rows {
+                    let k = super::agg::group_key(&eval_all(on, &r, ctx)?, &colls);
+                    keyed.push((k, r));
+                }
+                let types: Vec<crate::types::DataType> = on.iter().map(Expr::ty).collect();
+                hashed_distinct_keyed(keyed, types, &plan, ctx)?
             // (Shown as a Unique over its input sorted: the rows in that order.)
-            let out = if let Some(cols) = crate::sql::explain::distinct_order(&plan, ctx) {
+            } else if let Some(cols) = crate::sql::explain::distinct_order(&plan, ctx) {
                 let mut seen: HashMap<Row, ()> = HashMap::new();
                 let mut out: Vec<Row> = Vec::new();
                 for r in rows {

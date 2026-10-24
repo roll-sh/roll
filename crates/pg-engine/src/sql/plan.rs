@@ -1144,6 +1144,11 @@ pub enum Plan {
         /// DISTINCT ON: how many of its sorted input's leading keys the query's ORDER BY
         /// asks for (the rest order the rows of a group, or only group them).
         order: usize,
+        /// With `on`: grouped by hashing on those keys, its input unsorted, each group's
+        /// first row coming out whole, the columns that aren't keys passed through (a
+        /// unique path's AGG_HASHED plan: create_unique_plan keeps the subpath's target
+        /// list, its Agg grouping on the semi join's operands only).
+        hashed: bool,
     },
     SetOp {
         kind: SetOpKind,

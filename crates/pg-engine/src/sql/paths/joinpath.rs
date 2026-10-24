@@ -171,9 +171,13 @@ enum JNode {
     Unique {
         input: Rc<JP>,
         hashed: bool,
+        /// The columns it returns: its keys (the first `nkeys`, with no `exprs`), what the
+        /// expressions read, then the other columns needed above it, passed through from
+        /// each group's first row (the unique path's target is the relation's reltarget).
         cols: Vec<usize>,
-        /// Expressions (over the group's columns) it is also made unique on, sorted: the
-        /// columns `cols` are then what they read (semi_rhs_exprs that aren't Vars).
+        nkeys: usize,
+        /// Expressions (over the group's columns) it is also made unique on, sorted: every
+        /// key is one then, and `cols` all pass through (semi_rhs_exprs that aren't Vars).
         exprs: Vec<Expr>,
     },
     Join {
@@ -960,7 +964,9 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
     /// (None: not such a clause).
     fn clause_ec(&self, c: &Clause) -> Option<usize> {
         // (A semi join's own clause equates its sides as an inner join's does.)
-        if !c.ecable || (c.on && !(self.kind == JoinKind::Semi && !self.general)) {
+        if !c.ecable
+            || (c.on && !(self.kind == JoinKind::Semi && !self.general) && !(self.semi_classes() && c.sj.is_some()))
+        {
             return None;
         }
         let (a, b, _, _) = c.eq.as_ref()?;
@@ -998,7 +1004,10 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
     /// (generate_join_implied_equalities_normal): a Var (column) before an expression,
     /// else the first in the class.
     fn first_member(&self, members: &[usize], e: usize, set: u32) -> Option<usize> {
-        let mut it = members.iter().copied().filter(|&g| self.m_ec(g) == e && (1u32 << self.m_leaf(g)) & set != 0);
+        let mut it = members
+            .iter()
+            .copied()
+            .filter(|&g| self.m_ec(g) == e && (1u32 << self.m_leaf(g)) & set != 0 && !self.hidden(self.m_leaf(g), set));
         let first = it.next()?;
         if first < self.ec.len() {
             return Some(first);
@@ -1012,6 +1021,23 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
             Some(k) => self.xm[k].expr.columns(),
             None => vec![g],
         }
+    }
+
+    /// Leaf `l`'s columns don't come out of relation `set`: it is on the right of a semi or
+    /// anti join made inside `set` (the engine's semi join returns its left side's row
+    /// only, where Postgres's can carry the right side's Vars its reltarget needs).
+    fn hidden(&self, l: usize, set: u32) -> bool {
+        self.sjs.iter().any(|s| {
+            matches!(s.kind, JoinKind::Semi | JoinKind::Anti) && s.syn_r >> l & 1 == 1 && (s.syn_l | s.syn_r) & !set == 0
+        })
+    }
+
+    /// A group with semi joins and no other non-inner join: its semi joins' clauses go into
+    /// equivalence classes as its inner joins' do (deconstruct_distribute: a semi join adds
+    /// no nonnullable relations, so distribute_qual_to_rels leaves maybe_equivalence on for
+    /// its quals; process_equivalence), and so the classes choose its joins' clauses.
+    pub(super) fn semi_classes(&self) -> bool {
+        self.general && !self.sjs.is_empty() && self.sjs.iter().all(|j| j.kind == JoinKind::Semi) && self.phvs.is_empty()
     }
 
     /// Add the equalities between equivalence class members of different FROM items the
@@ -1255,18 +1281,24 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
     }
 
     fn crossing_all(&self, a: u32, b: u32) -> Vec<usize> {
-        if self.general {
-            return self.general_restrict(a, b);
+        // (In a group with outer joins: its clauses as written; with semi joins only,
+        // theirs are in classes too, one per class, below.)
+        let all: Vec<usize> = if self.general {
+            self.general_restrict(a, b)
+        } else {
+            let u = a | b;
+            let full = (1u32 << self.leaves.len()) - 1;
+            (0..self.clauses.len())
+                .filter(|&i| {
+                    let l = self.clauses[i].leaves;
+                    l & !u == 0
+                        && ((l & !a != 0 && l & !b != 0) || (l.count_ones() <= 1 && u == full))
+                })
+                .collect()
+        };
+        if self.general && !self.semi_classes() {
+            return all;
         }
-        let u = a | b;
-        let full = (1u32 << self.leaves.len()) - 1;
-        let all: Vec<usize> = (0..self.clauses.len())
-            .filter(|&i| {
-                let l = self.clauses[i].leaves;
-                l & !u == 0
-                    && ((l & !a != 0 && l & !b != 0) || (l.count_ones() <= 1 && u == full))
-            })
-            .collect();
         if !matches!(self.kind, JoinKind::Inner | JoinKind::Semi) && !self.clauses.iter().any(|c| c.derived) {
             return all;
         }
@@ -2668,9 +2700,23 @@ impl Search<'_, '_, '_> {
     /// The fewest rows of the leaves in `req` (get_loop_count) a scan of leaf `l`
     /// parameterized by them runs for.
     fn loop_count(&self, l: usize, req: u32) -> f64 {
+        // (A partitionwise child join's leaves are child relations: their relids are in no
+        // SpecialJoinInfo's syn_lefthand, which has their parents', so
+        // adjust_rowcount_for_semijoins leaves the parent's rows as they are.)
+        let child = self.loop_rows.len() == self.leaves.len();
+        self.loop_count_as(l, req, child)
+    }
+
+    /// `loop_count`, for a child relation's scan (an appendrel member's) when `child`:
+    /// no semi join adjustment (adjust_rowcount_for_semijoins matches the scanned relid
+    /// against the semi joins' syn_lefthand, never a child's).
+    fn loop_count_as(&self, l: usize, req: u32, child: bool) -> f64 {
         let n = (0..self.leaves.len())
             .filter(|j| req & (1 << j) != 0)
-            .map(|j| self.semi_loop_rows(l, j, self.leaf_loop_rows(j)))
+            .map(|j| {
+                let rows = self.leaf_loop_rows(j);
+                if child { rows } else { self.semi_loop_rows(l, j, rows) }
+            })
             .fold(f64::INFINITY, f64::min)
             .max(1.0);
         if n.is_finite() { n } else { 1.0 }
@@ -2846,7 +2892,7 @@ impl Search<'_, '_, '_> {
                         Expr::Call(def.clone(), vec![param, colx], ty.clone())
                     });
                 }
-                prel.loop_count = self.loop_count(l, req);
+                prel.loop_count = self.loop_count_as(l, req, true);
                 prel.rows = costs::clamp_rows(prel.size.tuples * self.pl.sel(&prel, &prel.quals));
                 (prel.qual_startup, prel.qual_cost) = self.pl.quals_cost(&prel.quals);
                 let prel = Rc::new(prel);
@@ -3352,6 +3398,22 @@ impl Search<'_, '_, '_> {
             }
             self.join_groups(&out_cols, rows_in)
         };
+        // (create_unique_path's target is the relation's: the other columns needed above it
+        // come out too, each group's first row's, e.g. an expression member's columns a
+        // parameterized path above reads.)
+        for (l, leaf) in self.leaves.iter().enumerate() {
+            if rset >> l & 1 == 0 {
+                continue;
+            }
+            if self.hidden(l, rset) {
+                continue;
+            }
+            for g in leaf.off..leaf.off + leaf.ncols {
+                if !out_cols.contains(&g) && self.phv(g).is_none() && self.needed_above(g, rset) {
+                    out_cols.push(g);
+                }
+            }
+        }
         let n = nkeys as f64;
         let width = input.width;
         // Sort + Unique.
@@ -3403,6 +3465,7 @@ impl Search<'_, '_, '_> {
                     input: Rc::new(input),
                     hashed,
                     cols: out_cols,
+                    nkeys,
                     exprs,
                 },
             }],
@@ -4504,8 +4567,19 @@ impl Search<'_, '_, '_> {
         if !param_join && op.req != 0 {
             return;
         }
-        // (A unique-ified outer side returns its keys only: the inner side's parameters
-        // from it must be among them.)
+        // (Nor can an outer side give a column of a semi join's right side inside it.)
+        if ip.req & op.set != 0
+            && self
+                .outer_params(ip)
+                .iter()
+                .flat_map(Expr::columns)
+                .filter_map(|g| self.leaf_of.get(g).copied())
+                .any(|l| l < self.leaves.len() && op.set >> l & 1 == 1 && self.hidden(l, op.set))
+        {
+            return;
+        }
+        // (A unique-ified outer side returns its reltarget: the inner side's parameters
+        // from it must be among those columns.)
         if let JNode::Unique { cols, .. } = &op.node
             && ip.req & op.set != 0
             && self
@@ -5629,6 +5703,7 @@ impl Search<'_, '_, '_> {
                 hashed,
                 cols,
                 exprs: keyx,
+                ..
             } if !keyx.is_empty() => {
                 // (Sorted on the expressions too, a Unique on them all, then the columns.)
                 let (p, layout) = self.build(input);
@@ -5665,6 +5740,7 @@ impl Search<'_, '_, '_> {
                     }),
                     on: Some(on),
                     order: 0,
+                    hashed: false,
                 };
                 let plan = Plan::Project {
                     input: Arc::new(uniq),
@@ -5676,6 +5752,7 @@ impl Search<'_, '_, '_> {
                 input,
                 hashed,
                 cols,
+                nkeys,
                 ..
             } => {
                 let (p, layout) = self.build(input);
@@ -5688,14 +5765,23 @@ impl Search<'_, '_, '_> {
                     input: Arc::new(p),
                     exprs,
                 };
-                let plan = if *hashed {
+                let plan = if *hashed && *nkeys == cols.len() {
                     Plan::Distinct {
                         input: Arc::new(proj),
                         on: None,
                         order: 0,
+                        hashed: false,
+                    }
+                } else if *hashed {
+                    // (Grouped on the keys, the other columns passed through.)
+                    Plan::Distinct {
+                        input: Arc::new(proj),
+                        on: Some((0..*nkeys).map(|i| Expr::Col(i, self.col_type(cols[i]))).collect()),
+                        order: 0,
+                        hashed: true,
                     }
                 } else {
-                    let keys: Vec<SortKey> = cols
+                    let keys: Vec<SortKey> = cols[..*nkeys]
                         .iter()
                         .enumerate()
                         .map(|(i, &g)| SortKey {
@@ -5713,6 +5799,7 @@ impl Search<'_, '_, '_> {
                         }),
                         on: Some(on),
                         order: 0,
+                        hashed: false,
                     }
                 };
                 (plan, cols.clone())
@@ -7774,10 +7861,11 @@ impl Planner<'_, '_> {
         // operator written the other way round doesn't exist, the class is broken and the
         // clause comes back as it was, never checked as hashable (only clauses
         // distribute_restrictinfo_to_rels places are).)
+        let semi_classes = s.semi_classes();
         for c in s.clauses.iter_mut() {
             if c.ecable
                 && !c.commutes
-                && !(s.general && (c.sj.is_some() || c.req != c.leaves))
+                && !(s.general && ((c.sj.is_some() && !semi_classes) || c.req != c.leaves))
                 && !(!s.general && outer_join && c.on)
                 && let Some((_, _, al, bl)) = &c.eq
                 && al.trailing_zeros() > bl.trailing_zeros()
@@ -7787,7 +7875,7 @@ impl Planner<'_, '_> {
         }
         for c in &s.clauses {
             if !c.ecable
-                || (s.general && (c.sj.is_some() || c.req != c.leaves))
+                || (s.general && ((c.sj.is_some() && !semi_classes) || c.req != c.leaves))
                 || (!s.general && outer_join && c.on)
             {
                 continue;
@@ -8227,10 +8315,11 @@ impl Planner<'_, '_> {
         }
         // generate_join_implied_equalities: in a group of inner joins, each pair of an
         // equivalence class's columns from different FROM items can be joined on.
-        if s.kind == JoinKind::Inner && !s.general && s.leaves.len() >= 3 {
+        let classes = s.kind == JoinKind::Inner && (!s.general || s.semi_classes());
+        if classes && s.leaves.len() >= 3 {
             s.derive_equalities();
         }
-        if s.kind == JoinKind::Inner && !s.general {
+        if classes {
             s.orient_ec_clauses();
         }
         // reduce_unique_semijoins: a semi join whose right side has at most one match

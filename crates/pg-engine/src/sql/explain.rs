@@ -7191,7 +7191,10 @@ impl Builder<'_, '_> {
                 let n = n.expect("a plan");
                 Built::passthrough(n, c.exported)
             }
-            Plan::Distinct { input, on, .. } => {
+            Plan::Distinct { input, on, hashed: by_hash, .. } => {
+                // (Grouped on keys by hashing, the other columns passed through: a unique
+                // path's HashAggregate as the join search chose it.)
+                let hashed_on = *by_hash && on.is_some();
                 // (Hashed: sorted, the Sort's input is the projection.)
                 let plain = on.is_none()
                     && crate::sql::paths::Gucs::read(self.ctx).hashagg
@@ -7273,7 +7276,26 @@ impl Builder<'_, '_> {
                         .map(|(_, n)| self.pick(n, Cx::Output))
                         .collect();
                 }
-                let mut n = if on.is_some() {
+                let mut n = if hashed_on {
+                    let mut n = ExNode {
+                        strategy: Some("Hashed"),
+                        partial_mode: Some("Simple"),
+                        ..ExNode::new("Aggregate")
+                    };
+                    n.title = "HashAggregate".into();
+                    let keys = on
+                        .iter()
+                        .flatten()
+                        .filter_map(|e| match e {
+                            Expr::Col(j, _) => c.exported.get(*j).map(|k| self.pick(k, Cx::Upper)),
+                            _ => None,
+                        })
+                        .collect();
+                    n.details.push(Detail::List("Group Key", keys));
+                    n.details.push(Detail::HashAggInfo);
+                    n.disabled = !crate::sql::paths::Gucs::read(self.ctx).hashagg;
+                    n
+                } else if on.is_some() {
                     ExNode::new("Unique")
                 } else {
                     let mut n = ExNode {
@@ -7362,7 +7384,7 @@ impl Builder<'_, '_> {
                 n.width = c.node.width;
                 n.cols = cols;
                 let key_ops = costs::CPU_OPERATOR_COST * keys.len() as f64;
-                if on.is_some() {
+                if on.is_some() && !hashed_on {
                     // cost_unique-like: one comparison per input row and key.
                     n.startup_cost = c.node.startup_cost;
                     n.total_cost = c.node.total_cost + c.node.rows * key_ops;
@@ -7393,7 +7415,7 @@ impl Builder<'_, '_> {
                 // Every key fixed by an equality with a constant (its distinct pathkeys all
                 // redundant): the first row is the one distinct row (a Limit 1).
                 // (So with DISTINCT ON keys the input fixes.)
-                let on_fixed = on.as_ref().is_some_and(|on| {
+                let on_fixed = !hashed_on && on.as_ref().is_some_and(|on| {
                     let fixed = super::paths::constant_columns(input);
                     !on.is_empty()
                         && on.iter().all(|e| crate::sql::explain::key_col_fixed(e, &fixed))

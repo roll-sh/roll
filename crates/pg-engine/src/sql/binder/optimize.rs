@@ -580,6 +580,8 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             // (What the join was written as, and the PlaceHolderVars a projection over it
             // computes, stay with it.)
             let (old_wk, old_phv) = (meta.written_kind, (meta.phv_eval, meta.phv_join));
+            let (lcoll, rcoll) = (|c: usize| output_collation(&left, c), |c: usize| output_collation(&right, c));
+            let mut rewrites = Vec::new();
             let broken = ec_constants(
                 cat,
                 &mut lpush,
@@ -590,6 +592,8 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 (to_right, to_left),
                 &mut kept,
                 (&lhave, &rhave),
+                (&lcoll, &rcoll),
+                &mut rewrites,
             );
             // (The constants' clauses derived for the other side too, in class order.)
             order_by_places(&mut lpush, &places, 0);
@@ -597,6 +601,9 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             let saved = BROKEN_DUPS.with(|b| b.replace(broken));
             let mut l = Arc::try_unwrap(left).unwrap_or_else(|a| (*a).clone());
             let mut r = Arc::try_unwrap(right).unwrap_or_else(|a| (*a).clone());
+            for (on_right, old, new) in rewrites {
+                replace_restriction(cat, if on_right { &mut r } else { &mut l }, &old, &new);
+            }
             if !lpush.is_empty() {
                 l = add_filter(cat, l, Expr::And(lpush));
             }
@@ -1134,12 +1141,13 @@ fn push_into_level(cat: &Catalog, plan: Plan, parts: Vec<Expr>) -> Plan {
                 keys,
             }
         }
-        Plan::Distinct { input, on, order } => {
+        Plan::Distinct { input, on, order, hashed } => {
             let i = Arc::try_unwrap(input).unwrap_or_else(|a| (*a).clone());
             Plan::Distinct {
                 input: Arc::new(push_into_level(cat, i, parts)),
                 on,
                 order,
+                hashed,
             }
         }
         Plan::Agg { input, groups, sets: None, aggs } if !groups.is_empty() => {
@@ -1617,7 +1625,17 @@ fn ec_constants(
     (to_right, to_left): (bool, bool),
     kept: &mut Vec<usize>,
     (lhave, rhave): (&[Expr], &[Expr]),
+    (lcoll, rcoll): (&dyn Fn(usize) -> Option<String>, &dyn Fn(usize) -> Option<String>),
+    rewrites: &mut Vec<(bool, Expr, Expr)>,
 ) -> Vec<Expr> {
+    // The nondeterministic collation a clause compares under (None: a deterministic one, all
+    // of which compare bytes): an equivalence class is one collation's (process_equivalence
+    // merges only clauses of the class's ec_collation), so a constant joins a join clause's
+    // class only under the same one.
+    let nondet = |e: &Expr| match e {
+        Expr::Call(d, ..) => d.coll.as_ref().filter(|c| !c.deterministic).map(|c| c.name.clone()),
+        _ => None,
+    };
     // `x = k`: (x, k, the clause).
     let const_eq = |e: &Expr| -> Option<(Expr, Expr)> {
         let Expr::Call(def, args, _) = e else {
@@ -1653,24 +1671,27 @@ fn ec_constants(
             None
         }
     };
-    // The equi-join pairs, the right side in the right input's columns.
-    let mut pairs: Vec<(Expr, Expr, Option<usize>)> = Vec::new();
+    // The equi-join pairs, the right side in the right input's columns: (left, right, the
+    // hash key's index or else the condition's conjunct's, the class's nondeterministic
+    // collation).
+    let mut pairs: Vec<(Expr, Expr, Result<usize, usize>, Option<String>)> = Vec::new();
     if let Some((hl, hr)) = hash.as_ref() {
         for (i, (a, b)) in hl.iter().zip(hr).enumerate() {
-            pairs.push((a.clone(), b.clone(), Some(i)));
+            pairs.push((a.clone(), b.clone(), Ok(i), None));
         }
     }
-    let mut cond_pairs = Vec::new();
     // (Whether a join clause names its right side's column first.)
     let mut right_first = Vec::new();
     for (i, c) in cond.iter().enumerate() {
-        if let Some((a, b)) = ec_pair(c, nleft) {
-            cond_pairs.push(i);
+        let pair = ec_pair(c, nleft)
+            .map(|(a, b)| (a, b, None))
+            .or_else(|| nondet_pair(c, nleft).map(|(a, b)| (a, b, nondet(c))));
+        if let Some((a, b, coll)) = pair {
             right_first.push((
                 pairs.len(),
                 matches!(c, Expr::Call(_, args, _) if args[0].same_as(&b)),
             ));
-            pairs.push((a, b.shift_cols(-(nleft as isize)), None));
+            pairs.push((a, b.shift_cols(-(nleft as isize)), Err(i), coll));
         }
     }
     // (Into an outer join's nullable side not an outer query's value: in Postgres a
@@ -1681,17 +1702,23 @@ fn ec_constants(
     let rls = QUERY_RLS.with(|f| f.get());
     // (The restrictions already in each input count too, `lhave` / `rhave`: a pulled-up
     // subquery's `x = k` in its scan. They are the class's sources, never pushed again.)
+    // (A nondeterministic class's member is its column: an explicit COLLATE is a
+    // relabeling, eval_const_expressions' RelabelType.)
     let consts = |push: &[Expr], have: &[Expr], to: bool| -> Vec<(Expr, Expr, Expr, bool)> {
         push.iter()
             .map(|e| (e, false))
             .chain(have.iter().map(|e| (e, true)))
             .filter(|_| to)
             .filter(|(e, _)| !(rls && leaks(cat, e)))
-            // (Not one under a nondeterministic collation: its class is that collation's.)
-            .filter(|(e, old)| {
-                !*old || !matches!(e, Expr::Call(d, ..) if d.coll.as_ref().is_some_and(|c| !c.deterministic))
+            .filter_map(|(e, old)| {
+                let x = match e {
+                    Expr::Call(d, args, t) if nondet(e).is_some() => {
+                        Expr::Call(d.clone(), args.iter().map(|a| uncollate(a).clone()).collect(), t.clone())
+                    }
+                    e => e.clone(),
+                };
+                const_eq(&x).map(|(x, k)| (x, k, e.clone(), old))
             })
-            .filter_map(|(e, old)| const_eq(e).map(|(x, k)| (x, k, e.clone(), old)))
             .filter(|(_, k, _, old)| !((outer_join || *old) && k.has_outer_refs()))
             .collect()
     };
@@ -1765,15 +1792,53 @@ fn ec_constants(
             }
         }
     };
+    // generate_base_implied_equalities_const for a nondeterministic class: each member's
+    // `member = k` built over the class's collation (canonicalize_ec_expression: a member
+    // of another collation relabeled, `(x)::text`; the constant given the class's,
+    // `'k'::text COLLATE c`).
+    let regen = |clause: &Expr, m: &Expr, k: &Expr, coll: &str, mcoll: &dyn Fn(usize) -> Option<String>| -> Expr {
+        let Expr::Call(def, _, ty) = clause else { return clause.clone() };
+        let m = uncollate(m).clone();
+        let own = match &m {
+            Expr::Col(c, _) => mcoll(*c),
+            _ => None,
+        };
+        let m = if own.as_deref() == Some(coll) { m } else { Expr::Collate(Box::new(m), String::new(), -1) };
+        let k = Expr::Collate(Box::new(uncollate(k).clone()), coll.to_string(), -1);
+        Expr::Call(def.clone(), vec![m, k], ty.clone())
+    };
     let mut broken_dups: Vec<Expr> = Vec::new();
-    let mut used_pairs: Vec<(Expr, Expr)> = Vec::new();
-    for (n, (a, b, hi)) in pairs.iter().enumerate() {
+    let mut used_pairs: Vec<usize> = Vec::new();
+    for (n, (a, b, hi, pcoll)) in pairs.iter().enumerate() {
         let mut used = false;
+        let (a, b) = if pcoll.is_some() { (uncollate(a), uncollate(b)) } else { (a, b) };
         let (lclass, rclass) = (side_class(lpush, a), side_class(rpush, b));
         // (The join clause goes when both columns compare with the constant.)
         for (x, k, clause, old) in &lconst {
+            // (A constant of another collation's class: not this one's.)
+            if nondet(clause) != *pcoll {
+                continue;
+            }
             let direct = x.same_as(a);
             if !direct && !lclass.iter().any(|m| m.same_as(x)) {
+                continue;
+            }
+            if let Some(coll) = pcoll {
+                let d = regen(clause, b, k, coll, rcoll);
+                if !rpush.iter().chain(rhave).any(|e| uncollated_eq(e, &d)) {
+                    rpush.push(d);
+                }
+                // (Its own clause rebuilt too, in a class of the inner join's: one member
+                // and the constant keep the clause as written, as on an outer join's side.)
+                if !outer_join {
+                    let own = regen(clause, x, k, coll, lcoll);
+                    if *old {
+                        rewrites.push((false, clause.clone(), own));
+                    } else if let Some(c) = lpush.iter_mut().find(|e| e.same_as(clause)) {
+                        *c = own;
+                    }
+                }
+                used = true;
                 continue;
             }
             if derivable(b, k)
@@ -1816,8 +1881,27 @@ fn ec_constants(
             }
         }
         for (x, k, clause, old) in &rconst {
+            if nondet(clause) != *pcoll {
+                continue;
+            }
             let direct = x.same_as(b);
             if !direct && !rclass.iter().any(|m| m.same_as(x)) {
+                continue;
+            }
+            if let Some(coll) = pcoll {
+                let d = regen(clause, a, k, coll, lcoll);
+                if !lpush.iter().chain(lhave).any(|e| uncollated_eq(e, &d)) {
+                    lpush.push(d);
+                }
+                if !outer_join {
+                    let own = regen(clause, x, k, coll, rcoll);
+                    if *old {
+                        rewrites.push((true, clause.clone(), own));
+                    } else if let Some(c) = rpush.iter_mut().find(|e| e.same_as(clause)) {
+                        *c = own;
+                    }
+                }
+                used = true;
                 continue;
             }
             if derivable(a, k)
@@ -1855,7 +1939,7 @@ fn ec_constants(
             }
         }
         if used {
-            used_pairs.push((a.clone(), b.clone()));
+            used_pairs.push(n);
             // (Postgres still carries the columns up to the join.)
             for c in a.columns() {
                 if !kept.contains(&c) {
@@ -1868,11 +1952,8 @@ fn ec_constants(
                 }
             }
             match hi {
-                Some(i) => drop_hash.push(*i),
-                None => {
-                    let _ = n;
-                    drop_cond = true;
-                }
+                Ok(i) => drop_hash.push(*i),
+                Err(_) => drop_cond = true,
             }
         }
     }
@@ -1890,18 +1971,125 @@ fn ec_constants(
     }
     if drop_cond {
         // The implied equalities among the join clauses.
+        let gone: Vec<usize> = used_pairs
+            .iter()
+            .filter_map(|&n| pairs[n].2.err())
+            .collect();
         let mut i = 0;
-        cond.retain(|c| {
-            let keep = !cond_pairs.contains(&i) || {
-                let (a, b) = ec_pair(c, nleft).unwrap();
-                let b = b.shift_cols(-(nleft as isize));
-                !used_pairs.iter().any(|(x, y)| x.same_as(&a) && y.same_as(&b))
-            };
+        cond.retain(|_| {
+            let keep = !gone.contains(&i);
             i += 1;
             keep
         });
     }
     broken_dups
+}
+
+/// Two `=` clauses the same but for their operands' COLLATE relabelings.
+fn uncollated_eq(a: &Expr, b: &Expr) -> bool {
+    match (a, b) {
+        (Expr::Call(d1, a1, _), Expr::Call(d2, a2, _)) => {
+            d1.oid == d2.oid
+                && a1.len() == a2.len()
+                && a1.iter().zip(a2).all(|(x, y)| uncollate(x).same_as(uncollate(y)))
+        }
+        _ => a.same_as(b),
+    }
+}
+
+/// Restriction `old` (over `p`'s row) of a scan or filter in `p` (through projections of
+/// columns and inner joins, as `input_restrictions` finds them) replaced by `new`.
+fn replace_restriction(cat: &Catalog, p: &mut Plan, old: &Expr, new: &Expr) -> bool {
+    let swap = |pred: &Expr| -> Option<Expr> {
+        let mut parts = Vec::new();
+        conjuncts(pred.clone(), &mut parts);
+        let i = parts.iter().position(|e| e.same_as(old))?;
+        parts[i] = new.clone();
+        and_all(parts)
+    };
+    match p {
+        Plan::Scan(s) => {
+            let Some(f) = s.filter.as_ref().and_then(swap) else { return false };
+            s.filter = Some(f);
+            if !matches!(s.access, crate::sql::plan::Access::Index { ordered: true, .. }) {
+                s.access = crate::sql::plan::Access::Unplanned;
+                choose_index(cat, s);
+            }
+            true
+        }
+        Plan::Filter { input, pred } => match swap(pred) {
+            Some(f) => {
+                *pred = f;
+                true
+            }
+            None => replace_restriction(cat, Arc::make_mut(input), old, new),
+        },
+        Plan::Project { input, exprs } => {
+            let back = |e: &Expr| {
+                e.clone().transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(j, t) => match exprs.get(j) {
+                            Some(Expr::Col(i, _)) => Expr::Col(*i, t),
+                            _ => return Err(crate::error::internal("not a column")),
+                        },
+                        x => x,
+                    })
+                })
+            };
+            match (back(old), back(new)) {
+                (Ok(o), Ok(n)) => replace_restriction(cat, Arc::make_mut(input), &o, &n),
+                _ => false,
+            }
+        }
+        Plan::Join {
+            kind: JoinKind::Inner,
+            left,
+            right,
+            nleft,
+            ..
+        } => {
+            let n = *nleft;
+            if old.columns().iter().all(|&c| c < n) {
+                replace_restriction(cat, Arc::make_mut(left), old, new)
+            } else if old.columns().iter().all(|&c| c >= n) {
+                let (o, w) = (old.clone().shift_cols(-(n as isize)), new.clone().shift_cols(-(n as isize)));
+                replace_restriction(cat, Arc::make_mut(right), &o, &w)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// An operand without its explicit COLLATE relabelings.
+fn uncollate(e: &Expr) -> &Expr {
+    match e {
+        Expr::Collate(x, ..) => uncollate(x),
+        e => e,
+    }
+}
+
+/// A join clause of a nondeterministic collation's class: the built-in `=` between a column
+/// (or its relabeling, `x COLLATE c`) of each side (the right one in the join's row).
+fn nondet_pair(e: &Expr, nleft: usize) -> Option<(Expr, Expr)> {
+    let Expr::Call(def, args, _) = e else {
+        return None;
+    };
+    if def.name != "=" || args.len() != 2 || !def.coll.as_ref().is_some_and(|c| !c.deterministic) {
+        return None;
+    }
+    if !builtin_eq(def, &args[0].ty(), &args[1].ty()) || e.is_volatile() {
+        return None;
+    }
+    if !matches!(uncollate(&args[0]), Expr::Col(..)) || !matches!(uncollate(&args[1]), Expr::Col(..)) {
+        return None;
+    }
+    match (side(&args[0], nleft), side(&args[1], nleft)) {
+        (Side::Left, Side::Right) => Some((args[0].clone(), args[1].clone())),
+        (Side::Right, Side::Left) => Some((args[1].clone(), args[0].clone())),
+        _ => None,
+    }
 }
 
 /// A WHERE's equalities above a left join, read in its nullable side: an equivalence class
@@ -3291,7 +3479,24 @@ pub fn join(
     if matches!(kind, JoinKind::Inner | JoinKind::Semi) && params.is_empty() {
         let mut no_hash = None;
         let (lhave, rhave) = (input_restrictions(&left), input_restrictions(&right));
-        broken = ec_constants(cat, &mut lpush, &mut rpush, &mut no_hash, &mut rest, nleft, (true, true), &mut kept, (&lhave, &rhave));
+        let (lcoll, rcoll) = (|c: usize| output_collation(&left, c), |c: usize| output_collation(&right, c));
+        let mut rewrites = Vec::new();
+        broken = ec_constants(
+            cat,
+            &mut lpush,
+            &mut rpush,
+            &mut no_hash,
+            &mut rest,
+            nleft,
+            (true, true),
+            &mut kept,
+            (&lhave, &rhave),
+            (&lcoll, &rcoll),
+            &mut rewrites,
+        );
+        for (on_right, old, new) in rewrites {
+            replace_restriction(cat, if on_right { &mut right } else { &mut left }, &old, &new);
+        }
     }
     // reconsider_outer_join_clause: an outer join's `outer = inner` whose outer column its
     // side equates with a constant (in any join domain below) gives the nullable side

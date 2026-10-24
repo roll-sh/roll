@@ -396,9 +396,9 @@ fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bo
 /// the level doesn't return.
 fn barrier_corr(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
     match p {
-        Plan::Distinct { input, on: None, order } => {
+        Plan::Distinct { input, on: None, order, .. } => {
             let (c, i) = barrier_corr(input)?;
-            Some((c, Plan::Distinct { input: Arc::new(i), on: None, order: *order }))
+            Some((c, Plan::Distinct { input: Arc::new(i), on: None, order: *order, hashed: false }))
         }
         Plan::Sort { input, keys } if keys.iter().all(|k| !reads_outer(&k.expr)) => {
             let (c, i) = barrier_corr(input)?;

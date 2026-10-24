@@ -1,0 +1,207 @@
+> CREATE COLLATION ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)
+-- CREATE COLLATION
+
+> CREATE TABLE n1 (x text COLLATE ci, y int)
+-- CREATE TABLE
+
+> CREATE TABLE n2 (x text COLLATE ci, z text, y int)
+-- CREATE TABLE
+
+> CREATE TABLE n3 (x text, y int)
+-- CREATE TABLE
+
+> CREATE TABLE n4 (x text, y int)
+-- CREATE TABLE
+
+> INSERT INTO n1 SELECT chr(97 + i % 5) || (i % 3), i FROM generate_series(1, 200) i
+-- INSERT 0 200
+
+> INSERT INTO n2 SELECT upper(chr(97 + i % 5)) || (i % 3), chr(97 + i % 5) || (i % 3), i FROM generate_series(1, 300) i
+-- INSERT 0 300
+
+> INSERT INTO n3 SELECT chr(97 + i % 5) || (i % 3), i FROM generate_series(1, 30) i
+-- INSERT 0 30
+
+> INSERT INTO n4 SELECT upper(chr(97 + i % 5)) || (i % 3), i FROM generate_series(1, 30) i
+-- INSERT 0 30
+
+> INSERT INTO n4 SELECT chr(97 + i % 5) || (i % 3), i FROM generate_series(1, 6) i
+-- INSERT 0 6
+
+> CREATE INDEX ON n2 (x)
+-- CREATE INDEX
+
+> ANALYZE n1, n2, n3, n4
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM n1, n2 WHERE n1.x = n2.x AND n1.x = 'a1'
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on n2
+        Filter: (x = 'a1'::text COLLATE ci)
+  ->  Materialize
+        ->  Seq Scan on n1
+              Filter: (x = 'a1'::text COLLATE ci)
+-- EXPLAIN
+
+> SELECT count(*) FROM n1, n2 WHERE n1.x = n2.x AND n1.x = 'a1'
+count:int8
+260
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM n1, n2 WHERE n1.x = n2.x AND n2.x = 'A1'
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on n2
+        Filter: (x = 'A1'::text COLLATE ci)
+  ->  Materialize
+        ->  Seq Scan on n1
+              Filter: (x = 'A1'::text COLLATE ci)
+-- EXPLAIN
+
+> SELECT count(*) FROM n1, n2 WHERE n1.x = n2.x AND n2.x = 'A1'
+count:int8
+260
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM n1 JOIN n2 ON n1.x = n2.x WHERE n1.x = 'b2' AND n1.y < 50
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on n2
+        Filter: (x = 'b2'::text COLLATE ci)
+  ->  Materialize
+        ->  Seq Scan on n1
+              Filter: ((y < 50) AND (x = 'b2'::text COLLATE ci))
+-- EXPLAIN
+
+> SELECT count(*) FROM n1 JOIN n2 ON n1.x = n2.x WHERE n1.x = 'b2' AND n1.y < 50
+count:int8
+60
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM n1 JOIN n2 ON n1.x = n2.x JOIN n3 ON n3.y = n2.y WHERE n2.x = 'c0'
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on n1
+        Filter: (x = 'c0'::text COLLATE ci)
+  ->  Materialize
+        ->  Hash Join
+              Hash Cond: (n3.y = n2.y)
+              ->  Seq Scan on n3
+              ->  Hash
+                    ->  Seq Scan on n2
+                          Filter: (x = 'c0'::text COLLATE ci)
+-- EXPLAIN
+
+> SELECT count(*) FROM n1 JOIN n2 ON n1.x = n2.x JOIN n3 ON n3.y = n2.y WHERE n2.x = 'c0'
+count:int8
+26
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM n3 a, n4 b WHERE a.x = b.x COLLATE ci AND b.x = 'a1' COLLATE ci
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on n3 a
+        Filter: ((x)::text = 'a1'::text COLLATE ci)
+  ->  Materialize
+        ->  Seq Scan on n4 b
+              Filter: ((x)::text = 'a1'::text COLLATE ci)
+-- EXPLAIN
+
+> SELECT a.x, b.x, count(*) FROM n3 a, n4 b WHERE a.x = b.x COLLATE ci AND b.x = 'a1' COLLATE ci GROUP BY 1, 2 ORDER BY 1, 2
+x:text | x:text | count:int8
+a1 | A1 | 4
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM n1, n2, n3 WHERE n1.x = n2.x AND n2.x = n3.x COLLATE ci AND n3.x = 'b2' COLLATE ci
+QUERY PLAN:text
+Nested Loop
+  ->  Nested Loop
+        ->  Seq Scan on n1
+              Filter: (x = 'b2'::text COLLATE ci)
+        ->  Materialize
+              ->  Seq Scan on n3
+                    Filter: ((x)::text = 'b2'::text COLLATE ci)
+  ->  Materialize
+        ->  Seq Scan on n2
+              Filter: (x = 'b2'::text COLLATE ci)
+-- EXPLAIN
+
+> SELECT count(*) FROM n1, n2, n3 WHERE n1.x = n2.x AND n2.x = n3.x COLLATE ci AND n3.x = 'b2' COLLATE ci
+count:int8
+520
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM n1, n2 WHERE n1.x = n2.z COLLATE ci AND n2.z = 'a1' COLLATE ci
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on n2
+        Filter: ((z)::text = 'a1'::text COLLATE ci)
+  ->  Materialize
+        ->  Seq Scan on n1
+              Filter: (x = 'a1'::text COLLATE ci)
+-- EXPLAIN
+
+> SELECT count(*) FROM n1, n2 WHERE n1.x = n2.z COLLATE ci AND n2.z = 'a1' COLLATE ci
+count:int8
+260
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM n3 a, n4 b WHERE a.x = b.x AND a.x = 'A1' COLLATE ci
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (b.x = a.x)
+  ->  Seq Scan on n4 b
+  ->  Hash
+        ->  Seq Scan on n3 a
+              Filter: (x = 'A1'::text COLLATE ci)
+-- EXPLAIN
+
+> SELECT a.x, b.x, count(*) FROM n3 a, n4 b WHERE a.x = b.x AND a.x = 'A1' COLLATE ci GROUP BY 1, 2 ORDER BY 1, 2
+x:text | x:text | count:int8
+-- SELECT 0
+
+> EXPLAIN (COSTS OFF) SELECT * FROM n3 a, n4 b WHERE a.x = b.x COLLATE ci AND b.x = 'a1'
+QUERY PLAN:text
+Hash Join
+  Hash Cond: ((a.x)::text = (b.x)::text)
+  ->  Seq Scan on n3 a
+  ->  Hash
+        ->  Seq Scan on n4 b
+              Filter: (x = 'a1'::text)
+-- EXPLAIN
+
+> SELECT a.x, b.x, count(*) FROM n3 a, n4 b WHERE a.x = b.x COLLATE ci AND b.x = 'a1' GROUP BY 1, 2 ORDER BY 1, 2
+x:text | x:text | count:int8
+-- SELECT 0
+
+> EXPLAIN (COSTS OFF) SELECT * FROM n1 LEFT JOIN n2 ON n1.x = n2.x WHERE n1.x = 'a1'
+QUERY PLAN:text
+Nested Loop Left Join
+  ->  Seq Scan on n1
+        Filter: (x = 'a1'::text)
+  ->  Materialize
+        ->  Seq Scan on n2
+              Filter: (x = 'a1'::text COLLATE ci)
+-- EXPLAIN
+
+> SELECT count(*) FROM n1 LEFT JOIN n2 ON n1.x = n2.x WHERE n1.x = 'a1'
+count:int8
+260
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM n1 WHERE n1.x IN (SELECT x FROM n2 WHERE n2.x = 'D2')
+QUERY PLAN:text
+Nested Loop Semi Join
+  ->  Seq Scan on n1
+        Filter: (x = 'D2'::text COLLATE ci)
+  ->  Materialize
+        ->  Seq Scan on n2
+              Filter: (x = 'D2'::text COLLATE ci)
+-- EXPLAIN
+
+> SELECT count(*) FROM n1 WHERE n1.x IN (SELECT x FROM n2 WHERE n2.x = 'D2')
+count:int8
+13
+-- SELECT 1
+

@@ -2502,6 +2502,7 @@ impl Binder<'_, '_> {
                 input: Arc::new(plan),
                 on: None,
                 order: 0,
+                hashed: false,
             };
             if !needed.is_empty() {
                 plan = Plan::Sort {
@@ -2557,6 +2558,7 @@ impl Binder<'_, '_> {
                 input: Arc::new(plan),
                 on: Some(on),
                 order: sort_keys.iter().filter(|k| !constant_key(k)).count(),
+                hashed: false,
             };
         } else if let Some((_, post, map)) = postponed {
             let keys = needed

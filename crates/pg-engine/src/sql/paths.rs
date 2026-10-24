@@ -5348,6 +5348,7 @@ impl Planner<'_, '_> {
                             )),
                             on: None,
                             order: 0,
+                            hashed: false,
                         },
                         x => crate::sql::binder::optimize::add_filter(&self.cat, x, q.clone()),
                     }
@@ -5674,6 +5675,7 @@ impl Planner<'_, '_> {
             input: Arc::new(tmp),
             on: None,
             order: 0,
+            hashed: false,
         });
         // (Only when the distinct step reads its input in that order, keeping it: a Unique
         // over it rather than hashing.)
@@ -5693,6 +5695,7 @@ impl Planner<'_, '_> {
             input,
             on: Some(on),
             order,
+            hashed: false,
         } = &*p
         else {
             return false;
@@ -5759,6 +5762,7 @@ impl Planner<'_, '_> {
                     }),
                     on: Some(on),
                     order: 0,
+                    hashed: false,
                 };
                 *p = if satisfied || wanted.is_empty() {
                     distinct
@@ -5794,6 +5798,7 @@ impl Planner<'_, '_> {
                 input: Arc::new(tmp),
                 on: Some(on),
                 order: 0,
+                hashed: false,
             };
             *p = if satisfied || wanted.is_empty() {
                 distinct
@@ -5907,7 +5912,7 @@ pub(crate) fn plan_order(ctx: &ExecCtx, p: &Plan) -> Vec<(usize, bool, bool)> {
         | Plan::Filter { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::Context { input, .. }
-        | Plan::Distinct { input, on: Some(_), .. } => plan_order(ctx, input),
+        | Plan::Distinct { input, on: Some(_), hashed: false, .. } => plan_order(ctx, input),
         Plan::Scan(s) if matches!(s.access, Access::Index { ordered: true, .. }) => index_order(ctx, s)
             .iter()
             .map_while(|k| match &k.expr {
