@@ -325,6 +325,9 @@ pub struct Code {
     pub streams: streams::Streams,
     /// This `Code`, for tasks it starts.
     me: std::sync::Weak<Code>,
+    /// The cluster this node is part of (docs/code/cluster.md); unset on a single node, which
+    /// owns every repo.
+    pub(crate) cluster: std::sync::OnceLock<Arc<code_cluster::Cluster>>,
 }
 
 impl Code {
@@ -369,6 +372,7 @@ impl Code {
             webhooks: webhooks::Webhooks::default(),
             streams: Default::default(),
             me: me.clone(),
+            cluster: std::sync::OnceLock::new(),
         });
         code.clean_worktrees();
         Ok(code)
@@ -381,6 +385,22 @@ impl Code {
 
     pub fn set_runner(&self, r: Arc<dyn Runner>) {
         *self.runner.write() = Some(r);
+    }
+
+    /// The cluster, if this node is part of one.
+    pub fn cluster(&self) -> Option<&Arc<code_cluster::Cluster>> {
+        self.cluster.get()
+    }
+
+    /// Whether this node does a repo's work now: always on a single node; in a cluster, while it
+    /// holds the repo's lease.
+    pub fn owns_repo(&self, repo_id: &str) -> bool {
+        self.cluster.get().is_none_or(|c| c.owns(repo_id))
+    }
+
+    /// Whether this node runs the cluster-wide worker `name` now: always on a single node.
+    pub fn singleton(&self, name: &str) -> bool {
+        self.cluster.get().is_none_or(|c| c.singleton(name))
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<model::Event> {
@@ -421,25 +441,10 @@ impl Code {
     }
 }
 
-/// control.db in `dir` (SQLite) — or, in tests with `ROLL_CODE_TEST_DATABASE` set, a fresh
-/// Postgres schema ([`code_sql::Db::open_or_test`]). The schema's name is kept in `dir`, so
-/// opening the same state directory again (a restart) finds the same database.
+/// control.db in `dir` (SQLite) — or, in tests with `ROLL_CODE_TEST_DATABASE` set, a Postgres
+/// schema that a restart on the same directory finds again ([`code_sql::Db::open_or_test`]).
 fn sqlite_or_test_db(dir: &std::path::Path) -> anyhow::Result<code_sql::Db> {
-    let target = code_sql::Target::Sqlite(dir.join("control.db"));
-    let url = std::env::var(code_sql::TEST_DATABASE_ENV).unwrap_or_default();
-    if url.is_empty() {
-        return Ok(code_sql::Db::open(&target)?);
-    }
-    let marker = dir.join("control.pg-schema");
-    if let Ok(schema) = std::fs::read_to_string(&marker) {
-        return Ok(code_sql::Db::connect(&url, schema.trim(), code_sql::PgOptions { max_connections: 8, ..Default::default() })?);
-    }
-    let db = code_sql::Db::open_or_test(&target, "control")?;
-    if let Some(schema) = db.pg_schema() {
-        std::fs::create_dir_all(dir)?;
-        std::fs::write(&marker, schema)?;
-    }
-    Ok(db)
+    Ok(code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.join("control.db")), "control")?)
 }
 
 pub(crate) fn hash_token(token: &str) -> String {

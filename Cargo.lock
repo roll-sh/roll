@@ -1284,6 +1284,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "code-cluster",
  "code-git",
  "code-github",
  "code-index",

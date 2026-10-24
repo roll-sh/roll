@@ -17,6 +17,7 @@ chrono.workspace = true
 code-git.workspace = true
 code-index.workspace = true
 code-review.workspace = true
+code-cluster.workspace = true
 code-sql.workspace = true
 code-github.workspace = true
 code-store.workspace = true

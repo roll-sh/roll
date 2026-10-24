@@ -194,12 +194,26 @@ impl Db {
 
     /// `target` unless [`TEST_DATABASE_ENV`] names a Postgres URL and `target` is SQLite: then
     /// a fresh schema there, named after `name` and a random suffix. This is how the test suites
-    /// run against Postgres unchanged.
+    /// run against Postgres unchanged. The schema's name is kept next to the SQLite path
+    /// (`<path>.pg-schema`), so opening the same path again (a restart in a test) finds the
+    /// same data.
     pub fn open_or_test(target: &Target, name: &str) -> Result<Db> {
+        let opts = || PgOptions { max_connections: 8, ..PgOptions::default() };
         match (target, std::env::var(TEST_DATABASE_ENV)) {
-            (Target::Sqlite(_), Ok(url)) if !url.is_empty() => {
+            (Target::Sqlite(path), Ok(url)) if !url.is_empty() => {
+                let mut marker = path.as_os_str().to_owned();
+                marker.push(".pg-schema");
+                let marker = PathBuf::from(marker);
+                if let Ok(schema) = std::fs::read_to_string(&marker) {
+                    return Db::connect(&url, schema.trim(), opts());
+                }
                 let schema = format!("t_{}_{name}", random_suffix());
-                Db::connect(&url, &schema, PgOptions { max_connections: 8, ..PgOptions::default() })
+                let db = Db::connect(&url, &schema, opts())?;
+                if let Some(dir) = marker.parent() {
+                    std::fs::create_dir_all(dir).map_err(|e| Error::Other(format!("{}: {e}", dir.display())))?;
+                }
+                std::fs::write(&marker, &schema).map_err(|e| Error::Other(format!("{}: {e}", marker.display())))?;
+                Ok(db)
             }
             _ => Db::open(target),
         }
