@@ -64,6 +64,10 @@ pub struct Subquery {
     /// Bound in a WHERE or JOIN ... ON clause (the join tree's quals, which
     /// subquery_planner preprocesses in their order, the order they were bound in).
     pub qual: bool,
+    /// Bound in the target list (the select list and what becomes resjunk entries of it:
+    /// ORDER BY, DISTINCT ON, window clauses; an UPDATE's SET, RETURNING), which
+    /// subquery_planner preprocesses before everything else of its level.
+    pub tlist: bool,
 }
 
 /// A call of a user-defined function run as a subquery (`Subquery::func`), as the planner

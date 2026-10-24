@@ -3700,6 +3700,7 @@ impl Binder<'_, '_> {
                 test_op: None,
                 names: Default::default(),
                 qual: self.binding_qual(),
+                tlist: self.binding_tlist(),
             }));
             let rs = if one {
                 vec![sq]
@@ -3728,6 +3729,7 @@ impl Binder<'_, '_> {
             test_op: None,
             names: Default::default(),
             qual: self.binding_qual(),
+            tlist: self.binding_tlist(),
         })))
     }
 
@@ -3807,6 +3809,7 @@ impl Binder<'_, '_> {
                 test_op: None,
                 names: Default::default(),
                 qual: self.binding_qual(),
+                tlist: self.binding_tlist(),
             }))),
             T::ExprSublink => {
                 if cols.len() != 1 {
@@ -3841,6 +3844,7 @@ impl Binder<'_, '_> {
                     test_op: None,
                     names: Default::default(),
                     qual: self.binding_qual(),
+                    tlist: self.binding_tlist(),
                 })))
             }
             T::ArraySublink => {
@@ -3874,6 +3878,7 @@ impl Binder<'_, '_> {
                     test_op: None,
                     names: Default::default(),
                     qual: self.binding_qual(),
+                    tlist: self.binding_tlist(),
                 })))
             }
             T::AnySublink | T::AllSublink => {
@@ -3936,6 +3941,7 @@ impl Binder<'_, '_> {
                             test_op: Some(own_params),
                             names: Default::default(),
                             qual: self.binding_qual(),
+                            tlist: self.binding_tlist(),
                         })));
                     }
                 }
@@ -3959,6 +3965,7 @@ impl Binder<'_, '_> {
                     test_op: None,
                     names: Arc::new(cols.iter().map(|c| c.name.clone()).collect()),
                     qual: self.binding_qual(),
+                    tlist: self.binding_tlist(),
                 })))
             }
             _ => Err(crate::error::unsupported("this kind of subquery")),
@@ -7344,6 +7351,7 @@ impl Binder<'_, '_> {
             test_op: None,
             names: Default::default(),
             qual: self.binding_qual(),
+            tlist: self.binding_tlist(),
         }));
         // evaluate_function: an immutable call over constants is its value (a composite one
         // a constant of its type). (One that fails runs, and fails, when executed.)

@@ -937,7 +937,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 .unwrap()
                 .transform(&mut |e| {
                     Ok(match e {
-                        Expr::Col(i, _) => exprs[i].clone(),
+                        Expr::Col(i, _) => output_copy(&exprs[i]),
                         e => e,
                     })
                 })
@@ -1485,13 +1485,43 @@ fn projectable(p: &Expr, exprs: &[Expr]) -> bool {
             if phv && !matches!(e, Expr::Col(..)) && !e.columns().is_empty() && contain_nonstrict(e) {
                 return false;
             }
-            let mut plain = !e.is_volatile();
+            // (A sub-select, nothing volatile in it, outside PlaceHolderVar semantics: the
+            // qual reads a copy of its own, pullup_replace_vars.)
+            let mut plain = !crate::sql::explain::expr_volatile_deep(e);
             e.walk(&mut |x| {
-                plain &= !matches!(x, Expr::Subquery(_) | Expr::Srf(..) | Expr::Agg(..) | Expr::Window(..))
+                plain &= match x {
+                    Expr::Subquery(s) => !phv && s.call.is_none(),
+                    Expr::Srf(..) | Expr::Agg(..) | Expr::Window(..) => false,
+                    _ => true,
+                }
             });
             plain
         })
     })
+}
+
+/// A pulled-up subquery's output put in place of a reference to it: a sub-select in it is a
+/// copy of its own there (an id and plan nodes of its own, `make_subquery_copy`), the
+/// reference a qual's.
+fn output_copy(e: &Expr) -> Expr {
+    let mut sub = false;
+    e.walk(&mut |x| sub |= matches!(x, Expr::Subquery(s) if s.call.is_none()));
+    if !sub {
+        return e.clone();
+    }
+    e.clone()
+        .transform(&mut |x| {
+            Ok(match x {
+                Expr::Subquery(mut s) if s.call.is_none() => {
+                    crate::sql::paths::make_subquery_copy(&mut s);
+                    s.qual = true;
+                    s.tlist = false;
+                    Expr::Subquery(s)
+                }
+                x => x,
+            })
+        })
+        .unwrap_or_else(|_| e.clone())
 }
 
 /// `col COLLATE c` where the column's collation is `c` already: the column

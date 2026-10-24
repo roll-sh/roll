@@ -262,11 +262,15 @@ fn flatten_join_subquery(p: &Plan, nulled: u32, anulled: u32, cx: &mut Cx) -> Op
     if !join_subquery(input)
         || virtual_proj(proj).is_some()
         || reads_outer(input)
-        || !exprs.iter().all(|e| matches!(e, Expr::Col(..)) || movable(e) && outer_refs(e).is_empty())
+        || !exprs
+            .iter()
+            .all(|e| matches!(e, Expr::Col(..)) || (movable(e) || nulled == 0 && movable_fromless(e)) && outer_refs(e).is_empty())
         || exprs.iter().any(|e| needs_phv(e) && e.has_outer_refs())
     {
         return None;
     }
+    // (Its sub-select outputs, no outer join nulling them, computed where read: a copy each.)
+    note_moved(exprs, &vec![true; exprs.len()], cx);
     let (join, pred) = match &**input {
         Plan::Filter { input, pred } => (&**input, Some(pred)),
         j => (j, None),
@@ -437,6 +441,8 @@ struct Cx {
     /// (remove_useless_result_rtes): its PlaceHolderVars are a lower join's, nulled at the
     /// join above.
     merged: bool,
+    /// The sub-selects of the outputs moved up (`copy_moved_subselects`).
+    moved: Vec<usize>,
 }
 
 /// `nulled`: the outer joins above `p` (in the group) that null its rows, as written;
@@ -925,6 +931,7 @@ fn lift(
             cx.lifted = true;
             cx.results = true;
             cx.nrel += 1;
+            note_moved(exprs, &up, cx);
             let kept: Vec<Expr> = exprs.iter().zip(&up).filter(|(_, u)| !**u).map(|(e, _)| e.clone()).collect();
             let mut k = 0;
             let map: Vec<Expr> = exprs
@@ -1072,7 +1079,9 @@ fn lift(
             let up: Vec<bool> = exprs
                 .iter()
                 .map(|e| {
-                    if matches!(e, Expr::Col(..)) || !movable(e) {
+                    // (A sub-select no outer join of the group nulls moves too:
+                    // pullup_replace_vars puts a copy of it in each place reading it.)
+                    if matches!(e, Expr::Col(..)) || !movable(e) && !(nulled == 0 && movable_fromless(e)) {
                         return false;
                     }
                     let refs = outer_refs(e);
@@ -1098,6 +1107,7 @@ fn lift(
                     (own || refs.iter().any(same_level)) && !nonstrict(e)
                 })
                 .collect();
+            note_moved(exprs, &up, cx);
             // (A subquery whose outputs are all columns: as it is, unless its WHERE
             // reads the LATERAL values, which become the join's. Nor one lifted already:
             // the relation's columns, then what stays computed.)
@@ -1754,6 +1764,82 @@ fn prune_params(r: Plan, params: Vec<Expr>) -> (Plan, Vec<Expr>) {
     (r2, params)
 }
 
+/// The sub-selects of the outputs that move up (`up`), for `copy_moved_subselects`.
+fn note_moved(exprs: &[Expr], up: &[bool], cx: &mut Cx) {
+    for (e, _) in exprs.iter().zip(up).filter(|(_, u)| **u) {
+        e.walk(&mut |x| {
+            if let Expr::Subquery(s) = x
+                && s.call.is_none()
+            {
+                cx.moved.push(s.id);
+            }
+        });
+    }
+}
+
+/// pullup_replace_vars puts a copy of a pulled-up subquery's output in each place reading
+/// it, so a sub-select there is planned once per place (make_subplan for each copy of the
+/// SubLink): its own SubPlan, run where that place is evaluated. The sub-selects of the
+/// outputs moved up (`moved`) met again after their first place, the group's target list
+/// (`map`, preprocessed first) then its clauses, get an id and plan nodes of their own.
+fn copy_moved_subselects(plan: &mut Plan, map: &mut [Expr], moved: &[usize]) {
+    if moved.is_empty() {
+        return;
+    }
+    let moved: std::collections::HashSet<usize> = moved.iter().copied().collect();
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // (`tlist`: the place is the target list's, else a qual's.)
+    let mut fix = |e: &mut Expr, tlist: bool| {
+        let mut any = false;
+        e.walk(&mut |x| any |= matches!(x, Expr::Subquery(s) if moved.contains(&s.id)));
+        if !any {
+            return;
+        }
+        // (Each reference a copy: `x + x` reads two.)
+        *e = e
+            .clone()
+            .transform(&mut |x| {
+                Ok(match x {
+                    Expr::Subquery(mut s) if moved.contains(&s.id) => {
+                        if !seen.insert(s.id) {
+                            crate::sql::paths::sublinkcopy::make_copy(&mut s);
+                        }
+                        s.tlist = tlist;
+                        s.qual = !tlist;
+                        Expr::Subquery(s)
+                    }
+                    x => x,
+                })
+            })
+            .unwrap_or_else(|_| e.clone());
+    };
+    for e in map.iter_mut() {
+        fix(e, true);
+    }
+    // (The join tree's quals in preprocess_qual_conditions' order: a join's inputs', then
+    // its own.)
+    fn go(p: &mut Plan, fix: &mut dyn FnMut(&mut Expr, bool)) {
+        for c in crate::sql::explain::plan_inputs_mut(p) {
+            go(Arc::make_mut(c), fix);
+        }
+        match p {
+            Plan::Join { cond, hash, params, .. } => {
+                params.iter_mut().for_each(|e| fix(e, true));
+                if let Some((l, r)) = hash {
+                    l.iter_mut().chain(r.iter_mut()).for_each(|e| fix(e, false));
+                }
+                if let Some(c) = cond {
+                    fix(c, false);
+                }
+            }
+            Plan::Filter { pred, .. } => fix(pred, false),
+            Plan::Project { exprs, .. } => exprs.iter_mut().for_each(|e| fix(e, true)),
+            _ => {}
+        }
+    }
+    go(plan, &mut fix);
+}
+
 /// The join tree at `p` with its subqueries' liftable outputs taken out of their scans;
 /// None when nothing moves.
 pub(super) fn lift_group(p: &Plan) -> Option<Lifted> {
@@ -1767,11 +1853,14 @@ pub(super) fn lift_group(p: &Plan) -> Option<Lifted> {
         nrel: 0,
         results: false,
         merged: false,
+        moved: Vec::new(),
     };
-    let (plan, map, _) = lift(p, 0, 0, None, &mut cx);
+    let (mut plan, map, _) = lift(p, 0, 0, None, &mut cx);
     if !cx.lifted || cx.bad {
         return None;
     }
+    let mut map = map;
+    copy_moved_subselects(&mut plan, &mut map, &cx.moved);
     // (Columns read through the map keep their types.)
     let types = super::super::analyzejoins::col_types(p);
     let map = map

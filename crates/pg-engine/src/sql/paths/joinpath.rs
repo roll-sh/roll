@@ -1752,7 +1752,9 @@ impl Search<'_, '_, '_> {
                     if args.len() == 2 && matches!(def.name, "<" | "<=" | ">" | ">=") =>
                 {
                     let (la, lb) = (leaves_of(&args[0]), leaves_of(&args[1]));
-                    if la == 0 || lb == 0 || c.expr.is_volatile() {
+                    // (A SubPlan in it is no volatile function: contain_volatile_functions
+                    // looks at its arguments, not its plan.)
+                    if la == 0 || lb == 0 || crate::sql::explain::expr_volatile_deep(&c.expr) {
                         continue;
                     }
                     vec![(args[0].clone(), args[1].clone(), la, lb)]
@@ -2437,7 +2439,9 @@ impl Search<'_, '_, '_> {
             let (a, b, al, bl) = match (&c.eq, &c.expr) {
                 (Some((a, b, al, bl)), _) => (a.clone(), b.clone(), *al, *bl),
                 (None, Expr::Call(def, args, _))
-                    if args.len() == 2 && matches!(def.name, "<" | "<=" | ">" | ">=") && !c.expr.is_volatile() =>
+                    if args.len() == 2
+                        && matches!(def.name, "<" | "<=" | ">" | ">=")
+                        && !crate::sql::explain::expr_volatile_deep(&c.expr) =>
                 {
                     let (la, lb) = (self.leaves_of(&args[0]), self.leaves_of(&args[1]));
                     if la == 0 || lb == 0 {

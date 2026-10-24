@@ -1803,6 +1803,7 @@ impl Binder<'_, '_> {
                                     test_op: None,
                                     names: Default::default(),
                                     qual: false,
+                                    tlist: false,
                                 }));
                                 let exprs = if one {
                                     vec![sq]

@@ -1,0 +1,382 @@
+> create table spc_i (f1 int4)
+-- CREATE TABLE
+
+> insert into spc_i values (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> analyze spc_i
+-- ANALYZE
+
+> create table spc_p (id int primary key) partition by range (id)
+-- CREATE TABLE
+
+> create table spc_p0 partition of spc_p for values from (0) to (1)
+-- CREATE TABLE
+
+> create table spc_p1 partition of spc_p for values from (1) to (2)
+-- CREATE TABLE
+
+> insert into spc_p values (0), (1)
+-- INSERT 0 2
+
+> explain (costs off)
+> select * from
+>   (select exists (select 1 from spc_i tinner where f1 = touter.f1) as b
+>    from spc_i touter) ss,
+>   spc_p
+> where spc_p.id > ss.b::int
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on spc_i touter
+  ->  Append
+        ->  Index Only Scan using spc_p0_pkey on spc_p0 spc_p_1
+              Index Cond: (id > (EXISTS(SubPlan 3))::integer)
+              SubPlan 4
+                ->  Seq Scan on spc_i tinner_2
+        ->  Index Only Scan using spc_p1_pkey on spc_p1 spc_p_2
+              Index Cond: (id > (EXISTS(SubPlan 3))::integer)
+        SubPlan 3
+          ->  Seq Scan on spc_i tinner_1
+                Filter: (f1 = touter.f1)
+  SubPlan 2
+    ->  Seq Scan on spc_i tinner
+-- EXPLAIN
+
+> explain (costs off, verbose)
+> select * from
+>   (select exists (select 1 from spc_i tinner where f1 = touter.f1) as b
+>    from spc_i touter) ss,
+>   spc_p
+> where spc_p.id > ss.b::int
+QUERY PLAN:text
+Nested Loop
+  Output: (ANY (touter.f1 = (hashed SubPlan 2).col1)), spc_p.id
+  ->  Seq Scan on public.spc_i touter
+        Output: touter.f1
+  ->  Append
+        ->  Index Only Scan using spc_p0_pkey on public.spc_p0 spc_p_1
+              Output: spc_p_1.id
+              Index Cond: (spc_p_1.id > (EXISTS(SubPlan 3))::integer)
+              SubPlan 4
+                ->  Seq Scan on public.spc_i tinner_2
+                      Output: tinner_2.f1
+        ->  Index Only Scan using spc_p1_pkey on public.spc_p1 spc_p_2
+              Output: spc_p_2.id
+              Index Cond: (spc_p_2.id > (EXISTS(SubPlan 3))::integer)
+        SubPlan 3
+          ->  Seq Scan on public.spc_i tinner_1
+                Filter: (tinner_1.f1 = touter.f1)
+  SubPlan 2
+    ->  Seq Scan on public.spc_i tinner
+          Output: tinner.f1
+-- EXPLAIN
+
+> select * from
+>   (select exists (select 1 from spc_i tinner where f1 = touter.f1) as b
+>    from spc_i touter) ss,
+>   spc_p
+> where spc_p.id > ss.b::int - 1
+> order by 1, 2
+b:bool | id:int4
+t | 1
+t | 1
+t | 1
+t | 1
+t | 1
+-- SELECT 5
+
+> create table spc_a (a int, b int)
+-- CREATE TABLE
+
+> create table spc_b (a int, b int)
+-- CREATE TABLE
+
+> insert into spc_a select g, g % 5 from generate_series(1, 30) g
+-- INSERT 0 30
+
+> insert into spc_b select g, g % 3 from generate_series(1, 30) g
+-- INSERT 0 30
+
+> create index on spc_b (a)
+-- CREATE INDEX
+
+> analyze spc_a, spc_b
+-- ANALYZE
+
+> explain (verbose, costs off)
+> select (select max(a) from spc_b where spc_b.a = spc_a.a) from spc_a
+> where spc_a.b > (select max(b) from spc_b where spc_b.a = spc_a.a)
+QUERY PLAN:text
+Seq Scan on public.spc_a
+  Output: (SubPlan 2)
+  Filter: (spc_a.b > (SubPlan 3))
+  SubPlan 2
+    ->  Result
+          Output: (InitPlan 1).col1
+          InitPlan 1
+            ->  Limit
+                  Output: spc_b.a
+                  ->  Seq Scan on public.spc_b
+                        Output: spc_b.a
+                        Filter: ((spc_b.a IS NOT NULL) AND (spc_b.a = spc_a.a))
+  SubPlan 3
+    ->  Aggregate
+          Output: max(spc_b_1.b)
+          ->  Seq Scan on public.spc_b spc_b_1
+                Output: spc_b_1.a, spc_b_1.b
+                Filter: (spc_b_1.a = spc_a.a)
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select (select max(a) from spc_b where spc_b.a = x.a)
+> from spc_a x join spc_a y on x.a = y.b and y.a > (select max(b) from spc_b where spc_b.a = x.b)
+> where x.b > (select max(b) from spc_b where spc_b.a = y.a)
+QUERY PLAN:text
+Hash Join
+  Output: (SubPlan 2)
+  Hash Cond: (y.b = x.a)
+  Join Filter: ((y.a > (SubPlan 3)) AND (x.b > (SubPlan 4)))
+  ->  Seq Scan on public.spc_a y
+        Output: y.a, y.b
+  ->  Hash
+        Output: x.a, x.b
+        ->  Seq Scan on public.spc_a x
+              Output: x.a, x.b
+  SubPlan 2
+    ->  Result
+          Output: (InitPlan 1).col1
+          InitPlan 1
+            ->  Limit
+                  Output: spc_b.a
+                  ->  Seq Scan on public.spc_b
+                        Output: spc_b.a
+                        Filter: ((spc_b.a IS NOT NULL) AND (spc_b.a = x.a))
+  SubPlan 3
+    ->  Aggregate
+          Output: max(spc_b_1.b)
+          ->  Seq Scan on public.spc_b spc_b_1
+                Output: spc_b_1.a, spc_b_1.b
+                Filter: (spc_b_1.a = x.b)
+  SubPlan 4
+    ->  Aggregate
+          Output: max(spc_b_2.b)
+          ->  Seq Scan on public.spc_b spc_b_2
+                Output: spc_b_2.a, spc_b_2.b
+                Filter: (spc_b_2.a = y.a)
+-- EXPLAIN
+
+> explain (costs off)
+> select ss.x, spc_b.a from (select (select max(a) from spc_b where spc_b.b = spc_a.b) as x, spc_a.a as y from spc_a) ss, spc_b
+> where spc_b.a > ss.x - 2 and ss.y < 4 order by 1, 2
+QUERY PLAN:text
+Sort
+  Sort Key: ((SubPlan 2)), spc_b.a
+  ->  Nested Loop
+        ->  Seq Scan on spc_a
+              Filter: (a < 4)
+        ->  Index Only Scan using spc_b_a_idx on spc_b
+              Index Cond: (a > ((SubPlan 4) - 2))
+              SubPlan 4
+                ->  Result
+                      InitPlan 3
+                        ->  Limit
+                              ->  Index Scan Backward using spc_b_a_idx on spc_b spc_b_2
+                                    Index Cond: (a IS NOT NULL)
+                                    Filter: (b = spc_a.b)
+        SubPlan 2
+          ->  Result
+                InitPlan 1
+                  ->  Limit
+                        ->  Index Scan Backward using spc_b_a_idx on spc_b spc_b_1
+                              Index Cond: (a IS NOT NULL)
+                              Filter: (b = spc_a.b)
+-- EXPLAIN
+
+> select ss.x, spc_b.a from (select (select max(a) from spc_b where spc_b.b = spc_a.b) as x, spc_a.a as y from spc_a) ss, spc_b
+> where spc_b.a > ss.x - 2 and ss.y < 4 order by 1, 2
+x:int4 | a:int4
+28 | 27
+28 | 28
+28 | 29
+28 | 30
+29 | 28
+29 | 29
+29 | 30
+-- SELECT 7
+
+> explain (verbose, costs off)
+> select ss.x, ss.x + 1, spc_b.a from (select (select min(a) from spc_b where spc_b.b = spc_a.b) as x from spc_a where spc_a.a < 3) ss
+> join spc_b on spc_b.a = ss.x
+QUERY PLAN:text
+Hash Join
+  Output: (SubPlan 2), ((SubPlan 4) + 1), spc_b.a
+  Hash Cond: ((SubPlan 6) = spc_b.a)
+  ->  Seq Scan on public.spc_a
+        Output: spc_a.a, spc_a.b
+        Filter: (spc_a.a < 3)
+  ->  Hash
+        Output: spc_b.a
+        ->  Seq Scan on public.spc_b
+              Output: spc_b.a
+  SubPlan 2
+    ->  Result
+          Output: (InitPlan 1).col1
+          InitPlan 1
+            ->  Limit
+                  Output: spc_b_1.a
+                  ->  Index Scan using spc_b_a_idx on public.spc_b spc_b_1
+                        Output: spc_b_1.a
+                        Index Cond: (spc_b_1.a IS NOT NULL)
+                        Filter: (spc_b_1.b = spc_a.b)
+  SubPlan 4
+    ->  Result
+          Output: (InitPlan 3).col1
+          InitPlan 3
+            ->  Limit
+                  Output: spc_b_2.a
+                  ->  Index Scan using spc_b_a_idx on public.spc_b spc_b_2
+                        Output: spc_b_2.a
+                        Index Cond: (spc_b_2.a IS NOT NULL)
+                        Filter: (spc_b_2.b = spc_a.b)
+  SubPlan 6
+    ->  Result
+          Output: (InitPlan 5).col1
+          InitPlan 5
+            ->  Limit
+                  Output: spc_b_3.a
+                  ->  Index Scan using spc_b_a_idx on public.spc_b spc_b_3
+                        Output: spc_b_3.a
+                        Index Cond: (spc_b_3.a IS NOT NULL)
+                        Filter: (spc_b_3.b = spc_a.b)
+-- EXPLAIN
+
+> select ss.x, ss.x + 1, spc_b.a from (select (select min(a) from spc_b where spc_b.b = spc_a.b) as x from spc_a where spc_a.a < 3) ss
+> join spc_b on spc_b.a = ss.x order by 1, 3
+x:int4 | ?column?:int4 | a:int4
+1 | 2 | 1
+2 | 3 | 2
+-- SELECT 2
+
+> explain (verbose, costs off)
+> select ss.x, ss.a from (select (select max(a) from spc_b where spc_b.b = spc_a.b) x, a from spc_a) ss where ss.x > 5
+QUERY PLAN:text
+Seq Scan on public.spc_a
+  Output: (SubPlan 2), spc_a.a
+  Filter: ((SubPlan 4) > 5)
+  SubPlan 2
+    ->  Result
+          Output: (InitPlan 1).col1
+          InitPlan 1
+            ->  Limit
+                  Output: spc_b.a
+                  ->  Index Scan Backward using spc_b_a_idx on public.spc_b
+                        Output: spc_b.a
+                        Index Cond: (spc_b.a IS NOT NULL)
+                        Filter: (spc_b.b = spc_a.b)
+  SubPlan 4
+    ->  Result
+          Output: (InitPlan 3).col1
+          InitPlan 3
+            ->  Limit
+                  Output: spc_b_1.a
+                  ->  Index Scan Backward using spc_b_a_idx on public.spc_b spc_b_1
+                        Output: spc_b_1.a
+                        Index Cond: (spc_b_1.a IS NOT NULL)
+                        Filter: (spc_b_1.b = spc_a.b)
+-- EXPLAIN
+
+> select ss.x from (select (select max(a) from spc_b where spc_b.b = spc_a.b) x, a from spc_a) ss where ss.x > 28 and ss.a < 10
+x:int4
+29
+29
+30
+-- SELECT 3
+
+> explain (costs off)
+> select * from (select a, exists (select 1 from spc_b where spc_b.a = spc_a.b) e from spc_a) s where e
+QUERY PLAN:text
+Seq Scan on spc_a
+  Filter: (ANY (b = (hashed SubPlan 4).col1))
+  SubPlan 2
+    ->  Seq Scan on spc_b
+  SubPlan 4
+    ->  Seq Scan on spc_b spc_b_1
+-- EXPLAIN
+
+> select * from (select a, exists (select 1 from spc_b where spc_b.a = spc_a.b) e from spc_a) s where e and a < 4 order by a
+a:int4 | e:bool
+1 | t
+2 | t
+3 | t
+-- SELECT 3
+
+> explain (costs off)
+> select ss.x, ss.y from (select (select max(a) from spc_b x where x.b = spc_a.b) x, spc_b.a y from spc_a join spc_b on spc_a.a = spc_b.a) ss, spc_a
+> where spc_a.b = ss.x % 5 and ss.y < 5
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (((SubPlan 4) % 5) = spc_a.b)
+  ->  Hash Join
+        Hash Cond: (spc_a_1.a = spc_b.a)
+        ->  Seq Scan on spc_a spc_a_1
+        ->  Hash
+              ->  Seq Scan on spc_b
+                    Filter: (a < 5)
+  ->  Hash
+        ->  Seq Scan on spc_a
+  SubPlan 2
+    ->  Result
+          InitPlan 1
+            ->  Limit
+                  ->  Index Scan Backward using spc_b_a_idx on spc_b x
+                        Index Cond: (a IS NOT NULL)
+                        Filter: (b = spc_a_1.b)
+  SubPlan 4
+    ->  Result
+          InitPlan 3
+            ->  Limit
+                  ->  Index Scan Backward using spc_b_a_idx on spc_b x_1
+                        Index Cond: (a IS NOT NULL)
+                        Filter: (b = spc_a_1.b)
+-- EXPLAIN
+
+> select ss.x, ss.y from (select (select max(a) from spc_b x where x.b = spc_a.b) x, spc_b.a y from spc_a join spc_b on spc_a.a = spc_b.a) ss, spc_a
+> where spc_a.b = ss.x % 5 and ss.y < 5 order by 1, 2
+x:int4 | y:int4
+28 | 1
+28 | 1
+28 | 1
+28 | 1
+28 | 1
+28 | 1
+29 | 2
+29 | 2
+29 | 2
+29 | 2
+29 | 2
+29 | 2
+-- SELECT 12
+
+> explain (costs off)
+> select * from (select a, (select random() > 2 from spc_b limit 1) e from spc_a) s where e
+QUERY PLAN:text
+Subquery Scan on s
+  Filter: s.e
+  ->  Seq Scan on spc_a
+        InitPlan 1
+          ->  Limit
+                ->  Seq Scan on spc_b
+-- EXPLAIN
+
+> drop table spc_p
+-- DROP TABLE
+
+> drop table spc_i
+-- DROP TABLE
+
+> drop table spc_a
+-- DROP TABLE
+
+> drop table spc_b
+-- DROP TABLE
+

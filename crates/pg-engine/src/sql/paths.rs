@@ -46,6 +46,7 @@ mod rowmarks;
 pub use rowmarks::level_scans;
 pub(crate) use rowmarks::{OWN_LOCK, PUSHED_LEVEL};
 mod sublinkcopy;
+pub(crate) use sublinkcopy::make_copy as make_subquery_copy;
 mod syscat;
 pub use syscat::{sys_index_order, sys_size, sys_table};
 pub(crate) use syscat::sys_unique_col;
@@ -6300,6 +6301,7 @@ impl Planner<'_, '_> {
                     test_op: None,
                     names: Default::default(),
                     qual: false,
+                    tlist: false,
                 }))
             })
             .collect();

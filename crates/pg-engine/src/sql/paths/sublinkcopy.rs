@@ -80,6 +80,9 @@ fn subst(e: &Expr, defs: &[Option<Expr>]) -> Expr {
                             Expr::Subquery(mut s) => {
                                 s.id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 s.plan = deep_copy(&s.plan);
+                                // (A MERGE's actions are preprocessed after its quals: no
+                                // target list's.)
+                                s.tlist = false;
                                 Expr::Subquery(s)
                             }
                             y => y,
@@ -91,6 +94,162 @@ fn subst(e: &Expr, defs: &[Option<Expr>]) -> Expr {
             })
         })
         .unwrap_or_else(|_| e.clone())
+}
+
+/// A copy of a sub-select as pullup_replace_vars makes one for another place reading a
+/// pulled-up subquery's output: an id of its own (its own SubPlan; the executor keys its
+/// caches by id) and plan nodes of its own (its relations range table entries of their own,
+/// named apart).
+pub(crate) fn make_copy(s: &mut crate::sql::expr::Subquery) {
+    let mut fresh = std::collections::HashMap::new();
+    copy_ids(s, &mut fresh);
+}
+
+/// `make_copy`, the sub-selects inside the copy copies too (planned again with it, each
+/// SubPlan or InitPlan of its own), one new id per old one (`fresh`).
+fn copy_ids(s: &mut crate::sql::expr::Subquery, fresh: &mut std::collections::HashMap<usize, usize>) {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new((1 << 39) + (1 << 36));
+    s.id = *fresh.entry(s.id).or_insert_with(|| {
+        // (A MIN / MAX InitPlan the planner made stays one of the planner's.)
+        if s.id >= super::PLANNER_SUBQUERY_BASE {
+            super::PLANNER_SUBQUERY_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        } else {
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        }
+    });
+    let mut plan = deep_copy(&s.plan);
+    let mut inner = |e: &mut Expr| {
+        let mut any = false;
+        e.walk(&mut |x| any |= matches!(x, Expr::Subquery(_)));
+        if !any {
+            return;
+        }
+        if let Ok(x) = e.clone().transform(&mut |y| {
+            Ok(match y {
+                Expr::Subquery(mut q) => {
+                    copy_ids(&mut q, fresh);
+                    Expr::Subquery(q)
+                }
+                y => y,
+            })
+        }) {
+            *e = x;
+        }
+    };
+    plan_exprs_mut(Arc::make_mut(&mut plan), &mut inner);
+    s.plan = plan;
+}
+
+/// Every expression of a plan tree (not of its sub-selects' plans), mutably.
+fn plan_exprs_mut(p: &mut Plan, f: &mut dyn FnMut(&mut Expr)) {
+    use crate::sql::plan::{Access, BitmapQual, ConflictAction, IndexBounds, OnConflict};
+    fn bounds(b: &mut IndexBounds, f: &mut dyn FnMut(&mut Expr)) {
+        b.eq.iter_mut().for_each(&mut *f);
+        if let Some(a) = &mut b.any {
+            f(a);
+        }
+        if let Some((x, _)) = &mut b.lower {
+            f(x);
+        }
+        if let Some((x, _)) = &mut b.upper {
+            f(x);
+        }
+    }
+    fn bitmap(q: &mut BitmapQual, f: &mut dyn FnMut(&mut Expr)) {
+        match q {
+            BitmapQual::Index { quals, pred, bounds: b, .. } => {
+                for x in quals {
+                    f(&mut x.expr);
+                    f(&mut x.orig);
+                }
+                pred.iter_mut().for_each(&mut *f);
+                bounds(b, f);
+            }
+            BitmapQual::And(v) | BitmapQual::Or(v) => v.iter_mut().for_each(|q| bitmap(q, f)),
+        }
+    }
+    match p {
+        Plan::Values { rows, .. } => rows.iter_mut().flatten().for_each(&mut *f),
+        Plan::Scan(s) => {
+            if let Some(x) = &mut s.filter {
+                f(x);
+            }
+            s.written.iter_mut().for_each(&mut *f);
+            s.phv_quals.iter_mut().for_each(&mut *f);
+            if let Some(x) = &mut s.current_of {
+                f(x);
+            }
+            if let Some((_, b)) = &mut s.index {
+                bounds(b, f);
+            }
+            match &mut s.access {
+                Access::Index { quals, .. } => {
+                    for x in quals {
+                        f(&mut x.expr);
+                        f(&mut x.orig);
+                    }
+                }
+                Access::Bitmap(b, _) => bitmap(Arc::make_mut(b), f),
+                Access::Tid { quals, removed } => quals.iter_mut().chain(removed.iter_mut()).for_each(&mut *f),
+                Access::TidRange(q) => q.iter_mut().for_each(&mut *f),
+                _ => {}
+            }
+        }
+        Plan::SysScan { filter: Some(x), .. } => f(x),
+        Plan::FunctionScan { calls, .. } => calls.iter_mut().flat_map(|c| c.args.iter_mut()).for_each(&mut *f),
+        Plan::PlCall { args, .. } => args.iter_mut().for_each(&mut *f),
+        Plan::Filter { pred, .. } => f(pred),
+        Plan::Project { exprs, .. } => exprs.iter_mut().for_each(&mut *f),
+        Plan::ProjectSet { exprs, srfs, .. } => {
+            exprs.iter_mut().for_each(&mut *f);
+            srfs.iter_mut().flat_map(|c| c.args.iter_mut()).for_each(&mut *f);
+        }
+        Plan::Agg { groups, aggs, .. } => {
+            groups.iter_mut().for_each(&mut *f);
+            for a in aggs {
+                a.args.iter_mut().for_each(&mut *f);
+                if let Some(x) = &mut a.filter {
+                    f(x);
+                }
+            }
+        }
+        Plan::Sort { keys, .. } => keys.iter_mut().for_each(|k| f(&mut k.expr)),
+        Plan::Window { calls, .. } => {
+            for c in calls {
+                c.args.iter_mut().for_each(&mut *f);
+                if let crate::sql::plan::WinFunc::Agg(a) = &mut c.func
+                    && let Some(x) = &mut a.filter
+                {
+                    f(x);
+                }
+                c.partition_by.iter_mut().for_each(&mut *f);
+                c.order_by.iter_mut().for_each(|k| f(&mut k.expr));
+            }
+        }
+        Plan::Limit { limit, offset, .. } => limit.iter_mut().chain(offset.iter_mut()).for_each(&mut *f),
+        Plan::Join { cond, hash, params, .. } => {
+            if let Some(c) = cond {
+                f(c);
+            }
+            if let Some((l, r)) = hash {
+                l.iter_mut().chain(r.iter_mut()).for_each(&mut *f);
+            }
+            params.iter_mut().for_each(&mut *f);
+        }
+        Plan::Insert(i) => {
+            if let Some(OnConflict { action: ConflictAction::Update { sets, filter, .. }, .. }) = &mut i.on_conflict {
+                sets.iter_mut().for_each(|s| f(&mut s.1));
+                if let Some(x) = filter {
+                    f(x);
+                }
+            }
+            i.returning.iter_mut().for_each(&mut *f);
+        }
+        _ => {}
+    }
+    for c in crate::sql::explain::plan_inputs_mut(p) {
+        plan_exprs_mut(Arc::make_mut(c), f);
+    }
 }
 
 /// A plan of nodes of its own (a copy's relations are range table entries of their own,

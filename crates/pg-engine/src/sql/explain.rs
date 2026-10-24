@@ -682,6 +682,22 @@ struct Builder<'c, 'a> {
     /// subquery id: each place reading one picks the alternative for how often it runs
     /// there (fix_alternative_subplan), an inheritance tree's members each their own.
     alts: HashMap<usize, AltSubPlan>,
+    /// Nested loop parameters holding sub-selects (a sub-select copy in an inner scan's
+    /// clause, the value passed in): the outer frame they are (`outer`'s length once
+    /// pushed), the parameters, and where the outer side's column names start in that
+    /// frame. A place reading one shows the sub-select itself (`inline_sub_params`),
+    /// registered there, as Postgres keeps the SubPlan in the inner clause and passes its
+    /// arguments.
+    sub_params: Vec<(usize, Vec<Expr>, usize)>,
+    /// Registering sub-selects without attaching their SubPlans to the node being built:
+    /// expressions the executor doesn't initialize under EXPLAIN without ANALYZE (an
+    /// index-only scan's index conditions, a bitmap index scan's).
+    detach: bool,
+    /// SubPlans labeled under `detach`, attached by the first place that registers them.
+    unattached: HashMap<usize, ExNode>,
+    /// Correlated EXISTS sub-selects both of whose alternatives a build before showed:
+    /// the hashed one's relations are named apart.
+    fresh_hashed: std::rc::Rc<std::collections::HashSet<usize>>,
     /// A MERGE's empty inheritance target: its name (its dummy relation's columns are
     /// qualified by it).
     dummy_target: Option<String>,
@@ -786,6 +802,8 @@ struct PlanIdEvent {
     /// The sub-select's id and whether it is a join tree qual's (`Subquery::qual`).
     id: Option<usize>,
     qual: bool,
+    /// A target list's (`Subquery::tlist`).
+    tlist: bool,
     /// Taken right after the one before, for the same sub-select (a hashed alternative).
     follows: bool,
 }
@@ -804,7 +822,9 @@ struct PlanIdEvent {
 /// MERGE source copies' and the planner's own).
 const GROUPING_COPY_BASE: usize = (1 << 39) + (1 << 37);
 
-fn renumbering(events: &[PlanIdEvent]) -> Option<Vec<usize>> {
+/// `merge_top`: the statement is a MERGE, whose actions' target lists subquery_planner
+/// preprocesses after the quals (mergeActionList), its own level no target list first.
+fn renumbering(events: &[PlanIdEvent], merge_top: bool) -> Option<Vec<usize>> {
     let n = events.len();
     let mut order: Vec<usize> = (0..n).collect();
     let mut levels: Vec<usize> = events.iter().filter(|e| e.key).map(|e| e.level).collect();
@@ -892,6 +912,50 @@ fn renumbering(events: &[PlanIdEvent]) -> Option<Vec<usize>> {
             order = rebuilt;
             moved = true;
         }
+    }
+    // (The target list's, each with the sub-selects inside it and its hashed alternative:
+    // before the level's other own ones, subquery_planner preprocessing the target list
+    // first. EXPLAIN meets a scan's or a join's quals before the node computing the target
+    // list above them.)
+    let mut levels: Vec<usize> = events
+        .iter()
+        .filter(|e| e.tlist && !e.key && e.id.is_some() && !(merge_top && e.level == 1))
+        .map(|e| e.level)
+        .collect();
+    levels.sort_unstable();
+    levels.dedup();
+    for l in levels {
+        let mut unit: Vec<Option<usize>> = vec![None; n];
+        for (i, e) in events.iter().enumerate() {
+            if e.level == l && !e.key && e.id.is_some() && unit[i].is_none() {
+                for u in unit.iter_mut().take(i + 1).skip(e.start) {
+                    *u = Some(i);
+                }
+                let mut j = i + 1;
+                while j < n && events[j].follows {
+                    unit[j] = Some(i);
+                    j += 1;
+                }
+            }
+        }
+        let mut segs: Vec<(Option<usize>, Vec<usize>)> = Vec::new();
+        for &i in &order {
+            match segs.last_mut() {
+                Some((u, v)) if unit[i].is_some() && *u == unit[i] => v.push(i),
+                _ => segs.push((unit[i], vec![i])),
+            }
+        }
+        let tl = |u: &Option<usize>| u.is_some_and(|q| events[q].tlist);
+        let Some(first_other) = segs.iter().position(|(u, _)| u.is_some() && !tl(u)) else {
+            continue;
+        };
+        if !segs[first_other + 1..].iter().any(|(u, _)| tl(u)) {
+            continue;
+        }
+        let (late, rest): (Vec<_>, Vec<_>) =
+            segs.split_off(first_other).into_iter().partition(|(u, _)| tl(u));
+        order = segs.into_iter().chain(late).chain(rest).flat_map(|(_, v)| v).collect();
+        moved = true;
     }
     if !moved {
         return None;
@@ -2629,7 +2693,7 @@ fn assign_refnames(root: &Plan) -> (HashMap<usize, String>, usize) {
 /// The same, leaving out the members of inheritance Appends that pruning when the executor
 /// starts removes (`ctx`): EXPLAIN names only the relations the plan still scans.
 fn assign_refnames_in(root: &Plan, ctx: Option<&ExecCtx>) -> (HashMap<usize, String>, usize) {
-    assign_refnames_skip(root, ctx, &[], &[])
+    assign_refnames_skip(root, ctx, &[], &[], None)
 }
 
 /// The same, the inheritance Appends at `skip` (grouped partitionwise) taking no name:
@@ -2641,6 +2705,7 @@ fn assign_refnames_skip(
     ctx: Option<&ExecCtx>,
     skip: &[usize],
     orders: &[Vec<usize>],
+    ranks: Option<&HashMap<usize, usize>>,
 ) -> (HashMap<usize, String>, usize) {
     let mut out = HashMap::new();
     let mut results = 0;
@@ -2739,7 +2804,51 @@ fn assign_refnames_skip(
     let mut fake = usize::MAX;
     let mut inline_barriers: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut appendrel_nested: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    while qi < queue.len() {
+    // (The SubPlans a build showed, by their numbers: setrefs flattens their range tables
+    // after the main query's, in plan_id order, so their relations are named in that order
+    // once the levels' own are, a nested one before the one it is in.)
+    let mut ranked: Vec<(usize, &Plan)> = Vec::new();
+    if let Some(r) = ranks {
+        fn collect<'p>(p: &'p Plan, r: &HashMap<usize, usize>, out: &mut Vec<(usize, &'p Plan)>) {
+            let mut es = Vec::new();
+            node_exprs(p, &mut es);
+            match p {
+                Plan::Insert(i) => es.extend(i.rules.view_checks.iter().map(|(_, e)| e)),
+                Plan::Update(u) => es.extend(u.rules.view_checks.iter().map(|(_, e)| e)),
+                _ => {}
+            }
+            let mut sq = Vec::new();
+            for e in es {
+                subqueries_in(e, &mut sq);
+            }
+            for s in sq {
+                if let Some(&k) = r.get(&s.id) {
+                    match out.iter_mut().find(|(_, q)| std::ptr::eq(*q, &*s.plan)) {
+                        Some(x) => x.0 = x.0.min(k),
+                        None => out.push((k, &*s.plan)),
+                    }
+                }
+                collect(&s.plan, r, out);
+            }
+            if let Plan::With { ctes, .. } = p {
+                ctes.iter().for_each(|(_, c)| collect(c, r, out));
+            }
+            plan_inputs(p).into_iter().for_each(|c| collect(c, r, out));
+        }
+        collect(root, r, &mut ranked);
+        ranked.sort_by_key(|x| std::cmp::Reverse(x.0));
+    }
+    loop {
+    if qi >= queue.len() {
+        match ranked.pop() {
+            Some((_, p)) => {
+                queue.push(p);
+                continue;
+            }
+            None => break,
+        }
+    }
+    {
         let mut stack = vec![queue[qi]];
         qi += 1;
         let mut later: Vec<&Plan> = Vec::new();
@@ -2977,6 +3086,8 @@ fn assign_refnames_skip(
             for s in sq {
                 if !later.iter().any(|x| std::ptr::eq(*x, &*s.plan))
                     && !queue.iter().any(|x| std::ptr::eq(*x, &*s.plan))
+                    && !ranked.iter().any(|x| std::ptr::eq(x.1, &*s.plan))
+                    && !ranks.is_some_and(|r| r.contains_key(&s.id))
                 {
                     later.push(&*s.plan);
                 }
@@ -3111,6 +3222,7 @@ fn assign_refnames_skip(
         }
         queue.extend(later_sub);
         queue.extend(later);
+    }
     }
     copy_names_in_order(root, &mut out);
     // Partitions joined partitionwise are numbered as their parent expands them (bound
@@ -3727,6 +3839,9 @@ impl Builder<'_, '_> {
 
     /// `e` over columns `cols`, deparsed bare and qualified.
     fn name(&mut self, e: &Expr, cols: &[Name], aggs: &[AggCall]) -> Name {
+        if let Some(x) = self.inline_sub_params(e) {
+            return self.name(&x, cols, aggs);
+        }
         // (A record column of a FROM subquery never planned: its fields `f1`, `f2`, ….)
         if !self.unplanned_cols.is_empty() {
             let unknown = |x: &Expr| {
@@ -3889,6 +4004,8 @@ impl Builder<'_, '_> {
                             let mut copy = s;
                             copy.id = GROUPING_COPY_BASE + self.phantoms.len();
                             copy.qual = false;
+                            // (Numbered with the target list the GROUPING() call is in.)
+                            copy.tlist = true;
                             let before = self.pending.len();
                             self.subquery(&copy, &[]);
                             let Some(l) = self.labels.get(&copy.id).cloned() else { continue };
@@ -4052,31 +4169,113 @@ impl Builder<'_, '_> {
         subqueries_in(e, &mut sq);
         for s in sq {
             if !self.labels.contains_key(&s.id) {
+                let before = self.pending.len();
                 self.subquery(s, cols);
+                if self.detach {
+                    // (Labeled, its SubPlan kept for a place the executor initializes.)
+                    if let Some(alt) = self.alts.get_mut(&s.id) {
+                        alt.shown = [false; 2];
+                        self.pending.truncate(before);
+                    } else if self.pending.len() > before
+                        && let Some(n) = self.pending.pop()
+                    {
+                        self.unattached.insert(s.id, n);
+                    }
+                }
             } else if let Some(alt) = self.alts.get_mut(&s.id) {
                 // (Another place reading it: its own choice.)
                 let i = alt.pick(self.num_exec.unwrap_or(0.0));
                 let (label, node) = alt.get(i).clone();
-                if !alt.shown[i] {
+                if !alt.shown[i] && !self.detach {
                     alt.shown[i] = true;
                     self.pending.push(node);
                 }
                 self.labels.insert(s.id, label);
+            } else if !self.detach
+                && let Some(n) = self.unattached.remove(&s.id)
+            {
+                self.pending.push(n);
             }
         }
     }
 
+    /// The SubPlans shown, by sub-select id: their numbers (a correlated EXISTS's plain
+    /// one's when shown, else its hashed one's).
+    fn sub_ranks(&self) -> HashMap<usize, usize> {
+        let num = |l: &SubplanLabel| {
+            l.name
+                .rsplit(' ')
+                .next()
+                .and_then(|n| n.parse::<usize>().ok())
+        };
+        let mut out = HashMap::new();
+        for (id, l) in &self.labels {
+            if self.unattached.contains_key(id) {
+                continue;
+            }
+            let n = match self.alts.get(id) {
+                Some(a) if a.shown[0] => num(&a.plain.0),
+                Some(a) if a.shown[1] => num(&a.hashed.0),
+                Some(_) => None,
+                None => num(l),
+            };
+            if let Some(n) = n {
+                out.insert(*id, n);
+            }
+        }
+        out
+    }
+
+    /// `e` with each nested loop parameter that holds a sub-select (`sub_params`) read as
+    /// that expression over the outer side's columns; None when it reads none.
+    fn inline_sub_params(&self, e: &Expr) -> Option<Expr> {
+        if self.sub_params.is_empty() || !e.has_outer_refs() {
+            return None;
+        }
+        let m = self.outer.len();
+        let mut any = false;
+        let out = e
+            .clone()
+            .transform(&mut |x| {
+                Ok(match x {
+                    Expr::Outer(d, k, t) => {
+                        let frame = self.sub_params.iter().find(|(pos, ..)| m + 1 >= *pos && d == m + 1 - pos);
+                        match frame {
+                            Some((_, params, base)) if params.get(k).is_some_and(has_subselect) => {
+                                any = true;
+                                params[k]
+                                    .clone()
+                                    .transform(&mut |y| {
+                                        Ok(match y {
+                                            Expr::Col(i, t) => Expr::Outer(d, base + i, t),
+                                            Expr::Outer(n, i, t) => Expr::Outer(n + d, i, t),
+                                            y => y,
+                                        })
+                                    })
+                                    .unwrap_or(Expr::Outer(d, k, t))
+                            }
+                            _ => Expr::Outer(d, k, t),
+                        }
+                    }
+                    x => x,
+                })
+            })
+            .ok()?;
+        any.then_some(out)
+    }
+
     /// The next SubPlan number, for the sub-select `sub` (`start`: the first number taken
     /// for the sub-selects inside it).
-    fn next_plan_id(&mut self, sub: Option<(usize, bool)>, start: usize, follows: bool) -> usize {
+    fn next_plan_id(&mut self, sub: Option<&Subquery>, start: usize, follows: bool) -> usize {
         self.plan_ids += 1;
         let met = self.plan_ids;
         self.events.push(PlanIdEvent {
             level: self.lvl_stack.last().copied().unwrap_or(0),
-            key: sub.is_some_and(|(i, _)| self.key_sub_ids.contains(&i)),
+            key: sub.is_some_and(|s| self.key_sub_ids.contains(&s.id)),
             start,
-            id: sub.map(|(i, _)| i),
-            qual: sub.is_some_and(|(_, q)| q),
+            id: sub.map(|s| s.id),
+            qual: sub.is_some_and(|s| s.qual),
+            tlist: sub.is_some_and(|s| s.tlist),
             follows,
         });
         match &self.renumber {
@@ -4138,7 +4337,7 @@ impl Builder<'_, '_> {
             self.outer_depth.remove(0);
         }
         self.pending = saved;
-        let id = self.next_plan_id(Some((s.id, s.qual)), block_start, false);
+        let id = self.next_plan_id(Some(s), block_start, false);
         let correlated = match s.test_op {
             Some(n) => n > 0,
             None => level_param,
@@ -4217,10 +4416,30 @@ impl Builder<'_, '_> {
             let per_plain = (node.total_cost - node.startup_cost) / costs::clamp_rows(node.rows)
                 + node.startup_cost;
             let hplan = Arc::new(hplan);
-            // Its scan is the plain plan's under the same name.
+            // Its scan is the plain plan's under the same name, unless both are shown: its
+            // relation is a range table entry of its own then, named after the plain one's
+            // (`fresh_hashed`, from a build before).
             if let (Plan::Project { input, .. }, Some(orig)) = (&*hplan, scan_below(&s.plan))
                 && let Some(name) = self.refnames.get(&addr(orig)).cloned()
             {
+                let name = match orig {
+                    Plan::Scan(sc) if self.fresh_hashed.contains(&s.id) => {
+                        let base = sc.alias.clone().unwrap_or_else(|| sc.table.name.clone());
+                        let next = self
+                            .refnames
+                            .values()
+                            .filter_map(|n| {
+                                if *n == base {
+                                    return Some(0);
+                                }
+                                n.strip_prefix(base.as_str())?.strip_prefix('_')?.parse::<usize>().ok()
+                            })
+                            .max()
+                            .map_or(0, |m| m + 1);
+                        if next == 0 { base } else { crate::catalog::suffixed_name(&base, &format!("_{next}")) }
+                    }
+                    _ => name,
+                };
                 self.refnames.insert(addr(input), name);
             }
             // (An inheritance tree's copy is range table entries of its own: the parent's
@@ -5597,9 +5816,10 @@ impl Builder<'_, '_> {
                         _ => n.wrapped(),
                     })
                     .collect();
-                if c.node.node_type == "Aggregate" {
+                if c.node.node_type == "Aggregate" || c.node.is_join() || c.node.node_type.ends_with(" Scan") {
                     // (ExecInitAgg initializes the projection before the aggregates'
-                    // arguments: its SubPlans come first.)
+                    // arguments: its SubPlans come first. So do a scan's and a join's
+                    // ExecInit functions, before their quals.)
                     let mut tl = std::mem::take(&mut self.pending);
                     tl.append(&mut c.node.subplans);
                     c.node.subplans = tl;
@@ -7551,6 +7771,20 @@ impl Builder<'_, '_> {
                         {
                             n.full = replace_qualifier(&n.full, m, &format!("{parent}."));
                         }
+                    }
+                }
+                // (Run-time pruning's exec steps: the partition keys' clauses over a nested
+                // loop's values, fixed for one run (register_partpruneinfo) and initialized
+                // by the Append before its members: a SubPlan there is the Append's when no
+                // member's shows it.)
+                if inh.is_some() && kept.len() > 1 && partition_pruning_on(self.ctx) {
+                    let vals = exec_prune_values(&kept);
+                    if vals.iter().any(|v| self.inline_sub_params(v).is_some_and(|x| has_subselect(&x))) {
+                        let saved = self.num_exec.replace(1.0);
+                        for v in &vals {
+                            let _ = self.name(v, &[], &[]);
+                        }
+                        self.num_exec = saved;
                     }
                 }
                 if kept.len() < inputs.len() {
@@ -10489,6 +10723,20 @@ impl Builder<'_, '_> {
                 })
                 .unwrap_or_default();
             let keys = self.ios_expr_keys(s);
+            // (setrefs: an index scan shows indexqualorig, fixed for NUM_EXEC_QUAL and
+            // initialized; an index-only scan its indexqual, fixed for one run and not
+            // initialized under EXPLAIN alone, while its recheckqual, the same quals as
+            // written, is fixed for NUM_EXEC_QUAL and initialized: its SubPlans are the ones
+            // attached.)
+            let saved = (self.num_exec, self.detach);
+            if only && d.index_conds.iter().any(|e| has_subselect(&self.inline_sub_params(e).unwrap_or_else(|| e.clone()))) {
+                self.num_exec = Some(n.rows * 2.0);
+                for e in &d.index_conds {
+                    let _ = self.show(e, names, Cx::Scan);
+                }
+            }
+            self.num_exec = Some(if only { 1.0 } else { n.rows * 2.0 });
+            self.detach = only && !self.o.analyze;
             let texts = d
                 .index_conds
                 .iter()
@@ -10497,6 +10745,7 @@ impl Builder<'_, '_> {
                     self.paren_index_exprs(text, e, &keys, names)
                 })
                 .collect();
+            (self.num_exec, self.detach) = saved;
             n.details
                 .push(Detail::Text("Index Cond", and_text(texts).unwrap_or_default()));
             n.details
@@ -10533,11 +10782,14 @@ impl Builder<'_, '_> {
                 .push(Detail::Text("Order By", and_text(texts).unwrap_or_default()));
         }
         if !d.recheck.is_empty() {
+            // (bitmapqualorig: fixed for NUM_EXEC_QUAL, initialized.)
+            let saved = self.num_exec.replace(n.rows * 2.0);
             let texts = d
                 .recheck
                 .iter()
                 .map(|e| self.show(e, names, Cx::Scan))
                 .collect();
+            self.num_exec = saved;
             n.details.push(Detail::Text(
                 "Recheck Cond",
                 and_text(texts).unwrap_or_default(),
@@ -10614,7 +10866,23 @@ impl Builder<'_, '_> {
                 n.rows = *rows;
                 n.key = Some(*key);
                 if !quals.is_empty() {
+                    // (indexqualorig, fixed for NUM_EXEC_QUAL, is shown; the executor
+                    // initializes only the runtime keys, indexqual fixed for one run, and
+                    // those not under EXPLAIN alone.)
+                    let saved = (self.num_exec, self.detach);
+                    self.num_exec = Some(*rows * 2.0);
+                    self.detach = true;
                     let texts = quals.iter().map(|e| self.index_cond(e, names, &[])).collect();
+                    if self.o.analyze {
+                        self.num_exec = Some(1.0);
+                        self.detach = false;
+                        let before = self.pending.len();
+                        for e in quals {
+                            let _ = self.index_cond(e, names, &[]);
+                        }
+                        n.subplans.extend(self.pending.drain(before..));
+                    }
+                    (self.num_exec, self.detach) = saved;
                     n.details
                         .push(Detail::Text("Index Cond", and_text(texts).unwrap_or_default()));
                 }
@@ -13424,11 +13692,22 @@ impl Builder<'_, '_> {
                 l.node.output = vec![format!("{}.*", quote_ident(&self.refname(left)))];
             }
         }
+        // (Parameters holding sub-selects: shown where the inner side reads them, each
+        // place registering its SubPlan; here only labeled.)
+        let sub_frame = lateral && params.iter().any(has_subselect);
         if lateral {
-            let names: Vec<String> = params
+            let saved = self.detach;
+            self.detach |= sub_frame;
+            let mut names: Vec<String> = params
                 .iter()
                 .map(|e| self.name(e, &l.exported, &[]).full)
                 .collect();
+            self.detach = saved;
+            if sub_frame {
+                let base = names.len();
+                names.extend(l.exported.iter().map(|n| n.full.clone()));
+                self.sub_params.push((self.outer.len() + 1, params.to_vec(), base));
+            }
             self.outer.insert(0, names);
             self.outer_depth.insert(0, self.depth);
         }
@@ -13440,6 +13719,9 @@ impl Builder<'_, '_> {
         if lateral {
             self.outer.remove(0);
             self.outer_depth.remove(0);
+        }
+        if sub_frame {
+            self.sub_params.pop();
         }
         let copy = |b: &Built| Built {
             node: b.node.clone(),
@@ -14250,6 +14532,8 @@ impl Builder<'_, '_> {
             true,
         ));
         // Conditions, written outer side first.
+        // (set_join_references: the join's clauses fixed for NUM_EXEC_QUAL.)
+        let saved_num_exec = self.num_exec.replace(n.rows * 2.0);
         let mut keys_text = Vec::new();
         let mut merge_names: Vec<(String, String)> = Vec::new();
         // An inner join's equality comes from its equivalence class: operands whose
@@ -14448,6 +14732,7 @@ impl Builder<'_, '_> {
             };
             join_filter.push(self.show(&p, &all, Cx::Upper));
         }
+        self.num_exec = saved_num_exec;
         if let Some(t) = and_text(join_filter) {
             // (Under ANALYZE, the pairs a nested loop's filter rejected.)
             let removed = (method == JoinMethod::NestLoop).then_some(Removed::Scan(at));
@@ -16680,6 +16965,10 @@ fn estimate_builder<'c, 'a>(plan: &Arc<Plan>, ctx: &'c ExecCtx<'a>, o: &'c Optio
         copy_marks: Default::default(),
         plain_consts: Default::default(),
         alts: Default::default(),
+        sub_params: Vec::new(),
+        detach: false,
+        unattached: HashMap::new(),
+        fresh_hashed: Default::default(),
         dummy_target: None,
     }
 }
@@ -17227,6 +17516,10 @@ pub fn setop_shape(left: &Arc<Plan>, right: &Arc<Plan>, intersect: bool, ctx: &E
             copy_marks: Default::default(),
             plain_consts: Default::default(),
         alts: Default::default(),
+        sub_params: Vec::new(),
+        detach: false,
+        unattached: HashMap::new(),
+        fresh_hashed: Default::default(),
         dummy_target: None,
         };
         let n = b.level(p);
@@ -17319,6 +17612,10 @@ pub fn set_group_estimates(
         copy_marks: Default::default(),
         plain_consts: Default::default(),
         alts: Default::default(),
+        sub_params: Vec::new(),
+        detach: false,
+        unattached: HashMap::new(),
+        fresh_hashed: Default::default(),
         dummy_target: None,
     };
     let n = b.level(input);
@@ -17420,6 +17717,10 @@ pub fn agg_redundant_keys(
         copy_marks: Default::default(),
         plain_consts: Default::default(),
         alts: Default::default(),
+        sub_params: Vec::new(),
+        detach: false,
+        unattached: HashMap::new(),
+        fresh_hashed: Default::default(),
         dummy_target: None,
     };
     let n = b.level(input);
@@ -17501,6 +17802,10 @@ pub fn sets_sorted(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
         copy_marks: Default::default(),
         plain_consts: Default::default(),
         alts: Default::default(),
+        sub_params: Vec::new(),
+        detach: false,
+        unattached: HashMap::new(),
+        fresh_hashed: Default::default(),
         dummy_target: None,
     };
     let n = b.level(plan);
@@ -17605,6 +17910,10 @@ fn level_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> ExNode {
         copy_marks: Default::default(),
         plain_consts: Default::default(),
         alts: Default::default(),
+        sub_params: Vec::new(),
+        detach: false,
+        unattached: HashMap::new(),
+        fresh_hashed: Default::default(),
         dummy_target: None,
     };
     b.level(plan)
@@ -17711,6 +18020,66 @@ pub fn subquery_paths(plan: &Arc<Plan>, ctx: &ExecCtx) -> Vec<SubPathCost> {
 
 /// The EXPLAIN output of `plan`: text lines, or one JSON / YAML / XML document. Planning
 /// and execution times are in seconds.
+/// enable_partition_pruning.
+fn partition_pruning_on(ctx: &ExecCtx) -> bool {
+    ctx.sess
+        .settings
+        .borrow()
+        .get_raw("enable_partition_pruning")
+        .is_none_or(|v| !matches!(v.as_str(), "off" | "false" | "0"))
+}
+
+/// The values an inheritance Append's run-time pruning compares its partition keys with
+/// each time it is rescanned (its exec pruning steps' expressions): its members' clauses
+/// on their partition keys reading an outer row's values, from the first member with any.
+fn exec_prune_values(members: &[Arc<Plan>]) -> Vec<Expr> {
+    for m in members {
+        let mut q: &Plan = m;
+        while let Plan::Project { input, exprs } = q
+            && exprs.iter().all(|e| matches!(e, Expr::Col(..)))
+        {
+            q = input;
+        }
+        let Plan::Scan(sc) = q else { continue };
+        let Some(levels) = &sc.part else { continue };
+        let mut quals = Vec::new();
+        if let Some(f) = &sc.filter {
+            crate::sql::binder::optimize::conjuncts(f.clone(), &mut quals);
+        }
+        if let super::plan::Access::Index { quals: iq, .. } = &sc.access {
+            for x in iq {
+                if !quals.iter().any(|y| y.same_as(&x.orig)) {
+                    quals.push(x.orig.clone());
+                }
+            }
+        }
+        let key = |e: &Expr| levels.iter().any(|l| l.key.iter().any(|k| k.same_as(strip_widening(e))));
+        let mut out = Vec::new();
+        for qual in &quals {
+            let Expr::Call(_, args, _) = qual else { continue };
+            if args.len() != 2 {
+                continue;
+            }
+            for (a, b) in [(0, 1), (1, 0)] {
+                if key(&args[a]) && args[b].columns().is_empty() && args[b].has_outer_refs() {
+                    out.push(args[b].clone());
+                }
+            }
+        }
+        if !out.is_empty() {
+            return out;
+        }
+    }
+    Vec::new()
+}
+
+/// Whether `e` holds a sub-select (not a function call run as one).
+fn has_subselect(e: &Expr) -> bool {
+    let mut any = false;
+    e.walk(&mut |x| any |= matches!(x, Expr::Subquery(s) if s.call.is_none()));
+    any
+}
+
 /// The sub-selects of a projection's entries, by id.
 fn entry_subquery_ids(e: &Expr) -> Vec<usize> {
     let mut out = Vec::new();
@@ -17732,7 +18101,6 @@ fn entry_subquery_ids(e: &Expr) -> Vec<usize> {
 /// there. The plan with each such later copy given an id of its own (EXPLAIN without
 /// ANALYZE: the executor shares one), when there is one.
 fn split_shared_subqueries(p: &Arc<Plan>) -> Option<Arc<Plan>> {
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1 << 39);
     fn shared(exprs: &[Expr]) -> bool {
         let mut seen = std::collections::HashSet::new();
         exprs.iter().any(|e| {
@@ -17760,12 +18128,6 @@ fn split_shared_subqueries(p: &Arc<Plan>) -> Option<Arc<Plan>> {
                 e.walk(&mut |x| plain &= !matches!(x, Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..) | Expr::Grouping(..)));
                 plain && !expr_volatile_deep(e)
             })
-    }
-    fn deep_copy(p: &mut Arc<Plan>) {
-        let n = Arc::make_mut(p);
-        for c in plan_inputs_mut(n) {
-            deep_copy(c);
-        }
     }
     fn any_shared(p: &Plan) -> bool {
         matches!(p, Plan::Project { exprs, input } if shared(exprs) || reread(exprs, input))
@@ -17807,9 +18169,9 @@ fn split_shared_subqueries(p: &Arc<Plan>) -> Option<Arc<Plan>> {
                         .transform(&mut |x| {
                             Ok(match x {
                                 Expr::Subquery(mut s) if s.func.is_none() && seen.contains(&s.id) => {
-                                    s.id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    // (Its relations are range table entries of their own.)
-                                    deep_copy(&mut s.plan);
+                                    // (Its relations are range table entries of their own, its
+                                    // own sub-selects copies too.)
+                                    crate::sql::paths::make_subquery_copy(&mut s);
                                     Expr::Subquery(s)
                                 }
                                 x => x,
@@ -18045,8 +18407,10 @@ pub fn explain(
     let mut ordered = false;
     let gtl = std::rc::Rc::new(group_tlists(plan));
     let mut renumber: Option<std::rc::Rc<Vec<usize>>> = None;
+    let mut fresh_hashed: Option<std::rc::Rc<std::collections::HashSet<usize>>> = None;
+    let mut sub_ranks: Option<std::rc::Rc<HashMap<usize, usize>>> = None;
     let root = loop {
-    let (refnames, results) = assign_refnames_skip(plan, Some(ctx), &skip, &orders);
+    let (refnames, results) = assign_refnames_skip(plan, Some(ctx), &skip, &orders, sub_ranks.as_deref());
     // ON CONFLICT DO UPDATE's EXCLUDED is a range table entry of its own.
     // (Under a rule's actions too: a CTE of them, a frame.)
     fn excluded_rte(p: &Plan) -> bool {
@@ -18061,6 +18425,7 @@ pub fn explain(
         }
     }
     let excluded = excluded_rte(plan) as usize;
+    let names_before = refnames.clone();
     let mut b = Builder {
         ctx,
         o,
@@ -18124,6 +18489,10 @@ pub fn explain(
         copy_marks: copy_mark_leaves(plan),
         plain_consts: plain_const_lists(plan),
         alts: Default::default(),
+        sub_params: Vec::new(),
+        detach: false,
+        unattached: HashMap::new(),
+        fresh_hashed: fresh_hashed.clone().unwrap_or_default(),
         dummy_target: None,
     };
     b.top = addr(plan);
@@ -18145,17 +18514,36 @@ pub fn explain(
         ordered = true;
         let mut o2 = Vec::new();
         arm_orders(&root, &mut o2);
-        if !o2.is_empty() && assign_refnames_skip(plan, Some(ctx), &skip, &o2).0 != b.refnames {
+        if !o2.is_empty() && assign_refnames_skip(plan, Some(ctx), &skip, &o2, sub_ranks.as_deref()).0 != b.refnames {
             orders = o2;
             continue;
         }
     }
     // (Again with the SubPlans numbered in the order Postgres plans them.)
     if renumber.is_none()
-        && let Some(r) = renumbering(&b.events)
+        && let Some(r) = renumbering(&b.events, matches!(&**plan, Plan::Merge(_)))
     {
         renumber = Some(std::rc::Rc::new(r));
         continue;
+    }
+    // (Again with the SubPlans' relations named in their numbers' order.)
+    if sub_ranks.is_none() {
+        let r = b.sub_ranks();
+        let again = !r.is_empty() && assign_refnames_skip(plan, Some(ctx), &skip, &orders, Some(&r)).0 != names_before;
+        sub_ranks = Some(std::rc::Rc::new(r));
+        if again {
+            continue;
+        }
+    }
+    // (Again with the hashed alternatives shown beside their plain ones named apart.)
+    if fresh_hashed.is_none() {
+        let both: std::collections::HashSet<usize> =
+            b.alts.iter().filter(|(_, a)| a.shown == [true, true]).map(|(id, _)| *id).collect();
+        let again = !both.is_empty();
+        fresh_hashed = Some(std::rc::Rc::new(both));
+        if again {
+            continue;
+        }
     }
     let root = b.single_copy(plan, root);
     break if o.scroll && !backward_ok(&root) { b.materialize_top(root) } else { root };

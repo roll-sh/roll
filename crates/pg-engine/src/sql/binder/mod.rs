@@ -744,6 +744,21 @@ impl<'b, 'a> Binder<'b, 'a> {
         matches!(self.clause(), Clause::Where | Clause::JoinOn)
     }
 
+    /// Binding the target list (EXPRKIND_TARGET: the select list and its resjunk entries,
+    /// an UPDATE's SET list, a one-row INSERT's values, RETURNING).
+    pub(crate) fn binding_tlist(&self) -> bool {
+        matches!(
+            self.clause(),
+            Clause::Select
+                | Clause::OrderBy
+                | Clause::DistinctOn
+                | Clause::Window
+                | Clause::Returning
+                | Clause::UpdateSet
+                | Clause::ValuesSingle
+        )
+    }
+
     /// Run `f` with `clause` as the current clause.
     pub(crate) fn in_clause<T>(
         &mut self,
