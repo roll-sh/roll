@@ -981,6 +981,10 @@ pub struct DummyInfo {
     /// their queries read (flatten_unplanned_rtes keeps them in the range table), and what
     /// their record columns hold is unknown (EXPLAIN shows their fields as `fN`).
     pub unplanned: Vec<(String, usize)>,
+    /// Empty by a constant false (or NULL) qual of its own, a pulled-up subquery's `WHERE
+    /// false` (that constant): remove_useless_results_recurse merges it into the ON clause
+    /// of an outer join above whose nullable side it is.
+    pub qual_false: Option<Expr>,
 }
 
 #[derive(Clone, Debug)]

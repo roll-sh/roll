@@ -842,7 +842,8 @@ fn dummy(p: &Plan) -> Plan {
     let ec = super::column_classes(p);
     let mut unplanned = Vec::new();
     unplanned_subqueries(p, &mut unplanned);
-    Plan::Empty { ncols, cols, info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec, table: None, unplanned })) }
+    let qual_false = pseudo_false(p);
+    Plan::Empty { ncols, cols, info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec, table: None, unplanned, qual_false })) }
 }
 
 /// The FROM subqueries (not pulled up) a plan proven empty reads, never planned: each with
@@ -906,15 +907,30 @@ fn dummy_outputs(p: &Plan) -> (Vec<Option<(String, Option<String>)>>, Vec<Expr>)
 
 /// A relation made empty by a constant-false qual of its own (a pulled-up subquery's
 /// `WHERE false`), which Postgres places at the outer join above as its Join Filter.
-fn pseudo_false(p: &Plan) -> bool {
+fn pseudo_false(p: &Plan) -> Option<Expr> {
+    pseudo_false_at(p, true)
+}
+
+/// `pseudo_false`, the constant; `single`: `p` is the subquery's one FROM item (a scan made a
+/// dummy rel by its `WHERE false` counts only so: a FROM list of several items keeps its
+/// quals, remove_useless_results_recurse elides single-child FromExprs only).
+fn pseudo_false_at(p: &Plan, single: bool) -> Option<Expr> {
+    let falsy = |q: &Expr| matches!(q, Expr::Const(v, _) if v.is_null() || *v == Value::Bool(false));
     match p {
-        Plan::Filter { input, pred } => constant_false(&Some(pred.clone())) || pseudo_false(input),
-        Plan::Project { input, .. } | Plan::Sort { input, .. } => pseudo_false(input),
-        Plan::Join { kind: JoinKind::Inner, left, right, .. } => pseudo_false(left) || pseudo_false(right),
-        Plan::Join { kind: JoinKind::Left, left, .. } => pseudo_false(left),
-        // (A FROM-less query's `WHERE false`, folded already.)
-        Plan::Empty { ncols: 0, .. } => true,
-        _ => false,
+        Plan::Filter { input, pred } => {
+            let mut parts = Vec::new();
+            conjuncts(pred.clone(), &mut parts);
+            parts.into_iter().find(falsy).or_else(|| pseudo_false_at(input, single))
+        }
+        Plan::Project { input, .. } | Plan::Sort { input, .. } => pseudo_false_at(input, single),
+        Plan::Join { kind: JoinKind::Inner, left, right, .. } => {
+            pseudo_false_at(left, false).or_else(|| pseudo_false_at(right, false))
+        }
+        Plan::Join { kind: JoinKind::Left, left, .. } => pseudo_false_at(left, false),
+        // (A FROM-less query's `WHERE false`, folded already; a scan's, made a dummy rel.)
+        Plan::Empty { ncols: 0, .. } => Some(Expr::Const(Value::Bool(false), DataType::Bool)),
+        Plan::Empty { info: Some(i), .. } if single => i.qual_false.clone(),
+        _ => None,
     }
 }
 
@@ -934,7 +950,23 @@ impl Planner<'_, '_> {
     /// outer join with an empty outer side is, and an outer join's constant-false
     /// condition empties its nullable side.
     pub(super) fn reduce_dummies(&self, p: &mut Plan) {
-        let right_false = matches!(p, Plan::Join { kind: JoinKind::Left, right, params, .. } if params.is_empty() && pseudo_false(right));
+        // (remove_useless_results_recurse: the nullable side's quals go to the front of the
+        // ON clause, a LATERAL item's too.)
+        let side_false = match p {
+            Plan::Join { kind: JoinKind::Left, right, .. } => pseudo_false(right),
+            Plan::Join { kind: JoinKind::Right, left, .. } => pseudo_false(left),
+            _ => None,
+        };
+        let prepend = |cond: &mut Option<Expr>, f: Expr| {
+            *cond = Some(match cond.take() {
+                None => f,
+                Some(Expr::And(mut parts)) => {
+                    parts.insert(0, f);
+                    Expr::And(parts)
+                }
+                Some(c) => Expr::And(vec![f, c]),
+            });
+        };
         let kids: Vec<&mut Arc<Plan>> = match p {
             Plan::Filter { input, .. }
             | Plan::Project { input, .. }
@@ -1001,8 +1033,8 @@ impl Planner<'_, '_> {
                         if empty(left) {
                             true
                         } else {
-                            if right_false && empty(right) && cond.is_none() {
-                                *cond = Some(Expr::Const(Value::Bool(false), DataType::Bool));
+                            if let Some(f) = side_false.clone().filter(|_| *kind == JoinKind::Left && empty(right) && !cf) {
+                                prepend(cond, f);
                             }
                             if cf && params.is_empty() && !empty(right) {
                                 let d = dummy(right);
@@ -1015,6 +1047,9 @@ impl Planner<'_, '_> {
                         if empty(right) {
                             true
                         } else {
+                            if let Some(f) = side_false.clone().filter(|_| empty(left) && !cf) {
+                                prepend(cond, f);
+                            }
                             if cf && params.is_empty() && !empty(left) {
                                 let d = dummy(left);
                                 *left = Arc::new(d);

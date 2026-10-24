@@ -35,9 +35,9 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51069 (**99.84%**) |
-| units differing | 81 |
-| files fully matching | 222 |
+| units matching | 51072 (**99.85%**) |
+| units differing | 78 |
+| files fully matching | 223 |
 | engine output == expected/*.out (pg_regress "ok") | 184 files |
 | engine crashes / panics | none |
 
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 81 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 78 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 81 units
-join (50), partition_join (15), partition_prune (2), groupingsets (7), with (3), aggregates (1), join_hash (2), returning (1)
+### EXPLAIN (group C1) — 78 units
+join (48), partition_join (15), partition_prune (2), groupingsets (7), with (3), join_hash (2), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -344,9 +344,26 @@ What changed:
 Goldens: `tests/sql/a16_sort_support.sql` (both errors, with the type oids masked),
 `a16_join_parity.sql`.
 
-aggregates 116 is still open: a sub-select's grouping keeps its GROUP BY key that the select
-list doesn't name (`y.y`, resjunk) in its output and its Sort's, as the statement's top
-level does (agent 11); in an ARRAY() sub-select the engine drops it.
+Second batch (the same subset, against the first batch's binary, again on 5cfa72a and 9b0ac33: 3 units fixed, none
+broken):
+
+| file | fixed units |
+|---|---|
+| join | 772, 777 |
+| aggregates | 116 |
+
+- remove_useless_results_recurse: a pulled-up subquery's constant false (or NULL) WHERE on
+  an outer join's nullable side goes to the front of the join's ON clause, the side a dummy
+  rel (`Join Filter: false`, `(false AND (f1 = i8.q1))`): a LATERAL item's too, a RIGHT JOIN's
+  left side, and a single scan made a dummy rel by it (`DummyInfo::qual_false`, the constant
+  kept); a FROM list of several items keeps its quals (only single-child FromExprs are
+  elided) (join 772, 777).
+- A query level's grouping returns the GROUP BY keys its select list doesn't name (resjunk)
+  under the sorts and limits above it too, and they carry them up to the level's top
+  (`grouping_top`, `carry_group_junk`, make_sort_input_target); a sub-select's level as well
+  as the statement's (aggregates 116: `Output: (sum((x.x + y.y))), y.y`).
+
+Goldens: `a16_nullable_false.sql`, `a16_group_junk.sql`.
 
 Looked at and left (why):
 
@@ -359,13 +376,18 @@ Looked at and left (why):
   (the kept scan still returns a column only the removed join clause read, `t3.c`), and a
   physical target list for the kept scan; 632: Postgres removes the relation with the lower
   range table index, which for a pulled-up subquery's relations isn't the earlier leaf here.
-- join 775: a pulled-up LATERAL subquery's WHERE goes in front of the ON clause
-  (remove_useless_results_recurse), here after it (in `lift.rs`, agent 8's PlaceHolderVar
-  code).
 - join 428–432, 424, 426, 548 (PlaceHolderVars: a pulled-up subquery's constant output wrapped
   only where an outer join nulls it, pullup_replace_vars_callback with varnullingrels; 429 /
   431 are their row order), 332, 440, 450, 771, 774 (nested PlaceHolderVars): agent 8's area.
 - join 499, 543, 560, 715, 819, 888: cost-driven join orders and unique-ification choices.
+- Seen while probing, not failing a unit (results match): an inner LATERAL join with a
+  subquery proven empty shows its LATERAL output as `^1#0` in VERBOSE (`select * from i8 join
+  lateral (select *, i8.q2 from i4 where false) ss on true`; Postgres `i8.q2`); a LEFT LATERAL
+  join's ON clause over such a subquery is lost (`Join Filter: false` and `NULL` outputs for
+  Postgres's `(false AND (f1 = i8.q1))` and `f1, (i8.q2)`); `WHERE null::boolean` shows as
+  `false`; a pulled-up subquery's var-free WHERE that isn't constant (`now() > ...`) gates its
+  scan (Postgres: the top of the join domain, or the ON clause of the outer join above);
+  `IN (SELECT sum(b) ... GROUP BY a)` isn't shown over a Subquery Scan on `"ANY_subquery"`.
 ## Round 16, agent 19 (PlaceHolderVar class order, semi joins over FROM-less relations)
 
 Measured in subset runs (test_setup, create_misc, create_index, create_view, select, union,
@@ -2721,8 +2743,8 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 875 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (50) |
-| aggregates | 556 | 555 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| join | 925 | 877 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (48) |
+| aggregates | 556 | 556 | 100% | yes | no |  |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
 | portals | 354 | 354 | 100% | yes | yes |  |

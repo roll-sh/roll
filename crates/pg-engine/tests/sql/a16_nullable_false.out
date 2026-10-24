@@ -1,0 +1,125 @@
+> create table a16_i8 (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> create table a16_i4 (f1 int4)
+-- CREATE TABLE
+
+> insert into a16_i8 values (123, 456), (123, 4567890123456789), (4567890123456789, 123), (4567890123456789, 4567890123456789), (4567890123456789, -4567890123456789)
+-- INSERT 0 5
+
+> insert into a16_i4 values (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> analyze a16_i8
+-- ANALYZE
+
+> analyze a16_i4
+-- ANALYZE
+
+> explain (verbose, costs off)
+> select * from
+>   (select 0 as val0) as ss0
+>   left join (select 1 as val) as ss1 on true
+>   left join lateral (select ss1.val as val_filtered where false) as ss2 on true
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: 0, (1), ((1))
+  Join Filter: false
+  ->  Result
+        Output: 1
+  ->  Result
+        Output: (1)
+        One-Time Filter: false
+-- EXPLAIN
+
+> select * from
+>   (select 0 as val0) as ss0
+>   left join (select 1 as val) as ss1 on true
+>   left join lateral (select ss1.val as val_filtered where false) as ss2 on true
+val0:int4 | val:int4 | val_filtered:int4
+0 | 1 | NULL
+-- SELECT 1
+
+> explain (verbose, costs off)
+> select * from a16_i8 i8 left join lateral
+>   (select *, i8.q2 from a16_i4 where false) ss on true
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: i8.q1, i8.q2, f1, (i8.q2)
+  Join Filter: false
+  ->  Seq Scan on public.a16_i8 i8
+        Output: i8.q1, i8.q2
+  ->  Result
+        Output: f1, i8.q2
+        One-Time Filter: false
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select * from a16_i8 i8 left join lateral
+>   (select *, i8.q2 from a16_i4 i1, a16_i4 i2 where false) ss on true
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: i8.q1, i8.q2, f1, f1, (i8.q2)
+  ->  Seq Scan on public.a16_i8 i8
+        Output: i8.q1, i8.q2
+  ->  Result
+        Output: f1, f1, i8.q2
+        One-Time Filter: false
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select * from a16_i8 a left join (select * from a16_i4 where false) ss on ss.f1 = a.q1
+QUERY PLAN:text
+Hash Left Join
+  Output: a.q1, a.q2, f1
+  Hash Cond: (a.q1 = f1)
+  Join Filter: false
+  ->  Seq Scan on public.a16_i8 a
+        Output: a.q1, a.q2
+  ->  Hash
+        Output: f1
+        ->  Result
+              Output: f1
+              One-Time Filter: false
+-- EXPLAIN
+
+> select count(*) from a16_i8 a left join (select * from a16_i4 where false) ss on ss.f1 = a.q1
+count:int8
+5
+-- SELECT 1
+
+> explain (verbose, costs off)
+> select * from a16_i8 a left join (select * from a16_i4 where false) ss on ss.f1 = a.q1 and a.q2 > 0
+QUERY PLAN:text
+Hash Left Join
+  Output: a.q1, a.q2, f1
+  Hash Cond: (a.q1 = f1)
+  Join Filter: (false AND (a.q2 > 0))
+  ->  Seq Scan on public.a16_i8 a
+        Output: a.q1, a.q2
+  ->  Hash
+        Output: f1
+        ->  Result
+              Output: f1
+              One-Time Filter: false
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select * from (select * from a16_i4 where false) ss right join a16_i8 a on true
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: f1, a.q1, a.q2
+  Join Filter: false
+  ->  Seq Scan on public.a16_i8 a
+        Output: a.q1, a.q2
+  ->  Result
+        Output: f1
+        One-Time Filter: false
+-- EXPLAIN
+
+> drop table a16_i8
+-- DROP TABLE
+
+> drop table a16_i4
+-- DROP TABLE
+

@@ -1,0 +1,137 @@
+> explain (verbose, costs off)
+> select array(select sum(x+y) s
+>             from generate_series(1,3) y group by y order by s)
+>   from generate_series(1,3) x
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_series x
+  Output: ARRAY(SubPlan 1)
+  Function Call: generate_series(1, 3)
+  SubPlan 1
+    ->  Sort
+          Output: (sum((x.x + y.y))), y.y
+          Sort Key: (sum((x.x + y.y)))
+          ->  HashAggregate
+                Output: sum((x.x + y.y)), y.y
+                Group Key: y.y
+                ->  Function Scan on pg_catalog.generate_series y
+                      Output: y.y
+                      Function Call: generate_series(1, 3)
+-- EXPLAIN
+
+> select array(select sum(x+y) s
+>             from generate_series(1,3) y group by y order by s)
+>   from generate_series(1,3) x
+array:int8[]
+{2,3,4}
+{3,4,5}
+{4,5,6}
+-- SELECT 3
+
+> explain (verbose, costs off)
+> select sum(y) s from generate_series(1,3) y group by y order by s
+QUERY PLAN:text
+Sort
+  Output: (sum(y)), y
+  Sort Key: (sum(y.y))
+  ->  HashAggregate
+        Output: sum(y), y
+        Group Key: y.y
+        ->  Function Scan on pg_catalog.generate_series y
+              Output: y
+              Function Call: generate_series(1, 3)
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select sum(y) s from generate_series(1,3) y group by y
+QUERY PLAN:text
+HashAggregate
+  Output: sum(y), y
+  Group Key: y.y
+  ->  Function Scan on pg_catalog.generate_series y
+        Output: y
+        Function Call: generate_series(1, 3)
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select (select sum(x+y) s from generate_series(1,3) y group by y limit 1) from generate_series(1,3) x
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_series x
+  Output: (SubPlan 1)
+  Function Call: generate_series(1, 3)
+  SubPlan 1
+    ->  Limit
+          Output: (sum((x.x + y.y))), y.y
+          ->  HashAggregate
+                Output: sum((x.x + y.y)), y.y
+                Group Key: y.y
+                ->  Function Scan on pg_catalog.generate_series y
+                      Output: y.y
+                      Function Call: generate_series(1, 3)
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select x, (select count(*) from generate_series(1,3) y group by y % 2 limit 1) from generate_series(1,3) x
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_series x
+  Output: x.x, (InitPlan 1).col1
+  Function Call: generate_series(1, 3)
+  InitPlan 1
+    ->  Limit
+          Output: (count(*)), ((y.y % 2))
+          ->  HashAggregate
+                Output: count(*), ((y.y % 2))
+                Group Key: (y.y % 2)
+                ->  Function Scan on pg_catalog.generate_series y
+                      Output: (y.y % 2)
+                      Function Call: generate_series(1, 3)
+-- EXPLAIN
+
+> create table a16_gj (a int, b int)
+-- CREATE TABLE
+
+> insert into a16_gj select i % 4, i from generate_series(1, 20) i
+-- INSERT 0 20
+
+> analyze a16_gj
+-- ANALYZE
+
+> explain (verbose, costs off)
+> select array(select sum(b) from a16_gj group by a order by 1) from a16_gj
+QUERY PLAN:text
+Seq Scan on public.a16_gj
+  Output: (InitPlan 1).col1
+  InitPlan 1
+    ->  Sort
+          Output: (sum(a16_gj_1.b)), a16_gj_1.a
+          Sort Key: (sum(a16_gj_1.b))
+          ->  HashAggregate
+                Output: sum(a16_gj_1.b), a16_gj_1.a
+                Group Key: a16_gj_1.a
+                ->  Seq Scan on public.a16_gj a16_gj_1
+                      Output: a16_gj_1.a, a16_gj_1.b
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select sum(b) from a16_gj group by a order by 1 limit 2
+QUERY PLAN:text
+Limit
+  Output: (sum(b)), a
+  ->  Sort
+        Output: (sum(b)), a
+        Sort Key: (sum(a16_gj.b))
+        ->  HashAggregate
+              Output: sum(b), a
+              Group Key: a16_gj.a
+              ->  Seq Scan on public.a16_gj
+                    Output: a, b
+-- EXPLAIN
+
+> select sum(b) from a16_gj group by a order by 1 limit 2
+sum:int8
+45
+50
+-- SELECT 2
+
+> drop table a16_gj
+-- DROP TABLE
+

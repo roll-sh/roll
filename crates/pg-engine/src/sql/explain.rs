@@ -433,6 +433,9 @@ impl std::fmt::Debug for ColInfo {
 
 #[derive(Clone, Debug, Default)]
 struct ExNode {
+    /// The resjunk GROUP BY keys a level's grouping returns (`group_tops`): the sorts and
+    /// limits above it return them too (`carry_group_junk`).
+    junk_keys: Vec<String>,
     /// Output columns (empty: not tracked).
     cols: Vec<ColInfo>,
     /// The order rows come out in, as sort keys show (empty: none known).
@@ -722,6 +725,10 @@ struct Builder<'c, 'a> {
     /// The top nodes of the query levels converted (a sub-select's, a CTE's): their
     /// target lists keep the resjunk columns the level carries.
     level_tops: std::collections::HashSet<usize>,
+    /// The groupings computing a query level's target list (its top, or below the top's
+    /// sorts and limits, `grouping_top`): their target lists keep the GROUP BY keys the
+    /// select list doesn't name, resjunk, as the level's does (a sub-select's too).
+    group_tops: std::collections::HashSet<usize>,
     /// The FROM subqueries whose Subquery Scan shows (`shown_subqueries`), by address,
     /// with whether the node above wants just the columns it reads from it.
     shown: HashMap<usize, bool>,
@@ -732,6 +739,42 @@ struct Builder<'c, 'a> {
     /// computes the constructor of (by the Agg's address): the calls, their input's
     /// column names, and the group key count.
     json_aggs: HashMap<usize, (Vec<AggCall>, Vec<Name>, usize)>,
+}
+
+/// The resjunk GROUP BY keys a level's grouping returns go up through the sorts and limits
+/// over it to the level's top (a Var referencing a Var shows as it does). The keys passed up.
+fn carry_group_junk(n: &mut ExNode) -> Vec<String> {
+    match n.node_type {
+        "Sort" | "Incremental Sort" | "Limit" => {
+            let Some(c) = n.children.first_mut() else { return Vec::new() };
+            let extra = carry_group_junk(c);
+            for e in &extra {
+                if !n.output.contains(e) {
+                    n.output.push(e.clone());
+                }
+            }
+            extra
+        }
+        _ => n.junk_keys.clone(),
+    }
+}
+
+/// The node computing a query level's target list under its top: through the sorts and
+/// limits above it and a projection only dropping the resjunk columns they read
+/// (make_sort_input_target's Sort keeps the resjunk GROUP BY keys too).
+fn grouping_top(mut p: &Plan) -> usize {
+    loop {
+        match p {
+            Plan::Sort { input, .. } | Plan::Limit { input, .. } => p = input,
+            Plan::Project { input, exprs }
+                if exprs.len() < super::binder::plan_width(input)
+                    && exprs.iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i)) =>
+            {
+                p = input
+            }
+            _ => return addr(p),
+        }
+    }
 }
 
 fn addr(p: &Plan) -> usize {
@@ -3591,10 +3634,12 @@ impl Builder<'_, '_> {
         self.inits.push(Vec::new());
         let saved_depth = std::mem::take(&mut self.proj_depth);
         self.level_tops.insert(addr(p));
+        self.group_tops.insert(grouping_top(p));
         let mut node = self.node(p).node;
         self.proj_depth = saved_depth;
         self.settle(&mut node);
         if self.o.verbose {
+            carry_group_junk(&mut node);
             tlist_layout(&mut node);
             // (A LockRows at the level's top returns its rows' marks too, resjunk, and so
             // do the Limits over it, which return their input's target list.)
@@ -4852,7 +4897,7 @@ impl Builder<'_, '_> {
                     }
                     // The statement's target list carries the GROUP BY keys its select list
                     // doesn't name as resjunk entries (in their order).
-                    if addr(p) == self.top
+                    if self.group_tops.contains(&addr(p))
                         && c.node.node_type == "Aggregate"
                         && let Some(ng) = match &**input {
                             Plan::Agg { groups, .. } => Some(groups.len()),
@@ -4869,7 +4914,8 @@ impl Builder<'_, '_> {
                             {
                                 let shown = self.pick(n, Cx::Output);
                                 if !c.node.output.contains(&shown) {
-                                    c.node.output.push(shown);
+                                    c.node.output.push(shown.clone());
+                                    c.node.junk_keys.push(shown);
                                 }
                             }
                         }
@@ -15769,6 +15815,7 @@ pub fn setop_shape(left: &Arc<Plan>, right: &Arc<Plan>, intersect: bool, ctx: &E
         json_casts: Vec::new(),
         proj_depth: 0,
         level_tops: std::collections::HashSet::new(),
+        group_tops: std::collections::HashSet::new(),
         json_aggs: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
@@ -15849,6 +15896,7 @@ pub fn set_group_estimates(
         json_casts: Vec::new(),
         proj_depth: 0,
         level_tops: std::collections::HashSet::new(),
+        group_tops: std::collections::HashSet::new(),
         json_aggs: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
@@ -15938,6 +15986,7 @@ pub fn agg_redundant_keys(
         json_casts: Vec::new(),
         proj_depth: 0,
         level_tops: std::collections::HashSet::new(),
+        group_tops: std::collections::HashSet::new(),
         json_aggs: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
@@ -16007,6 +16056,7 @@ pub fn sets_sorted(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
         json_casts: Vec::new(),
         proj_depth: 0,
         level_tops: std::collections::HashSet::new(),
+        group_tops: std::collections::HashSet::new(),
         json_aggs: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
@@ -16099,6 +16149,7 @@ fn level_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> ExNode {
         json_casts: Vec::new(),
         proj_depth: 0,
         level_tops: std::collections::HashSet::new(),
+        group_tops: std::collections::HashSet::new(),
         json_aggs: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
@@ -16164,6 +16215,7 @@ pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
         json_casts: Vec::new(),
         proj_depth: 0,
         level_tops: std::collections::HashSet::new(),
+        group_tops: std::collections::HashSet::new(),
         json_aggs: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
@@ -16557,6 +16609,7 @@ pub fn explain(
         json_casts: Vec::new(),
         proj_depth: 0,
         level_tops: std::collections::HashSet::new(),
+        group_tops: std::collections::HashSet::new(),
         json_aggs: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
@@ -16574,6 +16627,7 @@ pub fn explain(
         dummy_target: None,
     };
     b.top = addr(plan);
+    b.group_tops.insert(grouping_top(plan));
     if let Plan::Merge(m) = &**plan
         && dummy_merge_target(plan) == 1
     {

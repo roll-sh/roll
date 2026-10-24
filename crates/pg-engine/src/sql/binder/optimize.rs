@@ -431,6 +431,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             let not_null = |x: &Expr| {
                 matches!(x, Expr::Col(c, _) if s.table.columns.get(*c).is_some_and(|col| col.not_null))
             };
+            let qual_false = all.iter().find(|q| super::refute::always_false(q)).cloned();
             reduce_null_tests(&mut all, &not_null);
             ec_scan_constants(&mut all);
             // Constraint exclusion: the filter contradicts the table's constraints (or
@@ -444,7 +445,13 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 return Plan::Empty {
                     ncols,
                     cols: Some(Arc::new(names)),
-                    info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec: Vec::new(), table, ..Default::default() })),
+                    info: Some(Arc::new(crate::sql::plan::DummyInfo {
+                        rels,
+                        ec: Vec::new(),
+                        table,
+                        qual_false,
+                        ..Default::default()
+                    })),
                 };
             }
             if super::partprune::const_conflict(&all)
