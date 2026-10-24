@@ -35,17 +35,17 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51082 (**99.87%**) |
-| units differing | 68 |
-| files fully matching | 224 |
-| engine output == expected/*.out (pg_regress "ok") | 185 files |
+| units matching | 51091 (**99.88%**) |
+| units differing | 59 |
+| files fully matching | 226 |
+| engine output == expected/*.out (pg_regress "ok") | 187 files |
 | engine crashes / panics | none |
 
 ## Remaining differences, classified
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 68 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 59 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 68 units
-join (41), partition_join (15), partition_prune (2), groupingsets (7), join_hash (2), returning (1)
+### EXPLAIN (group C1) — 59 units
+join (41), partition_join (15), partition_prune (2), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -106,6 +106,90 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 18 (SubPlan numbering in subquery_planner's order, GROUPING() copies, resjunk group keys)
+
+Subset runs of 33 planner-heavy files (test_setup, create_index, create_misc, create_view,
+inherit, select, union, join, aggregates, groupingsets, subselect, select_distinct, window,
+with, partition_aggregate, partition_join, partition_prune, join_hash, updatable_views,
+returning, merge, limit, tsrf, equivclass, incremental_sort, select_parallel, rowsecurity,
+rules, memoize, rangefuncs, insert_conflict, stats_ext, sqljson_jsontable, select_views), unit
+by unit against a run of the branch head the commit is on (b8a205b): 13164 → 13173, +9, none
+lost; on the earlier heads 5cfa72a (28 of those files) +10, 68498b3, 3fb95cb, b963500 and
+f334753 +9
+(b963500's base run also lost select_parallel 112 / 116 to the reference's parallel workers
+starting late under load), none lost; crate tests and clippy on each.
+groupingsets 55, 57, 189, 191, 195, 197, 215 and join_hash 269, 271 match: both files
+match fully. (aggregates 116 matched with this change too; agent 16's second batch fixed it
+first: the two resjunk-key mechanisms are merged, `group_tlists` deciding which nodes carry
+the keys.)
+
+- **SubPlan numbering** (`explain.rs` `renumbering`, `next_plan_id`). Postgres numbers
+  sub-selects as subquery_planner makes them (make_subplan / build_subplan: a sub-select's
+  own sub-selects first): the target list, the join tree's quals in their order, HAVING, ...,
+  the RTEs' expressions, and in Postgres 18 the GROUP BY expressions last (RTE_GROUP's
+  groupexprs, preprocessed after the target list; flatten_group_exprs puts them back in it
+  after that). The engine numbers them as EXPLAIN meets them, child first. EXPLAIN now builds
+  the plan once recording each number taken (the sub-select's query level, whether it is a
+  group key's, whether it was bound in a WHERE / ON clause: `Subquery::qual`), and when
+  Postgres's order differs builds it again with the numbers in that order: a level's group
+  keys' sub-selects (each with the ones inside it) after its other own ones, and its quals'
+  in the order they were bound, which is the join tree's (ON clauses as the FROM list is
+  bound, then WHERE; a pulled-up IN / EXISTS subquery's quals where it was written). A level's
+  InitPlans are then listed in their numbers' order (SS_attach_initplans). Nothing else
+  moves: the target list's sub-selects against the quals' (Postgres: target list first; the
+  engine's met order has the scans' first) and FROM subqueries planned apart (Postgres: after
+  the level's expressions) keep the engine's order, as no unit of the measured subset differs
+  by them.
+- **GROUPING() arguments' copies.** A GROUPING() argument that is a sub-select group key is a
+  copy of its own in Postgres (the parser leaves GROUPING()'s arguments alone;
+  SS_process_sublinks plans each copy; build_subplan for a sub-select's GROUPING() parameter),
+  numbered with the target list, so before the key's: `GROUPING((SubPlan 1))` over the key
+  `(SubPlan 3)` (195 / 197), `InitPlan 1` for an uncorrelated one, listed with the level's
+  InitPlans though nothing runs it (189 / 191). One copy per GROUPING() call (keyed by the
+  call), shown as the copy's reference; a correlated copy's SubPlan isn't shown (the executor
+  never initializes it). The grouping's input returns what the copies read
+  (make_group_input_target's pull_var_clause recurses into GROUPING()'s arguments: `t1.id`).
+- **GROUPING() without grouping sets** stays a GROUPING() call over the keys (always 0), no
+  longer the constant 0: shown as `GROUPING(q1)`, kept in HAVING (contain_agg_clause), a
+  correlated parameter of a sub-select (`(SELECT grouping(q1))` a SubPlan, 191), and it makes
+  the grouping an Agg (GroupAggregate, not Group).
+- **Pseudoconstant group keys** (a constant, an InitPlan's output, a pulled-up one-row
+  VALUES' such value) are redundant group pathkeys (make_pathkeys_for_sortclauses_extended),
+  out of processed_groupClause: no Group Key, and all of them redundant a GroupAggregate of
+  one group (191, `GROUP BY 1 + 1`).
+- **Resjunk GROUP BY keys** (`group_tlists`). A key the select list doesn't name is a resjunk
+  target-list entry (findTargetlistEntrySQL99), after the select list and the ORDER BY's
+  entries: every node returning the level's target list returns it, not only the statement's
+  top aggregation: a Sort, Limit, Unique, ProjectSet or WindowAgg above the grouping, a
+  sub-select's or FROM subquery's grouping (aggregates 116, groupingsets 215, 195 / 197's
+  `t1.v`). The grouping's input computes the keys in the target list's order
+  (make_group_input_target: `(q2 + 1), q1`). A ProjectSet computing the target list over a
+  grouping reads what its expressions use, in that order (split_pathtarget_at_srfs), not the
+  grouping sets' mask column.
+- **A FROM-less subquery whose output is a sub-select is pulled up** (is_simple_subquery takes
+  it when nothing in it is volatile; `lift.rs` `movable_fromless`) when no outer join nulls it:
+  the sub-select computed where the query reads it (55 / 57: the key computed by the scan
+  under the grouping, its SubPlan attached to that scan, the Sort above referring to it).
+- **A scan reading a system column** (`tableoid`) has no physical target list
+  (use_physical_tlist refuses): it returns its reltarget, the columns used above, then the
+  hash keys' and the join quals' (join_hash 269 / 271's outer side).
+
+Golden: `tests/sql/a18_grouping_subplans.sql`.
+
+Left (none fails a unit of the subset):
+- A pulled-up subquery's sub-select output read in several places is one value computed once
+  (the lifted group's projection), where Postgres copies it into each place, each a SubPlan of
+  its own (`SELECT ss.x, ss.x ...`: Postgres `(SubPlan 1), (SubPlan 2)`).
+- Under grouping sets a pulled-up subquery's output is a PlaceHolderVar in Postgres, so a
+  GROUPING() argument matches the key's target-list entry: VERBOSE shows
+  `GROUPING(((InitPlan 3).col1))`, the engine the copy, `GROUPING((InitPlan 1).col1)` (189's
+  VERBOSE form; the suite's is COSTS OFF only).
+- `GROUP BY` a correlated sub-select alone (`GROUP BY s` without grouping sets): Postgres sorts
+  (a Group over a Sort), the engine hashes (a cost difference of the sub-select key).
+- The general order (target list before the quals, FROM subqueries after the level's
+  expressions, MIN / MAX InitPlans at createplan time) isn't applied: it needs every
+  sub-select's clause recorded as `qual` is.
 
 ## Round 16, agent 22 (a FROM subquery's several paths, class clauses' first making)
 
@@ -3005,12 +3089,12 @@ produces no units on Linux (skipped by the file itself).
 | rowsecurity | 1226 | 1226 | 100% | yes | no |  |
 | object_address | 85 | 85 | 100% | yes | yes |  |
 | tablesample | 58 | 58 | 100% | yes | yes |  |
-| groupingsets | 217 | 210 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (7) |
+| groupingsets | 217 | 217 | 100% | yes | yes |  |
 | drop_operator | 12 | 12 | 100% | yes | yes |  |
 | password | 53 | 53 | 100% | yes | yes |  |
 | identity | 288 | 288 | 100% | yes | yes |  |
 | generated_stored | 468 | 468 | 100% | yes | yes |  |
-| join_hash | 279 | 277 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
+| join_hash | 279 | 279 | 100% | yes | yes |  |
 | brin_bloom | 40 | 40 | 100% | yes | yes |  |
 | brin_multi | 172 | 172 | 100% | yes | yes |  |
 | create_table_like | 191 | 191 | 100% | yes | yes |  |

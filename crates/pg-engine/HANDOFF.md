@@ -17,9 +17,9 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,082 of 51,150 statements match (99.87%).** 68 differ. The full
+- **Regression suite: 51,091 of 51,150 statements match (99.88%).** 59 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - All 68 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
+  - All 59 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
     order since round 16, agent 17: join relations parameterized by LATERAL references).
   - None differs by design any more (aggregates `balk` matches since round 16, agent 14: a
     Finalize Aggregate runs the user-defined combine functions).
@@ -371,9 +371,12 @@ them all with the "Fixed in round N" sections describing what was already tried.
    LIMIT subquery under its Limit, a DML statement's FROM subquery's `o.*`). (VERBOSE lists of UPDATE /
    DELETE joined with an inherited target of several members, and a CTE's / VALUES' /
    function's whole-row mark there: round 16, agent 14.)
-5. **groupingsets** (12, including the sorted-vs-hashed choice and output order), **join_hash** (2: SubPlan
-   numbering), then the long tail in STATUS.md. (select_parallel, select_distinct and
-   join_hash's batch counts match since round 16, agent 14; with since round 16, agent 20.)
+5. The long tail in STATUS.md. (select_parallel, select_distinct and join_hash's batch counts
+   match since round 16, agent 14; with since round 16, agent 20; groupingsets and join_hash
+   fully since round 16, agent 18: SubPlans numbered in subquery_planner's order for group
+   keys and quals, GROUPING() argument copies, resjunk group keys up the plan. The rest of
+   Postgres's numbering order, target list before quals and FROM subqueries after, is in its
+   section.)
 6. **equivclass**, **inherit** and **collate.icu.utf8**: done (round 15, agent 10).
 7. **partition_aggregate**: done (137/137).
 8. The 18 plan-choice units listed in STATUS.md ("Plan choice visible in results").
