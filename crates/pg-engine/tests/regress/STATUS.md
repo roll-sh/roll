@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51102 (**99.91%**) |
-| units differing | 48 |
+| units matching | 51107 (**99.92%**) |
+| units differing | 43 |
 | files fully matching | 226 |
 | engine output == expected/*.out (pg_regress "ok") | 187 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 48 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 43 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 48 units
-join (30), partition_join (15), partition_prune (2), returning (1)
+### EXPLAIN (group C1) — 43 units
+join (25), partition_join (15), partition_prune (2), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -106,6 +106,97 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 25 (column-selecting subqueries pulled up, WHERE over pulled-up subqueries, LATERAL join restrictions, constant classes, `name = text` merge keys)
+
+Measured in subset runs of 35 planner-heavy files (create_index, create_misc, create_view,
+select, union, subselect, join, aggregates, inherit, insert_conflict, limit, returning,
+updatable_views, merge, with, rules, rowsecurity, select_views, select_distinct, equivclass,
+partition_join, partition_prune, partition_aggregate, select_parallel, incremental_sort,
+memoize, join_hash, explain, stats_ext, groupingsets, window, tsrf, rangefuncs,
+sqljson_jsontable, collate, with test_setup; 13442 units), unit by unit against a run of the
+base cce1f9c (13394 -> 13399): 5 units fixed, none broken. Crate tests and clippy on this state.
+
+| file | fixed units |
+|---|---|
+| join | 424, 430, 440, 450, 548 |
+
+What changed:
+
+- **A subquery selecting some of its table's columns is pulled up** (`lift.rs`, join 424):
+  `(select unique2 as j from tenk1) ss` stayed a leaf planned for itself (lift kept an
+  all-columns projection "as it is"), so the join search had no parameterized paths into it:
+  `int4_tbl s join (select unique2 from tenk1) ss on ss.unique2 = s.f1` was a Hash Join over
+  an Index Only Scan of all 10000 rows where Postgres runs 5 index probes. Like any simple
+  subquery (pull_up_simple_subquery), it is now the table in the join tree, its columns
+  read through the map.
+- **A WHERE over a pulled-up subquery** (join 548): a clause pushed down onto a single-table
+  subquery (`Filter` over its projection) kept the subquery a leaf; it is now pulled up, the
+  clause over its outputs as the query reads them (a PlaceHolderVar's restricting the
+  relation it is evaluated at, distribute_qual_to_rels), so the outer join's own clause reads
+  the expression itself (`Join Filter: (t0.f1 = CASE ...)`) and the WHERE is t1's filter. A
+  join subquery planned for itself first (a parameterized nested loop inside) was refused:
+  `reads_outer` counted the nested loop's own parameters as outer values (now only values
+  from outside it, `Outer` of a deeper level, its parameters' and clauses' own), its several
+  projections (column order, a removed join's constants) are composed, and a CASE's operand
+  placeholder in its own WHEN tests no longer makes it unmovable. Whether an output needs a
+  PlaceHolderVar is judged after its own subqueries were pulled up into it.
+- **has_legal_joinclause with join_is_legal's LATERAL checks** (`outerjoins.rs`, join 440):
+  a clause to an item whose LATERAL references can't be met from there (`t1.f1 = ss2.f1`
+  with `ss2` reading `ss1`, which reads the nullable `i8`: join_plus_rhs) is no legal one, so
+  the left join's order restriction makes `t1 ⟕ i8` at level 2 and the search finishes with
+  all four items (it fell back to planning `ss2` above the rest, without a Memoize).
+- **Memoize keys over a subquery's outputs** (`joins::memo_ndistinct_keyed`, join 440):
+  estimate_num_groups takes a subquery output's relation to be the subquery (examine_variable's
+  vardata->rel), its tuples for the distinct count when there are no statistics (fewer than
+  DEFAULT_NUM_DISTINCT) and as the clamp: `Cache Key: (i8.q1), t2.f1` over a one-row LIMIT
+  subquery is one value.
+- **A PlaceHolderVar's join selectivity** (`Search::join_var`, join 430): examine_variable
+  over a PlaceHolderVar takes the relations of its ph_eval_at; evaluated at one, that
+  relation without statistics, else none, the default 200 (it counted a constant one as one
+  value, which is estimate_num_groups', not eqjoinsel's): `(NULL::integer) = i8b1.q2` keeps 5
+  rows, not 25, and `i8 ⟕ i4` stays at the top.
+- **Classes with a constant relate their items** (`Search::const_ecs`, join 450):
+  `i8.q1 = ss1.c2` with `ss1.c2 = 0` puts `i8` and `i43` in one class with `0` and no join
+  clause; have_relevant_eclass_joinclause still counts them joinable (has_eclass_joins), so the
+  search makes `i8 × i43` as Postgres does (only in a group without outer joins: one join
+  domain). A PlaceHolderVar a join computes comes after the join relation's columns in that
+  relation's own order (build_joinrel_tlist over the first pair it was made from).
+- **`name = text` as a merge key** (agent 19's open item): the clause (nameeqtext /
+  texteqname, in the btree text_ops family) is mergeable; its class sorts under the comparison's
+  collation, the name side's C, so a text side sorts `COLLATE "C"` (`Sort Key: tx.i COLLATE
+  "C"`), an outer join's sides too (initialize_mergeclause_eclasses makes each side's class with
+  the clause's collation). A text column's own order (an index, an ORDER BY) isn't that class's
+  unless the column is `COLLATE "C"` (`Search::order_ec`), and an index of a text column of
+  another collation doesn't take the clause as an index qual (IndexCollMatchesExprColl).
+
+Goldens: `tests/sql/a25_join_parity.sql`, `a25_name_text_merge.sql`.
+
+Still open, and why:
+
+- join 426: the USING column `x` of `ss1 left join ss2 using (x)` (`(ss1.x)::bigint`, ss1's
+  `123`) read above `i0 left join (...) ss0` is Postgres's PlaceHolderVar over the join alias
+  expansion (flatten_join_alias_vars wraps a non-Var expansion of an alias Var with
+  varnullingrels, phrels the join's relations: `'123'::bigint` computed at `i1 ⟕ i2`). The
+  engine binds join aliases as expressions of the joined columns, so `123` is ss1's
+  PlaceHolderVar at `i1`'s scan and the cast is above. Treating merged columns as a
+  projection over the join would make every USING join with a cast or COALESCE an opaque
+  subquery leaf; not done.
+- join 332: the WHERE `ss1.loc = ss1.lat` (`lat` a LATERAL value, a PlaceHolderVar with
+  ph_eval_at `{i81, i42}` under the right join as written) is pushed into `i42`'s scan by the
+  binder (add_filter_phv takes a LATERAL value as a plain value), and even kept above the
+  subquery it becomes `i42.f1 = i41.f1` when the outer level gathers the planned join again:
+  the join clause needs a required-relations mark that survives regathering. Tried and
+  reverted.
+- join 345, 360, 362 / 363 (362 / 363 now also wait for agent 27's per-place SubPlan copies),
+  partition_join 41 / 204: as agent 19 left them. 41 / 204 need PlaceHolderVars with
+  ph_lateral (a LATERAL join subquery's `least(t1.a, t2.a, t3.b)` evaluated at `t2 ⋈ t3`,
+  that join parameterized by `t1`); the engine doesn't pull a LATERAL join subquery up, and
+  its PlaceHolderVars have no lateral set to make their evaluation join LATERAL-dependent.
+- Seen while probing: `name = text` with a text column declared `COLLATE "C"` shows its
+  merge / hash condition relabeled (`(tc.i)::text = nk.s`; Postgres `tc.i = nk.s`: the
+  column has the class's collation already); EXPLAIN's `name_text_relabel` doesn't see column
+  collations.
 
 ## Round 16, agent 24 (row marks: several locking clauses, preprocess_rowmarks' order, whole-row mark widths)
 
@@ -3288,7 +3379,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 895 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (30) |
+| join | 925 | 900 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (25) |
 | aggregates | 556 | 556 | 100% | yes | no |  |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |

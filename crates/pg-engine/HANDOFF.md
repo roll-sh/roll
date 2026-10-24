@@ -17,9 +17,9 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,102 of 51,150 statements match (99.91%).** 48 differ. The full
+- **Regression suite: 51,107 of 51,150 statements match (99.92%).** 43 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - All 48 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
+  - All 43 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
     order since round 16, agent 17: join relations parameterized by LATERAL references).
   - None differs by design any more (aggregates `balk` matches since round 16, agent 14: a
     Finalize Aggregate runs the user-defined combine functions).

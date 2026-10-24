@@ -200,27 +200,60 @@ pub fn memo_ndistinct(
     vars: &[(Option<VarRef>, Option<f64>, f64)],
     rows: f64,
 ) -> Option<f64> {
+    let keyed: Vec<_> = vars.iter().map(|v| (v.clone(), None)).collect();
+    memo_ndistinct_keyed(cat, &keyed, rows)
+}
+
+/// `memo_ndistinct` with each variable's relation given (`Some((id, tuples))`) where it isn't
+/// its statistics' table: a subquery's output, whose vardata->rel is the subquery's
+/// relation (examine_variable), grouped and clamped by that relation's tuples; one without
+/// statistics counts its relation's tuples as distinct values when they are fewer than
+/// DEFAULT_NUM_DISTINCT (get_variable_numdistinct), else the default.
+pub fn memo_ndistinct_keyed(
+    cat: &Catalog,
+    vars: &[((Option<VarRef>, Option<f64>, f64), Option<(u64, f64)>)],
+    rows: f64,
+) -> Option<f64> {
     let mut total = 1.0;
-    // Per relation: (table, product of distinct counts, tuples, rows, columns, max).
-    let mut rels: Vec<(u32, f64, f64, f64, usize, f64)> = Vec::new();
-    for (var, distinct, leaf_rows) in vars {
-        match var {
-            Some(v) => {
+    // Per relation: (relation, product of distinct counts, tuples, rows, columns, max).
+    let mut rels: Vec<(u64, f64, f64, f64, usize, f64)> = Vec::new();
+    for ((var, distinct, leaf_rows), rel) in vars {
+        let (key, nd, tuples, rel_rows) = match (var, rel) {
+            (Some(v), None) => {
                 let (nd, def) = v.ndistinct(cat);
                 if def {
                     return None;
                 }
                 let rel_rows = if v.rows > 0.0 { v.rows } else { *leaf_rows };
-                match rels.iter_mut().find(|r| r.0 == v.table.oid) {
-                    Some(r) => {
-                        r.1 *= nd;
-                        r.4 += 1;
-                        r.5 = r.5.max(nd);
-                    }
-                    None => rels.push((v.table.oid, nd, v.tuples, rel_rows, 1, nd)),
-                }
+                (v.table.oid as u64, nd, v.tuples, rel_rows)
             }
-            None => total *= (*distinct)?,
+            (Some(v), Some((id, tuples))) => {
+                let mut v = v.clone();
+                v.tuples = *tuples;
+                let (nd, def) = v.ndistinct(cat);
+                if def {
+                    return None;
+                }
+                (*id, nd, *tuples, *tuples)
+            }
+            (None, Some((id, tuples))) if distinct.is_none() => {
+                if *tuples <= 0.0 || *tuples >= costs::DEFAULT_NUM_DISTINCT {
+                    return None;
+                }
+                (*id, costs::clamp_rows(*tuples), *tuples, *tuples)
+            }
+            (None, _) => {
+                total *= (*distinct)?;
+                continue;
+            }
+        };
+        match rels.iter_mut().find(|r| r.0 == key) {
+            Some(r) => {
+                r.1 *= nd;
+                r.4 += 1;
+                r.5 = r.5.max(nd);
+            }
+            None => rels.push((key, nd, tuples, rel_rows, 1, nd)),
         }
     }
     for (_, mut nd, tuples, rel_rows, nvars, maxnd) in rels {

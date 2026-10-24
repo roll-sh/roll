@@ -33,6 +33,39 @@ fn nonstrict(e: &Expr) -> bool {
 /// volatile call, and no reference to a query further out than the join's LATERAL values.
 fn movable(e: &Expr) -> bool {
     let mut ok = !e.is_volatile();
+    // (A CASE's operand placeholder inside its own WHEN tests moves with the CASE.)
+    let e = &e
+        .clone()
+        .transform(&mut |x| {
+            Ok(match x {
+                Expr::Case {
+                    operand: Some(o),
+                    whens,
+                    else_,
+                    ty,
+                } => Expr::Case {
+                    operand: Some(o),
+                    whens: whens
+                        .into_iter()
+                        .map(|(c, r)| {
+                            let c = c
+                                .transform(&mut |y| {
+                                    Ok(match y {
+                                        Expr::CaseTest(t) => Expr::Const(Value::Null, t),
+                                        y => y,
+                                    })
+                                })
+                                .unwrap();
+                            (c, r)
+                        })
+                        .collect(),
+                    else_,
+                    ty,
+                },
+                x => x,
+            })
+        })
+        .unwrap();
     e.walk(&mut |x| match x {
         // (A call of a function that isn't volatile is a function call: it moves.)
         Expr::Subquery(s) if s.call.is_some() && matches!(s.func, Some('i' | 's')) => {}
@@ -105,6 +138,33 @@ fn subst_outer(e: Expr, params: &[Expr]) -> Expr {
 /// Whether the plan reads any value of an enclosing level (a LATERAL join's parameters
 /// included).
 fn reads_outer(p: &Plan) -> bool {
+    // (A nested loop passing its inner side parameters: the inner side's `Outer(1, …)`
+    // are those, values of its outer side; the level's own come in through them.)
+    if let Plan::Join {
+        left, right, params, cond, hash, ..
+    } = p
+        && !params.is_empty()
+    {
+        let mut deeper = false;
+        let mut exprs = Vec::new();
+        let mut stack: Vec<&Plan> = vec![right];
+        while let Some(q) = stack.pop() {
+            exprs.clear();
+            crate::sql::explain::node_exprs(q, &mut exprs);
+            if let Plan::Scan(sp) = q {
+                exprs.extend(sp.written.iter());
+                exprs.extend(sp.phv_quals.iter());
+            }
+            for e in &exprs {
+                e.walk(&mut |x| deeper |= matches!(x, Expr::Outer(d, ..) if *d != 1));
+            }
+            stack.extend(crate::sql::explain::plan_inputs(q).into_iter().map(|a| &**a));
+        }
+        return deeper
+            || params.iter().chain(cond.iter()).any(|e| e.has_outer_refs())
+            || hash.as_ref().is_some_and(|(l, r)| l.iter().chain(r).any(|e| e.has_outer_refs()))
+            || reads_outer(left);
+    }
     let mut exprs = Vec::new();
     crate::sql::explain::node_exprs(p, &mut exprs);
     if let Plan::Scan(sp) = p {
@@ -168,19 +228,29 @@ fn flatten_join_subquery(p: &Plan, nulled: u32, anulled: u32, cx: &mut Cx) -> Op
     let Plan::Project { input, exprs } = proj else {
         return None;
     };
-    // (A projection over another one, over the join: the two composed.)
+    // (Projections over another one, over the join: composed. A planned subquery's
+    // join can sit under several: its columns put back in order, a removed join's
+    // columns as constants.)
+    let mut chain: Vec<&Vec<Expr>> = vec![exprs];
+    let mut below = input;
+    while let Plan::Project { input: i2, exprs: e2 } = &**below
+        && crate::sql::plan::phv_projection(below).is_none()
+        && virtual_proj(below).is_none()
+        && e2.iter().all(|e| matches!(e, Expr::Col(..)) || movable(e))
+    {
+        chain.push(e2);
+        below = i2;
+    }
     let composed: Vec<Expr>;
-    let (input, exprs) = match &**input {
-        Plan::Project { input: i2, exprs: e2 }
-            if crate::sql::plan::phv_projection(input).is_none()
-                && virtual_proj(input).is_none()
-                && e2.iter().all(|e| matches!(e, Expr::Col(..)) || movable(e))
-                && join_subquery(i2) =>
-        {
-            composed = exprs.iter().map(|e| subst(e, e2)).collect();
-            (i2, &composed)
+    let (input, exprs) = if chain.len() > 1 && join_subquery(below) {
+        let mut acc = chain.pop().unwrap().clone();
+        while let Some(upper) = chain.pop() {
+            acc = upper.iter().map(|e| subst(e, &acc)).collect();
         }
-        _ => (input, exprs),
+        composed = acc;
+        (below, &composed)
+    } else {
+        (input, exprs)
     };
     // An output an outer join above nulls (as written: pull-up comes before
     // reduce_outer_joins) that wouldn't go NULL with the subquery's rows: a
@@ -219,7 +289,9 @@ fn flatten_join_subquery(p: &Plan, nulled: u32, anulled: u32, cx: &mut Cx) -> Op
         .iter()
         .zip(&direct)
         .map(|(e, d)| {
-            if needs_phv(e) {
+            // (Judged on the output as its own pulled-up subqueries left it: a column
+            // of one that became its constant needs one too.)
+            if needs_phv(d) {
                 phvs.push(d.clone());
                 Expr::Col(w2 + phvs.len() - 1, e.ty())
             } else {
@@ -958,6 +1030,35 @@ fn lift(
                     return (scan, exprs.clone(), vec![(nulled, rel); w]);
                 }
             }
+            // (A clause pushed down onto a single-table subquery from above, a WHERE over
+            // its outputs: the subquery pulled up all the same, the clause over its outputs
+            // as the query reads them, PlaceHolderVars included (one restricting the
+            // relation the PlaceHolderVar is evaluated at, distribute_qual_to_rels).)
+            if lateral.is_none()
+                && let Plan::Filter { input, pred } = p
+                && subquery_leaf(input).is_some()
+                && clauses_movable(pred)
+            {
+                let before = std::mem::take(&mut cx.lifted);
+                let (plan, map, nul) = lift(input, nulled, anulled, None, cx);
+                let changed = cx.lifted;
+                cx.lifted |= before;
+                if !changed {
+                    return (p.clone(), map, nul);
+                }
+                let pred = subst(pred, &map);
+                let plan = match plan {
+                    Plan::Scan(mut sp) => {
+                        sp.filter = and_all(sp.filter.take().into_iter().chain([pred]).collect());
+                        Plan::Scan(sp)
+                    }
+                    plan => Plan::Filter {
+                        input: Arc::new(plan),
+                        pred,
+                    },
+                };
+                return (plan, map, nul);
+            }
             let Some((sp, exprs)) = subquery_leaf(p) else {
                 return identity(p, cx);
             };
@@ -1006,7 +1107,13 @@ fn lift(
                 && exprs[..ncol].windows(2).all(|w| matches!((&w[0], &w[1]), (Expr::Col(a, _), Expr::Col(b, _)) if a < b))
                 && exprs[ncol..].iter().all(|e| !matches!(e, Expr::Col(..)))
                 && !up.iter().any(|u| *u);
-            if (exprs.iter().all(|e| matches!(e, Expr::Col(..))) || canonical) && !lateral_where {
+            // (A subquery selecting some of its table's columns is the table in the join
+            // tree too, pulled up as any simple subquery: its paths the group's, the
+            // parameterized ones included.)
+            let picks = exprs.iter().all(|e| matches!(e, Expr::Col(..)))
+                && lateral.is_none()
+                && !(exprs.len() == sw && exprs.iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i)));
+            if (exprs.iter().all(|e| matches!(e, Expr::Col(..))) && !picks || canonical) && !lateral_where {
                 // (All the relation's columns, then its PlaceHolderVars: the scan is the join
                 // group's relation, the PlaceHolderVars evaluated at it.)
                 if canonical

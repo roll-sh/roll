@@ -469,6 +469,10 @@ struct Search<'s, 'c, 'a> {
     /// (get_joinrel_parampathinfo, get_parameterized_joinrel_size), which every path of
     /// that parameterization has.
     ppi: std::cell::RefCell<Vec<(u32, u32, f64)>>,
+    /// Per equivalence class with a constant that the restrictions of several items
+    /// equate with it (`a.x = 0 AND b.y = 0`: one class, no join clause), those items
+    /// (have_relevant_eclass_joinclause counts them as joinable: the join is likely small).
+    const_ecs: Vec<u32>,
 }
 
 /// A PlaceHolderVar of the group (`plan::phv_projection`): its column of the group's
@@ -662,6 +666,20 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
 
     fn join_var(&self, e: &Expr) -> joins::JoinVar {
         match key_col(e) {
+            // A PlaceHolderVar: examine_variable takes the relations of its ph_eval_at
+            // (pull_varnos); evaluated at one, that relation without statistics for it
+            // (its tuples as distinct values when fewer than the default), else no
+            // relation at all: the default. (A grouping counts a constant one once,
+            // `var_of`; a join's selectivity doesn't.)
+            Some(g) if let Some(p) = self.phv(g) => {
+                let leaf = (p.eval_at.count_ones() == 1).then(|| &self.leaves[p.eval_at.trailing_zeros() as usize]);
+                let tuples = leaf.map(|l| l.scan.as_ref().map_or(l.rows, |(_, r)| r.size.tuples));
+                joins::JoinVar {
+                    var: None,
+                    distinct: tuples.filter(|t| *t < costs::DEFAULT_NUM_DISTINCT).map(costs::clamp_rows),
+                    rel_rows: self.leaves[self.leaf_of[g]].rows,
+                }
+            }
             Some(g) => {
                 let (var, distinct, rows) = self.var_of(g);
                 joins::JoinVar {
@@ -1260,7 +1278,7 @@ impl Search<'_, '_, '_> {
             };
             let g = leaf.off + local;
             let gk = GKey {
-                ec: self.ec[g],
+                ec: self.order_ec(g),
                 desc: k.desc,
                 nulls_first: k.nulls_first,
             };
@@ -1538,7 +1556,7 @@ impl Search<'_, '_, '_> {
                 }
                 let mut gk: Vec<GKey> = Vec::new();
                 for &(c, desc, nulls_first) in &p.order {
-                    let k = GKey { ec: self.ec[leaf.off + c], desc, nulls_first };
+                    let k = GKey { ec: self.order_ec(leaf.off + c), desc, nulls_first };
                     if !gk.iter().any(|x| x.ec == k.ec) {
                         gk.push(k);
                     }
@@ -1636,6 +1654,47 @@ impl Search<'_, '_, '_> {
         })
     }
 
+    /// A class a `name = text` merge clause has a side in: its collation is the
+    /// comparison's, the name side's C (a non-default implicit collation beats the
+    /// default), so its order is C's. (An outer join's clause too: each side's class is
+    /// made with the clause's collation, initialize_mergeclause_eclasses.)
+    fn ec_name_text(&self, ec: usize) -> bool {
+        self.clauses.iter().any(|c| {
+            c.mergeable
+                && c.eq.as_ref().is_some_and(|(a, b, _, _)| {
+                    crate::sql::binder::optimize::name_text_pair(&a.ty(), &b.ty())
+                        && [a, b].iter().any(|x| key_col(x).is_some_and(|g| self.ec[g] == ec))
+                })
+        })
+    }
+
+    /// Whether column `g` sorts under C by itself: a `name`, or a text column declared
+    /// COLLATE "C".
+    fn c_ordered(&self, g: usize) -> bool {
+        if self.col_type(g).without_typmod() == DataType::Name {
+            return true;
+        }
+        let l = self.leaf_of[g];
+        let leaf = &self.leaves[l];
+        leaf.cols
+            .get(g - leaf.off)
+            .and_then(|c| c.1.as_ref())
+            .filter(|v| v.expr.is_none())
+            .and_then(|v| v.table.columns.get(v.col).and_then(|c| c.collation.clone()))
+            .is_some_and(|n| n == "C")
+    }
+
+    /// The class column `g`'s own order stands for (a pathkey's EC with its collation): its
+    /// class, unless that is a `name = text` class whose C order isn't the column's (its
+    /// index or ORDER BY sorts under its own collation: an EC of its own).
+    fn order_ec(&self, g: usize) -> usize {
+        let ec = self.ec[g];
+        if self.ec_name_text(ec) && !self.c_ordered(g) {
+            return self.ec.len() + g;
+        }
+        ec
+    }
+
     /// A column's equivalence class has a member in another leaf than `set`'s.
     fn ec_has_other(&self, g: usize, set: u32) -> bool {
         let e = self.ec[g];
@@ -1661,7 +1720,7 @@ impl Search<'_, '_, '_> {
             }
             match &k.expr {
                 Expr::Col(c, _) => out.push(GKey {
-                    ec: self.ec[off + c],
+                    ec: self.order_ec(off + c),
                     desc: k.desc,
                     nulls_first: k.nulls_first,
                 }),
@@ -1703,6 +1762,17 @@ impl Search<'_, '_, '_> {
             for (a, b, al, bl) in sides {
                 for (mine, other, ml, ol) in [(&a, &b, al, bl), (&b, &a, bl, al)] {
                     if ml != set || ol & set != 0 {
+                        continue;
+                    }
+                    // (`text = name` compares under C: an index of a text column of
+                    // another collation doesn't match it, IndexCollMatchesExprColl.)
+                    if crate::sql::binder::optimize::name_text_pair(&mine.ty(), &other.ty())
+                        && mine.ty().without_typmod() != DataType::Name
+                        && key_col(mine).is_none_or(|g| {
+                            g < leaf.off
+                                || r.table.columns.get(g - leaf.off).is_none_or(|col| col.collation.as_deref() != Some("C"))
+                        })
+                    {
                         continue;
                     }
                     let local = match key_col(mine) {
@@ -4149,8 +4219,18 @@ impl Search<'_, '_, '_> {
                 }
             }
         }
-        let vs: Vec<_> = vars.into_iter().map(|g| self.var_of(g)).collect();
-        (joins::memo_ndistinct(&self.pl.cat, &vs, rows), width)
+        // (A column of a FROM item that isn't a table scan, a subquery's output: its
+        // relation is the item, examine_variable's vardata->rel.)
+        let vs: Vec<_> = vars
+            .into_iter()
+            .map(|g| {
+                let l = self.leaf_of[g];
+                let leaf = &self.leaves[l];
+                let opaque = leaf.scan.is_none() && leaf.members.is_none() && self.phv(g).is_none();
+                (self.var_of(g), opaque.then(|| ((1u64 << 40) | l as u64, costs::clamp_rows(leaf.rows))))
+            })
+            .collect();
+        (joins::memo_ndistinct_keyed(&self.pl.cat, &vs, rows), width)
     }
 
     /// get_joinrel_parampathinfo: the clauses a join path parameterized by `req_all` (beyond
@@ -4733,6 +4813,7 @@ impl Search<'_, '_, '_> {
         for l in 0..n {
             self.base_rel(l);
         }
+        self.const_ecs = self.find_const_ecs();
         // Rels of each level, in creation order.
         let mut levels: Vec<Vec<usize>> = vec![Vec::new(); n + 1];
         levels[1] = (0..n).collect();
@@ -4744,6 +4825,7 @@ impl Search<'_, '_, '_> {
                 // items before it can be checked (a parameterized path's).
                 !s.crossing(a, b).is_empty()
                     || s.clauses.iter().any(|c| c.leaves & a != 0 && c.leaves & b != 0)
+                    || s.const_ec_relevant(a, b)
             }
         };
         for level in 2..=n {
@@ -4754,8 +4836,9 @@ impl Search<'_, '_, '_> {
                 let has_join = if self.general {
                     self.clauses.iter().any(|c| c.req & rs != 0 && c.req & !rs != 0)
                         || self.has_join_restriction(rs)
+                        || self.const_ec_joins(rs)
                 } else {
-                    self.clauses.iter().any(|c| c.leaves & rs != 0 && c.leaves & !rs != 0)
+                    self.clauses.iter().any(|c| c.leaves & rs != 0 && c.leaves & !rs != 0) || self.const_ec_joins(rs)
                 };
                 let first = if level == 2 { pi + 1 } else { 0 };
                 for &b in levels[1].iter().skip(first) {
@@ -4782,8 +4865,10 @@ impl Search<'_, '_, '_> {
                     let joinable = if self.general {
                         self.clauses.iter().any(|c| c.req & as_ != 0 && c.req & !as_ != 0)
                             || self.has_join_restriction(as_)
+                            || self.const_ec_joins(as_)
                     } else {
                         self.clauses.iter().any(|c| c.leaves & as_ != 0 && c.leaves & !as_ != 0)
+                            || self.const_ec_joins(as_)
                     };
                     if !joinable {
                         continue;
@@ -4818,6 +4903,59 @@ impl Search<'_, '_, '_> {
         self.final_path(top)
     }
 
+    /// The items whose restrictions equate one of their columns with the same
+    /// pseudo-constant (process_equivalence matches a constant member within a join
+    /// domain: one class), per such constant: only in a group without outer joins, one
+    /// join domain.
+    fn find_const_ecs(&self) -> Vec<u32> {
+        if !self.sjs.is_empty() {
+            return Vec::new();
+        }
+        let mut classes: Vec<(Expr, u32)> = Vec::new();
+        for (l, leaf) in self.leaves.iter().enumerate() {
+            let filter = match (&leaf.scan, &leaf.plan) {
+                (Some((sp, _)), _) => sp.filter.as_ref(),
+                (None, Plan::Scan(sp)) => sp.filter.as_ref(),
+                _ => None,
+            };
+            let Some(f) = filter else { continue };
+            let mut parts = Vec::new();
+            conjuncts(f.clone(), &mut parts);
+            for q in parts {
+                let Expr::Call(d, args, _) = &q else { continue };
+                if d.name != "=" || args.len() != 2 || d.coll.as_ref().is_some_and(|c| !c.deterministic) {
+                    continue;
+                }
+                let k = match (&args[0], &args[1]) {
+                    (Expr::Col(..), k) | (k, Expr::Col(..))
+                        if k.columns().is_empty()
+                            && !k.is_volatile()
+                            && crate::sql::binder::optimize::pseudo_constant(k) =>
+                    {
+                        k
+                    }
+                    _ => continue,
+                };
+                match classes.iter_mut().find(|(e, _)| e.same_as(k) && e.ty() == k.ty()) {
+                    Some(c) => c.1 |= 1u32 << l,
+                    None => classes.push((k.clone(), 1u32 << l)),
+                }
+            }
+        }
+        classes.into_iter().map(|c| c.1).filter(|m| m.count_ones() > 1).collect()
+    }
+
+    /// have_relevant_eclass_joinclause for a class with a constant: `a` and `b` each have
+    /// a member.
+    fn const_ec_relevant(&self, a: u32, b: u32) -> bool {
+        self.const_ecs.iter().any(|&m| m & a != 0 && m & b != 0)
+    }
+
+    /// has_eclass_joins through a class with a constant: a member outside `a`.
+    fn const_ec_joins(&self, a: u32) -> bool {
+        self.const_ecs.iter().any(|&m| m & a != 0 && m & !a != 0)
+    }
+
     /// The query's order as group keys.
     fn query_keys(&self) -> Vec<GKey> {
         self.order
@@ -4826,7 +4964,7 @@ impl Search<'_, '_, '_> {
                 o.keys
                     .iter()
                     .map(|&(g, desc, nulls_first)| GKey {
-                        ec: self.ec[g],
+                        ec: self.order_ec(g),
                         desc,
                         nulls_first,
                     })
@@ -5057,8 +5195,12 @@ impl Search<'_, '_, '_> {
         }
         // (The relation's target list: the columns needed above it, then the
         // PlaceHolderVars it computes.)
+        // (Its columns in the join relation's own order, build_joinrel_tlist over the
+        // first pair it was made from.)
         let n = layout.len();
-        let mut keep: Vec<usize> = (0..n).filter(|&i| self.needed_above(layout[i], set)).collect();
+        let order = self.tlist_order(set, &layout);
+        let order: Vec<usize> = if order.is_empty() { (0..n).collect() } else { order };
+        let mut keep: Vec<usize> = order.into_iter().filter(|&i| self.needed_above(layout[i], set)).collect();
         if keep.is_empty() && n > 0 {
             keep.push(0);
         }
@@ -5445,8 +5587,21 @@ impl Search<'_, '_, '_> {
                                 });
                             };
                             let ty = self.col_type(g);
+                            // (A text member of a `name = text` class: sorted under the
+                            // class's C collation, `Sort Key: tx.i COLLATE "C"`.)
+                            let using = if self.ec_name_text(k.ec) && !self.c_ordered(g) {
+                                crate::types::collation::by_name(&self.pl.cat, "C").and_then(|c| {
+                                    let lt = crate::sql::func::resolve_binop("<", &ty, &ty).ok()?.def;
+                                    Some(Arc::new(FuncDef {
+                                        coll: Some(c),
+                                        ..(*lt).clone()
+                                    }))
+                                })
+                            } else {
+                                made_type_order(&self.pl.cat, &ty)
+                            };
                             Some(SortKey {
-                                using: made_type_order(&self.pl.cat, &ty),
+                                using,
                                 expr: Expr::Col(pos(layout, g)?, ty),
                                 desc: k.desc,
                                 nulls_first: k.nulls_first,
@@ -7074,6 +7229,7 @@ impl Planner<'_, '_> {
             phvs,
             derives: Default::default(),
             ppi: Default::default(),
+            const_ecs: Vec::new(),
         };
         s.needed.resize(gw, false);
         for (ci, (e, on)) in raw_clauses.into_iter().enumerate() {
@@ -7129,10 +7285,15 @@ impl Planner<'_, '_> {
                             commutes = comm;
                             (hashes, merges && cols)
                         }
+                        // (`name = text`: in the btree text_ops family too, a merge key
+                        // whose class sorts under the name side's C collation.)
                         None => (
                             (same && crate::sql::binder::optimize::hashable_type(&ta))
                                 || crate::sql::binder::optimize::name_text_pair(&ta, &tb),
-                            same && mergeable(&ta) && cols,
+                            (same && mergeable(&ta) && cols)
+                                || (crate::sql::binder::optimize::name_text_pair(&ta, &tb)
+                                    && key_col(a).is_some()
+                                    && key_col(b).is_some()),
                         ),
                     }
                 }

@@ -437,12 +437,8 @@ pub(super) fn phv_eval_at(phvs: &[(usize, Expr, u32, u32)], leaf_of: &[usize]) -
 
 impl Search<'_, '_, '_> {
     /// join_is_legal: whether the items of `a` and `b` may be joined now, and if so as
-    /// which outer join (None: an inner join) and whether `b` is its left side.
-    pub(super) fn join_is_legal(&self, a: u32, b: u32) -> Option<(Option<usize>, bool)> {
-        self.join_is_legal_u(a, b).map(|(sj, rev, _)| (sj, rev))
-    }
-
-    /// join_is_legal, and whether the join is legal only with the semi join's right side
+    /// which outer join (None: an inner join) and whether `b` is its left side; and
+    /// whether the join is legal only with the semi join's right side
     /// unique-ified (it is exactly one side, the other less than the semi join's left side).
     pub(super) fn join_is_legal_u(&self, a: u32, b: u32) -> Option<(Option<usize>, bool, bool)> {
         let j = a | b;
@@ -574,7 +570,12 @@ impl Search<'_, '_, '_> {
             if a & b != 0 {
                 continue;
             }
-            if self.relevant_clause(a, b) && self.join_is_legal(a, b).is_some() {
+            // (join_is_legal with its LATERAL checks: a clause to an item whose LATERAL
+            // references can't be met from there is no legal one.)
+            if self.relevant_clause(a, b)
+                && let Some((sj, rev, u)) = self.join_is_legal_u(a, b)
+                && self.lateral_legal(a, b, sj, rev, u)
+            {
                 return true;
             }
         }
@@ -586,7 +587,7 @@ impl Search<'_, '_, '_> {
     pub(super) fn relevant_clause(&self, a: u32, b: u32) -> bool {
         self.clauses.iter().any(|c| {
             c.req != 0 && c.req & !(a | b) == 0 && c.req & a != 0 && c.req & b != 0
-        })
+        }) || self.const_ec_relevant(a, b)
     }
 
     /// The clauses to check at the join of `a` and `b`: those needing items of both and
