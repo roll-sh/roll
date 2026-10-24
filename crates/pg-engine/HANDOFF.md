@@ -77,7 +77,12 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   statement by statement, runs TLP / NoREC oracles and planner-setting variants, and reduces
   failures to minimal reproducers. `smoke` (fixed seeds, a few minutes) is a regression check
   against `tests/difftest/smoke_known.txt`. Score, what it found and fixed, and what is open:
-  `tests/difftest/STATUS.md`.
+  `tests/difftest/STATUS.md`. Round 17 ran about 50,000 statements; its wrong-results fixes:
+  grouping sets nulling constants they shouldn't, max / min ties, bpchar keys (merge joins,
+  grouping, set operations), self-join elimination over outer join clauses. Open wrong
+  results: a pseudoconstant qual of an inner join under an outer join gating the outer join
+  (`c LEFT JOIN (a JOIN b ON (SELECT false)) ON ...` loses c's rows), and the empty grouping
+  set over no input rows (constants equal to keys).
 
 ## Repository layout
 

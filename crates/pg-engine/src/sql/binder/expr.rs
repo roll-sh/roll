@@ -8731,6 +8731,21 @@ fn indeterminate_hash(args: &[Value], _: &func::FnCtx) -> Result<Value> {
 /// a nested loop compares (and fails comparing two values); a hash join fails hashing one.
 pub(crate) fn check_merge_keys(ctx: &crate::exec::ExecCtx, plan: &mut Plan) -> Result<()> {
     let bad = |k: &Expr| matches!(k, Expr::Call(d, ..) if d.name == INDETERMINATE_HASH);
+    // (A constant-false restriction of the FULL JOIN's own join relation marks it dummy
+    // before any path is looked for (restriction_is_constant_false, after
+    // eval_const_expressions: `NOT NULL` too): it never runs.)
+    let constant_false = |e: &Expr| {
+        let mut plain = e.columns().is_empty() && e.is_immutable() && !e.has_outer_refs();
+        e.walk(&mut |x| plain &= !matches!(x, Expr::Subquery(_) | Expr::Param(..)));
+        plain && matches!(crate::sql::expr::eval(e, &[], ctx), Ok(Value::Bool(false) | Value::Null))
+    };
+    if let Plan::Filter { input, pred } = plan
+        && constant_false(pred)
+        && let Plan::Join { kind: crate::sql::plan::JoinKind::Full, left, right, .. } = Arc::make_mut(input)
+    {
+        check_merge_keys(ctx, Arc::make_mut(left))?;
+        return check_merge_keys(ctx, Arc::make_mut(right));
+    }
     // populate_joinrel_with_paths: a FULL JOIN no merge or hash join can run.
     if let Plan::Join { kind: crate::sql::plan::JoinKind::Full, cond, hash, nleft, params, .. } = &*plan
         && params.is_empty()

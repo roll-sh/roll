@@ -158,6 +158,14 @@ Batch 4 (`a35_sje_outer_join`):
   t8.id = t9.a AND t7.id = t9.a` (t2's key `id`) merged t7 into t8 and returned 2 of 4 rows
   (`paths/analyzejoins.rs` `self_join_pair`).
 
+Batch 5 (`a35_full_join_dummy`):
+
+- **Wrong error / wrong state**: a FULL JOIN under a constant-false restriction of its own
+  join relation (`WHERE false`, `WHERE NOT NULL`) raised "FULL JOIN is only supported with
+  merge-joinable or hash-joinable join conditions"; PostgreSQL marks the join relation dummy
+  first (restriction_is_constant_false), so `INSERT ... SELECT count(*) FROM (a FULL JOIN b ON
+  <not mergeable>) WHERE NOT NULL` inserts its one row.
+
 ## Open
 
 - **Wrong rows**: a pseudoconstant qual (an uncorrelated sub-select, an InitPlan) or a
@@ -190,8 +198,8 @@ Batch 4 (`a35_sje_outer_join`):
   not kept as a Subquery Scan (`UPDATE t x ... FROM (SELECT DISTINCT ON (id) ...) s`): the
   rows' physical order after the UPDATE differs, which an `INSERT ... SELECT ... ON CONFLICT
   DO NOTHING` then shows (planner costs; agents 26/28/31/33's area).
-- FULL JOIN error decisions where PostgreSQL makes the join dummy first (a constant-false
-  WHERE at the join, `restriction_is_constant_false`) or plans an inner FULL JOIN under an
-  `ON false` join: both directions seen.
+- FULL JOIN error decisions where PostgreSQL plans an inner FULL JOIN under an `ON false` join
+  (PostgreSQL errors, the engine doesn't), and dummy relations other than a constant-false
+  WHERE directly over the FULL JOIN.
 - Collation conflicts (42P21) PostgreSQL finds in branches the engine folds away, and the other
   way round (an implicit-collation conflict across a UNION with a NULL-collation column).
