@@ -1252,6 +1252,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "code-cluster"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "code-sql",
+ "futures",
+ "hex",
+ "hmac 0.12.1",
+ "http-body-util",
+ "libc",
+ "parking_lot",
+ "reqwest",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "code-control"
 version = "0.1.0"
 dependencies = [
