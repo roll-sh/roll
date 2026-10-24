@@ -703,6 +703,11 @@ impl<'b, 'a> Binder<'b, 'a> {
     /// A query bound elsewhere (an inlined CTE's) read here as a subquery: its scans take
     /// places in the range table after this level's, keeping their order.
     pub(crate) fn restamp_rti(&mut self, p: &mut crate::sql::plan::Plan) {
+        self.restamp_rti_below(p, 0)
+    }
+
+    /// `restamp_rti` for the scans at query levels `min_depth` and deeper only.
+    pub(crate) fn restamp_rti_below(&mut self, p: &mut crate::sql::plan::Plan, min_depth: usize) {
         fn scans<'p>(p: &'p mut crate::sql::plan::Plan, out: &mut Vec<&'p mut crate::sql::plan::ScanPlan>) {
             if let crate::sql::plan::Plan::Scan(s) = p {
                 out.push(s);
@@ -714,6 +719,7 @@ impl<'b, 'a> Binder<'b, 'a> {
         }
         let mut all = Vec::new();
         scans(p, &mut all);
+        all.retain(|s| s.rti.0 >> 40 >= min_depth);
         all.sort_by_key(|s| s.rti);
         let depth = self.levels.len() + 1;
         for s in all {

@@ -157,7 +157,13 @@ pub fn rel_size(t: &Table, ctx: &ExecCtx) -> RelSize {
         .relstats
         .get(&t.oid)
         .map_or((0.0, -1.0), |s| (s.pages as f64, s.tuples));
-    if curpages < 10.0 && reltuples < 0.0 && cat.children(t.oid).is_empty() {
+    // (Not for a table with inheritance children: relhassubclass, which stays set after
+    // the last child is dropped, until a VACUUM.)
+    if curpages < 10.0
+        && reltuples < 0.0
+        && cat.children(t.oid).is_empty()
+        && !cat.class_has_subclass.contains(&t.oid)
+    {
         curpages = 10.0;
     }
     if curpages == 0.0 {

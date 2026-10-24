@@ -35,17 +35,17 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51120 (**99.94%**) |
-| units differing | 30 |
-| files fully matching | 226 |
-| engine output == expected/*.out (pg_regress "ok") | 187 files |
+| units matching | 51121 (**99.94%**) |
+| units differing | 29 |
+| files fully matching | 227 |
+| engine output == expected/*.out (pg_regress "ok") | 188 files |
 | engine crashes / panics | none |
 
 ## Remaining differences, classified
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 30 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 29 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 30 units
-join (19), partition_join (9), partition_prune (1), returning (1)
+### EXPLAIN (group C1) — 29 units
+join (19), partition_join (9), partition_prune (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -106,6 +106,86 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 29 (rule actions over a view: range table order, NEW in the action's SET; whole-row Vars of subqueries)
+
+Subset runs of 45 files (returning, rules, updatable_views, with, triggers, merge, insert,
+update, delete, insert_conflict, portals, foreign_key, privileges, matview, generated_*, the
+planner-heavy files and their prerequisites), unit by unit: on e7e37e6 19297 -> 19298 with this
+batch (returning 105 fixed, nothing else moved); rebased onto a8de4bd, a run of that commit
+against one of this batch: 19306 -> 19307, only returning 105 moved (returning also equals
+`expected/returning.out` now). Rebased onto 35d7dbb (agent 27's join 442): 19307 -> 19308 against that commit's run, again only returning 105.
+Rebased onto dc5a6a2 (agent 26's batch): 19311 -> 19312 against that commit's run, only returning 105 (rowsecurity re-run alone: a concurrent run on the reference held its roles). Rebased onto ad16655 (agent 26's second batch): against the dc5a6a2 run, exactly agent 26's join 662, 663, 671, 706 and returning 105 moved (19316). The table goes to
+51121. Crate tests and clippy pass.
+
+| file | fixed units |
+|---|---|
+| returning | 105 (returning matches fully) |
+
+What changed:
+
+- **The rule action's range table** (`binder/rules.rs`). rewriteRuleAction puts the statement's
+  range table first, the action's after it, and a view the statement names is expanded and
+  pulled up only later (fireRIRrules, pull_up_subqueries): its relations are appended after
+  the action's own entries, and inheritance children after all of them. The `*RULE*` FROM item
+  (OLD / NEW) now stands where Postgres has OLD: last in the action's FROM list when it is OLD
+  alone (an UPDATE / DELETE without FROM items of its own: transformRuleStmt appends OLD to the
+  action's jointree), first when it also carries the statement's FROM items (adjustJoinTreeList
+  puts the statement's jointree first) or an item of the action reads OLD / NEW (LATERAL). The
+  relations of the statement's views and FROM subqueries are stamped after the action's own
+  (`Binder::restamp_rti_below`), so the names follow (the action's `joinme`, then the view's
+  `joinme_1`; the target `foo_1`, the view's `foo_2`), and with them the join search's order:
+  the cost tie between the two `joinme` scans goes the way Postgres's does, the first pair made
+  winning, with no tie-breaking change needed.
+- **NEW values in the action's SET** (`paths/joinpath/lift.rs`, now agent 25's composition of
+  stacked projections, which this batch had too): `*RULE*`'s projection of OLD / NEW over the
+  view's select list over its join is pulled up into the action's join tree, so `new.f3` is
+  `(foo_2.f3 + 1)` computed by the top join (ReplaceVarsFromTargetList, pullup_replace_vars),
+  not below it; EXPLAIN shows a SET value read from a projection merged into the join as that
+  join computes it (`(x + 1)`, not the reference `((x + 1))`; `computed_names`), also for a
+  plain `UPDATE ... SET a = v.x FROM (SELECT f + 1 AS x ...) v`.
+- **The processed target list over an inheritance parent** (`explain.rs` `expanded_tlist`,
+  preprocess_targetlist then expand_inherited_rtentry): the new values, the row marks' ctids,
+  what RETURNING reads of the other relations, then, per inheritance parent in range table
+  order, a row mark's tableoid or the target's row identity (tableoid, ctid). RETURNING's
+  columns were missing from an inherited target's join, and another parent's tableoid came
+  before the target's; a DELETE's join now carries what RETURNING reads too.
+- **A data-modifying statement's join target lists** (`junk_layout`): a join's columns in its
+  relations' range table order (build_joinrel_tlist from the first input pair the join search
+  makes, which pairs relations in that order), not its outer side's first.
+- **relhassubclass in estimate_rel_size** (`costs.rs` `rel_size`): a never-vacuumed table
+  whose relhassubclass is set (a child was dropped, no VACUUM since) gets no 10-page minimum
+  (table_block_relation_estimate_size), so its scans estimate its real pages (107 rows where
+  the engine had 1070).
+- **Whole-row Vars of a subquery not pulled up** (`binder/select.rs`, `explain.rs`): a FROM
+  subquery Postgres keeps (OFFSET 0, LIMIT, DISTINCT, GROUP BY, ...) has its whole row as a Var
+  of its Subquery Scan, `s.*` (`row_to_json(s.*)`), where the engine showed `ROW(s.a, s.b)`, and
+  its IS [NOT] NULL test stays whole (`(s.* IS NULL)`), as a CTE's does; a pulled-up one's is
+  still a ROW() of its outputs with the test expanded, as in Postgres.
+
+Goldens: `a29_rule_view_actions`, `a29_whole_row_subquery` (recorded from PostgreSQL 18.6).
+
+Left, and why:
+
+- A FROM subquery's whole row read above a join (`SELECT x.a, s FROM wt x, (... OFFSET 0) s
+  WHERE ...`): Postgres keeps its Subquery Scan and passes `s.*` up as one value (`Output:
+  s.*, s.a` on the scan and the Sort); the engine's whole row is a ROW() of the columns, which
+  go up one by one, so the subquery's scan is trivial and goes. Needs a whole-row column in the
+  plan (or EXPLAIN's target lists carrying one), HANDOFF's "a whole-row Var isn't passed up".
+- A base relation's columns in its reltarget order when a join clause reads them
+  (build_base_rel_tlists after the final target list, then the clauses as deconstruct_jointree
+  distributes them: a pulled-up view's ON clause before the WHERE's): `a29_foo_1.ctid,
+  a29_foo_1.f2, a29_foo_1.f1` where the engine shows `ctid, f1, f2` (agent 28's per-scan order).
+- A rule-rewritten DELETE's RETURNING column of another relation (`a29_plain.a`) is missing
+  from the joins and scan below the top join (EXPLAIN's needed masks see the action's own
+  RETURNING, not the statement's over it).
+- RETURNING reading a pulled-up subquery's computed output (`RETURNING v.x` for `x = f + 1`):
+  Postgres computes the expression in the ModifyTable over `f`, which the join returns; the
+  engine shows the join returning the computed value, referenced as `((f + 1))`.
+- A SELECT scan of a table whose relhassubclass is set but has no children returns its
+  physical target list; Postgres's is an appendrel member (no physical target list).
+
+Units this batch moves for other agents: none (the rebased run shows only returning 105).
 
 ## Round 16, agent 21 (expression members of equivalence classes; IN over a join pulled up, unique-ified joins)
 
@@ -3848,7 +3928,7 @@ produces no units on Linux (skipped by the file itself).
 | sequence | 265 | 265 | 100% | no | no |  |
 | polymorphism | 426 | 426 | 100% | yes | yes |  |
 | rowtypes | 237 | 237 | 100% | yes | no |  |
-| returning | 145 | 144 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| returning | 145 | 145 | 100% | yes | yes |  |
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 307 | 100% | yes | yes |  |
 | xml | 281 | 281 | 100% | yes | yes |  |

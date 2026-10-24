@@ -17,9 +17,9 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,120 of 51,150 statements match (99.94%).** 30 differ. The full
+- **Regression suite: 51,121 of 51,150 statements match (99.94%).** 29 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - All 30 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
+  - All 29 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
     order since round 16, agent 17: join relations parameterized by LATERAL references).
   - None differs by design any more (aggregates `balk` matches since round 16, agent 14: a
     Finalize Aggregate runs the user-defined combine functions).
@@ -370,9 +370,9 @@ them all with the "Fixed in round N" sections describing what was already tried.
    relations without index-only scans, locks pushed into FROM subqueries and views, and
    rule-rewritten statements explained as Postgres's list of plans (`explain.rs`
    `rule_statements`). Left (STATUS.md, round 16 agent 9): merge 462 (Inner Unique over an
-   empty partitioned target), returning 105 (the view's relations named after the rule
-   action's, a cost tie, the view's NEW values put into the action's SET: STATUS.md, round 16
-   agent 24). (Round 16, agent 15: the level with only `s.*` marks gets its LockRows, a
+   empty partitioned target). (returning 105, a rule action over a view: done in round 16,
+   agent 29: `*RULE*` placed where Postgres has OLD, the view's relations after the action's
+   in the range table, NEW computed in the action's SET.) (Round 16, agent 15: the level with only `s.*` marks gets its LockRows, a
    whole-row-marked subquery keeps every column; agent 20: a unique-ified semi join under FOR
    UPDATE locks above the join, a locked LIMIT subquery under its Limit, a DML statement's
    FROM subquery's `o.*`; agent 24: a level's several locking clauses all lock, marks in
@@ -394,8 +394,10 @@ Smaller known differences that don't fail a unit today (round 14, agent 11 fixed
 `((a + 1))` Sort output listed here before): a pulled-up one-row VALUES' constants aren't
 folded into the expressions over them (`SELECT a + b FROM (VALUES (1, 2)) t(a, b)`: Postgres
 shows `3`); a whole-row Var isn't passed up through a join or sort as one value (Postgres's scan
-returns `r.*, r.a`, the engine the columns); a FROM subquery not pulled up keeps a ROW() of its
-columns where Postgres shows `ss.*`, and its `IS NULL` expanded.
+returns `r.*, r.a`, the engine the columns), so a FROM subquery not pulled up whose whole row is
+read above a join loses its Subquery Scan (`SELECT x.a, s FROM t x, (... OFFSET 0) s`). (Read
+over the subquery's own scan it is `s.*` and its `IS NULL` stays whole since round 16, agent
+29.)
 
 Not started and lower priority: `roll_pk_clustered` adds a primary key's duplicate check by raw
 key bytes, so duplicates that are only equal under a nondeterministic collation aren't caught

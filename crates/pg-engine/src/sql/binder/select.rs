@@ -3637,6 +3637,9 @@ impl Binder<'_, '_> {
                     && !self.unplanned
                     && !self.deparse
                 {
+                    // (A subquery Postgres doesn't pull up: its whole row stays a Var to
+                    // it, its IS [NOT] NULL test not expanded.)
+                    rel.whole_var = true;
                     Plan::Barrier {
                         input: Arc::new(plan),
                         alias: name.clone(),

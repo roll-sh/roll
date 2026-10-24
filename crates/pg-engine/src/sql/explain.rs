@@ -1285,6 +1285,7 @@ thread_local! {
     static RULE_RETURNING: std::cell::RefCell<Option<Vec<Expr>>> = const { std::cell::RefCell::new(None) };
     /// The plan being explained is a rule's action (`rule_statements`).
     static RULE_ACTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
 }
 
 /// The statements a rule rewrote one into (QueryRewrite's list, each planned and explained
@@ -2302,11 +2303,60 @@ fn junk_layout(
     top: &[String],
     last: &[String],
     junk_of: &HashMap<usize, Vec<((u8, super::plan::Rti), String)>>,
+    rtis: &HashMap<usize, super::plan::Rti>,
 ) -> Vec<String> {
     let mut junk = Vec::new();
     for c in &mut n.children {
-        junk.extend(junk_layout(c, top, last, junk_of));
+        junk.extend(junk_layout(c, top, last, junk_of, rtis));
     }
+    junk_layout_node(n, top, last, junk_of, rtis, junk)
+}
+
+/// The range table positions of a plan's scans, by plan address (`junk_layout`).
+fn scan_rtis(p: &Plan) -> HashMap<usize, super::plan::Rti> {
+    fn go(p: &Plan, out: &mut HashMap<usize, super::plan::Rti>) {
+        if let Plan::Scan(s) = p {
+            out.insert(addr(p), s.rti);
+            return;
+        }
+        let r = leaf_rti(p);
+        if r.0 != usize::MAX {
+            out.insert(addr(p), r);
+            return;
+        }
+        for c in plan_inputs(p) {
+            go(c, out);
+        }
+    }
+    let mut out = HashMap::new();
+    go(p, &mut out);
+    out
+}
+
+/// The range table position of the relation each output of the scans at or under `n`
+/// comes from (`rtis`: the scans', by node key).
+fn output_rtis(n: &ExNode, rtis: &HashMap<usize, super::plan::Rti>, out: &mut HashMap<String, super::plan::Rti>) {
+    if (n.is_scan() || n.node_type == "Subquery Scan")
+        && let Some(r) = n.key.and_then(|k| rtis.get(&k).copied())
+    {
+        for o in &n.output {
+            out.entry(o.clone()).or_insert(r);
+        }
+        return;
+    }
+    for c in &n.children {
+        output_rtis(c, rtis, out);
+    }
+}
+
+fn junk_layout_node(
+    n: &mut ExNode,
+    top: &[String],
+    last: &[String],
+    junk_of: &HashMap<usize, Vec<((u8, super::plan::Rti), String)>>,
+    rtis: &HashMap<usize, super::plan::Rti>,
+    mut junk: Vec<String>,
+) -> Vec<String> {
     if (n.is_scan() || n.node_type == "Subquery Scan")
         && let Some(js) = n.key.and_then(|k| junk_of.get(&k))
     {
@@ -2330,7 +2380,7 @@ fn junk_layout(
         }
     }
     // (A Subquery Scan returns its reltarget; an inheritance tree's Append its parent's.)
-    let rank: Box<dyn Fn(&String) -> usize> = if n.children.is_empty()
+    let rank: Box<dyn Fn(&String) -> (usize, usize)> = if n.children.is_empty()
         || n.node_type == "Subquery Scan"
         || (n.node_type == "Append" && last.iter().any(|l| n.output.contains(l)))
     {
@@ -2338,14 +2388,28 @@ fn junk_layout(
         // `last`'s order.)
         Box::new(|o: &String| {
             if let Some(i) = last.iter().position(|l| l == o) {
-                usize::MAX - last.len() + i
+                (0, usize::MAX - last.len() + i)
             } else {
-                top.iter().position(|t| mentions(t, o)).unwrap_or(usize::MAX - last.len() - 1)
+                (0, top.iter().position(|t| mentions(t, o)).unwrap_or(usize::MAX - last.len() - 1))
             }
         })
     } else {
         let below: Vec<String> = n.children.iter().flat_map(|c| c.output.iter().cloned()).collect();
-        Box::new(move |o: &String| below.iter().position(|t| t == o).unwrap_or(usize::MAX))
+        // (A join's: build_joinrel_tlist from the input pairs the join search made it of
+        // first, its relations' columns by their place in the range table (the join
+        // search pairs them in that order), not the path's outer side first.)
+        let mut by_rel = HashMap::new();
+        if n.is_join() && !rtis.is_empty() {
+            output_rtis(n, rtis, &mut by_rel);
+        }
+        Box::new(move |o: &String| {
+            let at = below.iter().position(|t| t == o).unwrap_or(usize::MAX);
+            match by_rel.get(o) {
+                Some(r) => (r.0, at),
+                None if by_rel.is_empty() => (0, at),
+                None => (usize::MAX, at),
+            }
+        })
     };
     n.output.sort_by_key(|o| rank(o));
     junk
@@ -2578,6 +2642,62 @@ fn mentions(t: &str, o: &str) -> bool {
 }
 
 /// The row mark columns of the scans at or under `n`, in range table order.
+/// The processed target list of an UPDATE / DELETE of an inheritance tree over a join, after
+/// its new values (`top`): the row marks' junk (preprocess_targetlist: each mark's ctid or
+/// whole row, in mark order), what RETURNING reads of the other relations, then what
+/// expand_inherited_rtentry appends as it expands each parent in range table order: a row
+/// mark's tableoid, the target's row identity (its `tableoid`, then `ident`; a target that
+/// is no inheritance parent has it before the row marks). Returns that last part, which each
+/// scan returns last.
+fn expanded_tlist(
+    top: &mut Vec<String>,
+    n: &ExNode,
+    junk_of: &HashMap<usize, Vec<((u8, super::plan::Rti), String)>>,
+    returning: Vec<String>,
+    tableoid: Option<&str>,
+    ident: &str,
+) -> Vec<String> {
+    let keyed = junk_in_keyed(n, junk_of);
+    for (k, j) in &keyed {
+        if k.0 == 0 && !top.contains(j) {
+            top.push(j.clone());
+        }
+    }
+    for v in returning {
+        if !top.contains(&v) {
+            top.push(v);
+        }
+    }
+    let mut last = Vec::new();
+    for (k, j) in &keyed {
+        if k.0 != 0 && !last.contains(j) {
+            last.push(j.clone());
+            if Some(j.as_str()) == tableoid {
+                last.push(ident.to_string());
+            }
+        }
+    }
+    if let Some(t) = tableoid
+        && !last.iter().any(|l| l == t)
+    {
+        last.push(t.to_string());
+        last.push(ident.to_string());
+    }
+    top.extend(last.iter().cloned());
+    last
+}
+
+/// The names a node computing a data-modifying statement's target list (a join) gives its
+/// own outputs: a projection merged into it computes its expressions there, as they read
+/// (`internal`), not as a node above would refer to them.
+fn computed_names(b: &Built) -> &[Name] {
+    if b.internal.len() == b.exported.len() && b.node.is_join() {
+        &b.internal
+    } else {
+        &b.exported
+    }
+}
+
 fn junk_in(n: &ExNode, junk_of: &HashMap<usize, Vec<((u8, super::plan::Rti), String)>>) -> Vec<String> {
     junk_in_keyed(n, junk_of).into_iter().map(|j| j.1).collect()
 }
@@ -5171,6 +5291,8 @@ impl Builder<'_, '_> {
                 let saved = self.sub_alias.replace(info);
                 let mut b = self.subquery_scan(c, key);
                 self.sub_alias = saved;
+                // (Its whole row is a Var of its own above: `s.*`.)
+                self.whole_vars.insert(quote_ident(alias), cols.len());
                 if let (Some(a), Some(ao)) = (alt, alt_order) {
                     let mut n = b.node.clone();
                     n.startup_cost = a.startup_cost;
@@ -5818,6 +5940,8 @@ impl Builder<'_, '_> {
                     let saved = self.sub_alias.replace(info.clone());
                     c = self.subquery_scan(c, addr(p));
                     self.sub_alias = saved;
+                    // (Its whole row is a Var of its own above: `s.*`.)
+                    self.whole_vars.insert(quote_ident(&info.0), info.1.len());
                     c.node.order = order;
                     c.internal = names.clone();
                     c.exported = names;
@@ -8358,7 +8482,7 @@ impl Builder<'_, '_> {
                         last.push(format!("{parent}.tableoid"));
                     }
                     for ch in &mut c.node.children {
-                        junk_layout(ch, &ranks, &last, &self.rowmark_junk);
+                        junk_layout(ch, &ranks, &last, &self.rowmark_junk, &HashMap::new());
                     }
                     c.node.output = top;
                 }
@@ -8604,11 +8728,14 @@ impl Builder<'_, '_> {
                     // its row identity is a tableoid and the ctid, after the other row
                     // marks, as expand_inherited_rtentry adds them; each scan returns it last.)
                     let parent = up.inh || self.ctx.catalog().class_has_subclass.contains(&t.oid);
-                    let mut last: Vec<String> = Vec::new();
+                    let last: Vec<String>;
                     let mut sets: Vec<&(usize, Expr)> = up.sets.iter().collect();
                     sets.sort_by_key(|x| x.0);
+                    // (The join computes them: a pulled-up subquery's output they read is
+                    // its expression there, pullup_replace_vars.)
+                    let own = computed_names(&c);
                     let mut top: Vec<String> =
-                        sets.iter().map(|(_, e)| self.set_value(e, &c.exported)).collect();
+                        sets.iter().map(|(_, e)| self.set_value(e, own)).collect();
                     top.extend(self.rescans(&sets));
                     // (A view's row identity, for its INSTEAD OF triggers: the whole row.)
                     let ident = if up.rules.view {
@@ -8620,38 +8747,22 @@ impl Builder<'_, '_> {
                     } else {
                         self.pick(k, Cx::Output)
                     };
+                    // (Then what RETURNING reads of the other relations: resjunk entries
+                    // preprocess_targetlist adds for its Vars.)
+                    let ncols = t.columns.len();
+                    let limit = up.old_new.as_ref().map_or(c.exported.len(), |o| o.width);
+                    let ret_vars = self.returning_vars(&returning, &c.exported, ncols + 1, limit);
                     if parent && let Some(ts) = target_scan(&up.source, t.oid) {
                         let Plan::Scan(s) = ts else { unreachable!() };
                         let tableoid = format!("{}.tableoid", quote_ident(&self.refname(ts)));
                         self.rowmark_junk.insert(addr(ts), vec![((1, s.rti), tableoid.clone())]);
-                        let junk = junk_in(&c.node, &self.rowmark_junk);
-                        last.extend(junk.iter().filter(|j| j.ends_with(".tableoid") && **j != tableoid).cloned());
-                        top.extend(junk.into_iter().filter(|j| *j != tableoid));
-                        top.push(tableoid.clone());
-                        top.push(ident.clone());
-                        last.push(tableoid);
-                        last.push(ident);
+                        last = expanded_tlist(&mut top, &c.node, &self.rowmark_junk, ret_vars, Some(&tableoid), &ident);
                     } else {
                         top.push(ident);
-                        top.extend(junk_in(&c.node, &self.rowmark_junk));
-                    }
-                    // (Then what RETURNING reads of the other relations: resjunk entries
-                    // preprocess_targetlist adds for its Vars.)
-                    let ncols = t.columns.len();
-                    for e in &returning {
-                        for col in e.columns() {
-                            if col > ncols
-                                && let Some(n) = c.exported.get(col)
-                            {
-                                let s = self.pick(n, Cx::Output);
-                                if !top.contains(&s) {
-                                    top.push(s);
-                                }
-                            }
-                        }
+                        last = expanded_tlist(&mut top, &c.node, &self.rowmark_junk, ret_vars, None, "");
                     }
                     for ch in &mut c.node.children {
-                        junk_layout(ch, &top, &last, &self.rowmark_junk);
+                        junk_layout(ch, &top, &last, &self.rowmark_junk, &scan_rtis(&up.source));
                     }
                     c.node.output = top;
                 }
@@ -8731,11 +8842,14 @@ impl Builder<'_, '_> {
                     && let Some(k) = c.exported.get(t.columns.len())
                 {
                     // A join returns the target row's ctid, then the other relations' row
-                    // marks.
+                    // marks, then what RETURNING reads of them.
                     let mut top = vec![self.pick(k, Cx::Output)];
-                    top.extend(junk_in(&c.node, &self.rowmark_junk));
+                    let skip = t.columns.len() + 1 + if dp.sys { crate::exec::scan::NUM_SYS_COLS } else { 0 };
+                    let limit = dp.old_new.as_ref().map_or(c.exported.len(), |o| o.width);
+                    let ret_vars = self.returning_vars(&returning, &c.exported, skip, limit);
+                    let last = expanded_tlist(&mut top, &c.node, &self.rowmark_junk, ret_vars, None, "");
                     for ch in &mut c.node.children {
-                        junk_layout(ch, &top, &[], &self.rowmark_junk);
+                        junk_layout(ch, &top, &last, &self.rowmark_junk, &scan_rtis(&dp.source));
                     }
                     c.node.output = top;
                 }
@@ -8861,7 +8975,7 @@ impl Builder<'_, '_> {
                         ident
                     };
                     for ch in &mut c.node.children {
-                        junk_layout(ch, &top, &last, &self.rowmark_junk);
+                        junk_layout(ch, &top, &last, &self.rowmark_junk, &scan_rtis(&mp.source));
                     }
                     // (The dummy relation returns what is read of it and its ctid, no other
                     // system column.)
@@ -9188,6 +9302,25 @@ impl Builder<'_, '_> {
         }
     }
 
+    /// The columns of other relations a data-modifying statement's RETURNING reads (those in
+    /// `from..until` of its source's row), in the order it reads them.
+    fn returning_vars(&self, returning: &[Expr], exported: &[Name], from: usize, until: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        for e in returning {
+            for col in e.columns() {
+                if (from..until).contains(&col)
+                    && let Some(n) = exported.get(col)
+                {
+                    let s = self.pick(n, Cx::Output);
+                    if !out.contains(&s) {
+                        out.push(s);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     fn inherited_dml(
         &mut self,
         key: usize,
@@ -9276,19 +9409,15 @@ impl Builder<'_, '_> {
             self.rowmark_junk.insert(addr(ts), vec![((1, s.rti), tableoid.clone())]);
             let mut sorted: Vec<&(usize, Expr)> = sets.iter().collect();
             sorted.sort_by_key(|x| x.0);
-            let mut top: Vec<String> =
-                sorted.iter().map(|(_, e)| self.set_value(e, &app.exported)).collect();
+            let own = computed_names(&app);
+            let mut top: Vec<String> = sorted.iter().map(|(_, e)| self.set_value(e, own)).collect();
             top.extend(self.rescans(&sorted));
-            let junk = junk_in(&app.node, &self.rowmark_junk);
-            let mut last: Vec<String> =
-                junk.iter().filter(|j| j.ends_with(".tableoid") && **j != tableoid).cloned().collect();
-            top.extend(junk.into_iter().filter(|j| *j != tableoid));
-            top.push(tableoid.clone());
-            top.push(ident.clone());
-            last.push(tableoid);
-            last.push(ident);
+            let skip = pt.columns.len() + 1 + if sys { crate::exec::scan::NUM_SYS_COLS } else { 0 };
+            let limit = old_new.map_or(app.exported.len(), |o| o.width);
+            let ret_vars = self.returning_vars(returning, &app.exported, skip, limit);
+            let last = expanded_tlist(&mut top, &app.node, &self.rowmark_junk, ret_vars, Some(&tableoid), &ident);
             for ch in &mut app.node.children {
-                junk_layout(ch, &top, &last, &self.rowmark_junk);
+                junk_layout(ch, &top, &last, &self.rowmark_junk, &scan_rtis(source));
             }
             app.node.output = top;
         }
@@ -9390,7 +9519,8 @@ impl Builder<'_, '_> {
             && let Some(ctid) = app.exported.get(pt.columns.len()).map(|k| self.pick(k, Cx::Output))
             && let Some(parent) = ctid.strip_suffix(".ctid").map(str::to_string)
         {
-            let mut top: Vec<String> = sorted.iter().map(|(_, e)| self.set_value(e, &app.exported)).collect();
+            let own = computed_names(&app);
+            let mut top: Vec<String> = sorted.iter().map(|(_, e)| self.set_value(e, own)).collect();
             top.extend(self.rescans(&sorted));
             top.extend(junk_in(&app.node, &self.rowmark_junk));
             let members: Vec<String> = all.iter().map(|(_, r)| quote_ident(r)).collect();
@@ -9402,7 +9532,7 @@ impl Builder<'_, '_> {
                 .flat_map(|m| [format!("{m}.tableoid"), format!("{m}.ctid")])
                 .collect();
             for ch in &mut app.node.children {
-                junk_layout(ch, &top, &last, &self.rowmark_junk);
+                junk_layout(ch, &top, &last, &self.rowmark_junk, &scan_rtis(source));
                 append_passthrough(ch, &parent, &members);
             }
             app.node.output = top;

@@ -118,9 +118,21 @@ fn lateral_old_new(from: &mut [Node]) {
     }
 }
 
-/// Put the `*RULE*` item first in an action's FROM list. False when the action has no
-/// place for it (a set operation, a utility statement).
-fn inject(n: &mut Node) -> bool {
+/// Put the `*RULE*` item in an action's FROM list. False when the action has no place for
+/// it (a set operation, a utility statement). `last`: it stands for OLD alone (an UPDATE or
+/// DELETE without FROM items of its own), which transformRuleStmt appends to the action's
+/// FROM list; otherwise it is the statement's own FROM list too, which rewriteRuleAction puts
+/// first (adjustJoinTreeList). (First anyway when an item of the action reads OLD / NEW: the
+/// items to its left are all it may refer to.)
+fn inject(n: &mut Node, last: bool) -> bool {
+    fn put(from: &mut Vec<Node>, last: bool) {
+        lateral_old_new(from);
+        if last && !from.iter().any(item_reads_old_new) {
+            from.push(marker());
+        } else {
+            from.insert(0, marker());
+        }
+    }
     match n.node.as_mut() {
         Some(NodeEnum::InsertStmt(s)) => match s.select_stmt.as_deref_mut() {
             None => {
@@ -135,16 +147,14 @@ fn inject(n: &mut Node) -> bool {
                 )))));
                 true
             }
-            Some(sel) => inject(sel),
+            Some(sel) => inject(sel, last),
         },
         Some(NodeEnum::UpdateStmt(s)) => {
-            lateral_old_new(&mut s.from_clause);
-            s.from_clause.insert(0, marker());
+            put(&mut s.from_clause, last);
             true
         }
         Some(NodeEnum::DeleteStmt(s)) => {
-            lateral_old_new(&mut s.using_clause);
-            s.using_clause.insert(0, marker());
+            put(&mut s.using_clause, last);
             true
         }
         Some(NodeEnum::SelectStmt(s)) => {
@@ -152,12 +162,23 @@ fn inject(n: &mut Node) -> bool {
             if !matches!(op, pb::SetOperation::SetopNone | pb::SetOperation::Undefined) {
                 return false;
             }
-            lateral_old_new(&mut s.from_clause);
-            s.from_clause.insert(0, marker());
+            put(&mut s.from_clause, last);
             true
         }
         _ => false,
     }
+}
+
+/// Whether a FROM item refers to OLD / NEW (a LATERAL subquery, a function's arguments).
+fn item_reads_old_new(item: &Node) -> bool {
+    let sel = ast::mk(NodeEnum::SelectStmt(Box::new(pb::SelectStmt {
+        target_list: vec![],
+        from_clause: vec![item.clone()],
+        op: pb::SetOperation::SetopNone as i32,
+        limit_option: pb::LimitOption::Default as i32,
+        ..Default::default()
+    })));
+    ast::deparse_stmt(&sel).map_or(true, |sql| old_new_refs(&sql) != (false, false))
 }
 
 /// `OLD.*` / `NEW.*` in an action's VALUES lists stand for the relation's columns
@@ -896,7 +917,7 @@ impl Binder<'_, '_> {
                     if let Some(v) = values_as_select(&node) {
                         node = v;
                     }
-                    let injected = inject(&mut node);
+                    let injected = inject(&mut node, tg.event != '3' && !has_from);
                     if !injected && needed && command(&node) != 'n' {
                         return Err(Error::new(
                             code::FEATURE_NOT_SUPPORTED,
@@ -1735,10 +1756,13 @@ impl Binder<'_, '_> {
     pub(crate) fn rule_from_item(&mut self) -> Option<(Plan, Scope)> {
         let rs = self.rule_src.clone()?;
         let rels = self.rule_rels(&rs, true);
-        Some((
-            Arc::try_unwrap(rs.plan).unwrap_or_else(|a| (*a).clone()),
-            Scope { rels },
-        ))
+        let mut plan = Arc::try_unwrap(rs.plan).unwrap_or_else(|a| (*a).clone());
+        // (The statement's views and FROM subqueries are expanded (fireRIRrules) and pulled
+        // up after rewriteRuleAction made the action's range table: their relations come
+        // after the action's own entries.)
+        let depth = self.levels.len();
+        self.restamp_rti_below(&mut plan, depth);
+        Some((plan, Scope { rels }))
     }
 
     /// An INSERT rule action's VALUES rows, evaluated for each of the triggering statement's
@@ -1943,7 +1967,7 @@ impl Binder<'_, '_> {
             if let Some(v) = values_as_select(&node) {
                 node = v;
             }
-            let setop = !inject(&mut node);
+            let setop = !inject(&mut node, false);
             if setop && (qual.is_some() || has_old || has_new && event == '2') {
                 return Err(Error::new(
                     code::FEATURE_NOT_SUPPORTED,
