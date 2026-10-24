@@ -13,6 +13,26 @@ The measure is PostgreSQL's own regression suite (`src/test/regress` at `REL_18_
 51,150 statements), run through the engine and through a reference PostgreSQL 18.6 and
 compared statement by statement.
 
+**Compatible outside, free inside.** A client must be able to use the engine like any other
+PostgreSQL 18.6: drivers, ORMs, psql, pg_dump, the wire protocol, concurrency and locking,
+extensions. What a client can observe has to match. That covers the items above, plus
+transaction and lock behaviour, wire messages, and catalog contents. How the engine gets
+there does not. Storage, executor, caches and data structures may differ from PostgreSQL's
+wherever that makes the engine faster or leaner. EXPLAIN still prints PostgreSQL's plan,
+because clients and the suite read it, but an executor node may compute its rows any way it
+likes as long as the rows, their order, errors and side effects are PostgreSQL's.
+Performance is a goal of its own: measure it (`tools/bench`, BENCH.md) against the reference
+and make the engine faster than PostgreSQL wherever possible.
+
+The regression suite is one measure, not the whole one. Round 16 found locking and
+wrong-result bugs that no statement in it catches. Further measures, each with its own
+harness and score in `tests/`:
+- the isolation suite (`src/test/isolation`);
+- differential random queries against the reference;
+- pg_dump / restore round-trips;
+- driver and ORM test suites;
+- contrib extensions.
+
 ## Where it stands
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
