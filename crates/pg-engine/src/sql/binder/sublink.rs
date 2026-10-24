@@ -7,7 +7,7 @@
 use super::optimize::{conjuncts, width};
 use crate::catalog::Catalog;
 use crate::sql::expr::{Expr, Subquery, SubqueryKind};
-use crate::sql::plan::{Access, JoinKind, Plan, ScanPlan};
+use crate::sql::plan::{Access, JoinKind, Plan, ScanPlan, SortKey};
 use crate::types::Value;
 use std::sync::Arc;
 
@@ -963,6 +963,74 @@ fn plan_constants(p: &Plan) -> Vec<(usize, Expr, Expr)> {
     }
 }
 
+/// A sub-select's plan (scans, filters, projections, sorts and limits over one table) with
+/// its references to the query it is in, `Outer(1, i)`, as the values `params` (of queries
+/// further up) they stand for; None when it has something else, or reads further out.
+fn params_in_place(p: &Plan, params: &[Expr]) -> Option<Plan> {
+    let fix = |e: &Expr| -> Option<Expr> {
+        let mut ok = true;
+        e.walk(&mut |x| ok &= !matches!(x, Expr::Outer(l, ..) if *l > 1) && !matches!(x, Expr::Subquery(_) | Expr::Srf(..)));
+        if !ok {
+            return None;
+        }
+        outer_to_params(e.clone(), params)
+    };
+    Some(match p {
+        Plan::Scan(s) => {
+            if s.sample.is_some() || s.current_of.is_some() {
+                return None;
+            }
+            let mut s = s.clone();
+            if let Some((_, b)) = &mut s.index {
+                b.eq = b.eq.iter().map(fix).collect::<Option<_>>()?;
+                if let Some(a) = &b.any {
+                    b.any = Some(fix(a)?);
+                }
+                for bound in [&mut b.lower, &mut b.upper] {
+                    if let Some((e, inc)) = bound {
+                        *bound = Some((fix(e)?, *inc));
+                    }
+                }
+            }
+            s.filter = match &s.filter {
+                Some(f) => Some(fix(f)?),
+                None => None,
+            };
+            s.written = s.written.iter().map(fix).collect::<Option<_>>()?;
+            s.phv_quals = s.phv_quals.iter().map(fix).collect::<Option<_>>()?;
+            Plan::Scan(s)
+        }
+        Plan::Filter { input, pred } => Plan::Filter {
+            input: Arc::new(params_in_place(input, params)?),
+            pred: fix(pred)?,
+        },
+        Plan::Project { input, exprs } => Plan::Project {
+            input: Arc::new(params_in_place(input, params)?),
+            exprs: exprs.iter().map(fix).collect::<Option<_>>()?,
+        },
+        Plan::Sort { input, keys } => Plan::Sort {
+            input: Arc::new(params_in_place(input, params)?),
+            keys: keys
+                .iter()
+                .map(|k| Some(SortKey { expr: fix(&k.expr)?, ..k.clone() }))
+                .collect::<Option<_>>()?,
+        },
+        Plan::Limit { input, limit, offset, with_ties: None } => Plan::Limit {
+            input: Arc::new(params_in_place(input, params)?),
+            limit: match limit {
+                Some(e) => Some(fix(e)?),
+                None => None,
+            },
+            offset: match offset {
+                Some(e) => Some(fix(e)?),
+                None => None,
+            },
+            with_ties: None,
+        },
+        _ => return None,
+    })
+}
+
 /// The subquery's references to this query: the expressions they stand for.
 fn outer_to_params(e: Expr, params: &[Expr]) -> Option<Expr> {
     let mut ok = true;
@@ -1085,6 +1153,38 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -
             };
             let types = rows[0].iter().map(Expr::ty).collect();
             (Vec::new(), Plan::Values { rows, ncols: *ncols, rti: *rti }, types, false)
+        }
+        // A sub-select that isn't a simple one (an OFFSET) reading only queries further up,
+        // none of this one's rows: convert_ANY_sublink_to_join takes it (only Vars of the
+        // parent query bar it), a subquery of its own ("ANY_subquery") with those values
+        // in place.
+        None if !sub.params.is_empty()
+            && sub.params.iter().all(|e| {
+                e.columns().is_empty() && !crate::sql::explain::expr_volatile_deep(e) && !has_sublink(e)
+            })
+            && !matches!(p, Plan::Empty { .. } | Plan::One) =>
+        {
+            let p = params_in_place(p, &sub.params)?;
+            let n = width(&p);
+            let types = (0..n)
+                .map(|i| {
+                    sub.ops
+                        .get(i)
+                        .and_then(|o| o.args.get(1).cloned())
+                        .unwrap_or(crate::types::DataType::Unknown)
+                })
+                .collect();
+            let sorted = matches!(p, Plan::Sort { .. }).then_some(0);
+            let rhs = Plan::Barrier {
+                input: Arc::new(p),
+                alias: "ANY_subquery".into(),
+                cols: (1..=n).map(|i| format!("column{i}")).collect(),
+                secure: false,
+                path: None,
+                sorted,
+                rti: Default::default(),
+            };
+            (Vec::new(), rhs, types, false)
         }
         None => return None,
     };

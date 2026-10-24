@@ -230,6 +230,17 @@ fn sorted_form(n: &ExNode) -> Option<ExNode> {
 /// add_path over `paths` in turn (compare_path_costs_fuzzily, then their orders: one in
 /// the order of `keys` beats one in none): the ones left.
 pub(super) fn add_path_survivors(paths: Vec<ExNode>, keys: &[String]) -> Vec<ExNode> {
+    let kept = add_path_kept(&paths, keys);
+    paths
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| kept.contains(i))
+        .map(|(_, p)| p)
+        .collect()
+}
+
+/// `add_path_survivors` as the positions of the paths left, in the order they are kept.
+fn add_path_kept(paths: &[ExNode], keys: &[String]) -> Vec<usize> {
     #[derive(PartialEq)]
     enum C {
         Better1,
@@ -258,27 +269,27 @@ pub(super) fn add_path_survivors(paths: Vec<ExNode>, keys: &[String]) -> Vec<ExN
         C::Equal
     };
     let sorted = |n: &ExNode| !keys.is_empty() && n.order.len() >= keys.len() && n.order[..keys.len()] == keys[..];
-    let mut kept: Vec<ExNode> = Vec::new();
-    for new in paths {
+    let mut kept: Vec<usize> = Vec::new();
+    for (ni, new) in paths.iter().enumerate() {
         let mut accept = true;
         let mut i = 0;
         while i < kept.len() {
-            let old = &kept[i];
+            let old = &paths[kept[i]];
             // (Their orders: 1 the new one's is better, 2 the old one's, 0 the same.)
-            let keyscmp = match (sorted(&new), sorted(old)) {
+            let keyscmp = match (sorted(new), sorted(old)) {
                 (true, false) => 1,
                 (false, true) => 2,
                 _ => 0,
             };
             let mut remove_old = false;
-            match costs(&new, old, FUZZ) {
+            match costs(new, old, FUZZ) {
                 C::Better1 if keyscmp != 2 => remove_old = true,
                 C::Better2 if keyscmp != 1 => accept = false,
                 C::Equal => match keyscmp {
                     1 => remove_old = true,
                     2 => accept = false,
                     _ => {
-                        if costs(&new, old, 1.000_000_000_1) == C::Better1 {
+                        if costs(new, old, 1.000_000_000_1) == C::Better1 {
                             remove_old = true;
                         } else {
                             accept = false;
@@ -297,7 +308,7 @@ pub(super) fn add_path_survivors(paths: Vec<ExNode>, keys: &[String]) -> Vec<ExN
             }
         }
         if accept {
-            kept.push(new);
+            kept.push(ni);
         }
     }
     kept
@@ -634,7 +645,9 @@ impl Builder<'_, '_> {
                 f.total_cost = f.startup_cost + f.rows * costs::CPU_TUPLE_COST;
             } else {
                 f.startup_cost = input.startup_cost;
-                f.total_cost = input.total_cost + in_rows * (trans + ops) + f.rows * costs::CPU_TUPLE_COST;
+                // (Without aggregates a Group: cost_group charges the comparisons only.)
+                let per_group = if aggs.is_empty() { 0.0 } else { costs::CPU_TUPLE_COST };
+                f.total_cost = input.total_cost + in_rows * (trans + ops) + f.rows * per_group;
                 // (Its groups come out in the keys' order.)
                 f.order = keys.to_vec();
             }
@@ -803,7 +816,23 @@ impl Builder<'_, '_> {
                 best_cost = best_cost.min(self.ordered_cost(&g, keys, hint_full));
             }
         }
-        if db > ds || (db == ds && best_cost >= serial_cost) {
+        // (add_path into the grouping relation, the serial grouping's paths first: a
+        // partitionwise one fuzzily as cheap that starts sooner, or is in the keys' order
+        // where they aren't, removes them though it costs a little more; the cheapest of
+        // the paths left wins.)
+        let survives = || {
+            let mut paths = vec![serial.clone()];
+            paths.extend(serial.alt.as_deref().filter(|a| parallel::disabled_nodes(a) <= ds).cloned());
+            paths.push(best.clone());
+            let last = paths.len() - 1;
+            let kept = add_path_kept(&paths, keys);
+            kept.contains(&last)
+                && kept
+                    .iter()
+                    .filter(|&&i| i != last)
+                    .all(|&i| best_cost < self.ordered_cost(&paths[i], keys, hint_full))
+        };
+        if db > ds || (db == ds && best_cost >= serial_cost && !survives()) {
             return None;
         }
         self.pw_aggs.push(addr(app));

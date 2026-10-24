@@ -3335,9 +3335,13 @@ impl Planner<'_, '_> {
                     parts.insert(first.min(parts.len()), q.clone());
                 }
             }
+            // (A clause over a PlaceHolderVar is the relation's, whatever it reads: pull_varnos
+            // counts the PlaceHolderVar's ph_eval_at.)
             quals = parts
                 .into_iter()
-                .filter(|e| !e.columns().is_empty() || expr_volatile_deep(e))
+                .filter(|e| {
+                    !e.columns().is_empty() || expr_volatile_deep(e) || s.phv_quals.iter().any(|q| q.same_as(e))
+                })
                 .collect();
         }
         let ncols = t.columns.len();

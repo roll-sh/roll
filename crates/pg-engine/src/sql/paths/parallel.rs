@@ -148,6 +148,13 @@ pub fn func_parallel(cat: &Catalog, oid: u32) -> char {
 
 /// max_parallel_hazard of an expression: the worst function in it ('s', 'r' or 'u').
 pub fn hazard(e: &Expr, cat: &Catalog) -> char {
+    hazard_at(e, cat, 0)
+}
+
+/// `hazard` of an expression `bound` parameterized nested loops deep in the plan being
+/// checked: an `Outer` reference to their values is a nested loop parameter (a PARAM_EXEC
+/// set inside the same process), not an enclosing query's value.
+fn hazard_at(e: &Expr, cat: &Catalog, bound: usize) -> char {
     let mut worst = 's';
     let mut note = |c: char| {
         worst = match (worst, c) {
@@ -166,10 +173,11 @@ pub fn hazard(e: &Expr, cat: &Catalog) -> char {
                 // query's values as Params, which workers don't get.
                 note('r');
             } else {
-                note(plan_hazard(&s.plan, cat));
+                note(plan_hazard_at(&s.plan, cat, bound));
             }
         }
         // (So does a reference to an enclosing query's value.)
+        Expr::Outer(l, ..) if *l <= bound => {}
         Expr::Outer(..) | Expr::Window(..) => note('r'),
         _ => {}
     });
@@ -178,6 +186,14 @@ pub fn hazard(e: &Expr, cat: &Catalog) -> char {
 
 /// The worst parallel hazard in a plan's expressions and nodes.
 pub fn plan_hazard(p: &Plan, cat: &Catalog) -> char {
+    plan_hazard_at(p, cat, 0)
+}
+
+/// `plan_hazard` `bound` parameterized nested loops deep: a nested loop's inner side reads
+/// its parameters as `Outer(1, ..)` (the outer row's values pushed for it), which are no
+/// hazard (a path's parallel safety doesn't depend on the nested loop parameters it is
+/// given; max_parallel_hazard restricts only the PARAM_EXEC Params set outside the plan).
+fn plan_hazard_at(p: &Plan, cat: &Catalog, bound: usize) -> char {
     let mut exprs = Vec::new();
     crate::sql::explain::node_exprs(p, &mut exprs);
     let mut worst = 's';
@@ -189,7 +205,7 @@ pub fn plan_hazard(p: &Plan, cat: &Catalog) -> char {
         }
     };
     for e in exprs {
-        note(hazard(e, cat));
+        note(hazard_at(e, cat, bound));
     }
     match p {
         Plan::Scan(s) if s.table.temporary => note('r'),
@@ -199,8 +215,15 @@ pub fn plan_hazard(p: &Plan, cat: &Catalog) -> char {
         Plan::LockRows { .. } => note('u'),
         _ => {}
     }
+    if let Plan::Join { left, right, params, .. } = p
+        && !params.is_empty()
+    {
+        note(plan_hazard_at(left, cat, bound));
+        note(plan_hazard_at(right, cat, bound + 1));
+        return worst;
+    }
     for c in crate::sql::explain::plan_inputs(p) {
-        note(plan_hazard(c, cat));
+        note(plan_hazard_at(c, cat, bound));
     }
     worst
 }

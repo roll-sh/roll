@@ -1,0 +1,498 @@
+> create table a26_p1 (a int, b int, c varchar) partition by range (a)
+-- CREATE TABLE
+
+> create table a26_p1_1 partition of a26_p1 for values from (0) to (250)
+-- CREATE TABLE
+
+> create table a26_p1_3 partition of a26_p1 for values from (500) to (600)
+-- CREATE TABLE
+
+> create table a26_p1_2 partition of a26_p1 for values from (250) to (500)
+-- CREATE TABLE
+
+> insert into a26_p1 select i, i % 25, to_char(i, 'FM0000') from generate_series(0, 599) i where i % 2 = 0
+-- INSERT 0 300
+
+> create table a26_p2 (a int, b int, c varchar) partition by range (b)
+-- CREATE TABLE
+
+> create table a26_p2_1 partition of a26_p2 for values from (0) to (250)
+-- CREATE TABLE
+
+> create table a26_p2_2 partition of a26_p2 for values from (250) to (500)
+-- CREATE TABLE
+
+> create table a26_p2_3 partition of a26_p2 for values from (500) to (600)
+-- CREATE TABLE
+
+> insert into a26_p2 select i % 25, i, to_char(i, 'FM0000') from generate_series(0, 599) i where i % 3 = 0
+-- INSERT 0 200
+
+> analyze a26_p1, a26_p2
+-- ANALYZE
+
+> set enable_partitionwise_join = on
+-- SET
+
+> set enable_partitionwise_aggregate = on
+-- SET
+
+> set enable_hashjoin = off
+-- SET
+
+> explain select a, b from a26_p1_1 p1 full join a26_p2_1 p2(b, a, c) using (a, b)
+>   where a between 490 and 510
+QUERY PLAN:text
+Merge Full Join  (cost=11.13..12.74 rows=14 width=8)
+  Merge Cond: ((p1.a = p2.a) AND (p1.b = p2.b))
+  Filter: ((COALESCE(p1.a, p2.a) >= 490) AND (COALESCE(p1.a, p2.a) <= 510))
+  ->  Sort  (cost=6.60..6.92 rows=125 width=8)
+        Sort Key: p1.a, p1.b
+        ->  Seq Scan on a26_p1_1 p1  (cost=0.00..2.25 rows=125 width=8)
+  ->  Sort  (cost=4.52..4.73 rows=84 width=8)
+        Sort Key: p2.a, p2.b
+        ->  Seq Scan on a26_p2_1 p2  (cost=0.00..1.84 rows=84 width=8)
+-- EXPLAIN
+
+> explain select a, b from a26_p1_1 p1 full join a26_p2_1 p2(b, a, c) using (a, b)
+QUERY PLAN:text
+Merge Full Join  (cost=11.13..12.73 rows=125 width=8)
+  Merge Cond: ((p1.a = p2.a) AND (p1.b = p2.b))
+  ->  Sort  (cost=6.60..6.92 rows=125 width=8)
+        Sort Key: p1.a, p1.b
+        ->  Seq Scan on a26_p1_1 p1  (cost=0.00..2.25 rows=125 width=8)
+  ->  Sort  (cost=4.52..4.73 rows=84 width=8)
+        Sort Key: p2.a, p2.b
+        ->  Seq Scan on a26_p2_1 p2  (cost=0.00..1.84 rows=84 width=8)
+-- EXPLAIN
+
+> explain (costs off)
+> select a, b from a26_p1 p1 full join a26_p2 p2(b, a, c) using (a, b)
+>   where a between 490 and 510 group by 1, 2 order by 1, 2
+QUERY PLAN:text
+Group
+  Group Key: (COALESCE(p1.a, p2.a)), (COALESCE(p1.b, p2.b))
+  ->  Merge Append
+        Sort Key: (COALESCE(p1.a, p2.a)), (COALESCE(p1.b, p2.b))
+        ->  Group
+              Group Key: (COALESCE(p1.a, p2.a)), (COALESCE(p1.b, p2.b))
+              ->  Sort
+                    Sort Key: (COALESCE(p1.a, p2.a)), (COALESCE(p1.b, p2.b))
+                    ->  Merge Full Join
+                          Merge Cond: ((p1.a = p2.a) AND (p1.b = p2.b))
+                          Filter: ((COALESCE(p1.a, p2.a) >= 490) AND (COALESCE(p1.a, p2.a) <= 510))
+                          ->  Sort
+                                Sort Key: p1.a, p1.b
+                                ->  Seq Scan on a26_p1_1 p1
+                          ->  Sort
+                                Sort Key: p2.a, p2.b
+                                ->  Seq Scan on a26_p2_1 p2
+        ->  Group
+              Group Key: (COALESCE(p1_1.a, p2_1.a)), (COALESCE(p1_1.b, p2_1.b))
+              ->  Sort
+                    Sort Key: (COALESCE(p1_1.a, p2_1.a)), (COALESCE(p1_1.b, p2_1.b))
+                    ->  Merge Full Join
+                          Merge Cond: ((p1_1.a = p2_1.a) AND (p1_1.b = p2_1.b))
+                          Filter: ((COALESCE(p1_1.a, p2_1.a) >= 490) AND (COALESCE(p1_1.a, p2_1.a) <= 510))
+                          ->  Sort
+                                Sort Key: p1_1.a, p1_1.b
+                                ->  Seq Scan on a26_p1_2 p1_1
+                          ->  Sort
+                                Sort Key: p2_1.a, p2_1.b
+                                ->  Seq Scan on a26_p2_2 p2_1
+        ->  Group
+              Group Key: (COALESCE(p1_2.a, p2_2.a)), (COALESCE(p1_2.b, p2_2.b))
+              ->  Sort
+                    Sort Key: (COALESCE(p1_2.a, p2_2.a)), (COALESCE(p1_2.b, p2_2.b))
+                    ->  Merge Full Join
+                          Merge Cond: ((p1_2.a = p2_2.a) AND (p1_2.b = p2_2.b))
+                          Filter: ((COALESCE(p1_2.a, p2_2.a) >= 490) AND (COALESCE(p1_2.a, p2_2.a) <= 510))
+                          ->  Sort
+                                Sort Key: p1_2.a, p1_2.b
+                                ->  Seq Scan on a26_p1_3 p1_2
+                          ->  Sort
+                                Sort Key: p2_2.a, p2_2.b
+                                ->  Seq Scan on a26_p2_3 p2_2
+-- EXPLAIN
+
+> select a, b from a26_p1 p1 full join a26_p2 p2(b, a, c) using (a, b)
+>   where a between 490 and 510 group by 1, 2 order by 1, 2
+a:int4 | b:int4
+490 | 15
+492 | 17
+494 | 19
+495 | 20
+496 | 21
+498 | 23
+500 | 0
+501 | 1
+502 | 2
+504 | 4
+506 | 6
+507 | 7
+508 | 8
+510 | 10
+-- SELECT 14
+
+> reset enable_partitionwise_aggregate
+-- RESET
+
+> reset enable_hashjoin
+-- RESET
+
+> create table a26_al (a double precision, b int, c text) partition by range (a)
+-- CREATE TABLE
+
+> create table a26_al_neg partition of a26_al for values from ('-Infinity') to (0) partition by range (b)
+-- CREATE TABLE
+
+> create table a26_al_pos partition of a26_al for values from (0) to (10.0) partition by list (c)
+-- CREATE TABLE
+
+> create table a26_al_neg_p1 partition of a26_al_neg for values from (100) to (200)
+-- CREATE TABLE
+
+> create table a26_al_neg_p2 partition of a26_al_neg for values from (200) to (300)
+-- CREATE TABLE
+
+> create table a26_al_neg_p3 partition of a26_al_neg for values from (300) to (400)
+-- CREATE TABLE
+
+> create table a26_al_pos_p1 partition of a26_al_pos for values in ('0001', '0003')
+-- CREATE TABLE
+
+> create table a26_al_pos_p2 partition of a26_al_pos for values in ('0004', '0006')
+-- CREATE TABLE
+
+> create table a26_al_pos_p3 partition of a26_al_pos for values in ('0008', '0009')
+-- CREATE TABLE
+
+> insert into a26_al_neg select -1.0, i, to_char(i % 10, 'FM0000') from generate_series(100, 399) i where i % 10 in (1, 3, 4, 6, 8, 9)
+-- INSERT 0 180
+
+> insert into a26_al_pos select 1.0, i, to_char(i % 10, 'FM0000') from generate_series(100, 399) i where i % 10 in (1, 3, 4, 6, 8, 9)
+-- INSERT 0 180
+
+> create table a26_be (a double precision, b int, c text) partition by range (a)
+-- CREATE TABLE
+
+> create table a26_be_neg partition of a26_be for values from (-10.0) to (0) partition by range (b)
+-- CREATE TABLE
+
+> create table a26_be_pos partition of a26_be for values from (0) to ('Infinity') partition by list (c)
+-- CREATE TABLE
+
+> create table a26_be_neg_p1 partition of a26_be_neg for values from (100) to (150)
+-- CREATE TABLE
+
+> create table a26_be_neg_p2 partition of a26_be_neg for values from (200) to (300)
+-- CREATE TABLE
+
+> create table a26_be_neg_p3 partition of a26_be_neg for values from (350) to (500)
+-- CREATE TABLE
+
+> create table a26_be_pos_p1 partition of a26_be_pos for values in ('0002', '0003')
+-- CREATE TABLE
+
+> create table a26_be_pos_p2 partition of a26_be_pos for values in ('0004', '0006')
+-- CREATE TABLE
+
+> create table a26_be_pos_p3 partition of a26_be_pos for values in ('0007', '0009')
+-- CREATE TABLE
+
+> insert into a26_be_neg select -1.0, i, to_char(i % 10, 'FM0000') from generate_series(100, 149) i where i % 10 in (2, 3, 4, 6, 7, 9)
+-- INSERT 0 30
+
+> insert into a26_be_neg select -1.0, i, to_char(i % 10, 'FM0000') from generate_series(200, 299) i where i % 10 in (2, 3, 4, 6, 7, 9)
+-- INSERT 0 60
+
+> insert into a26_be_neg select -1.0, i, to_char(i % 10, 'FM0000') from generate_series(350, 499) i where i % 10 in (2, 3, 4, 6, 7, 9)
+-- INSERT 0 90
+
+> insert into a26_be_pos select 1.0, i, to_char(i % 10, 'FM0000') from generate_series(100, 149) i where i % 10 in (2, 3, 4, 6, 7, 9)
+-- INSERT 0 30
+
+> insert into a26_be_pos select 1.0, i, to_char(i % 10, 'FM0000') from generate_series(200, 299) i where i % 10 in (2, 3, 4, 6, 7, 9)
+-- INSERT 0 60
+
+> insert into a26_be_pos select 1.0, i, to_char(i % 10, 'FM0000') from generate_series(350, 499) i where i % 10 in (2, 3, 4, 6, 7, 9)
+-- INSERT 0 90
+
+> analyze a26_al, a26_be
+-- ANALYZE
+
+> explain (costs off)
+> select t1.*, t2.* from a26_al t1 join a26_be t2 on (t1.a = t2.a and t1.c = t2.c)
+>   where ((t1.b >= 100 and t1.b < 110) or (t1.b >= 200 and t1.b < 210))
+>     and ((t2.b >= 100 and t2.b < 110) or (t2.b >= 200 and t2.b < 210)) and t1.c in ('0004', '0009')
+>   order by t1.a, t1.b, t2.b
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a, t1.b, t2.b
+  ->  Append
+        ->  Hash Join
+              Hash Cond: ((t1_2.a = t2_2.a) AND (t1_2.c = t2_2.c))
+              ->  Append
+                    ->  Seq Scan on a26_al_neg_p1 t1_2
+                          Filter: ((c = ANY ('{0004,0009}'::text[])) AND (((b >= 100) AND (b < 110)) OR ((b >= 200) AND (b < 210))))
+                    ->  Seq Scan on a26_al_neg_p2 t1_3
+                          Filter: ((c = ANY ('{0004,0009}'::text[])) AND (((b >= 100) AND (b < 110)) OR ((b >= 200) AND (b < 210))))
+              ->  Hash
+                    ->  Append
+                          ->  Seq Scan on a26_be_neg_p1 t2_2
+                                Filter: (((b >= 100) AND (b < 110)) OR ((b >= 200) AND (b < 210)))
+                          ->  Seq Scan on a26_be_neg_p2 t2_3
+                                Filter: (((b >= 100) AND (b < 110)) OR ((b >= 200) AND (b < 210)))
+        ->  Nested Loop
+              Join Filter: ((t1_4.a = t2_4.a) AND (t1_4.c = t2_4.c))
+              ->  Seq Scan on a26_al_pos_p2 t1_4
+                    Filter: ((c = ANY ('{0004,0009}'::text[])) AND (((b >= 100) AND (b < 110)) OR ((b >= 200) AND (b < 210))))
+              ->  Seq Scan on a26_be_pos_p2 t2_4
+                    Filter: (((b >= 100) AND (b < 110)) OR ((b >= 200) AND (b < 210)))
+        ->  Nested Loop
+              Join Filter: ((t1_5.a = t2_5.a) AND (t1_5.c = t2_5.c))
+              ->  Seq Scan on a26_al_pos_p3 t1_5
+                    Filter: ((c = ANY ('{0004,0009}'::text[])) AND (((b >= 100) AND (b < 110)) OR ((b >= 200) AND (b < 210))))
+              ->  Seq Scan on a26_be_pos_p3 t2_5
+                    Filter: (((b >= 100) AND (b < 110)) OR ((b >= 200) AND (b < 210)))
+-- EXPLAIN
+
+> select t1.*, t2.* from a26_al t1 join a26_be t2 on (t1.a = t2.a and t1.c = t2.c)
+>   where ((t1.b >= 100 and t1.b < 110) or (t1.b >= 200 and t1.b < 210))
+>     and ((t2.b >= 100 and t2.b < 110) or (t2.b >= 200 and t2.b < 210)) and t1.c in ('0004', '0009')
+>   order by t1.a, t1.b, t2.b
+a:float8 | b:int4 | c:text | a:float8 | b:int4 | c:text
+-1 | 104 | 0004 | -1 | 104 | 0004
+-1 | 104 | 0004 | -1 | 204 | 0004
+-1 | 109 | 0009 | -1 | 109 | 0009
+-1 | 109 | 0009 | -1 | 209 | 0009
+-1 | 204 | 0004 | -1 | 104 | 0004
+-1 | 204 | 0004 | -1 | 204 | 0004
+-1 | 209 | 0009 | -1 | 109 | 0009
+-1 | 209 | 0009 | -1 | 209 | 0009
+1 | 104 | 0004 | 1 | 104 | 0004
+1 | 104 | 0004 | 1 | 204 | 0004
+1 | 109 | 0009 | 1 | 109 | 0009
+1 | 109 | 0009 | 1 | 209 | 0009
+1 | 204 | 0004 | 1 | 104 | 0004
+1 | 204 | 0004 | 1 | 204 | 0004
+1 | 209 | 0009 | 1 | 109 | 0009
+1 | 209 | 0009 | 1 | 209 | 0009
+-- SELECT 16
+
+> reset enable_partitionwise_join
+-- RESET
+
+> create table a26_h (a int, b int, c text) partition by hash (c)
+-- CREATE TABLE
+
+> create table a26_h_1 partition of a26_h for values with (modulus 3, remainder 0)
+-- CREATE TABLE
+
+> create table a26_h_2 partition of a26_h for values with (modulus 3, remainder 1)
+-- CREATE TABLE
+
+> create table a26_h_3 partition of a26_h for values with (modulus 3, remainder 2)
+-- CREATE TABLE
+
+> insert into a26_h select i, i % 25, to_char(i % 12, 'FM0000') from generate_series(0, 599, 2) i
+-- INSERT 0 300
+
+> create index a26_h_c on a26_h (c)
+-- CREATE INDEX
+
+> analyze a26_h
+-- ANALYZE
+
+> set max_parallel_workers_per_gather = 1
+-- SET
+
+> set debug_parallel_query = on
+-- SET
+
+> set enable_partitionwise_join = on
+-- SET
+
+> explain (costs off) select * from a26_h p1 join a26_h p2 using (c) limit 100
+QUERY PLAN:text
+Gather
+  Workers Planned: 1
+  Single Copy: true
+  ->  Limit
+        ->  Append
+              ->  Nested Loop
+                    Join Filter: (p1_1.c = p2_1.c)
+                    ->  Seq Scan on a26_h_1 p1_1
+                    ->  Seq Scan on a26_h_1 p2_1
+              ->  Hash Join
+                    Hash Cond: (p1_2.c = p2_2.c)
+                    ->  Seq Scan on a26_h_2 p1_2
+                    ->  Hash
+                          ->  Seq Scan on a26_h_2 p2_2
+              ->  Hash Join
+                    Hash Cond: (p1_3.c = p2_3.c)
+                    ->  Seq Scan on a26_h_3 p1_3
+                    ->  Hash
+                          ->  Seq Scan on a26_h_3 p2_3
+-- EXPLAIN
+
+> set enable_memoize = off
+-- SET
+
+> set enable_material = off
+-- SET
+
+> set enable_hashjoin = off
+-- SET
+
+> set enable_mergejoin = off
+-- SET
+
+> set enable_seqscan = off
+-- SET
+
+> explain (costs off) select * from a26_h_1 p1 join a26_h_1 p2 using (c)
+QUERY PLAN:text
+Gather
+  Workers Planned: 1
+  Single Copy: true
+  ->  Nested Loop
+        Join Filter: (p1.c = p2.c)
+        ->  Index Scan using a26_h_1_c_idx on a26_h_1 p1
+        ->  Index Scan using a26_h_1_c_idx on a26_h_1 p2
+-- EXPLAIN
+
+> reset enable_memoize
+-- RESET
+
+> reset enable_material
+-- RESET
+
+> reset enable_hashjoin
+-- RESET
+
+> reset enable_mergejoin
+-- RESET
+
+> reset enable_seqscan
+-- RESET
+
+> reset enable_partitionwise_join
+-- RESET
+
+> reset debug_parallel_query
+-- RESET
+
+> reset max_parallel_workers_per_gather
+-- RESET
+
+> create table a26_t (unique1 int, unique2 int)
+-- CREATE TABLE
+
+> insert into a26_t select i, 9999 - i from generate_series(0, 9999) i
+-- INSERT 0 10000
+
+> create unique index a26_t_u2 on a26_t (unique2)
+-- CREATE INDEX
+
+> create table a26_i (f1 int)
+-- CREATE TABLE
+
+> insert into a26_i values (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> analyze a26_t, a26_i
+-- ANALYZE
+
+> explain (verbose, costs off)
+> select * from (values (0, 9998), (1, 1000)) v(id, x),
+>   lateral (select f1 from a26_i where f1 = any (select unique1 from a26_t where unique2 = v.x offset 0)) ss
+QUERY PLAN:text
+Nested Loop
+  Output: "*VALUES*".column1, "*VALUES*".column2, a26_i.f1
+  ->  Values Scan on "*VALUES*"
+        Output: "*VALUES*".column1, "*VALUES*".column2
+  ->  Nested Loop Semi Join
+        Output: a26_i.f1
+        Join Filter: (a26_i.f1 = a26_t.unique1)
+        ->  Seq Scan on public.a26_i
+              Output: a26_i.f1
+        ->  Materialize
+              Output: a26_t.unique1
+              ->  Index Scan using a26_t_u2 on public.a26_t
+                    Output: a26_t.unique1
+                    Index Cond: (a26_t.unique2 = "*VALUES*".column2)
+-- EXPLAIN
+
+> select * from (values (0, 9998), (1, 1000)) v(id, x),
+>   lateral (select f1 from a26_i where f1 = any (select unique1 from a26_t where unique2 = v.x offset 0)) ss
+id:int4 | x:int4 | f1:int4
+-- SELECT 0
+
+> select * from (values (0, 9998), (1, 1000), (2, 3), (3, 3)) v(id, x),
+>   lateral (select unique1 from a26_t t where t.unique2 = any
+>     (select unique2 from a26_t where unique2 < v.x order by unique2 limit 2)) ss order by 1, 3
+id:int4 | x:int4 | unique1:int4
+0 | 9998 | 9998
+0 | 9998 | 9999
+1 | 1000 | 9998
+1 | 1000 | 9999
+2 | 3 | 9998
+2 | 3 | 9999
+3 | 3 | 9998
+3 | 3 | 9999
+-- SELECT 8
+
+> select v.id, (select count(*) from a26_i i where i.f1 = any
+>     (select unique1 from a26_t where unique2 = v.x offset 0))
+>   from (values (0, 9998), (1, 1000), (2, 5)) v(id, x) order by 1
+id:int4 | count:int8
+0 | 0
+1 | 0
+2 | 0
+-- SELECT 3
+
+> create table a26_e (id int primary key, code int)
+-- CREATE TABLE
+
+> insert into a26_e values (1, 1), (2, 2)
+-- INSERT 0 2
+
+> analyze a26_e
+-- ANALYZE
+
+> explain (verbose, costs off)
+> select 1 from a26_e t1 left join (select 1 as x, * from a26_e t2) s1 on true where s1.x = 1
+QUERY PLAN:text
+Nested Loop
+  Output: 1
+  ->  Seq Scan on public.a26_e t2
+        Output: t2.id, t2.code
+        Filter: (1 = 1)
+  ->  Seq Scan on public.a26_e t1
+        Output: t1.id, t1.code
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select 1 from a26_e t1 left join (select 1 as x, * from a26_e t2) s1 on true where s1.x is not null
+QUERY PLAN:text
+Nested Loop
+  Output: 1
+  ->  Seq Scan on public.a26_e t1
+        Output: t1.id, t1.code
+  ->  Materialize
+        ->  Seq Scan on public.a26_e t2
+              Filter: (1 IS NOT NULL)
+-- EXPLAIN
+
+> select 1 from a26_e t1 left join (select 1 as x, * from a26_e t2) s1 on true where s1.x = 1
+?column?:int4
+1
+1
+1
+1
+-- SELECT 4
+
+> drop table a26_p1, a26_p2, a26_al, a26_be, a26_h, a26_t, a26_i, a26_e
+-- DROP TABLE
+

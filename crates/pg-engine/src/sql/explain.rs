@@ -535,6 +535,10 @@ struct ExNode {
     /// plain columns, no node of Postgres's): the scan's physical target list, which it
     /// returns where its consumer takes any (`physical_input`).
     physical: Vec<String>,
+    /// A join: the tuples its quals other than the hash / merge clauses are checked on
+    /// (final_cost_nestloop's ntuples, final_cost_hashjoin's hashjointuples,
+    /// final_cost_mergejoin's mergejointuples), what a filter over it costs per row of.
+    qual_tuples: Option<f64>,
 }
 
 impl ExNode {
@@ -3666,6 +3670,24 @@ fn partitionwise_scans<'p>(p: &'p Plan, out: &mut Vec<&'p Plan>) {
         _ => plan_inputs(p)
             .into_iter()
             .for_each(|i| partitionwise_scans(i, out)),
+    }
+}
+
+/// The partition scans a partitionwise join's first child join reads, as a node above
+/// the join's Append names them: ruleutils descends to an Append's first child (a
+/// partition's own partitions' Append too), and a Var whose topmost parent is among the
+/// Appends' apprelids prints as that parent's (get_variable's appendparents).
+fn pw_named_scans<'p>(p: &'p Plan, out: &mut Vec<&'p Plan>) {
+    match p {
+        Plan::Scan(s) if s.part.is_some() => out.push(p),
+        Plan::Append { inh: Some(_), inputs, .. } => {
+            if let Some(first) = inputs.first() {
+                pw_named_scans(first, out);
+            }
+        }
+        _ => plan_inputs(p)
+            .into_iter()
+            .for_each(|i| pw_named_scans(i, out)),
     }
 }
 
@@ -7867,7 +7889,7 @@ impl Builder<'_, '_> {
                 if inh.is_none() && let Some(first) = arms.first() {
                     let mut map: Vec<(String, String)> = Vec::new();
                     let mut scans = Vec::new();
-                    partitionwise_scans(first, &mut scans);
+                    pw_named_scans(first, &mut scans);
                     for sp in scans {
                         let Plan::Scan(sc) = sp else { continue };
                         if let Some(name) = self.refnames.get(&addr(sp)) {
@@ -10506,12 +10528,14 @@ impl Builder<'_, '_> {
         {
             // (A volatile clause of no columns is the relation's, as distribute_qual_to_rels
             // puts it: not a gating qual.)
-            // (Nor is a part of a clause over a PlaceHolderVar: the clause is one.)
+            // (Nor is a clause over a PlaceHolderVar, or a part of one: pull_varnos counts
+            // the PlaceHolderVar's ph_eval_at, so distribute_qual_to_rels makes it a
+            // restriction of the relation computing it, `Filter: (1 = 1)`.)
             let in_phv = |e: &Expr| {
                 s.phv_quals.iter().any(|q| {
                     let mut sub = Vec::new();
                     conjuncts(q, &mut sub);
-                    sub.len() > 1 && sub.iter().any(|x| x.same_as(e))
+                    sub.iter().any(|x| x.same_as(e))
                 })
             };
             let gating: Vec<Expr> = parts
@@ -11646,7 +11670,10 @@ impl Builder<'_, '_> {
                 };
                 let qc: f64 = quals.iter().map(costs::qual_cost).sum();
                 let sel = est.clauses(&quals);
-                c.node.total_cost += c.node.rows * qc;
+                // (A join checks them with its other quals, on the tuples those are checked
+                // on: final_cost_*join's qp_qual_cost.)
+                let tuples = c.node.qual_tuples.filter(|_| c.node.is_join()).unwrap_or(c.node.rows);
+                c.node.total_cost += tuples * qc;
                 c.node.rows = costs::clamp_rows(c.node.rows * sel);
                 if let Some(sa) = &mut c.node.safe_alt {
                     sa.total_cost += sa.rows * qc;
@@ -13138,7 +13165,9 @@ impl Builder<'_, '_> {
         }
         // Or partition by partition.
         if sets.is_none() {
-            let names: Vec<String> = gnames.iter().map(|g| self.pick(g, Cx::Upper)).collect();
+            // (As the nodes above the partitions' groupings refer to the keys: a key
+            // computed below them wrapped, as the serial grouping's sort keys are.)
+            let names: Vec<String> = gref.iter().map(|g| self.pick(g, Cx::Upper)).collect();
             self.group_order = hint.clone();
             let pw = self.partitionwise_agg(input, groups, aggs, &n, having.as_ref(), &names, hint_full);
             self.group_order = None;
@@ -14651,6 +14680,11 @@ impl Builder<'_, '_> {
         }
         n.startup_cost = cost.startup;
         n.total_cost = cost.total;
+        n.qual_tuples = match (method, jt) {
+            (_, Jt::Semi | Jt::Anti) => None,
+            (JoinMethod::NestLoop, _) => Some(lrows * rrows),
+            _ => Some(costs::clamp_rows(inner_sel * lrows * rrows)),
+        };
         // (initial_cost_nestloop / _mergejoin / _hashjoin count a disabled method itself,
         // FULL JOIN or not.)
         n.disabled = match method {
