@@ -455,6 +455,11 @@ struct Search<'s, 'c, 'a> {
     /// their members in that order; and whether that order is still to be put on the
     /// clause (one a parameterized join path made first).
     derives: std::cell::RefCell<Vec<(usize, usize, bool)>>,
+    /// The join relations' ParamPathInfos: (relation, parameterization, rows), the rows
+    /// estimated from the first pair of input paths a path of it was made from
+    /// (get_joinrel_parampathinfo, get_parameterized_joinrel_size), which every path of
+    /// that parameterization has.
+    ppi: std::cell::RefCell<Vec<(u32, u32, f64)>>,
 }
 
 /// A PlaceHolderVar of the group (`plan::phv_projection`): its column of the group's
@@ -1717,34 +1722,64 @@ impl Search<'_, '_, '_> {
         // consider_index_join_outer_rels: each clause's set of outer leaves, and its union
         // with each set tried before (but not with one using its equivalence class
         // already), up to ten sets a clause.
+        // (Per index, of the clauses on its keys: consider_index_join_clauses; a TID scan's
+        // own.)
+        let outer_sets = |cs: &[&(Expr, Expr, u32, usize)]| -> Vec<u32> {
+            let mut reqs: Vec<u32> = Vec::new();
+            let limit = 10 * cs.len();
+            for c in cs {
+                if reqs.contains(&c.2) {
+                    continue;
+                }
+                let ec = self.clause_ec(&self.clauses[c.3]);
+                for pos in 0..reqs.len() {
+                    let o = reqs[pos];
+                    if c.2 & !o == 0 || o & !c.2 == 0 {
+                        continue;
+                    }
+                    if ec.is_some()
+                        && cs.iter().any(|d| d.2 & !o == 0 && self.clause_ec(&self.clauses[d.3]) == ec)
+                    {
+                        continue;
+                    }
+                    if reqs.len() >= limit {
+                        break;
+                    }
+                    if !reqs.contains(&(c.2 | o)) {
+                        reqs.push(c.2 | o);
+                    }
+                }
+                if !reqs.contains(&c.2) {
+                    reqs.push(c.2);
+                }
+            }
+            reqs
+        };
+        let on_key = |ii: &crate::sql::paths::IndexInfo, local: &Expr| {
+            ii.keys.iter().any(|k| match (k, local) {
+                (Expr::Col(a, _), Expr::Col(b, _)) => a == b,
+                (k, l) => k.same_as(l),
+            })
+        };
+        let index_reqs: Vec<Vec<u32>> = r
+            .indexes
+            .iter()
+            .map(|ii| {
+                let cs: Vec<&(Expr, Expr, u32, usize)> = cands.iter().filter(|c| on_key(ii, &c.0)).collect();
+                outer_sets(&cs)
+            })
+            .collect();
+        let tid_reqs: Vec<u32> = {
+            let cs: Vec<&(Expr, Expr, u32, usize)> = cands
+                .iter()
+                .filter(|c| matches!(c.0, Expr::Col(j, DataType::Tid) if j >= r.table.columns.len()))
+                .collect();
+            outer_sets(&cs)
+        };
         let mut reqs: Vec<u32> = Vec::new();
-        let limit = 10 * cands.len();
-        for c in &cands {
-            if reqs.contains(&c.2) {
-                continue;
-            }
-            let ec = self.clause_ec(&self.clauses[c.3]);
-            for pos in 0..reqs.len() {
-                let o = reqs[pos];
-                if c.2 & !o == 0 || o & !c.2 == 0 {
-                    continue;
-                }
-                if ec.is_some()
-                    && cands
-                        .iter()
-                        .any(|d| d.2 & !o == 0 && self.clause_ec(&self.clauses[d.3]) == ec)
-                {
-                    continue;
-                }
-                if reqs.len() >= limit {
-                    break;
-                }
-                if !reqs.contains(&(c.2 | o)) {
-                    reqs.push(c.2 | o);
-                }
-            }
-            if !reqs.contains(&c.2) {
-                reqs.push(c.2);
+        for q in index_reqs.iter().flatten().chain(tid_reqs.iter()) {
+            if !reqs.contains(q) {
+                reqs.push(*q);
             }
         }
         let mut out: Vec<JP> = Vec::new();
@@ -1929,6 +1964,10 @@ impl Search<'_, '_, '_> {
             let prel = Rc::new(prel);
             let mut best: Vec<JP> = Vec::new();
             for (ix, ii) in prel.indexes.iter().enumerate() {
+                // (An index's paths are of its own clauses' outer relations.)
+                if index_reqs.get(ix).is_some_and(|rs| !rs.contains(&req)) {
+                    continue;
+                }
                 if !ii.pred.is_empty() && !implied_by(&ii.pred, &prel.quals) {
                     continue;
                 }
@@ -4111,7 +4150,7 @@ impl Search<'_, '_, '_> {
         // parameters restrict it, times the join's other clauses.)
         let rows = if param_join {
             let sel: f64 = quals.iter().map(|&q| self.clause_sel(&self.clauses[q], None)).product();
-            costs::clamp_rows(op.rows * ip.rows * sel)
+            self.ppi_rows(ex.set, req_all, costs::clamp_rows(op.rows * ip.rows * sel).min(ex.rows))
         } else {
             ex.rows
         };
@@ -4352,7 +4391,19 @@ impl Search<'_, '_, '_> {
         // (As a parameterized nested loop's: the inputs' rows times the clauses'
         // selectivity.)
         let sel: f64 = all.iter().map(|&q| self.clause_sel(&self.clauses[q], None)).product();
-        Some((req, costs::clamp_rows(op.rows * ip.rows * sel)))
+        Some((req, self.ppi_rows(ex.set, req, costs::clamp_rows(op.rows * ip.rows * sel).min(ex.rows))))
+    }
+
+    /// The rows of join relation `set`'s paths parameterized by `req`: those of its
+    /// ParamPathInfo, made by the first path of that parameterization (`rows` its
+    /// estimate, get_parameterized_joinrel_size, at most the relation's own rows).
+    fn ppi_rows(&self, set: u32, req: u32, rows: f64) -> f64 {
+        let mut ppi = self.ppi.borrow_mut();
+        if let Some(&(_, _, r)) = ppi.iter().find(|p| p.0 == set && p.1 == req) {
+            return r;
+        }
+        ppi.push((set, req, rows));
+        rows
     }
 
     /// add_path: a parameterized path into the join relation's list of them (compared
@@ -6883,6 +6934,7 @@ impl Planner<'_, '_> {
             loop_rows: self.pw_loop_rows.take(),
             phvs,
             derives: Default::default(),
+            ppi: Default::default(),
         };
         s.needed.resize(gw, false);
         for (ci, (e, on)) in raw_clauses.into_iter().enumerate() {

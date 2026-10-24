@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51091 (**99.88%**) |
-| units differing | 59 |
+| units matching | 51092 (**99.89%**) |
+| units differing | 58 |
 | files fully matching | 226 |
 | engine output == expected/*.out (pg_regress "ok") | 187 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 59 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 58 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 59 units
-join (41), partition_join (15), partition_prune (2), returning (1)
+### EXPLAIN (group C1) — 58 units
+join (40), partition_join (15), partition_prune (2), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -204,7 +204,7 @@ fixed, none broken, no other agent's units moved.
 
 | file | fixed units |
 |---|---|
-| join | 123, 502, 503 |
+| join | 123, 410, 502, 503 |
 
 What changed:
 
@@ -238,6 +238,30 @@ What changed:
 
 Goldens: `tests/sql/a22_subquery_paths.sql`, `a22_ec_derives.sql`.
 
+Second batch (join 410; subset run on f334753 against the first batch's: 13108 -> 13109, none
+broken, and again rebased onto b8a205b and f517f1c against their baselines: 13112 -> 13113,
+13121 -> 13122; a full run of the whole schedule in one database on it measured 51074: every file as
+the table has it, join at 881, and stats 387 / 388 / 392 / 415 / 418 lost to the shared
+reference, whose `regress_tblspace` a concurrent run had dropped, so its ALTER ... SET
+TABLESPACE errored):
+
+- **ParamPathInfo rows** (get_joinrel_parampathinfo, get_parameterized_joinrel_size): every
+  path of a join relation with one parameterization has the rows estimated from the first
+  pair of input paths that made one (at most the relation's own rows); the engine estimated
+  each path from its own inputs (`Search::ppi`). Agent 17's try of this made other plans
+  worse because the pairs came in another order than Postgres's: the cause was index
+  parameterizations Postgres never makes. consider_index_join_clauses works per index, on
+  the outer relations of that index's own clauses (and their unions); the engine took the
+  unions over every index's clauses, so `b` (indexes on `unique2` and on
+  `(thousand, tenthous)`) had paths parameterized by `{a, i2}` and `{a, i1, i2}` (an index
+  scan on one index checking the other's clause as a filter), and those made the first
+  pairs. Now each index has its own outer sets (`param_paths`), its paths only those; the
+  bitmap ANDs per parameterization as before. With that the first pairs are Postgres's:
+  join 410's `b` parameterized by `i2` joined to `i1` (1 row), and its plan matches,
+  costs included.
+
+Golden: `a22_param_rows.sql`.
+
 Looked at and left (why):
 
 - A trivial Subquery Scan's cost: Postgres charges cpu_tuple_cost per row when the outer query
@@ -246,6 +270,19 @@ Looked at and left (why):
   (costs only: join 502's Merge Right Join total 634.93 for 657.53).
 - A Subquery Scan under a Hash (`Hash -> Subquery Scan on s -> HashAggregate`) Postgres keeps
   and the engine drops; seen while testing, not this round's.
+- join 442: three separate gaps, none of them the join search's. reconsider_outer_join_clauses
+  (the left join's `tt3.f1 = tt4.f1` with `tt3.f1 = 'foo'` below it gives `tt4.f1 = 'foo'` on
+  the nullable side and the join clause goes; Postgres then has to keep `tt3 ⟕ tt4` joined
+  first, which the engine's join search doesn't know of), a constant class member pushed as a
+  LATERAL LIMIT subquery's Subquery Scan filter (`ss1.c0 = 'foo'`), and a Memoize over that
+  Subquery Scan keyed by its LATERAL reference.
+- partition_prune 265: fix_alternative_subplan per copy of the AlternativeSubPlan, by each
+  copy's num_exec (an index qual 1, so the plain SubPlan; the recheck qual and the target
+  list rows, so the hashed one), plus where each SubPlan shows: an Append's run-time pruning
+  expressions hold their own copy (SubPlan 3 under the Append), and EXPLAIN prints a SubPlan
+  only where it is first met. The engine has one sub-select per expression and decides
+  hashing once; this needs SubPlan copies with their own ids (agent 18's SubPlan numbering
+  touches the same code).
 
 ## Round 16, agent 20, second batch (agent 15's row-mark leftovers: locks over unique-ified semi joins, RETURNING sub-selects, SET costs)
 
@@ -3063,7 +3100,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 884 | 96% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (41) |
+| join | 925 | 885 | 96% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (40) |
 | aggregates | 556 | 556 | 100% | yes | no |  |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
