@@ -57,7 +57,7 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
 - **contrib extensions** (round 17, agent 39): CREATE / ALTER / DROP EXTENSION run the
   extensions' own PostgreSQL 18.6 scripts (`src/ext/`, `session/ddl/extension.rs`), C
   functions are native code by library and symbol; the contrib modules' regression tests run
-  with `pg_contrib` (`tests/pg_regress.rs`). Per-module scores and how it works:
+  with `pg_contrib` (`tests/pg_contrib.rs`). Per-module scores and how it works:
   `tests/contrib/STATUS.md`.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
@@ -84,7 +84,8 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     `xml/`; `mbconv/` encodings).
   - `src/storage/`, `src/txn/`: key-value storage and MVCC.
   - `tests/golden.rs` + `tests/sql/*.sql|.out`: golden tests recorded from PostgreSQL 18.
-  - `tests/pg_regress.rs`: the regression-suite harness. `tests/regress/STATUS.md`: the
+  - `tests/pg_regress.rs` (the harness: `tests/harness/regress.rs`, shared with
+    `tests/pg_contrib.rs`, the contrib modules' tests): the regression suite. `tests/regress/STATUS.md`: the
     classified list of every remaining difference. `tests/regress/REPORT.md`: last run report.
   - `tools/heavy.sh`: the one-heavy-job-at-a-time lock (see "Machine rules").
 - `crates/pg-icu`: ICU4C 78.1 built from source (exact collation behaviour; needs curl or
@@ -149,7 +150,7 @@ GOLDEN_RECORD=127.0.0.1:55499 GOLDEN_PASSWORD=pw GOLDEN_FILTER=<name> cargo test
   files, `GOLDEN_SHUFFLE=off` none; `GOLDEN_SHUFFLE_SEED=<n>` another order (the failure message
   names the seed and the files before the differing one, and says whether it matches alone).
 
-**Regression suite** (`tests/pg_regress.rs`, `#[ignore]`d):
+**Regression suite** (`tests/pg_regress.rs`, harness in `tests/harness/regress.rs`, `#[ignore]`d):
 
 ```sh
 # a subset (test_setup always runs first; add prerequisites such as create_misc,create_index)
@@ -157,6 +158,10 @@ PGREGRESS_ONLY=join,subselect PGREGRESS_DIR=/tmp/pgregress PGREGRESS_DB=regressi
 PGREGRESS_PORT=55843 PGREGRESS_REPORT_DIR=/tmp/pgregress/report \
   cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 ```
+
+The contrib modules' tests are a test binary of their own (`--test pg_contrib`, same harness,
+`PGCONTRIB_ONLY=<modules>`), so `--test pg_regress -- --ignored` runs only the main suite; its
+engine's data directory and binary copy are per process, never the main suite's.
 
 - A full run takes about an hour; subsets take minutes.
 - Without `PGREGRESS_REPORT_DIR` a run overwrites `tests/regress/REPORT.md`.

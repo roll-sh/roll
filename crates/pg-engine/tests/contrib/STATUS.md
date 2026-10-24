@@ -2,7 +2,7 @@
 
 The contrib modules' own regression tests (`contrib/<module>/sql` at `REL_18_6`) run through
 the engine and a reference PostgreSQL 18.6 and compared unit by unit, as the main suite is
-(`pg_contrib` in `tests/pg_regress.rs`; its doc comment has the options). `REPORT.md` is the
+(`tests/pg_contrib.rs`; `pg_contrib` in `tests/harness/regress.rs` documents the options). `REPORT.md` is the
 last run's per-file table.
 
 ## How extensions work here
@@ -27,7 +27,7 @@ docker run -d --name a39-ref -p 127.0.0.1:55939:5432 -e POSTGRES_PASSWORD=pw \
   -c shared_preload_libraries=pg_stat_statements -c max_prepared_transactions=5
 PGCONTRIB_ONLY=uuid-ossp,citext PGREGRESS_DIR=$D PGREGRESS_CONTAINER=a39-ref \
   PGREGRESS_ENGINE_CONTAINER=<psql container on the host network> PGREGRESS_PORT=55940 \
-  cargo test -p pg-engine --test pg_regress pg_contrib -- --ignored --nocapture
+  cargo test -p pg-engine --test pg_contrib -- --ignored --nocapture
 ```
 
 ## Scores
