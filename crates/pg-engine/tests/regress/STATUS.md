@@ -107,6 +107,88 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
 
+## Round 16, agent 24 (row marks: several locking clauses, preprocess_rowmarks' order, whole-row mark widths)
+
+No regress unit changes: a 46-file subset (returning, updatable_views, merge, with, rules,
+triggers, update, delete, insert, insert_conflict, portals, limit, select, union, subselect,
+join, rowsecurity, matview, inherit, partition_join, partition_prune, select_parallel,
+aggregates, equivclass, groupingsets, select_distinct, incremental_sort, memoize, join_hash,
+explain, stats_ext, foreign_key, privileges, generated_*, window and their prerequisites)
+on cce1f9c and on cce1f9c plus this batch: 18653 both, compared unit by unit, none moved. The
+table's counts stand (51102). The crate tests pass.
+
+- **A correctness fix: several locking clauses of one level** (`binder/select.rs`
+  `Locking::mark_for`). Only the last clause locked anything: `FOR UPDATE OF t1 FOR SHARE OF
+  t3` left t1 unlocked. Now each clause applies (transformLockingClause per clause,
+  applyLockingClause): a relation takes the strongest strength and the strictest wait policy
+  (NOWAIT over SKIP LOCKED) of the clauses naming it or naming none, and a lock pushed down
+  from the level above is combined with the subquery's own the same way. Checked with a
+  second session's NOWAIT locks against PostgreSQL (`tests/wire.rs`
+  `several_locking_clauses`).
+- **LockRows marks in preprocess_rowmarks' order** (`paths/rowmarks.rs`, `explain.rs`):
+  the locked relations' ctids in the order the clauses name them (parse->rowMarks: the clause
+  first naming the relation, then its place in the clause's list; a pulled-up subquery's
+  after the level's own), then the other relations' ctids and whole rows by range table
+  index: `s.*, t2.ctid` for `FROM (...) s, t2 FOR UPDATE OF s`, `t1.ctid, t3.ctid, t2.ctid`
+  for `FOR UPDATE OF t1, t3`. FROM subqueries, functions, VALUES and CTE scans carry an `rti`
+  now (`Plan::Barrier` / `FunctionScan` / `Values` / `CteScan`), taken where the FROM item is
+  bound, so a pulled-up VALUES list (its RTE appended by pull-up) comes after the level's
+  own; a data-modifying statement's whole-row marks are ordered with its ctids the same way.
+- **Whole-row marks' widths, in the paths and in EXPLAIN** (set_rel_width): a whole-row
+  Var is 24 bytes plus the widths the relation knows of its columns (a subquery's plain
+  column outputs, else the columns read), counted in the relation's and every join's width
+  above it. The join search sees it (`Planner::copy_marks`, `rowmarks::copied`, a leaf's
+  `whole`), and a subquery scan returning it is no trivial one (cost_subqueryscan's
+  cpu_tuple_cost), so `UPDATE t1 ... FROM (SELECT x FROM t2 OFFSET 0) s` takes Postgres's
+  join order. EXPLAIN knows the marks without VERBOSE too (`copy_mark_leaves`; a semi join's
+  inner relations' ctids too): `Subquery Scan on s (... width=32)`. A data-modifying
+  statement's subqueries keep every output for their whole row (`whole_marked`).
+- **An UPDATE over a join shows its final target list's width** (apply_scanjoin_target_to_paths):
+  the new values (a column's width, else its type's), the target's ctid (and tableoid when
+  inherited), the other relations' row marks and what RETURNING reads of them: 44 for
+  `UPDATE t1 SET b = 'z' FROM t3 ...`, where the engine showed 12.
+- **Locked subqueries**: a subquery locking its rows keeps its Subquery Scan (its plan's
+  target list has the marks: trivial_subqueryscan; also under an `OFFSET 0`), whose width is
+  its reltarget's; a LockRows keeps its input's column statistics and order
+  (create_lockrows_path), so a join over a locked subquery's key estimates as Postgres (10
+  rows where the engine had 1); a level's LockRows is as wide as its target list with the
+  marks (`width=10` for `x` and the ctid).
+- **Smaller EXPLAIN gaps** (agent 20's): the statement's select-list constants read only by a
+  Sort / Limit / LockRows, with no outer join, appendrel or grouping set below, are plain
+  Consts (`'a'::text`, not `('a'::text)`: search_indexed_tlist_for_non_var never references a
+  Const; `plain_const_lists`); a projection over a pulled-up one-row subquery of constants is
+  folded (`SELECT b || 'y' FROM (SELECT 'x' b) s`: `'xy'::text`, `pullup.rs`). A constant
+  GROUP BY key was done by agent 18 (`fixed_group_keys`); this batch's own version was dropped
+  in the rebase.
+- VERBOSE: a Hash or Materialize over a join under a data-modifying statement's or a
+  LockRows's junk layout returns its input's target list (it listed unread columns).
+
+Goldens: `a24_rowmark_order_widths` (recorded from PostgreSQL 18.6).
+
+Left, and why:
+
+- **returning 105**: three parts, none a name. (1) rewriteRuleAction puts the original
+  statement's range table first, but the view `joinview` in it is expanded later and its
+  relations, pulled up, are appended after the rule action's: the target and the action's
+  `joinme` are `foo_1` / `joinme`, the view's `foo_2` / `joinme_1`; the engine names the
+  view's first. (2) The join order is a cost tie between the two `joinme` scans, broken by
+  range table order. (3) The NEW values are the view's expressions put into the action's SET
+  (`(foo_2.f3 + 1)` computed in the top join's target list); the engine computes them in the
+  view's projection below the join. And the top join clause's member is an equivalence-class
+  choice (below).
+- **Equivalence class member order** (found here, not changed: agents 21 / 22's area):
+  generate_join_implied_equalities takes the first outer member in ec_members order, the
+  order the clauses as written added them (`t2.x = t1.a AND t3.p = t1.a`: `t2.x = t3.p`);
+  the clauses the join search gets are already re-derived, `t1.a` first
+  (`FROM t1, t2, t3 WHERE t2.x = t1.a AND t3.p = t1.a` shows `t1.a = t3.p`).
+- **A join's target list order under row-mark junk**: Postgres's is its joinrel's reltarget
+  (build_joinrel_tlist from the first input pair the join search made: rtindex order), the
+  engine's its inputs' order (`t1.ctid, t1.a, s.*` for the engine's `s.*, t1.ctid, t1.a`);
+  and a scan's columns in attr_needed order (`rm3.q, rm3.p` when the join clause reads q
+  first).
+- A whole-row Var of a FROM subquery in the select list (`SELECT s FROM (... OFFSET 0) s`)
+  still loses the Subquery Scan (HANDOFF's "ROW() of its columns").
+
 ## Round 16, agent 23 (self-join elimination order, SubPlan classes with outer values, semi join unique-ification, join costing)
 
 Measured in subset runs of the planner-heavy files (the 33 of agent 22's list), unit by unit

@@ -366,11 +366,14 @@ them all with the "Fixed in round N" sections describing what was already tried.
    relations without index-only scans, locks pushed into FROM subqueries and views, and
    rule-rewritten statements explained as Postgres's list of plans (`explain.rs`
    `rule_statements`). Left (STATUS.md, round 16 agent 9): merge 462 (Inner Unique over an
-   empty partitioned target), returning 105 (the rule action's range table order and join
-   planning), a whole-row-marked subquery's width in the planner's costs (round 16, agent 15:
-   the level with only `s.*` marks gets its LockRows, a whole-row-marked subquery keeps every
-   column; agent 20: a unique-ified semi join under FOR UPDATE locks above the join, a locked
-   LIMIT subquery under its Limit, a DML statement's FROM subquery's `o.*`). (VERBOSE lists of UPDATE /
+   empty partitioned target), returning 105 (the view's relations named after the rule
+   action's, a cost tie, the view's NEW values put into the action's SET: STATUS.md, round 16
+   agent 24). (Round 16, agent 15: the level with only `s.*` marks gets its LockRows, a
+   whole-row-marked subquery keeps every column; agent 20: a unique-ified semi join under FOR
+   UPDATE locks above the join, a locked LIMIT subquery under its Limit, a DML statement's
+   FROM subquery's `o.*`; agent 24: a level's several locking clauses all lock, marks in
+   preprocess_rowmarks' order, whole-row marks' widths in the paths and EXPLAIN, an UPDATE
+   join's final target list width.) (VERBOSE lists of UPDATE /
    DELETE joined with an inherited target of several members, and a CTE's / VALUES' /
    function's whole-row mark there: round 16, agent 14.)
 5. The long tail in STATUS.md. (select_parallel, select_distinct and join_hash's batch counts
