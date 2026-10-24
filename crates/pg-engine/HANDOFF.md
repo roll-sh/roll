@@ -37,7 +37,7 @@ harness and score in `tests/`:
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,129 of 51,150 statements match (99.96%).** 21 differ. The full
+- **Regression suite: 51,134 of 51,150 statements match (99.97%).** 16 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
   - All 21 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
     order since round 16, agent 17: join relations parameterized by LATERAL references).
@@ -365,7 +365,7 @@ them all with the "Fixed in round N" sections describing what was already tried.
    (join 332, partition_join 41 / 204; STATUS.md round 16, agent 30). (744, a hash join
    parameterized by a LATERAL inner side: done in round 16, agent 17; 426, a JOIN USING alias
    as a PlaceHolderVar at its join: round 16, agent 30.)
-2. **Remaining join / partition_join / partition_prune plan shapes** (join 14, partition_join 6,
+2. **Remaining join / partition_join / partition_prune plan shapes** (join 12, partition_join 3,
    partition_prune 1 unit; round 14's agent 5 and round 16's agent 12 sections in STATUS.md have
    what changed and why the rest is open; round 16's agent 17 section has join relations
    parameterized by LATERAL references and why partition_prune 410 stays open (265 and 442 done in
@@ -380,7 +380,10 @@ them all with the "Fixed in round N" sections describing what was already tried.
    with why 715 stays open (a FROM subquery holding a semi join is planned as a group of its
    own, not flattened into its parent's); join 662/663/671/706/781, partition_join 52/234/553/588/608 done in round
    16, agent 26, whose section lists the causes of the rest of join 674–808 and
-   partition_join 98–300): cost-driven choices (join 715),
+   partition_join 98–300; join 691/765, partition_join 138/210/300 done in round 16, agent 40:
+   class clauses made in range table order, child joins of partitioned join relations only,
+   partitionwise paths of join relations inside outer-join groups, DML sublinks pulled up over
+   inheritance targets, whole-row Vars passed up): cost-driven choices (join 715),
    partitionwise LATERAL joins left (partition_join 48/207 done in round 16, agent 19; 204:
    a PlaceHolderVar), partition_prune 410. (partition_join 86, a unique-ified side passing
    non-key columns through, done in round 16, agent 31: a hashed Distinct with pass-through
@@ -427,9 +430,9 @@ them all with the "Fixed in round N" sections describing what was already tried.
 Smaller known differences that don't fail a unit today (round 14, agent 11 fixed the DISTINCT
 `((a + 1))` Sort output listed here before): a pulled-up one-row VALUES' constants aren't
 folded into the expressions over them (`SELECT a + b FROM (VALUES (1, 2)) t(a, b)`: Postgres
-shows `3`); a whole-row Var isn't passed up through a join or sort as one value (Postgres's scan
-returns `r.*, r.a`, the engine the columns), so a FROM subquery not pulled up whose whole row is
-read above a join loses its Subquery Scan (`SELECT x.a, s FROM t x, (... OFFSET 0) s`). (Read
+shows `3`); a FROM subquery not pulled up whose whole row is read above a join loses its
+Subquery Scan (a table's whole row goes up as `r.*` since round 16, agent 40; a subquery's is
+bound as a ROW() of its columns) (`SELECT x.a, s FROM t x, (... OFFSET 0) s`). (Read
 over the subquery's own scan it is `s.*` and its `IS NULL` stays whole since round 16, agent
 29.)
 

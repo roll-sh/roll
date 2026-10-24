@@ -1856,6 +1856,11 @@ struct Planner<'c, 'a> {
     /// its parameterized paths' loop counts come from (a child relation's are made
     /// parameterized by the parent relations, then reparameterized by child).
     pw_loop_rows: std::cell::RefCell<Vec<f64>>,
+    /// Planning a partitionwise join's child join: the sets of the parent group's leaves
+    /// whose join relations are partitioned (`Planner::pw_partitioned_sets`); the child
+    /// search makes join relations of those only (a child join relation exists only for a
+    /// partitioned parent one, try_partitionwise_join), and the parent's leaf count.
+    pw_rels: std::cell::RefCell<Option<(usize, Vec<u32>)>>,
     /// Walking a LATERAL join's inner relation: the outer side's rows (its scans' loops).
     lateral_loops: std::cell::Cell<Option<f64>>,
     /// Planning a partitionwise join's child joins under a LIMIT (no ORDER BY): its count
@@ -1890,6 +1895,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             id: PLANNER_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             lifted: Default::default(),
             pw_loop_rows: Default::default(),
+            pw_rels: Default::default(),
             lateral_loops: Default::default(),
             pw_limit: Default::default(),
             pw_order: Default::default(),

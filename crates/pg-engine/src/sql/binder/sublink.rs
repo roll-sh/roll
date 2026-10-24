@@ -526,6 +526,8 @@ fn sub_join(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
                     None => input,
                 })
             }
+            // (A LATERAL join inside: its right side reads its own parameters, values of
+            // its left side, and nothing of the outer query; it goes as it is.)
             Plan::Join {
                 kind,
                 left,
@@ -536,7 +538,13 @@ fn sub_join(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
                 nleft,
                 nright,
                 meta,
-            } if params.is_empty() => {
+            } if params.is_empty()
+                || (matches!(kind, JoinKind::Inner | JoinKind::Left)
+                    && hash.is_none()
+                    && params.iter().all(clean)
+                    && lateral_clean(right, params.len())) =>
+            {
+                let lateral = !params.is_empty();
                 let inner = *kind == JoinKind::Inner;
                 let cond = match cond {
                     Some(c) if pull && inner => split(c, off, out)?,
@@ -555,14 +563,14 @@ fn sub_join(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
                     _ => (false, false),
                 };
                 let l = go(left, off, lp, out)?;
-                let r = go(right, off + nleft, rp, out)?;
+                let r = if lateral { (**right).clone() } else { go(right, off + nleft, rp, out)? };
                 Some(Plan::Join {
                     kind: *kind,
                     left: Arc::new(l),
                     right: Arc::new(r),
                     cond,
                     hash: hash.clone(),
-                    params: Vec::new(),
+                    params: params.clone(),
                     nleft: *nleft,
                     nright: *nright,
                     meta: meta.clone(),
@@ -591,9 +599,9 @@ fn sub_join(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
                     exprs: exprs.clone(),
                 })
             }
-            // Anything else (a FROM subquery planned already) on a side nothing of the
-            // outer query may come from: as it is, when it reads nothing of it.
-            _ if !pull && plan_clean(p) => Some(p.clone()),
+            // Anything else (a FROM subquery planned already): as it is, when it reads
+            // nothing of the outer query.
+            _ if plan_clean(p) => Some(p.clone()),
             _ => None,
         }
     }
@@ -605,12 +613,50 @@ fn sub_join(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
     Some((out, rest))
 }
 
+/// A LATERAL item's plan of plain relational nodes reading only its `n` parameters
+/// (`Outer(1, k)`) of the query around it, through no deeper LATERAL join of its own.
+fn lateral_clean(p: &Plan, n: usize) -> bool {
+    if !matches!(
+        p,
+        Plan::Scan(_)
+            | Plan::Barrier { secure: false, .. }
+            | Plan::Filter { .. }
+            | Plan::Project { .. }
+            | Plan::Sort { .. }
+            | Plan::Join { .. }
+            | Plan::Agg { .. }
+            | Plan::Limit { .. }
+            | Plan::Distinct { .. }
+            | Plan::Append { .. }
+            | Plan::Values { .. }
+            | Plan::Empty { .. }
+            | Plan::One
+    ) || matches!(p, Plan::Join { params, .. } if !params.is_empty())
+        || matches!(p, Plan::Scan(s) if s.current_of.is_some())
+    {
+        return false;
+    }
+    let mut exprs = Vec::new();
+    crate::sql::explain::node_exprs(p, &mut exprs);
+    let ok = exprs.iter().all(|e| {
+        let mut ok = true;
+        e.walk(&mut |x| match x {
+            Expr::Outer(1, k, _) if *k < n => {}
+            Expr::Outer(..) | Expr::Subquery(_) | Expr::Srf(..) => ok = false,
+            _ => {}
+        });
+        ok
+    });
+    ok && crate::sql::explain::plan_inputs(p).iter().all(|c| lateral_clean(c, n))
+}
+
 /// A plan of plain relational nodes reading nothing of an outer query.
 fn plan_clean(p: &Plan) -> bool {
     if !matches!(
         p,
         Plan::Scan(_)
             | Plan::SysScan { .. }
+            | Plan::Barrier { secure: false, .. }
             | Plan::Filter { .. }
             | Plan::Project { .. }
             | Plan::Sort { .. }

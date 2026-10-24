@@ -1287,7 +1287,9 @@ fn copy_mark_leaves(root: &Arc<Plan>) -> HashMap<usize, Option<u32>> {
 /// VALUES, a FROM subquery (not one holding the target: a view written through).
 fn dml_copies<'p>(source: &'p Plan, out: &mut Vec<(usize, &'p Plan)>) {
     let (mut semi, mut copies) = (Vec::new(), Vec::new());
-    lock_level_marks(source, false, &mut semi, &mut copies);
+    // (Its pulled-up sublinks' sources too: they are in its join tree,
+    // get_relids_in_jointree.)
+    level_marks(source, false, true, &mut semi, &mut copies);
     fn holds(p: &Plan, a: usize) -> bool {
         addr(p) == a || plan_inputs(p).into_iter().any(|c| holds(c, a))
     }
@@ -1310,6 +1312,12 @@ fn copy_widths_under(p: &Plan, marks: &HashMap<usize, Option<u32>>) -> u32 {
 /// table scans on a semi / anti join's inner side (their ctids, `semi`), and the sources of
 /// no table's rows (functions, VALUES, CTEs: their whole rows, `copies`), by address.
 pub(crate) fn lock_level_marks<'p>(p: &'p Plan, inner: bool, semi: &mut Vec<usize>, copies: &mut Vec<(usize, &'p Plan)>) {
+    level_marks(p, inner, false, semi, copies)
+}
+
+/// `lock_level_marks`; `copy_inner`: a semi / anti join's inner sources of no table's
+/// rows get their whole-row marks too (a data-modifying statement's).
+fn level_marks<'p>(p: &'p Plan, inner: bool, copy_inner: bool, semi: &mut Vec<usize>, copies: &mut Vec<(usize, &'p Plan)>) {
     match p {
         Plan::Scan(_) => {
             if inner {
@@ -1317,7 +1325,7 @@ pub(crate) fn lock_level_marks<'p>(p: &'p Plan, inner: bool, semi: &mut Vec<usiz
             }
         }
         Plan::FunctionScan { .. } | Plan::Values { .. } | Plan::CteScan { .. } | Plan::Barrier { .. } => {
-            if !inner {
+            if !inner || copy_inner {
                 copies.push((addr(p), p));
             }
         }
@@ -1327,15 +1335,15 @@ pub(crate) fn lock_level_marks<'p>(p: &'p Plan, inner: bool, semi: &mut Vec<usiz
         | Plan::Sort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::Context { input, .. }
-        | Plan::With { body: input, .. } => lock_level_marks(input, inner, semi, copies),
+        | Plan::With { body: input, .. } => level_marks(input, inner, copy_inner, semi, copies),
         Plan::Join { kind, left, right, .. } => {
-            lock_level_marks(left, inner, semi, copies);
+            level_marks(left, inner, copy_inner, semi, copies);
             let semi_join = matches!(kind, JoinKind::Semi | JoinKind::Anti);
-            lock_level_marks(right, inner || semi_join, semi, copies);
+            level_marks(right, inner || semi_join, copy_inner, semi, copies);
         }
         // (A semi join's inner side unique-ified: its HashAggregate / Unique carries the
         // relations' ctids through, ungrouped.)
-        Plan::Distinct { input, on: None, .. } => lock_level_marks(input, true, semi, copies),
+        Plan::Distinct { input, on: None, .. } => level_marks(input, true, copy_inner, semi, copies),
         _ => {}
     }
 }
@@ -2311,7 +2319,7 @@ fn shown_subqueries(root: &Plan, needed: &HashMap<usize, Vec<bool>>) -> HashMap<
             }
             let target = target_scan(source, oid).map(addr);
             let (mut semi, mut copies) = (Vec::new(), Vec::new());
-            lock_level_marks(source, false, &mut semi, &mut copies);
+            level_marks(source, false, true, &mut semi, &mut copies);
             for (a, q) in copies {
                 if matches!(q, Plan::Barrier { alias, .. } if !alias.is_empty())
                     && target.is_none_or(|t| !holds(q, t))
@@ -2634,7 +2642,13 @@ fn tlist_layout_at(top: &mut ExNode, locked: bool) {
             let sys = n.output.iter().any(|o| {
                 rel_of(o).is_some_and(|_| matches!(o.rsplit('.').next(), Some("tableoid" | "ctid" | "xmin" | "xmax" | "cmin" | "cmax")))
             });
-            if (small_parent || locked || sys) && n.node_type != "Index Only Scan" && n.output.iter().all(|o| rel_of(o).is_some()) {
+            // (Nor one returning a whole-row Var: use_physical_tlist refuses.)
+            let own = node_alias(n).map(|a| format!("{a}.*"));
+            let whole = own.is_some_and(|w| n.output.contains(&w));
+            if (small_parent || locked || sys || whole)
+                && n.node_type != "Index Only Scan"
+                && n.output.iter().all(|o| rel_of(o).is_some())
+            {
                 // (The target list's columns, then the join clauses' as they came in.)
                 let order = std::mem::take(&mut n.rel_order);
                 n.output.sort_by_key(|o| (rank(o), order.iter().position(|x| x == o).unwrap_or(usize::MAX)));
@@ -2745,6 +2759,236 @@ fn tlist_layout_at(top: &mut ExNode, locked: bool) {
 }
 
 /// Whether the expression text `t` reads the column `o` (`ref.col`).
+/// The relations whose whole-row Vars (`r.*`) `s` reads.
+fn whole_refs(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let b = s.as_bytes();
+    for (i, _) in s.match_indices(".*") {
+        // (Not a multiplication's `.*`: the star ends the reference.)
+        if b.get(i + 2).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'"') {
+            continue;
+        }
+        let start = if i > 0 && b[i - 1] == b'"' {
+            match s[..i - 1].rfind('"') {
+                Some(q) => q,
+                None => continue,
+            }
+        } else {
+            let mut k = i;
+            while k > 0 && (b[k - 1].is_ascii_alphanumeric() || b[k - 1] == b'_' || b[k - 1] == b'$') {
+                k -= 1;
+            }
+            k
+        };
+        if start == i || (start > 0 && matches!(b[start - 1], b'.' | b'"' | b'\'')) {
+            continue;
+        }
+        let r = s[start..i].to_string();
+        if !out.contains(&r) {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// The text of a node's own expressions: its target list and its details' (quals,
+/// conditions, keys).
+fn node_texts(n: &ExNode) -> Vec<&str> {
+    // (Not an output that is a value an input computes, `(f(r.*))`: read from the input.)
+    let from_input = |o: &str| {
+        o.strip_prefix('(').and_then(|x| x.strip_suffix(')')).is_some_and(|x| {
+            n.children
+                .iter()
+                .any(|c| matches!(c.relationship, Some("Outer" | "Inner")) && c.output.iter().any(|co| co == x))
+        })
+    };
+    let mut out: Vec<&str> = n.output.iter().map(String::as_str).filter(|o| !from_input(o)).collect();
+    for d in &n.details {
+        match d {
+            Detail::Text(_, s) => out.push(s),
+            Detail::List(_, v) => out.extend(v.iter().map(String::as_str)),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The reference name of the relation a node scans (its `Alias`), a scan or a Subquery
+/// Scan's), quoted as EXPLAIN qualifies columns with it.
+fn node_alias(n: &ExNode) -> Option<String> {
+    if !n.node_type.ends_with("Scan") {
+        return None;
+    }
+    n.target.iter().find(|t| t.0 == "Alias").map(|t| quote_ident(&t.1))
+}
+
+/// The relations scanned in `n`'s join tree (through its Outer / Inner children).
+fn tree_rels(n: &ExNode, out: &mut Vec<String>) {
+    if let Some(a) = node_alias(n) {
+        out.push(a);
+    }
+    for c in &n.children {
+        if matches!(c.relationship, Some("Outer" | "Inner")) {
+            tree_rels(c, out);
+        }
+    }
+}
+
+/// Whole-row Vars passed up as one value: Postgres's reltargets carry `r.*` (attribute 0)
+/// wherever a node above reads it (build_base_rel_tlists, a join's target list, a nested
+/// loop's parameter for its inner side: find_lateral_references), and a scan returning
+/// one has no physical target list (use_physical_tlist). The executor passes the columns
+/// and builds the row where it is read; EXPLAIN shows `r.*` returned from r's scan up to
+/// the node reading it (`i.f1, i.*` under a nested loop whose inner side reads `i.*`).
+/// `added`: the relations whose scans had no `r.*` before (a row mark's), collected.
+fn whole_row_outputs(n: &mut ExNode, added: &mut Vec<String>) {
+    let kids: Vec<usize> = (0..n.children.len())
+        .filter(|&k| matches!(n.children[k].relationship, Some("Outer" | "Inner")))
+        .collect();
+    if !kids.is_empty() && !n.is_scan() {
+        let rels: Vec<Vec<String>> = kids
+            .iter()
+            .map(|&k| {
+                let mut v = Vec::new();
+                tree_rels(&n.children[k], &mut v);
+                v
+            })
+            .collect();
+        // What this node reads, and (a nested loop's parameters) what each side reads of
+        // the other's relations.
+        let mut wants: Vec<(usize, String)> = Vec::new();
+        for r in node_texts(n).into_iter().flat_map(whole_refs) {
+            if let Some(i) = rels.iter().position(|v| v.contains(&r)) {
+                wants.push((i, r));
+            }
+        }
+        if n.is_join() {
+            for (i, &k) in kids.iter().enumerate() {
+                let mut used = Vec::new();
+                subtree_whole_refs(&n.children[k], &mut used);
+                for r in used {
+                    if rels[i].contains(&r) {
+                        continue;
+                    }
+                    if let Some(j) = rels.iter().position(|v| v.contains(&r)) {
+                        wants.push((j, r));
+                    }
+                }
+            }
+        }
+        for (i, r) in wants {
+            let c = &mut n.children[kids[i]];
+            if can_return_whole(c, &r) && return_whole(c, &r) && !added.contains(&r) {
+                added.push(r);
+            }
+        }
+    }
+    for c in &mut n.children {
+        whole_row_outputs(c, added);
+    }
+}
+
+/// The columns of a relation returning its whole row (`r.*`) that nothing reads but that
+/// whole row (the executor's row of it): no reltarget has them, they go from the target
+/// lists. `top`: the level's top node, whose target list is the level's.
+/// `rels`: those `whole_row_outputs` gave a whole row. (Not under a data-modifying node,
+/// whose actions read columns EXPLAIN doesn't show.)
+fn drop_whole_only_columns(top: &mut ExNode, rels: Vec<String>) {
+    if rels.is_empty() || top.operation.is_some() || top.node_type == "ModifyTable" {
+        return;
+    }
+    // Every reading of a column but passing it up as it is.
+    fn reads(n: &ExNode, top: bool, col: &str) -> bool {
+        let in_outputs = n.output.iter().any(|t| (top || t != col) && mentions(t, col));
+        let in_details = n.details.iter().any(|d| match d {
+            Detail::Text(_, s) => mentions(s, col),
+            Detail::List(_, v) => v.iter().any(|s| mentions(s, col)),
+            _ => false,
+        });
+        let own = in_outputs || in_details;
+        own || n.children.iter().chain(&n.subplans).any(|c| reads(c, false, col))
+    }
+    fn drop(n: &mut ExNode, col: &str) {
+        n.output.retain(|o| o != col);
+        for c in &mut n.children {
+            if matches!(c.relationship, Some("Outer" | "Inner")) {
+                drop(c, col);
+            }
+        }
+    }
+    fn columns(n: &ExNode, r: &str, out: &mut Vec<String>) {
+        if n.is_scan() && node_alias(n).as_deref() == Some(r) {
+            let prefix = format!("{r}.");
+            out.extend(n.output.iter().filter(|o| o.starts_with(&prefix) && !o.ends_with(".*")).cloned());
+        }
+        for c in &n.children {
+            if matches!(c.relationship, Some("Outer" | "Inner")) {
+                columns(c, r, out);
+            }
+        }
+    }
+    for r in rels {
+        let mut cols = Vec::new();
+        columns(top, &r, &mut cols);
+        for c in cols {
+            if !reads(top, true, &c) {
+                drop(top, &c);
+            }
+        }
+    }
+}
+
+/// The whole-row Vars read anywhere in `n`'s join tree.
+fn subtree_whole_refs(n: &ExNode, out: &mut Vec<String>) {
+    for r in node_texts(n).into_iter().flat_map(whole_refs) {
+        if !out.contains(&r) {
+            out.push(r);
+        }
+    }
+    for c in &n.children {
+        if matches!(c.relationship, Some("Outer" | "Inner")) {
+            subtree_whole_refs(c, out);
+        }
+    }
+}
+
+/// Whether `r.*` can come up from `n`: through joins and nodes passing their input's
+/// rows on, from r's own scan.
+fn can_return_whole(n: &ExNode, r: &str) -> bool {
+    if node_alias(n).as_deref() == Some(r) {
+        return n.is_scan() || n.node_type == "Subquery Scan";
+    }
+    let through = n.is_join() || matches!(n.node_type, "Hash" | "Materialize" | "Memoize" | "Sort" | "Incremental Sort");
+    through
+        && n.children.iter().any(|c| {
+            matches!(c.relationship, Some("Outer" | "Inner")) && {
+                let mut v = Vec::new();
+                tree_rels(c, &mut v);
+                v.iter().any(|x| x == r)
+            } && can_return_whole(c, r)
+        })
+}
+
+/// `n` returns `r.*` (checked by `can_return_whole`), and so does each node below it on
+/// the way to r's scan.
+/// Whether r's scan had no `r.*` of its own before (a row mark's).
+fn return_whole(n: &mut ExNode, r: &str) -> bool {
+    let var = format!("{r}.*");
+    let added = !n.output.contains(&var);
+    if added {
+        n.output.push(var.clone());
+    }
+    if node_alias(n).as_deref() == Some(r) {
+        return added;
+    }
+    for c in &mut n.children {
+        if matches!(c.relationship, Some("Outer" | "Inner")) && can_return_whole(c, r) {
+            return return_whole(c, r);
+        }
+    }
+    false
+}
+
 fn mentions(t: &str, o: &str) -> bool {
     let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '.' || c == '"';
     t.match_indices(o).any(|(i, _)| {
@@ -4976,6 +5220,9 @@ impl Builder<'_, '_> {
         self.settle(&mut node);
         if self.o.verbose {
             carry_group_junk(&mut node);
+            let mut whole = Vec::new();
+            whole_row_outputs(&mut node, &mut whole);
+            drop_whole_only_columns(&mut node, whole);
             tlist_layout(&mut node);
             // (A LockRows at the level's top returns its rows' marks too, resjunk, and so
             // do the Limits over it, which return their input's target list.)

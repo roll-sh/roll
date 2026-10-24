@@ -218,7 +218,9 @@ pub(super) fn copied(plan: &Plan) -> std::collections::HashSet<usize> {
                 }
             }
             Plan::Scan(_) | Plan::LockRows { .. } => {}
-            Plan::Join { kind: JoinKind::Semi | JoinKind::Anti, left, .. } => level(left, dml, out),
+            // (A data-modifying statement's pulled-up sublinks' relations are in its join
+            // tree, get_relids_in_jointree: marked too.)
+            Plan::Join { kind: JoinKind::Semi | JoinKind::Anti, left, .. } if !dml => level(left, dml, out),
             p => crate::sql::explain::plan_inputs(p).into_iter().for_each(|c| level(c, dml, out)),
         }
     }

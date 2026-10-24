@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51129 (**99.96%**) |
-| units differing | 21 |
+| units matching | 51134 (**99.97%**) |
+| units differing | 16 |
 | files fully matching | 227 |
 | engine output == expected/*.out (pg_regress "ok") | 188 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 21 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 16 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 21 units
-join (14), partition_join (6), partition_prune (1)
+### EXPLAIN (group C1) — 16 units
+join (12), partition_join (3), partition_prune (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -106,6 +106,97 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 40 (partitionwise join relations inside outer-join groups, child joins of partitioned relations only, DML sublink pull-up over inheritance targets, whole-row Vars passed up)
+
+Agent 26's leftovers. Measured in subset runs of 39 files (test_setup, create_misc,
+create_index, create_view, select, union, subselect, join, aggregates, inherit,
+partition_join, partition_prune, partition_aggregate, equivclass, memoize, with, rowsecurity,
+updatable_views, select_distinct, groupingsets, incremental_sort, merge, returning, rules,
+insert_conflict, join_hash, select_parallel, rangefuncs, tsrf, limit, window, stats_ext,
+sqljson_jsontable, update, delete, insert, triggers, privileges, foreign_key), unit by unit
+against a run of the base, the base run first and this batch's after it: on b1917d6
+17563 -> 17567 with the first version (updatable_views 842 / 846 and with 241 lost, fixed
+below; checked again in a subset run of those files), on f00b52a 17563 -> 17568 (exactly join 691, 765, partition_join 138, 210, 300; nothing lost). Crate tests and
+clippy pass.
+
+| file | fixed units |
+|---|---|
+| join | 691, 765 |
+| partition_join | 138, 210, 300 |
+
+What changed:
+
+- **Class clauses' first making in range table order** (join 691; `joinpath.rs`
+  `orient_ec_clauses`). check_index_predicates and the index paths' class clauses
+  (match_eclass_clauses_to_index) are made per relation as set_base_rel_sizes /
+  set_base_rel_pathlists visit them, in range table order, not FROM order: a rule action
+  `UPDATE sj SET a = 1 WHERE a = old.a` has OLD (the statement's `sj`, rti 1) before its target
+  `sj_1` though transformRuleStmt appends OLD last to the action's FROM list, so the unique
+  index on `sj.a` makes `sj.a = sj_1.a` first (agent 29's returning 105 ordered the range table;
+  this is its use by the clause orientation).
+- **A partitionwise child join makes join relations of partitioned parents only**
+  (partition_join 300; `Planner::pw_rels`, `pw_partitioned_sets`). try_partitionwise_join builds
+  a child join relation only for a parent join relation that is partitioned
+  (build_joinrel_partition_info: its inputs' partition keys equi-joined;
+  compute_partition_bounds: its partitions matched, a pair a join needs not missing, else
+  nparts = 0). `prt2_adv t1 LEFT JOIN prt1_adv t2 ... JOIN prt1_adv t3` with an extra partition
+  of t1 that t2 lacks: `t1 ⟕ t2` isn't partitioned, so in the child joins only `t1 ⋈ t3` is
+  made first and the left join goes on top; the engine's child search made both and kept the
+  one it made first on an exact cost tie. With Postgres's set of child join relations add_path's
+  tie handling (the old path kept) gives Postgres's plan; no tie-breaking rule of its own.
+  The bound folding is `pw_fold`, shared with `partitionwise_merged`.
+- **Partitionwise paths of join relations inside groups with outer joins** (partition_join 138;
+  `partitionwise.rs` `pw_rel_path`, `JNode::Pre`). generate_partitionwise_join_paths runs for
+  every join relation of the search; in a group with outer joins, a join relation of
+  partitioned items with no outer join inside it (its items inner-joined) gets the Append of its
+  child joins as one more path after each level, competing by add_path (a `Pre` path: the
+  planned Append and the group columns it returns). `t2 ⋈ t3` joins partition by partition
+  below the LEFT JOIN of the empty subquery. Agent 26's `pw_subset` covers inner groups; this
+  covers the join relations of general groups (both sides of an outer join, a semi / anti join's
+  outer side). A join relation an outer join is made inside isn't given one (its child joins'
+  outer joins: not needed by the suite).
+- **An UPDATE / DELETE of an inheritance or partition tree pulls up its WHERE's sublinks**
+  (partition_join 210; `dml.rs` `dml_where`). The target is one relation of the join tree, its
+  members an appendrel (expand_inherited_rtentry after pull_up_sublinks), so `EXISTS` / `IN`
+  become semi / anti joins with the members' Append as with a plain table; the pushed-down
+  `c IS NULL` then prunes the partitions it excludes. A security barrier view's quals stay the
+  base relation's security quals (rewriteTargetView's securityQuals: their sublinks stay
+  SubPlans); other views' quals are the statement's (AddQual) and are pulled up too
+  (`ViewBase::filters_by_security`).
+- **EXISTS over a join with a LATERAL item or a FROM subquery** (`sublink.rs` `sub_join`,
+  `lateral_clean`): a LATERAL join whose right side reads only its own parameters (its left
+  side's values) and nothing of the outer query, and a FROM subquery planned apart reading
+  nothing of the outer query, go along as they are (convert_EXISTS_sublink_to_join takes any
+  jointree). Their whole-row marks: a data-modifying statement's pulled-up sublinks' sources
+  are in its join tree (preprocess_rowmarks over get_relids_in_jointree), so a subquery on the
+  semi join's inner side has its `ss.*` mark and keeps its Subquery Scan (`rowmarks::copied`,
+  `explain.rs` `level_marks`).
+- **Whole-row Vars passed up as one value** (join 765; `explain.rs` `whole_row_outputs`,
+  `drop_whole_only_columns`). A reltarget carries `r.*` (attribute 0) up to the node reading
+  it: a join's quals or target list, a nested loop's inner side reading the outer side's whole
+  row (find_lateral_references); the scan returning it has no physical target list. The
+  executor still passes the columns and builds the row where it is read (no plan change, no
+  cost); EXPLAIN shows `i.f1, i.*` from the scan, and the columns read only through the whole
+  row go from the target lists. `Output: w.*, w.a` where the engine showed `w.a, w.b`.
+
+Goldens: `a40_pw_outer_ties`, `a40_dml_sublinks_wholerow` (recorded from PostgreSQL 18.6).
+
+Left, and why:
+
+- A FROM subquery's whole row read above a join (`SELECT x.a, s FROM wt x, (... OFFSET 0) s
+  WHERE x.a = s.a`): Postgres keeps its Subquery Scan and passes `s.*` up; the engine binds the
+  whole row as a ROW() of the subquery's columns, so the Subquery Scan is trivial and goes
+  (agent 29's note). Needs the binder to keep `s.*` as a Var of the subquery when it isn't
+  pulled up, through the join planner's column handling.
+- A constant ORDER BY key's resjunk column (`ORDER BY 1::text` carried to the top as `'1'::text`
+  when the sort is removed) and a lateral nested loop's join filter orientation (`w.a = i.f1`):
+  seen in the probes, no unit.
+- Join relations an outer join is made inside are not given partitionwise paths inside a
+  general group (child joins with outer joins in them); no unit needs them.
+
+Units this batch moves for other agents: none (the subset's other differing units are the
+same in both runs).
 
 ## Round 16, agent 28 (join search enumeration, semi joins' classes, scans' reltargets)
 
@@ -4241,7 +4332,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 911 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (14) |
+| join | 925 | 913 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (12) |
 | aggregates | 556 | 556 | 100% | yes | no |  |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
@@ -4351,7 +4442,7 @@ produces no units on Linux (skipped by the file itself).
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 307 | 100% | yes | yes |  |
 | xml | 281 | 281 | 100% | yes | yes |  |
-| partition_join | 614 | 608 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (6) |
+| partition_join | 614 | 611 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (3) |
 | partition_prune | 771 | 770 | 100% | yes | no | wrong result `SELECT: row count differs` (1) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |

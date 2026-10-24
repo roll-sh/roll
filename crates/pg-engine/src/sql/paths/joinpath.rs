@@ -157,6 +157,9 @@ enum JNode {
         enforced: Vec<usize>,
     },
     Material(Rc<JP>),
+    /// A join relation's partitionwise path (generate_partitionwise_join_paths): the
+    /// Append of its child joins, planned on their own, and the group columns it returns.
+    Pre { plan: Rc<Plan>, layout: Vec<usize> },
     /// A Memoize over a parameterized inner path: its cache keys (over the group row),
     /// mode, single-row-ness and rescan costs.
     Memoize {
@@ -236,7 +239,7 @@ impl JP {
                 JNode::Material(_) => InKind::Material,
                 JNode::Memoize { rescan, .. } => InKind::Memoize(rescan.0, rescan.1),
                 JNode::Opaque { kind, .. } => *kind,
-                JNode::Append { .. } | JNode::Unique { .. } => InKind::Plain,
+                JNode::Append { .. } | JNode::Unique { .. } | JNode::Pre { .. } => InKind::Plain,
                 JNode::Join {
                     method: JoinMethod::Hash,
                     batches,
@@ -457,6 +460,9 @@ struct Search<'s, 'c, 'a> {
     lateral_supplied: std::cell::Cell<bool>,
     /// A partitionwise child join's parent leaves' rows (`Planner::pw_loop_rows`).
     loop_rows: Vec<f64>,
+    /// A partitionwise child join's search: the leaf sets it may make join relations of
+    /// (`Planner::pw_rels`), the whole group's besides; with the parent's leaf count.
+    pw_rels: Option<(usize, Vec<u32>)>,
     /// The group is the query level's topmost scan/join relation: its join returns the
     /// scan/join target (apply_scanjoin_target_to_paths), not its reltarget.
     top_level: bool,
@@ -1116,10 +1122,14 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
             let g = s.leaves[l].off + c;
             members.contains(&g).then_some(g)
         };
-        let nleaves = self.leaves.len();
+        // (Relations in range table order, as set_base_rel_sizes / set_base_rel_pathlists
+        // visit them: a rule action's OLD relation, the statement's, comes before the
+        // action's own target though it is last in the action's FROM list.)
+        let mut by_rti: Vec<usize> = (0..self.leaves.len()).collect();
+        by_rti.sort_by_key(|&l| (self.leaves[l].scan.as_ref().map_or(usize::MAX, |(sp, _)| sp.rti.0), l));
         // (check_index_predicates: one clause per class, its first member in the other
         // relations and its first in this one.)
-        for l in 0..nleaves {
+        for &l in &by_rti {
             let Some((_, rel)) = &self.leaves[l].scan else { continue };
             if !rel.indexes.iter().any(|ii| !ii.pred.is_empty()) {
                 continue;
@@ -1141,7 +1151,7 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
             }
         }
         // (match_eclass_clauses_to_index: the indexed member with every other one.)
-        for l in 0..nleaves {
+        for &l in &by_rti {
             let Some((_, rel)) = &self.leaves[l].scan else { continue };
             // (An expression index's key that is an expression member of the class too.)
             let off = self.leaves[l].off;
@@ -3287,6 +3297,15 @@ impl Search<'_, '_, '_> {
             return;
         }
         let set = s1 | s2;
+        // (A partitionwise child join: try_partitionwise_join makes the child of a join
+        // relation whose parent is partitioned only, from pairs of partitioned inputs.)
+        if let Some((n, ok)) = &self.pw_rels
+            && *n == self.leaves.len()
+            && set != (1u32 << n) - 1
+            && !ok.contains(&set)
+        {
+            return;
+        }
         let restrict = self.crossing(s1, s2);
         let ri = match self.rel_index(set) {
             Some(i) => i,
@@ -5243,6 +5262,13 @@ impl Search<'_, '_, '_> {
                 }
             }
             levels[level] = (before..self.rels.len()).collect();
+            // (generate_partitionwise_join_paths for each of the level's join relations,
+            // after their other paths.)
+            if level < n {
+                for ri in before..self.rels.len() {
+                    self.pw_rel_path(ri);
+                }
+            }
         }
         let full = (1u32 << n) - 1;
         let top = self.rel_index(full)?;
@@ -5631,6 +5657,7 @@ impl Search<'_, '_, '_> {
 
     fn build_path_node(&self, p: &JP) -> (Plan, Vec<usize>) {
         match &p.node {
+            JNode::Pre { plan, layout } => ((**plan).clone(), layout.clone()),
             JNode::Opaque { leaf, merged, sub, .. } => {
                 let l = &self.leaves[*leaf];
                 let mut plan = match sub {
@@ -7815,6 +7842,7 @@ impl Planner<'_, '_> {
             param_stack: Default::default(),
             lateral_supplied: Default::default(),
             loop_rows: self.pw_loop_rows.take(),
+            pw_rels: self.pw_rels.take(),
             top_level: scanjoin_top,
             phvs,
             derives: Default::default(),

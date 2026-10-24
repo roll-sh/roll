@@ -122,6 +122,21 @@ impl ViewBase {
             .collect()
     }
 
+    /// The views' WHERE conditions split as rewriteTargetView adds them: a security barrier
+    /// view's become security quals of the base relation (sublinks in them stay
+    /// SubPlans), the others the statement's quals (pull_up_sublinks sees them). Each
+    /// ANDed, the outer view's first.
+    pub fn filters_by_security(&self) -> (Option<Expr>, Option<Expr>) {
+        let secure = |name: &str| {
+            std::iter::once(&self.view)
+                .chain(self.layers.iter().map(|l| &l.0))
+                .any(|v| v.name == name && v.option("security_barrier"))
+        };
+        let and = |v: Vec<Expr>| (!v.is_empty()).then(|| Expr::And(v));
+        let (s, p): (Vec<_>, Vec<_>) = self.conds.iter().rev().partition(|c| secure(&c.0));
+        (and(s.into_iter().map(|c| c.1.clone()).collect()), and(p.into_iter().map(|c| c.1.clone()).collect()))
+    }
+
     /// All the views' WHERE conditions, ANDed.
     pub fn filter(&self) -> Option<Expr> {
         match self.conds.len() {

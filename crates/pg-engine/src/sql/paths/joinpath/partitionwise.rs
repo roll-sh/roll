@@ -307,8 +307,15 @@ impl Search<'_, '_, '_> {
     /// have_partkey_equi_join over the group: each partition key column of every leaf is
     /// equated with the others' (an equivalence class; an outer join's own clause).
     fn partkey_equi_join(&self, parted: &[Parted]) -> bool {
+        let full = (1u32 << parted.len()) - 1;
+        self.partkey_joined(parted).iter().all(|j| connected(j, full))
+    }
+
+    /// Per partition key column, which pairs of leaves a clause equates on it.
+    fn partkey_joined(&self, parted: &[Parted]) -> Vec<Vec<Vec<bool>>> {
         let nkeys = parted[0].keys.len();
         let n = parted.len();
+        let mut out = Vec::new();
         for j in 0..nkeys {
             let keys: Vec<&Vec<Expr>> = parted.iter().map(|p| &p.keys[j]).collect();
             // Leaves joined on key j: by an equality clause between their keys (an outer
@@ -372,24 +379,30 @@ impl Search<'_, '_, '_> {
                     }
                 }
             }
-            // Connected.
-            let mut seen = vec![false; n];
-            let mut stack = vec![0];
-            seen[0] = true;
-            while let Some(a) = stack.pop() {
-                for b in 0..n {
-                    if joined[a][b] && !seen[b] {
-                        seen[b] = true;
-                        stack.push(b);
-                    }
-                }
-            }
-            if seen.iter().any(|s| !s) {
-                return false;
+            out.push(joined);
+        }
+        out
+    }
+}
+
+/// Whether the leaves of `mask` are connected by `joined`'s pairs among themselves.
+fn connected(joined: &[Vec<bool>], mask: u32) -> bool {
+    let n = joined.len();
+    let Some(start) = (0..n).find(|&l| mask >> l & 1 != 0) else {
+        return true;
+    };
+    let mut seen = vec![false; n];
+    let mut stack = vec![start];
+    seen[start] = true;
+    while let Some(a) = stack.pop() {
+        for b in 0..n {
+            if mask >> b & 1 != 0 && joined[a][b] && !seen[b] {
+                seen[b] = true;
+                stack.push(b);
             }
         }
-        true
     }
+    (0..n).all(|l| mask >> l & 1 == 0 || seen[l])
 }
 
 impl Planner<'_, '_> {
@@ -438,6 +451,7 @@ impl Planner<'_, '_> {
         if parted.iter().any(|p| p.bounds != first.bounds) {
             return self.partitionwise_merged(p, s, needed, &parted);
         }
+        let pw_rels = self.pw_partitioned_sets(s, &parted);
         let mut ordered: Option<Vec<Plan>> = self.pw_order.borrow().as_ref().map(|_| Vec::new());
         let mut wholes: Vec<Option<Plan>> = Vec::new();
         let mut children = Vec::new();
@@ -507,15 +521,19 @@ impl Planner<'_, '_> {
             let before_order = child.clone();
             self.absorbed.replace(s.extra.clone());
             self.pw_loop_rows.replace(s.leaves.iter().map(|l| l.rows).collect());
+            self.pw_rels.replace(pw_rels.clone());
             let planned = self.plan_joins_with(&mut child, needed, lim.as_ref(), &[]);
             self.pw_loop_rows.take();
+            self.pw_rels.take();
             self.absorbed.take();
             planned?;
             if let Some(w) = whole.as_mut() {
                 self.absorbed.replace(s.extra.clone());
                 self.pw_loop_rows.replace(s.leaves.iter().map(|l| l.rows).collect());
+                self.pw_rels.replace(pw_rels.clone());
                 let planned = self.plan_joins_with(w, needed, None, &[]);
                 self.pw_loop_rows.take();
+                self.pw_rels.take();
                 self.absorbed.take();
                 planned?;
             }
@@ -528,8 +546,10 @@ impl Planner<'_, '_> {
                 let mut oc = before_order.clone();
                 self.absorbed.replace(s.extra.clone());
                 self.pw_loop_rows.replace(s.leaves.iter().map(|l| l.rows).collect());
+                self.pw_rels.replace(pw_rels.clone());
                 let r = self.plan_joins_with(&mut oc, needed, Some(&o), &[]);
                 self.pw_loop_rows.take();
+                self.pw_rels.take();
                 self.absorbed.take();
                 if r == Some(true) {
                     list.push(oc);
@@ -835,17 +855,20 @@ pub(in crate::sql::paths) fn whole_rows(p: &Plan, out: &mut Vec<u32>) {
 }
 
 impl Planner<'_, '_> {
-    /// `partitionwise` for items partitioned with different bounds: their partitions
-    /// matched (partmerge), a side's missing partition an empty relation.
-    fn partitionwise_merged(
+    /// The partitions of the group's items `sub` (leaves, in order) matched: their bounds
+    /// merged pairwise in the items' order (partition_bounds_merge; an inner join's; an
+    /// outer join of two items is its own, its outer side first; in a group with outer
+    /// joins inside, the join that brings each item in), then per merged partition, kept
+    /// ones only, its place and each item's partition (None: missing). None when the
+    /// bounds don't merge or a partition a join needs is missing (try_partitionwise_join).
+    fn pw_fold(
         &self,
-        p: &Plan,
         s: &Search,
-        needed: &[bool],
         parted: &[Parted],
-    ) -> Option<(Vec<Plan>, f64, f64, PwJoin, Option<Vec<Plan>>)> {
+        sub: &[usize],
+    ) -> Option<(Vec<(usize, Vec<Option<usize>>)>, Vec<PartBound>)> {
         let n = parted.len();
-        let first = &parted[0];
+        let first = &parted[sub[0]];
         let live = |pt: &Parted| -> Vec<bool> {
             pt.parts
                 .iter()
@@ -853,9 +876,6 @@ impl Planner<'_, '_> {
                 .collect()
         };
         let _g = crate::catalog::partition::under(first.colls.clone());
-        // Folded pairwise in the items' order (an inner join's; an outer join of two
-        // items is its own, its outer side first; in a group with outer joins inside, the
-        // join that brings each item in).
         let (mut slots, mut bounds): (Vec<Vec<Option<usize>>>, Vec<PartBound>) = (
             (0..first.bounds.len()).map(|i| vec![Some(i)]).collect(),
             first.bounds.clone(),
@@ -863,10 +883,11 @@ impl Planner<'_, '_> {
         let mut acc_live = live(first);
         // Each item's join to the ones before it (its kind; whether it is the outer side).
         let mut kinds: Vec<(Jt, bool)> = vec![(Jt::Inner, false)];
-        for (k, other) in parted.iter().enumerate().skip(1) {
+        let mut acc = 1u32 << sub[0];
+        for (k, &l) in sub.iter().enumerate().skip(1) {
+            let other = &parted[l];
+            let bit = 1u32 << l;
             let (kind, swap) = if s.general {
-                let bit = 1u32 << k;
-                let acc = bit - 1;
                 let mut kind = (Jt::Inner, false);
                 for sj in &s.sjs {
                     let j = match sj.kind {
@@ -893,7 +914,8 @@ impl Planner<'_, '_> {
                     JoinKind::Anti => (Jt::Anti, false),
                 }
             };
-            let acc = partmerge::Side {
+            acc |= bit;
+            let a_side = partmerge::Side {
                 bounds: &bounds,
                 live: acc_live.clone(),
             };
@@ -902,10 +924,10 @@ impl Planner<'_, '_> {
                 live: live(other),
             };
             let merged = if swap {
-                partmerge::merge(first.strategy, &oth, &acc, kind)
+                partmerge::merge(first.strategy, &oth, &a_side, kind)
                     .map(|(ps, b)| (ps.into_iter().map(|(a, b)| (b, a)).collect::<Vec<_>>(), b))
             } else {
-                partmerge::merge(first.strategy, &acc, &oth, kind)
+                partmerge::merge(first.strategy, &a_side, &oth, kind)
             };
             let (ps, nb) = merged?;
             kinds.push((kind, swap));
@@ -922,13 +944,12 @@ impl Planner<'_, '_> {
             bounds = nb;
             acc_live = vec![true; bounds.len()];
         }
-        let mut children = Vec::new();
-        let mut idx = Vec::new();
-        for (i, row) in slots.iter().enumerate() {
+        let mut kept = Vec::new();
+        for (i, row) in slots.into_iter().enumerate() {
             // try_partitionwise_join: a pair with no partition on a side (merged with a
             // dummy, or pruned) is left out when the join can produce no rows from it, else
             // the join can't be done partitionwise.
-            let missing = |k: usize| row[k].is_none_or(|j| parted[k].parts[j].is_none());
+            let missing = |k: usize| row[k].is_none_or(|j| parted[sub[k]].parts[j].is_none());
             let mut skip = false;
             let mut reject = false;
             if kinds.iter().any(|k| k.0 == Jt::Full) {
@@ -964,6 +985,63 @@ impl Planner<'_, '_> {
             if reject {
                 return None;
             }
+            kept.push((i, row));
+        }
+        Some((kept, bounds))
+    }
+
+    /// The sets of a group's leaves (two or more, not all) whose join relations are
+    /// partitioned (IS_PARTITIONED_REL), for its child joins' searches: their partition
+    /// keys equi-joined among them (build_joinrel_partition_info's have_partkey_equi_join)
+    /// and their partitions matched with none a join needs missing
+    /// (compute_partition_bounds, try_partitionwise_join, which marks the join relation
+    /// unpartitioned then: a left join whose outer side has a partition the inner side
+    /// lacks isn't, though a join of it with a third item dropping that partition is).
+    pub(super) fn pw_partitioned_sets(&self, s: &Search, parted: &[Parted]) -> Option<(usize, Vec<u32>)> {
+        let n = parted.len();
+        if !(3..=12).contains(&n) {
+            return None;
+        }
+        let joined = s.partkey_joined(parted);
+        let mut out = Vec::new();
+        for mask in 1u32..(1u32 << n) - 1 {
+            if mask.count_ones() < 2 || !joined.iter().all(|j| connected(j, mask)) {
+                continue;
+            }
+            let sub: Vec<usize> = (0..n).filter(|&l| mask >> l & 1 != 0).collect();
+            let ok = if sub.iter().all(|&l| parted[l].bounds == parted[sub[0]].bounds) {
+                // (The same bounds: matching partitions by place.)
+                (0..parted[sub[0]].bounds.len()).all(|i| {
+                    let have: Vec<bool> = sub.iter().map(|&l| parted[l].parts[i].is_some()).collect();
+                    !s.general || have.iter().all(|h| *h) || have.iter().all(|h| !h)
+                })
+            } else {
+                self.pw_fold(s, parted, &sub).is_some()
+            };
+            if ok {
+                out.push(mask);
+            }
+        }
+        Some((n, out))
+    }
+
+    /// `partitionwise` for items partitioned with different bounds: their partitions
+    /// matched (partmerge), a side's missing partition an empty relation.
+    fn partitionwise_merged(
+        &self,
+        p: &Plan,
+        s: &Search,
+        needed: &[bool],
+        parted: &[Parted],
+    ) -> Option<(Vec<Plan>, f64, f64, PwJoin, Option<Vec<Plan>>)> {
+        let first = &parted[0];
+        let _g = crate::catalog::partition::under(first.colls.clone());
+        let all: Vec<usize> = (0..parted.len()).collect();
+        let (rows, bounds) = self.pw_fold(s, parted, &all)?;
+        let mut children = Vec::new();
+        let mut idx = Vec::new();
+        let pw_rels = self.pw_partitioned_sets(s, parted);
+        for (i, row) in rows {
             let mut plans = Vec::new();
             for (k, slot) in row.iter().enumerate() {
                 let leaf = &s.leaves[k];
@@ -983,6 +1061,7 @@ impl Planner<'_, '_> {
             };
             self.absorbed.replace(s.extra.clone());
             self.pw_loop_rows.replace(s.leaves.iter().map(|l| l.rows).collect());
+            self.pw_rels.replace(pw_rels.clone());
             let lim = self.pw_limit.get().map(|l| Order {
                 keys: Vec::new(),
                 complete: true,
@@ -992,6 +1071,7 @@ impl Planner<'_, '_> {
             });
             let planned = self.plan_joins_with(&mut child, needed, lim.as_ref(), &[]);
             self.pw_loop_rows.take();
+            self.pw_rels.take();
             self.absorbed.take();
             planned?;
             children.push(child);
@@ -1342,5 +1422,129 @@ impl Planner<'_, '_> {
             }
         };
         true
+    }
+}
+
+impl Search<'_, '_, '_> {
+    /// generate_partitionwise_join_paths for a join relation inside a group with outer
+    /// joins (try_partitionwise_join in populate_joinrel_with_paths gives every join
+    /// relation of partitioned items its child joins): the relation's items inner-joined
+    /// on their own, partitionwise, the Append of the child joins one more path of the
+    /// relation, competing with the others by add_path (`t2 ⋈ t3` partition by partition
+    /// below the LEFT JOIN of an empty relation). Relations an outer join is made inside
+    /// (items of both its sides) aren't taken.
+    pub(super) fn pw_rel_path(&mut self, ri: usize) {
+        let set = self.rels[ri].set;
+        let n = self.leaves.len();
+        if !self.general
+            || set.count_ones() < 2
+            || self.pw_rels.is_some()
+            || !self.loop_rows.is_empty()
+            || self.pl.pw_alt.get()
+            || self.pl.pw_limit.get().is_some()
+            || !self.phvs.is_empty()
+            || !self.extra.is_empty()
+            || self.sjs.iter().any(|sj| sj.syn_r & set != 0 && sj.syn_l & set != 0)
+            || (0..n).any(|l| set >> l & 1 == 1 && (self.leaves[l].lateral.is_some() || self.parted(l).is_none()))
+        {
+            return;
+        }
+        {
+            let st = self.pl.ctx.sess.settings.borrow();
+            if !st
+                .get_raw("enable_partitionwise_join")
+                .is_some_and(|v| v == "on" || v == "true")
+            {
+                return;
+            }
+        }
+        let inside: Vec<usize> = (0..n).filter(|&l| set >> l & 1 == 1).collect();
+        // The relation's row: its items' columns, in the group's order.
+        let width = self.leaf_of.len();
+        let mut map: Vec<Option<usize>> = vec![None; width];
+        let mut layout = Vec::new();
+        for &l in &inside {
+            let lf = &self.leaves[l];
+            for c in 0..lf.ncols {
+                if let Some(m) = map.get_mut(lf.off + c) {
+                    *m = Some(layout.len());
+                }
+                layout.push(lf.off + c);
+            }
+        }
+        let mapped = |e: &Expr| -> Option<Expr> {
+            let mut ok = true;
+            let out = e
+                .clone()
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(g, t) => match map.get(g).copied().flatten() {
+                            Some(c) => Expr::Col(c, t),
+                            None => {
+                                ok = false;
+                                Expr::Col(g, t)
+                            }
+                        },
+                        x => x,
+                    })
+                })
+                .ok()?;
+            ok.then_some(out)
+        };
+        // (Its clauses as written: no outer join's, none needing items outside it.)
+        let mut conds = Vec::new();
+        for c in self.clauses.iter().filter(|c| !c.derived) {
+            if c.leaves & !set != 0 || c.req & !set != 0 {
+                continue;
+            }
+            if c.on || c.sj.is_some() {
+                return;
+            }
+            let Some(e) = mapped(&c.expr) else { return };
+            conds.push(e);
+        }
+        let mut it = inside.iter().map(|&l| self.leaves[l].plan.clone());
+        let mut sub = it.next().unwrap();
+        for p in it {
+            let (nl, nr) = (crate::sql::binder::plan_width(&sub), crate::sql::binder::plan_width(&p));
+            sub = Plan::Join {
+                kind: JoinKind::Inner,
+                left: Arc::new(sub),
+                right: Arc::new(p),
+                cond: None,
+                hash: None,
+                params: Vec::new(),
+                nleft: nl,
+                nright: nr,
+                meta: Default::default(),
+            };
+        }
+        if let (Plan::Join { cond, .. }, false) = (&mut sub, conds.is_empty()) {
+            *cond = Some(if conds.len() == 1 { conds.into_iter().next().unwrap() } else { Expr::And(conds) });
+        }
+        let need: Vec<bool> = layout.iter().map(|&g| self.needed_above(g, set)).collect();
+        let planned = {
+            let _alt = super::super::FlagScope::set(&self.pl.pw_alt, true);
+            self.pl.plan_joins_with(&mut sub, &need, None, &[])
+        };
+        if planned.is_none() || !matches!(sub, Plan::Append { pw: Some(_), .. }) {
+            return;
+        }
+        let e = crate::sql::explain::estimate(&Arc::new(sub.clone()), self.pl.ctx);
+        let jp = JP {
+            node: JNode::Pre {
+                plan: Rc::new(sub),
+                layout,
+            },
+            rows: e.rows,
+            startup: e.startup,
+            total: e.total,
+            width: self.rels[ri].width,
+            disabled: e.disabled as u32,
+            keys: Vec::new(),
+            req: 0,
+            set,
+        };
+        self.add_join_path(ri, jp);
     }
 }

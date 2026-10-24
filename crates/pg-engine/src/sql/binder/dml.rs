@@ -2288,8 +2288,14 @@ impl Binder<'_, '_> {
         };
         // An updatable view's WHERE conditions limit the rows touched.
         let view_filter = updatable.and_then(|v| v.filter());
-        if let Some(f) = &view_filter {
-            plan = self.dml_where(plan, f.clone());
+        if let Some(v) = updatable {
+            let (secure, plain) = v.filters_by_security();
+            if let Some(f) = secure {
+                plan = super::optimize::add_filter(&self.cat, plan, f);
+            }
+            if let Some(f) = plain {
+                plan = self.dml_where(plan, f);
+            }
         }
         for item in from {
             // (FROM items can't reference the target.)
@@ -2365,6 +2371,9 @@ impl Binder<'_, '_> {
             && !self.unplanned
             && match &plan {
                 Plan::Scan(s) => s.current_of.is_none() && s.table.partkey.is_none(),
+                // (An inheritance / partition tree's members: the target relation is still
+                // one relation of the join tree, its children an appendrel.)
+                Plan::Append { inh: Some(_), .. } => true,
                 _ => false,
             };
         if !plain_target {
