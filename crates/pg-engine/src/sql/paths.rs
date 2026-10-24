@@ -1830,6 +1830,9 @@ struct Planner<'c, 'a> {
     group_dirs: std::cell::RefCell<Option<GroupDirs>>,
     /// Planning a join group under a grouping that may go partitionwise.
     pw_agg_join: std::cell::Cell<bool>,
+    /// Planning a join group's alternative with some of its items joined partitionwise
+    /// first (`joinpath::partitionwise`'s `pw_subset`): no nested alternatives.
+    pw_alt: std::cell::Cell<bool>,
     /// Planning what is below a join group or inside one (its items, a partitionwise
     /// join's child joins): a join group there isn't its query level's topmost scan/join
     /// relation.
@@ -1879,6 +1882,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             post_cost: Default::default(),
             group_dirs: Default::default(),
             pw_agg_join: Default::default(),
+            pw_alt: Default::default(),
             join_nested: Default::default(),
             merge_target: Default::default(),
             phv_quals: Default::default(),

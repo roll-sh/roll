@@ -7425,6 +7425,9 @@ impl Planner<'_, '_> {
         // A tree with outer joins inside is one group with the joins' constraints
         // (`outerjoins`); one outer join of two items, or inner joins alone, the plain way.
         let extra = self.absorbed.take();
+        // (What the topmost scan/join relation is planned with: again, with its items' joins
+        // made partitionwise, when it can't be joined partitionwise as they come.)
+        let as_given = (scanjoin_top && !self.pw_agg_join.get()).then(|| (needed.to_vec(), extra.clone()));
         let mut laterals: Vec<(usize, Vec<Expr>)> = Vec::new();
         let mut group_phvs: Vec<(usize, Expr, u32, u32)> = Vec::new();
         let mut group_kept: Vec<Vec<usize>> = Vec::new();
@@ -7628,7 +7631,9 @@ impl Planner<'_, '_> {
         // Self-join elimination: a leaf merged into another reads its columns
         // (`alias`).
         let mut alias: Vec<usize> = (0..gw).collect();
-        if group_phvs.is_empty() {
+        // ("PHVs should not impose any constraints on removing self-joins": a
+        // PlaceHolderVar of the removed relation is the kept one's.)
+        {
             let mut sides: Vec<(u32, u32)> = sjs.iter().map(|s| (s.syn_l, s.syn_r)).collect();
             let merges = self.self_joins(
                 &mut kind,
@@ -7637,6 +7642,7 @@ impl Planner<'_, '_> {
                 &mut alias,
                 &mut sides,
                 &mut clause_meta,
+                if group_phvs.is_empty() { 1 } else { 2 },
             );
             // (remove_self_join_rel: LATERAL items' references to the removed relation read
             // the kept one, ChangeVarNodes over lateral_vars.)
@@ -7657,7 +7663,7 @@ impl Planner<'_, '_> {
                         .expect("remapping a LATERAL reference");
                 }
             }
-            for (r, k) in merges {
+            for &(r, k) in &merges {
                 let remap = |m: u32| {
                     let m = if m >> r & 1 == 1 { (m | 1 << k) & !(1 << r) } else { m };
                     (m & ((1u32 << r) - 1)) | ((m >> (r + 1)) << r)
@@ -7667,6 +7673,22 @@ impl Planner<'_, '_> {
                     sj.syn_r = remap(sj.syn_r);
                     sj.min_l = remap(sj.min_l);
                     sj.min_r = remap(sj.min_r);
+                }
+                for (_, _, scope, force) in group_phvs.iter_mut() {
+                    *scope = remap(*scope);
+                    *force = remap(*force);
+                }
+            }
+            if !merges.is_empty() {
+                for (_, e, _, _) in group_phvs.iter_mut() {
+                    *e = std::mem::replace(e, Expr::Const(Value::Null, DataType::Unknown))
+                        .transform(&mut |x| {
+                            Ok(match x {
+                                Expr::Col(g, t) if g < alias.len() => Expr::Col(alias[g], t),
+                                x => x,
+                            })
+                        })
+                        .expect("remapping a PlaceHolderVar");
                 }
             }
         }
@@ -8492,6 +8514,35 @@ impl Planner<'_, '_> {
             }
         }
         let pwj = pwj.map(|(a, b, c, d, _)| (a, b, c, d));
+        let pw_none = pwj.is_none();
+        // The topmost scan/join relation keeps only partitionwise paths when it has any
+        // (apply_scanjoin_target_to_paths), and its items' joins have partitionwise paths
+        // whatever their cheapest is: an item that is a join of partitioned tables planned
+        // plainly, as cheaper on its own, is planned again partitionwise (the forcing
+        // `pw_agg_join` gives), and the group with it, which may then be joined partition by
+        // partition (partition_join 553).
+        if pw_none
+            && let Some((need_in, extra_in)) = as_given
+            && s.leaves.iter().any(|l| join_item(&l.plan))
+            && s.leaves.iter().enumerate().all(|(i, l)| join_item(&l.plan) || s.parted(i).is_some())
+        {
+            let mut q = p.clone();
+            let saved_agg = self.pw_agg_join.replace(true);
+            let saved_nested = self.join_nested.replace(false);
+            self.absorbed.replace(extra_in);
+            let r = self.plan_joins_with(&mut q, &need_in, order, sort_exprs);
+            self.absorbed.take();
+            self.join_nested.set(saved_nested);
+            self.pw_agg_join.set(saved_agg);
+            let mut top = &q;
+            while let Plan::Project { input, .. } | Plan::Sort { input, .. } | Plan::Filter { input, .. } = top {
+                top = input;
+            }
+            if r.is_some() && matches!(top, Plan::Append { pw: Some(_), .. }) {
+                *p = q;
+                return r;
+            }
+        }
         if let Some((children, pw_total, pw_rows, pw_join)) = pwj {
             let pw = match &s.order {
                 Some(o) if sorted => {
@@ -8578,6 +8629,11 @@ impl Planner<'_, '_> {
                 exprs,
             }
         };
+        // (Or some of the items joined partitionwise first.)
+        if pw_none && !sorted && alias.iter().enumerate().all(|(i, &g)| i == g) {
+            *p = self.pw_subset(&s, needed, width, out);
+            return Some(sorted);
+        }
         *p = out;
         Some(sorted)
     }
@@ -8589,6 +8645,16 @@ impl Planner<'_, '_> {
 fn join_clauses_first(mut cs: Vec<IClause>, nrq: usize) -> Vec<IClause> {
     cs.sort_by_key(|c| (c.col, c.qual < nrq));
     cs
+}
+
+/// An item that is a join planned as a group of its own (through projections and
+/// filters), not a partitionwise join's Append.
+fn join_item(p: &Plan) -> bool {
+    match p {
+        Plan::Project { input, .. } | Plan::Filter { input, .. } => join_item(input),
+        Plan::Join { params, .. } => params.is_empty(),
+        _ => false,
+    }
 }
 
 /// A LATERAL item that is a join Postgres would have pulled up into the query: a join

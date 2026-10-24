@@ -453,6 +453,7 @@ impl Planner<'_, '_> {
         alias: &mut [usize],
         sides: &mut [(u32, u32)],
         meta: &mut Vec<(Option<usize>, u32, u32)>,
+        min_leaves: usize,
     ) -> Vec<(usize, usize)> {
         let mut merges = Vec::new();
         let on = {
@@ -477,6 +478,11 @@ impl Planner<'_, '_> {
         // clauses over the kept relation may pair it with a relation tried before.)
         let mut pass_start = 0;
         loop {
+            // (A group computing PlaceHolderVars keeps two items: its single-item form
+            // computes none.)
+            if leaves.len() <= min_leaves {
+                break;
+            }
             let mut by_rti: Vec<usize> = (0..leaves.len()).collect();
             by_rti.sort_by_key(|&i| (rti(&leaves[i].0), i));
             let Some(&r) = by_rti.get(tried) else {
@@ -639,6 +645,8 @@ impl Planner<'_, '_> {
         if let Some(f) = &rs.filter {
             conjuncts(f.clone(), &mut quals);
         }
+        // (Its quals over PlaceHolderVars stay restrictions, of the kept relation now.)
+        let phv_quals = rs.phv_quals.clone();
         let mut kept = Vec::new();
         for (ci, (e, on)) in std::mem::take(clauses).into_iter().enumerate() {
             let m = old_meta.get(ci).copied();
@@ -676,6 +684,11 @@ impl Planner<'_, '_> {
         leaves.remove(r);
         let k = if k > r { k - 1 } else { k };
         let Plan::Scan(ks) = &mut leaves[k].0 else { unreachable!() };
+        for q in phv_quals {
+            if !ks.phv_quals.iter().any(|x| x.same_as(&q)) {
+                ks.phv_quals.push(q);
+            }
+        }
         let mut all = Vec::new();
         if let Some(f) = ks.filter.take() {
             conjuncts(f, &mut all);

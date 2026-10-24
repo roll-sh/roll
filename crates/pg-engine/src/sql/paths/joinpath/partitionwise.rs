@@ -10,7 +10,7 @@ use crate::sql::plan::PartLevel;
 
 /// One FROM item as partitions: per partition (in bound order) the member plan, or None
 /// where plan-time pruning left the partition out.
-struct Parted {
+pub(super) struct Parted {
     strategy: crate::catalog::PartStrategy,
     types: Vec<DataType>,
     bounds: Vec<PartBound>,
@@ -134,7 +134,7 @@ fn member_plan(p: &Arc<Plan>) -> Plan {
 
 impl Search<'_, '_, '_> {
     /// The leaf as a partitioned table's partitions (see `Parted`).
-    fn parted(&self, l: usize) -> Option<Parted> {
+    pub(super) fn parted(&self, l: usize) -> Option<Parted> {
         let leaf = &self.leaves[l];
         // A partitionwise join below.
         if let Plan::Append { inputs, inh: None, pw: Some(id), .. } = &leaf.plan
@@ -611,6 +611,163 @@ impl Planner<'_, '_> {
             colls: first.colls.clone(),
         };
         Some((children, total, rows, pw, ordered))
+    }
+}
+
+impl Planner<'_, '_> {
+    /// try_partitionwise_join for join relations inside an inner join group whose items
+    /// aren't all joined partitionwise: Postgres's search gives every join relation of
+    /// partitioned items its partitionwise paths (populate_joinrel_with_paths), so some of
+    /// the items may join partition by partition below a join that can't (`t1 ⋈ t3` under
+    /// a hash join with an item partitioned otherwise). The group is planned again with each
+    /// such subset joined first, partitionwise, as one item; the cheapest of those replaces
+    /// `orig` when it costs fuzzily less (a path the search would have kept).
+    pub(super) fn pw_subset(&self, s: &Search, needed: &[bool], width: usize, orig: Plan) -> Plan {
+        let n = s.leaves.len();
+        if self.pw_alt.get()
+            || !(3..=6).contains(&n)
+            || s.kind != JoinKind::Inner
+            || s.general
+            || !s.phvs.is_empty()
+            || !s.extra.is_empty()
+            || s.order.is_some()
+            || self.pw_limit.get().is_some()
+            || s.leaf_of.len() != width
+            || s.leaves.iter().any(|l| l.lateral.is_some())
+        {
+            return orig;
+        }
+        {
+            let st = self.ctx.sess.settings.borrow();
+            if !st
+                .get_raw("enable_partitionwise_join")
+                .is_some_and(|v| v == "on" || v == "true")
+            {
+                return orig;
+            }
+        }
+        let parted: Vec<bool> = (0..n).map(|l| s.parted(l).is_some()).collect();
+        if parted.iter().filter(|x| **x).count() < 2 {
+            return orig;
+        }
+        let base = crate::sql::explain::estimate(&Arc::new(orig.clone()), self.ctx).total;
+        let mut best: Option<(f64, Plan)> = None;
+        let _alt = super::super::FlagScope::set(&self.pw_alt, true);
+        for mask in 1u32..(1u32 << n) - 1 {
+            if mask.count_ones() < 2 || (0..n).any(|l| mask >> l & 1 == 1 && !parted[l]) {
+                continue;
+            }
+            let Some(alt) = self.pw_subset_plan(s, mask, needed, width) else { continue };
+            let c = crate::sql::explain::estimate(&Arc::new(alt.clone()), self.ctx).total;
+            if c * 1.01 < best.as_ref().map_or(base, |b| b.0) {
+                best = Some((c, alt));
+            }
+        }
+        best.map_or(orig, |b| b.1)
+    }
+
+    /// The group with the items of `mask` joined first (their join planned on its own,
+    /// partitionwise), the others joined to it, under a projection back to the group's
+    /// columns; None when that join isn't partitionwise.
+    fn pw_subset_plan(&self, s: &Search, mask: u32, needed: &[bool], width: usize) -> Option<Plan> {
+        let n = s.leaves.len();
+        let inside: Vec<usize> = (0..n).filter(|&l| mask >> l & 1 == 1).collect();
+        let outside: Vec<usize> = (0..n).filter(|&l| mask >> l & 1 == 0).collect();
+        // The new row: the subset's items, then the others, each in the group's order.
+        let mut map: Vec<Option<usize>> = vec![None; width];
+        let mut pos = 0;
+        for &l in inside.iter().chain(&outside) {
+            let lf = &s.leaves[l];
+            for c in 0..lf.ncols {
+                if let Some(m) = map.get_mut(lf.off + c) {
+                    *m = Some(pos + c);
+                }
+            }
+            pos += lf.ncols;
+        }
+        let sub_w: usize = inside.iter().map(|&l| s.leaves[l].ncols).sum();
+        let mapped = |e: &Expr| -> Option<Expr> {
+            let mut ok = true;
+            let out = e
+                .clone()
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(g, t) => match map.get(g).copied().flatten() {
+                            Some(c) => Expr::Col(c, t),
+                            None => {
+                                ok = false;
+                                Expr::Col(g, t)
+                            }
+                        },
+                        x => x,
+                    })
+                })
+                .ok()?;
+            ok.then_some(out)
+        };
+        let (mut sub_conds, mut top_conds) = (Vec::new(), Vec::new());
+        for c in s.clauses.iter().filter(|c| !c.derived) {
+            let e = mapped(&c.expr)?;
+            if c.leaves & !mask == 0 {
+                sub_conds.push(e);
+            } else {
+                top_conds.push(e);
+            }
+        }
+        // (A left-deep tree of inner joins, the clauses on its top: the group planner
+        // gathers it as one group.)
+        let chain = |items: Vec<Plan>, conds: Vec<Expr>| -> Plan {
+            let mut it = items.into_iter();
+            let mut acc = it.next().unwrap();
+            for p in it {
+                let (nl, nr) = (crate::sql::binder::plan_width(&acc), crate::sql::binder::plan_width(&p));
+                acc = Plan::Join {
+                    kind: JoinKind::Inner,
+                    left: Arc::new(acc),
+                    right: Arc::new(p),
+                    cond: None,
+                    hash: None,
+                    params: Vec::new(),
+                    nleft: nl,
+                    nright: nr,
+                    meta: Default::default(),
+                };
+            }
+            if let (Plan::Join { cond, .. }, false) = (&mut acc, conds.is_empty()) {
+                *cond = Some(if conds.len() == 1 { conds.into_iter().next().unwrap() } else { Expr::And(conds) });
+            }
+            acc
+        };
+        let mut need_new = vec![false; pos];
+        for (g, &x) in needed.iter().enumerate().take(width) {
+            if x && let Some(c) = map[g] {
+                need_new[c] = true;
+            }
+        }
+        let mut need_sub = need_new[..sub_w].to_vec();
+        for e in &top_conds {
+            for c in e.columns() {
+                if c < sub_w {
+                    need_sub[c] = true;
+                }
+            }
+        }
+        let mut sub = chain(inside.iter().map(|&l| s.leaves[l].plan.clone()).collect(), sub_conds);
+        self.plan_joins_with(&mut sub, &need_sub, None, &[])?;
+        if !matches!(sub, Plan::Append { pw: Some(_), .. }) {
+            return None;
+        }
+        let mut items = vec![sub];
+        items.extend(outside.iter().map(|&l| s.leaves[l].plan.clone()));
+        let mut top = chain(items, top_conds);
+        self.plan_joins_with(&mut top, &need_new, None, &[])?;
+        let exprs = (0..width)
+            .map(|g| map[g].map(|c| Expr::Col(c, s.col_type(g))))
+            .collect::<Option<Vec<_>>>()?;
+        Some(Plan::Project {
+            input: Arc::new(top),
+            exprs,
+        })
     }
 }
 
