@@ -275,6 +275,95 @@ Still open, and why:
   (`tlist_layout`), where Postgres adds a PlaceHolderVar's Vars only at its evaluation level
   (`i2.q2, i2.q1` for `COALESCE(..., i2.q2)` over a FULL JOIN USING).
 
+## Round 16, agent 32 (agent 27's leftovers: index operand costs, SubPlan copies as class members and per place, anti join constants, numbering order)
+
+Full runs of the whole schedule in one database on 35d7dbb, base against the costing,
+sort-key and copy changes, unit by unit: 51112 -> 51111, the one unit `database` 2 lost to
+the shared reference (its `regress_tblspace` dropped by a concurrent run; matches alone, 95/95).
+Subset runs of the planner-heavy files (agent 27's list) against 35d7dbb's baseline with each
+later change (13403 -> 13403 of 13441), and again rebased onto 4ae4438, 7d29166 and e958e87
+against their own baselines (13412 -> 13412, 13413 -> 13413, 13414 -> 13414): no unit fixed, none broken, no other agent's units moved. Crate tests and clippy on
+each. The suite's count is unchanged by it (51121; 51123 with agents 30 and 31's batches); what changed is plan choice and EXPLAIN
+outside the suite's statements, and execution of sub-select copies.
+
+What changed:
+
+- **Index condition costs** (genericcostestimate's index_other_operands_eval_cost,
+  cost_bitmap_heap_scan's get_restriction_qual_cost). A parameterized path's clauses read
+  the nested loop's parameters (`Outer(1, k)`), each standing for a whole outer expression
+  (`touter.f1 + 1`, a sub-select); Postgres's nestloop parameters are only the outer Vars, the
+  scan evaluating the rest. The parameterized relation now carries the expressions
+  (`Rel::params`, recorded in the plan as `ScanPlan::params` for EXPLAIN's re-costing,
+  `paths::describe`), and costs read the clause as written (`Rel::unparam`,
+  `rel_quals_cost`): an index scan's startup pays for the other operand once (also a
+  correlated sub-select's run, cost_qual_eval of a SubPlan), a bitmap heap scan's recheck
+  per row. So `id > f1 + 1` takes the index (only) scan, as Postgres does, while `id > f1`
+  keeps its bitmap (the engine had them the other way round). The appendrel members of a
+  parameterized Append take a parameterized bitmap heap scan too
+  (get_cheapest_parameterized_child_path over the member's paths: they had a sequential or
+  an index scan only).
+- **ORDER BY over a sub-select output a join clause also reads** (agent 27's leftover). Not a
+  wrong-results bug: the clause's copy and the target list's are equal on every row (nothing
+  volatile is pulled up: is_simple_subquery), so ordering by one orders by the other; it was
+  EXPLAIN only. Postgres's copies are different SubPlans, so the join clause's copy is never
+  equal() to the sort key's (get_eclass_for_sort_expr makes the sort key a class of its
+  own). The redundant-sort-key classes (`paths/pathkeys.rs`) now mark the columns computing a
+  pulled-up sub-select output (`subsel`): no clause puts them in a class or makes them
+  constant (`WHERE ss.x = 2 ORDER BY ss.x, ss.a` keeps `ss.x`). A subquery scan's outputs are
+  Vars again (one member wherever read).
+- **Copies run apart** (item 3): the split of a projection reading one sub-select output
+  twice (`explain::split_shared_subqueries`) is made when each query level is planned
+  (`plan_level`), not for EXPLAIN's display only: each copy has its id and plan nodes, is
+  cached and run apart, `EXPLAIN ANALYZE` shows both with their loops, and a function the
+  sub-select calls runs once per copy (a STABLE function raising a NOTICE: twice per row, as
+  in Postgres; it ran once). Volatile sub-selects aren't pulled up, so they are one value.
+- **reconsider_outer_join_clauses for anti joins** (left_join_clauses take an anti join's
+  clauses): `NOT EXISTS (... b.y = a.x)` with `a.x = 1` gives the inner side `b.y = 1` and the
+  clause is the constant-TRUE one (`oj_const_redundant`): `Nested Loop Anti Join` with no join
+  clause, as Postgres's.
+- **A left join whose key a constant replaced stays strict** for reduce_outer_joins (run on
+  the clauses as written in Postgres; the binder had dropped the key, so `IS NULL` above no
+  longer made the join an anti join): the key's nullable columns go into `JoinMeta::pushed`.
+- A multi-key EXISTS made a hashed ANY shows each comparison parenthesized (an AND of
+  OpExprs): `(ANY ((a = (hashed SubPlan 2).col1) AND (b = (hashed SubPlan 2).col2)))`.
+- **Numbering** (agents 18 / 27's rest): a level's FROM subqueries planned apart (each with
+  everything inside it) are numbered after the level's own expressions' sub-selects, then its
+  MIN / MAX InitPlans (create_minmaxagg_plan at createplan time): `explain` `LevelSpan`s,
+  `renumbering`'s last pass. A MIN / MAX InitPlan's quals reading the level's InitPlans: those
+  are attached to the level's top (`level_in`, shared), and a HAVING over MIN / MAX aggregates
+  reads their Params, the Result's `One-Time Filter`.
+
+Goldens: `tests/sql/a32_index_operand_cost.sql`, `a32_subplan_copy_keys.sql`,
+`a32_anti_join_consts.sql`, `a32_subplan_numbering.sql` (rows checked beside every plan).
+
+Left, and why:
+
+- EXPLAIN ANALYZE loops of a copied EXISTS used as an index condition (item 4): the engine
+  passes the sub-select's value in as the nested loop's parameter (evaluated once per outer
+  row); Postgres's parameter is the outer Var and each scan (and the Append's run-time
+  pruning) evaluates the SubPlan, so `loops=10` for the engine's 5. Making the parameter the
+  Var means the parameterized clause keeps the sub-select over `Outer(1, k)`, the Append's
+  pruning evaluating expressions (not just parameters), and agent 27's display of
+  sub-select parameters (`inline_sub_params`, `sub_params`) and agent 30's PlaceHolderVar
+  work built on it; not done here. The hashed alternative EXPLAIN shows is still never run
+  (Postgres doesn't run it in that example either: the member is pruned).
+- A pulled-up subquery's unread output stays in a single-table scan's VERBOSE output
+  (`Output: (spc_a.a + 1), spc_a.a`, with or without a sub-select): the level's top
+  projection selecting a prefix of the one below is taken for one dropping resjunk columns
+  (`junk_only` in EXPLAIN); a projection carrying ORDER BY's resjunk keys over an ordered index
+  scan has the same shape and must keep them. Needs the binder to mark which projection is a
+  pulled-up subquery's.
+- A hash join's clause over a sub-select: EXPLAIN's hash clause cost leaves out the SubPlan's
+  run (cost_qual_eval per probe: 15.80 vs 11.53), and a Memoize keyed by a sub-select
+  (`Cache Key: (SubPlan 2)`) isn't made (the clause's outer side reads its leaf only through
+  the sub-select's parameters): Postgres's Nested Loop over a Memoize, the engine's Hash Join.
+- A qual `a = (InitPlan 2).col1` (a pseudo-constant equality, an equivalence class's) is
+  ordered after the other restrictions in Postgres's baserestrictinfo; the engine keeps the
+  written order.
+- EXPLAIN ANALYZE's `Rows Removed by Filter` of a backward index scan under a Limit in a
+  SubPlan (23 for Postgres's 11): the engine's scan counts more removed rows than Postgres's
+  stops at; before this round too.
+
 ## Round 16, agent 29 (rule actions over a view: range table order, NEW in the action's SET; whole-row Vars of subqueries)
 
 Subset runs of 45 files (returning, rules, updatable_views, with, triggers, merge, insert,

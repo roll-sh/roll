@@ -388,9 +388,9 @@ them all with the "Fixed in round N" sections describing what was already tried.
 5. The long tail in STATUS.md. (select_parallel, select_distinct and join_hash's batch counts
    match since round 16, agent 14; with since round 16, agent 20; groupingsets and join_hash
    fully since round 16, agent 18: SubPlans numbered in subquery_planner's order for group
-   keys and quals, GROUPING() argument copies, resjunk group keys up the plan. The rest of
-   Postgres's numbering order, target list before quals and FROM subqueries after, is in its
-   section.)
+   keys and quals, GROUPING() argument copies, resjunk group keys up the plan; the target
+   list first since round 16, agent 27; FROM subqueries after the level's expressions and
+   MIN / MAX InitPlans last since agent 32, whose section lists agent 27's other leftovers.)
 6. **equivclass**, **inherit** and **collate.icu.utf8**: done (round 15, agent 10).
 7. **partition_aggregate**: done (137/137).
 8. The 18 plan-choice units listed in STATUS.md ("Plan choice visible in results").
