@@ -6038,6 +6038,7 @@ fn plan_level_ordered(
     p.push_pw_targets(plan);
     p.minmax_aggs(plan);
     rowmarks::hoist(plan);
+    crate::sql::binder::optimize::subplan_classes(plan);
     p.removed.get()
 }
 

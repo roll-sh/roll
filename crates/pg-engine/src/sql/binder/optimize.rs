@@ -2246,6 +2246,222 @@ fn ec_scan_constants(all: &mut Vec<Expr>) {
     all.extend(derived);
 }
 
+/// generate_base_implied_equalities_const in the sub-selects that stay SubPlans: the outer
+/// query's values a sub-select reads are Params there, pseudo-constant members of its
+/// equivalence classes. Postgres plans a sub-select (make_subplan) once pull_up_sublinks has
+/// taken the ones it pulls up; here a sub-select's level is planned as it is bound, before
+/// the level reading it decides, so the classes with outer values are made once that level
+/// is planned (`plan_level`), for the sub-selects left in its expressions. A class's
+/// constant is its first Const, else its last pseudo-constant; each other member is compared
+/// with it, a pseudo-constant giving a gating qual (the One-Time Filter of a Result over the
+/// scan). Done where the sub-select's level is one sequential scan (a join's classes span
+/// its relations); an EXISTS that also gets a hashed form keeps its quals (Postgres hashes
+/// the query as written, convert_EXISTS_to_ANY).
+pub fn subplan_classes(plan: &mut Plan) {
+    fn rewritten(s: &crate::sql::expr::Subquery) -> Option<Plan> {
+        if s.params.is_empty()
+            || s.call.is_some()
+            || (s.kind == crate::sql::expr::SubqueryKind::Exists
+                && crate::sql::explain::exists_hashed_from(&s.plan, true).is_some())
+        {
+            return None;
+        }
+        let mut p = (*s.plan).clone();
+        rewrite_level_scan(&mut p).then_some(p)
+    }
+    fn wants(p: &Plan) -> bool {
+        let mut es = Vec::new();
+        crate::sql::explain::node_exprs(p, &mut es);
+        let mut found = false;
+        for e in es {
+            e.walk(&mut |x| {
+                if !found && let Expr::Subquery(s) = x {
+                    found = rewritten(s).is_some();
+                }
+            });
+        }
+        found || crate::sql::explain::plan_inputs(p).into_iter().any(|c| wants(c))
+    }
+    if !wants(plan) {
+        return;
+    }
+    for c in crate::sql::explain::plan_inputs_mut(plan) {
+        if wants(c) {
+            subplan_classes(Arc::make_mut(c));
+        }
+    }
+    let one = |e: &mut Expr| {
+        *e = std::mem::replace(e, Expr::Const(Value::Null, DataType::Unknown))
+            .transform(&mut |x| {
+                Ok(match x {
+                    Expr::Subquery(mut s) => {
+                        if let Some(p) = rewritten(&s) {
+                            s.plan = Arc::new(p);
+                        }
+                        Expr::Subquery(s)
+                    }
+                    x => x,
+                })
+            })
+            .expect("rewriting a sub-select");
+    };
+    match plan {
+        Plan::Scan(s) => s.filter.iter_mut().for_each(one),
+        Plan::SysScan { filter, .. } => filter.iter_mut().for_each(one),
+        Plan::Filter { pred, .. } => one(pred),
+        Plan::Project { exprs, .. } | Plan::ProjectSet { exprs, .. } => exprs.iter_mut().for_each(one),
+        Plan::Join { cond, .. } => cond.iter_mut().for_each(one),
+        Plan::Agg { groups, .. } => groups.iter_mut().for_each(one),
+        Plan::Sort { keys, .. } => keys.iter_mut().for_each(|k| one(&mut k.expr)),
+        _ => {}
+    }
+}
+
+/// `subplan_classes` for one sub-select's plan: its level's scan, under the projections,
+/// sorts, limits and aggregation over it, when that is a sequential scan whose
+/// restrictions equate a column with an outer value. Whether it changed anything.
+fn rewrite_level_scan(p: &mut Plan) -> bool {
+    use crate::sql::plan::Access;
+    match p {
+        Plan::Project { input, .. }
+        | Plan::Sort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Agg { input, sets: None, .. } => {
+            let mut c = (**input).clone();
+            let done = rewrite_level_scan(&mut c);
+            if done {
+                *input = Arc::new(c);
+            }
+            done
+        }
+        Plan::Scan(s) if s.index.is_none() && matches!(s.access, Access::Seq | Access::Unplanned) => {
+            let Some(f) = s.filter.clone() else { return false };
+            let mut cs = Vec::new();
+            conjuncts(f, &mut cs);
+            // (In the order baserestrictinfo holds them, which the classes met them in.)
+            cs.sort_by_key(|q| s.written.iter().position(|w| w.same_as(q)).unwrap_or(usize::MAX));
+            let Some(mut all) = outer_value_classes(cs) else { return false };
+            let mut written: Vec<Expr> = s
+                .written
+                .iter()
+                .filter(|w| all.iter().any(|q| q.same_as(w)))
+                .cloned()
+                .collect();
+            for q in &all {
+                if !written.iter().any(|w| w.same_as(q)) {
+                    written.push(q.clone());
+                }
+            }
+            order_quals(&mut all);
+            s.written = written;
+            s.filter = match all.len() {
+                1 => all.pop(),
+                _ => Some(Expr::And(all)),
+            };
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The restrictions `cs` (in the order the classes met them) with the classes holding an
+/// outer value made (`subplan_classes`): the other quals, then each class's equalities with
+/// its constant. None when there is no such class.
+fn outer_value_classes(cs: Vec<Expr>) -> Option<Vec<Expr>> {
+    let konst = |x: &Expr| {
+        let mut sub = false;
+        x.walk(&mut |y| sub |= matches!(y, Expr::Subquery(_)));
+        x.columns().is_empty() && !sub && !x.is_volatile() && pseudo_constant(x)
+    };
+    // `member = member` with a column on one side at least: (left, right, operator).
+    let pair = |e: &Expr| -> Option<(Expr, Expr, Arc<crate::sql::func::FuncDef>)> {
+        let Expr::Call(def, args, _) = e else { return None };
+        if !ec_clause(e)
+            || !def.strict
+            || def.coll.as_ref().is_some_and(|c| !c.deterministic)
+            || args[0].ty().without_typmod() != args[1].ty().without_typmod()
+        {
+            return None;
+        }
+        let col = |x: &Expr| matches!(x, Expr::Col(..));
+        let ok = (col(&args[0]) || konst(&args[0])) && (col(&args[1]) || konst(&args[1]));
+        (ok && (col(&args[0]) || col(&args[1]))).then(|| (args[0].clone(), args[1].clone(), def.clone()))
+    };
+    let found: Vec<_> = cs.iter().map(pair).collect();
+    let mut members: Vec<Expr> = Vec::new();
+    let mut parent: Vec<usize> = Vec::new();
+    fn root(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    let idx = |e: &Expr, members: &mut Vec<Expr>, parent: &mut Vec<usize>| -> usize {
+        match members.iter().position(|m| m.same_as(e)) {
+            Some(i) => i,
+            None => {
+                members.push(e.clone());
+                parent.push(parent.len());
+                members.len() - 1
+            }
+        }
+    };
+    let mut src: Vec<Option<usize>> = Vec::new();
+    for f in &found {
+        src.push(f.as_ref().map(|(a, b, _)| {
+            let (i, j) = (idx(a, &mut members, &mut parent), idx(b, &mut members, &mut parent));
+            let (ri, rj) = (root(&mut parent, i), root(&mut parent, j));
+            if ri != rj {
+                parent[rj] = ri;
+            }
+            i
+        }));
+    }
+    let roots: Vec<usize> = (0..members.len()).map(|i| root(&mut parent, i)).collect();
+    let mut drop = vec![false; cs.len()];
+    let mut derived = Vec::new();
+    let mut done = Vec::new();
+    for &r in &roots {
+        if done.contains(&r) {
+            continue;
+        }
+        done.push(r);
+        let class: Vec<usize> = (0..members.len()).filter(|&i| roots[i] == r).collect();
+        let sources: Vec<usize> = (0..cs.len()).filter(|&q| src[q].is_some_and(|i| roots[i] == r)).collect();
+        let konsts: Vec<usize> = class.iter().copied().filter(|&i| konst(&members[i])).collect();
+        let consts = konsts.iter().filter(|&&i| matches!(members[i], Expr::Const(..))).count();
+        if sources.len() < 2 || consts > 1 || !konsts.iter().any(|&i| members[i].has_outer_refs()) {
+            continue;
+        }
+        // (One operator for the whole class.)
+        let def = found[sources[0]].as_ref().unwrap().2.clone();
+        if sources.iter().any(|&q| found[q].as_ref().unwrap().2.oid != def.oid) {
+            continue;
+        }
+        let k = konsts
+            .iter()
+            .copied()
+            .find(|&i| matches!(members[i], Expr::Const(..)))
+            .or(konsts.last().copied())
+            .unwrap();
+        for &q in &sources {
+            drop[q] = true;
+        }
+        for &m in &class {
+            if m != k {
+                derived.push(Expr::Call(def.clone(), vec![members[m].clone(), members[k].clone()], DataType::Bool));
+            }
+        }
+    }
+    if derived.is_empty() {
+        return None;
+    }
+    let mut out: Vec<Expr> = cs.into_iter().zip(drop).filter(|(_, d)| !d).map(|(q, _)| q).collect();
+    out.extend(derived);
+    Some(out)
+}
+
 /// generate_base_implied_equalities_no_const for a scan's restriction equating a
 /// PlaceHolderVar it evaluates (a LATERAL subquery's output under an outer join, read as
 /// the join's value) with one of its columns: the class lists its members in the order the
@@ -3434,6 +3650,18 @@ pub fn project(plan: Plan, exprs: Vec<Expr>) -> Plan {
         input: Arc::new(plan),
         exprs,
     }
+}
+
+/// A pseudoconstant clause that isn't a constant (RestrictInfo.pseudoconstant): no column
+/// of the query level, nothing volatile, a sub-select's only as an InitPlan's output.
+/// clause_selectivity_ext counts it 1.0: it gates the plan, filtering no rows.
+pub fn pseudo_gate(e: &Expr) -> bool {
+    if matches!(e, Expr::Const(..)) || !e.columns().is_empty() {
+        return false;
+    }
+    let mut ok = pseudo_constant(e);
+    e.walk(&mut |x| ok &= !matches!(x, Expr::Subquery(s) if !s.params.is_empty()));
+    ok
 }
 
 /// `is_pseudo_constant_clause`: no columns of the query's own rows, nothing volatile.

@@ -1,0 +1,391 @@
+> create table a23_t (unique1 int, hundred int, thousand int, tenthous int, odd int)
+-- CREATE TABLE
+
+> insert into a23_t select i, i % 100, i % 1000, i, (i % 100) * 2 + 1 from generate_series(0, 9999) i
+-- INSERT 0 10000
+
+> create index a23_t_hundred on a23_t (hundred)
+-- CREATE INDEX
+
+> create index a23_t_thous_tenthous on a23_t (thousand, tenthous)
+-- CREATE INDEX
+
+> create index a23_t_unique1 on a23_t (unique1)
+-- CREATE INDEX
+
+> vacuum analyze a23_t
+-- VACUUM
+
+> create table a23_o (unique1 int, hundred int)
+-- CREATE TABLE
+
+> insert into a23_o select i, i % 100 from generate_series(0, 999) i
+-- INSERT 0 1000
+
+> create index a23_o_unique1 on a23_o (unique1)
+-- CREATE INDEX
+
+> vacuum analyze a23_o
+-- VACUUM
+
+> create table a23_q (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> insert into a23_q values (123, 456), (123, 4567890123456789), (4567890123456789, 123),
+>   (4567890123456789, 4567890123456789), (4567890123456789, -4567890123456789)
+-- INSERT 0 5
+
+> create table a23_f (f1 int4)
+-- CREATE TABLE
+
+> insert into a23_f values (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> explain (costs off)
+> select exists(
+>   select * from a23_q t1 left join
+>     (a23_q t2 inner join a23_q t3 on x0.f1 = 1
+>      left join a23_q t4 on t2.q2 = t4.q2)
+>   on t1.q1 = t2.q1
+> ) from a23_f x0
+QUERY PLAN:text
+Seq Scan on a23_f x0
+  SubPlan 1
+    ->  Nested Loop Left Join
+          Join Filter: (t2.q2 = t4.q2)
+          ->  Nested Loop Left Join
+                Join Filter: (t1.q1 = t2.q1)
+                ->  Seq Scan on a23_q t1
+                ->  Materialize
+                      ->  Result
+                            One-Time Filter: (x0.f1 = 1)
+                            ->  Nested Loop
+                                  ->  Seq Scan on a23_q t2
+                                  ->  Materialize
+                                        ->  Seq Scan on a23_q t3
+          ->  Materialize
+                ->  Seq Scan on a23_q t4
+-- EXPLAIN
+
+> select exists(
+>   select * from a23_q t1 left join
+>     (a23_q t2 inner join a23_q t3 on x0.f1 = 1
+>      left join a23_q t4 on t2.q2 = t4.q2)
+>   on t1.q1 = t2.q1
+> ) from a23_f x0
+exists:bool
+t
+t
+t
+t
+t
+-- SELECT 5
+
+> create table a23_inner (id int8 primary key, dat1 int8)
+-- CREATE TABLE
+
+> insert into a23_inner values (123, 42)
+-- INSERT 0 1
+
+> explain (costs off)
+> select f1, x from a23_f
+>   join ((select 42 as x from a23_q left join a23_inner on q1 = id) as ss1
+>         right join a23_t on null)
+>   on a23_t.unique1 = ss1.x or a23_t.hundred = ss1.x
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a23_f
+  ->  Materialize
+        ->  Nested Loop Left Join
+              Join Filter: NULL::boolean
+              Filter: ((a23_t.unique1 = (42)) OR (a23_t.hundred = (42)))
+              ->  Seq Scan on a23_t
+              ->  Result
+                    One-Time Filter: false
+-- EXPLAIN
+
+> select f1, x from a23_f
+>   join ((select 42 as x from a23_q left join a23_inner on q1 = id) as ss1
+>         right join a23_t on null)
+>   on a23_t.unique1 = ss1.x or a23_t.hundred = ss1.x
+f1:int4 | x:int4
+-- SELECT 0
+
+> create table a23_fk (x integer, x10 integer, x10b integer, x100 integer)
+-- CREATE TABLE
+
+> insert into a23_fk select x, x/10, x/10, x/100 from generate_series(1, 1000) x
+-- INSERT 0 1000
+
+> create unique index on a23_fk (x, x10, x100)
+-- CREATE INDEX
+
+> analyze a23_fk
+-- ANALYZE
+
+> alter table a23_fk add constraint a23_fk_fk foreign key (x, x10b, x100) references a23_fk (x, x10, x100)
+-- ALTER TABLE
+
+> explain (costs off)
+> select * from a23_fk f1
+>   join a23_fk f2 on (f1.x = f2.x and f1.x10 = f2.x10b and f1.x100 = f2.x100)
+>   join a23_fk f3 on f1.x = f3.x
+>   where f1.x100 = 2
+QUERY PLAN:text
+Hash Join
+  Hash Cond: ((f2.x = f1.x) AND (f2.x10b = f1.x10))
+  ->  Hash Join
+        Hash Cond: (f3.x = f2.x)
+        ->  Seq Scan on a23_fk f3
+        ->  Hash
+              ->  Seq Scan on a23_fk f2
+                    Filter: (x100 = 2)
+  ->  Hash
+        ->  Seq Scan on a23_fk f1
+              Filter: (x100 = 2)
+-- EXPLAIN
+
+> select count(*) from a23_fk f1
+>   join a23_fk f2 on (f1.x = f2.x and f1.x10 = f2.x10b and f1.x100 = f2.x100)
+>   join a23_fk f3 on f1.x = f3.x
+>   where f1.x100 = 2
+count:int8
+100
+-- SELECT 1
+
+> explain (verbose, costs off)
+> select t1.unique1, t2.hundred
+> from a23_o t1, a23_t t2
+> where exists (select 1 from a23_t t3
+>               where t3.thousand = t1.unique1 and t3.tenthous = t2.hundred)
+>       and t1.unique1 < 1
+QUERY PLAN:text
+Nested Loop
+  Output: t1.unique1, t2.hundred
+  ->  Hash Join
+        Output: t1.unique1, t3.tenthous
+        Hash Cond: (t3.thousand = t1.unique1)
+        ->  HashAggregate
+              Output: t3.thousand, t3.tenthous
+              Group Key: t3.thousand, t3.tenthous
+              ->  Seq Scan on public.a23_t t3
+                    Output: t3.unique1, t3.hundred, t3.thousand, t3.tenthous, t3.odd
+        ->  Hash
+              Output: t1.unique1
+              ->  Index Only Scan using a23_o_unique1 on public.a23_o t1
+                    Output: t1.unique1
+                    Index Cond: (t1.unique1 < 1)
+  ->  Index Only Scan using a23_t_hundred on public.a23_t t2
+        Output: t2.hundred
+        Index Cond: (t2.hundred = t3.tenthous)
+-- EXPLAIN
+
+> select t1.unique1, t2.hundred
+> from a23_o t1, a23_t t2
+> where exists (select 1 from a23_t t3
+>               where t3.thousand = t1.unique1 and t3.tenthous = t2.hundred)
+>       and t1.unique1 < 1
+unique1:int4 | hundred:int4
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+0 | 0
+-- SELECT 100
+
+> explain (costs off)
+> select * from a23_t a inner join a23_t b
+>   on a.hundred in (select c.hundred from a23_t c where c.odd = b.odd)
+>   where a.thousand < 750 and b.unique1 < 3
+QUERY PLAN:text
+Nested Loop
+  ->  Hash Join
+        Hash Cond: (c.odd = b.odd)
+        ->  HashAggregate
+              Group Key: c.odd, c.hundred
+              ->  Seq Scan on a23_t c
+        ->  Hash
+              ->  Index Scan using a23_t_unique1 on a23_t b
+                    Index Cond: (unique1 < 3)
+  ->  Index Scan using a23_t_hundred on a23_t a
+        Index Cond: (hundred = c.hundred)
+        Filter: (thousand < 750)
+-- EXPLAIN
+
+> select count(*) from a23_t a inner join a23_t b
+>   on a.hundred in (select c.hundred from a23_t c where c.odd = b.odd)
+>   where a.thousand < 750 and b.unique1 < 3
+count:int8
+240
+-- SELECT 1
+
+> create table a23_s2 (id serial, a int)
+-- CREATE TABLE
+
+> create table a23_s3 (id serial, a int)
+-- CREATE TABLE
+
+> create table a23_s4 (id serial, a int)
+-- CREATE TABLE
+
+> create unique index on a23_s3 (a, id)
+-- CREATE INDEX
+
+> create unique index on a23_s2 (id)
+-- CREATE INDEX
+
+> explain (costs off)
+> select a23_s2.id from a23_s2
+> where exists (select true from a23_s3, a23_s4 where a23_s3.a = 1 and a23_s3.id = a23_s2.id)
+QUERY PLAN:text
+Nested Loop
+  ->  HashAggregate
+        Group Key: a23_s3.id
+        ->  Nested Loop
+              ->  Seq Scan on a23_s4
+              ->  Materialize
+                    ->  Bitmap Heap Scan on a23_s3
+                          Recheck Cond: (a = 1)
+                          ->  Bitmap Index Scan on a23_s3_a_id_idx
+                                Index Cond: (a = 1)
+  ->  Index Only Scan using a23_s2_id_idx on a23_s2
+        Index Cond: (id = a23_s3.id)
+-- EXPLAIN
+
+> insert into a23_s2 (a) select i from generate_series(1, 5) i
+-- INSERT 0 5
+
+> insert into a23_s3 (a) select 1 from generate_series(1, 3) i
+-- INSERT 0 3
+
+> insert into a23_s4 (a) values (1), (2)
+-- INSERT 0 2
+
+> select a23_s2.id from a23_s2
+> where exists (select true from a23_s3, a23_s4 where a23_s3.a = 1 and a23_s3.id = a23_s2.id)
+> order by 1
+id:int4
+1
+2
+3
+-- SELECT 3
+
+> explain (verbose, costs off)
+> select t.hundred, q.q2 from a23_t t, a23_f f, a23_q q where t.hundred = f.f1 and t.thousand = q.q1
+QUERY PLAN:text
+Hash Join
+  Output: t.hundred, q.q2
+  Hash Cond: (f.f1 = t.hundred)
+  ->  Seq Scan on public.a23_f f
+        Output: f.f1
+  ->  Hash
+        Output: t.hundred, q.q2
+        ->  Hash Join
+              Output: t.hundred, q.q2
+              Hash Cond: (q.q1 = t.thousand)
+              ->  Seq Scan on public.a23_q q
+                    Output: q.q1, q.q2
+              ->  Hash
+                    Output: t.hundred, t.thousand
+                    ->  Seq Scan on public.a23_t t
+                          Output: t.hundred, t.thousand
+-- EXPLAIN
+
+> drop table a23_t, a23_o, a23_q, a23_f, a23_inner, a23_fk, a23_s2, a23_s3, a23_s4
+-- DROP TABLE
+

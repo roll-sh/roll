@@ -258,6 +258,9 @@ struct JRel {
     /// Parameterized paths (base relations: the cheapest for each set of required leaves;
     /// join relations: those add_path keeps).
     param: Vec<JP>,
+    /// Its leaves in the order its target list has their columns (build_joinrel_tlist over
+    /// the first pair make_join_rel built it from: the first input's, then the second's).
+    tl: Vec<usize>,
 }
 
 /// add_path for group paths (parameterized ones keep to their own required set).
@@ -447,6 +450,9 @@ struct Search<'s, 'c, 'a> {
     lateral_supplied: std::cell::Cell<bool>,
     /// A partitionwise child join's parent leaves' rows (`Planner::pw_loop_rows`).
     loop_rows: Vec<f64>,
+    /// The group is the query level's topmost scan/join relation: its join returns the
+    /// scan/join target (apply_scanjoin_target_to_paths), not its reltarget.
+    top_level: bool,
     /// PlaceHolderVars evaluated at joins of the group (a pulled-up subquery's outputs an
     /// outer join above nulls), innermost first.
     phvs: Vec<Phv>,
@@ -700,6 +706,11 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
 
     /// clause_selectivity of a join clause (JOIN_INNER semantics, or the semi one).
     fn clause_sel(&self, c: &Clause, semi_inner: Option<(u32, f64)>) -> f64 {
+        // (clause_selectivity_ext: a pseudoconstant clause, an outer query's value
+        // compared, gates the join and filters no rows.)
+        if crate::sql::binder::optimize::pseudo_gate(&c.expr) {
+            return 1.0;
+        }
         let mut s = self.clause_sel_raw(c, semi_inner);
         // (consider_new_or_clause's adjustment of the cached selectivity.)
         for d in &c.sel_div {
@@ -1168,6 +1179,26 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
     fn rel_index(&self, set: u32) -> Option<usize> {
         self.rels.iter().position(|r| r.set == set)
     }
+
+    /// `JoinMeta::tlist` for a join of the relation `set` whose row has the group
+    /// columns `layout`: by the join relation's leaf order (`JRel::tl`); empty when that
+    /// is the row's own order.
+    fn tlist_order(&self, set: u32, layout: &[usize]) -> Vec<usize> {
+        let full = (1u32 << self.leaves.len()) - 1;
+        if self.top_level && set == full {
+            return Vec::new();
+        }
+        let Some(tl) = self.rel_index(set).map(|i| &self.rels[i].tl) else {
+            return Vec::new();
+        };
+        let rank = |g: usize| self.leaf_of.get(g).and_then(|l| tl.iter().position(|x| x == l)).unwrap_or(usize::MAX);
+        let mut order: Vec<usize> = (0..layout.len()).collect();
+        order.sort_by_key(|&i| (rank(layout[i]), i));
+        if order.iter().enumerate().all(|(i, &j)| i == j) {
+            return Vec::new();
+        }
+        order
+    }
 }
 
 // ── base relations ──
@@ -1271,6 +1302,7 @@ impl Search<'_, '_, '_> {
             width,
             paths: Vec::new(),
             param: Vec::new(),
+            tl: vec![l],
         };
         match &leaf.scan {
             None => {
@@ -1951,14 +1983,7 @@ impl Search<'_, '_, '_> {
                 prel.quals.extend(quals);
             }
             let nrq = r.quals.len();
-            prel.loop_count = (0..self.leaves.len())
-                .filter(|j| req & (1 << j) != 0)
-                .map(|j| self.leaf_loop_rows(j))
-                .fold(f64::INFINITY, f64::min)
-                .max(1.0);
-            if !prel.loop_count.is_finite() {
-                prel.loop_count = 1.0;
-            }
+            prel.loop_count = self.loop_count(l, req);
             prel.rows = costs::clamp_rows(prel.size.tuples * self.pl.sel(&prel, &prel.quals));
             (prel.qual_startup, prel.qual_cost) = self.pl.quals_cost(&prel.quals);
             let prel = Rc::new(prel);
@@ -2215,7 +2240,7 @@ impl Search<'_, '_, '_> {
                 prel.quals.push(dq);
                 enforced.push(cj);
             }
-            prel.loop_count = self.loop_count(req);
+            prel.loop_count = self.loop_count(l, req);
             prel.rows = costs::clamp_rows(prel.size.tuples * self.pl.sel(&prel, &prel.quals));
             (prel.qual_startup, prel.qual_cost) = self.pl.quals_cost(&prel.quals);
             let prel = Rc::new(prel);
@@ -2382,14 +2407,95 @@ impl Search<'_, '_, '_> {
         }
     }
 
-    /// The fewest rows of the leaves in `req` (get_loop_count).
-    fn loop_count(&self, req: u32) -> f64 {
+    /// The fewest rows of the leaves in `req` (get_loop_count) a scan of leaf `l`
+    /// parameterized by them runs for.
+    fn loop_count(&self, l: usize, req: u32) -> f64 {
         let n = (0..self.leaves.len())
             .filter(|j| req & (1 << j) != 0)
-            .map(|j| self.leaf_loop_rows(j))
+            .map(|j| self.semi_loop_rows(l, j, self.leaf_loop_rows(j)))
             .fold(f64::INFINITY, f64::min)
             .max(1.0);
         if n.is_finite() { n } else { 1.0 }
+    }
+
+    /// adjust_rowcount_for_semijoins: leaf `j` on the right of a semi join `l` is on the
+    /// left of runs at most once per unique-ified row of its right side (its
+    /// semi_rhs_exprs' groups over approximate_joinrel_size's rows).
+    fn semi_loop_rows(&self, l: usize, j: usize, mut rows: f64) -> f64 {
+        for (t, s) in self.sjs.iter().enumerate() {
+            if s.kind != JoinKind::Semi || s.syn_l >> l & 1 == 0 || s.syn_r >> j & 1 == 0 {
+                continue;
+            }
+            let mut keys: Vec<usize> = Vec::new();
+            let mut exprs = false;
+            for c in &self.clauses {
+                let Some((a, b, al, bl)) = c.eq.as_ref().filter(|_| c.sj == Some(t)) else { continue };
+                let rhs = if *bl & !s.syn_r == 0 && *bl != 0 {
+                    b
+                } else if *al & !s.syn_r == 0 && *al != 0 {
+                    a
+                } else {
+                    continue;
+                };
+                match key_col(rhs) {
+                    Some(g) if !keys.contains(&g) => keys.push(g),
+                    Some(_) => {}
+                    None => exprs = true,
+                }
+            }
+            if keys.is_empty() || exprs {
+                continue;
+            }
+            let nraw: f64 = (0..self.leaves.len()).filter(|&x| s.syn_r >> x & 1 == 1).map(|x| self.leaves[x].rows).product();
+            rows = rows.min(self.join_groups(&keys, nraw));
+        }
+        rows
+    }
+
+    /// estimate_num_groups over the columns `keys` of one leaf (an expression list
+    /// `keyx` instead, when given): a table's by its scan's statistics, any other's by
+    /// their distinct counts or the default.
+    fn leaf_groups(&self, l: usize, keys: &[usize], keyx: &[Expr], rows: f64) -> f64 {
+        match &self.leaves[l].scan {
+            Some((_, lr)) => {
+                let off = self.leaves[l].off;
+                let keyx: Vec<Expr> = if keyx.is_empty() {
+                    keys.iter().map(|&g| Expr::Col(g - off, DataType::Unknown)).collect()
+                } else {
+                    keyx.iter().map(|e| e.clone().remap_cols(&|g| g - off)).collect()
+                };
+                let refs: Vec<&Expr> = keyx.iter().collect();
+                self.pl.num_groups(lr, &refs, rows)
+            }
+            // (Columns with statistics of their own, as a CTE's of a table: their distinct
+            // counts; any other get_variable_numdistinct's default, the relation's rows when
+            // fewer.)
+            None => {
+                let leaf = &self.leaves[l];
+                let mut prod = 1.0;
+                for &g in keys {
+                    match leaf.cols.get(g - leaf.off) {
+                        Some((_, Some(v), _)) => prod *= v.ndistinct(&self.pl.cat).0,
+                        Some((_, None, Some(d))) => prod *= *d,
+                        _ => prod *= rows.min(costs::DEFAULT_NUM_DISTINCT),
+                    }
+                }
+                costs::clamp_rows(prod.min(rows))
+            }
+        }
+    }
+
+    /// estimate_num_groups over columns of several leaves: each leaf's by its own rows,
+    /// the product at most `rows`.
+    fn join_groups(&self, keys: &[usize], rows: f64) -> f64 {
+        let mut prod = 1.0;
+        for l in 0..self.leaves.len() {
+            let mine: Vec<usize> = keys.iter().copied().filter(|&g| self.leaf_of[g] == l).collect();
+            if !mine.is_empty() {
+                prod *= self.leaf_groups(l, &mine, &[], self.leaves[l].rows);
+            }
+        }
+        prod.ceil().min(costs::clamp_rows(rows)).max(1.0)
     }
 
     /// Parameterized paths of an inheritance Append leaf (add_paths_to_append_rel): for
@@ -2482,7 +2588,7 @@ impl Search<'_, '_, '_> {
                         Expr::Call(def.clone(), vec![param, colx], ty.clone())
                     });
                 }
-                prel.loop_count = self.loop_count(req);
+                prel.loop_count = self.loop_count(l, req);
                 prel.rows = costs::clamp_rows(prel.size.tuples * self.pl.sel(&prel, &prel.quals));
                 (prel.qual_startup, prel.qual_cost) = self.pl.quals_cost(&prel.quals);
                 let prel = Rc::new(prel);
@@ -2848,13 +2954,16 @@ impl Search<'_, '_, '_> {
                 }
                 // build_join_rel: the size from this first pair.
                 let rows = self.join_size(jt, r1, r2, &restrict);
+                let mut tl = self.rels[r1].tl.clone();
+                tl.extend(self.rels[r2].tl.iter().copied());
                 self.rels.push(JRel {
                     set,
                     rows,
                     width: self.width_of(set),
                     paths: Vec::new(),
                     param: Vec::new(),
-                        });
+                    tl,
+                });
                 self.rels.len() - 1
             }
         };
@@ -2906,19 +3015,22 @@ impl Search<'_, '_, '_> {
     /// equalities, or every such column is equated to a constant.
     fn unique_rel(&self, r: usize, restrict: &[usize]) -> Option<JRel> {
         let rset = self.rels[r].set;
-        if rset.count_ones() != 1 || restrict.is_empty() {
+        if restrict.is_empty() {
             return None;
         }
-        let l = rset.trailing_zeros() as usize;
+        // (The side may be a join of several items: create_unique_path over a join
+        // relation, its semi_rhs_exprs over any of them.)
+        let inside = |x: u32| x != 0 && x & !rset == 0;
+        let in_side = |g: usize| self.leaf_of.get(g).is_some_and(|&l| rset >> l & 1 == 1);
         let mut cols = Vec::new();
         let mut exprs: Vec<Expr> = Vec::new();
         let (mut can_btree, mut can_hash) = (true, true);
         for &c in restrict {
             let cl = &self.clauses[c];
             let (a, b, al, bl) = cl.eq.as_ref()?;
-            let rhs = if *bl == rset {
+            let rhs = if inside(*bl) && *al & rset == 0 {
                 b
-            } else if *al == rset {
+            } else if inside(*al) && *bl & rset == 0 {
                 a
             } else {
                 return None;
@@ -2929,7 +3041,7 @@ impl Search<'_, '_, '_> {
             // Unique keeping a row per value.)
             let Some(g) = key_col(rhs).filter(|&g| self.phv(g).is_none()) else {
                 let ok = !rhs.columns().is_empty()
-                    && rhs.columns().iter().all(|&g| self.leaf_of.get(g) == Some(&l) && self.phv(g).is_none())
+                    && rhs.columns().iter().all(|&g| in_side(g) && self.phv(g).is_none())
                     && !rhs.is_volatile()
                     && !rhs.has_outer_refs();
                 if !ok {
@@ -2942,8 +3054,9 @@ impl Search<'_, '_, '_> {
                 continue;
             };
             // (A column equated to a constant needs no unique-ifying.)
-            let constant = match &self.leaves[l].scan {
-                Some((_, rel)) => rel.quals.iter().any(|q| const_equality(q, g - self.leaves[l].off)),
+            let gl = self.leaf_of[g];
+            let constant = match &self.leaves[gl].scan {
+                Some((_, rel)) => rel.quals.iter().any(|q| const_equality(q, g - self.leaves[gl].off)),
                 None => false,
             };
             if !constant && !cols.contains(&g) {
@@ -2973,32 +3086,13 @@ impl Search<'_, '_, '_> {
         let rel = &self.rels[r];
         let input = cheapest_of(&rel.paths, false)?.clone();
         let rows_in = rel.rows;
-        let groups = match &self.leaves[l].scan {
-            Some((_, lr)) => {
-                let off = self.leaves[l].off;
-                let keyx: Vec<Expr> = if exprs.is_empty() {
-                    cols.iter().map(|&g| Expr::Col(g - off, DataType::Unknown)).collect()
-                } else {
-                    exprs.iter().map(|e| e.clone().remap_cols(&|g| g - off)).collect()
-                };
-                let refs: Vec<&Expr> = keyx.iter().collect();
-                self.pl.num_groups(lr, &refs, rows_in)
+        let groups = if rset.count_ones() == 1 {
+            self.leaf_groups(rset.trailing_zeros() as usize, &out_cols, &exprs, rows_in)
+        } else {
+            if !exprs.is_empty() {
+                return None;
             }
-            // (Columns with statistics of their own, as a CTE's of a table: their distinct
-            // counts; any other get_variable_numdistinct's default, the relation's rows when
-            // fewer.)
-            None => {
-                let leaf = &self.leaves[l];
-                let mut prod = 1.0;
-                for &g in out_cols.iter() {
-                    match leaf.cols.get(g - leaf.off) {
-                        Some((_, Some(v), _)) => prod *= v.ndistinct(&self.pl.cat).0,
-                        Some((_, None, Some(d))) => prod *= *d,
-                        _ => prod *= rows_in.min(costs::DEFAULT_NUM_DISTINCT),
-                    }
-                }
-                costs::clamp_rows(prod.min(rows_in))
-            }
+            self.join_groups(&out_cols, rows_in)
         };
         let n = nkeys as f64;
         let width = input.width;
@@ -3037,6 +3131,7 @@ impl Search<'_, '_, '_> {
             set: rset,
             rows: rel.rows,
             width: rel.width,
+            tl: rel.tl.clone(),
             paths: vec![JP {
                 rows: groups,
                 startup,
@@ -3079,7 +3174,7 @@ impl Search<'_, '_, '_> {
             }
         };
         for (cl, cleaf) in self.leaves.iter().enumerate() {
-            let Some((cs, _)) = &cleaf.scan else { continue };
+            let Some((cs, crel)) = &cleaf.scan else { continue };
             if !cat.children(cs.table.oid).is_empty() {
                 continue;
             }
@@ -3114,11 +3209,33 @@ impl Search<'_, '_, '_> {
                     }
                     let mut mine: Vec<usize> = Vec::new();
                     let mut ok = true;
+                    // (The referencing columns' `= constant` restrictions, of the columns
+                    // matched through a class with a constant.)
+                    let mut const_quals: Vec<Expr> = Vec::new();
                     for (&cc, &rc) in columns.iter().zip(ref_columns) {
                         let (gc, gr) = (cleaf.off + cc, rleaf.off + rc);
                         if constant(gc) || constant(gr) {
-                            ok = false;
-                            break;
+                            // match_eclasses_to_foreign_key_col: both columns in one class
+                            // with a constant (nconst_ec), which made no join clause.
+                            let konst = |leaf: &Leaf, rel: &Rel, g: usize| {
+                                rel.quals.iter().find(|q| const_equality(q, g - leaf.off)).and_then(|q| {
+                                    let Expr::Call(_, a, _) = q else { return None };
+                                    let k = if key_col(&a[0]) == Some(g - leaf.off) { &a[1] } else { &a[0] };
+                                    Some((q.clone(), k.clone()))
+                                })
+                            };
+                            match (konst(cleaf, crel, gc), konst(rleaf, rrel, gr)) {
+                                (Some((cq, ck)), Some((_, rk)))
+                                    if self.ec[gc] == self.ec[gr] || ck.same_as(&rk) =>
+                                {
+                                    const_quals.push(cq);
+                                    continue;
+                                }
+                                _ => {
+                                    ok = false;
+                                    break;
+                                }
+                            }
                         }
                         let matching: Vec<usize> = restrict
                             .iter()
@@ -3151,6 +3268,15 @@ impl Search<'_, '_, '_> {
                     removed.extend(mine);
                     let tuples = rrel.size.tuples.max(1.0);
                     sel *= if semi { rleaf.rows / tuples } else { 1.0 / tuples };
+                    // (get_foreign_key_join_selectivity: the class's `var = constant`
+                    // restriction already shrank the referencing side; its selectivity is
+                    // divided out, not counted twice.)
+                    for q in const_quals {
+                        let s0 = self.pl.sel(crel, std::slice::from_ref(&q));
+                        if s0 > 0.0 {
+                            sel /= s0;
+                        }
+                    }
                 }
             }
         }
@@ -3363,7 +3489,13 @@ impl Search<'_, '_, '_> {
         let (oset, iset) = (self.rels[outer].set, self.rels[inner].set);
         let inner_unique = match (jt, uniq) {
             (Jt::Semi | Jt::Anti, _) => false,
-            (_, Uniq::Inner) => true,
+            // (add_paths_to_joinrel's JOIN_UNIQUE_INNER: unique for the outer side only
+            // when it has all of the semi join's minimal left side; a part of it may
+            // meet several of the unique-ified rows.)
+            (_, Uniq::Inner) => match self.cur_sj.filter(|_| self.general) {
+                Some(t) => self.sjs[t].min_l & !oset == 0,
+                None => true,
+            },
             _ => self.inner_unique(iset, restrict),
         };
         let semi = (matches!(jt, Jt::Semi | Jt::Anti) || inner_unique)
@@ -5584,6 +5716,7 @@ impl Search<'_, '_, '_> {
                         presorted: false,
                         phv_join: false,
                         lifted_by: 0,
+                        tlist: self.tlist_order(p.set, &both),
                     }),
                 };
                 let layout = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
@@ -6932,6 +7065,7 @@ impl Planner<'_, '_> {
             param_stack: Default::default(),
             lateral_supplied: Default::default(),
             loop_rows: self.pw_loop_rows.take(),
+            top_level: scanjoin_top,
             phvs,
             derives: Default::default(),
             ppi: Default::default(),
@@ -7400,13 +7534,15 @@ impl Planner<'_, '_> {
         }
         if s.order.is_some() {
             // The width the sort sees: its projection's, else the whole row's.
+            // (A column of a relation self-join elimination removed is the kept one's.)
+            let kept = |g: usize| alias.get(g).copied().unwrap_or(g);
             let w: u32 = if sort_exprs.is_empty() {
-                (0..width).map(|g| s.col_width(g)).sum()
+                (0..width).map(|g| s.col_width(kept(g))).sum()
             } else {
                 sort_exprs
                     .iter()
                     .map(|e| match e {
-                        Expr::Col(g, _) if *g < width => s.col_width(*g),
+                        Expr::Col(g, _) if *g < width => s.col_width(kept(*g)),
                         e => costs::type_width(&e.ty()),
                     })
                     .sum()

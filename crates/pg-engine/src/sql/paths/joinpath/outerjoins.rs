@@ -448,12 +448,11 @@ impl Search<'_, '_, '_> {
         let j = a | b;
         let mut matched: Option<(usize, bool)> = None;
         let mut unique = false;
-        // (create_unique_path succeeds: one item, joined by equalities.)
+        // (create_unique_path succeeds: the side, an item or a join of several, joined
+        // by equalities.)
         let uniqueable = |x: u32| {
-            x.count_ones() == 1
-                && self
-                    .rel_index(x)
-                    .is_some_and(|r| self.unique_rel(r, &self.semi_rhs_clauses(x)).is_some())
+            self.rel_index(x)
+                .is_some_and(|r| self.unique_rel(r, &self.semi_rhs_clauses(x)).is_some())
         };
         let mut must_be_left = false;
         for (i, s) in self.sjs.iter().enumerate() {
@@ -616,6 +615,10 @@ impl Search<'_, '_, '_> {
         let cl = &self.clauses[c];
         let bit = 1u32 << l;
         match cl.sj {
+            // (A semi join's clauses are distributed as an inner join's, no outer_relids:
+            // movable to its left side too, which a unique-ified right side then
+            // parameterizes.)
+            Some(t) if self.sjs[t].kind == JoinKind::Semi => cl.nullable & bit == 0,
             Some(t) => self.sjs[t].syn_r & bit != 0,
             None => cl.nullable & bit == 0 && cl.req == cl.leaves,
         }

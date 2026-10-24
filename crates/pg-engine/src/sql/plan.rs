@@ -276,6 +276,11 @@ pub struct JoinMeta {
     /// The planner (`paths::Planner::id`) that planned this join as a lifted group's
     /// tree (`paths::joinpath::lift`): not lifted again when its walk comes to it (0: none).
     pub lifted_by: u64,
+    /// The order the join relation's target list has the join's columns in (indices into
+    /// its row, the left input's then the right's; empty: that order): each relation's
+    /// columns together, the relations as the first pair make_join_rel built the join
+    /// relation from has them (build_joinrel_tlist), whichever input is outer.
+    pub tlist: Vec<usize>,
 }
 
 /// `p` with its join (if it is one) marked as computing PlaceHolderVars in the projection

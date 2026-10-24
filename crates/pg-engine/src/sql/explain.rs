@@ -531,6 +531,10 @@ struct ExNode {
     /// Its target list is in the order built (a sort's input target): `tlist_layout`
     /// leaves it, and the nodes below it, as they are.
     fixed_tlist: bool,
+    /// A scan under a pulled-up subquery's selection of its columns (a projection of
+    /// plain columns, no node of Postgres's): the scan's physical target list, which it
+    /// returns where its consumer takes any (`physical_input`).
+    physical: Vec<String>,
 }
 
 impl ExNode {
@@ -2365,6 +2369,13 @@ fn tlist_layout_at(top: &mut ExNode, locked: bool) {
                     }
                     b.is_join()
                 };
+                // (A PlaceHolderVar a scan below computes is its base relation's, in its
+                // reltarget after its Vars (add_placeholders_to_base_rels): where the
+                // relation's columns are.)
+                fn scan_computes(c: &ExNode, s: &str) -> bool {
+                    (c.is_scan() && c.output.iter().any(|o| o == s))
+                        || c.children.iter().any(|x| matches!(x.relationship, Some("Outer" | "Inner")) && scan_computes(x, s))
+                }
                 for (k, o) in keys.iter_mut().zip(&n.output) {
                     if rel_of(o).is_some() {
                         continue;
@@ -2373,7 +2384,8 @@ fn tlist_layout_at(top: &mut ExNode, locked: bool) {
                         None => true,
                         Some(p) => {
                             let first = if right { kids.len().saturating_sub(1) } else { 0 };
-                            p != first && below_join(kids[p])
+                            let at_scan = o.strip_prefix('(').and_then(|x| x.strip_suffix(')')).is_some_and(|s| scan_computes(kids[p], s));
+                            p != first && below_join(kids[p]) && !at_scan
                         }
                     };
                     if moved {
@@ -4468,12 +4480,15 @@ impl Builder<'_, '_> {
                     }
                 }
             }
-            b.node.output = b
-                .internal
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| mask.as_ref().is_none_or(|m| m.get(*i).copied().unwrap_or(true)))
-                .map(|(_, n)| self.pick(n, Cx::Output))
+            // (A join's in its relation's target list order, JoinMeta::tlist.)
+            let order: Vec<usize> = match &**p {
+                Plan::Join { meta, .. } if b.node.is_join() && meta.tlist.len() == b.internal.len() => meta.tlist.clone(),
+                _ => (0..b.internal.len()).collect(),
+            };
+            b.node.output = order
+                .into_iter()
+                .filter(|i| mask.as_ref().is_none_or(|m| m.get(*i).copied().unwrap_or(true)))
+                .map(|i| self.pick(&b.internal[i], Cx::Output))
                 .collect();
             let out = b.node.output.clone();
             for pt in b.node.partials_mut() {
@@ -5173,6 +5188,16 @@ impl Builder<'_, '_> {
                 }
                 let mut c = self.node(input);
                 self.order_hint = saved_hint;
+                // (A scan returning its physical target list under a selection of its
+                // columns.)
+                if self.o.verbose
+                    && matches!(&**input, Plan::Scan(_))
+                    && matches!(c.node.node_type, "Seq Scan" | "Index Scan" | "Bitmap Heap Scan")
+                    && c.node.output.len() == c.internal.len()
+                    && exprs.iter().all(|e| matches!(e, Expr::Col(..)))
+                {
+                    c.node.physical = c.node.output.clone();
+                }
                 if !junk_only {
                     self.proj_depth -= 1;
                 }
@@ -6510,6 +6535,25 @@ impl Builder<'_, '_> {
                 let mut physical = false;
                 if self.o.verbose && on.is_none() && semi_unique && c.node.is_scan() {
                     c.node.output = c.internal.iter().map(|n| self.pick(n, Cx::Output)).collect();
+                    // (Hashed, of plain columns: create_unique_plan keeps the subplan's
+                    // target list, its physical one where the join reads it as it is.)
+                    if let Plan::Project { input: pin, exprs } = &**input
+                        && exprs.iter().all(|e| matches!(e, Expr::Col(..)))
+                        && let Plan::Scan(sc) = &**pin
+                        && matches!(c.node.node_type, "Seq Scan" | "Index Scan" | "Bitmap Heap Scan")
+                        && sc.mark.is_none()
+                        && !sc.with_key
+                    {
+                        let names = self.table_names(&sc.table, &self.refname(pin));
+                        c.node.physical = sc
+                            .table
+                            .columns
+                            .iter()
+                            .zip(&names)
+                            .filter(|(col, _)| !col.dropped)
+                            .map(|(_, n)| self.pick(n, Cx::Output))
+                            .collect();
+                    }
                 }
                 if self.o.verbose
                     && on.is_none()
@@ -6696,7 +6740,10 @@ impl Builder<'_, '_> {
                     distinct_named = named.clone();
                     let mut ord: Vec<String> = Vec::new();
                     // (In either direction: a backward scan's order serves as well.)
-                    for o in &c.node.order {
+                    // (A semi join's side made unique is sorted whole, its input's order
+                    // unused: create_unique_path costs cost_sort without pathkeys and
+                    // create_unique_plan sorts.)
+                    for o in c.node.order.iter().filter(|_| !semi_unique) {
                         let base = presorted_name(o);
                         if names.contains(&base) && !ord.iter().any(|k| presorted_name(k) == base) {
                             ord.push(o.clone());
@@ -6708,6 +6755,7 @@ impl Builder<'_, '_> {
                     // lead: merged in it (generate_orderedappend_paths).
                     let mut merged: Option<ExNode> = None;
                     if ord.is_empty()
+                        && !semi_unique
                         && c.node.node_type == "Append"
                         && c.node.children.len() > 1
                         && let Some((keys, kids)) = self.merged_append_keys(&c.node, &named)
@@ -6837,7 +6885,7 @@ impl Builder<'_, '_> {
                     u.children.push(input_node.child("Outer"));
                     // (Or the input's other path, already in an order of the keys: a nested
                     // loop over a Gather Merge, say.)
-                    if let Some(a) = in_alt.as_deref()
+                    if let Some(a) = in_alt.as_deref().filter(|_| !semi_unique)
                         && a.order.len() >= names.len()
                         && names.iter().all(|nm| a.order[..names.len()].iter().any(|o| uncollated(&presorted_name(o)) == *nm))
                     {
@@ -6867,6 +6915,7 @@ impl Builder<'_, '_> {
                 n.children.push(c.node.child("Outer"));
                 // The rows made distinct in the workers, then again over what they send.
                 if on.is_none()
+                    && !semi_unique
                     && let Some(u) = sorted.as_ref()
                     && let Some(pt) = part.as_deref()
                     && self.par.is_some()
@@ -6888,7 +6937,15 @@ impl Builder<'_, '_> {
                     return Built::passthrough(best, c.exported);
                 }
                 if let Some(u) = sorted {
-                    if !parallel::unsorted_kept(&n, &u) || parallel::cheaper(&u, &n) {
+                    // (create_unique_path: hashed when it is enabled where the sort isn't,
+                    // or cheaper in total.)
+                    let sort_wins = if semi_unique {
+                        let (dh, ds) = (parallel::disabled_nodes(&n), parallel::disabled_nodes(&u));
+                        !(dh < ds || (dh == ds && n.total_cost < u.total_cost))
+                    } else {
+                        !parallel::unsorted_kept(&n, &u) || parallel::cheaper(&u, &n)
+                    };
+                    if sort_wins {
                         let hashed = std::mem::replace(&mut n, u);
                         n.alt = Some(Box::new(hashed));
                     } else {
@@ -9010,7 +9067,9 @@ impl Builder<'_, '_> {
                 None => total *= c.distinct.unwrap_or(costs::DEFAULT_NUM_DISTINCT),
             }
         }
-        let rel_rows = rel_rows.map_or(in_rows, |r| r.max(in_rows));
+        // (estimate_num_groups scales a relation's distinct values to its own rows, rel->rows,
+        // however many rows a join above makes of them.)
+        let rel_rows = rel_rows.unwrap_or(in_rows);
         super::extstat::num_groups(self.ctx, vars, total, in_rows, Some(rel_rows))
     }
 
@@ -13533,7 +13592,9 @@ impl Builder<'_, '_> {
             user: None,
             same_rel: false,
         };
-        let other_sel = est.clauses(&others);
+        // (A pseudoconstant qual gates the join: 1.0, clause_selectivity_ext.)
+        let filtering: Vec<Expr> = others.iter().filter(|q| !super::binder::optimize::pseudo_gate(q)).cloned().collect();
+        let other_sel = est.clauses(&filtering);
         let fmt = self.ctx.fmt();
         let inner_sel: f64 = pairs
             .iter()
@@ -14345,6 +14406,31 @@ impl Builder<'_, '_> {
                 l.node.output = order.iter().map(|&i| self.pick(&l.internal[i], Cx::Output)).collect();
             }
         }
+        // A scan the join reads as it is (no Sort, Hash or Materialize between them: flags
+        // 0 in create_nestloop_plan / create_mergejoin_plan / create_hashjoin_plan's outer
+        // side) under a pulled-up subquery's selection of its columns returns its physical
+        // target list (use_physical_tlist: the subquery is no node of Postgres's).
+        if self.o.verbose {
+            let hashed = method == JoinMethod::Hash;
+            for (i, side) in [&mut l.node, &mut r.node].into_iter().enumerate() {
+                if hashed && i == 1 {
+                    continue;
+                }
+                if !side.physical.is_empty() && side.is_scan() {
+                    side.output = side.physical.clone();
+                }
+                // (A semi join's side hashed unique: its scan's, the HashAggregate passing
+                // the flags on.)
+                if side.node_type == "Aggregate"
+                    && side.strategy == Some("Hashed")
+                    && let [c] = &mut side.children[..]
+                    && !c.physical.is_empty()
+                    && c.is_scan()
+                {
+                    c.output = c.physical.clone();
+                }
+            }
+        }
         n.children.push(l.node.child("Outer"));
         if method == JoinMethod::Hash {
             let mut h = ExNode::new("Hash");
@@ -14401,6 +14487,10 @@ impl Builder<'_, '_> {
                 // (A Subquery Scan returns what the join reads of it.)
                 if r.node.node_type == "Subquery Scan" && !r.node.output.is_empty() {
                     h.output = r.node.output.clone();
+                }
+                // (So does a join: its exact target list, build_path_tlist.)
+                if r.node.is_join() && !r.node.output.is_empty() {
+                    h.output = r.node.output.iter().map(|o| refer_to(o)).collect();
                 }
                 // The hashed side's scan returns just the columns the join needs
                 // (CP_SMALL_TLIST): those used above, then the keys' and quals'.

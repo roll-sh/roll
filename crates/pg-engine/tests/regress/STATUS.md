@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51092 (**99.89%**) |
-| units differing | 58 |
+| units matching | 51102 (**99.91%**) |
+| units differing | 48 |
 | files fully matching | 226 |
 | engine output == expected/*.out (pg_regress "ok") | 187 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 58 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 48 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 58 units
-join (40), partition_join (15), partition_prune (2), returning (1)
+### EXPLAIN (group C1) — 48 units
+join (30), partition_join (15), partition_prune (2), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -106,6 +106,112 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 23 (self-join elimination order, SubPlan classes with outer values, semi join unique-ification, join costing)
+
+Measured in subset runs of the planner-heavy files (the 33 of agent 22's list), unit by unit
+against a baseline run of the same subset on 68498b3 (13102 -> 13112),
+then again after rebasing onto b8a205b, f517f1c and 773f83c against their own baselines
+(13112 -> 13122, 13121 -> 13131, 13122 -> 13132 of 13180): 10 units fixed, none broken. Crate
+tests and clippy on each rebased state.
+
+| file | fixed units |
+|---|---|
+| join | 499, 543, 612, 632, 654, 655, 771, 774, 819, 888 |
+
+(771 / 774 are agent 19's nested PlaceHolderVar units: they follow from the join target list
+order below.)
+
+What changed:
+
+- **remove_self_joins_one_group order** (`analyzejoins.rs` `self_joins`; join 632): the
+  candidates by range table index (`ScanPlan::rti`: a pulled-up subquery's relations after the
+  query's own), each removed into the first later one it pairs with: `t4` goes into the
+  subquery's `t1`, not the other way round. (A removed relation before the kept one made the
+  sort width read its columns at the kept leaf's offset: an overflow panic, also before this
+  round for `FROM t1, i, t4 WHERE t1.a = t4.a ... ORDER BY`.)
+- **A pulled-up subquery's column selection over a scan** (join 654 / 655): Postgres has no node
+  for it, so a scan a join reads as it is (create_nestloop_plan's inputs, a merge join's
+  unsorted ones, a hash join's outer side: flags 0) returns its physical target list
+  (use_physical_tlist), not the selected columns (`ExNode::physical`, set in the projection's
+  conversion, applied in `join_built`). So does a scan under a semi join's side hashed unique
+  of plain columns (create_unique_plan keeps the subplan's list).
+- **SubPlan classes with outer values** (`optimize::subplan_classes`; join 612):
+  generate_base_implied_equalities_const in a sub-select: the outer values are Params,
+  pseudo-constant members of its classes; the class's first Const, else its last
+  pseudo-constant, is compared with every other member, two pseudo-constants giving a gating
+  qual (`One-Time Filter: (t2.a = t2.a)` over `Filter: (a = t2.a)`). Done once the level
+  reading the sub-select is planned (`plan_level`), so only for sub-selects that stay SubPlans
+  (agent 16 found doing it at bind time changed EXISTS pull-ups); for a sub-select level that
+  is one sequential scan; an EXISTS that also gets a hashed form keeps its quals (Postgres
+  hashes the query as written).
+- **Pseudoconstant join quals** (join 499): clause_selectivity_ext counts a pseudoconstant
+  clause that isn't a Const 1.0 (`optimize::pseudo_gate`, in the join search's `clause_sel`
+  and EXPLAIN's join rows): `x0.f1 = 1` gating `t2 ⋈ t3` sized it 1 row.
+- **An equality with a PlaceHolderVar** (costs.rs `binary_op`; join 543): a join-level `var =
+  column without statistics` is eqjoinsel's, `(1 - nullfrac) / max(nd, 200)`, not
+  DEFAULT_EQ_SEL: `tenk1.unique1 = (42)` keeps 1 of 10000 rows.
+- **Foreign keys with constants** (`fk_selectivity`; join 819): an FK column pair in one class
+  with a constant (match_eclasses_to_foreign_key_col, nconst_ec) is matched without a join
+  clause, and get_foreign_key_join_selectivity divides out the referencing column's `=
+  constant` restriction (it already shrank that side): 100 rows for `f1 ⋈ f2`, not 1.
+- **The semi join's unique-ified side** (join 888, subselect 326 stays matching):
+  - add_paths_to_joinrel's JOIN_UNIQUE_INNER is inner-unique only when the outer side has the
+    whole minimal left side (`min_lefthand ⊆ outerrel`); a part of it may meet several
+    unique-ified rows.
+  - create_unique_path (PostgreSQL 18) sorts its input whole: EXPLAIN's DISTINCT for a semi
+    join's side (`unique_sides`) no longer reads the input's order, an incremental sort, a
+    Gather Merge or a partial DISTINCT, and hashes when that is enabled where the sort isn't or
+    cheaper in total.
+  - join_clause_is_movable_to: a semi join's clauses have no outer_relids, so they parameterize
+    scans of its left side too (`outerjoins::movable_to`), which the unique-ified side then
+    drives (888's Index Only Scan on `t2` by `t3.tenthous`).
+  - adjust_rowcount_for_semijoins: such a scan's loop count is at most the unique-ified rows
+    of the semi join's right side (`Search::semi_loop_rows`, estimate_num_groups of its
+    semi_rhs_exprs over approximate_joinrel_size); subselect 326's Memoized index scan on `a`
+    cost 2.43 for Postgres's 3.71 once the movable clauses gave it.
+  - The right side may be a join of several relations (`unique_rel`, `join_is_legal_u`'s
+    uniqueable; estimate_num_groups per relation, `Search::join_groups`).
+  - EXPLAIN's estimate_num_groups scales a relation's distinct values to that relation's rows
+    (rel->rows), not the rows of a join above it.
+- **A join relation's target list order** (`JRel::tl`, `JoinMeta::tlist`; join 888): Postgres
+  builds it from the first pair make_join_rel makes the relation from (build_joinrel_tlist over
+  the first input, then the second), whichever input a path puts outside; a join now returns
+  its columns in that order (`Output: t1.unique1, t3.tenthous` over `HashAggregate(t3) ⋈
+  Hash(t1)`). Not for the level's topmost join, which returns the scan/join target. A
+  PlaceHolderVar a scan below computes stays with its relation's columns in agent 19's
+  `tlist_layout` regrouping (add_placeholders_to_base_rels). A Hash over a join returns the
+  join's target list (it listed every column of the join's row).
+
+Goldens: `tests/sql/a23_sje_subplan.sql`, `a23_join_costs.sql`.
+
+Looked at and left (why):
+
+- join 620: after self-join elimination the kept relation's reltarget is both relations'
+  (`t3.c`, only the removed join clause read, stays: `Output: t3.c, t3.b`). The columns could
+  be kept, but the order is the reltarget's (the final target list's Vars, then each clause's
+  as distribute_qual_to_rels meets them), which EXPLAIN reconstructs as needed columns then
+  clause columns in column order; the same gap shows without self-join elimination (`Output:
+  t2.b, t2.c` under a Materialize for Postgres's `t2.c, t2.b`). Needs reltarget order
+  modelled.
+- join 560 (agent 22's join-search order): the joinrel `{t1, t3, t4, t5, t6}` is sized from
+  its first pair (Postgres: `{t1, unique(t4 t5 t6)}` then `t3`, 1 row; here `t1` with
+  `{unique, t3}`, 124 rows), which decides the plan; the remaining text is the columns of
+  classes with constants a join still carries up (`t5.b`, `t4.a`).
+- join 715: the unique-ified first semi join matches now (`HashAggregate` over `t3 ⋈ t4`, an
+  Index Only Scan on `t2_1` by it), but Postgres's plan runs the second semi join as a Nested
+  Loop Semi Join whose inner side is the join `t3_1 ⋈ t4_1` parameterized by the first's `t3`
+  (the class `t1.id = t2.id = t3.id = t3_1.id`): a parameterized join path as a semi join's
+  inner side, not built here (870.77 for Postgres, 917.40 here).
+- Seen while probing, results matching: an EXISTS pulled up and self-join-eliminated shows its
+  class's restriction as `b = a` for Postgres's `a = b` (the class's member order); an IN
+  whose sub-select's quals read the outer query shows `sj.a = t1.b` for `t1.b = sj.a`; a
+  Memoize over a Function Scan whose output nothing reads shows `Output: gs.i` (Postgres
+  none); `IN (...)` with hash and merge joins off is shown over a Subquery Scan on
+  `"ANY_subquery"`; a pseudoconstant join qual costs per row (Postgres: once, at startup);
+  an EXISTS sub-select's `SELECT *` columns count in its scans' widths (simplify_EXISTS_query
+  drops the target list); `a = 1 AND b = 2 AND a = b` isn't folded to false (a class with two
+  Consts); a sub-select over a join keeps both copies of a class's outer-value equalities.
 
 ## Round 16, agent 18 (SubPlan numbering in subquery_planner's order, GROUPING() copies, resjunk group keys)
 
@@ -3100,7 +3206,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 885 | 96% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (40) |
+| join | 925 | 895 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (30) |
 | aggregates | 556 | 556 | 100% | yes | no |  |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |

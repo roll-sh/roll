@@ -959,8 +959,18 @@ impl Est<'_> {
                     return match op {
                         "=" => {
                             // var = var of the same relation, or an expression.
+                            let bare = |x: &Expr| matches!(strip(x), Expr::Col(..));
                             match (self.var(l), self.var(r)) {
                                 (Some(a), Some(_)) if !self.same_rel => 1.0 / a.ndistinct(self.cat).0.max(1.0),
+                                // (eqjoinsel_inner against another relation's value without
+                                // statistics, a PlaceHolderVar: its distinct count the
+                                // default, DEFAULT_NUM_DISTINCT.)
+                                (Some(a), None) | (None, Some(a))
+                                    if !self.same_rel && bare(l) && bare(r) =>
+                                {
+                                    let nf = nullfrac_of(a.stats(self.cat));
+                                    (1.0 - nf) / a.ndistinct(self.cat).0.max(200.0)
+                                }
                                 _ => DEFAULT_EQ_SEL,
                             }
                         }
