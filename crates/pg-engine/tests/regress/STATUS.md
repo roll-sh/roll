@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51111 (**99.92%**) |
-| units differing | 39 |
+| units matching | 51112 (**99.92%**) |
+| units differing | 38 |
 | files fully matching | 226 |
 | engine output == expected/*.out (pg_regress "ok") | 187 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 39 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 38 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 39 units
-join (25), partition_join (12), partition_prune (1), returning (1)
+### EXPLAIN (group C1) — 38 units
+join (24), partition_join (12), partition_prune (1), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -218,6 +218,7 @@ agent's units moved. Crate tests and clippy on each.
 | file | fixed units |
 |---|---|
 | partition_prune | 265 |
+| join | 442 (second batch) |
 
 What changed:
 
@@ -270,6 +271,34 @@ What changed:
 
 Golden: `tests/sql/a27_subplan_copies.sql`.
 
+Second batch (join 442; subset run on deee52e plus both batches against deee52e's baseline:
+13398 -> 13400, then rebased onto a8de4bd against its baseline: 13402 -> 13403; none broken,
+no other agent's units moved; crate tests and clippy on each):
+
+- **reconsider_outer_join_clauses** (`optimize::join`, `Search::oj_const_redundant`): a left
+  (or right) join's `outer = inner` whose outer column its side equates with a constant, in
+  its own join domain or a lower one (`restrictions(.., lower)`: the nullable sides' filters
+  too, reconsider_outer_join_clause matching the column's class whatever its domain), gives
+  the nullable side `inner = constant` (the ON clause pushed into it as any other), valid in
+  every join order. The clause itself stays in the plan; the join search drops it wherever
+  it is Postgres's constant-TRUE replacement: both columns equated with the same constant in
+  their relations' own restrictions and neither relation null-extended by an outer join made
+  inside its side (`tt3 ⟕ tt4` made first, the outer join identity 3 order; joined above
+  `tt1 ⟕ tt3` the clause stays, as the clone with tt3's nulling does in Postgres). Its
+  selectivity is 1 there, so the join sizes are Postgres's, and `tt4.f1` equal to a constant
+  is one distinct value for the Memoize above (442's `Memoize` over the LATERAL subquery
+  follows from that).
+- **A constant class through an outer join's preserved side and over a LATERAL join**
+  (`input_restrictions`, add_filter's join case): an inner join's inputs' restrictions now
+  include a left join's left side's (a right join's right side's), the same join domain, and
+  a LATERAL join takes its left side's (not the LATERAL side's, which it doesn't look into):
+  `tt1.f1 = 'foo'` below `tt1 ⟕ ...` and the WHERE's `tt1.f1 = ss1.c0` give `ss1.c0 =
+  'foo'`, the LIMIT subquery's Subquery Scan filter, and the join clause goes
+  (generate_base_implied_equalities_const).
+
+Golden: `tests/sql/a27_outer_join_constants.sql` (rows checked for null-extended outer rows
+too).
+
 For agent 30 (join 362 / 363, PlaceHolderVars with sub-selects), how a pulled-up output gets
 its own copy:
 
@@ -313,6 +342,12 @@ Left, and why (none fails a unit of the subset):
   scan over a bitmap for `id > touter.f1 + 1` (startup 0.16), the engine the bitmap.
 - A FROM subquery's plain output nothing above reads stays in its scan's target list when the
   subquery also has a sub-select output (`Output: (SubPlan 1), t1.a`), before this batch too.
+- reconsider_outer_join_clauses for anti joins and FULL JOIN's merged columns over a lower
+  domain's constant: not done (only left / right join clauses; FULL JOIN's USING column with
+  a WHERE constant was done before, `reconsider_full_join_clause`).
+- The rest of subquery_planner's numbering order (FROM subqueries planned after the level's
+  expressions, MIN / MAX InitPlans after both): not applied, no unit of the subset differs by
+  it (the target list's move is the one that did, 265).
 - A multi-key hashed EXISTS's test expression shows `(a = (hashed SubPlan n).col1 AND b = ...)`
   for Postgres's `((a = ...) AND (b = ...))`.
 
@@ -3588,7 +3623,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 900 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (25) |
+| join | 925 | 901 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (24) |
 | aggregates | 556 | 556 | 100% | yes | no |  |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |

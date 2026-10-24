@@ -17,9 +17,9 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,111 of 51,150 statements match (99.92%).** 39 differ. The full
+- **Regression suite: 51,112 of 51,150 statements match (99.92%).** 38 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - All 39 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
+  - All 38 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
     order since round 16, agent 17: join relations parameterized by LATERAL references).
   - None differs by design any more (aggregates `balk` matches since round 16, agent 14: a
     Finalize Aggregate runs the user-defined combine functions).
@@ -335,11 +335,11 @@ them all with the "Fixed in round N" sections describing what was already tried.
    with sub-selects (362/363), a dummy Result showing a view's expressions (368), a
    partitionwise join with a LATERAL PlaceHolderVar (partition_join 41). (744, a hash join
    parameterized by a LATERAL inner side: done in round 16, agent 17.)
-2. **Remaining join / partition_join / partition_prune plan shapes** (join 25, partition_join 12,
+2. **Remaining join / partition_join / partition_prune plan shapes** (join 24, partition_join 12,
    partition_prune 1 unit; round 14's agent 5 and round 16's agent 12 sections in STATUS.md have
    what changed and why the rest is open; round 16's agent 17 section has join relations
-   parameterized by LATERAL references and why 442 and partition_prune 410 stay open (265 done in
-   round 16, agent 27: SubPlan copies per place); partition_join 74/88/92 done in round 16, agent
+   parameterized by LATERAL references and why partition_prune 410 stays open (265 and 442 done in
+   round 16, agent 27: SubPlan copies per place, reconsider_outer_join_clauses); partition_join 74/88/92 done in round 16, agent
    21: expression members of equivalence classes, IN over a join pulled up before planning,
    with why 86 stays open; join 123/410/502/503 done in round 16, agent 22: a FROM
    subquery's sorted paths, class clauses' first making, ParamPathInfo rows; join
