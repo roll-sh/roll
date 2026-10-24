@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51078 (**99.86%**) |
-| units differing | 72 |
+| units matching | 51082 (**99.87%**) |
+| units differing | 68 |
 | files fully matching | 224 |
 | engine output == expected/*.out (pg_regress "ok") | 185 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 72 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 68 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 72 units
-join (45), partition_join (15), partition_prune (2), groupingsets (7), join_hash (2), returning (1)
+### EXPLAIN (group C1) — 68 units
+join (41), partition_join (15), partition_prune (2), groupingsets (7), join_hash (2), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -600,7 +600,25 @@ What changed:
   comes relabeled. examine_variable looks through a COLLATE (a RelabelType once folded)
   for statistics.
 
-Goldens: `a19_phv_lateral_ec`, `a19_result_semijoin`, `a19_name_text_hash`.
+- Third batch (the subset unit by unit on 3fb95cb and this batch, again rebased onto f334753: join 428, 429, 431, 432
+  fixed, none broken; 429 / 431 are those plans' row order):
+  - pullup_replace_vars_callback with varnullingrels: a pulled-up single-table subquery's
+    constant output read in an outer join's own ON clause through joins inside the side that
+    don't null it (as written) is the constant itself, not a PlaceHolderVar
+    (`lift::unnulled_const`, deeper than the side right below the join that `direct` took):
+    `t1.f1 = '***'::text` reads only the preserved side, the outer join's Join Filter over a
+    Materialize, as Postgres's. When `direct` or this puts a constant in, the group is
+    planned over the lifted tree (its inlining was dropped unless something else was
+    lifted); a LATERAL value stays a PlaceHolderVar.
+  - A Materialize over a join returns that join's target list (none, or `i8.q2`), not all
+    its columns.
+  - A join's target list below the node computing the level's: its first input's (as
+    written: a Right join's inner side) columns and passed-up PlaceHolderVars, then its
+    second's, the PlaceHolderVars a second input that is a join passes up after that side's
+    Vars, those evaluated at the join last (build_joinrel_tlist, add_placeholders_to_joinrel):
+    `Output: i8.q2, (NULL::integer)` over a Hash Right Join.
+
+Goldens: `a19_phv_lateral_ec`, `a19_result_semijoin`, `a19_name_text_hash`, `a19_phv_on_const`.
 
 Still open, and why:
 
@@ -626,6 +644,16 @@ Still open, and why:
   non-partitioned plan also differs, a LEFT JOIN's ON clause acting as a class constant
   inside the LATERAL side (`t1.a = t3.b` derived) and the inner join costed differently).
   join 744 left to agent 17 (LATERAL parameterized join relations).
+- From agent 16's list: join 430 (the same shape as 428 / 432 but the engine commutes the
+  `i8 left join i4` below the others, a cost choice; the Hash under it also returns `i4.f1`),
+  424 (Postgres's parameterized index scan on `tenk1_unique2` inside the Materialize; the
+  engine hashes), 426 (a USING join alias over two subqueries' outputs of different types is
+  Postgres's PlaceHolderVar `'123'::bigint`, folded; here `(123)` of the int side, computed
+  at its scan), 440 (a Memoize over the LATERAL `ss2` Limit, keyed by `ss1`'s values), 548
+  (a PlaceHolderVar a WHERE reduced away from its outer join is evaluated at its one
+  relation's scan: the WHERE `stringu2 !~* CASE ...` is t1's filter there, a join filter here),
+  332, 450 (join orders a PlaceHolderVar forces), 771 / 774 (nested PlaceHolderVars: the
+  join order and its target list's order): not done.
 
 ## Round 16, agent 14 (parallel join inputs, partial DISTINCT orders, hash table sizing, inherited DML row marks, combine functions)
 
@@ -2951,7 +2979,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 880 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (45) |
+| join | 925 | 884 | 96% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (41) |
 | aggregates | 556 | 556 | 100% | yes | no |  |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |

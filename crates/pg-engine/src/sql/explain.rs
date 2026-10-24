@@ -1990,6 +1990,46 @@ fn tlist_layout_at(top: &mut ExNode, locked: bool) {
                     }
                 }
             }
+            // (Below the node computing the level's target list a join's list is its
+            // relations' Vars, then the PlaceHolderVars it computes or passes up
+            // (build_joinrel_tlist, then add_placeholders_to_joinrel).)
+            // The joinrel's list is its first input's (as written: a Right join's inner side)
+            // then its second's, each with the PlaceHolderVars it passes up where it has them,
+            // a subquery relation's values among its columns; those of the second input below
+            // a join of its own come after its Vars, and those evaluated here last.
+            let final_tlist = n.output.len() == top.len()
+                && n.output.iter().zip(top).all(|(o, t)| o == t || *t == format!("({o})"));
+            if !final_tlist {
+                let right = n.title.contains("Right");
+                let kids: Vec<&ExNode> = n.children.iter().filter(|c| matches!(c.relationship, Some("Outer" | "Inner"))).collect();
+                let provider = |o: &String| {
+                    kids.iter().position(|c| c.output.iter().any(|co| co == o || format!("({co})") == *o))
+                };
+                let below_join = |c: &ExNode| {
+                    let mut b = c;
+                    while matches!(b.node_type, "Hash" | "Materialize" | "Memoize" | "Sort" | "Incremental Sort")
+                        && let Some(x) = b.children.first()
+                    {
+                        b = x;
+                    }
+                    b.is_join()
+                };
+                for (k, o) in keys.iter_mut().zip(&n.output) {
+                    if rel_of(o).is_some() {
+                        continue;
+                    }
+                    let moved = match provider(o) {
+                        None => true,
+                        Some(p) => {
+                            let first = if right { kids.len().saturating_sub(1) } else { 0 };
+                            p != first && below_join(kids[p])
+                        }
+                    };
+                    if moved {
+                        k.0 = usize::MAX;
+                    }
+                }
+            }
             let mut items: Vec<((usize, usize), String)> = keys.into_iter().zip(std::mem::take(&mut n.output)).collect();
             items.sort_by_key(|x| x.0);
             n.output = items.into_iter().map(|x| x.1).collect();
@@ -13509,6 +13549,9 @@ impl Builder<'_, '_> {
                     Some(order) => order.iter().map(|&i| self.pick(&r.internal[i], Cx::Output)).collect(),
                     // (Over a Gather: what it returns, its exact target list.)
                     None if r.node.node_type == "Gather" => r.node.output.iter().map(|o| refer_to(o)).collect(),
+                    // (Over a join: its target list, the columns needed above it, possibly
+                    // none.)
+                    None if r.node.is_join() => r.node.output.iter().map(|o| refer_to(o)).collect(),
                     None => r.internal.iter().map(|x| self.pick(x, Cx::Output)).collect(),
                 };
             }

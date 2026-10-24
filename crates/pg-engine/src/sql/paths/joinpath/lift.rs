@@ -491,15 +491,57 @@ fn lift(
                 });
                 and_all(parts).unwrap_or(Expr::Const(Value::Bool(true), DataType::Bool))
             };
-            let cond2 = cond.as_ref().map(|c| direct(direct(subst(c, &map), &l2, 0), &r2, nleft2));
+            // (Deeper down too: a pulled-up subquery's constant output read in this join's own
+            // clause through joins that don't null it (as written) has no varnullingrels
+            // there either, so pullup_replace_vars_callback puts the constant itself, no
+            // PlaceHolderVar: `t1.f1 = '***'::text` over `b1 left join (...)`.)
+            let deep = |e: Expr, side: &Plan, off: usize, merged: bool| -> Expr {
+                if merged {
+                    return e;
+                }
+                let w = crate::sql::binder::plan_width(side);
+                e.transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(j, t) if j >= off && j < off + w => match unnulled_const(side, j - off) {
+                            Some(k) => k,
+                            None => Expr::Col(j, t),
+                        },
+                        x => x,
+                    })
+                })
+                .unwrap()
+            };
+            // (When that puts a constant in, the group is planned over the clause with it. A
+            // LATERAL value stays a PlaceHolderVar: pullup_replace_vars_callback wraps a
+            // lateral reference to outside the subquery.)
+            let put_in = |c: &Expr, d: &Expr| !d.same_as(c) && outer_refs(d).len() == outer_refs(c).len();
+            let cond2 = cond.as_ref().map(|c| {
+                let c = subst(c, &map);
+                let d = direct(direct(c.clone(), &l2, 0), &r2, nleft2);
+                let d = deep(deep(d, &l2, 0, lmerged), &r2, nleft2, rmerged);
+                if put_in(&c, &d) {
+                    cx.lifted = true;
+                }
+                d
+            });
             let hash2 = hash.as_ref().map(|(lk, rk)| {
-                let rk: Vec<Expr> = rk.iter().map(|e| direct(subst(e, &mr), &r2, nleft2)).collect();
+                let mut deepened = false;
+                let mut keep = |e: Expr, side: &Plan, off: usize, merged: bool| {
+                    let d = deep(direct(e.clone(), side, off), side, off, merged);
+                    deepened |= put_in(&e, &d);
+                    d
+                };
+                let rk: Vec<Expr> = rk.iter().map(|e| keep(subst(e, &mr), &r2, nleft2, rmerged)).collect();
+                let lk: Vec<Expr> = lk.iter().map(|e| keep(subst(e, &ml), &l2, 0, lmerged)).collect();
+                if deepened {
+                    cx.lifted = true;
+                }
                 // (A right key now reading the left side: not a hash key any more.)
                 if rk.iter().any(|e| e.columns().iter().any(|&c| c < nleft2)) {
                     cx.bad = true;
                 }
                 (
-                    lk.iter().map(|e| direct(subst(e, &ml), &l2, 0)).collect::<Vec<_>>(),
+                    lk,
                     rk.into_iter()
                         .map(|e| if cx.bad { e } else { e.shift_cols(-(nleft2 as isize)) })
                         .collect::<Vec<_>>(),
@@ -1047,6 +1089,43 @@ fn lift(
             let w = crate::sql::binder::plan_width(&plan);
             (plan, map, vec![(nulled, rel); w])
         }
+    }
+}
+
+/// Column `c` of a lifted side when it is a pulled-up subquery's constant output (a
+/// PlaceHolderVar computed by its projection) that no outer join inside the side nulls, as
+/// written: the constant. None for anything else.
+fn unnulled_const(p: &Plan, c: usize) -> Option<Expr> {
+    match p {
+        Plan::Project { input, exprs } => match exprs.get(c)? {
+            Expr::Col(i, _) => unnulled_const(input, *i),
+            // (A subquery over one table, its PlaceHolderVars evaluated at its scan; not an
+            // empty relation's values merged into its partner, which an outer join removed
+            // with it nulled as written.)
+            e if matches!(&**input, Plan::Scan(sp) if sp.phv_proj) => {
+                let mut plain = e.columns().is_empty() && !e.is_volatile() && outer_refs(e).is_empty();
+                e.walk(&mut |x| plain &= !matches!(x, Expr::Subquery(_) | Expr::Param(..) | Expr::Outer(..)));
+                plain.then(|| e.clone())
+            }
+            _ => None,
+        },
+        Plan::Filter { input, .. } => unnulled_const(input, c),
+        Plan::Join {
+            kind: kind @ (JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full),
+            left,
+            right,
+            nleft,
+            meta,
+            ..
+        } => {
+            let wk = meta.written_kind.unwrap_or(*kind);
+            if c < *nleft {
+                (!matches!(wk, JoinKind::Right | JoinKind::Full)).then(|| unnulled_const(left, c)).flatten()
+            } else {
+                (!matches!(wk, JoinKind::Left | JoinKind::Full)).then(|| unnulled_const(right, c - nleft)).flatten()
+            }
+        }
+        _ => None,
     }
 }
 
