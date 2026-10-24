@@ -818,6 +818,7 @@ Defects found by the phase-3 coverage audit, each with the test that failed befo
 | MCP `comment` hid "not found" behind "needs a thread"; `create_change` refused work items by number | `mcp.rs::tool_argument_errors`, `mcp.rs::tools_map_onto_their_routes` |
 | `roll code` exited 2 (rebase and retry) for usage errors and for landing a landed or closed change | `roll-cli/tests/code.rs::repo_land_and_usage_edges`, `roll-cli/tests/code.rs::change_and_work_edges` |
 | the MCP snippet lost its auth header placeholder before a token was created | `connect-agent.test.tsx` (dashboard) |
+| a thread resolved on GitHub could be resolved back there when a notification read the thread between "GitHub has it resolved" and the resolution itself (now one write, read in one statement) | `github.rs::reviews_both_ways` |
 
 ## Dashboard (`apps/dashboard`, vitest)
 

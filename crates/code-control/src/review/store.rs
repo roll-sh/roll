@@ -480,16 +480,18 @@ impl Db {
     }
 
     pub fn set_thread_resolved(&self, id: &str, by: Option<&str>) -> Result<()> {
+        self.write(|c| Self::thread_resolved_in(c, id, by))
+    }
+
+    /// [`Db::set_thread_resolved`] inside a write (with whatever else must change with it).
+    pub(crate) fn thread_resolved_in(c: &code_sql::Conn<'_>, id: &str, by: Option<&str>) -> code_sql::Result<()> {
         let t = now();
         match by {
-            Some(by) => self.sql().execute(
+            Some(by) => c.execute(
                 "UPDATE review_threads SET resolved_at = COALESCE(resolved_at, ?), resolved_by = COALESCE(resolved_by, ?), updated_at = ? WHERE id = ?",
                 params![t, by, t, id],
             )?,
-            None => self.sql().execute(
-                "UPDATE review_threads SET resolved_at = NULL, resolved_by = NULL, updated_at = ? WHERE id = ?",
-                params![t, id],
-            )?,
+            None => c.execute("UPDATE review_threads SET resolved_at = NULL, resolved_by = NULL, updated_at = ? WHERE id = ?", params![t, id])?,
         };
         Ok(())
     }

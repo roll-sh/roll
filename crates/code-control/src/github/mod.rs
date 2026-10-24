@@ -182,7 +182,12 @@ pub(crate) fn mark(code: &Code, key: &str) -> Result<Option<String>> {
 }
 
 pub(crate) fn set_mark(code: &Code, key: &str, value: &str) -> Result<()> {
-    code.db.sql().execute(
+    Ok(code.db.write(|c| set_mark_in(c, key, value))?)
+}
+
+/// [`set_mark`] inside a write (with whatever else must change with it).
+pub(crate) fn set_mark_in(c: &code_sql::Conn<'_>, key: &str, value: &str) -> code_sql::Result<()> {
+    c.execute(
         "INSERT INTO github_marks (key, value, at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value, at = excluded.at",
         params![key, value, crate::db::now()],
     )?;
