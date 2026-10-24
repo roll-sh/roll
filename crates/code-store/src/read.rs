@@ -7,7 +7,7 @@ use crate::path::RepoPath;
 use crate::tree::Overlay;
 use crate::{Store, not_found, now_ms};
 use bytes::Bytes;
-use rusqlite::{OptionalExtension, params};
+use code_sql::{OptionalExtension, params};
 use serde::Serialize;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::path::Path;
@@ -130,11 +130,9 @@ impl Store {
 
     pub fn refs(&self, repo: &str) -> anyhow::Result<Vec<RefInfo>> {
         type Row = (String, Vec<u8>, Option<Vec<u8>>, i64, i64);
-        let rows: Vec<Row> = {
-            let db = self.read();
-            let mut st = db.prepare_cached("SELECT name, cs, tag, version, updated_at FROM refs WHERE repo = ? ORDER BY name")?;
-            st.query_map([repo], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?.collect::<Result<_, _>>()?
-        };
+        let rows: Vec<Row> = self.db.query("SELECT name, cs, tag, version, updated_at FROM refs WHERE repo = ? ORDER BY name", [repo], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?;
         let mut out = Vec::with_capacity(rows.len());
         for (name, cs, tag, version, updated_at) in rows {
             if crate::is_internal_ref(&name) {
@@ -342,7 +340,7 @@ impl Store {
     /// A git object by id: derived commits and trees, stored blobs, raw tags.
     pub async fn git_object(&self, repo: &str, oid: &Oid) -> anyhow::Result<Option<(Kind, Bytes)>> {
         if let Some(data) = self
-            .read()
+            .db
             .query_row("SELECT data FROM git_commits WHERE repo = ? AND oid = ?", params![repo, &oid.0[..]], |r| {
                 r.get::<_, Vec<u8>>(0)
             })
@@ -354,7 +352,7 @@ impl Store {
             return Ok(Some((Kind::Tree, Bytes::new())));
         }
         if let Some(data) = self
-            .read()
+            .db
             .query_row("SELECT data FROM trees WHERE repo = ? AND oid = ?", params![repo, &oid.0[..]], |r| r.get::<_, Vec<u8>>(0))
             .optional()?
         {
@@ -472,7 +470,7 @@ impl Store {
     }
 
     pub fn stats(&self, repo: &str) -> anyhow::Result<RepoStats> {
-        let db = self.read();
+        let db = &self.db;
         let count = |sql: &str| -> anyhow::Result<i64> { Ok(db.query_row(sql, [repo], |r| r.get::<_, Option<i64>>(0))?.unwrap_or(0)) };
         let minute = now_ms() / 60_000;
         let since = |m: i64| -> anyhow::Result<i64> {
@@ -497,13 +495,15 @@ impl Store {
     pub fn land_daily(&self, repo: &str, days: i64) -> anyhow::Result<Vec<(i64, u64)>> {
         let days = days.clamp(1, 366);
         let today = now_ms() / 86_400_000;
-        let db = self.read();
-        let mut st = db.prepare_cached(
-            "SELECT minute / 1440, SUM(count) FROM land_stats WHERE repo = ? AND minute >= ? GROUP BY minute / 1440",
-        )?;
-        let rows: HashMap<i64, i64> = st
-            .query_map(params![repo, (today - days + 1) * 1440], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<Result<_, _>>()?;
+        let rows: HashMap<i64, i64> = self
+            .db
+            .query(
+                "SELECT minute / 1440, SUM(count) FROM land_stats WHERE repo = ? AND minute >= ? GROUP BY minute / 1440",
+                params![repo, (today - days + 1) * 1440],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?
+            .into_iter()
+            .collect();
         Ok(((today - days + 1)..=today).map(|d| (d, rows.get(&d).copied().unwrap_or(0) as u64)).collect())
     }
 
@@ -511,26 +511,30 @@ impl Store {
     /// in every repo, durably, for consumers that must not miss one. Entries older than
     /// [`crate::LAND_LOG_RETENTION_MS`] are pruned.
     pub fn land_log(&self, after: i64, limit: usize) -> anyhow::Result<Vec<(i64, crate::Landed)>> {
-        let db = self.read();
-        let mut st = db.prepare_cached("SELECT seq, record FROM land_log WHERE seq > ? ORDER BY seq LIMIT ?")?;
-        let rows: Vec<(i64, String)> =
-            st.query_map(params![after, limit.clamp(1, 10_000) as i64], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+        let rows: Vec<(i64, String)> = self.db.query(
+            "SELECT seq, record FROM land_log WHERE seq > ? ORDER BY seq LIMIT ?",
+            params![after, limit.clamp(1, 10_000) as i64],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
         rows.into_iter().map(|(seq, rec)| Ok((seq, serde_json::from_str(&rec)?))).collect()
     }
 
     /// The newest land log sequence number (0 when empty).
     pub fn land_log_head(&self) -> anyhow::Result<i64> {
-        Ok(self.read().query_row("SELECT COALESCE(MAX(seq), 0) FROM land_log", [], |r| r.get(0))?)
+        Ok(self.db.query_row("SELECT COALESCE(MAX(seq), 0) FROM land_log", (), |r| r.get(0))?)
     }
 
     /// Landings per minute for the last `minutes` minutes, oldest first: `(unix minute, count)`.
     pub fn land_rate(&self, repo: &str, minutes: i64) -> anyhow::Result<Vec<(i64, u64)>> {
         let minutes = minutes.clamp(1, 7 * 24 * 60);
         let now = now_ms() / 60_000;
-        let db = self.read();
-        let mut st = db.prepare_cached("SELECT minute, count FROM land_stats WHERE repo = ? AND minute > ? ORDER BY minute")?;
-        let rows: HashMap<i64, i64> =
-            st.query_map(params![repo, now - minutes], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+        let rows: HashMap<i64, i64> = self
+            .db
+            .query("SELECT minute, count FROM land_stats WHERE repo = ? AND minute > ? ORDER BY minute", params![repo, now - minutes], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
+            .into_iter()
+            .collect();
         Ok(((now - minutes + 1)..=now).map(|m| (m, rows.get(&m).copied().unwrap_or(0) as u64)).collect())
     }
 }

@@ -80,11 +80,14 @@ statement per node (`UPDATE … WHERE node_id = me`).
 
 - **Webhook and review-app deliveries** are claimed row by row (`FOR UPDATE SKIP LOCKED` with a
   claim that expires), so every node delivers and none twice.
-- **Landings to webhooks** come from the durable landing log. On Postgres a log row's sequence
-  number doesn't say when it committed, so the reader only takes rows written by transactions
-  older than the oldest one still running (`pg_snapshot_xmin`); nothing is skipped and nothing
-  is read twice. One node at a time runs the forwarder (a lease), and the cursor moves in the
-  same transaction as the deliveries it queues.
+- **Landings to webhooks** come from the durable landing log. On Postgres, concurrent
+  transactions could take sequence numbers in one order and commit in another, so `code-store`
+  appends under a transaction-scoped advisory lock taken just before the append (the landing's
+  last statements): numbers become visible in order, and a reader paging by `seq` skips nothing
+  and reads nothing twice. (Reading only rows older than `pg_snapshot_xmin` isn't enough by
+  itself: a transaction still running can hold a lower number than a committed row whose
+  transaction id is older.) One node at a time runs the forwarder (a lease), and the cursor
+  moves in the same transaction as the deliveries it queues.
 - **AI spend caps** reserve their price in a `ai_reservations` row inside the same serializable
   transaction that checks the cap, so concurrent jobs on different nodes can't overshoot it.
   Reservations of a dead node expire.

@@ -1,6 +1,6 @@
 mod common;
 
-use code_store::Expect;
+use code_store::{CommitFault, Expect};
 use code_store::{ConflictKind, LandError, NewChangeset};
 use common::*;
 
@@ -207,6 +207,10 @@ async fn ref_compare_and_swap() {
 /// so only the checkpointer thread can have copied them into the database file.
 #[tokio::test]
 async fn landings_are_synced_before_they_are_acknowledged_and_checkpointed_in_the_background() {
+    if on_postgres() {
+        // Every Postgres commit is durable by itself; there's no WAL of ours to sync.
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let store = store(dir.path());
     let db = dir.path().join("code").join("code.db");
@@ -235,4 +239,153 @@ async fn landings_are_synced_before_they_are_acknowledged_and_checkpointed_in_th
     }
     assert!(checkpointed, "code.db is still {} bytes (fresh: {fresh}): nothing was checkpointed", size());
     assert_eq!(store.get_ref(REPO, "main").unwrap(), base);
+}
+
+fn edit(n: usize, s: &str) -> String {
+    lines(30, |i| if i == n { format!("{s} {i}") } else { format!("line {i}") })
+}
+
+/// Another lander (another node, here a second store on the same database) moves the ref while
+/// this lander's view of it is stale: the batch is rebuilt on the new head and merges with what
+/// landed there, instead of failing or overwriting it.
+#[tokio::test]
+async fn a_batch_is_rebuilt_when_another_lander_moved_the_ref() {
+    let (dir, a, root) = setup().await;
+    let b = second(dir.path(), &a);
+    let x = commit(&a, REPO, Some(root), "x", vec![write("x.txt", "x\n")]).await;
+    a.land(REPO, "main", x).await.unwrap();
+    // B lands on top: A's lander still has x as the head.
+    let y = commit(&b, REPO, Some(root), "y", vec![write("src/lib.rs", &edit(20, "Y"))]).await;
+    let ly = b.land(REPO, "main", y).await.unwrap();
+    assert_eq!(ly.previous, Some(x));
+    let z = commit(&a, REPO, Some(root), "z", vec![write("src/lib.rs", &edit(2, "Z"))]).await;
+    let lz = a.land(REPO, "main", z).await.unwrap();
+    assert_eq!(lz.previous, Some(ly.changeset), "rebuilt on B's landing");
+    assert_eq!(lz.merged_paths.iter().map(|p| p.as_str()).collect::<Vec<_>>(), ["src/lib.rs"]);
+    let text = read(&a, REPO, "main", "src/lib.rs").await.unwrap();
+    assert!(text.contains("Y 20\n") && text.contains("Z 2\n"), "{text}");
+    assert_eq!(read(&a, REPO, "main", "x.txt").await.as_deref(), Some("x\n"));
+
+    // B moves it again; a change that conflicts with what's there is a conflict against the
+    // current head, and one that's already there is `already`, both checked against the ref.
+    let v = commit(&b, REPO, Some(root), "v", vec![write("v.txt", "v\n")]).await;
+    let lv = b.land(REPO, "main", v).await.unwrap();
+    let w = commit(&a, REPO, Some(root), "w", vec![write("src/lib.rs", &edit(2, "W"))]).await;
+    match a.land(REPO, "main", w).await {
+        Err(LandError::Conflict(c)) => assert_eq!(c.head, Some(lv.changeset)),
+        other => panic!("expected a conflict, got {other:?}"),
+    }
+    assert!(a.land(REPO, "main", x).await.unwrap().already);
+
+    // B resets the ref (not a fast-forward: the path index starts over); A's next landing is
+    // built on the reset head, not the index A last saw.
+    b.update_ref(REPO, "main", Expect::Any, Some(root)).await.unwrap();
+    let u = commit(&a, REPO, Some(root), "u", vec![write("src/lib.rs", &edit(25, "U"))]).await;
+    let lu = a.land(REPO, "main", u).await.unwrap();
+    assert!(lu.fast_forward);
+    assert_eq!(lu.previous, Some(root));
+    let text = read(&b, REPO, "main", "src/lib.rs").await.unwrap();
+    assert!(text.contains("U 25\n") && !text.contains("Y 20\n"), "{text}");
+
+    // A ref update through A after B moved the ref compares against the real head.
+    let t = commit(&b, REPO, Some(lu.changeset), "t", vec![write("t.txt", "t\n")]).await;
+    b.land(REPO, "main", t).await.unwrap();
+    assert!(a.update_ref(REPO, "main", Expect::Is(lu.changeset), Some(root)).await.is_err());
+    a.update_ref(REPO, "main", Expect::Is(t), Some(lu.changeset)).await.unwrap();
+    assert_eq!(b.get_ref(REPO, "main").unwrap(), Some(lu.changeset));
+
+    // Every landing was logged once, in order.
+    let log: Vec<String> = a.land_log(0, 100).unwrap().into_iter().map(|(_, l)| l.summary).collect();
+    assert_eq!(log, ["x", "y", "z", "v", "u", "t"]);
+    assert_eq!(a.stats(REPO).unwrap().landed_total, 6);
+}
+
+/// Two landers on one ref, many concurrent landings through each: every landing succeeds,
+/// lands once, and nothing is lost or logged twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_landers_on_one_ref_lose_and_duplicate_nothing() {
+    const AGENTS: usize = 8;
+    const EACH: usize = 12;
+    let (dir, a, root) = setup().await;
+    let b = second(dir.path(), &a);
+    let mut tasks = Vec::new();
+    for agent in 0..AGENTS {
+        let store = if agent % 2 == 0 { a.clone() } else { b.clone() };
+        tasks.push(tokio::spawn(async move {
+            let mut out = Vec::new();
+            for i in 0..EACH {
+                let cs = commit(&store, REPO, Some(root), &format!("{agent}/{i}"), vec![write(&format!("agents/{agent}/{i}"), "x\n")]).await;
+                let l = store.land(REPO, "main", cs).await.unwrap_or_else(|e| panic!("agent {agent} change {i}: {e:#}"));
+                assert!(!l.already);
+                out.push(l.changeset);
+            }
+            out
+        }));
+    }
+    let mut landed = Vec::new();
+    for t in tasks {
+        landed.extend(t.await.unwrap());
+    }
+    let head = a.get_ref(REPO, "main").unwrap().unwrap();
+    assert_eq!(a.meta(REPO, &head).unwrap().unwrap().depth, (AGENTS * EACH) as u64, "one changeset per landing on main");
+    for c in &landed {
+        assert!(a.is_fp_ancestor(REPO, c, &head).unwrap(), "{} isn't on main", c.short());
+    }
+    for agent in 0..AGENTS {
+        for i in 0..EACH {
+            assert_eq!(read(&b, REPO, "main", &format!("agents/{agent}/{i}")).await.as_deref(), Some("x\n"));
+        }
+    }
+    let log = a.land_log(0, 10_000).unwrap();
+    assert_eq!(log.len(), AGENTS * EACH);
+    let unique: std::collections::HashSet<_> = log.iter().map(|(_, l)| l.changeset).collect();
+    assert_eq!(unique.len(), AGENTS * EACH, "logged once each");
+    assert!(log.windows(2).all(|w| w[0].0 < w[1].0));
+    assert_eq!(b.stats(REPO).unwrap().landed_total, (AGENTS * EACH) as u64);
+}
+
+/// The database lost the connection while committing and can't say whether the commit
+/// happened: the lander finds out before it answers. A commit that happened is acknowledged
+/// and published once; one that didn't fails and can be landed again, once.
+#[tokio::test]
+async fn a_lost_commit_reply_is_resolved_before_answering() {
+    let (_d, store, root) = setup().await;
+    let mut events = store.subscribe(REPO);
+    let a = commit(&store, REPO, Some(root), "a", vec![write("a.txt", "a\n")]).await;
+    store.inject_commit_fault(CommitFault::LostReply);
+    let la = store.land(REPO, "main", a).await.unwrap();
+    assert_eq!(store.get_ref(REPO, "main").unwrap(), Some(la.changeset));
+    assert_eq!(events.recv().await.unwrap().source, a);
+
+    let b = commit(&store, REPO, Some(root), "b", vec![write("b.txt", "b\n")]).await;
+    store.inject_commit_fault(CommitFault::RolledBack);
+    match store.land(REPO, "main", b).await {
+        Err(LandError::Other(e)) => assert!(format!("{e:#}").contains("didn't happen"), "{e:#}"),
+        other => panic!("expected a failure, got {other:?}"),
+    }
+    assert_eq!(store.get_ref(REPO, "main").unwrap(), Some(la.changeset));
+    assert!(events.try_recv().is_err(), "nothing published");
+    let lb = store.land(REPO, "main", b).await.unwrap();
+    assert!(!lb.already && !lb.fast_forward);
+    assert_eq!(lb.previous, Some(la.changeset));
+    assert_eq!(events.recv().await.unwrap().source, b);
+
+    // The same for ref updates and `advance`.
+    store.inject_commit_fault(CommitFault::LostReply);
+    store.update_ref(REPO, "feature", Expect::Absent, Some(root)).await.unwrap();
+    assert_eq!(store.get_ref(REPO, "feature").unwrap(), Some(root));
+    store.inject_commit_fault(CommitFault::RolledBack);
+    assert!(store.update_ref(REPO, "feature", Expect::Is(root), Some(lb.changeset)).await.is_err());
+    assert_eq!(store.get_ref(REPO, "feature").unwrap(), Some(root));
+    let c = commit(&store, REPO, Some(lb.changeset), "c", vec![write("c.txt", "c\n")]).await;
+    store.inject_commit_fault(CommitFault::LostReply);
+    assert_eq!(store.advance(REPO, "main", Some(lb.changeset), c).await.unwrap().len(), 1);
+    assert_eq!(store.get_ref(REPO, "main").unwrap(), Some(c));
+
+    let log: Vec<String> = store.land_log(0, 100).unwrap().into_iter().map(|(_, l)| l.summary).collect();
+    assert_eq!(log, ["a", "b", "c"]);
+    assert_eq!(store.stats(REPO).unwrap().landed_total, 3);
+    // And the lander carries on from the right state.
+    let d = commit(&store, REPO, Some(root), "d", vec![write("d.txt", "d\n")]).await;
+    assert_eq!(store.land(REPO, "main", d).await.unwrap().previous, Some(c));
 }

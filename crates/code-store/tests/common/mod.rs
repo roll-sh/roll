@@ -6,8 +6,28 @@ use pg_storage::{Objects, StorageConfig};
 use std::sync::Arc;
 
 pub fn store(dir: &std::path::Path) -> Arc<Store> {
-    let objects = Objects::new(&StorageConfig::Local(dir.join("objects"))).unwrap();
-    Store::open(dir, objects).unwrap()
+    Store::open(dir, objects(dir)).unwrap()
+}
+
+pub fn objects(dir: &std::path::Path) -> Objects {
+    Objects::new(&StorageConfig::Local(dir.join("objects"))).unwrap()
+}
+
+/// Whether the tests run on Postgres (`ROLL_CODE_TEST_DATABASE`).
+pub fn on_postgres() -> bool {
+    std::env::var(code_sql::TEST_DATABASE_ENV).is_ok_and(|v| !v.is_empty())
+}
+
+/// The store in `dir` opened afresh: SQLite reopens the file, Postgres the same schema.
+pub fn reopen(dir: &std::path::Path, old: Arc<Store>) -> Arc<Store> {
+    let db = old.db().clone();
+    drop(old);
+    if on_postgres() { Store::open_db(db, objects(dir)).unwrap() } else { store(dir) }
+}
+
+/// Another store (another node) on the same database and objects.
+pub fn second(dir: &std::path::Path, store: &Store) -> Arc<Store> {
+    Store::open_db(store.db().clone(), objects(dir)).unwrap()
 }
 
 pub fn sig() -> Signature {

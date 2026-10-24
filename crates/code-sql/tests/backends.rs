@@ -403,3 +403,39 @@ fn killed_connections_never_lose_or_repeat_acknowledged_writes() {
     // commit, and looked up (pg_xact_status) when the commit got no answer.
     assert_eq!((ok, unknown, failed, v), (320, 0, 0, 320));
 }
+
+/// Several statements in one round trip (Postgres), in order: each sees the ones before it, a
+/// long pipeline is sent in chunks, and a failing statement fails the whole write.
+#[test]
+fn execute_pipeline_runs_statements_in_order() {
+    use code_sql::ValueRef::{Blob, Int, Text};
+    for f in each("pipeline") {
+        let db = &f.db;
+        db.ensure_schema(SCHEMA).unwrap();
+        let keys: Vec<String> = (0..1500).map(|i| format!("p{i:05}")).collect();
+        let counts = db
+            .write(|c| {
+                c.execute_pipeline(&[
+                    ("INSERT INTO kv (k, v) VALUES (?, ?)", keys.iter().enumerate().map(|(i, k)| vec![Text(k), Int(i as i64)]).collect()),
+                    ("UPDATE kv SET v = v + 100 WHERE k = ?", vec![vec![Text("p00000")], vec![Text("p01499")]]),
+                    ("INSERT OR IGNORE INTO byte (repo, id, n) VALUES (?, ?, ?)", vec![vec![Text("r"), Blob(b"x"), Int(1)], vec![Text("r"), Blob(b"x"), Int(2)]]),
+                    ("DELETE FROM kv WHERE k = ?", vec![]),
+                ])
+            })
+            .unwrap();
+        assert_eq!(counts, [1500, 2, 1, 0]);
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM kv", (), |r| r.get::<_, i64>(0)).unwrap(), 1500);
+        assert_eq!(db.query_row("SELECT v FROM kv WHERE k = 'p01499'", (), |r| r.get::<_, i64>(0)).unwrap(), 1599);
+        assert_eq!(db.query_row("SELECT n FROM byte WHERE repo = 'r'", (), |r| r.get::<_, i64>(0)).unwrap(), 1);
+
+        let r = db.write(|c| {
+            c.execute_pipeline(&[
+                ("INSERT INTO kv (k, v) VALUES (?, ?)", vec![vec![Text("new"), Int(1)]]),
+                ("INSERT INTO kv (k, v) VALUES (?, ?)", vec![vec![Text("p00001"), Int(1)]]),
+                ("INSERT INTO kv (k, v) VALUES (?, ?)", vec![vec![Text("after"), Int(1)]]),
+            ])
+        });
+        assert!(r.unwrap_err().is_unique_violation());
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM kv", (), |r| r.get::<_, i64>(0)).unwrap(), 1500, "nothing was written");
+    }
+}

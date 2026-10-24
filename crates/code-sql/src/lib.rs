@@ -413,6 +413,26 @@ impl Conn<'_> {
         }
     }
 
+    /// Several statements, each run once per parameter list, in order: [`Conn::execute_many`]
+    /// across statements, one round trip for the lot on Postgres. Returns the rows each
+    /// statement changed. Meant for the inserts of a [`Db::write`] (a stale cached plan re-runs
+    /// the transaction, as for any statement there).
+    pub fn execute_pipeline(&self, steps: &[(&str, Vec<Vec<ValueRef<'_>>>)]) -> Result<Vec<usize>> {
+        match self.0 {
+            ConnRef::Sqlite(c) => steps
+                .iter()
+                .map(|(sql, rows)| {
+                    let mut n = 0;
+                    for v in rows {
+                        n += sqlite::execute(c, sql, v)?;
+                    }
+                    Ok(n)
+                })
+                .collect(),
+            ConnRef::Pg(c) => c.execute_pipeline(steps).map(|v| v.into_iter().map(|n| n as usize).collect()),
+        }
+    }
+
     /// Statements without parameters, `;`-separated (schema changes).
     pub fn execute_batch(&self, sql: &str) -> Result<()> {
         match self.0 {
