@@ -127,6 +127,7 @@ diffy = "0.5"
 serde_yaml_ng = "0.10"
 jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
 code-sql = { path = "crates/code-sql" }
+code-cluster = { path = "crates/code-cluster" }
 code-store = { path = "crates/code-store" }
 code-git = { path = "crates/code-git" }
 code-github = { path = "crates/code-github" }
