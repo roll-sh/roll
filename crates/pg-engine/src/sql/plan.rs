@@ -176,6 +176,20 @@ pub struct ScanPlan {
     /// The orderings the planner found useful for the scan (the query's pathkeys, merge
     /// join columns), which its partial paths are built for too.
     pub useful: ScanUseful,
+    /// A nested loop's parameterized inner scan: the outer expressions its parameters
+    /// (`Outer(1, k)`) stand for, which its costs evaluate in the scan as Postgres does
+    /// (`sql::paths` `Rel::unparam`). Not part of its Debug text.
+    pub params: ScanParams,
+}
+
+/// `ScanPlan::params`.
+#[derive(Clone, Default)]
+pub struct ScanParams(pub Arc<Vec<Expr>>);
+
+impl std::fmt::Debug for ScanParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("_")
+    }
 }
 
 /// `ScanPlan::useful`: the pathkeys (as `sql::paths` builds them) and merge columns. Not

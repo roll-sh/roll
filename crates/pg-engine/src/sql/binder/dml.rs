@@ -2267,6 +2267,7 @@ impl Binder<'_, '_> {
                     check_as: self.check_as,
                     rti: self.next_rti(),
                     useful: Default::default(),
+                    params: Default::default(),
                 };
                 let mut scan = scan;
                 if self.dml_inh {
@@ -2628,6 +2629,7 @@ impl Binder<'_, '_> {
                     check_as: self.check_as,
                     rti: self.next_rti(),
                     useful: Default::default(),
+                    params: Default::default(),
                 };
                 if inh {
                     // (Through a view: its relation's name in the view, not the MERGE's

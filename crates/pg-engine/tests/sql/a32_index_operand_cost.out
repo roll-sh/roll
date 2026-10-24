@@ -1,0 +1,160 @@
+> create table ioc_o (f1 int4)
+-- CREATE TABLE
+
+> insert into ioc_o values (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> analyze ioc_o
+-- ANALYZE
+
+> create table ioc_p (id int primary key) partition by range (id)
+-- CREATE TABLE
+
+> create table ioc_p0 partition of ioc_p for values from (0) to (1)
+-- CREATE TABLE
+
+> create table ioc_p1 partition of ioc_p for values from (1) to (2)
+-- CREATE TABLE
+
+> insert into ioc_p values (0), (1)
+-- INSERT 0 2
+
+> create table ioc_t (id int primary key)
+-- CREATE TABLE
+
+> insert into ioc_t values (0)
+-- INSERT 0 1
+
+> explain (costs off)
+> select * from ioc_o, ioc_t where ioc_t.id > ioc_o.f1
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on ioc_o
+  ->  Bitmap Heap Scan on ioc_t
+        Recheck Cond: (id > ioc_o.f1)
+        ->  Bitmap Index Scan on ioc_t_pkey
+              Index Cond: (id > ioc_o.f1)
+-- EXPLAIN
+
+> explain (costs off)
+> select * from ioc_o, ioc_t where ioc_t.id > ioc_o.f1 + 1
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on ioc_o
+  ->  Index Only Scan using ioc_t_pkey on ioc_t
+        Index Cond: (id > (ioc_o.f1 + 1))
+-- EXPLAIN
+
+> explain (costs off)
+> select * from ioc_o, ioc_t where ioc_t.id > abs(ioc_o.f1) + 1
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on ioc_o
+  ->  Index Only Scan using ioc_t_pkey on ioc_t
+        Index Cond: (id > (abs(ioc_o.f1) + 1))
+-- EXPLAIN
+
+> select * from ioc_o, ioc_t where ioc_t.id > ioc_o.f1 - 1 order by 1, 2
+f1:int4 | id:int4
+-2147483647 | 0
+-123456 | 0
+0 | 0
+-- SELECT 3
+
+> explain
+> select * from ioc_o, ioc_t where ioc_t.id > abs(abs(abs(abs(ioc_o.f1)))) + 1 + 1 + 1 + 1 + 1 + 1
+QUERY PLAN:text
+Nested Loop  (cost=0.18..166.83 rows=4250 width=8)
+  ->  Seq Scan on ioc_o  (cost=0.00..1.05 rows=5 width=4)
+  ->  Index Only Scan using ioc_t_pkey on ioc_t  (cost=0.18..24.66 rows=850 width=4)
+        Index Cond: (id > ((((((abs(abs(abs(abs(ioc_o.f1)))) + 1) + 1) + 1) + 1) + 1) + 1))
+-- EXPLAIN
+
+> set enable_bitmapscan = off
+-- SET
+
+> explain
+> select * from ioc_o, ioc_t where ioc_t.id > abs(abs(abs(abs(ioc_o.f1)))) + 1 + 1 + 1 + 1 + 1 + 1
+QUERY PLAN:text
+Nested Loop  (cost=0.18..166.83 rows=4250 width=8)
+  ->  Seq Scan on ioc_o  (cost=0.00..1.05 rows=5 width=4)
+  ->  Index Only Scan using ioc_t_pkey on ioc_t  (cost=0.18..24.66 rows=850 width=4)
+        Index Cond: (id > ((((((abs(abs(abs(abs(ioc_o.f1)))) + 1) + 1) + 1) + 1) + 1) + 1))
+-- EXPLAIN
+
+> set enable_indexscan = off
+-- SET
+
+> set enable_bitmapscan = on
+-- SET
+
+> explain
+> select * from ioc_o, ioc_t where ioc_t.id > abs(abs(abs(abs(ioc_o.f1)))) + 1 + 1 + 1 + 1 + 1 + 1
+QUERY PLAN:text
+Nested Loop  (cost=8.37..271.35 rows=4250 width=8)
+  ->  Seq Scan on ioc_o  (cost=0.00..1.05 rows=5 width=4)
+  ->  Bitmap Heap Scan on ioc_t  (cost=8.37..45.56 rows=850 width=4)
+        Recheck Cond: (id > ((((((abs(abs(abs(abs(ioc_o.f1)))) + 1) + 1) + 1) + 1) + 1) + 1))
+        ->  Bitmap Index Scan on ioc_t_pkey  (cost=0.00..8.15 rows=850 width=0)
+              Index Cond: (id > ((((((abs(abs(abs(abs(ioc_o.f1)))) + 1) + 1) + 1) + 1) + 1) + 1))
+-- EXPLAIN
+
+> reset enable_indexscan
+-- RESET
+
+> explain (costs off)
+> select * from ioc_o, ioc_p where ioc_p.id > ioc_o.f1
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on ioc_o
+  ->  Append
+        ->  Bitmap Heap Scan on ioc_p0 ioc_p_1
+              Recheck Cond: (id > ioc_o.f1)
+              ->  Bitmap Index Scan on ioc_p0_pkey
+                    Index Cond: (id > ioc_o.f1)
+        ->  Bitmap Heap Scan on ioc_p1 ioc_p_2
+              Recheck Cond: (id > ioc_o.f1)
+              ->  Bitmap Index Scan on ioc_p1_pkey
+                    Index Cond: (id > ioc_o.f1)
+-- EXPLAIN
+
+> explain (costs off)
+> select * from ioc_o, ioc_p where ioc_p.id > ioc_o.f1 + 1
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on ioc_o
+  ->  Append
+        ->  Index Only Scan using ioc_p0_pkey on ioc_p0 ioc_p_1
+              Index Cond: (id > (ioc_o.f1 + 1))
+        ->  Index Only Scan using ioc_p1_pkey on ioc_p1 ioc_p_2
+              Index Cond: (id > (ioc_o.f1 + 1))
+-- EXPLAIN
+
+> select * from ioc_o, ioc_p where ioc_p.id > ioc_o.f1 order by 1, 2
+f1:int4 | id:int4
+-2147483647 | 0
+-2147483647 | 1
+-123456 | 0
+-123456 | 1
+0 | 1
+-- SELECT 5
+
+> select * from ioc_o, ioc_p where ioc_p.id >= ioc_o.f1 - 1 order by 1, 2
+f1:int4 | id:int4
+-2147483647 | 0
+-2147483647 | 1
+-123456 | 0
+-123456 | 1
+0 | 0
+0 | 1
+-- SELECT 6
+
+> drop table ioc_o
+-- DROP TABLE
+
+> drop table ioc_p
+-- DROP TABLE
+
+> drop table ioc_t
+-- DROP TABLE
+

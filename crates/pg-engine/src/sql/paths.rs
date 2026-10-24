@@ -285,9 +285,32 @@ struct Rel {
     acl: Arc<(bool, Vec<bool>)>,
     /// Index expressions with statistics only leakproof functions may see.
     hidden: Arc<Vec<(Expr, VarRef)>>,
+    /// A parameterized path's parameters (`Outer(1, k)`): the outer expressions the nested
+    /// loop passes in. Postgres passes only the outer Vars (nestloop params) and the scan
+    /// evaluates the rest of a clause, so costs see the clause as written.
+    params: Arc<Vec<Expr>>,
 }
 
 impl Rel {
+    /// `e` with a parameterized path's parameters replaced by the outer expressions they
+    /// stand for: the clause Postgres costs (cost_qual_eval of a ppi_clause, an index
+    /// qual's other operand in index_other_operands_eval_cost), where only the outer
+    /// relation's Vars are parameters (Vars and Params cost nothing, the rest of the
+    /// expression is evaluated by the scan).
+    fn unparam(&self, e: &Expr) -> Expr {
+        if self.params.is_empty() {
+            return e.clone();
+        }
+        e.clone()
+            .transform(&mut |x| {
+                Ok(match x {
+                    Expr::Outer(1, k, t) => self.params.get(k).cloned().unwrap_or(Expr::Outer(1, k, t)),
+                    x => x,
+                })
+            })
+            .unwrap_or_else(|_| e.clone())
+    }
+
     fn vars(&self) -> impl Fn(usize) -> Option<VarRef> + '_ {
         move |i| {
             (i < self.table.columns.len()).then(|| VarRef {
@@ -2079,10 +2102,7 @@ impl Planner<'_, '_> {
         } else {
             num_pages * self.g.random_page_cost
         };
-        let arg_cost: f64 = quals
-            .iter()
-            .map(|q| q.value.as_ref().map_or(0.0, costs::qual_cost))
-            .sum();
+        let arg_cost = self.other_operands_cost(rel, quals);
         // (The reference build fuses multiply-adds, as GCC does on aarch64.)
         let per_tuple =
             CPU_OPERATOR_COST.mul_add((quals.len() + orderbys) as f64, CPU_INDEX_TUPLE_COST);
@@ -2282,10 +2302,7 @@ impl Planner<'_, '_> {
             (minimal / corr).min(index_ranges)
         };
         let sel = (estimated / index_ranges).clamp(0.0, 1.0);
-        let arg_cost: f64 = quals
-            .iter()
-            .map(|q| q.value.as_ref().map_or(0.0, costs::qual_cost))
-            .sum();
+        let arg_cost = self.other_operands_cost(rel, quals);
         let startup = self.g.seq_page_cost * revmap_pages * loop_count + arg_cost;
         let mut total =
             startup + self.g.random_page_cost * (ii.pages - revmap_pages) * loop_count;
@@ -2414,7 +2431,7 @@ impl Planner<'_, '_> {
             })
             .map(|(_, q)| q.clone())
             .collect();
-        let (qs, qp) = self.quals_cost(&qpquals);
+        let (qs, qp) = self.rel_quals_cost(rel, &qpquals);
         startup += qs;
         let cpu_run = (CPU_TUPLE_COST + qp) * tuples_fetched;
         run += cpu_run;
@@ -2816,6 +2833,7 @@ impl Rel {
             written: self.written.clone(),
             acl: self.acl.clone(),
             hidden: self.hidden.clone(),
+            params: self.params.clone(),
         }
     }
 }
@@ -2965,6 +2983,31 @@ fn presorted(want: &[PathKey], have: &[PathKey]) -> (bool, usize) {
 impl Planner<'_, '_> {
     /// cost_qual_eval over quals: (startup, per tuple), sub-selects included
     /// (cost_subplan): a hashed one builds its table once; a correlated one runs per row.
+    /// quals_cost of a relation's clauses as Postgres sees them: a parameterized path's
+    /// with the outer expressions in place of its parameters (get_restriction_qual_cost
+    /// over the ppi_clauses, `Rel::unparam`).
+    pub(super) fn rel_quals_cost(&self, rel: &Rel, quals: &[Expr]) -> (f64, f64) {
+        if rel.params.is_empty() {
+            return self.quals_cost(quals);
+        }
+        let quals: Vec<Expr> = quals.iter().map(|q| rel.unparam(q)).collect();
+        self.quals_cost(&quals)
+    }
+
+    /// index_other_operands_eval_cost: evaluating the index conditions' other operands
+    /// (once a scan, startup and per-tuple cost alike), a parameterized path's as the
+    /// scan computes them from the outer Vars.
+    fn other_operands_cost(&self, rel: &Rel, quals: &[IClause]) -> f64 {
+        quals
+            .iter()
+            .filter_map(|q| q.value.as_ref())
+            .map(|v| {
+                let (s, p) = self.rel_quals_cost(rel, std::slice::from_ref(v));
+                s + p
+            })
+            .sum()
+    }
+
     pub(super) fn quals_cost(&self, quals: &[Expr]) -> (f64, f64) {
         let (mut startup, mut per_tuple) = (0.0, 0.0);
         for q in quals {
@@ -3487,6 +3530,7 @@ impl Planner<'_, '_> {
             written: Arc::new(s.written.clone()),
             acl,
             hidden: Arc::new(hidden),
+            params: s.params.0.clone(),
         };
         {
             let mut pq = self.phv_quals.borrow_mut();
@@ -3497,7 +3541,7 @@ impl Planner<'_, '_> {
             }
         }
         rel.rows = costs::clamp_rows(size.tuples * self.sel(&rel, &rel.quals));
-        (rel.qual_startup, rel.qual_cost) = self.quals_cost(&rel.quals);
+        (rel.qual_startup, rel.qual_cost) = self.rel_quals_cost(&rel, &rel.quals);
         Some(rel)
     }
 }
@@ -3619,6 +3663,7 @@ fn to_bitmap(rel: &Rel, b: &BPath) -> BitmapQual {
 
 /// Record path `p` in the scan.
 fn apply(rel: &Rel, s: &mut ScanPlan, p: &Path) {
+    s.params = crate::sql::plan::ScanParams(rel.params.clone());
     match &p.kind {
         PathKind::Seq => {
             s.index = None;
@@ -6054,6 +6099,14 @@ fn plan_level_ordered(
     p.minmax_aggs(plan);
     rowmarks::hoist(plan);
     crate::sql::binder::optimize::subplan_classes(plan);
+    // A sub-select output a projection reads twice: a copy per place, each run apart
+    // (pullup_replace_vars, make_subplan per copy).
+    let whole = Arc::new(std::mem::replace(plan, Plan::One));
+    if let Some(split) = crate::sql::explain::split_shared_subqueries(&whole) {
+        *plan = Arc::try_unwrap(split).unwrap_or_else(|a| (*a).clone());
+    } else {
+        *plan = Arc::try_unwrap(whole).unwrap_or_else(|a| (*a).clone());
+    }
     p.removed.get()
 }
 
@@ -6367,6 +6420,7 @@ pub fn index_order(ctx: &ExecCtx, s: &ScanPlan) -> Vec<SortKey> {
         written: Default::default(),
         acl: Default::default(),
         hidden: Default::default(),
+        params: Default::default(),
     };
     let mut out = Vec::new();
     for (i, k) in b.keys.iter().enumerate() {

@@ -1,0 +1,210 @@
+> create table spk_a (a int, b int)
+-- CREATE TABLE
+
+> create table spk_b (a int, b int)
+-- CREATE TABLE
+
+> insert into spk_a select g, g % 5 from generate_series(1, 30) g
+-- INSERT 0 30
+
+> insert into spk_b select g, g % 3 from generate_series(1, 30) g
+-- INSERT 0 30
+
+> create index on spk_b (a)
+-- CREATE INDEX
+
+> analyze spk_a, spk_b
+-- ANALYZE
+
+> explain (costs off)
+> select ss.x, spk_b.a, spk_b.b from (select (select min(a) from spk_b where spk_b.b = spk_a.b) as x from spk_a where spk_a.a < 8) ss
+> join spk_b on spk_b.a = ss.x order by ss.x, spk_b.a
+QUERY PLAN:text
+Sort
+  Sort Key: ((SubPlan 2)), spk_b.a
+  ->  Hash Join
+        Hash Cond: ((SubPlan 4) = spk_b.a)
+        ->  Seq Scan on spk_a
+              Filter: (a < 8)
+        ->  Hash
+              ->  Seq Scan on spk_b
+        SubPlan 2
+          ->  Result
+                InitPlan 1
+                  ->  Limit
+                        ->  Index Scan using spk_b_a_idx on spk_b spk_b_1
+                              Index Cond: (a IS NOT NULL)
+                              Filter: (b = spk_a.b)
+        SubPlan 4
+          ->  Result
+                InitPlan 3
+                  ->  Limit
+                        ->  Index Scan using spk_b_a_idx on spk_b spk_b_2
+                              Index Cond: (a IS NOT NULL)
+                              Filter: (b = spk_a.b)
+-- EXPLAIN
+
+> select ss.x, spk_b.a, spk_b.b from (select (select min(a) from spk_b where spk_b.b = spk_a.b) as x from spk_a where spk_a.a < 8) ss
+> join spk_b on spk_b.a = ss.x order by ss.x, spk_b.a
+x:int4 | a:int4 | b:int4
+1 | 1 | 1
+1 | 1 | 1
+2 | 2 | 2
+2 | 2 | 2
+3 | 3 | 0
+-- SELECT 5
+
+> explain (costs off)
+> select ss.x, spk_b.a from (select (select min(a) from spk_b where spk_b.b = spk_a.b) as x from spk_a where spk_a.a < 8) ss
+> join spk_b on spk_b.a = ss.x order by spk_b.a desc, ss.x
+QUERY PLAN:text
+Sort
+  Sort Key: spk_b.a DESC, ((SubPlan 2))
+  ->  Hash Join
+        Hash Cond: ((SubPlan 4) = spk_b.a)
+        ->  Seq Scan on spk_a
+              Filter: (a < 8)
+        ->  Hash
+              ->  Seq Scan on spk_b
+        SubPlan 2
+          ->  Result
+                InitPlan 1
+                  ->  Limit
+                        ->  Index Scan using spk_b_a_idx on spk_b spk_b_1
+                              Index Cond: (a IS NOT NULL)
+                              Filter: (b = spk_a.b)
+        SubPlan 4
+          ->  Result
+                InitPlan 3
+                  ->  Limit
+                        ->  Index Scan using spk_b_a_idx on spk_b spk_b_2
+                              Index Cond: (a IS NOT NULL)
+                              Filter: (b = spk_a.b)
+-- EXPLAIN
+
+> select ss.x, spk_b.a from (select (select min(a) from spk_b where spk_b.b = spk_a.b) as x from spk_a where spk_a.a < 8) ss
+> join spk_b on spk_b.a = ss.x order by spk_b.a desc, ss.x
+x:int4 | a:int4
+3 | 3
+2 | 2
+2 | 2
+1 | 1
+1 | 1
+-- SELECT 5
+
+> explain (costs off)
+> select ss.x, ss.a from (select (select min(a) from spk_b where spk_b.b = spk_a.b) as x, a from spk_a) ss
+> where ss.x = 2 order by ss.x, ss.a
+QUERY PLAN:text
+Sort
+  Sort Key: ((SubPlan 2)), spk_a.a
+  ->  Seq Scan on spk_a
+        Filter: ((SubPlan 4) = 2)
+        SubPlan 2
+          ->  Result
+                InitPlan 1
+                  ->  Limit
+                        ->  Index Scan using spk_b_a_idx on spk_b
+                              Index Cond: (a IS NOT NULL)
+                              Filter: (b = spk_a.b)
+        SubPlan 4
+          ->  Result
+                InitPlan 3
+                  ->  Limit
+                        ->  Index Scan using spk_b_a_idx on spk_b spk_b_1
+                              Index Cond: (a IS NOT NULL)
+                              Filter: (b = spk_a.b)
+-- EXPLAIN
+
+> explain (costs off)
+> select ss.x, spk_b.a from (select (select min(a) from spk_b where spk_b.b = spk_a.b) as x from spk_a where spk_a.a < 8 offset 0) ss
+> join spk_b on spk_b.a = ss.x order by ss.x, spk_b.a
+QUERY PLAN:text
+Sort
+  Sort Key: ((SubPlan 2))
+  ->  Hash Join
+        Hash Cond: (spk_b.a = ((SubPlan 2)))
+        ->  Seq Scan on spk_b
+        ->  Hash
+              ->  Seq Scan on spk_a
+                    Filter: (a < 8)
+                    SubPlan 2
+                      ->  Result
+                            InitPlan 1
+                              ->  Limit
+                                    ->  Index Scan using spk_b_a_idx on spk_b spk_b_1
+                                          Index Cond: (a IS NOT NULL)
+                                          Filter: (b = spk_a.b)
+-- EXPLAIN
+
+> create function spk_noisy(int) returns int stable language plpgsql as $$
+> begin raise notice 'noisy %', $1; return $1; end $$
+-- CREATE FUNCTION
+
+> explain (analyze, costs off, timing off, summary off, buffers off)
+> select ss.x, ss.x * 2 from (select (select min(a) from spk_b) x from spk_a where a < 3) ss
+QUERY PLAN:text
+Seq Scan on spk_a (actual rows=2.00 loops=1)
+  Filter: (a < 3)
+  Rows Removed by Filter: 28
+  InitPlan 2
+    ->  Result (actual rows=1.00 loops=1)
+          InitPlan 1
+            ->  Limit (actual rows=1.00 loops=1)
+                  ->  Index Only Scan using spk_b_a_idx on spk_b (actual rows=1.00 loops=1)
+                        Index Cond: (a IS NOT NULL)
+                        Heap Fetches: 1
+                        Index Searches: 1
+  InitPlan 4
+    ->  Result (actual rows=1.00 loops=1)
+          InitPlan 3
+            ->  Limit (actual rows=1.00 loops=1)
+                  ->  Index Only Scan using spk_b_a_idx on spk_b spk_b_1 (actual rows=1.00 loops=1)
+                        Index Cond: (a IS NOT NULL)
+                        Heap Fetches: 1
+                        Index Searches: 1
+-- EXPLAIN
+
+> select ss.x, ss.x + 1 from (select (select spk_noisy(max(a)) from spk_b where spk_b.b = spk_a.b) x from spk_a where a < 4) ss
+NOTICE 00000: noisy 28
+CONTEXT: PL/pgSQL function spk_noisy(integer) line 2 at RAISE
+NOTICE 00000: noisy 28
+CONTEXT: PL/pgSQL function spk_noisy(integer) line 2 at RAISE
+NOTICE 00000: noisy 29
+CONTEXT: PL/pgSQL function spk_noisy(integer) line 2 at RAISE
+NOTICE 00000: noisy 29
+CONTEXT: PL/pgSQL function spk_noisy(integer) line 2 at RAISE
+NOTICE 00000: noisy <NULL>
+CONTEXT: PL/pgSQL function spk_noisy(integer) line 2 at RAISE
+NOTICE 00000: noisy <NULL>
+CONTEXT: PL/pgSQL function spk_noisy(integer) line 2 at RAISE
+x:int4 | ?column?:int4
+28 | 29
+29 | 30
+NULL | NULL
+-- SELECT 3
+
+> select ss.x, ss.x * 2 from (select (select spk_noisy(min(a)) from spk_b) x from spk_a where a < 3) ss
+NOTICE 00000: noisy 1
+CONTEXT: PL/pgSQL function spk_noisy(integer) line 2 at RAISE
+NOTICE 00000: noisy 1
+CONTEXT: PL/pgSQL function spk_noisy(integer) line 2 at RAISE
+x:int4 | ?column?:int4
+1 | 2
+1 | 2
+-- SELECT 2
+
+> select count(*) filter (where x <> y) from (select ss.x x, ss.x y from (select (select random() + a) x from spk_a) ss) s2
+count:int8
+0
+-- SELECT 1
+
+> drop function spk_noisy(int)
+-- DROP FUNCTION
+
+> drop table spk_a
+-- DROP TABLE
+
+> drop table spk_b
+-- DROP TABLE
+

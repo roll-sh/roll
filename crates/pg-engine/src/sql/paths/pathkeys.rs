@@ -13,6 +13,12 @@ struct Classes {
     constant: Vec<bool>,
     /// Expressions (over the row) a clause equates with a constant.
     const_exprs: Vec<Expr>,
+    /// Columns computing a pulled-up subquery's sub-select output. Postgres copies such an
+    /// output into each place reading it (pullup_replace_vars, each copy a SubPlan of its
+    /// own), so a clause's copy is never equal() to the target list's: no clause puts
+    /// the column in a class (get_eclass_for_sort_expr finds no member for the sort key's
+    /// copy) or makes it constant.
+    subsel: Vec<bool>,
 }
 
 impl Classes {
@@ -21,7 +27,12 @@ impl Classes {
             parent: (0..n).collect(),
             constant: vec![false; n],
             const_exprs: Vec::new(),
+            subsel: vec![false; n],
         }
+    }
+
+    fn copied(&self, a: usize) -> bool {
+        self.subsel.get(a).copied().unwrap_or(false)
     }
 
     fn find(&mut self, x: usize) -> usize {
@@ -39,7 +50,7 @@ impl Classes {
     }
 
     fn union(&mut self, a: usize, b: usize) {
-        if a >= self.parent.len() || b >= self.parent.len() {
+        if a >= self.parent.len() || b >= self.parent.len() || self.copied(a) || self.copied(b) {
             return;
         }
         let (x, y) = (self.find(a), self.find(b));
@@ -50,7 +61,7 @@ impl Classes {
     }
 
     fn set_const(&mut self, a: usize) {
-        if a < self.parent.len() {
+        if a < self.parent.len() && !self.copied(a) {
             let r = self.find(a);
             self.constant[r] = true;
         }
@@ -65,6 +76,12 @@ impl Classes {
     /// column).
     fn mapped(inner: &mut Classes, map: &[Option<usize>]) -> Classes {
         let mut out = Classes::new(map.len());
+        out.map_from(inner, map);
+        out
+    }
+
+    fn map_from(&mut self, inner: &mut Classes, map: &[Option<usize>]) {
+        let out = self;
         for (i, a) in map.iter().enumerate() {
             let Some(a) = a else { continue };
             if *a >= inner.parent.len() {
@@ -82,7 +99,6 @@ impl Classes {
                 }
             }
         }
-        out
     }
 }
 
@@ -173,6 +189,13 @@ fn absorb_in(c: &mut Classes, pred: &Expr, coll: &dyn Fn(usize) -> Option<String
     }
 }
 
+/// Whether `e` holds a sub-select (not an inlined or called function).
+fn has_subselect(e: &Expr) -> bool {
+    let mut any = false;
+    e.walk(&mut |x| any |= matches!(x, Expr::Subquery(s) if s.func.is_none() && s.call.is_none()));
+    any
+}
+
 /// A partitionwise join's child join: a join (through projections and filters) over
 /// partitions.
 fn child_join(p: &Plan) -> bool {
@@ -235,6 +258,9 @@ fn member_consts(p: &Plan) -> Vec<Option<Expr>> {
 
 /// Copy `inner`'s classes onto `c`'s columns from `off` on.
 fn import(c: &mut Classes, inner: &mut Classes, off: usize) {
+    for i in 0..inner.parent.len().min(c.parent.len().saturating_sub(off)) {
+        c.subsel[off + i] = inner.subsel[i];
+    }
     for i in 0..inner.parent.len() {
         if off + i >= c.parent.len() {
             break;
@@ -276,8 +302,12 @@ fn classes(p: &Plan) -> Classes {
             }
             c
         }
-        Plan::Sort { input, .. } | Plan::Limit { input, .. } | Plan::Barrier { input, .. } | Plan::Context { input, .. } => {
-            classes(input)
+        Plan::Sort { input, .. } | Plan::Limit { input, .. } | Plan::Context { input, .. } => classes(input),
+        // (A subquery scan's outputs are its Vars: one member wherever they are read.)
+        Plan::Barrier { input, .. } => {
+            let mut c = classes(input);
+            c.subsel.iter_mut().for_each(|f| *f = false);
+            c
         }
         // An inheritance tree's columns the parent's clauses (pushed into every member)
         // equate with constants.
@@ -339,7 +369,14 @@ fn classes(p: &Plan) -> Classes {
         Plan::Project { input, exprs } => {
             let mut inner = classes(input);
             let map: Vec<Option<usize>> = exprs.iter().map(col_of).collect();
-            let mut out = Classes::mapped(&mut inner, &map);
+            let mut out = Classes::new(map.len());
+            for (i, e) in exprs.iter().enumerate() {
+                out.subsel[i] = match map[i] {
+                    Some(k) => inner.copied(k),
+                    None => has_subselect(e),
+                };
+            }
+            out.map_from(&mut inner, &map);
             // A constant output column is a class with a constant; so is one computing an
             // expression a clause below equates with one.
             for (i, e) in exprs.iter().enumerate() {

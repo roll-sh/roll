@@ -457,13 +457,22 @@ impl Deparser<'_, '_> {
         };
         if let Some((left, ops)) = &label.exists_any {
             self.buf.push_str("(ANY (");
+            // (convert_EXISTS_to_ANY's test expression: one OpExpr, or an AND of them, each
+            // parenthesized as a BoolExpr's argument.)
+            let many = left.len() > 1;
             for (i, (l, op)) in left.iter().zip(ops).enumerate() {
                 if i > 0 {
                     self.buf.push_str(" AND ");
                 }
                 let r = reference.replace(").col1", &format!(").col{}", i + 1));
+                if many {
+                    self.buf.push('(');
+                }
                 self.paren(l, true, Parent::BinOp(op.name, true))?;
                 self.buf.push_str(&format!(" {} {r}", op.name));
+                if many {
+                    self.buf.push(')');
+                }
             }
             self.buf.push_str("))");
             return Some(());

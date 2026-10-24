@@ -1242,8 +1242,8 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
     fn oj_const_redundant(&self, ci: usize, a: u32, b: u32) -> bool {
         let c = &self.clauses[ci];
         let left_oj = match c.sj {
-            Some(t) => self.sjs.get(t).is_some_and(|j| j.kind == JoinKind::Left),
-            None => !self.general && c.on && matches!(self.kind, JoinKind::Left | JoinKind::Right),
+            Some(t) => self.sjs.get(t).is_some_and(|j| matches!(j.kind, JoinKind::Left | JoinKind::Anti)),
+            None => !self.general && c.on && matches!(self.kind, JoinKind::Left | JoinKind::Right | JoinKind::Anti),
         };
         let Some((x, y, xl, yl)) = &c.eq else { return false };
         if !left_oj || !c.ecable || xl.count_ones() != 1 || yl.count_ones() != 1 {
@@ -2273,7 +2273,8 @@ impl Search<'_, '_, '_> {
             let nrq = r.quals.len();
             prel.loop_count = self.loop_count(l, req);
             prel.rows = costs::clamp_rows(prel.size.tuples * self.pl.sel(&prel, &prel.quals));
-            (prel.qual_startup, prel.qual_cost) = self.pl.quals_cost(&prel.quals);
+            prel.params = Arc::new(params.clone());
+            (prel.qual_startup, prel.qual_cost) = self.pl.rel_quals_cost(&prel, &prel.quals);
             let prel = Rc::new(prel);
             let mut best: Vec<JP> = Vec::new();
             for (ix, ii) in prel.indexes.iter().enumerate() {
@@ -2530,7 +2531,8 @@ impl Search<'_, '_, '_> {
             }
             prel.loop_count = self.loop_count(l, req);
             prel.rows = costs::clamp_rows(prel.size.tuples * self.pl.sel(&prel, &prel.quals));
-            (prel.qual_startup, prel.qual_cost) = self.pl.quals_cost(&prel.quals);
+            prel.params = Arc::new(params.clone());
+            (prel.qual_startup, prel.qual_cost) = self.pl.rel_quals_cost(&prel, &prel.quals);
             let prel = Rc::new(prel);
             let mk = |path: Path| JP {
                 rows: prel.rows,
@@ -2894,7 +2896,8 @@ impl Search<'_, '_, '_> {
                 }
                 prel.loop_count = self.loop_count_as(l, req, true);
                 prel.rows = costs::clamp_rows(prel.size.tuples * self.pl.sel(&prel, &prel.quals));
-                (prel.qual_startup, prel.qual_cost) = self.pl.quals_cost(&prel.quals);
+                prel.params = Arc::new(params.clone());
+                (prel.qual_startup, prel.qual_cost) = self.pl.rel_quals_cost(&prel, &prel.quals);
                 let prel = Rc::new(prel);
                 // The member's sequential scan, reparameterized: the join clauses filter.
                 let seq_total = prel.qual_startup
@@ -2934,6 +2937,53 @@ impl Search<'_, '_, '_> {
                             disabled: ip.disabled,
                             kind: PathKind::Index(ip),
                         };
+                    }
+                }
+                // The member's parameterized bitmap heap scan (create_index_paths'
+                // bitjoinpaths, as for a plain relation: `param_paths`), a path of the
+                // member's list get_cheapest_parameterized_child_path picks from too.
+                let mut bits: Vec<BPath> = Vec::new();
+                for (ix, ii) in prel.indexes.iter().enumerate() {
+                    if !ii.pred.is_empty() && !implied_by(&ii.pred, &prel.quals) {
+                        continue;
+                    }
+                    let cs = join_clauses_first(match_quals(ii, &prel.quals, None, prel.booleq.as_ref(), self.pl), nrq);
+                    if cs.iter().any(|c| c.qual >= nrq) {
+                        let ip = self.pl.index_path(&prel, ix, cs, Vec::new(), false, false);
+                        if ip.index_sel < 1.0 {
+                            bits.push(BPath::Index(ip));
+                        }
+                    }
+                    let cs = match_quals(ii, &m.rel.quals, None, m.rel.booleq.as_ref(), self.pl);
+                    if !cs.is_empty() {
+                        let ip = self.pl.index_path(&m.rel, ix, cs, Vec::new(), false, false);
+                        if ip.index_sel < 1.0 {
+                            bits.push(BPath::Index(ip));
+                        }
+                    }
+                }
+                if bits.iter().any(|b| b.uses_from(nrq)) {
+                    bits.extend(self.pl.bitmap_or_paths(&m.rel, &m.rel.quals, &[]));
+                    let b = self.pl.choose_bitmap_and(&prel, bits);
+                    if b.uses_from(nrq) {
+                        let (st, tot, _, _) = self.pl.bitmap_heap(&prel, &b);
+                        let disabled = (!self.pl.g.bitmapscan) as u32;
+                        let better = if disabled != best.disabled {
+                            disabled < best.disabled
+                        } else {
+                            tot < best.total || (tot == best.total && st < best.startup)
+                        };
+                        if better {
+                            indexed = true;
+                            best = Path {
+                                kind: PathKind::Bitmap(b),
+                                startup: st,
+                                total: tot,
+                                rows: prel.rows,
+                                keys: Vec::new(),
+                                disabled,
+                            };
+                        }
                     }
                 }
                 // (The member's target list computes the leaf's values: a UNION ALL arm's

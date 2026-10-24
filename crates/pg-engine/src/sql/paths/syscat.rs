@@ -378,6 +378,7 @@ fn stand_in_scan(table: Arc<Table>, filter: Option<Expr>) -> ScanPlan {
         check_as: None,
         rti: Default::default(),
         useful: Default::default(),
+        params: Default::default(),
     }
 }
 

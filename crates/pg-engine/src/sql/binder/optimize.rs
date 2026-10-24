@@ -595,6 +595,22 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 (&lcoll, &rcoll),
                 &mut rewrites,
             );
+            // (A left join's key a constant replaced, reconsider_outer_join_clause's
+            // constant TRUE: its nullable side's columns are an ON clause's still, which
+            // reduce_outer_joins, run on the clauses as written, sees strict.)
+            let mut const_keyed: Vec<usize> = Vec::new();
+            if kind == JoinKind::Left
+                && let Some((ol, or)) = &old_keys
+            {
+                for (a, b) in ol.iter().zip(or) {
+                    let still = hash
+                        .as_ref()
+                        .is_some_and(|(hl, hr)| hl.iter().zip(hr).any(|(x, y)| x.same_as(a) && y.same_as(b)));
+                    if !still {
+                        const_keyed.extend(b.columns().into_iter().map(|c| c + nleft));
+                    }
+                }
+            }
             // (The constants' clauses derived for the other side too, in class order.)
             order_by_places(&mut lpush, &places, 0);
             order_by_places(&mut rpush, &places, nleft);
@@ -617,7 +633,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 meta.kept = kept;
                 meta.written_kind = old_wk;
                 (meta.phv_eval, meta.phv_join) = old_phv;
-                for c in old_pushed {
+                for c in old_pushed.into_iter().chain(const_keyed) {
                     if !meta.pushed.contains(&c) {
                         meta.pushed.push(c);
                     }
@@ -3502,15 +3518,16 @@ pub fn join(
     // side equates with a constant (in any join domain below) gives the nullable side
     // `inner = constant`; the clause itself stays (the join search drops it where it is
     // the constant-TRUE clause, `oj_const_redundant`).
-    if params.is_empty() && matches!(kind, JoinKind::Left | JoinKind::Right) {
-        let have: Vec<Expr> = if kind == JoinKind::Left {
+    // (An anti join's too: its clauses are a left join's, left_join_clauses.)
+    if params.is_empty() && matches!(kind, JoinKind::Left | JoinKind::Right | JoinKind::Anti) {
+        let have: Vec<Expr> = if kind != JoinKind::Right {
             restrictions(&left, true)
         } else {
             restrictions(&right, true).into_iter().map(|e| e.shift_cols(nleft as isize)).collect()
         };
         for p in &rest {
             let Some((l, r)) = equi_key(p, nleft) else { continue };
-            let (ov, iv) = if kind == JoinKind::Left { (l, r) } else { (r, l) };
+            let (ov, iv) = if kind != JoinKind::Right { (l, r) } else { (r, l) };
             if iv.ty().without_typmod() != ov.ty().without_typmod() {
                 continue;
             }
@@ -3520,7 +3537,7 @@ pub fn join(
                     continue;
                 }
                 let d = Expr::Call(def, vec![iv.clone(), k], DataType::Bool);
-                if kind == JoinKind::Left {
+                if kind != JoinKind::Right {
                     let d = d.shift_cols(-(nleft as isize));
                     if !rpush.iter().any(|e| e.same_as(&d)) {
                         rpush.push(d);

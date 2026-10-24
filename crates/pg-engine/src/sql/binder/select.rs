@@ -4196,6 +4196,7 @@ impl Binder<'_, '_> {
                     check_as: self.check_as,
                     rti: self.next_rti(),
                     useful: Default::default(),
+                    params: Default::default(),
                 };
                 let mut scan = scan;
                 if !colnames.is_empty() {
@@ -4307,6 +4308,7 @@ impl Binder<'_, '_> {
                             check_as: self.check_as,
                             rti: self.next_rti(),
                             useful: Default::default(),
+                            params: Default::default(),
                         }))
                     }
                     None if self.view_stack.contains(&v.oid) => {

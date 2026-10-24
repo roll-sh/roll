@@ -787,6 +787,8 @@ struct Builder<'c, 'a> {
     /// The query levels being converted (an id each), innermost last.
     lvl_stack: Vec<usize>,
     lvl_next: usize,
+    /// Each level met: the events taken while converting it (`LevelSpan`).
+    spans: Vec<LevelSpan>,
     /// The sub-selects of the group keys of the aggregation being converted (by id).
     key_sub_ids: std::collections::HashSet<usize>,
     /// A group key that is a sub-select, by the names its aggregation's row shows it by.
@@ -794,6 +796,18 @@ struct Builder<'c, 'a> {
     /// The copies of group keys' sub-selects GROUPING() arguments are, by the GROUPING
     /// call (its definition's address, unique per call) and argument.
     phantoms: HashMap<(usize, usize), SubplanLabel>,
+}
+
+/// A query level met while converting: its id, the level it is in, whether it is a FROM
+/// subquery planned apart (a Subquery Scan's), and the events taken while converting it
+/// (`start..end`).
+#[derive(Clone, Copy)]
+struct LevelSpan {
+    level: usize,
+    parent: usize,
+    apart: bool,
+    start: usize,
+    end: usize,
 }
 
 /// A SubPlan number taken: the query level of the sub-select, whether it is a group key's
@@ -828,7 +842,7 @@ const GROUPING_COPY_BASE: usize = (1 << 39) + (1 << 37);
 
 /// `merge_top`: the statement is a MERGE, whose actions' target lists subquery_planner
 /// preprocesses after the quals (mergeActionList), its own level no target list first.
-fn renumbering(events: &[PlanIdEvent], merge_top: bool) -> Option<Vec<usize>> {
+fn renumbering(events: &[PlanIdEvent], spans: &[LevelSpan], merge_top: bool) -> Option<Vec<usize>> {
     let n = events.len();
     let mut order: Vec<usize> = (0..n).collect();
     let mut levels: Vec<usize> = events.iter().filter(|e| e.key).map(|e| e.level).collect();
@@ -960,6 +974,50 @@ fn renumbering(events: &[PlanIdEvent], merge_top: bool) -> Option<Vec<usize>> {
             segs.split_off(first_other).into_iter().partition(|(u, _)| tl(u));
         order = segs.into_iter().chain(late).chain(rest).flat_map(|(_, v)| v).collect();
         moved = true;
+    }
+    // (A level's FROM subqueries planned apart, each with everything inside it: after the
+    // level's own expressions' sub-selects, query_planner planning them (set_subquery_pathlist)
+    // once subquery_planner has preprocessed the level's expressions. Then the level's MIN /
+    // MAX InitPlans, which create_minmaxagg_plan makes at createplan time.)
+    let mut by_level: Vec<&LevelSpan> = spans.iter().filter(|sp| sp.end != usize::MAX).collect();
+    by_level.sort_by_key(|sp| sp.level);
+    for l in by_level {
+        let blocks: Vec<&LevelSpan> = spans.iter().filter(|b| b.apart && b.parent == l.level && b.end != usize::MAX).collect();
+        let in_block = |i: usize| blocks.iter().any(|b| b.start <= i && i < b.end);
+        let mut minmax = vec![false; n];
+        for (i, e) in events.iter().enumerate() {
+            if e.level == l.level
+                && !e.key
+                && !in_block(i)
+                && e.id.is_some_and(|id| id >= crate::sql::paths::PLANNER_SUBQUERY_BASE)
+            {
+                for m in minmax.iter_mut().take(i + 1).skip(e.start) {
+                    *m = true;
+                }
+                let mut j = i + 1;
+                while j < n && events[j].follows {
+                    minmax[j] = true;
+                    j += 1;
+                }
+            }
+        }
+        let own = |i: usize| l.start <= i && i < l.end && !in_block(i) && !minmax[i];
+        let late = |i: usize| in_block(i) || minmax[i];
+        let Some(last_own) = order.iter().rposition(|&i| own(i)) else { continue };
+        if !order[..last_own].iter().any(|&i| late(i)) && !order[last_own..].iter().any(|&i| minmax[i]) {
+            continue;
+        }
+        let blocks_taken: Vec<usize> = order.iter().copied().filter(|&i| in_block(i)).collect();
+        let mm_taken: Vec<usize> = order.iter().copied().filter(|&i| minmax[i] && !in_block(i)).collect();
+        let anchor = order[last_own];
+        let mut rebuilt: Vec<usize> = order.iter().copied().filter(|&i| !late(i)).collect();
+        let at = rebuilt.iter().position(|&i| i == anchor).map_or(rebuilt.len(), |p| p + 1);
+        let tail: Vec<usize> = blocks_taken.into_iter().chain(mm_taken).collect();
+        rebuilt.splice(at..at, tail);
+        if rebuilt != order {
+            order = rebuilt;
+            moved = true;
+        }
     }
     if !moved {
         return None;
@@ -4598,9 +4656,24 @@ impl Builder<'_, '_> {
         }
     }
 
-    fn push_level(&mut self) {
+    fn push_level(&mut self, apart: bool) {
         self.lvl_next += 1;
+        self.spans.push(LevelSpan {
+            level: self.lvl_next,
+            parent: self.lvl_stack.last().copied().unwrap_or(0),
+            apart,
+            start: self.events.len(),
+            end: usize::MAX,
+        });
         self.lvl_stack.push(self.lvl_next);
+    }
+
+    fn pop_level(&mut self) {
+        if let Some(l) = self.lvl_stack.pop()
+            && let Some(sp) = self.spans.iter_mut().rev().find(|sp| sp.level == l)
+        {
+            sp.end = self.events.len();
+        }
     }
 
     fn subquery(&mut self, s: &Subquery, cols: &[Name]) {
@@ -4636,9 +4709,12 @@ impl Builder<'_, '_> {
             (Plan::Project { input, exprs }, Some(_)) if exprs.len() == 1 => Some((input.clone(), exprs[0].clone())),
             _ => None,
         };
+        // (A MIN / MAX InitPlan the planner made: its path's quals are its level's, whose
+        // InitPlans they read are that level's, attached to its top by SS_attach_initplans.)
+        let minmax = s.id >= crate::sql::paths::PLANNER_SUBQUERY_BASE && s.params.is_empty();
         let mut node = match &test {
-            Some((input, _)) => self.level(input),
-            None => self.level(&s.plan),
+            Some((input, _)) => self.level_in(input, minmax),
+            None => self.level_in(&s.plan, minmax),
         };
         if s.kind == SubqueryKind::Exists {
             // simplify_EXISTS_query: the subquery returns no columns.
@@ -4847,13 +4923,20 @@ impl Builder<'_, '_> {
 
     /// A query level (the statement, a CTE or a subquery): its root carries its InitPlans.
     fn level(&mut self, p: &Arc<Plan>) -> ExNode {
-        self.inits.push(Vec::new());
+        self.level_in(p, false)
+    }
+
+    /// `level`; `shared`: its InitPlans are the enclosing level's.
+    fn level_in(&mut self, p: &Arc<Plan>, shared: bool) -> ExNode {
+        if !shared {
+            self.inits.push(Vec::new());
+        }
         let saved_depth = std::mem::take(&mut self.proj_depth);
         self.level_tops.insert(addr(p));
         self.group_tops.insert(grouping_top(p));
-        self.push_level();
+        self.push_level(false);
         let mut node = self.node(p).node;
-        self.lvl_stack.pop();
+        self.pop_level();
         self.proj_depth = saved_depth;
         self.settle(&mut node);
         if self.o.verbose {
@@ -4862,6 +4945,9 @@ impl Builder<'_, '_> {
             // (A LockRows at the level's top returns its rows' marks too, resjunk, and so
             // do the Limits over it, which return their input's target list.)
             lock_junk(&mut node);
+        }
+        if shared {
+            return node;
         }
         let mut inits = self.inits.pop().unwrap_or_default();
         // (SS_attach_initplans: in the order they were made, once renumbered.)
@@ -5006,11 +5092,11 @@ impl Builder<'_, '_> {
         let apart = matches!(&**p, Plan::Barrier { .. });
         self.depth += apart as usize;
         if apart {
-            self.push_level();
+            self.push_level(true);
         }
         let mut b = self.convert(p);
         if apart {
-            self.lvl_stack.pop();
+            self.pop_level();
         }
         self.depth -= apart as usize;
         // (The MIN / MAX InitPlans the node's expressions run: their costs are its own.)
@@ -5765,7 +5851,30 @@ impl Builder<'_, '_> {
                 } else {
                     // (Over a set operation: its Subquery Scan checks it.)
                     let setop = matches!(subquery_input(input), Plan::SetOp { .. } | Plan::Barrier { .. });
-                    self.fold_filter(c, pred, key, setop)
+                    // (A HAVING over MIN / MAX aggregates made InitPlans: it reads their
+                    // Params, as preprocess_minmax_aggregates replaced the Aggrefs, so it
+                    // is the Result's constant qual.)
+                    let minmax_having = match &**input {
+                        Plan::Project { input: one, exprs }
+                            if matches!(&**one, Plan::One)
+                                && !exprs.is_empty()
+                                && exprs.iter().all(|e| {
+                                    matches!(e, Expr::Subquery(s) if s.id >= crate::sql::paths::PLANNER_SUBQUERY_BASE && s.params.is_empty())
+                                        || matches!(e, Expr::Const(..))
+                                }) =>
+                        {
+                            pred.clone()
+                                .transform(&mut |x| {
+                                    Ok(match x {
+                                        Expr::Col(i, t) => exprs.get(i).cloned().unwrap_or(Expr::Col(i, t)),
+                                        x => x,
+                                    })
+                                })
+                                .ok()
+                        }
+                        _ => None,
+                    };
+                    self.fold_filter(c, minmax_having.as_ref().unwrap_or(pred), key, setop)
                 };
                 // (The subquery's InitPlans are its top node's: under the Subquery Scan.)
                 let mut out = out;
@@ -17305,6 +17414,7 @@ fn estimate_builder<'c, 'a>(plan: &Arc<Plan>, ctx: &'c ExecCtx<'a>, o: &'c Optio
         events: Vec::new(),
         lvl_stack: Vec::new(),
         lvl_next: 0,
+        spans: Vec::new(),
         key_sub_ids: Default::default(),
         key_subs: HashMap::new(),
         phantoms: HashMap::new(),
@@ -17856,6 +17966,7 @@ pub fn setop_shape(left: &Arc<Plan>, right: &Arc<Plan>, intersect: bool, ctx: &E
         events: Vec::new(),
         lvl_stack: Vec::new(),
         lvl_next: 0,
+        spans: Vec::new(),
         key_sub_ids: Default::default(),
         key_subs: HashMap::new(),
         phantoms: HashMap::new(),
@@ -17952,6 +18063,7 @@ pub fn set_group_estimates(
         events: Vec::new(),
         lvl_stack: Vec::new(),
         lvl_next: 0,
+        spans: Vec::new(),
         key_sub_ids: Default::default(),
         key_subs: HashMap::new(),
         phantoms: HashMap::new(),
@@ -18057,6 +18169,7 @@ pub fn agg_redundant_keys(
         events: Vec::new(),
         lvl_stack: Vec::new(),
         lvl_next: 0,
+        spans: Vec::new(),
         key_sub_ids: Default::default(),
         key_subs: HashMap::new(),
         phantoms: HashMap::new(),
@@ -18142,6 +18255,7 @@ pub fn sets_sorted(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
         events: Vec::new(),
         lvl_stack: Vec::new(),
         lvl_next: 0,
+        spans: Vec::new(),
         key_sub_ids: Default::default(),
         key_subs: HashMap::new(),
         phantoms: HashMap::new(),
@@ -18250,6 +18364,7 @@ fn level_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> ExNode {
         events: Vec::new(),
         lvl_stack: Vec::new(),
         lvl_next: 0,
+        spans: Vec::new(),
         key_sub_ids: Default::default(),
         key_subs: HashMap::new(),
         phantoms: HashMap::new(),
@@ -18456,9 +18571,10 @@ fn entry_subquery_ids(e: &Expr) -> Vec<usize> {
 
 /// pullup_replace_vars puts a copy of a pulled-up subquery's output expression in each place
 /// that reads it: a sub-select two entries of a projection read is two SubPlans (InitPlans)
-/// there. The plan with each such later copy given an id of its own (EXPLAIN without
-/// ANALYZE: the executor shares one), when there is one.
-fn split_shared_subqueries(p: &Arc<Plan>) -> Option<Arc<Plan>> {
+/// there, each run where it is read. The plan with each such later copy given an id of its
+/// own (and its plan nodes: the executor runs and caches each apart), when there is one.
+/// Applied to every query level as it is planned (`paths::plan_query`).
+pub(crate) fn split_shared_subqueries(p: &Arc<Plan>) -> Option<Arc<Plan>> {
     fn shared(exprs: &[Expr]) -> bool {
         let mut seen = std::collections::HashSet::new();
         exprs.iter().any(|e| {
@@ -18745,6 +18861,7 @@ pub fn explain(
         }
         return out;
     }
+    // (The planner made the copies already; a plan built otherwise gets them here.)
     let split = if instr.is_none() { split_shared_subqueries(plan) } else { None };
     let plan = split.as_ref().unwrap_or(plan);
     // (Built again when it groups partitionwise: the parents' names go unused then.)
@@ -18829,6 +18946,7 @@ pub fn explain(
         events: Vec::new(),
         lvl_stack: Vec::new(),
         lvl_next: 0,
+        spans: Vec::new(),
         key_sub_ids: Default::default(),
         key_subs: HashMap::new(),
         phantoms: HashMap::new(),
@@ -18879,7 +18997,7 @@ pub fn explain(
     }
     // (Again with the SubPlans numbered in the order Postgres plans them.)
     if renumber.is_none()
-        && let Some(r) = renumbering(&b.events, matches!(&**plan, Plan::Merge(_)))
+        && let Some(r) = renumbering(&b.events, &b.spans, matches!(&**plan, Plan::Merge(_)))
     {
         renumber = Some(std::rc::Rc::new(r));
         continue;
