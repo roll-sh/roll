@@ -440,6 +440,9 @@ struct ExNode {
     /// The resjunk GROUP BY keys a level's grouping returns (`group_tops`): the sorts and
     /// limits above it return them too (`carry_group_junk`).
     junk_keys: Vec<String>,
+    /// A scan: the columns its join clauses read, as they came into its reltarget
+    /// (`ScanPlan::reltarget`), named as its output names them.
+    rel_order: Vec<String>,
     /// Output columns (empty: not tracked).
     cols: Vec<ColInfo>,
     /// The order rows come out in, as sort keys show (empty: none known).
@@ -1800,6 +1803,14 @@ fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
                 }
             }
         }
+        // (A scan's reltarget has its join clauses' columns, read above or not.)
+        if let Plan::Scan(sc) = p {
+            for &c in sc.reltarget.0.iter() {
+                if let Some(n) = needed.get_mut(c) {
+                    *n = true;
+                }
+            }
+        }
         out.insert(addr(p), needed);
         let mut es = Vec::new();
         node_exprs(p, &mut es);
@@ -2542,6 +2553,27 @@ impl AltSubPlan {
     }
 }
 
+/// A scan's reltarget join clause columns (`ScanPlan::reltarget`).
+fn scan_reltarget(p: &Plan) -> Vec<usize> {
+    match p {
+        Plan::Scan(s) => s.reltarget.0.to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+/// Where `o` comes into the reltarget of the scan under `n` that returns it (`rel_order`).
+fn rel_rank(n: &ExNode, o: &str) -> usize {
+    if n.is_scan() {
+        return n.rel_order.iter().position(|x| x == o).unwrap_or(usize::MAX);
+    }
+    for c in &n.children {
+        if matches!(c.relationship, Some("Outer" | "Inner")) && c.output.iter().any(|x| x == o || format!("({x})") == o) {
+            return rel_rank(c, o);
+        }
+    }
+    usize::MAX
+}
+
 /// The target lists below a query level's top node (whose list is the level's target
 /// list) in Postgres's order: a scan whose consumer wants a small target list (a Sort, a
 /// Hash, a Materialize or Memoize) returns its reltarget, what the level's target list
@@ -2603,7 +2635,10 @@ fn tlist_layout_at(top: &mut ExNode, locked: bool) {
                 rel_of(o).is_some_and(|_| matches!(o.rsplit('.').next(), Some("tableoid" | "ctid" | "xmin" | "xmax" | "cmin" | "cmax")))
             });
             if (small_parent || locked || sys) && n.node_type != "Index Only Scan" && n.output.iter().all(|o| rel_of(o).is_some()) {
-                n.output.sort_by_key(rank);
+                // (The target list's columns, then the join clauses' as they came in.)
+                let order = std::mem::take(&mut n.rel_order);
+                n.output.sort_by_key(|o| (rank(o), order.iter().position(|x| x == o).unwrap_or(usize::MAX)));
+                n.rel_order = order;
             }
             return;
         }
@@ -2611,7 +2646,7 @@ fn tlist_layout_at(top: &mut ExNode, locked: bool) {
             // (Each relation's columns in its reltarget's order; the relations, and the
             // values computed or referred to, where they are.)
             let mut groups: Vec<Option<String>> = Vec::new();
-            let mut keys: Vec<(usize, usize)> = Vec::new();
+            let mut keys: Vec<(usize, (usize, usize))> = Vec::new();
             for (i, o) in n.output.iter().enumerate() {
                 match rel_of(o) {
                     Some(r) => {
@@ -2622,11 +2657,11 @@ fn tlist_layout_at(top: &mut ExNode, locked: bool) {
                                 groups.len() - 1
                             }
                         };
-                        keys.push((g, rank(o)));
+                        keys.push((g, (rank(o), rel_rank(n, o))));
                     }
                     None => {
                         groups.push(None);
-                        keys.push((groups.len() - 1, i));
+                        keys.push((groups.len() - 1, (i, 0)));
                     }
                 }
             }
@@ -2678,7 +2713,7 @@ fn tlist_layout_at(top: &mut ExNode, locked: bool) {
                     }
                 }
             }
-            let mut items: Vec<((usize, usize), String)> = keys.into_iter().zip(std::mem::take(&mut n.output)).collect();
+            let mut items: Vec<((usize, (usize, usize)), String)> = keys.into_iter().zip(std::mem::take(&mut n.output)).collect();
             items.sort_by_key(|x| x.0);
             n.output = items.into_iter().map(|x| x.1).collect();
             return;
@@ -10823,6 +10858,7 @@ impl Builder<'_, '_> {
                 .cloned()
                 .collect();
             let mut n = self.planned_scan(p, s, d, &names);
+            n.rel_order = s.reltarget.0.iter().filter_map(|&c| names.get(c)).map(|nm| self.pick(nm, Cx::Output)).collect();
             n.width = width;
             for c in &mut cols {
                 if let Some(v) = &mut c.var {
@@ -15264,6 +15300,10 @@ impl Builder<'_, '_> {
                         add(c - nleft, &mut order);
                     }
                 }
+                // (And its reltarget's join clause columns, whether read here or not.)
+                for c in scan_reltarget(if swapped { left } else { right }) {
+                    add(c, &mut order);
+                }
                 order.sort_unstable();
                 if order.len() < width {
                     r.node.output = order.iter().map(|&i| self.pick(&r.internal[i], Cx::Output)).collect();
@@ -15505,6 +15545,10 @@ impl Builder<'_, '_> {
                                 add(c - inner_off, &mut order);
                             }
                         }
+                    }
+                    // (And its reltarget's join clause columns, whether read here or not.)
+                    for c in scan_reltarget(if swapped { left } else { right }) {
+                        add(c, &mut order);
                     }
                     // (A pulled-up subquery's PlaceHolderVars come after the relation's
                     // Vars: add_placeholders_to_base_rels adds them last.)

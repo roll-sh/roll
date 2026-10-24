@@ -494,6 +494,10 @@ pub struct Binder<'b, 'a> {
     pub(crate) view_stack: Vec<u32>,
     /// FROM-clause subqueries and views bound so far.
     pub(crate) hidden_rtes: usize,
+    /// Each scan's join clause columns so far (`ScanPlan::reltarget`), by range table index;
+    /// and the columns LATERAL items read of it (find_lateral_references, before any clause).
+    pub(crate) rel_vars: Vec<(crate::sql::plan::Rti, Vec<usize>)>,
+    pub(crate) lateral_vars: Vec<(crate::sql::plan::Rti, Vec<usize>)>,
     /// The last whole-row reference bound was of a relation whose whole row is a Var to the
     /// planner (`ScopeRel::whole_var`).
     pub(crate) whole_var_ref: bool,
@@ -652,6 +656,8 @@ impl<'b, 'a> Binder<'b, 'a> {
             rls_stack: Vec::new(),
             view_stack: Vec::new(),
             hidden_rtes: 0,
+            rel_vars: Vec::new(),
+            lateral_vars: Vec::new(),
             whole_var_ref: false,
             no_params: false,
             unplanned: false,

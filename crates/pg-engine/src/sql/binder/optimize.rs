@@ -2225,7 +2225,7 @@ fn oj_class_clauses(above: Vec<Expr>, nleft: usize, all: &[Expr]) -> Vec<Expr> {
 /// columns and the inner joins below (a pulled-up subquery's WHERE, pushed into its scan
 /// before the join above is formed). For `ec_constants`, which takes only their
 /// `column = constant` equalities.
-fn input_restrictions(p: &Plan) -> Vec<Expr> {
+pub(crate) fn input_restrictions(p: &Plan) -> Vec<Expr> {
     restrictions(p, false)
 }
 

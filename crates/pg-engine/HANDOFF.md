@@ -37,9 +37,9 @@ harness and score in `tests/`:
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,125 of 51,150 statements match (99.95%).** 25 differ. The full
+- **Regression suite: 51,129 of 51,150 statements match (99.96%).** 21 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - All 25 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
+  - All 21 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
     order since round 16, agent 17: join relations parameterized by LATERAL references).
   - None differs by design any more (aggregates `balk` matches since round 16, agent 14: a
     Finalize Aggregate runs the user-defined combine functions).
@@ -345,21 +345,22 @@ All remaining work is planner/EXPLAIN (`src/sql/paths*`, `src/sql/binder/optimiz
 numbers refer to the regress harness's per-file unit counter; `tests/regress/STATUS.md` lists
 them all with the "Fixed in round N" sections describing what was already tried.
 
-1. **PlaceHolderVars evaluated at joins** (join 345, 360, 362/363, 368;
+1. **PlaceHolderVars evaluated at joins** (join 360, 362/363, 368;
    partition_join 41). Round 14 (agent 8) evaluates them at joins: a pulled-up subquery's
    outputs an outer join nulls (as written) are PlaceHolderVars the join group computes at the
    lowest relation of their ph_eval_at (`lift.rs` `flatten_join_subquery`, `plan::phv_projection`,
    `joinpath.rs` `Phv` / `with_phvs`), so 328/343/388 match. Left: remove_useless_result_rtes
    moving PlaceHolderVars of RESULT relations onto their join partner (347, 366: done), one computed
    in a LATERAL subquery scan (345: the plan's shape since round 16, agent 30, PlaceHolderVar
-   nested loop parameters computed by the outer side; left a reltarget's column order) or over
+   nested loop parameters computed by the outer side; its reltarget's column order since
+   agent 28: done) or over
    a parameterized appendrel (360: a FROM-less UNION ALL arm as an appendrel member),
    PlaceHolderVars with sub-selects (362/363), a dummy Result showing a view's expressions
    (368), a LATERAL subquery over a join pulled up with PlaceHolderVars carrying ph_lateral
    (join 332, partition_join 41 / 204; STATUS.md round 16, agent 30). (744, a hash join
    parameterized by a LATERAL inner side: done in round 16, agent 17; 426, a JOIN USING alias
    as a PlaceHolderVar at its join: round 16, agent 30.)
-2. **Remaining join / partition_join / partition_prune plan shapes** (join 18, partition_join 6,
+2. **Remaining join / partition_join / partition_prune plan shapes** (join 14, partition_join 6,
    partition_prune 1 unit; round 14's agent 5 and round 16's agent 12 sections in STATUS.md have
    what changed and why the rest is open; round 16's agent 17 section has join relations
    parameterized by LATERAL references and why partition_prune 410 stays open (265 and 442 done in
@@ -368,10 +369,13 @@ them all with the "Fixed in round N" sections describing what was already tried.
    with why 86 stays open; join 123/410/502/503 done in round 16, agent 22: a FROM
    subquery's sorted paths, class clauses' first making, ParamPathInfo rows; join
    499/543/612/632/654/655/819/888 done in round 16, agent 23: self-join elimination order,
-   SubPlan classes, semi join unique-ification, join target list order, with why 560/620/715
-   stay open; join 662/663/671/706/781, partition_join 52/234/553/588/608 done in round
+   SubPlan classes, semi join unique-ification, join target list order; join 345/560/620/674
+   done in round 16, agent 28: the join search's enumeration (classes with constants across semi
+   joins, replaced equalities in min_lefthand), scans' reltargets (`ScanPlan::reltarget`),
+   with why 715 stays open (a FROM subquery holding a semi join is planned as a group of its
+   own, not flattened into its parent's); join 662/663/671/706/781, partition_join 52/234/553/588/608 done in round
    16, agent 26, whose section lists the causes of the rest of join 674–808 and
-   partition_join 98–300): cost-driven choices (join 424/450/560/715),
+   partition_join 98–300): cost-driven choices (join 715),
    partitionwise LATERAL joins left (partition_join 48/207 done in round 16, agent 19; 204:
    a PlaceHolderVar), partition_prune 410. (partition_join 86, a unique-ified side passing
    non-key columns through, done in round 16, agent 31: a hashed Distinct with pass-through

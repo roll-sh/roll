@@ -1,0 +1,183 @@
+> create table a28_rt_sj (a int unique, b int, c int unique)
+-- CREATE TABLE
+
+> insert into a28_rt_sj values (1, null, 2), (null, 2, null), (2, 1, 1)
+-- INSERT 0 3
+
+> analyze a28_rt_sj
+-- ANALYZE
+
+> explain (verbose, costs off)
+> select t1.a from a28_rt_sj t1 where t1.b in (
+>   select t2.b from a28_rt_sj t2 join a28_rt_sj t3 on t2.c = t3.c)
+QUERY PLAN:text
+Hash Semi Join
+  Output: t1.a
+  Hash Cond: (t1.b = t3.b)
+  ->  Seq Scan on public.a28_rt_sj t1
+        Output: t1.a, t1.b, t1.c
+  ->  Hash
+        Output: t3.c, t3.b
+        ->  Seq Scan on public.a28_rt_sj t3
+              Output: t3.c, t3.b
+              Filter: (t3.c IS NOT NULL)
+-- EXPLAIN
+
+> select t1.a from a28_rt_sj t1 where t1.b in (
+>   select t2.b from a28_rt_sj t2 join a28_rt_sj t3 on t2.c = t3.c)
+a:int4
+2
+-- SELECT 1
+
+> create table a28_rt_t (a int unique, b int)
+-- CREATE TABLE
+
+> insert into a28_rt_t values (1, 2)
+-- INSERT 0 1
+
+> explain (verbose)
+> select t1.a from a28_rt_t t1
+>   left join a28_rt_t t2 on t1.a = t2.a
+>        join a28_rt_t t3 on true
+> where exists (select 1 from a28_rt_t t4
+>                 join a28_rt_t t5 on t4.b = t5.b
+>                 join a28_rt_t t6 on t5.b = t6.b
+>               where t1.a = t4.a and t3.a = t5.a and t4.a = 1)
+QUERY PLAN:text
+Nested Loop  (cost=89.91..100.45 rows=1 width=4)
+  Output: t1.a
+  Inner Unique: true
+  ->  Nested Loop  (cost=89.76..100.25 rows=1 width=8)
+        Output: t1.a, t5.a
+        ->  Index Only Scan using a28_rt_t_a_key on public.a28_rt_t t1  (cost=0.15..8.17 rows=1 width=4)
+              Output: t1.a
+              Index Cond: (t1.a = 1)
+        ->  HashAggregate  (cost=89.60..90.84 rows=124 width=4)
+              Output: t5.a
+              Group Key: t5.a
+              ->  Hash Join  (cost=46.98..89.29 rows=124 width=4)
+                    Output: t5.a
+                    Hash Cond: (t6.b = t4.b)
+                    ->  Seq Scan on public.a28_rt_t t6  (cost=0.00..32.60 rows=2260 width=4)
+                          Output: t6.a, t6.b
+                    ->  Hash  (cost=46.84..46.84 rows=11 width=12)
+                          Output: t4.b, t5.b, t5.a
+                          ->  Hash Join  (cost=8.18..46.84 rows=11 width=12)
+                                Output: t4.b, t5.b, t5.a
+                                Inner Unique: true
+                                Hash Cond: (t5.b = t4.b)
+                                ->  Seq Scan on public.a28_rt_t t5  (cost=0.00..32.60 rows=2260 width=8)
+                                      Output: t5.a, t5.b
+                                ->  Hash  (cost=8.17..8.17 rows=1 width=8)
+                                      Output: t4.b, t4.a
+                                      ->  Index Scan using a28_rt_t_a_key on public.a28_rt_t t4  (cost=0.15..8.17 rows=1 width=8)
+                                            Output: t4.b, t4.a
+                                            Index Cond: (t4.a = 1)
+  ->  Index Only Scan using a28_rt_t_a_key on public.a28_rt_t t3  (cost=0.15..0.19 rows=1 width=4)
+        Output: t3.a
+        Index Cond: (t3.a = t5.a)
+-- EXPLAIN
+
+> create table a28_rt_m (p int, q int, r int)
+-- CREATE TABLE
+
+> create table a28_rt_n (x int, y int)
+-- CREATE TABLE
+
+> insert into a28_rt_m values (1, 2, 3)
+-- INSERT 0 1
+
+> insert into a28_rt_n values (2, 1)
+-- INSERT 0 1
+
+> explain (verbose, costs off)
+> select a28_rt_m.r from a28_rt_m join a28_rt_n on a28_rt_m.q = a28_rt_n.x and a28_rt_m.p = a28_rt_n.y
+QUERY PLAN:text
+Merge Join
+  Output: a28_rt_m.r
+  Merge Cond: ((a28_rt_m.q = a28_rt_n.x) AND (a28_rt_m.p = a28_rt_n.y))
+  ->  Sort
+        Output: a28_rt_m.r, a28_rt_m.q, a28_rt_m.p
+        Sort Key: a28_rt_m.q, a28_rt_m.p
+        ->  Seq Scan on public.a28_rt_m
+              Output: a28_rt_m.r, a28_rt_m.q, a28_rt_m.p
+  ->  Sort
+        Output: a28_rt_n.x, a28_rt_n.y
+        Sort Key: a28_rt_n.x, a28_rt_n.y
+        ->  Seq Scan on public.a28_rt_n
+              Output: a28_rt_n.x, a28_rt_n.y
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select a28_rt_m.r from a28_rt_m join a28_rt_n on a28_rt_m.q = a28_rt_n.x and a28_rt_m.p = a28_rt_n.y
+> for update
+QUERY PLAN:text
+LockRows
+  Output: a28_rt_m.r, a28_rt_m.ctid, a28_rt_n.ctid
+  ->  Merge Join
+        Output: a28_rt_m.r, a28_rt_m.ctid, a28_rt_n.ctid
+        Merge Cond: ((a28_rt_m.q = a28_rt_n.x) AND (a28_rt_m.p = a28_rt_n.y))
+        ->  Sort
+              Output: a28_rt_m.r, a28_rt_m.ctid, a28_rt_m.q, a28_rt_m.p
+              Sort Key: a28_rt_m.q, a28_rt_m.p
+              ->  Seq Scan on public.a28_rt_m
+                    Output: a28_rt_m.r, a28_rt_m.ctid, a28_rt_m.q, a28_rt_m.p
+        ->  Sort
+              Output: a28_rt_n.ctid, a28_rt_n.x, a28_rt_n.y
+              Sort Key: a28_rt_n.x, a28_rt_n.y
+              ->  Seq Scan on public.a28_rt_n
+                    Output: a28_rt_n.ctid, a28_rt_n.x, a28_rt_n.y
+-- EXPLAIN
+
+> select a28_rt_m.r from a28_rt_m join a28_rt_n on a28_rt_m.q = a28_rt_n.x and a28_rt_m.p = a28_rt_n.y
+> for update
+r:int4
+3
+-- SELECT 1
+
+> begin
+-- BEGIN
+
+> set local enable_hashjoin = off
+-- SET
+
+> set local enable_mergejoin = off
+-- SET
+
+> explain (verbose, costs off)
+> select a28_rt_m.r from a28_rt_m join a28_rt_n on a28_rt_m.q = a28_rt_n.x and a28_rt_m.p = a28_rt_n.y
+QUERY PLAN:text
+Nested Loop
+  Output: a28_rt_m.r
+  Join Filter: ((a28_rt_m.q = a28_rt_n.x) AND (a28_rt_m.p = a28_rt_n.y))
+  ->  Seq Scan on public.a28_rt_n
+        Output: a28_rt_n.x, a28_rt_n.y
+  ->  Materialize
+        Output: a28_rt_m.r, a28_rt_m.q, a28_rt_m.p
+        ->  Seq Scan on public.a28_rt_m
+              Output: a28_rt_m.r, a28_rt_m.q, a28_rt_m.p
+-- EXPLAIN
+
+> explain (verbose, costs off)
+> select a28_rt_m.r from a28_rt_m left join a28_rt_n on a28_rt_n.y = 1 and a28_rt_m.q = a28_rt_n.x
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: a28_rt_m.r
+  Join Filter: (a28_rt_m.q = a28_rt_n.x)
+  ->  Seq Scan on public.a28_rt_m
+        Output: a28_rt_m.p, a28_rt_m.q, a28_rt_m.r
+  ->  Materialize
+        Output: a28_rt_n.x
+        ->  Seq Scan on public.a28_rt_n
+              Output: a28_rt_n.x
+              Filter: (a28_rt_n.y = 1)
+-- EXPLAIN
+
+> select a28_rt_m.r from a28_rt_m left join a28_rt_n on a28_rt_n.y = 1 and a28_rt_m.q = a28_rt_n.x
+r:int4
+3
+-- SELECT 1
+
+> commit
+-- COMMIT
+

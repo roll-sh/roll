@@ -681,6 +681,8 @@ impl Planner<'_, '_> {
             }
         }
         *clauses = kept;
+        // (remove_self_join_rel: the kept relation's reltarget takes the removed one's.)
+        let removed_vars = rs.reltarget.0.clone();
         leaves.remove(r);
         let k = if k > r { k - 1 } else { k };
         let Plan::Scan(ks) = &mut leaves[k].0 else { unreachable!() };
@@ -688,6 +690,15 @@ impl Planner<'_, '_> {
             if !ks.phv_quals.iter().any(|x| x.same_as(&q)) {
                 ks.phv_quals.push(q);
             }
+        }
+        if removed_vars.iter().any(|c| !ks.reltarget.0.contains(c)) {
+            let mut v = (*ks.reltarget.0).clone();
+            for &c in removed_vars.iter() {
+                if !v.contains(&c) {
+                    v.push(c);
+                }
+            }
+            ks.reltarget = crate::sql::plan::RelVars(Arc::new(v));
         }
         let mut all = Vec::new();
         if let Some(f) = ks.filter.take() {

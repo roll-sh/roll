@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51125 (**99.95%**) |
-| units differing | 25 |
+| units matching | 51129 (**99.96%**) |
+| units differing | 21 |
 | files fully matching | 227 |
 | engine output == expected/*.out (pg_regress "ok") | 188 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 25 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 21 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 25 units
-join (18), partition_join (6), partition_prune (1)
+### EXPLAIN (group C1) — 21 units
+join (14), partition_join (6), partition_prune (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -106,6 +106,115 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 28 (join search enumeration, semi joins' classes, scans' reltargets)
+
+Measured in subset runs of 36 planner-heavy files (test_setup, create_index, create_misc,
+create_view, select, union, subselect, join, aggregates, inherit, insert_conflict, limit,
+returning, updatable_views, merge, with, rules, rowsecurity, select_views, select_distinct,
+equivclass, partition_join, partition_prune, partition_aggregate, select_parallel,
+incremental_sort, memoize, join_hash, explain, stats_ext, groupingsets, window, tsrf,
+rangefuncs, sqljson_jsontable, collate), unit by unit against a run of the base: on cce1f9c
+13393 -> 13394 (first batch), rebased on e7e37e6 13393 -> 13394 (first two batches) -> 13396
+(all three), rebased on 01368ea 13399 -> 13402, on dc5a6a2 13407 -> 13410, on 4ae4438 13412 -> 13414 (join 560, 620), on 7d29166 13413 -> 13416 (join 345, 560, 620), on e958e87 13411 -> 13417 (join 345, 560, 620; select_parallel 112 / 116 / 182 differed in
+the base run only, its Gather workers starting late under load), on fafa1cd 13414 -> 13415
+(join 345, 560, 620; select_parallel 112 / 116 lost to the reference's late workers in that
+run, 250 / 250 alone), on 9d18ee9 13414 -> 13417 (join 345, 560, 620), on 05af7e5 13416 -> 13420 (join 345, 560, 620, 674; the baseline and the new run one after
+the other);
+none broken. Full
+runs of the whole schedule in one database: cce1f9c plus the first batch 51103, e7e37e6 plus
+the first two 51103 (unit by unit the same), plus the third 51105 (unit by unit: join 560 and
+620 more), 01368ea plus all three 51111, dc5a6a2 plus all three 51119 (every file as the table
+has it, join 905). Crate tests and clippy on each state.
+
+| file | fixed units |
+|---|---|
+| join | 345, 560, 620, 674 |
+
+(345 on 7d29166: agent 30 gave it Postgres's plan shape; the scan's column order,
+`t1.tenthous, t1.unique1` as its join clauses read them, is the reltarget below. 674 on
+05af7e5: agent 26's self-join elimination passes left only the kept scan's reltarget.)
+
+(706 too on the earlier bases, a class with a constant over a pulled-up subquery and
+clauseless pairs both ways round; agent 26 fixed it the same way meanwhile, 9f6aa35, and the
+rebase kept that version of the clauseless pairs.)
+
+What changed:
+
+- **Join search enumeration** (`joinpath.rs` `run`, `outerjoins.rs`; join_search_one_level,
+  make_rels_by_clause_joins, make_rels_by_clauseless_joins):
+  - An equivalence class with a constant still relates the relations it spans:
+    generate_base_implied_equalities marks has_eclass_joins for every class over several
+    relations, and have_relevant_eclass_joinclause has no ec_has_const test. The binder turns
+    such a class's join clauses into `x = k` restrictions (`ec_constants`), so the group finds
+    the classes again from its items' restrictions, one per constant (process_equivalence
+    merges classes sharing an equal member, the constant included). Agent 25 added the same
+    for groups without outer joins (`find_const_ecs`, `Search::const_ecs`); it now takes
+    groups with outer joins too, per join domain (process_equivalence matches a constant only
+    within one: a semi join starts none, an outer or anti join's right side is one of its
+    own), and items that aren't plain scans (`input_restrictions`).
+  - An equality such a class replaced is still its outer join's clause: make_outerjoininfo's
+    clause_relids are the quals as written, so a semi join's min_lefthand has the relation
+    (`RawJoin::kept`, from `JoinMeta::kept`). With both, join 560's five-relation join is
+    sized from its first pair, `{t1, unique(t4 t5 t6)}` (1 row; it was `t1` with
+    `{unique(...), t3}`, 124), and the plan is Postgres's.
+  - A relation with no join clause or restriction is tried at level 2 with every initial
+    relation, those before it too (make_rels_by_clauseless_joins; only
+    make_rels_by_clause_joins starts after it). In a group of two items of one outer join
+    (not `general`) the pair stays left side first: its make_join_rel takes the sides as
+    given (the first try of this swapped such joins' sides, wrong rows in updatable_views 841,
+    caught by the subset run).
+- **Semi joins' classes**: in a group whose outer joins are all semi joins (one join domain:
+  a semi join starts none, deconstruct_distribute gives its quals no ojscope) the semi joins'
+  clauses are class members and the group derives its classes' clauses as an inner join group
+  does. Agent 31 made the same change meanwhile (`semi_classes`, 217b6d0) and the rebase keeps
+  that one; on it, such a group also notes its class clauses' first making
+  (`note_derived`) and its base implied equalities, and a semi join's clauses are all join
+  clauses, none a Filter (create_nestloop_plan: IS_OUTER_JOIN is false for JOIN_SEMI).
+  `FROM a JOIN b ON a.x = b.x WHERE EXISTS (SELECT FROM c WHERE c.x = b.x)` joins b to the
+  unique-ified c by `b.x = c.x`, as Postgres (golden).
+- **A scan's reltarget** (`ScanPlan::reltarget`, `binder/select.rs`): build_base_rel_tlists,
+  then add_vars_to_targetlist: the target list's columns, then the LATERAL references
+  (find_lateral_references), then each join clause's columns in deconstruct_jointree's order:
+  the ON clauses bottom-up as the joins are bound, the WHERE's join clauses (a sublink that
+  stays a SubPlan with its outer values), then the semi / anti joins pull_up_sublinks makes
+  (they wrap the FROM list), an equality a class with a constant replaced included. An outer
+  join's clause counts when it reads the nonnullable side (its relids are the join's
+  ojscope); a degenerate one of the nullable side alone doesn't. Recorded per range table
+  index while binding (`Binder::rel_vars`, `lateral_vars`) and put on each level's scans;
+  self-join elimination gives the kept scan the removed one's (remove_self_join_rel).
+  EXPLAIN counts them in the scan's columns (its width), and a scan returning its reltarget
+  (under a Hash, a Materialize, a LockRows) lists them after the target list's in that
+  order, as a join lists each relation's columns (build_joinrel_tlist over the inputs'
+  reltargets): join 620 (`Output: t3.c, t3.b`: the column only the removed clause read
+  stays), join 560 (`t4.b, t4.a`; `t4.b, t5.b, t5.a`), agent 24's `rm3.q, rm3.p`.
+
+Goldens: `tests/sql/a28_join_search.sql`, `a28_reltarget.sql`.
+
+Looked at and left (why):
+
+- join 715: Postgres's plan needs three things. (1) The two pulled-up subqueries, each with an
+  EXISTS, are one join problem of seven relations (pull_up_subqueries puts their semi joins
+  in the parent's join tree); the engine plans a FROM subquery holding a semi join as a group
+  of its own first (`plan_query_limited` at bind time), and the parent's group takes the
+  planned subquery (a Project over the planned join) as one leaf: neither `gather` nor
+  `outerjoins::walk` descends into it, and the planned semi join is already unique-ified.
+  (2) Classes across both semi joins (`t1.id = t2.id = t3.id = t2_1.id = t3_1.id`): there
+  now with `semi_ec`, once the relations are one group. (3) A join path parameterized by
+  `t3` (`t3_1 ⋈ t4_1`, the index scan's `t3_1.id = t3.id` a class clause) as the second semi
+  join's inner side: general groups make parameterized join paths (param_source_rels allows
+  `t3` for the semi join's right side), so this should follow from (1) and (2). (1), keeping a
+  subquery's semi join unplanned for the parent's group, is the missing piece.
+- Seen while probing, not this round's (results match): a whole-row-marked FROM subquery's
+  Subquery Scan returns its unread outputs too (`s.*, s.x, s.y` for Postgres's `s.*, s.x`,
+  `FROM jt1, (SELECT * FROM jt2 OFFSET 0) s ... FOR UPDATE` with hash joins off); `n1.a <>
+  n2.a` with `n2.a = 1` is estimated 1.0 (neqjoinsel is 1 - eqjoinsel over the columns'
+  statistics, 0.78 for a three-row table: 2 rows for 3), which picks another join order over
+  analyzed tables; the class member order of `FROM q1 JOIN q2 ON q1.id = q2.id WHERE EXISTS
+  (SELECT FROM q3 WHERE q3.id = q2.id)` (Postgres's merge clause `q3.id = q1.id`, the engine's
+  `q1.id = q2.id` with the sides swapped).
+- Agent 24's join target list under row-mark junk (`t1.ctid, t1.a, s.*`): not reproduced
+  with SELECT ... FOR UPDATE over a subquery and a table, hash, merge or nested loop.
 
 ## Round 16, agent 31 (a unique-ified side's pass-through columns, semi joins' clauses in classes, nondeterministic constant classes)
 
@@ -4121,7 +4230,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 907 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (18) |
+| join | 925 | 911 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (14) |
 | aggregates | 556 | 556 | 100% | yes | no |  |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |

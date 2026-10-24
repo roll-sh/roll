@@ -474,7 +474,8 @@ struct Search<'s, 'c, 'a> {
     /// that parameterization has.
     ppi: std::cell::RefCell<Vec<(u32, u32, f64)>>,
     /// Per equivalence class with a constant that the restrictions of several items
-    /// equate with it (`a.x = 0 AND b.y = 0`: one class, no join clause), those items
+    /// equate with it (`a.x = 0 AND b.y = 0`: one class, no join clause; or `t1.a = t4.a`
+    /// with `t4.a = 1`, the join clause replaced by both restrictions), those items
     /// (have_relevant_eclass_joinclause counts them as joinable: the join is likely small).
     const_ecs: Vec<u32>,
     /// Columns of join clauses a class with a constant absorbed (the lifted tree's
@@ -3292,7 +3293,7 @@ impl Search<'_, '_, '_> {
             None => {
                 // (build_joinrel_restrictlist: the class clauses joining the pair made now,
                 // as the search shows them, unless made before.)
-                if self.kind == JoinKind::Inner && !self.general {
+                if self.kind == JoinKind::Inner && self.ec_mode() {
                     for &ci in &restrict {
                         let c = &self.clauses[ci];
                         if !c.ecable || c.on {
@@ -4568,7 +4569,7 @@ impl Search<'_, '_, '_> {
                     quals.push(j);
                     // (generate_join_implied_equalities_for_ecs makes it the parameters'
                     // member first, unless it was made before.)
-                    if self.kind == JoinKind::Inner && !self.general {
+                    if self.kind == JoinKind::Inner && self.ec_mode() {
                         self.note_derived(x, z, true);
                     }
                 }
@@ -5138,6 +5139,13 @@ impl Search<'_, '_, '_> {
 // ── the search ──
 
 impl Search<'_, '_, '_> {
+    /// The group's equivalence classes derive its join clauses (generate_join_implied_
+    /// equalities): a group of inner joins (or of two items' outer join), or one whose
+    /// outer joins are all semi joins (`semi_classes`).
+    fn ec_mode(&self) -> bool {
+        !self.general || self.semi_classes()
+    }
+
     /// standard_join_search's levels (join_search_one_level).
     fn run(&mut self) -> Option<(JP, bool)> {
         let n = self.leaves.len();
@@ -5164,12 +5172,14 @@ impl Search<'_, '_, '_> {
             let prev = levels[level - 1].clone();
             for (pi, &r) in prev.iter().enumerate() {
                 let rs = self.rels[r].set;
+                // (joininfo, has_eclass_joins, has_join_restriction.)
                 let has_join = if self.general {
                     self.clauses.iter().any(|c| c.req & rs != 0 && c.req & !rs != 0)
-                        || self.has_join_restriction(rs)
                         || self.const_ec_joins(rs)
+                        || self.has_join_restriction(rs)
                 } else {
-                    self.clauses.iter().any(|c| c.leaves & rs != 0 && c.leaves & !rs != 0) || self.const_ec_joins(rs)
+                    self.clauses.iter().any(|c| c.leaves & rs != 0 && c.leaves & !rs != 0)
+                        || self.const_ec_joins(rs)
                 };
                 // (make_rels_by_clause_joins starts past the rel itself at level 2;
                 // make_rels_by_clauseless_joins tries every base rel, where any order is
@@ -5200,8 +5210,8 @@ impl Search<'_, '_, '_> {
                     let as_ = self.rels[a].set;
                     let joinable = if self.general {
                         self.clauses.iter().any(|c| c.req & as_ != 0 && c.req & !as_ != 0)
-                            || self.has_join_restriction(as_)
                             || self.const_ec_joins(as_)
+                            || self.has_join_restriction(as_)
                     } else {
                         self.clauses.iter().any(|c| c.leaves & as_ != 0 && c.leaves & !as_ != 0)
                             || self.const_ec_joins(as_)
@@ -5240,23 +5250,35 @@ impl Search<'_, '_, '_> {
     }
 
     /// The items whose restrictions equate one of their columns with the same
-    /// pseudo-constant (process_equivalence matches a constant member within a join
-    /// domain: one class), per such constant: only in a group without outer joins, one
-    /// join domain.
+    /// pseudo-constant (process_equivalence matches a constant member only within a join
+    /// domain: one class), per such constant. A semi join starts no join domain; an outer
+    /// join's (or anti join's) right side is one of its own, so only items in the same one
+    /// share a class. (The binder turned a class's join clauses into such restrictions,
+    /// `ec_constants`: `t1.a = t4.a` with `t4.a = 1`.)
     fn find_const_ecs(&self) -> Vec<u32> {
-        if !self.sjs.is_empty() {
-            return Vec::new();
-        }
-        let mut classes: Vec<(Expr, u32)> = Vec::new();
-        for (l, leaf) in self.leaves.iter().enumerate() {
-            let filter = match (&leaf.scan, &leaf.plan) {
-                (Some((sp, _)), _) => sp.filter.as_ref(),
-                (None, Plan::Scan(sp)) => sp.filter.as_ref(),
-                _ => None,
+        // (Each item's join domain: the innermost non-semi outer join whose right side
+        // has it.)
+        let domain = |l: usize| {
+            self.sjs
+                .iter()
+                .enumerate()
+                .filter(|(_, j)| j.kind != JoinKind::Semi && j.syn_r >> l & 1 == 1)
+                .min_by_key(|(_, j)| j.syn_r.count_ones())
+                .map(|(i, _)| i)
+        };
+        let mut classes: Vec<(Expr, Option<usize>, u32)> = Vec::new();
+        for (l, leaf) in self.leaves.iter().enumerate().take(32) {
+            let parts = match (&leaf.scan, &leaf.plan) {
+                (Some((sp, _)), _) => {
+                    let mut parts = Vec::new();
+                    if let Some(f) = &sp.filter {
+                        conjuncts(f.clone(), &mut parts);
+                    }
+                    parts
+                }
+                (None, p) => crate::sql::binder::optimize::input_restrictions(p),
             };
-            let Some(f) = filter else { continue };
-            let mut parts = Vec::new();
-            conjuncts(f.clone(), &mut parts);
+            let dom = domain(l);
             for q in parts {
                 let Expr::Call(d, args, _) = &q else { continue };
                 if d.name != "=" || args.len() != 2 || d.coll.as_ref().is_some_and(|c| !c.deterministic) {
@@ -5266,19 +5288,21 @@ impl Search<'_, '_, '_> {
                     (Expr::Col(..), k) | (k, Expr::Col(..))
                         if k.columns().is_empty()
                             && !k.is_volatile()
-                            && crate::sql::binder::optimize::pseudo_constant(k) =>
+                            && crate::sql::binder::optimize::pseudo_constant(k)
+                            // (A LATERAL item's `Outer` values are other items' columns.)
+                            && !(leaf.lateral.is_some() && k.has_outer_refs()) =>
                     {
                         k
                     }
                     _ => continue,
                 };
-                match classes.iter_mut().find(|(e, _)| e.same_as(k) && e.ty() == k.ty()) {
-                    Some(c) => c.1 |= 1u32 << l,
-                    None => classes.push((k.clone(), 1u32 << l)),
+                match classes.iter_mut().find(|(e, dm, _)| e.same_as(k) && e.ty() == k.ty() && *dm == dom) {
+                    Some(c) => c.2 |= 1u32 << l,
+                    None => classes.push((k.clone(), dom, 1u32 << l)),
                 }
             }
         }
-        classes.into_iter().map(|c| c.1).filter(|m| m.count_ones() > 1).collect()
+        classes.into_iter().map(|c| c.2).filter(|m| m.count_ones() > 1).collect()
     }
 
     /// have_relevant_eclass_joinclause for a class with a constant: `a` and `b` each have
@@ -6044,9 +6068,14 @@ impl Search<'_, '_, '_> {
                 // checked on its result (Postgres's "other quals": the join's Filter).
                 // (So is a clause moved into a parameterized join from above it: one needing
                 // relations outside the join, RINFO_IS_PUSHED_DOWN.)
+                // (A semi join's clauses are all join clauses: IS_OUTER_JOIN is false for it,
+                // create_nestloop_plan.)
                 let post_join = |c: usize| {
                     let cl = &self.clauses[c];
-                    self.general && *jt != Jt::Inner && (cl.sj.is_none() || (cl.req | cl.leaves) & !p.set != 0)
+                    self.general
+                        && *jt != Jt::Inner
+                        && !(self.semi_classes() && matches!(jt, Jt::Semi | Jt::RightSemi))
+                        && (cl.sj.is_none() || (cl.req | cl.leaves) & !p.set != 0)
                 };
                 let post: Vec<usize> = quals.iter().copied().filter(|&c| post_join(c)).collect();
                 let mut cond: Vec<Expr> = quals
@@ -8063,7 +8092,7 @@ impl Planner<'_, '_> {
         // equal there, a restriction of it (each to the one before); the joins need just
         // one equality per class (`crossing`).
         let mut leaves = leaves;
-        if matches!(s.kind, JoinKind::Inner | JoinKind::Semi) && !s.general {
+        if matches!(s.kind, JoinKind::Inner | JoinKind::Semi) && s.ec_mode() {
             let col_ty = |g: usize| {
                 if let Some(k) = g.checked_sub(s.ec.len()) {
                     return Some(s.xm[k].expr.ty());

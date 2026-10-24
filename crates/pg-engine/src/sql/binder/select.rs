@@ -1738,6 +1738,13 @@ impl Binder<'_, '_> {
                 }
             };
             let pred = self.simplify_where(pred);
+            let (src, parts) = if self.deparse {
+                (Vec::new(), Vec::new())
+            } else {
+                let mut parts = Vec::new();
+                optimize::conjuncts(pred.clone(), &mut parts);
+                (row_sources(&plan), parts)
+            };
             // EXISTS / IN sublinks become semi / anti joins (pull_up_sublinks); with FOR
             // UPDATE too, its rows locked above the joins (`paths::rowmarks`).
             let pred = if self.deparse {
@@ -1745,11 +1752,32 @@ impl Binder<'_, '_> {
             } else {
                 let (p, rest) = super::sublink::pull_up(&self.cat, self.ctx, plan, pred, &self.unplanned_subs);
                 plan = p;
+                // (The WHERE's join clauses' columns, a sublink's outer values too, then
+                // the semi / anti joins its pulled-up sublinks became: those wrap the FROM
+                // list, deconstruct_jointree meets them after.)
+                let mut left = Vec::new();
+                if let Some(r) = &rest {
+                    optimize::conjuncts(r.clone(), &mut left);
+                }
+                for e in &parts {
+                    let shaped = match e {
+                        Expr::Subquery(_) => true,
+                        Expr::Not(x) => matches!(&**x, Expr::Subquery(_)),
+                        _ => false,
+                    };
+                    if !shaped || left.iter().any(|x| x.same_as(e)) {
+                        self.note_join_clause(&e.columns(), &src, false);
+                    }
+                }
+                self.note_semi_joins(&plan);
                 rest
             };
             if let Some(pred) = pred {
                 plan = optimize::add_filter(&self.cat, plan, pred);
             }
+        }
+        if !self.deparse {
+            self.apply_rel_vars(&mut plan);
         }
         // GROUP BY (before the select list: it decides what the select list may reference).
         let (groups, sets) = match self.bind_group_by(s) {
@@ -3440,6 +3468,10 @@ impl Binder<'_, '_> {
                 Some(left) => {
                     let nleft = width(&left);
                     let nright = width(&p);
+                    if !self.deparse && !params.is_empty() {
+                        let src = row_sources(&left);
+                        self.note_lateral(&params, &src);
+                    }
                     self.scope().check_disjoint(&scope)?;
                     self.level().scope.extend(scope.shifted(nleft));
                     // (A join item reading the items to its left: reassociated. Not a
@@ -4197,6 +4229,7 @@ impl Binder<'_, '_> {
                     rti: self.next_rti(),
                     useful: Default::default(),
                     params: Default::default(),
+                    reltarget: Default::default(),
                 };
                 let mut scan = scan;
                 if !colnames.is_empty() {
@@ -4309,6 +4342,7 @@ impl Binder<'_, '_> {
                             rti: self.next_rti(),
                             useful: Default::default(),
                             params: Default::default(),
+                            reltarget: Default::default(),
                         }))
                     }
                     None if self.view_stack.contains(&v.oid) => {
@@ -6048,6 +6082,33 @@ impl Binder<'_, '_> {
             {
                 log.joins.push(r);
             }
+            if !self.deparse && !rparams.is_empty() {
+                let src = row_sources(&lp);
+                self.note_lateral(&rparams, &src);
+            }
+            // distribute_qual_to_rels: the ON clause's join clauses add their columns to
+            // the relations' reltargets (an outer join's clause reading its nonnullable side
+            // too: its relids are the join's ojscope; one of the nullable side alone is
+            // degenerate, pushed down).
+            if !self.deparse
+                && let Some(c) = &cond
+            {
+                let mut src = row_sources(&lp);
+                src.resize(nleft, None);
+                src.extend(row_sources(&rp));
+                let mut parts = Vec::new();
+                optimize::conjuncts(c.clone(), &mut parts);
+                for e in &parts {
+                    let cols = e.columns();
+                    let ojscope = match kind {
+                        JoinKind::Left => cols.iter().any(|&c| c < nleft),
+                        JoinKind::Right => cols.iter().any(|&c| c >= nleft),
+                        JoinKind::Full => true,
+                        _ => false,
+                    };
+                    self.note_join_clause(&cols, &src, ojscope);
+                }
+            }
             // pull_up_sublinks in a left join's ON clause: an EXISTS / IN reading only the
             // right side joins that side.
             let (rp, cond) = match cond {
@@ -6149,11 +6210,168 @@ impl Binder<'_, '_> {
             {
                 meta.explicit = true;
             }
+            if !self.deparse {
+                self.note_semi_joins(&plan);
+            }
             Ok((plan, scope, lparams))
         })();
         self.level().scope = saved;
         r
     }
+}
+
+impl Binder<'_, '_> {
+    /// add_vars_to_targetlist for a join clause (distribute_qual_to_rels: a clause of
+    /// several relations, or one an outer join's `ojscope` holds): the base relation columns
+    /// it reads (`cols`, of a row whose columns are `src`, in the order pull_var_clause meets
+    /// them) join their scans' reltargets.
+    fn note_join_clause(&mut self, cols: &[usize], src: &[Option<(crate::sql::plan::Rti, usize)>], ojscope: bool) {
+        let cols: Vec<(crate::sql::plan::Rti, usize)> =
+            cols.iter().filter_map(|&c| src.get(c).copied().flatten()).collect();
+        let mut rels: Vec<usize> = cols.iter().map(|(r, _)| r.0).collect();
+        rels.sort_unstable();
+        rels.dedup();
+        if rels.is_empty() || !(ojscope || rels.len() > 1) {
+            return;
+        }
+        for (r, c) in cols {
+            match self.rel_vars.iter_mut().find(|(x, _)| *x == r) {
+                Some((_, v)) => {
+                    if !v.contains(&c) {
+                        v.push(c);
+                    }
+                }
+                None => self.rel_vars.push((r, vec![c])),
+            }
+        }
+    }
+
+    /// find_lateral_references: the columns a LATERAL item reads (`params`, over a row whose
+    /// columns are `src`) come into their scans' reltargets before any clause's.
+    fn note_lateral(&mut self, params: &[Expr], src: &[Option<(crate::sql::plan::Rti, usize)>]) {
+        for e in params {
+            for c in e.columns() {
+                let Some((r, c)) = src.get(c).copied().flatten() else { continue };
+                match self.lateral_vars.iter_mut().find(|(x, _)| *x == r) {
+                    Some((_, v)) => {
+                        if !v.contains(&c) {
+                            v.push(c);
+                        }
+                    }
+                    None => self.lateral_vars.push((r, vec![c])),
+                }
+            }
+        }
+    }
+
+    /// The semi / anti joins pull_up_sublinks made under `p` (and any before): their
+    /// clauses are join clauses of both sides (an anti join's, its ojscope), met after the
+    /// FROM list they wrap; an equality a class with a constant replaced still counts.
+    fn note_semi_joins(&mut self, p: &Plan) {
+        match p {
+            Plan::Join { kind, left, right, cond, hash, nleft, meta, .. } => {
+                self.note_semi_joins(left);
+                self.note_semi_joins(right);
+                if !matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+                    return;
+                }
+                let mut src = row_sources(left);
+                src.resize(*nleft, None);
+                src.extend(row_sources(right));
+                // (Each clause's columns: the hash keys', the other quals', those of the
+                // equalities a class with a constant replaced.)
+                let mut clauses: Vec<Vec<usize>> = Vec::new();
+                if let Some((lk, rk)) = hash {
+                    for (a, b) in lk.iter().zip(rk) {
+                        let mut cols = a.columns();
+                        cols.extend(b.columns().into_iter().map(|c| c + nleft));
+                        clauses.push(cols);
+                    }
+                }
+                if let Some(c) = cond {
+                    let mut parts = Vec::new();
+                    optimize::conjuncts(c.clone(), &mut parts);
+                    clauses.extend(parts.iter().map(Expr::columns));
+                }
+                if !meta.kept.is_empty() {
+                    clauses.push(meta.kept.clone());
+                }
+                // (An anti join's clause reading its left side has the join's ojscope; a semi
+                // join's clauses are an inner join's.)
+                for cols in &clauses {
+                    let ojscope = *kind == JoinKind::Anti && cols.iter().any(|&c| c < *nleft);
+                    self.note_join_clause(cols, &src, ojscope);
+                }
+            }
+            Plan::Filter { input, .. } | Plan::Project { input, .. } => self.note_semi_joins(input),
+            _ => {}
+        }
+    }
+
+    /// Put each scan's LATERAL and join clause columns so far on it (`ScanPlan::reltarget`).
+    fn apply_rel_vars(&mut self, p: &mut Plan) {
+        fn go(p: &mut Plan, vars: &[(crate::sql::plan::Rti, Vec<usize>)]) {
+            if let Plan::Scan(s) = p {
+                if let Some((_, v)) = vars.iter().find(|(r, _)| *r == s.rti && r.0 != 0)
+                    && s.reltarget.0.as_slice() != v.as_slice()
+                {
+                    s.reltarget = crate::sql::plan::RelVars(Arc::new(v.clone()));
+                }
+                return;
+            }
+            for c in crate::sql::explain::plan_inputs_mut(p) {
+                go(Arc::make_mut(c), vars);
+            }
+        }
+        if self.rel_vars.is_empty() && self.lateral_vars.is_empty() {
+            return;
+        }
+        let mut all = self.lateral_vars.clone();
+        for (r, v) in &self.rel_vars {
+            match all.iter_mut().find(|(x, _)| x == r) {
+                Some((_, w)) => {
+                    for c in v {
+                        if !w.contains(c) {
+                            w.push(*c);
+                        }
+                    }
+                }
+                None => all.push((*r, v.clone())),
+            }
+        }
+        go(p, &all);
+    }
+}
+
+/// The base relation column (its scan's range table index and column) each column of a
+/// FROM item's row plainly is.
+fn row_sources(p: &Plan) -> Vec<Option<(crate::sql::plan::Rti, usize)>> {
+    let w = width(p);
+    let mut v = match p {
+        Plan::Scan(s) if s.rti.0 != 0 => (0..w).map(|i| (i < s.table.columns.len()).then_some((s.rti, i))).collect(),
+        Plan::Filter { input, .. } => row_sources(input),
+        Plan::Project { input, exprs } => {
+            let inner = row_sources(input);
+            exprs
+                .iter()
+                .map(|e| match e {
+                    Expr::Col(j, _) => inner.get(*j).copied().flatten(),
+                    _ => None,
+                })
+                .collect()
+        }
+        Plan::Join { kind, left, right, nleft, .. } => {
+            let mut v = row_sources(left);
+            v.resize(*nleft, None);
+            if !matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+                v.extend(row_sources(right));
+            }
+            v
+        }
+        _ => Vec::new(),
+    };
+    v.resize(w, None);
+    v
 }
 
 /// Whether the plan of a FROM item reads any value of its query level's outer row (the

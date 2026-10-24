@@ -180,6 +180,11 @@ pub struct ScanPlan {
     /// (`Outer(1, k)`) stand for, which its costs evaluate in the scan as Postgres does
     /// (`sql::paths` `Rel::unparam`). Not part of its Debug text.
     pub params: ScanParams,
+    /// The columns its query level's join clauses read, in the order
+    /// distribute_qual_to_rels met them (add_vars_to_targetlist): its reltarget after the
+    /// target list's columns, kept though a clause goes later (an equivalence class with a
+    /// constant replacing it, self-join elimination).
+    pub reltarget: RelVars,
 }
 
 /// `ScanPlan::params`.
@@ -187,6 +192,16 @@ pub struct ScanPlan {
 pub struct ScanParams(pub Arc<Vec<Expr>>);
 
 impl std::fmt::Debug for ScanParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("_")
+    }
+}
+
+/// `ScanPlan::reltarget`. Not part of its Debug text.
+#[derive(Clone, Default)]
+pub struct RelVars(pub Arc<Vec<usize>>);
+
+impl std::fmt::Debug for RelVars {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("_")
     }

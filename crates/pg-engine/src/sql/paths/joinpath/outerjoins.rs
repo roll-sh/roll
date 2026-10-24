@@ -32,7 +32,8 @@ struct RawJoin {
     /// Columns of ON conditions the binder already pushed into the nullable side.
     pushed: Vec<usize>,
     /// Columns the join's row carries for clauses an equivalence class with a constant
-    /// absorbed (`JoinMeta::kept`): still needed up to where they meet.
+    /// absorbed (`JoinMeta::kept`): still needed up to where they meet, and still the join's
+    /// clause_relids (make_outerjoininfo takes the quals as written).
     kept: Vec<usize>,
 }
 
@@ -340,9 +341,12 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
             }
             continue;
         }
-        // make_outerjoininfo.
+        // make_outerjoininfo: clause_relids are the join's quals as written, so the
+        // columns of an equality a class with a constant replaced count too (`t1.a = t4.a`
+        // with `t4.a = 1`: t1 is in the semi join's min_lefthand).
         let clause_items = j.conds.iter().fold(0u32, |m, e| m | items(e))
-            | j.pushed.iter().fold(0u32, |m, &g| m | item(g));
+            | j.pushed.iter().fold(0u32, |m, &g| m | item(g))
+            | j.kept.iter().fold(0u32, |m, &g| m | item(g));
         let strict = j.conds.iter().fold(0u32, |m, e| m | strict_items(e, &item));
         let semi = matches!(j.kind, JoinKind::Semi | JoinKind::Anti);
         // (Not what the right side's LATERAL items read: a join relation with LATERAL
