@@ -403,6 +403,7 @@ protocol: 2–27x PostgreSQL over the wire).
   `exec::fasthash::tests::row_keys_spread`, `tests/wire.rs` `text_parameters_of_reg_types`,
   `tests/session_state.rs` `catalog_rows_follow_ddl_roles_and_settings`.
 - Every benchmark query's result rows are hashed and compared with PostgreSQL's (above).
+- After the final rebase: agent 35's differential tester, `difftest smoke`, passes.
 - Storage format: unchanged (no new keys or value layouts); WAL files are zero-filled past
   their last record, which this version's replay stops at. (An older binary replaying a WAL
   this version left after a crash fails on the zeros: downgrades after a crash aren't
