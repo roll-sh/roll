@@ -2775,7 +2775,7 @@ impl Ddl<'_, '_> {
                     self.reown_acls(ObjKind::Function, f.oid, f.owner, new);
                     let mut nf = (*f).clone();
                     nf.owner = new;
-                    self.cat.functions.insert(f.oid, Arc::new(nf));
+                    std::sync::Arc::make_mut(&mut self.cat.functions).insert(f.oid, Arc::new(nf));
                 }
             }
             O::ObjectType | O::ObjectDomain => {
@@ -3110,7 +3110,7 @@ impl Ddl<'_, '_> {
                     t.owner = new;
                     c.put_table(t);
                 } else if let Some(v) = c.views.get(&oid).cloned() {
-                    c.views.insert(
+                    std::sync::Arc::make_mut(&mut c.views).insert(
                         oid,
                         Arc::new(crate::catalog::ViewDef {
                             owner: new,
@@ -3118,7 +3118,7 @@ impl Ddl<'_, '_> {
                         }),
                     );
                 } else if let Some(q) = c.sequences.get(&oid).cloned() {
-                    c.sequences.insert(
+                    std::sync::Arc::make_mut(&mut c.sequences).insert(
                         oid,
                         Arc::new(crate::catalog::Sequence {
                             owner: new,
@@ -3129,7 +3129,7 @@ impl Ddl<'_, '_> {
             }
             ObjKind::Function => {
                 if let Some(f) = c.functions.get(&oid).cloned() {
-                    c.functions.insert(
+                    std::sync::Arc::make_mut(&mut c.functions).insert(
                         oid,
                         Arc::new(crate::catalog::Function {
                             owner: new,

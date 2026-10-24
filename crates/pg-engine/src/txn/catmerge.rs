@@ -53,6 +53,8 @@ pub fn merge(base: &Catalog, mine: &Catalog, cur: &Catalog) -> Result<Catalog> {
     let mut merged: Catalog =
         serde_json::from_value(Value::Object(out)).map_err(|_| conflict())?;
     merged.oids = mine.oids.clone();
+    // (Not serialized: as stored, `cur`'s.)
+    merged.catalog_format = cur.catalog_format;
     merged.reindex();
     unique_names(&merged)?;
     Ok(merged)

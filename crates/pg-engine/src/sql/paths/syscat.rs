@@ -73,8 +73,21 @@ pub(crate) fn stand_in_of(t: &Table) -> Option<SysTable> {
     SysTable::by_oid(t.oid)
 }
 
-/// Postgres's btree indexes on catalog `t`: (index, unique).
+/// Postgres's btree indexes on catalog `t`: (index, unique). (Read from the list once per
+/// catalog: planning asks for each catalog column an estimate looks at.)
 fn sys_indexes(t: SysTable) -> Vec<Arc<Index>> {
+    static BY_TABLE: std::sync::OnceLock<parking_lot::Mutex<HashMap<u32, Vec<Arc<Index>>>>> =
+        std::sync::OnceLock::new();
+    let m = BY_TABLE.get_or_init(Default::default);
+    if let Some(v) = m.lock().get(&t.oid()) {
+        return v.clone();
+    }
+    let v = read_sys_indexes(t);
+    m.lock().insert(t.oid(), v.clone());
+    v
+}
+
+fn read_sys_indexes(t: SysTable) -> Vec<Arc<Index>> {
     static INDEXES: &str = include_str!("../../catalog/sys_indexes.tsv");
     let cols = t.columns();
     let mut out = Vec::new();

@@ -845,6 +845,10 @@ fn format_type(a: &[Value], c: &FnCtx) -> Result<Value> {
     let Some(oid) = a[0].as_i64() else {
         return Ok(Value::Null);
     };
+    // (format_type_extended: InvalidOid is "-"; an oid of no type "???".)
+    if oid == 0 {
+        return Ok(text("-"));
+    }
     let typmod = a.get(1).and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
     // An explicit typmod of -1 on bit / bpchar isn't BIT / CHARACTER (which mean length
     // 1): format_type shows the internal name so that it reads back the same.

@@ -560,8 +560,11 @@ fn derived_depends(ctx: &ExecCtx, cat: &Arc<Catalog>) -> Vec<Depend> {
             out.add((CAST, cast, 0), multi, 'i');
         }
     }
+    // (Tables' hidden row id sequences aren't objects of their own.)
+    let rowid_seqs: std::collections::HashSet<u32> =
+        cat.tables.values().filter_map(|t| t.rowid_seq).collect();
     for s in cat.sequences.values() {
-        if cat.tables.values().any(|t| t.rowid_seq == Some(s.oid)) {
+        if rowid_seqs.contains(&s.oid) {
             continue;
         }
         out.add((REL, s.oid, 0), (NAMESPACE, s.schema, 0), 'n');
@@ -1355,7 +1358,7 @@ fn relation_description(cat: &Catalog, oid: u32, sp: &[String]) -> Option<String
         let schema = cat.index_table(ix.table).map(|t| t.schema).unwrap_or(0);
         return Some(format!("index {}", q(schema, &ix.name)));
     }
-    if let Some(c) = cat.composites.values().find(|c| c.relid == oid) {
+    if let Some(c) = cat.composite_of_rel(oid) {
         return Some(format!("composite type {}", q(c.schema, &c.name)));
     }
     if let Some((t, index)) = cat.toast_owner(oid) {
@@ -1386,7 +1389,7 @@ fn column_name(cat: &Catalog, rel: u32, attnum: i32) -> Option<String> {
         let t = cat.index_table(ix.table)?;
         return super::system::index_att_names(&t, ix).get(i).cloned();
     }
-    if let Some(c) = cat.composites.values().find(|c| c.relid == rel) {
+    if let Some(c) = cat.composite_of_rel(rel) {
         return c.fields.get(i).map(|f| f.0.clone());
     }
     if let Some((_, index)) = cat.toast_owner(rel) {
@@ -1878,6 +1881,25 @@ struct Walk<'d> {
     targets: Vec<Target>,
     /// Where objects without an allocated OID of their own sort.
     keys: std::collections::HashMap<(u32, u32), u64>,
+    /// `deps` by depending object and by referenced object ((class, oid): positions in
+    /// order), and `targets` by object: each visit looked through all of them, quadratic
+    /// in a cascade over a large catalog (DROP SCHEMA ... CASCADE).
+    by_obj: std::collections::HashMap<(u32, u32), Vec<u32>>,
+    by_ref: std::collections::HashMap<(u32, u32), Vec<u32>>,
+    target_ix: std::collections::HashMap<(u32, u32), Vec<u32>>,
+}
+
+/// `deps`' positions by (class, oid) of what `key` picks, in order.
+fn deps_by(
+    deps: &[Depend],
+    key: impl Fn(&Depend) -> Addr,
+) -> std::collections::HashMap<(u32, u32), Vec<u32>> {
+    let mut m: std::collections::HashMap<(u32, u32), Vec<u32>> = std::collections::HashMap::new();
+    for (i, d) in deps.iter().enumerate() {
+        let a = key(d);
+        m.entry((a.0, a.1)).or_default().push(i as u32);
+    }
+    m
 }
 
 /// The visiting order of objects with synthetic OIDs (view rules from before those were
@@ -1912,7 +1934,11 @@ impl Walk<'_> {
     /// `object_address_present_add_flags`.
     fn present_add_flags(&mut self, obj: Addr, flags: u16) -> bool {
         let mut found = false;
-        for t in self.targets.iter_mut().rev() {
+        let Some(ix) = self.target_ix.get(&(obj.0, obj.1)) else {
+            return false;
+        };
+        for &i in ix.iter().rev() {
+            let t = &mut self.targets[i as usize];
             if !same_object(t.obj, obj) {
                 continue;
             }
@@ -1942,9 +1968,11 @@ impl Walk<'_> {
         // What this object is part of.
         let mut owning: Option<(Addr, char)> = None;
         let mut partition: Option<Addr> = None;
-        for d in self
-            .deps
+        let deps = self.deps;
+        let mine: Vec<u32> = self.by_obj.get(&(obj.0, obj.1)).cloned().unwrap_or_default();
+        for d in mine
             .iter()
+            .map(|&i| &deps[i as usize])
             .filter(|d| same_object(d.obj, obj) && (obj.2 == 0 || d.obj.2 == obj.2))
         {
             let other = d.refobj;
@@ -1990,9 +2018,10 @@ impl Walk<'_> {
             });
         }
         // Its dependents, newest first.
-        let mut dependents: Vec<(Addr, u16)> = self
-            .deps
-            .iter()
+        let mut dependents: Vec<(Addr, u16)> = (self.by_ref.get(&(obj.0, obj.1)))
+            .into_iter()
+            .flatten()
+            .map(|&i| &deps[i as usize])
             .filter(|d| same_object(d.refobj, obj) && (obj.2 == 0 || d.refobj.2 == obj.2))
             .filter(|d| !(same_object(d.obj, obj) && obj.2 == 0))
             .map(|d| {
@@ -2028,6 +2057,10 @@ impl Walk<'_> {
         } else {
             stack.last().map(|s| s.0)
         };
+        self.target_ix
+            .entry((obj.0, obj.1))
+            .or_default()
+            .push(self.targets.len() as u32);
         self.targets.push(Target {
             obj,
             flags,
@@ -2067,6 +2100,9 @@ pub fn find_dependents(
         pending: roots,
         targets: Vec::new(),
         keys: sort_keys(cat),
+        by_obj: deps_by(deps, |d| d.obj),
+        by_ref: deps_by(deps, |d| d.refobj),
+        target_ix: Default::default(),
     };
     for &r in roots {
         w.find(r, flag::ORIGINAL, &mut Vec::new())?;

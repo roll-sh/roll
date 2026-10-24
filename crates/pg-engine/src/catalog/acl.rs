@@ -548,6 +548,11 @@ pub fn parse_item(s: &str, lookup: &dyn Fn(&str) -> Option<u32>) -> Result<(AclI
 impl Catalog {
     /// The stored ACL of an object (`None`: the default).
     pub fn acl(&self, kind: ObjKind, oid: u32, sub: i32) -> Option<&Acl> {
+        if let Some(m) = self.acl_lookup() {
+            return m
+                .get(&(kind.class_oid(), oid, sub))
+                .map(|&i| &self.acls[i].acl);
+        }
         self.acls
             .iter()
             .find(|a| a.class == kind.class_oid() && a.oid == oid && a.sub == sub)

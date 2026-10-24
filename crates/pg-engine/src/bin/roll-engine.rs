@@ -47,6 +47,7 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
+    idle::setup();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -96,4 +97,45 @@ fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %a.listen, ?auth, "listening");
     pg_engine::server::serve(engine, listener, ServerOptions { auth })?;
     Ok(())
+}
+
+/// Idle sessions keep little memory (each connection is a thread of its own). Transparent
+/// huge pages are off for the process: with the system's `always` mode every thread's first
+/// heap pages took a 2 MB page, 2-3 MB per idle session (BENCH.md). And a connection idle for
+/// a while (`server::set_idle_hook`) gives its thread's free heap pages and the stack its
+/// statements touched but no longer use back to the system.
+#[cfg(target_os = "linux")]
+mod idle {
+    use std::ffi::{c_int, c_ulong, c_void};
+
+    unsafe extern "C" {
+        fn prctl(option: c_int, ...) -> c_int;
+        fn madvise(addr: *mut c_void, len: usize, advice: c_int) -> c_int;
+        // (mimalloc's: the thread's free pages go back to the system.)
+        fn mi_collect(force: bool);
+    }
+
+    const PR_SET_THP_DISABLE: c_int = 41;
+    const MADV_DONTNEED: c_int = 4;
+
+    pub fn setup() {
+        // SAFETY: prctl with PR_SET_THP_DISABLE only sets a flag of this process.
+        unsafe { prctl(PR_SET_THP_DISABLE, 1 as c_ulong, 0 as c_ulong, 0 as c_ulong, 0 as c_ulong) };
+        pg_engine::server::set_idle_hook(trim);
+    }
+
+    fn trim() {
+        // SAFETY: mi_collect only returns free memory of the global allocator (mimalloc).
+        unsafe { mi_collect(true) };
+        if let Some((lo, hi)) = pg_engine::stack::unused_range() {
+            // SAFETY: the range is this thread's stack below every live frame (and a margin),
+            // which reads as zeros when touched again.
+            unsafe { madvise(lo as *mut c_void, hi - lo, MADV_DONTNEED) };
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+mod idle {
+    pub fn setup() {}
 }

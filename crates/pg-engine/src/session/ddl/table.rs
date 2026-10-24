@@ -4940,7 +4940,7 @@ impl Ddl<'_, '_> {
                 }
                 t.columns[idx].identity = None;
                 if let Some(s) = t.columns[idx].seq.take()
-                    && let Some(seq) = self.cat.sequences.remove(&s)
+                    && let Some(seq) = std::sync::Arc::make_mut(&mut self.cat.sequences).remove(&s)
                 {
                     self.cat.remove_name(seq.schema, &seq.name);
                 }
@@ -5118,7 +5118,7 @@ impl Ddl<'_, '_> {
                     {
                         let seq = self.cat.sequences[&q].clone();
                         self.reown_acls(crate::catalog::acl::ObjKind::Sequence, q, seq.owner, new);
-                        self.cat.sequences.insert(
+                        std::sync::Arc::make_mut(&mut self.cat.sequences).insert(
                             q,
                             Arc::new(crate::catalog::Sequence {
                                 owner: new,
@@ -5652,7 +5652,7 @@ impl Ddl<'_, '_> {
                 t.pkey_unkeyed = false;
             }
             t.indexes.retain(|i| i != oid);
-            if let Some(ix) = self.cat.indexes.remove(oid) {
+            if let Some(ix) = std::sync::Arc::make_mut(&mut self.cat.indexes).remove(oid) {
                 self.cat.remove_name(t.schema, &ix.name);
                 self.delete_index_entries(&old, &ix)?;
             }
@@ -5667,7 +5667,7 @@ impl Ddl<'_, '_> {
         });
         // Owned sequence.
         if let Some(s) = t.columns[idx].seq
-            && let Some(seq) = self.cat.sequences.remove(&s)
+            && let Some(seq) = std::sync::Arc::make_mut(&mut self.cat.sequences).remove(&s)
         {
             self.cat.remove_name(seq.schema, &seq.name);
         }
@@ -6210,7 +6210,7 @@ impl Ddl<'_, '_> {
             ConstraintKind::PrimaryKey { index }
             | ConstraintKind::Unique { index }
             | ConstraintKind::Exclusion { index, .. } => {
-                if let Some(ix) = self.cat.indexes.remove(&index) {
+                if let Some(ix) = std::sync::Arc::make_mut(&mut self.cat.indexes).remove(&index) {
                     let old = t.clone();
                     self.cat.remove_name(t.schema, &ix.name);
                     t.indexes.retain(|i| *i != ix.oid);
@@ -6732,7 +6732,7 @@ impl Ddl<'_, '_> {
                 let mut f = (*f).clone();
                 f.name = newname;
                 let oid = f.oid;
-                self.cat.functions.insert(f.oid, Arc::new(f));
+                std::sync::Arc::make_mut(&mut self.cat.functions).insert(f.oid, Arc::new(f));
                 self.follow_renames(&before, &[super::stored::Change::Func(oid)])?;
                 self.save()?;
                 Ok(tag)
@@ -7047,7 +7047,7 @@ impl Ddl<'_, '_> {
                 let mut f = (*f).clone();
                 f.schema = new_schema;
                 let oid = f.oid;
-                self.cat.functions.insert(f.oid, Arc::new(f));
+                std::sync::Arc::make_mut(&mut self.cat.functions).insert(f.oid, Arc::new(f));
                 self.follow_renames(&before, &[super::stored::Change::Func(oid)])?;
                 self.save()?;
                 Ok(tag)
@@ -8255,7 +8255,7 @@ impl Ddl<'_, '_> {
     /// Give index `ix` of `tb` a new oid, as re-creating it does (its comment and statistics
     /// follow; a constraint it backs points at it anew). None: no such index.
     pub(super) fn renumber_index(&mut self, tb: &mut Table, ix: u32) -> Option<u32> {
-        let old = self.cat.indexes.remove(&ix)?;
+        let old = std::sync::Arc::make_mut(&mut self.cat.indexes).remove(&ix)?;
         let new = self.cat.alloc_oid();
         for i in tb.indexes.iter_mut().chain(tb.pkey_index.iter_mut()) {
             if *i == ix {
@@ -8292,8 +8292,8 @@ impl Ddl<'_, '_> {
         for c in self.cat.comments.iter_mut().filter(|c| c.0 == ix) {
             c.0 = new;
         }
-        if let Some(s) = self.cat.relstats.remove(&ix) {
-            self.cat.relstats.insert(new, s);
+        if let Some(s) = std::sync::Arc::make_mut(&mut self.cat.relstats).remove(&ix) {
+            std::sync::Arc::make_mut(&mut self.cat.relstats).insert(new, s);
         }
         if let Some(s) = self.cat.colstats.remove(&ix) {
             self.cat.colstats.insert(new, s);

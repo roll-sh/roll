@@ -421,7 +421,7 @@ impl Ddl<'_, '_> {
                     for leaf in self.cat.leaves(r.oid) {
                         tuples += self.table_rows(&leaf)?.len() as f64;
                     }
-                    self.cat.relstats.insert(
+                    std::sync::Arc::make_mut(&mut self.cat.relstats).insert(
                         r.oid,
                         RelStats {
                             pages: -1,
@@ -485,10 +485,10 @@ impl Ddl<'_, '_> {
             }
         }
         if main {
-            self.cat.frozen_xids.insert(t.oid, new.max(old));
+            std::sync::Arc::make_mut(&mut self.cat.frozen_xids).insert(t.oid, new.max(old));
         }
         if toast {
-            self.cat.frozen_xids.insert(t.toast, new_toast.max(old_toast));
+            std::sync::Arc::make_mut(&mut self.cat.frozen_xids).insert(t.toast, new_toast.max(old_toast));
         }
         Ok(())
     }
@@ -513,7 +513,7 @@ impl Ddl<'_, '_> {
                 Some(s) if s.tuples >= 0.0 => 0.0,
                 _ => -1.0,
             };
-            self.cat.relstats.insert(
+            std::sync::Arc::make_mut(&mut self.cat.relstats).insert(
                 t.oid,
                 RelStats {
                     pages: 0,
@@ -524,14 +524,14 @@ impl Ddl<'_, '_> {
             );
         }
         for i in indexes {
-            self.cat.relstats.remove(&i);
+            std::sync::Arc::make_mut(&mut self.cat.relstats).remove(&i);
         }
     }
 
     pub(super) fn reset_stats(&mut self, t: &Table) {
-        self.cat.relstats.remove(&t.oid);
+        std::sync::Arc::make_mut(&mut self.cat.relstats).remove(&t.oid);
         for i in t.indexes.iter().chain(&t.pkey_index) {
-            self.cat.relstats.insert(
+            std::sync::Arc::make_mut(&mut self.cat.relstats).insert(
                 *i,
                 RelStats {
                     pages: 0,
@@ -597,7 +597,7 @@ impl Ddl<'_, '_> {
         if vacuum && let Some(v) = crate::exec::sizing::vacuum(t, self.ctx).ok().flatten() {
             // The modelled heap, vacuumed: indexes it cleaned up are measured too.
             self.cat.had_triggers.remove(&t.oid);
-            self.cat.relstats.insert(
+            std::sync::Arc::make_mut(&mut self.cat.relstats).insert(
                 t.oid,
                 RelStats {
                     pages: v.pages,
@@ -607,7 +607,7 @@ impl Ddl<'_, '_> {
                 },
             );
             for (oid, pages, tuples) in v.indexes {
-                self.cat.relstats.insert(
+                std::sync::Arc::make_mut(&mut self.cat.relstats).insert(
                     oid,
                     RelStats {
                         pages,
@@ -643,7 +643,7 @@ impl Ddl<'_, '_> {
         } else {
             self.cat.relstats.get(&t.oid).map_or(0, |s| s.allfrozen)
         };
-        self.cat.relstats.insert(
+        std::sync::Arc::make_mut(&mut self.cat.relstats).insert(
             t.oid,
             RelStats {
                 pages,
@@ -683,7 +683,7 @@ impl Ddl<'_, '_> {
         let rows: Vec<crate::exec::Row> = self.table_rows(t)?.into_iter().map(|(_, r)| r).collect();
         let pages = self.heap_pages(t, &rows);
         let tuples = rows.len() as f64;
-        self.cat.relstats.insert(
+        std::sync::Arc::make_mut(&mut self.cat.relstats).insert(
             t.oid,
             RelStats {
                 pages,
@@ -991,7 +991,7 @@ impl Ddl<'_, '_> {
         let before = self.cat.relstats.get(&t.oid).copied();
         if !autovacuum_off && (!rows.is_empty() || before.is_some_and(|s| s.tuples >= 0.0)) {
             let pages = self.heap_pages(t, &rows);
-            self.cat.relstats.insert(
+            std::sync::Arc::make_mut(&mut self.cat.relstats).insert(
                 t.oid,
                 RelStats {
                     pages,
@@ -1074,7 +1074,7 @@ impl Ddl<'_, '_> {
             }
             let tuples = keys.len() as f64;
             let modelled = crate::exec::sizing::btree_blocks(bix.index.oid, &self.ctx.sess.db);
-            self.cat.relstats.insert(
+            std::sync::Arc::make_mut(&mut self.cat.relstats).insert(
                 bix.index.oid,
                 RelStats {
                     pages: modelled.map_or_else(|| relsize::btree_pages(&sizes), |n| n as i32),

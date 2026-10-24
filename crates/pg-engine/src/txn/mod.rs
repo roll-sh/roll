@@ -5,8 +5,8 @@ mod catmerge;
 pub mod locks;
 pub mod xids;
 
-use crate::catalog::{Catalog, Sequence};
-use crate::error::{Error, Result, code, internal};
+use crate::catalog::{Catalog, Sequence, persist};
+use crate::error::{Error, Result, code};
 use crate::storage::{SnapshotPin, Store};
 use crate::{bail, err};
 use bytes::Bytes;
@@ -19,7 +19,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-/// Reserved keyspace (table oid 0).
+/// Reserved keyspace (table oid 0): the catalog's header record (its objects' records are
+/// under `persist::RECORD_PREFIX`).
 pub const CATALOG_KEY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 1];
 const SEQ_PREFIX: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 2];
 
@@ -103,6 +104,9 @@ pub struct Database {
     pub relfiles: Mutex<crate::exec::sizing::RelFiles>,
     /// The cumulative statistics (`exec::pgstat`).
     pub pgstat: Mutex<crate::exec::pgstat::Shared>,
+    /// System catalogs' rows generated for its sessions' statements, for the next ones that
+    /// read them under the same catalog, roles, path and settings (`catalog::system::rows`).
+    pub sys_rows: Mutex<crate::catalog::system::SysRowsCache>,
 }
 
 impl Database {
@@ -110,18 +114,30 @@ impl Database {
         let ts = store.visible_ts();
         let catalog = match store.get(CATALOG_KEY, ts)? {
             Some(b) => {
-                let mut c: Catalog = serde_json::from_slice(&b)
-                    .map_err(|e| internal(format!("corrupt catalog: {e}")))?;
+                let (from, to) = persist::record_range();
+                let stored = persist::load(&b, || {
+                    store.scan(from, to, ts).collect::<Result<Vec<_>>>()
+                })?;
+                let mut c = stored.clone();
                 c.reindex();
+                if c.catalog_format < persist::CATALOG_FORMAT {
+                    // Stored as one value (before catalog format 1): rewritten as records,
+                    // in one commit.
+                    c.catalog_format = persist::CATALOG_FORMAT;
+                    store.commit(persist::writes_new(&c)?, |_| Ok(()))?;
+                } else {
+                    // What `reindex` brought up to date (oids a catalog from before them
+                    // lacked) is stored now: later commits write only what they change.
+                    let w = persist::changed(&stored, &c)?;
+                    if !w.is_empty() {
+                        store.commit(w, |_| Ok(()))?;
+                    }
+                }
                 c
             }
             None => {
                 let c = Catalog::bootstrap(owner);
-                let blob = serde_json::to_vec(&c).map_err(|e| internal(e.to_string()))?;
-                store.commit(
-                    vec![(CATALOG_KEY.to_vec(), Some(Bytes::from(blob)))],
-                    |_| Ok(()),
-                )?;
+                store.commit(persist::writes_new(&c)?, |_| Ok(()))?;
                 c
             }
         };
@@ -132,6 +148,7 @@ impl Database {
             catalog.next_oid,
             |_| {},
         )));
+        catalog.freeze();
         let version = catalog.version;
         static INSTANCES: AtomicU64 = AtomicU64::new(1);
         Ok(Arc::new(Database {
@@ -152,6 +169,7 @@ impl Database {
             xids: RwLock::new(Arc::new(xids::Xids::local())),
             relfiles: Mutex::new(Default::default()),
             pgstat: Mutex::new(Default::default()),
+            sys_rows: Mutex::new(Default::default()),
         }))
     }
 
@@ -160,6 +178,7 @@ impl Database {
         let mut w = self.catalog.write();
         let mut c = (**w).clone();
         c.oids = Some(g);
+        c.freeze();
         *w = Arc::new(c);
     }
 
@@ -740,8 +759,9 @@ impl Txn {
             self.catalog_base_cat = Some(base);
         }
         c.bump();
-        let blob = serde_json::to_vec(&c).map_err(|e| internal(e.to_string()))?;
-        self.buffer(CATALOG_KEY.to_vec(), Some(Bytes::from(blob)));
+        // (A stand-in: the commit writes the records of what changed, `catalog_writes`.)
+        self.buffer(CATALOG_KEY.to_vec(), Some(Bytes::new()));
+        c.freeze();
         self.catalog = Some(Arc::new(c));
         Ok(())
     }
@@ -765,9 +785,9 @@ impl Txn {
             self.catalog_base_cat = Some(base);
         }
         c.bump();
-        let blob = serde_json::to_vec(&c).map_err(|e| internal(e.to_string()))?;
-        self.record(CATALOG_KEY.to_vec(), Some(Bytes::from(blob)));
+        self.record(CATALOG_KEY.to_vec(), Some(Bytes::new()));
         self.wrote = true;
+        c.freeze();
         self.catalog = Some(Arc::new(c));
         Ok(())
     }
@@ -795,10 +815,9 @@ impl Txn {
             c.version = cur;
             c.bump();
         }
-        let blob = serde_json::to_vec(&c).map_err(|e| internal(e.to_string()))?;
         let cid = self.writes.get(CATALOG_KEY).and_then(|w| w.1);
-        self.writes
-            .insert(CATALOG_KEY.to_vec(), (Some(Bytes::from(blob)), cid));
+        self.writes.insert(CATALOG_KEY.to_vec(), (Some(Bytes::new()), cid));
+        c.freeze();
         self.catalog = Some(Arc::new(c));
         Ok(())
     }
@@ -1398,10 +1417,15 @@ impl Txn {
     }
 
     pub fn commit(mut self) -> Result<u64> {
-        let writes: Vec<(Vec<u8>, Option<Bytes>)> = std::mem::take(&mut self.writes)
-            .into_iter()
-            .map(|(k, (v, _))| (k, v))
-            .collect();
+        let mut writes: Vec<(Vec<u8>, Option<Bytes>)> = Vec::with_capacity(self.writes.len());
+        let mut new_catalog = false;
+        for (k, (v, _)) in std::mem::take(&mut self.writes) {
+            if k.as_slice() == CATALOG_KEY {
+                new_catalog = true;
+            } else {
+                writes.push((k, v));
+            }
+        }
         let catalog = RefCell::new(self.catalog.take());
         let base = self.catalog_base;
         let base_cat = self.catalog_base_cat.take();
@@ -1412,6 +1436,20 @@ impl Txn {
         } else {
             Vec::new()
         };
+        let pending = catalog.borrow().clone();
+        if new_catalog && let Some(c) = &pending {
+            // The records of what changed since the catalog the DDL started from (the one
+            // published now, unless other DDL committed since: `check` then writes the
+            // merged catalog's over the current one instead).
+            match self.catalog_writes(c) {
+                Ok(w) => writes.extend(w),
+                Err(e) => {
+                    self.finish_xid(false);
+                    self.release_locks();
+                    return Err(e);
+                }
+            }
+        }
         let db = self.db.clone();
         let check = |store: &Store, writes: &mut Vec<(Vec<u8>, Option<Bytes>)>| -> Result<()> {
             // Other DDL committed since this transaction's began: its catalog changes are
@@ -1429,17 +1467,15 @@ impl Txn {
                 let mut merged = catmerge::merge(b, &mine, &cur)?;
                 merged.version = cur.version;
                 merged.bump();
-                let blob = serde_json::to_vec(&merged).map_err(|e| internal(e.to_string()))?;
-                for w in writes.iter_mut().filter(|w| w.0.as_slice() == CATALOG_KEY) {
-                    w.1 = Some(Bytes::from(blob.clone()));
+                merged.freeze();
+                if new_catalog {
+                    writes.retain(|w| !persist::is_catalog_key(&w.0));
+                    writes.extend(persist::writes(&cur, &merged)?);
                 }
                 *catalog.borrow_mut() = Some(Arc::new(merged));
             }
             if strict {
                 for k in &keys {
-                    if k.as_slice() == CATALOG_KEY {
-                        continue;
-                    }
                     if store.latest_version_ts(k)?.is_some_and(|ts| ts > start) {
                         return Err(Error::new(
                             code::SERIALIZATION_FAILURE,
@@ -1471,6 +1507,13 @@ impl Txn {
         self.finish_xid(result.is_ok());
         self.release_locks();
         result
+    }
+
+    /// The writes storing catalog `c` over the one this transaction's DDL started from
+    /// (`persist::writes`).
+    fn catalog_writes(&self, c: &Catalog) -> Result<Vec<(Vec<u8>, Option<Bytes>)>> {
+        let cur = self.db.catalog();
+        persist::writes(&cur, c)
     }
 
     pub fn rollback(mut self) {

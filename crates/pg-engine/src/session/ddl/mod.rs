@@ -657,7 +657,7 @@ impl<'c, 'a> Ddl<'c, 'a> {
         // Access methods of relations that are gone.
         if !self.cat.rel_am.is_empty() {
             let cat = &self.cat;
-            let live: Vec<u32> = cat
+            let live: std::collections::HashSet<u32> = cat
                 .rel_am
                 .keys()
                 .copied()
@@ -705,20 +705,20 @@ impl<'c, 'a> Ddl<'c, 'a> {
         for o in now.iter().flat_map(|(o, t)| [*o, *t]) {
             if o != 0 && !old.contains(&o) && !self.cat.frozen_xids.contains_key(&o) {
                 let x = *xmin.get_or_insert_with(|| self.recent_xmin());
-                self.cat.frozen_xids.insert(o, x);
+                std::sync::Arc::make_mut(&mut self.cat.frozen_xids).insert(o, x);
             }
         }
         let live: std::collections::HashSet<u32> =
             now.into_iter().flat_map(|(o, t)| [o, t]).collect();
-        self.cat.frozen_xids.retain(|o, _| live.contains(o));
+        std::sync::Arc::make_mut(&mut self.cat.frozen_xids).retain(|o, _| live.contains(o));
     }
 
     /// A relation's new storage (TRUNCATE, a rewrite) is frozen up to `xid`; a new TOAST
     /// table goes with it.
     pub(super) fn set_frozen_xid(&mut self, t: &Table, xid: u64) {
-        self.cat.frozen_xids.insert(t.oid, xid);
+        std::sync::Arc::make_mut(&mut self.cat.frozen_xids).insert(t.oid, xid);
         if t.toast != 0 {
-            self.cat.frozen_xids.insert(t.toast, xid);
+            std::sync::Arc::make_mut(&mut self.cat.frozen_xids).insert(t.toast, xid);
         }
     }
 

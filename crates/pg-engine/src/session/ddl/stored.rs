@@ -376,6 +376,14 @@ fn words(before: &Catalog, c: &Change) -> Vec<String> {
 /// text as a letter, and each text that may name it is bound again: with many stored objects
 /// every ALTER TABLE of it rebound them all.
 fn mentions(text: &str, words: &[String]) -> bool {
+    // (Most texts contain none of the words at all: tell so without copying the text.)
+    let contains = |w: &str| {
+        let (t, w) = (text.as_bytes(), w.as_bytes());
+        !w.is_empty() && t.len() >= w.len() && t.windows(w.len()).any(|x| x.eq_ignore_ascii_case(w))
+    };
+    if !words.iter().any(|w| contains(w)) {
+        return false;
+    }
     let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$' || !c.is_ascii();
     let lower = text.to_ascii_lowercase();
     words.iter().any(|w| {
@@ -1358,6 +1366,18 @@ impl Ddl<'_, '_> {
         }
         // Tables: defaults, generation expressions, CHECK constraints, partition keys.
         for t in before.tables.values() {
+            // (Only tables with a text that may name something changed are copied.)
+            let named = t.columns.iter().any(|c| {
+                c.default.as_deref().is_some_and(hit) || c.generated.as_deref().is_some_and(hit)
+            }) || t.constraints.iter().any(
+                |con| matches!(&con.kind, ConstraintKind::Check { expr, .. } if hit(expr)),
+            ) || t
+                .partkey
+                .as_ref()
+                .is_some_and(|pk| pk.cols.iter().any(|k| k.expr.as_deref().is_some_and(hit)));
+            if !named {
+                continue;
+            }
             let Some(cur) = self.cat.tables.get(&t.oid).cloned() else {
                 continue;
             };
@@ -1411,6 +1431,14 @@ impl Ddl<'_, '_> {
         }
         // Index expressions and predicates.
         for ix in before.indexes.values() {
+            let named = ix.predicate.as_deref().is_some_and(hit)
+                || ix
+                    .columns
+                    .iter()
+                    .any(|c| matches!(&c.key, IndexKey::Expr(e) if hit(e)));
+            if !named {
+                continue;
+            }
             let Some(t) = before.index_table(ix.table) else {
                 continue;
             };
@@ -1656,7 +1684,7 @@ impl Ddl<'_, '_> {
             {
                 let mut nf = (*cur).clone();
                 nf.body = body;
-                self.cat.functions.insert(nf.oid, Arc::new(nf));
+                std::sync::Arc::make_mut(&mut self.cat.functions).insert(nf.oid, Arc::new(nf));
             }
         }
         Ok(())
@@ -2055,7 +2083,7 @@ impl Ddl<'_, '_> {
         let ctx = self.ctx;
         let nctx = ctx.child_over(cat.clone());
         let mut tables = Vec::new();
-        for (oid, t) in &cat.tables {
+        for (oid, t) in cat.tables.iter() {
             let old = before.tables.get(oid);
             if old.is_some_and(|o| Arc::ptr_eq(o, t)) {
                 continue;
@@ -2121,7 +2149,7 @@ impl Ddl<'_, '_> {
         }
         // Index expressions and predicates.
         let mut indexes = Vec::new();
-        for (oid, ix) in &cat.indexes {
+        for (oid, ix) in cat.indexes.iter() {
             let old = before.indexes.get(oid);
             if old.is_some_and(|o| Arc::ptr_eq(o, ix)) {
                 continue;

@@ -313,7 +313,7 @@ impl NameResolver for CatalogNames {
                 c.index_table(i.table).map(|t| t.schema).unwrap_or(0),
                 i.name.clone(),
             )
-        } else if let Some(ct) = c.composites.values().find(|ct| ct.relid == oid) {
+        } else if let Some(ct) = c.composite_of_rel(oid) {
             (ct.schema, ct.name.clone())
         } else if let Some((t, index)) = c.toast_owner(oid) {
             // TOAST tables: bare when their schema is on the path.

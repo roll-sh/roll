@@ -1460,3 +1460,45 @@ fn several_locking_clauses() {
     });
     s.engine.shutdown();
 }
+
+/// A connection idle for a while runs the server's idle hook (`server::set_idle_hook`: the
+/// binary returns the thread's free memory there) and goes on as before: the wait for the
+/// client's next message, and a message arriving in pieces, outlast the hook's timeout.
+#[test]
+fn idle_hook_runs_and_the_connection_goes_on() {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    pg_engine::server::set_idle_hook(|| {
+        RUNS.fetch_add(1, Ordering::SeqCst);
+    });
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let c = s.connect("postgres").await;
+        c.simple_query("CREATE TABLE idle_t (a int)").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(4500)).await;
+        assert!(RUNS.load(Ordering::SeqCst) >= 1, "the idle hook never ran");
+        c.simple_query("INSERT INTO idle_t VALUES (1), (2)").await.unwrap();
+        let rows = c.query("SELECT sum(a) FROM idle_t", &[]).await.unwrap();
+        assert_eq!(rows[0].get::<_, i64>(0), 3);
+    });
+    // A startup message split by a pause longer than the hook's timeout (a slow client).
+    let mut st = std::net::TcpStream::connect(&s.addr).unwrap();
+    let mut params = Vec::new();
+    for kv in ["user", "postgres", "database", "postgres"] {
+        params.extend_from_slice(kv.as_bytes());
+        params.push(0);
+    }
+    params.push(0);
+    let mut msg = ((params.len() + 8) as i32).to_be_bytes().to_vec();
+    msg.extend_from_slice(&196608i32.to_be_bytes());
+    msg.extend_from_slice(&params);
+    st.write_all(&msg[..5]).unwrap();
+    std::thread::sleep(Duration::from_millis(2500));
+    st.write_all(&msg[5..]).unwrap();
+    // (SCRAM: the server asks for the password, in step with the client.)
+    let mut b = [0u8; 1];
+    st.read_exact(&mut b).unwrap();
+    assert_eq!(b[0], b'R');
+    s.engine.shutdown();
+}

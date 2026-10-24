@@ -187,6 +187,84 @@ fn catalog_rows_follow_ddl_roles_and_settings() {
     );
 }
 
+/// The system catalogs' rows a database's sessions share (`Database::sys_rows`) are one
+/// session's only for another under the same catalog, roles, login, path, temporary schema
+/// and setting values: each script of `scripts` runs in a session of its own, one after the
+/// other, all in one database, and each must show what it shows in a database of its own
+/// after only `setup`.
+fn shared_rows_check(setup: &str, scripts: &[(&str, &str)]) {
+    let fresh = |user: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        let e = engine(dir.path());
+        let mut admin = e.connect(1, "postgres", "postgres", "t").unwrap();
+        run(&mut admin, setup);
+        (dir, e, admin, user.to_string())
+    };
+    // Together: every script in a session of the same database.
+    let (_dir, e, admin, _) = fresh("postgres");
+    let mut together = Vec::new();
+    let mut sessions = Vec::new();
+    for (i, (user, sql)) in scripts.iter().enumerate() {
+        let mut s = e.connect(10 + i as i32, "postgres", user, "t").unwrap();
+        together.push(run(&mut s, sql));
+        // (Kept open: their temporary schemas and settings stay.)
+        sessions.push(s);
+    }
+    drop((admin, sessions));
+    e.shutdown();
+    for ((user, sql), got) in scripts.iter().zip(together) {
+        let (_dir, e, admin, user) = fresh(user);
+        let mut s = e.connect(2, "postgres", &user, "t").unwrap();
+        let want = run(&mut s, sql);
+        drop((admin, s));
+        e.shutdown();
+        assert_eq!(got, want, "after the other sessions' scripts\n{sql}");
+    }
+}
+
+#[test]
+fn catalog_rows_shared_by_sessions_follow_their_state() {
+    on_thread(|| {
+        shared_rows_check(
+            "CREATE TABLE p (k timestamptz, v text DEFAULT 'x') PARTITION BY RANGE (k);
+             CREATE TABLE p1 PARTITION OF p FOR VALUES FROM ('2020-01-01 00:00+00') TO ('2021-01-01 00:00+00');
+             CREATE SCHEMA s2;
+             CREATE TABLE s2.p (a int);
+             CREATE ROLE regress_shared_r LOGIN;
+             GRANT SELECT ON p TO regress_shared_r;
+             GRANT USAGE ON SCHEMA s2 TO regress_shared_r",
+            &[
+                (
+                    "postgres",
+                    "SET TimeZone = 'UTC';
+                     SELECT relname, pg_get_expr(relpartbound, oid) FROM pg_class WHERE relname = 'p1';
+                     SELECT oid::regclass, relacl FROM pg_class WHERE relname = 'p' ORDER BY 1;
+                     CREATE TEMP TABLE tt (a int);
+                     SELECT oid::regclass FROM pg_class WHERE oid IN ('tt'::regclass, 'p'::regclass) ORDER BY 1;
+                     SELECT attrelid::regclass, attname FROM pg_attribute WHERE attname = 'a' AND attrelid IN ('tt'::regclass, 's2.p'::regclass) ORDER BY 1;",
+                ),
+                (
+                    "postgres",
+                    "SET TimeZone = 'Asia/Tokyo';
+                     SET DateStyle = 'SQL, DMY';
+                     SELECT relname, pg_get_expr(relpartbound, oid) FROM pg_class WHERE relname = 'p1';
+                     CREATE TEMP TABLE tt (b int);
+                     SELECT oid::regclass FROM pg_class WHERE oid IN ('tt'::regclass, 'p'::regclass) ORDER BY 1;
+                     SET search_path = s2, public;
+                     SELECT oid::regclass, relname FROM pg_class WHERE oid IN ('tt'::regclass, 's2.p'::regclass, 'public.p'::regclass) ORDER BY 2, 1;
+                     SELECT attrelid::regclass, attname FROM pg_attribute WHERE attname IN ('a', 'b') AND attnum > 0 AND attrelid IN ('tt'::regclass, 's2.p'::regclass) ORDER BY 1, 2;",
+                ),
+                (
+                    "regress_shared_r",
+                    "SELECT relname, pg_get_expr(relpartbound, oid) FROM pg_class WHERE relname = 'p1';
+                     SELECT oid::regclass, relacl, has_table_privilege(oid, 'SELECT') FROM pg_class WHERE relname = 'p' ORDER BY 1;
+                     SELECT current_user, session_user;",
+                ),
+            ],
+        );
+    });
+}
+
 /// A made range type's constructors are its own database's type's.
 #[test]
 fn range_constructors_per_database() {

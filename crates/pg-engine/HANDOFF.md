@@ -79,6 +79,17 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   still slower (index-scan fetches, joins and aggregates over joins on one thread) in
   BENCH.md's round 18 section.
   The regression suite, goldens and difftest are unchanged unit for unit.
+- **Catalog, DDL and sessions** (round 18, agent 44; BENCH.md "Catalog, DDL and sessions"): the
+  catalog is stored as a record per object (`catalog/persist.rs`, catalog format 1: older
+  databases are rewritten when first opened), so a DDL commit writes only what changed; its
+  per-object maps are shared by its copies until changed; system catalogs' rows are shared by
+  a database's sessions and looked up through hashes; quadratic catalog paths (TOAST owners,
+  row types, ACLs, cascaded drops' dependency walk, ...) are hashed. At 500 tables CREATE
+  TABLE / INDEX now beat PostgreSQL (0.7 / 0.9 ms vs 4.0 / 1.3), psql's `\d` queries take
+  1.3–2.5 ms (PostgreSQL 0.5–0.9), DROP SCHEMA CASCADE over 10,000 tables 3 s (PostgreSQL
+  16 s); an idle session holds 0.5 MB (PostgreSQL 1.5 MB). Still slower: every DDL statement
+  is O(catalog) (0.02–0.3x PostgreSQL at 10,000 tables), and the first catalog query after
+  DDL regenerates the catalog's rows.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
@@ -239,6 +250,34 @@ engine's data directory and binary copy are per process, never the main suite's.
   (`regression*`) is on the reference, a run ending leaves the tablespaces and roles that
   appeared during it (they may be the other run's: a run once dropped `regress_tblspace` under
   another, whose tablespace and stats files then lost 165 units).
+- **A private reference per run** avoids all of that (and lets a baseline run and a run of a
+  change go at the same time, as round 18's agent 44 compared them): roles and tablespaces
+  are then the run's own. The harness reaches the reference with `docker exec` (no published
+  port needed) and copies the suite's `data/` into it itself. One reference, one engine-side
+  psql helper, one directory and one port per run:
+
+  ```sh
+  IMG=postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+  # The reference: the pinned image (PostgreSQL 18.6, ICU 78.1), initialised as roll-engine-ref
+  # is (--locale=C, UTF8); nothing else differs.
+  docker run -d --name me-ref1 -e POSTGRES_PASSWORD=pw \
+    -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" $IMG
+  # The engine side's psql (same image), on the host network, with the run's directory.
+  D=~/.cache/me/pgr1; mkdir -p $D
+  cp -a <an existing src-repo checkout> $D/src-repo     # (or let the harness clone it)
+  docker run -d --name me-psql1 --network host --user $(id -u):$(id -g) -v $D:$D \
+    --entrypoint sleep $IMG infinity
+  PGREGRESS_DIR=$D PGREGRESS_DB=regression_me1 PGREGRESS_PORT=<free port, ss -ltn> \
+  PGREGRESS_CONTAINER=me-ref1 PGREGRESS_ENGINE_CONTAINER=me-psql1 \
+  PGREGRESS_REPORT_DIR=$D/report PGREGRESS_ENGINE_BIN=<roll-engine to test> \
+    crates/pg-engine/tools/heavy.sh <pg_regress test binary> pg_regress --exact --ignored --nocapture
+  ```
+
+  A second run takes `me-ref2`, `me-psql2`, another directory and port. (`<pg_regress test
+  binary>` is what `cargo test -p pg-engine --test pg_regress --no-run` built, copied aside;
+  or run `cargo test -p pg-engine --test pg_regress -- pg_regress --exact --ignored
+  --nocapture` with the same variables.) Compare the two `REPORT.md`s' per-file rows and
+  their `hunks/` directories. Remove the containers when done.
 - A full run outlives a tool's 2-hour background limit: start it detached (`setsid nohup ... &`)
   and poll its log. A run killed midway leaves its `PGREGRESS_DB` on the reference (drop it)
   and skips the cleanup of the roles / tablespaces it made.
@@ -289,7 +328,12 @@ Prefix scratch objects, and drop scratch databases and roles afterwards.
   match the surrounding style and comment density, don't run `cargo fmt` on others' files.
 - Stored data must stay loadable. Format changes need a migration: see
   `Catalog::index_key_format` and `Catalog::storage_format` with `Engine::upgrade_storage` in
-  `src/engine.rs` (batched, resumable, tested by `tests/storage_upgrade_batches.rs`).
+  `src/engine.rs` (batched, resumable, tested by `tests/storage_upgrade_batches.rs`), and
+  `Catalog::catalog_format` (`catalog/persist.rs`: a database's catalog is a header and a
+  record per object; `Database::open` rewrites a catalog stored as one value). A field added to
+  `Catalog` must be listed in `persist.rs`'s `stored_fields!` (as a map, a set or in the header;
+  the macro's exhaustive destructuring doesn't compile otherwise), with a record tag never used
+  before.
 - Every fix gets a golden recorded against PostgreSQL. Correctness (results, errors, data)
   before EXPLAIN text.
 - Commit only verified states: the whole `cargo test -p pg-engine` passes first.
@@ -322,13 +366,25 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
     catalog and the search path, started over by every `remember_equalities`.
   - `SYS_ROWS` (`explain::sys_tuples`, a system catalog's row count): by the catalog's address
     with a `Weak` holding it.
-  - `SessionState::sys_rows` (`catalog::system::rows`, round 17 agent 36: the generated rows
-    of `pg_class`, `pg_attribute`, `pg_attrdef`, `pg_type`, `pg_namespace`, `pg_index`,
-    `pg_constraint`, `pg_proc`, the catalogs whose rows read nothing but the catalog, roles,
-    path and settings): by a `Weak` to the catalog, current and session user, search path and
-    `Settings::generation` (unique per set of setting values). Only catalogs generated from
-    those alone may join the list (`rows_cacheable`): not statistics, locks, sequences, large
-    objects or other databases.
+  - `Database::sys_rows` (`catalog::system::rows_shared`, round 17 agent 36, round 18 agent 44: the
+    generated rows of `pg_class`, `pg_attribute`, `pg_attrdef`, `pg_type`, `pg_namespace`,
+    `pg_index`, `pg_constraint`, `pg_proc`, the catalogs whose rows read nothing but the
+    catalog, roles, path and settings, shared by all the database's sessions, with hashes on
+    the columns equalities looked up, `SysRows::lookup`): by a `Weak` to the catalog, current
+    and session user, the session's login name, search path, the session's temporary schema
+    and `Settings::values_key` (the values themselves, equal for sessions whose settings are:
+    `Settings::generation` is unique per session). Only catalogs generated from those alone
+    may join the list (`rows_cacheable`): not statistics, locks, sequences, large objects or
+    other databases. (Agent 36 kept them per session, keyed by `Settings::generation`; every
+    session then held its own copies.)
+  - `Catalog::lookups` (round 18 agent 44: hashes for lookups that scan a map otherwise:
+    TOAST owners, composite types by relation, schemas by name, ACLs, row types, user type
+    names, row-level security tables by name): part of one catalog value, built on first
+    use only once it is frozen (`Catalog::freeze`, as `Txn` and `Database` publish it in an
+    `Arc`, after which nothing changes it); a copy (what DDL edits) starts unfrozen and
+    empty, and its lookups scan. Static tables read per row (`type_procs`'s built-ins,
+    `SysTable::by_oid`, built-in operator classes, catalog indexes) are hashed once per
+    process. Golden `catalog_lookups`.
   - `sql::parse` `PARSED` (parse trees, per thread): by the text and the parser options (a
     pure function); `ast::parse_exprs` / `parse_stmt` (stored texts) under tags of their own.
   - `costs::SLOT_VALUES` (statistics slots' parsed values, per thread): by
