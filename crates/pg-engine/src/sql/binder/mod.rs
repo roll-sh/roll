@@ -984,8 +984,9 @@ impl<'b, 'a> Binder<'b, 'a> {
         clause: Clause,
     ) -> Result<Expr> {
         let mut rel = table_rel(t, &t.name, None);
-        // A policy may read the row's system columns (`USING (ctid IN ...)`).
-        if clause == Clause::Policy {
+        // A policy may read the row's system columns (`USING (ctid IN ...)`); deparsed, a
+        // generation expression's `tableoid` is the column, not the table's oid.
+        if clause == Clause::Policy || self.deparse {
             rel.sys_col = Some(t.columns.len());
         }
         let saved = std::mem::replace(&mut self.level().scope, Scope { rels: vec![rel] });

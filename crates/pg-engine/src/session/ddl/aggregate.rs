@@ -857,6 +857,9 @@ impl Ddl<'_, '_> {
             sql_body: None,
             atomic_returns: Vec::new(),
             probin: None,
+            support: 0,
+            window: false,
+            trftypes: Vec::new(),
         };
         self.cat.functions.insert(oid, Arc::new(func));
         self.save()?;

@@ -83,6 +83,20 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   results: a pseudoconstant qual of an inner join under an outer join gating the outer join
   (`c LEFT JOIN (a JOIN b ON (SELECT false)) ON ...` loses c's rows), and the empty grouping
   set over no input rows (constants equal to keys).
+- **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
+  PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified
+  (`pg_dump_tap`, through stand-ins for its Perl test modules in `tests/pg_dump/perl`), round
+  trips of the regression database in every format and the common options with restores
+  both ways (`pg_dump_roundtrip`; `pg_regress` keeps its databases with `PGREGRESS_KEEP=1`),
+  and psql's backslash commands (`pg_psql_meta`). Scores, the fixes and what is open:
+  `tests/pg_dump/STATUS.md`. pg_dump couldn't start before; 002_pg_dump.pl passes 14,603 of
+  14,609 checks and parallel dump / restore works. Fixes with effects beyond pg_dump:
+  concurrent DDL in different sessions commits (the catalog is merged onto the current one,
+  `txn/catmerge.rs`; it used to fail, or silently drop the other transaction's DDL when that
+  committed while a command ran), stored expressions are qualified when stored (they kept
+  working only under the search_path they were made in), snapshot export
+  (`pg_export_snapshot`, `SET TRANSACTION SNAPSHOT`), and `roll-engine` shuts down cleanly on
+  SIGTERM keeping sequence positions.
 
 ## Repository layout
 

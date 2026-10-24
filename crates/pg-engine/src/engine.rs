@@ -661,6 +661,9 @@ impl Engine {
                 .collect()
         };
         for (db, _closing) in closing {
+            if let Err(e) = db.persist_sequences() {
+                warn!(database = %db.name, error = %e, "saving sequence positions failed");
+            }
             match db.store.close() {
                 Ok(()) => info!(database = %db.name, "closed idle database"),
                 Err(e) => warn!(database = %db.name, error = %e, "closing idle database failed"),
@@ -1163,6 +1166,9 @@ impl Engine {
                 .collect()
         };
         for (db, _closing) in dbs {
+            if let Err(e) = db.persist_sequences() {
+                warn!(database = %db.name, error = %e, "saving sequence positions failed");
+            }
             if let Err(e) = db.store.close() {
                 warn!(database = %db.name, error = %e, "close failed");
             }

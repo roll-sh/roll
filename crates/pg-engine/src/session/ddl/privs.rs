@@ -1377,7 +1377,13 @@ impl Ddl<'_, '_> {
                             Some(crate::types::DataType::Row(r)) => r.fields.clone(),
                             _ => Vec::new(),
                         };
-                        let Some(i) = fields.iter().position(|f| &f.0 == col) else {
+                        // (Its system columns too: ctid is -1, tableoid -6.)
+                        let sys = crate::exec::scan::SYS_COLS
+                            .iter()
+                            .position(|(n, _)| n == col)
+                            .map(|k| -(k as i32) - 1);
+                        let pos = fields.iter().position(|f| &f.0 == col).map(|i| i as i32 + 1);
+                        let Some(attnum) = pos.or(sys) else {
                             return Err(Error::new(
                                 code::UNDEFINED_COLUMN,
                                 format!(
@@ -1388,7 +1394,7 @@ impl Ddl<'_, '_> {
                         };
                         self.grant_one(
                             &t,
-                            i as i32 + 1,
+                            attnum,
                             Some(col),
                             *bit,
                             false,
@@ -3197,7 +3203,7 @@ impl Ddl<'_, '_> {
         txn.release_savepoint(SP)?;
         drop(txn);
         if r.is_err() {
-            self.cat = (*self.ctx.catalog()).clone();
+            self.reload_catalog();
         }
         r
     }
@@ -3476,7 +3482,7 @@ impl Ddl<'_, '_> {
             let parsed = crate::sql::parse::parse(&sql)?;
             for st in parsed {
                 if let Some(n) = st.stmt.as_deref().and_then(|n| n.node.as_ref()) {
-                    self.cat = (*self.ctx.catalog()).clone();
+                    self.reload_catalog();
                     let before = self.ctx.notices.borrow().len();
                     self.run(n)?;
                     let notices: Vec<_> = self.ctx.notices.borrow_mut().drain(before..).collect();

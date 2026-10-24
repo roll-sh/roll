@@ -309,6 +309,28 @@ fn table_expr_refs(
             out.push((TYPE, d, 0));
         }
     }
+    // A whole-row reference to the table (`t.*`) is a reference to the relation itself
+    // (find_expr_references: a Var of attno 0), not to its columns or row type.
+    let mut whole = false;
+    if let Ok(x) = e.clone().transform(&mut |x| {
+        Ok(match x {
+            Expr::Row(args, DataType::Row(r))
+                if r.oid == t.rowtype
+                    && t.rowtype != 0
+                    && !args.is_empty()
+                    && args.iter().all(|a| matches!(a, Expr::Col(..))) =>
+            {
+                whole = true;
+                Expr::Const(Value::Null, DataType::Unknown)
+            }
+            x => x,
+        })
+    }) {
+        e = x;
+    }
+    if whole {
+        out.push((REL, t.oid, 0));
+    }
     expr_refs(cat, &e, Some(t.oid), &mut out);
     binder_refs(cat, &b, &mut out);
     dedupe(&mut out);
@@ -498,6 +520,8 @@ fn derived_depends(ctx: &ExecCtx, cat: &Arc<Catalog>) -> Vec<Depend> {
             r.subtype_domain,
             'n',
         );
+        // (RangeCreate: the subtype's operator class.)
+        out.add(me, (OPCLASS, r.subtype_opc, 0), 'n');
         out.add((TYPE, r.array_oid, 0), me, 'i');
         out.add(multi, (NAMESPACE, cat.multirange_schema(r), 0), 'n');
         out.add(multi, me, 'i');
@@ -542,11 +566,13 @@ fn derived_depends(ctx: &ExecCtx, cat: &Arc<Catalog>) -> Vec<Depend> {
         }
         out.add((REL, s.oid, 0), (NAMESPACE, s.schema, 0), 'n');
         if let Some((t, col)) = s.owned_by {
+            // (Only the column's identity sequence: a serial's sequence kept when the column
+            // became an identity is still just owned by it.)
             let identity = cat
                 .tables
                 .get(&t)
                 .and_then(|t| t.columns.get(col))
-                .is_some_and(|c| c.identity.is_some());
+                .is_some_and(|c| c.identity.is_some() && c.seq == Some(s.oid));
             out.add(
                 (REL, s.oid, 0),
                 (REL, t, col as i32 + 1),
@@ -1127,7 +1153,8 @@ fn table_depends(ctx: &ExecCtx, cat: &Arc<Catalog>, t: &Arc<Table>, out: &mut Ou
                 if own.is_empty() {
                     out.add(me_con, me, 'a');
                 }
-                for r in refs {
+                // (A whole-row reference to the table itself records nothing more.)
+                for r in refs.into_iter().filter(|r| *r != me) {
                     out.add(me_con, r, 'n');
                 }
             }

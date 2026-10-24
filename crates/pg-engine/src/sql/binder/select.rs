@@ -3921,9 +3921,10 @@ impl Binder<'_, '_> {
     }
 
     /// `restrict_nonsystem_relation_kind` with `view`: a query that is planned can't expand
-    /// a view users made (ApplyRetrieveRule, rewriteTargetView).
+    /// a view users made (ApplyRetrieveRule, rewriteTargetView). (Deparsing isn't planning:
+    /// pg_dump sets it and prints views over views.)
     pub(crate) fn check_view_restricted(&self, v: &crate::catalog::ViewDef) -> Result<()> {
-        if self.deps.is_some() || self.unplanned || v.oid < crate::catalog::FIRST_USER_OID {
+        if self.deps.is_some() || self.unplanned || self.deparse || v.oid < crate::catalog::FIRST_USER_OID {
             return Ok(());
         }
         if crate::session::settings::restricted_kinds(&self.ctx.sess.settings.borrow()).0 {
@@ -3937,7 +3938,7 @@ impl Binder<'_, '_> {
 
     /// `restrict_nonsystem_relation_kind` with `foreign-table`: no foreign table is planned.
     pub(crate) fn check_foreign_restricted(&self) -> Result<()> {
-        if self.deps.is_some() || self.unplanned {
+        if self.deps.is_some() || self.unplanned || self.deparse {
             return Ok(());
         }
         if crate::session::settings::restricted_kinds(&self.ctx.sess.settings.borrow()).1 {

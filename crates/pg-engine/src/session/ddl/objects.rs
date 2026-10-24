@@ -1089,6 +1089,11 @@ impl Ddl<'_, '_> {
                 .views
                 .get(&oid)
                 .map_or_else(Vec::new, |v| v.defaults.clone()),
+            default_oids: self
+                .cat
+                .views
+                .get(&oid)
+                .map_or_else(Vec::new, |v| v.default_oids.clone()),
             materialized: false,
             check_option,
             storage: None,
@@ -1288,6 +1293,12 @@ impl Ddl<'_, '_> {
                             if nv.defaults.len() < nv.columns.len() {
                                 nv.defaults.resize(nv.columns.len(), None);
                             }
+                            if nv.default_oids.len() < nv.columns.len() {
+                                nv.default_oids.resize(nv.columns.len(), 0);
+                            }
+                            // (A new default is a new pg_attrdef row.)
+                            nv.default_oids[i] =
+                                if sql.is_some() { self.cat.alloc_oid() } else { 0 };
                             nv.defaults[i] = sql;
                         }
                         A::AtSetRelOptions | A::AtResetRelOptions if !v.materialized => {
@@ -2458,6 +2469,7 @@ impl Ddl<'_, '_> {
         let mut multi: Option<Vec<String>> = None;
         let mut opclass = false;
         let mut subtype_opclass: Option<String> = None;
+        let mut subtype_opc = 0u32;
         let mut seen: Vec<&str> = Vec::new();
         for d in def_elems(&s.params) {
             if seen.contains(&d.defname.as_str()) {
@@ -2498,7 +2510,12 @@ impl Ddl<'_, '_> {
                 "multirange_type_name" => multi = Some(qualified()),
                 "subtype_opclass" => {
                     opclass = true;
-                    subtype_opclass = qualified().last().cloned();
+                    let parts = qualified();
+                    subtype_opc = self
+                        .cat
+                        .find_opclass(403, &parts, self.search_path())?
+                        .map_or(0, |c| c.oid);
+                    subtype_opclass = parts.last().cloned();
                 }
                 other => {
                     return Err(Error::new(
@@ -2600,6 +2617,7 @@ impl Ddl<'_, '_> {
             fn_oids,
             subtype_domain,
             subtype_opclass,
+            subtype_opc,
         };
         self.cat.ranges.insert(oid, Arc::new(def));
         if multi_schema != schema {
@@ -3358,6 +3376,8 @@ impl Ddl<'_, '_> {
         // A C function's `AS 'file', 'symbol'`: the symbol.
         let mut link_symbol: Option<String> = None;
         let mut as_items = 0usize;
+        let mut support = 0u32;
+        let mut transform: Option<&pb::DefElem> = None;
         let mut volatility = 'v';
         let mut strict = false;
         let mut security_definer = false;
@@ -3386,7 +3406,8 @@ impl Ddl<'_, '_> {
                 ));
             }
             match d.defname.as_str() {
-                "support" => self.check_support_function(d)?,
+                "support" => support = self.check_support_function(d)?,
+                "transform" => transform = Some(d),
                 "cost" => {
                     cost = def_number(d);
                     if cost <= 0.0 {
@@ -3695,6 +3716,19 @@ impl Ddl<'_, '_> {
                 .map(atomic_returns)
                 .unwrap_or_default(),
             probin,
+            support,
+            window: def_elems(&s.options).any(|d| {
+                d.defname == "window"
+                    && d.arg.as_deref().and_then(crate::sql::binder::ast::ival) != Some(0)
+            }),
+            trftypes: Vec::new(),
+        };
+        let f = match transform {
+            Some(d) => Function {
+                trftypes: self.transform_types(d, &f.language)?,
+                ..f
+            },
+            None => f,
         };
         // A BEGIN ATOMIC body is analyzed as it is parsed; a string body by the language's
         // validator, once the function is in place (ProcedureCreate), so it may call itself.
@@ -4314,15 +4348,48 @@ impl Ddl<'_, '_> {
     /// ALTER FUNCTION / PROCEDURE / ROUTINE … action…
     /// SUPPORT name (interpret_func_support): a function `name(internal)` returning
     /// internal.
-    fn check_support_function(&self, d: &pb::DefElem) -> Result<()> {
+    /// TRANSFORM FOR TYPE ...: the types' oids, each with a transform for `language`
+    /// (interpret_AS_clause's get_transform_oid).
+    fn transform_types(&self, d: &pb::DefElem, language: &str) -> Result<Vec<u32>> {
+        let Some(NodeEnum::List(l)) = d.arg.as_deref().and_then(inner) else {
+            return Ok(Vec::new());
+        };
+        let lang = self.cat.languages.values().find(|x| x.name == language).map(|x| x.oid).unwrap_or(match language {
+            "internal" => 12,
+            "c" => 13,
+            "sql" => 14,
+            "plpgsql" => crate::catalog::depend::PLPGSQL_LANG,
+            _ => 0,
+        });
+        let mut out = Vec::new();
+        for n in &l.items {
+            let Some(NodeEnum::TypeName(tn)) = inner(n) else { continue };
+            let (ty, domain) = resolve_type_name(&self.cat, self.search_path(), tn)?;
+            let oid = domain.unwrap_or_else(|| system::type_oid(&self.cat, &ty));
+            if !self.cat.transforms.values().any(|t| t.ty == oid && t.lang == lang) {
+                return Err(Error::new(
+                    code::UNDEFINED_OBJECT,
+                    format!(
+                        "transform for type {} language \"{language}\" does not exist",
+                        self.cat.format_type(&ty, domain, self.search_path())
+                    ),
+                ));
+            }
+            out.push(oid);
+        }
+        Ok(out)
+    }
+
+    /// The support function SUPPORT names (its oid), checked as Postgres does.
+    fn check_support_function(&self, d: &pb::DefElem) -> Result<u32> {
         let parts: Vec<String> = match d.arg.as_deref().and_then(inner) {
             Some(NodeEnum::List(l)) => names(&l.items),
             Some(NodeEnum::String(x)) => vec![x.sval.clone()],
             Some(NodeEnum::TypeName(tn)) => names(&tn.names),
-            _ => return Ok(()),
+            _ => return Ok(0),
         };
         let Some(name) = parts.last() else {
-            return Ok(());
+            return Ok(0);
         };
         const INTERNAL: u32 = 2281;
         let user = self.cat.functions.values().find(|f| {
@@ -4332,12 +4399,12 @@ impl Ddl<'_, '_> {
                 && (parts.len() < 2 || self.cat.schema_name(f.schema) == parts[parts.len() - 2])
         });
         let ret = match user {
-            Some(f) => Some(f.ret.oid()),
+            Some(f) => Some((f.ret.oid(), f.oid)),
             None if parts.len() < 2 || parts[parts.len() - 2] == "pg_catalog" => {
                 crate::catalog::system::builtin_proc_sigs()
                     .iter()
                     .find(|p| p.name == name && p.args == [INTERNAL])
-                    .map(|p| p.ret)
+                    .map(|p| (p.ret, p.oid))
             }
             None => None,
         };
@@ -4346,11 +4413,11 @@ impl Ddl<'_, '_> {
                 code::UNDEFINED_FUNCTION,
                 format!("function {}(internal) does not exist", parts.join(".")),
             )),
-            Some(r) if r != INTERNAL => Err(Error::new(
+            Some((r, _)) if r != INTERNAL => Err(Error::new(
                 code::INVALID_OBJECT_DEFINITION,
                 format!("support function {} must return type internal", parts.join(".")),
             )),
-            Some(_) => Ok(()),
+            Some((_, oid)) => Ok(oid),
         }
     }
 
@@ -4397,7 +4464,7 @@ impl Ddl<'_, '_> {
                 ));
             }
             match d.defname.as_str() {
-                "support" => self.check_support_function(d)?,
+                "support" => nf.support = self.check_support_function(d)?,
                 "volatility" => {
                     nf.volatility = match def_arg_str(d).as_deref() {
                         Some("immutable") => 'i',

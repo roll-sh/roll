@@ -1739,6 +1739,12 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
             {
                 let mut r = r.clone();
                 r[21] = boot_acl(&r[21], &boot);
+                // Column privileges granted on a system catalog.
+                if let (Value::Oid(rel), Some(num)) = (&r[0], r[4].as_i64())
+                    && let Some(acl) = cat.acl(ObjKind::Table, *rel, num as i32)
+                {
+                    r[21] = acl_value(cat, Some(acl));
+                }
                 out.push(r);
             }
             for r in relations(cat)
@@ -1802,7 +1808,7 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                         i4(if sys_domain.is_some() {
                             -1
                         } else {
-                            ty.typmod() as i64
+                            ty.catalog_typmod() as i64
                         }),
                         i2(ndims),
                         b(ty.by_value()),
@@ -1815,7 +1821,11 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                         b(col.as_ref().is_some_and(|c| c.not_null) || sys.is_some_and(|a| a.0)),
                         b(col
                             .as_ref()
-                            .is_some_and(|c| c.default.is_some() || c.generated.is_some())),
+                            .is_some_and(|c| c.default.is_some() || c.generated.is_some())
+                            || (col.is_none() && sys.is_none()
+                                && cat.views.get(&r.oid).is_some_and(|v| {
+                                    v.defaults.get(num - 1).is_some_and(Option::is_some)
+                                }))),
                         b(col.as_ref().is_some_and(|c| c.missing.is_some())),
                         c(match col.as_ref().and_then(|c| c.identity.clone()) {
                             Some(super::Identity::Always) => 'a',
@@ -2109,7 +2119,7 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                     0,
                     d.array_oid,
                     base,
-                    d.base.typmod(),
+                    d.base.catalog_typmod(),
                     d.not_null,
                     0,
                 );
@@ -2361,8 +2371,18 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                     row[22] = c(align);
                     row[23] = c('p');
                 }
-                if let Some(def) = cat.domains.get(&oid).and_then(|d| d.default.as_ref()) {
-                    row[30] = nm(def);
+                if let Some(d) = cat.domains.get(&oid) {
+                    if let Some(def) = &d.default {
+                        let shown = crate::sql::ruleutils::domain_default(ctx, &d.base, def)
+                            .unwrap_or_else(|| def.clone());
+                        row[29] = nm(&shown);
+                        row[30] = nm(shown);
+                    }
+                    if let Some(coll) = &d.collation
+                        && type_collation(&d.base) != 0
+                    {
+                        row[28] = o(collation_oid(coll).unwrap_or(100));
+                    }
                 }
                 // A made base type's own attributes (its array's alignment follows it).
                 if let Some(d) = cat.base_types.get(&oid) {
@@ -3083,6 +3103,8 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                     'p'
                 } else if f.agg.is_some() {
                     'a'
+                } else if f.window {
+                    'w'
                 } else {
                     'f'
                 };
@@ -3143,6 +3165,10 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                     "c" => 13,
                     _ => 12,
                 });
+                row[8] = o(f.support);
+                if !f.trftypes.is_empty() {
+                    row[24] = arr(DataType::Oid, f.trftypes.iter().map(|t| o(*t)).collect());
+                }
                 if let Some(bin) = &f.probin {
                     row[26] = Value::Text(Arc::from(bin.as_str()));
                 }
@@ -3509,10 +3535,14 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                 .cloned()
                 .chain(cat.ranges.values().map(|r| r.range_type()))
             {
-                let subopc = default_opclass(403, &rt.subtype);
+                let subopc = match cat.ranges.values().find(|r| r.oid == rt.oid) {
+                    Some(r) if r.subtype_opc != 0 => r.subtype_opc,
+                    _ => default_opclass(403, &rt.subtype),
+                };
                 out.push(vec![
                     o(rt.oid),
-                    o(type_oid(cat, &rt.subtype)),
+                    // (A range over a domain: the domain.)
+                    o(rt.subtype_domain.unwrap_or_else(|| type_oid(cat, &rt.subtype))),
                     o(rt.multi_oid),
                     o(rt.collation),
                     o(subopc),
@@ -4002,6 +4032,20 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                             o(t.oid),
                             i2(i as i64 + 1),
                             nm(shown_default(ctx, t, d, &col.ty)),
+                        ]);
+                    }
+                }
+            }
+            // ALTER VIEW ... ALTER COLUMN ... SET DEFAULT.
+            for v in cat.views.values().filter(|v| v.defaults.iter().any(Option::is_some)) {
+                let t = v.as_table();
+                for (i, d) in v.defaults.iter().enumerate() {
+                    if let (Some(d), Some(col)) = (d, v.columns.get(i)) {
+                        out.push(vec![
+                            o(v.default_oids.get(i).copied().unwrap_or(0)),
+                            o(v.oid),
+                            i2(i as i64 + 1),
+                            nm(shown_default(ctx, &t, d, &col.1)),
                         ]);
                     }
                 }

@@ -2018,9 +2018,11 @@ impl Ddl<'_, '_> {
                     let initially_valid = enforced && (!not_valid || !existing);
                     let partition = t.partbound.is_some();
                     let tname = t.name.clone();
-                    if let Some(c) = t.constraints.iter_mut().find(|c| {
-                        !c.islocal && name.as_deref() == Some(c.name.as_str()) && matches!(&c.kind, ConstraintKind::Check { expr: e, .. } if *e == expr)
-                    }) {
+                    let tc = Arc::new(t.clone());
+                    let pos = t.constraints.iter().position(|c| {
+                        !c.islocal && name.as_deref() == Some(c.name.as_str()) && matches!(&c.kind, ConstraintKind::Check { expr: e, .. } if self.same_check(&tc, e, &expr))
+                    });
+                    if let Some(c) = pos.map(|i| &mut t.constraints[i]) {
                         let conflict = |what: &str| {
                             Error::new(
                                 code::INVALID_OBJECT_DEFINITION,
@@ -3984,6 +3986,7 @@ impl Ddl<'_, '_> {
                 domains: t.columns.iter().map(|c| c.domain).collect(),
                 collations: t.columns.iter().map(|c| c.collation.clone()).collect(),
                 defaults: Vec::new(),
+                default_oids: Vec::new(),
                 materialized: true,
                 check_option: None,
                 storage: Some(Arc::new(t.clone())),
@@ -7341,6 +7344,14 @@ impl Ddl<'_, '_> {
                 continue;
             };
             let Some(rel) = self.lookup(rv)? else {
+                // A system catalog or view (pg_dump --schema=pg_catalog locks them all).
+                if let Some(t) =
+                    system::SysTable::lookup(Self::rv_schema(rv), &rv.relname, self.search_path())
+                {
+                    self.require_rel_priv(t.oid(), lock_acl_mask(s.mode), true)?;
+                    self.note_lock(t.oid(), s.mode);
+                    continue;
+                }
                 return Err(crate::catalog::no_such_relation(
                     Self::rv_schema(rv),
                     &rv.relname,

@@ -431,6 +431,170 @@ fn transactions_and_portals() {
     s.engine.shutdown();
 }
 
+/// pg_export_snapshot() / SET TRANSACTION SNAPSHOT, as `pg_dump -j` uses them: workers
+/// importing the leader's snapshot see its data as of the export, not later commits, until
+/// the exporting transaction ends.
+#[test]
+fn exported_snapshots() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let leader = s.connect("postgres").await;
+        let worker = s.connect("postgres").await;
+        let writer = s.connect("postgres").await;
+        leader.batch_execute("CREATE TABLE snap (v int); INSERT INTO snap VALUES (1)").await.unwrap();
+        leader
+            .batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .await
+            .unwrap();
+        let id: String = leader.query_one("SELECT pg_export_snapshot()", &[]).await.unwrap().get(0);
+        assert!(id.ends_with("-1"), "{id}");
+        writer.batch_execute("INSERT INTO snap VALUES (2)").await.unwrap();
+        let count = "SELECT count(*) FROM snap";
+        worker
+            .batch_execute(&format!(
+                "BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY; SET TRANSACTION SNAPSHOT '{id}'"
+            ))
+            .await
+            .unwrap();
+        assert_eq!(worker.query_one(count, &[]).await.unwrap().get::<_, i64>(0), 1);
+        worker.batch_execute("COMMIT").await.unwrap();
+        // Errors: READ COMMITTED, a query first, a malformed or unknown identifier, a
+        // serializable importer of a non-serializable snapshot.
+        let code = |e: tokio_postgres::Error| e.code().map(|c| c.code().to_string());
+        let set = format!("SET TRANSACTION SNAPSHOT '{id}'");
+        worker.batch_execute("BEGIN").await.unwrap();
+        let e = worker.batch_execute(&set).await.unwrap_err();
+        assert_eq!(code(e).as_deref(), Some("0A000"));
+        worker.batch_execute("ROLLBACK; BEGIN ISOLATION LEVEL REPEATABLE READ").await.unwrap();
+        worker.batch_execute("SELECT pg_current_xact_id()").await.unwrap();
+        let e = worker.batch_execute(&set).await.unwrap_err();
+        assert_eq!(code(e).as_deref(), Some("25001"));
+        worker.batch_execute("ROLLBACK; BEGIN ISOLATION LEVEL REPEATABLE READ").await.unwrap();
+        let e = worker.batch_execute("SET TRANSACTION SNAPSHOT 'x/y'").await.unwrap_err();
+        assert_eq!(code(e).as_deref(), Some("22023"));
+        worker.batch_execute("ROLLBACK; BEGIN ISOLATION LEVEL SERIALIZABLE").await.unwrap();
+        let e = worker.batch_execute(&set).await.unwrap_err();
+        assert_eq!(code(e).as_deref(), Some("0A000"));
+        worker.batch_execute("ROLLBACK").await.unwrap();
+        // A second export of the same transaction counts on; a subtransaction can't export.
+        let id2: String = leader.query_one("SELECT pg_export_snapshot()", &[]).await.unwrap().get(0);
+        assert!(id2.ends_with("-2") && id2[..id2.len() - 2] == id[..id.len() - 2], "{id2}");
+        leader.batch_execute("SAVEPOINT a").await.unwrap();
+        let e = leader.query_one("SELECT pg_export_snapshot()", &[]).await.unwrap_err();
+        assert_eq!(code(e).as_deref(), Some("25001"));
+        // Once the exporter ends, its snapshots are gone.
+        leader.batch_execute("ROLLBACK").await.unwrap();
+        worker.batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ").await.unwrap();
+        let e = worker.batch_execute(&set).await.unwrap_err();
+        assert_eq!(code(e).as_deref(), Some("42704"));
+        worker.batch_execute("ROLLBACK").await.unwrap();
+        assert_eq!(worker.query_one(count, &[]).await.unwrap().get::<_, i64>(0), 2);
+    });
+    s.engine.shutdown();
+}
+
+/// DDL of transactions running at once commits as in Postgres (`pg_restore -j` makes a
+/// database's indexes and constraints that way): changes to different objects, and indexes
+/// added to one table, all stay; a name both took fails the later commit; one object both
+/// changed fails it as a serialization failure.
+#[test]
+fn concurrent_ddl() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        a.batch_execute(
+            "CREATE TABLE t1 (x int, y int); CREATE TABLE t2 (x int);
+             CREATE TABLE p (k int, v int) PARTITION BY HASH (k);
+             CREATE TABLE p1 PARTITION OF p FOR VALUES WITH (MODULUS 2, REMAINDER 0)",
+        )
+        .await
+        .unwrap();
+        let code = |e: tokio_postgres::Error| e.code().map(|c| c.code().to_string());
+        let both = |sa: &'static str, sb: &'static str| {
+            let (a, b) = (&a, &b);
+            async move {
+                a.batch_execute(&format!("BEGIN; {sa}")).await.unwrap();
+                b.batch_execute(&format!("BEGIN; {sb}")).await.unwrap();
+                a.batch_execute("COMMIT").await.unwrap();
+                b.batch_execute("COMMIT").await
+            }
+        };
+        both("CREATE INDEX t1_x ON t1 (x)", "CREATE INDEX t2_x ON t2 (x); COMMENT ON TABLE t2 IS 'c'")
+            .await
+            .unwrap();
+        both("CREATE INDEX t1_y ON t1 (y)", "CREATE INDEX t1_xy ON t1 (x, y)").await.unwrap();
+        both(
+            "ALTER TABLE ONLY p ADD CONSTRAINT p_key UNIQUE (k, v)",
+            "ALTER TABLE ONLY p1 ADD CONSTRAINT p1_key UNIQUE (k, v)",
+        )
+        .await
+        .unwrap();
+        a.batch_execute("ALTER INDEX p_key ATTACH PARTITION p1_key").await.unwrap();
+        let names: Vec<String> = a
+            .query(
+                "SELECT relname::text FROM pg_class WHERE relname ~ '^(t1_|t2_|p_key|p1_key)' ORDER BY 1",
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        assert_eq!(names, ["p1_key", "p_key", "t1_x", "t1_xy", "t1_y", "t2_x"]);
+        let c: String = a.query_one("SELECT obj_description('t2'::regclass)", &[]).await.unwrap().get(0);
+        assert_eq!(c, "c");
+        // The same name taken by both.
+        let e = both("CREATE TABLE n (a int)", "CREATE TABLE n (b text)").await.unwrap_err();
+        assert_eq!(code(e).as_deref(), Some("23505"));
+        // The same object changed by both.
+        let e = both("ALTER TABLE t2 RENAME TO t3", "ALTER TABLE t2 RENAME TO t4").await.unwrap_err();
+        assert_eq!(code(e).as_deref(), Some("40001"));
+        b.batch_execute("ROLLBACK").await.ok();
+        let n: i64 = a
+            .query_one("SELECT count(*) FROM pg_class WHERE relname IN ('n', 't3', 't4')", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(n, 2);
+    });
+    s.engine.shutdown();
+}
+
+/// A database closed cleanly (idle, or at shutdown) keeps its sequences' positions, as
+/// Postgres's shutdown checkpoint does; only a crash skips the values logged ahead.
+#[test]
+fn sequences_survive_a_clean_close() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        a.batch_execute("CREATE DATABASE seqs").await.unwrap();
+        {
+            let c = s.connect("seqs").await;
+            c.batch_execute("CREATE SEQUENCE s1; CREATE TABLE t (id serial, v int)").await.unwrap();
+            c.batch_execute("SELECT nextval('s1'), nextval('s1'), nextval('s1'); INSERT INTO t (v) VALUES (1), (2)")
+                .await
+                .unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while s.engine.open_databases() > 1 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(s.engine.open_databases(), 1);
+        let c = s.connect("seqs").await;
+        let row = c
+            .query_one("SELECT last_value, is_called FROM s1", &[])
+            .await
+            .unwrap();
+        assert_eq!((row.get::<_, i64>(0), row.get::<_, bool>(1)), (3, true));
+        let n: i64 = c.query_one("SELECT nextval('s1')", &[]).await.unwrap().get(0);
+        assert_eq!(n, 4);
+        let id: i32 = c.query_one("INSERT INTO t (v) VALUES (3) RETURNING id", &[]).await.unwrap().get(0);
+        assert_eq!(id, 3);
+    });
+    s.engine.shutdown();
+}
+
 #[test]
 fn copy_in_and_out() {
     let s = server(AuthMethod::ScramSha256);

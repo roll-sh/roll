@@ -323,8 +323,19 @@ fn column(cat: &Catalog, oid: u32, attnum: i16) -> Option<(String, usize)> {
 }
 
 fn func_names(cat: &Catalog, oid: u32) -> Option<(String, String)> {
-    let f = cat.functions.get(&oid)?;
-    Some((cat.schema_name(f.schema).to_string(), f.name.clone()))
+    if let Some(f) = cat.functions.get(&oid) {
+        return Some((cat.schema_name(f.schema).to_string(), f.name.clone()));
+    }
+    // A range type's constructors (two of the range, three of the multirange).
+    let r = cat.ranges.values().find(|r| r.fn_oids.iter().take(5).any(|o| *o == oid))?;
+    let i = r.fn_oids.iter().position(|o| *o == oid)?;
+    let (ctor, name, schema) = if i < 2 {
+        (&r.ctors.0, &r.name, r.schema)
+    } else {
+        (&r.ctors.1, &r.multi_name, cat.multirange_schema(r))
+    };
+    let name = if ctor.is_empty() { name } else { ctor };
+    Some((cat.schema_name(schema).to_string(), name.clone()))
 }
 
 fn type_names(cat: &Catalog, oid: u32) -> Option<(String, String)> {
@@ -336,6 +347,8 @@ fn type_names(cat: &Catalog, oid: u32) -> Option<(String, String)> {
         (c.schema, c.name.clone())
     } else if let Some(r) = cat.ranges.values().find(|r| r.oid == oid) {
         (r.schema, r.name.clone())
+    } else if let Some(b) = cat.base_types.get(&oid) {
+        (b.ty.schema, b.ty.name.to_string())
     } else {
         let r = cat.ranges.values().find(|r| r.multi_oid == oid)?;
         (r.schema, r.multi_name.clone())
@@ -1043,6 +1056,19 @@ fn qualify_text(text: &str, log: &RefLog, cat: &Catalog, search_path: &[String])
             bare(loc, &schema, &name);
         }
     }
+    // A user operator: `OPERATOR(schema.op)`.
+    for &(loc, oid) in &log.opers {
+        if let Some(o) = cat.operators.get(&oid)
+            && let Some(p) = t.pos(loc)
+            && text[p..].starts_with(o.name.as_str())
+        {
+            edits.push(Edit {
+                start: p,
+                end: p + o.name.len(),
+                text: format!("OPERATOR({}.{})", quote_ident(cat.schema_name(o.schema)), o.name),
+            });
+        }
+    }
     for &(loc, class, oid) in &log.literals {
         if class == crate::catalog::depend::REL
             && let Some((schema, name, _)) = rel_names(cat, oid)
@@ -1145,6 +1171,21 @@ fn recorder<'b, 'a>(ctx: &'b crate::exec::ExecCtx<'a>, cat: &Arc<Catalog>) -> Bi
 
 /// The prefix `ast::parse_expr` puts before an expression.
 const EXPR_BASE: i32 = "SELECT ".len() as i32;
+
+/// A log recorded binding an expression parsed by `ast::parse_expr`, its positions in the
+/// expression's own text.
+fn expr_log(mut log: RefLog) -> RefLog {
+    for r in &mut log.rels {
+        r.loc -= EXPR_BASE;
+    }
+    for x in log.funcs.iter_mut().chain(log.types.iter_mut()).chain(log.opers.iter_mut()) {
+        x.0 -= EXPR_BASE;
+    }
+    for x in &mut log.literals {
+        x.0 -= EXPR_BASE;
+    }
+    log
+}
 
 impl Ddl<'_, '_> {
     /// Bind with `f`, recording, then rename what changed in `text`. None: unchanged (or not
@@ -1960,6 +2001,272 @@ impl Ddl<'_, '_> {
         b.bind_statement(&node).ok()?;
         let log = b.refs.take()?;
         qualify_text(text, &log, cat, self.search_path())
+    }
+
+    /// An expression stored over `table`, its names qualified (`qualify_names`); a column's
+    /// default or generation expression (`col`: its type and name) as coerced to the
+    /// column's type, which reg* literals are read as. None: nothing to qualify (or not
+    /// bindable).
+    fn qualified_table_expr(
+        &self,
+        cat: &Arc<Catalog>,
+        table: &Arc<crate::catalog::Table>,
+        sql: &str,
+        clause: Clause,
+        col: Option<(&crate::types::DataType, &str)>,
+    ) -> Option<String> {
+        let node = ast::parse_expr(sql).ok()?;
+        // Over the catalog as the statement has it: names (regclass input) of a relation
+        // being created resolve.
+        let nctx = self.ctx.child_over(cat.clone());
+        let mut b = recorder(&nctx, cat);
+        let e = b.bind_over_table(table, &node, clause).ok()?;
+        if let Some((ty, name)) = col {
+            b.coerce_assign(e, ty, name).ok()?;
+        }
+        let log = b.refs.take()?;
+        qualify_text(sql, &expr_log(*log), cat, self.search_path())
+    }
+
+    /// Whether two CHECK expressions over `table` are the same (as Postgres compares their
+    /// trees): equal texts, or equal once their names are qualified (one stored, so
+    /// qualified, the other not yet).
+    pub(super) fn same_check(&self, table: &Arc<crate::catalog::Table>, a: &str, b: &str) -> bool {
+        if a == b {
+            return true;
+        }
+        let cat = Arc::new(self.cat.clone());
+        let q = |s: &str| {
+            self.qualified_table_expr(&cat, table, s, Clause::Check, None)
+                .unwrap_or_else(|| s.to_string())
+        };
+        q(a) == q(b)
+    }
+
+    /// The expressions this statement stored (those `before` doesn't have) with the
+    /// relations, functions, types and reg* literals they name without a schema qualified,
+    /// so they keep naming the same objects under any search path, as Postgres's stored
+    /// trees (which name objects by oid) do: column defaults and generation expressions,
+    /// CHECK constraints, partition keys, index expressions and predicates, statistics
+    /// expressions, policies, trigger WHEN conditions and domain CHECKs. (Views, rules and
+    /// SQL-standard function bodies are qualified when made.)
+    pub(super) fn qualify_new_exprs(&mut self, before: &Catalog) {
+        let cat = Arc::new(self.cat.clone());
+        let ctx = self.ctx;
+        let nctx = ctx.child_over(cat.clone());
+        let mut tables = Vec::new();
+        for (oid, t) in &cat.tables {
+            let old = before.tables.get(oid);
+            if old.is_some_and(|o| Arc::ptr_eq(o, t)) {
+                continue;
+            }
+            let mut nt = (**t).clone();
+            let mut changed = false;
+            for (i, c) in t.columns.iter().enumerate() {
+                let prev = old.and_then(|o| o.columns.get(i));
+                if let Some(d) = c.default.as_deref()
+                    && prev.is_none_or(|p| p.default.as_deref() != Some(d))
+                    && let Some(q) = self.qualified_table_expr(&cat, t, d, Clause::Default, Some((&c.ty, &c.name)))
+                {
+                    nt.columns[i].default = Some(q);
+                    changed = true;
+                }
+                if let Some(g) = c.generated.as_deref()
+                    && prev.is_none_or(|p| p.generated.as_deref() != Some(g))
+                    && let Some(q) = self.qualified_table_expr(&cat, t, g, Clause::Generated, Some((&c.ty, &c.name)))
+                {
+                    nt.columns[i].generated = Some(q);
+                    changed = true;
+                }
+            }
+            for (i, con) in t.constraints.iter().enumerate() {
+                let ConstraintKind::Check { expr, .. } = &con.kind else {
+                    continue;
+                };
+                let known = old.is_some_and(|o| {
+                    o.constraints.iter().any(|x| {
+                        matches!(&x.kind, ConstraintKind::Check { expr: e, .. } if e == expr)
+                    })
+                });
+                if !known
+                    && let Some(q) = self.qualified_table_expr(&cat, t, expr, Clause::Check, None)
+                    && let Some(ConstraintKind::Check { expr: cur, .. }) =
+                        nt.constraints.get_mut(i).map(|c| &mut c.kind)
+                {
+                    *cur = q;
+                    changed = true;
+                }
+            }
+            if let Some(pk) = &t.partkey {
+                let old_pk = old.and_then(|o| o.partkey.as_ref());
+                for (i, k) in pk.cols.iter().enumerate() {
+                    if let Some(e) = k.expr.as_deref()
+                        && old_pk
+                            .and_then(|p| p.cols.get(i))
+                            .is_none_or(|x| x.expr.as_deref() != Some(e))
+                        && let Some(q) = self.qualified_table_expr(&cat, t, e, Clause::IndexExpr, None)
+                        && let Some(cur) = nt.partkey.as_mut().and_then(|p| p.cols.get_mut(i))
+                    {
+                        cur.expr = Some(q);
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                tables.push(nt);
+            }
+        }
+        for nt in tables {
+            self.cat.put_storage(nt);
+        }
+        // Index expressions and predicates.
+        let mut indexes = Vec::new();
+        for (oid, ix) in &cat.indexes {
+            let old = before.indexes.get(oid);
+            if old.is_some_and(|o| Arc::ptr_eq(o, ix)) {
+                continue;
+            }
+            let Some(t) = cat.index_table(ix.table) else {
+                continue;
+            };
+            let mut nix = (**ix).clone();
+            let mut changed = false;
+            for (i, c) in ix.columns.iter().enumerate() {
+                if let IndexKey::Expr(e) = &c.key
+                    && old
+                        .and_then(|o| o.columns.get(i))
+                        .is_none_or(|x| !matches!(&x.key, IndexKey::Expr(p) if p == e))
+                    && let Some(q) = self.qualified_table_expr(&cat, &t, e, Clause::IndexExpr, None)
+                    && let Some(IndexKey::Expr(cur)) = nix.columns.get_mut(i).map(|c| &mut c.key)
+                {
+                    *cur = q;
+                    changed = true;
+                }
+            }
+            if let Some(p) = ix.predicate.as_deref()
+                && old.is_none_or(|o| o.predicate.as_deref() != Some(p))
+                && let Some(q) = self.qualified_table_expr(&cat, &t, p, Clause::Check, None)
+            {
+                nix.predicate = Some(q);
+                changed = true;
+            }
+            if changed {
+                indexes.push(nix);
+            }
+        }
+        for nix in indexes {
+            self.cat.put_index(nix);
+        }
+        // Statistics objects' expressions.
+        for (oid, st) in &cat.statistics {
+            if before.statistics.get(oid).is_some_and(|o| o.exprs == st.exprs) {
+                continue;
+            }
+            let Some(t) = cat.tables.get(&st.table) else {
+                continue;
+            };
+            let mut exprs = st.exprs.clone();
+            let mut changed = false;
+            for e in &mut exprs {
+                if let Some(q) = self.qualified_table_expr(&cat, t, e, Clause::IndexExpr, None) {
+                    *e = q;
+                    changed = true;
+                }
+            }
+            if changed {
+                let mut ns = (**st).clone();
+                ns.exprs = exprs;
+                self.cat.statistics.insert(ns.oid, Arc::new(ns));
+            }
+        }
+        // Policies.
+        for (oid, p) in &cat.policies {
+            let old = before.policies.get(oid);
+            if old.is_some_and(|o| o.qual == p.qual && o.with_check == p.with_check) {
+                continue;
+            }
+            let Some(t) = cat.tables.get(&p.table) else {
+                continue;
+            };
+            let q = |s: &Option<String>, prev: Option<&Option<String>>| {
+                s.as_deref()
+                    .filter(|_| prev != Some(s))
+                    .and_then(|s| self.qualified_table_expr(&cat, t, s, Clause::Where, None))
+            };
+            let (qual, check) = (
+                q(&p.qual, old.map(|o| &o.qual)),
+                q(&p.with_check, old.map(|o| &o.with_check)),
+            );
+            if qual.is_some() || check.is_some() {
+                let mut np = (**p).clone();
+                if qual.is_some() {
+                    np.qual = qual;
+                }
+                if check.is_some() {
+                    np.with_check = check;
+                }
+                self.cat.policies.insert(np.oid, Arc::new(np));
+            }
+        }
+        // Trigger WHEN conditions.
+        for (oid, tg) in &cat.triggers {
+            let Some(w) = tg.when.as_deref() else {
+                continue;
+            };
+            if before.triggers.get(oid).is_some_and(|o| o.when.as_deref() == Some(w)) {
+                continue;
+            }
+            let table = (cat.tables.get(&tg.table).cloned())
+                .or_else(|| cat.views.get(&tg.table).map(|v| v.as_table()));
+            let Some(table) = table else {
+                continue;
+            };
+            let mut b = recorder(&nctx, &cat);
+            if b.bind_trigger_when(&table, w).is_err() {
+                continue;
+            }
+            let Some(log) = b.refs.take() else {
+                continue;
+            };
+            if let Some(q) = qualify_text(w, &expr_log(*log), &cat, self.search_path()) {
+                let mut nt = (**tg).clone();
+                nt.when = Some(q);
+                self.cat.triggers.insert(nt.oid, Arc::new(nt));
+            }
+        }
+        // Domain CHECKs.
+        for (oid, d) in &cat.domains {
+            let old = before.domains.get(oid);
+            if old.is_some_and(|o| o.checks == d.checks) {
+                continue;
+            }
+            let mut checks = d.checks.clone();
+            let mut changed = false;
+            for (name, sql) in &mut checks {
+                if old.is_some_and(|o| o.checks.iter().any(|(n, s)| n == name && s == sql)) {
+                    continue;
+                }
+                let Ok(node) = ast::parse_expr(sql) else {
+                    continue;
+                };
+                let mut b = recorder(&nctx, &cat);
+                if b.bind_domain_check(&node, &d.base).is_err() {
+                    continue;
+                }
+                let Some(log) = b.refs.take() else {
+                    continue;
+                };
+                if let Some(q) = qualify_text(sql, &expr_log(*log), &cat, self.search_path()) {
+                    *sql = q;
+                    changed = true;
+                }
+            }
+            if changed {
+                let mut nd = (**d).clone();
+                nd.checks = checks;
+                self.cat.domains.insert(nd.oid, Arc::new(nd));
+            }
+        }
     }
 
     /// A new SQL-standard function's body, its statements' names qualified

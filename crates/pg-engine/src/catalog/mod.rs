@@ -797,6 +797,9 @@ pub struct ViewDef {
     /// Per column: ALTER VIEW ... ALTER COLUMN ... SET DEFAULT's expression (SQL).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub defaults: Vec<Option<String>>,
+    /// Per column: the pg_attrdef oid of its default (0: none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_oids: Vec<u32>,
     /// The columns of FROM functions' named composite results the query reads, as they
     /// were when the view was made: (the composite type's relation, attnum, name, type).
     /// Postgres's stored query holds them by number and type, so a column dropped or
@@ -1160,6 +1163,9 @@ pub struct RangeDef {
     /// SUBTYPE_OPCLASS, when given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtype_opclass: Option<String>,
+    /// SUBTYPE_OPCLASS's pg_opclass oid (rngsubopc; 0: the subtype's default btree class).
+    #[serde(default)]
+    pub subtype_opc: u32,
 }
 
 impl Catalog {
@@ -1367,6 +1373,15 @@ pub struct Function {
     /// A C function's library (probin); `body` is its symbol (prosrc).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probin: Option<String>,
+    /// The planner support function (prosupport; 0: none).
+    #[serde(default)]
+    pub support: u32,
+    /// WINDOW (prokind 'w').
+    #[serde(default)]
+    pub window: bool,
+    /// TRANSFORM FOR TYPE ... (protrftypes).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trftypes: Vec<u32>,
 }
 
 fn parallel_unsafe() -> char {
@@ -1476,6 +1491,9 @@ impl Function {
             sql_body: None,
             atomic_returns: Vec::new(),
             probin: None,
+            support: 0,
+            window: false,
+            trftypes: Vec::new(),
         }))
     }
 
@@ -2251,6 +2269,8 @@ impl Catalog {
             || self.views.contains_key(&oid)
             || self.indexes.contains_key(&oid)
             || self.sequences.contains_key(&oid)
+            // (A composite type's pg_class entry.)
+            || self.composites.values().any(|c| c.relid == oid)
         {
             REL
         } else if self.schemas.contains_key(&oid) {

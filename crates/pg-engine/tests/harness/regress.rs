@@ -48,6 +48,9 @@
 //!   mounted at the same path, e.g.
 //!   `docker run -d --name x --network host --user $(id -u):$(id -g) -v $D:$D --entrypoint sleep <image> infinity`.
 //! - `PGREGRESS_REPORT_DIR`: where `REPORT.md` and `hunks/` go (default `tests/regress`).
+//! - `PGREGRESS_KEEP=1`: keep the reference's database, roles and tablespaces (and the engine's
+//!   data directory, `$PGREGRESS_DIR/enginedata`) at the end, e.g. to dump the regression
+//!   database as `tests/pg_dump.rs` does.
 //!
 //! The reference's database and any databases, roles and tablespaces the run created there
 //! are dropped at the end.
@@ -1591,7 +1594,11 @@ fn run_all(cfg: &Config, schedule: &[String]) {
         run_test(cfg, &mut engine, &log, test, &before);
     }
     engine.stop();
-    cleanup_reference(cfg, &before);
+    if std::env::var("PGREGRESS_KEEP").is_ok_and(|v| v == "1") {
+        eprintln!("PGREGRESS_KEEP: the reference's database, roles and tablespaces stay");
+    } else {
+        cleanup_reference(cfg, &before);
+    }
 }
 
 /// Runs one file of the suite on both sides and saves the outputs under `cfg.out`.

@@ -505,8 +505,15 @@ fn pg_get_serial_sequence(a: &[Value], c: &FnCtx) -> Result<Value> {
         return Err(crate::catalog::no_such_relation(schema, name));
     };
     let col = text_arg(&a[1]);
-    let (_, column) = t.column(col)?;
-    Ok(match column.seq.and_then(|s| cat.sequences.get(&s)) {
+    let (idx, column) = t.column(col)?;
+    // The first sequence pg_depend has the column owning (auto or internal): the oldest.
+    let owned = cat
+        .sequences
+        .values()
+        .filter(|s| s.owned_by == Some((t.oid, idx)))
+        .min_by_key(|s| s.oid)
+        .map(|s| s.oid);
+    Ok(match owned.or(column.seq).and_then(|s| cat.sequences.get(&s)) {
         Some(s) => text(format!(
             "{}.{}",
             quote_ident(cat.schema_name(s.schema)),
@@ -2353,9 +2360,21 @@ fn pg_get_functiondef(a: &[Value], c: &FnCtx) -> Result<Value> {
             function_result(&cat, f, &c.exec.search_path)
         ));
     }
+    if !f.trftypes.is_empty() {
+        let types: Vec<String> = f
+            .trftypes
+            .iter()
+            .map(|t| format!("FOR TYPE {}", format_type_oid(*t, -1, &cat, &c.exec.search_path).unwrap_or_default()))
+            .collect();
+        s.push_str(&format!(" TRANSFORM {}\n", types.join(", ")));
+    }
     s.push_str(&format!(" LANGUAGE {}\n", quote_ident(&f.language)));
+
     // As pg_get_functiondef orders them.
     let mut opts = String::new();
+    if f.window {
+        opts.push_str(" WINDOW");
+    }
     match f.volatility {
         'i' => opts.push_str(" IMMUTABLE"),
         's' => opts.push_str(" STABLE"),
@@ -2392,6 +2411,17 @@ fn pg_get_functiondef(a: &[Value], c: &FnCtx) -> Result<Value> {
             crate::types::text::format_float4(f.prorows(), 0)
         ));
     }
+    if f.support != 0 {
+        // (Qualified when the search path wouldn't find it.)
+        let name = match cat.functions.get(&f.support) {
+            Some(g) => cat.function_name(g, &c.exec.search_path),
+            None => crate::catalog::system::builtin_proc_sigs()
+                .iter()
+                .find(|p| p.oid == f.support)
+                .map_or_else(String::new, |p| quote_ident(p.name)),
+        };
+        opts.push_str(&format!(" SUPPORT {name}"));
+    }
     if !opts.is_empty() {
         s.push_str(&opts);
         s.push('\n');
@@ -2424,7 +2454,13 @@ fn pg_get_functiondef(a: &[Value], c: &FnCtx) -> Result<Value> {
         dq.push('x');
     }
     dq.push('$');
-    s.push_str(&format!("AS {dq}{}{dq}\n", f.body));
+    // A C function: its library, then its link symbol.
+    let lib = f
+        .probin
+        .as_deref()
+        .map(|l| format!("{}, ", super::string::quote_literal_str(l)))
+        .unwrap_or_default();
+    s.push_str(&format!("AS {lib}{dq}{}{dq}\n", f.body));
     Ok(text(s))
 }
 /// Events a relation supports: 1 << CMD_UPDATE | 1 << CMD_INSERT | 1 << CMD_DELETE.

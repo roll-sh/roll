@@ -2109,6 +2109,9 @@ impl Binder<'_, '_> {
         {
             deps.push((2617, o.oid));
         }
+        if schema.is_none() {
+            self.note_oper_ref(loc, o.oid);
+        }
         let mut args = Vec::new();
         for (a, t) in l.into_iter().chain([r]).zip(&res.arg_types) {
             args.push(self.coerce_implicit(a, t)?);
@@ -4362,6 +4365,9 @@ impl Binder<'_, '_> {
                     f.func_variadic,
                     f.location,
                 )?;
+                if schema.is_none() {
+                    self.note_func_ref(f.location, def.oid);
+                }
                 // A range over a domain: its constructor's bounds are of the domain.
                 if let DataType::Range(rt) = &ret
                     && let Some(d) = rt.subtype_domain

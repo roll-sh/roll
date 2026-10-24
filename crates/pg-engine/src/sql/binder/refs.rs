@@ -76,6 +76,8 @@ pub struct RefLog {
     pub types: Vec<(i32, u32)>,
     /// reg* literals: (A_Const location, the catalog it names (pg_depend class), oid).
     pub literals: Vec<(i32, u32, u32)>,
+    /// User operators written without a schema: (A_Expr location, operator oid).
+    pub opers: Vec<(i32, u32)>,
     /// Target columns of INSERT / UPDATE SET: (ResTarget location, relation, attnum).
     pub targets: Vec<(i32, u32, i16)>,
     /// WITH query names (a relation renamed to one of them must stay qualified).
@@ -148,6 +150,14 @@ impl Binder<'_, '_> {
             && let Some(log) = self.ref_log()
         {
             log.funcs.push((loc, oid));
+        }
+    }
+
+    pub(crate) fn note_oper_ref(&mut self, loc: i32, oid: u32) {
+        if loc >= 0
+            && let Some(log) = self.ref_log()
+        {
+            log.opers.push((loc, oid));
         }
     }
 

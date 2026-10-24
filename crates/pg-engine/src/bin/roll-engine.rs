@@ -68,6 +68,30 @@ fn main() -> anyhow::Result<()> {
         server_files: a.allow_server_files,
         ..EngineOptions::default()
     })?;
+    // SIGTERM / SIGINT: a clean shutdown (pg_ctl stop's smart / fast modes end sessions the
+    // same way here), so sequences keep their positions.
+    {
+        let engine = engine.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+            let Ok(rt) = rt else { return };
+            rt.block_on(async {
+                use tokio::signal::unix::{SignalKind, signal};
+                let (Ok(mut term), Ok(mut int)) =
+                    (signal(SignalKind::terminate()), signal(SignalKind::interrupt()))
+                else {
+                    return;
+                };
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = int.recv() => {}
+                }
+            });
+            tracing::info!("shutting down");
+            engine.shutdown();
+            std::process::exit(0);
+        });
+    }
     let listener = std::net::TcpListener::bind(&a.listen)?;
     tracing::info!(addr = %a.listen, ?auth, "listening");
     pg_engine::server::serve(engine, listener, ServerOptions { auth })?;
