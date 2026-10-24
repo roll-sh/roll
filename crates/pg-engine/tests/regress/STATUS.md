@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51122 (**99.95%**) |
-| units differing | 28 |
+| units matching | 51123 (**99.95%**) |
+| units differing | 27 |
 | files fully matching | 227 |
 | engine output == expected/*.out (pg_regress "ok") | 188 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 28 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 27 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 28 units
-join (18), partition_join (9), partition_prune (1)
+### EXPLAIN (group C1) — 27 units
+join (18), partition_join (8), partition_prune (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -106,6 +106,69 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 31 (a unique-ified side's pass-through columns, semi joins' clauses in classes, nondeterministic constant classes)
+
+Measured in subset runs of the planner-heavy files (agent 30's list plus collate.icu.utf8;
+14122 units), unit by unit against a run of the same subset on the base: a8de4bd, then
+rebased onto ad16655 (14092 -> 14093) and 7d29166 (14094 -> 14095): partition_join 86 fixed,
+nothing broken. Crate tests and clippy on each state.
+
+| file | fixed units |
+|---|---|
+| partition_join | 86 |
+
+What changed:
+
+- **A unique-ified side passes its other columns through** (`Plan::Distinct::hashed`,
+  create_unique_path / create_unique_plan). The path's target is the relation's reltarget:
+  the columns needed above it (`needed_above`) come out besides the semi join's operands,
+  each group's first row's. Hashed, a `Distinct` with `on` keys and `hashed: true` (a
+  HashAggregate grouping on the keys only: executor `hashed_distinct_keyed`, EXPLAIN's
+  Group Key and costs over the keys); sorted, the Unique over the keys' Sort carries them as
+  well. With no column beyond the keys the plan is the old one. A nested loop over the
+  unique-ified side may take any of those columns as parameters. A semi join's right side
+  inside the unique-ified relation returns nothing (`Search::hidden`; Postgres's semi join
+  can carry its inner Vars, the engine's can't), so its columns are neither passed through
+  nor parameters.
+- **A semi join's clauses are equivalence-class clauses in a group of semi and inner joins**
+  (`semi_classes`): deconstruct_distribute gives a semi join no nonnullable relations, so
+  distribute_qual_to_rels leaves maybe_equivalence on and process_equivalence takes its
+  quals. The general (SpecialJoinInfo) groups kept them as written; with only semi joins
+  (and no PlaceHolderVars) their classes now derive clauses and choose one per class at each
+  join, as inner groups do. partition_join 86: `t1.a` joins the class of `t1.b` and
+  `(t2.a + t2.b) / 2`, so the index scan of `prt1` is parameterized by the expression, which
+  the HashAggregate passes through, under a Join Filter `t1.a = t1_5.b`.
+- **A child relation's parameterized scan loops as often as its parent's parameter source**
+  (get_loop_count / adjust_rowcount_for_semijoins): the semi join adjustment matches the
+  scanned relid against syn_lefthand, which has parents' relids only, so a partitionwise
+  child join's scans and an appendrel's member scans keep the outer parent's rows (here 300
+  for prt1_e: the index scan costs 0.21 a loop, not 3.16, and the nested loop wins).
+- **Constants and nondeterministic collations** (agent 10's open item; `optimize::ec_constants`).
+  A class is one collation's: a constant joins a join clause's class only under the same
+  collation. A correctness fix: `a.x = b.x AND a.x = 'A1' COLLATE ci` (deterministic join
+  clause, nondeterministic constant) derived `b.x = 'A1' COLLATE ci` and dropped the join
+  clause, returning rows Postgres doesn't. Join clauses of a nondeterministic collation
+  (`nondet_pair`, kept out of hash keys) now take that collation's constants: the other
+  side gets `x = k` and the join clause goes, each member's clause rebuilt over the class's
+  collation (canonicalize_ec_expression: a column of another collation relabeled `(x)::text`,
+  the constant `'a1'::text COLLATE ci`), an input's own restriction too (`replace_restriction`,
+  the IN's sub-select's `x = 'D2'`); across an outer join the preserved side keeps its clause
+  as written.
+
+Goldens: `a31_unique_passthrough`, `a31_nondet_constant_classes` (recorded from PostgreSQL 18.6).
+
+Found, not fixed:
+
+- A hash join on an expression key costs less than Postgres's (`prt2_p1 t1, prt1_e_p1 t2 WHERE
+  t1.b = (t2.a + t2.b)/2`: 6.44 for 6.76; `t1.b = t2.a + 0`: 6.29 for 6.60, as if the hash
+  clause's evaluation per outer row were missing; the expression on the inner side costs
+  8.47). No unit fails on it; it shows in partition_join 86's costs (`Hash Join` 5.15 for 5.17).
+- VERBOSE: scans under a unique-ified side's join list their physical target list
+  (`t2_1.a, t2_1.b, t2_1.c`) where Postgres's partition children have none (use_physical_tlist
+  refuses a RELOPT_OTHER_MEMBER_REL); also before this batch.
+- Deterministic collations stay one class (`a.x = b.x AND a.x = 'a1' COLLATE "C"` derives
+  across; Postgres keeps the default collation's class and C's apart): same rows, other plan.
 
 ## Round 16, agent 30 (JOIN USING aliases as PlaceHolderVars, PlaceHolderVar nested loop parameters, constant classes through reduced outer joins)
 
@@ -4037,7 +4100,7 @@ produces no units on Linux (skipped by the file itself).
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 307 | 100% | yes | yes |  |
 | xml | 281 | 281 | 100% | yes | yes |  |
-| partition_join | 614 | 605 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (9) |
+| partition_join | 614 | 606 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (8) |
 | partition_prune | 771 | 770 | 100% | yes | no | wrong result `SELECT: row count differs` (1) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |
