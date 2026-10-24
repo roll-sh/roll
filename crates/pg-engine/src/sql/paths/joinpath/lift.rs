@@ -230,6 +230,102 @@ fn standard_alias(e: &Expr) -> bool {
 /// no place for here) keeps the subquery a leaf, unless reduce_outer_joins made those joins
 /// inner.
 fn flatten_join_subquery(p: &Plan, nulled: u32, anulled: u32, cx: &mut Cx) -> Option<(Plan, Vec<Expr>, Vec<(u32, u64)>)> {
+    // pull_up_sublinks runs before pull_up_subqueries, and a pulled-up subquery's semi
+    // joins join the query's join tree: a subquery whose join tree has them is pulled up
+    // as its level had it before planning (which may have unique-ified them already).
+    if let Some(b) = bound_form(p, &cx.bound) {
+        let saved = std::mem::replace(&mut cx.semi, true);
+        let r = flatten_tree(&b, nulled, anulled, cx, true);
+        cx.semi = saved;
+        if r.is_some() {
+            return r;
+        }
+    }
+    flatten_tree(p, nulled, anulled, cx, false)
+}
+
+/// `p` with the restrictions as written (`ScanPlan::written`) of its semi / anti joins'
+/// right sides that read the query: the correlated quals pull_up_sublinks made the joins'
+/// clauses, which the scan keeps in its written order but no longer checks.
+fn semi_written_dropped(p: &Plan) -> Plan {
+    fn strip(p: &Plan) -> Plan {
+        match p {
+            Plan::Scan(sp) => {
+                let mut sp = sp.clone();
+                sp.written.retain(|w| !w.has_outer_refs());
+                Plan::Scan(sp)
+            }
+            Plan::Join { .. } | Plan::Filter { .. } | Plan::Project { .. } => {
+                let mut q = p.clone();
+                for c in crate::sql::explain::plan_inputs_mut(&mut q) {
+                    *c = Arc::new(strip(c));
+                }
+                q
+            }
+            p => p.clone(),
+        }
+    }
+    let mut q = p.clone();
+    if let Plan::Join { kind, right, .. } = &mut q
+        && matches!(kind, JoinKind::Semi | JoinKind::Anti)
+    {
+        *right = Arc::new(strip(right));
+    }
+    for c in crate::sql::explain::plan_inputs_mut(&mut q) {
+        if matches!(&**c, Plan::Join { .. } | Plan::Filter { .. }) {
+            *c = Arc::new(semi_written_dropped(c));
+        }
+    }
+    q
+}
+
+/// A FROM subquery (`p`, perhaps under a clause pushed down onto it) with the join tree its
+/// level had before planning in place of the planned one (`ExecCtx::bound_trees`).
+fn bound_form(p: &Plan, bound: &[crate::sql::paths::BoundTree]) -> Option<Plan> {
+    fn tree_of(p: &Plan, bound: &[crate::sql::paths::BoundTree]) -> Option<Arc<Plan>> {
+        let (join, glue) = match p {
+            Plan::Project { input, exprs } => (&**input, Some(exprs)),
+            j => (j, None),
+        };
+        let Plan::Join { meta, .. } = join else {
+            return None;
+        };
+        let b = bound.iter().find(|b| meta.bound != 0 && b.id == meta.bound)?;
+        let glue_ok = match (glue, &b.glue) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.same_as(y)),
+            _ => false,
+        };
+        (glue_ok && crate::sql::paths::join_tree_key(p).as_ref() == Some(&b.key)).then(|| b.tree.clone())
+    }
+    fn go(p: &Plan, bound: &[crate::sql::paths::BoundTree]) -> Option<Plan> {
+        let Plan::Project { input, exprs } = p else {
+            return None;
+        };
+        let input = match tree_of(input, bound) {
+            Some(tree) => tree,
+            None => Arc::new(go(input, bound)?),
+        };
+        Some(Plan::Project {
+            input,
+            exprs: exprs.clone(),
+        })
+    }
+    if bound.is_empty() {
+        return None;
+    }
+    match p {
+        Plan::Filter { input, pred } => Some(Plan::Filter {
+            input: Arc::new(go(input, bound)?),
+            pred: pred.clone(),
+        }),
+        p => go(p, bound),
+    }
+}
+
+/// `flatten_join_subquery` of `p` as it is; `semi`: a join tree as bound, whose semi / anti
+/// joins may be the group's.
+fn flatten_tree(p: &Plan, nulled: u32, anulled: u32, cx: &mut Cx, semi: bool) -> Option<(Plan, Vec<Expr>, Vec<(u32, u64)>)> {
     let (proj, above) = match p {
         Plan::Filter { input, pred } if matches!(&**input, Plan::Project { .. }) && clauses_movable(pred) => {
             (&**input, Some(pred))
@@ -253,7 +349,7 @@ fn flatten_join_subquery(p: &Plan, nulled: u32, anulled: u32, cx: &mut Cx) -> Op
         below = i2;
     }
     let composed: Vec<Expr>;
-    let (input, exprs) = if chain.len() > 1 && join_subquery(below) {
+    let (input, exprs) = if chain.len() > 1 && join_subquery(below, semi) {
         let mut acc = chain.pop().unwrap().clone();
         while let Some(upper) = chain.pop() {
             acc = upper.iter().map(|e| subst(e, &acc)).collect();
@@ -287,9 +383,9 @@ fn flatten_join_subquery(p: &Plan, nulled: u32, anulled: u32, cx: &mut Cx) -> Op
         }
         !matches!(e, Expr::Col(..)) && nulled != 0 && (e.columns().is_empty() || nonstrict(e))
     };
-    if !join_subquery(input)
+    if !join_subquery(input, semi)
         || virtual_proj(proj).is_some()
-        || reads_outer(input)
+        || if semi { reads_outer(&semi_written_dropped(input)) } else { reads_outer(input) }
         || !exprs
             .iter()
             .all(|e| matches!(e, Expr::Col(..)) || (movable(e) || nulled == 0 && movable_fromless(e)) && outer_refs(e).is_empty())
@@ -426,7 +522,7 @@ fn clauses_movable(f: &Expr) -> bool {
 
 /// A subquery's plan below its select list that is a join tree the group can take in: a
 /// plain join (or its WHERE over one, each clause reading the subquery's columns).
-fn join_subquery(p: &Plan) -> bool {
+fn join_subquery(p: &Plan, semi: bool) -> bool {
     let (j, pred) = match p {
         Plan::Filter { input, pred } => (&**input, Some(pred)),
         j => (j, None),
@@ -434,7 +530,9 @@ fn join_subquery(p: &Plan) -> bool {
     let Plan::Join { kind, meta, .. } = j else {
         return false;
     };
-    if !matches!(kind, JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full)
+    // (A semi / anti join: in a join tree as bound, `bound_form`.)
+    if !(matches!(kind, JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full)
+        || semi && matches!(kind, JoinKind::Semi | JoinKind::Anti))
         || meta.from_call.is_some()
         || meta.phv_eval
     {
@@ -472,6 +570,11 @@ struct Cx {
     merged: bool,
     /// The sub-selects of the outputs moved up (`copy_moved_subselects`).
     moved: Vec<usize>,
+    /// FROM subqueries' join trees with semi / anti joins as bound (`ExecCtx::bound_trees`):
+    /// per planned tree, the tree to pull up instead.
+    bound: Vec<crate::sql::paths::BoundTree>,
+    /// Pulling up such a tree: its semi / anti joins are the group's.
+    semi: bool,
 }
 
 /// `nulled`: the outer joins above `p` (in the group) that null its rows, as written;
@@ -894,6 +997,76 @@ fn lift(
                 },
                 map,
                 nul,
+            )
+        }
+        // A semi / anti join of a subquery's join tree as bound (`flatten_join_subquery`):
+        // pull_up_subqueries goes on into both its sides; its row is its left side's, its
+        // right side's columns read by its clauses only (no outer join above nulls those).
+        Plan::Join {
+            kind: kind @ (JoinKind::Semi | JoinKind::Anti),
+            left,
+            right,
+            cond,
+            hash,
+            params,
+            nleft: _,
+            nright: _,
+            meta,
+        } if cx.semi && params.is_empty() && meta.method.is_none() && meta.from_call.is_none() => {
+            let (l2, ml, nl) = lift(left, nulled, anulled, None, cx);
+            cx.merged = false;
+            let nleft2 = crate::sql::binder::plan_width(&l2);
+            let (r2, mr, _) = lift(right, 0, 0, None, cx);
+            cx.merged = false;
+            let nright2 = crate::sql::binder::plan_width(&r2);
+            let mut map = ml.clone();
+            map.extend(mr.iter().map(|e| e.clone().shift_cols(nleft2 as isize)));
+            let cond2 = cond.as_ref().map(|c| subst(c, &map));
+            let hash2 = hash.as_ref().map(|(lk, rk)| {
+                let lk: Vec<Expr> = lk.iter().map(|e| subst(e, &ml)).collect();
+                let rk: Vec<Expr> = rk.iter().map(|e| subst(e, &mr)).collect();
+                (lk, rk)
+            });
+            // (A key that became a value of no column: not lifted.)
+            if hash2
+                .as_ref()
+                .is_some_and(|(lk, rk)| lk.iter().chain(rk).any(|e| e.columns().is_empty()))
+            {
+                cx.bad = true;
+            }
+            let remap_cols = |cols: &[usize]| {
+                let mut out = Vec::new();
+                for &c in cols {
+                    match map.get(c) {
+                        Some(e) => {
+                            for k in e.columns() {
+                                if !out.contains(&k) {
+                                    out.push(k);
+                                }
+                            }
+                        }
+                        None => out.push(c),
+                    }
+                }
+                out
+            };
+            let mut meta2 = (**meta).clone();
+            meta2.kept = remap_cols(&meta.kept);
+            meta2.pushed = remap_cols(&meta.pushed);
+            (
+                Plan::Join {
+                    kind: *kind,
+                    left: Arc::new(l2),
+                    right: Arc::new(r2),
+                    cond: cond2,
+                    hash: hash2,
+                    params: Vec::new(),
+                    nleft: nleft2,
+                    nright: nright2,
+                    meta: Box::new(meta2),
+                },
+                ml,
+                nl,
             )
         }
         // (Under an outer join that nulls it: an empty relation computing its values as
@@ -1872,7 +2045,7 @@ fn copy_moved_subselects(plan: &mut Plan, map: &mut [Expr], moved: &[usize]) {
 
 /// The join tree at `p` with its subqueries' liftable outputs taken out of their scans;
 /// None when nothing moves.
-pub(super) fn lift_group(p: &Plan) -> Option<Lifted> {
+pub(super) fn lift_group(p: &Plan, bound: &[crate::sql::paths::BoundTree]) -> Option<Lifted> {
     if !matches!(p, Plan::Join { .. }) {
         return None;
     }
@@ -1884,6 +2057,8 @@ pub(super) fn lift_group(p: &Plan) -> Option<Lifted> {
         results: false,
         merged: false,
         moved: Vec::new(),
+        bound: bound.to_vec(),
+        semi: false,
     };
     let (mut plan, map, _) = lift(p, 0, 0, None, &mut cx);
     if !cx.lifted || cx.bad {

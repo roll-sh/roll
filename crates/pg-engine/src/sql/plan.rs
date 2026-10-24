@@ -326,6 +326,9 @@ pub struct JoinMeta {
     /// deconstruct_recurse folds its sides into one join problem only within
     /// join_collapse_limit.
     pub explicit: bool,
+    /// A FROM subquery's planned join tree whose level had semi / anti joins before
+    /// planning: the `ExecCtx::bound_trees` entry with that tree (0: none).
+    pub bound: u64,
 }
 
 /// `p` with its join (if it is one) marked as computing PlaceHolderVars in the projection

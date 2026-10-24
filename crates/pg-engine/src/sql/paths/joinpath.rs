@@ -1033,6 +1033,47 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
         Some(it.find(|&g| g < self.ec.len()).unwrap_or(first))
     }
 
+    /// generate_join_implied_equalities_normal over the rows the inputs' paths return
+    /// (`ol`, `il`: their group columns): a class's clause between the relations equates
+    /// each one's first member. The search took the first members not on the right of a
+    /// semi join made inside the relation (`hidden`: the engine's semi join returns its
+    /// left row only); one there whose relation is joined unique-ified returns its columns,
+    /// as Postgres's semi join relation does, and its clause is the join's.
+    fn returned_members(&self, cs: &[usize], oset: u32, iset: u32, ol: &[usize], il: &[usize]) -> Vec<usize> {
+        if self.kind != JoinKind::Inner || self.general && !self.semi_classes() {
+            return cs.to_vec();
+        }
+        let members = self.ec_members();
+        let first = |e: usize, set: u32, layout: &[usize]| -> Option<(usize, bool)> {
+            let g = self.first_member_in(&members, e, set, layout)?;
+            Some((g, self.hidden(self.m_leaf(g), set)))
+        };
+        cs.iter()
+            .map(|&c| {
+                let Some(e) = self.clause_ec(&self.clauses[c]) else { return c };
+                let (Some((x, hx)), Some((y, hy))) = (first(e, oset, ol), first(e, iset, il)) else { return c };
+                if !(hx || hy) || self.equates(&self.clauses[c], x, y) {
+                    return c;
+                }
+                (0..self.clauses.len())
+                    .find(|&j| self.clause_ec(&self.clauses[j]) == Some(e) && self.equates(&self.clauses[j], x, y))
+                    .unwrap_or(c)
+            })
+            .collect()
+    }
+
+    /// `first_member` among the members a path's row (`layout`, group columns) returns.
+    fn first_member_in(&self, members: &[usize], e: usize, set: u32, layout: &[usize]) -> Option<usize> {
+        let mut it = members.iter().copied().filter(|&g| {
+            self.m_ec(g) == e && (1u32 << self.m_leaf(g)) & set != 0 && self.m_columns(g).iter().all(|c| layout.contains(c))
+        });
+        let first = it.next()?;
+        if first < self.ec.len() {
+            return Some(first);
+        }
+        Some(it.find(|&g| g < self.ec.len()).unwrap_or(first))
+    }
+
     /// The group columns a member reads.
     fn m_columns(&self, g: usize) -> Vec<usize> {
         match g.checked_sub(self.ec.len()) {
@@ -1225,7 +1266,9 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
         let flips: Vec<usize> = (0..self.clauses.len())
             .filter(|&i| {
                 let c = &self.clauses[i];
-                if !c.ecable || c.on {
+                // (A semi join's own clause is a class's as an inner join's is, in a group
+                // of semi joins.)
+                if !c.ecable || c.on && !(self.semi_classes() && c.sj.is_some()) {
                     return false;
                 }
                 let Some((a, b, _, _)) = &c.eq else { return false };
@@ -3322,7 +3365,9 @@ impl Search<'_, '_, '_> {
             Some(i) => i,
             None => {
                 // (build_joinrel_restrictlist: the class clauses joining the pair made now,
-                // as the search shows them, unless made before.)
+                // as the search shows them, unless made before; one the class derives
+                // (create_join_clause, not written) shown so, its first relation's member
+                // first.)
                 if self.kind == JoinKind::Inner && self.ec_mode() {
                     for &ci in &restrict {
                         let c = &self.clauses[ci];
@@ -3333,7 +3378,7 @@ impl Search<'_, '_, '_> {
                             && let (Some(x), Some(y)) = (self.mem_id(a), self.mem_id(b))
                         {
                             let (x, y) = if *al & s1 != 0 { (x, y) } else { (y, x) };
-                            self.note_derived(x, y, false);
+                            self.note_derived(x, y, c.derived);
                         }
                     }
                 }
@@ -6039,6 +6084,9 @@ impl Search<'_, '_, '_> {
                 if join_params.is_some() {
                     self.param_stack.borrow_mut().pop();
                 }
+                let (ol, il) = if swapped { (&rl, &ll) } else { (&ll, &rl) };
+                let quals = &self.returned_members(quals, outer.set, inner.set, ol, il);
+                let keys = &self.returned_members(keys, outer.set, inner.set, ol, il);
                 let pos = |layout: &[usize], g: usize| layout.iter().position(|&x| x == g);
                 // (A parameterized join's clauses read the values from outside it as the
                 // enclosing nested loop's parameters.)
@@ -6404,6 +6452,7 @@ impl Search<'_, '_, '_> {
                         alias_cols: 0,
                         tlist: self.tlist_order(p.set, &both),
                         explicit: false,
+                        bound: 0,
                     }),
                 };
                 let layout = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
@@ -7472,7 +7521,7 @@ impl Planner<'_, '_> {
         let done = matches!(&*p, Plan::Join { meta, .. } if meta.lifted_by == self.id);
         if self.lifting.get() != p as *const Plan as usize
             && !done
-            && let Some(l) = lift::lift_group(p)
+            && let Some(l) = lift::lift_group(p, &self.ctx.bound_trees.borrow())
         {
             return self.plan_lifted(p, l, needed, order, sort_exprs);
         }

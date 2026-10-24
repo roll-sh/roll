@@ -6525,6 +6525,11 @@ impl Binder<'_, '_> {
             }
         }
         go(p, &all);
+        // (A FROM subquery's join tree kept as bound for this level's pull-up: its scans
+        // are this level's relations too.)
+        for b in self.ctx.bound_trees.borrow_mut().iter_mut() {
+            go(Arc::make_mut(&mut b.tree), &all);
+        }
     }
 }
 

@@ -137,6 +137,11 @@ pub struct ExecCtx<'a> {
     /// Catalogs a statement scans again and again (`nodes::sys_rescan`): each one's rows,
     /// generated once, by catalog oid.
     pub sys_rescans: RefCell<HashMap<u32, Rc<nodes::SysRescan>>>,
+    /// FROM subqueries whose join trees hold semi / anti joins, as their levels had them
+    /// before planning (`paths::BoundTree`): the query above pulls such a subquery up from
+    /// that (pull_up_subqueries comes before any planning), not from the planned tree,
+    /// whose semi joins may be unique-ified already.
+    pub bound_trees: RefCell<Vec<crate::sql::paths::BoundTree>>,
 }
 
 /// EvalPlanQual's test rows (`ExecCtx::epq`): per scan, its row's key and stored data.
@@ -414,6 +419,7 @@ impl<'a> ExecCtx<'a> {
             sys_cols: RefCell::default(),
             epq: RefCell::new(None),
             sys_rescans: RefCell::default(),
+            bound_trees: RefCell::default(),
         }
     }
 
@@ -483,6 +489,7 @@ impl<'a> ExecCtx<'a> {
             sys_cols: RefCell::default(),
             epq: RefCell::new(None),
             sys_rescans: RefCell::default(),
+            bound_trees: RefCell::default(),
         }
     }
 

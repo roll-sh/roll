@@ -35,6 +35,9 @@ struct RawJoin {
     /// absorbed (`JoinMeta::kept`): still needed up to where they meet, and still the join's
     /// clause_relids (make_outerjoininfo takes the quals as written).
     kept: Vec<usize>,
+    /// Per condition: a semi join's equality rebuilt from a hash key the other way round
+    /// from how it was written (`JoinMeta::hash_swapped`).
+    swapped: Vec<bool>,
 }
 
 /// What `gather_group` makes of a join tree.
@@ -157,6 +160,7 @@ fn walk(
                 conds.push(e.remap_cols(&map));
             }
         }
+        let mut swapped = vec![false; conds.len()];
         if let Some((lk, rk)) = hash {
             for (i, (a, b)) in lk.iter().zip(rk).enumerate() {
                 let (a, bad, coll) = crate::sql::binder::hash_key_operand(a);
@@ -172,7 +176,10 @@ fn walk(
                     (a, b)
                 };
                 match rebuild_eq(a, b, bad) {
-                    Some(e) => conds.push(crate::sql::binder::eq_under(e, coll)),
+                    Some(e) => {
+                        conds.push(crate::sql::binder::eq_under(e, coll));
+                        swapped.push(*kind == JoinKind::Semi && meta.hash_swapped.get(i) == Some(&true));
+                    }
                     // (A key not rebuilt as a clause: the tree isn't taken as a group.)
                     None => super::GATHER_FAILED.with(|f| f.set(true)),
                 }
@@ -195,6 +202,7 @@ fn walk(
             inner,
             pushed: meta.pushed.iter().map(|&c| map(c)).collect(),
             kept: meta.kept.iter().map(|&c| map(c)).collect(),
+            swapped,
         });
         return (l | r, inner);
     }
@@ -221,6 +229,7 @@ fn walk(
             inner: 0,
             pushed: Vec::new(),
             kept: Vec::new(),
+            swapped: Vec::new(),
         });
         return (m, inner);
     }
@@ -326,6 +335,7 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
     let mut sjs: Vec<Sj> = Vec::new();
     let mut clauses = Vec::new();
     let mut meta = Vec::new();
+    let mut semi_swapped: Vec<usize> = Vec::new();
     for j in &joins {
         let below = sjs.len();
         if j.kind == JoinKind::Inner {
@@ -393,12 +403,15 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
             lhs_strict: strict & j.l != 0,
         };
         let me = sjs.len();
-        for e in &j.conds {
+        for (k, e) in j.conds.iter().enumerate() {
             let it = items(e);
             if it & j.l != 0 || it == 0 || e.is_volatile() {
                 // The join's own condition: checked exactly where it joins (a volatile
                 // one too: the binder kept it out of the nullable side).
                 clauses.push((e.clone(), true));
+                if j.swapped.get(k) == Some(&true) {
+                    semi_swapped.push(clauses.len() - 1);
+                }
                 // (A semi join's clause needs only its own items, as an inner join's:
                 // ojscope is NULL for it; join_is_legal keeps it from joining early.)
                 let req = if j.kind == JoinKind::Semi { it } else { it | min_l | min_r };
@@ -418,6 +431,18 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
         let (req, nullable) = delay(items(e), &sjs);
         clauses.push((e.clone(), false));
         meta.push((None, req, nullable));
+    }
+    // A group whose outer joins are all semi joins (`Search::semi_classes`): their
+    // equalities are class members as written (process_equivalence adds a clause's
+    // operands to their class in that order; the classes then choose the clauses).
+    if !sjs.is_empty() && sjs.iter().all(|j| j.kind == JoinKind::Semi) && phvs.is_empty() {
+        for i in semi_swapped {
+            if let Expr::Call(d, args, t) = &clauses[i].0
+                && args.len() == 2
+            {
+                clauses[i].0 = Expr::Call(d.clone(), vec![args[1].clone(), args[0].clone()], t.clone());
+            }
+        }
     }
     Some(Group {
         leaves,
