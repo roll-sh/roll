@@ -215,6 +215,17 @@ Looked at and left (why):
   `q1.id = q2.id` with the sides swapped).
 - Agent 24's join target list under row-mark junk (`t1.ctid, t1.a, s.*`): not reproduced
   with SELECT ... FOR UPDATE over a subquery and a table, hash, merge or nested loop.
+- Handed over by agent 26 at the end, not done: join 675, a LATERAL function scan computing a
+  PlaceHolderVar (`t1id`): Postgres's reltarget has the function's column, then the
+  PlaceHolderVar (add_placeholders_to_base_rels adds them last), `t3.t3, t2.id`; the engine
+  shows the subquery's projection order, `t2.id, t3.t3`, with or without self-join
+  elimination. join 676: after self-join elimination the kept scan computes the LATERAL
+  PlaceHolderVar, so it has no physical target list (use_physical_tlist refuses a reltarget
+  with PlaceHolderVars): `t3.id, t1.id`; the engine returns the physical one, `t3.id,
+  t3.code` (without self-join elimination it matches). join 681 (an Index Only Scan where
+  Postgres keeps the Index Scan after self-join elimination, the scan filtering on the
+  PlaceHolderVar `1 IS NOT NULL`) and 783 (a LATERAL nested loop's rows, agent 26's
+  analysis) not looked into.
 
 ## Round 16, agent 31 (a unique-ified side's pass-through columns, semi joins' clauses in classes, nondeterministic constant classes)
 
