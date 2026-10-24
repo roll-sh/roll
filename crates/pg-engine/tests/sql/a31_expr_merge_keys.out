@@ -1,0 +1,130 @@
+> CREATE TABLE em1 (a int, b int, c varchar) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE em1_p1 PARTITION OF em1 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE em1_p2 PARTITION OF em1 FOR VALUES FROM (250) TO (600)
+-- CREATE TABLE
+
+> INSERT INTO em1 SELECT i, i % 25, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 2 = 0
+-- INSERT 0 300
+
+> CREATE TABLE em2 (a int, b int, c varchar) PARTITION BY RANGE (b)
+-- CREATE TABLE
+
+> CREATE TABLE em2_p1 PARTITION OF em2 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE em2_p2 PARTITION OF em2 FOR VALUES FROM (250) TO (600)
+-- CREATE TABLE
+
+> INSERT INTO em2 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 3 = 0
+-- INSERT 0 200
+
+> CREATE TABLE ep1 (a int, b int)
+-- CREATE TABLE
+
+> CREATE TABLE ep2 (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO ep1 SELECT i, i % 7 FROM generate_series(1, 300) i
+-- INSERT 0 300
+
+> INSERT INTO ep2 SELECT i % 50, i FROM generate_series(1, 200) i
+-- INSERT 0 200
+
+> ANALYZE em1, em2, ep1, ep2
+-- ANALYZE
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_nestloop = off
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.a, t2.b FROM em1 t1, em2 t2 WHERE t1::text = t2::text AND t1.a = t2.b ORDER BY t1.a
+QUERY PLAN:text
+Merge Join
+  Merge Cond: ((t1.a = t2.b) AND (((((t1.*)::em1))::text) = ((((t2.*)::em2))::text)))
+  ->  Sort
+        Sort Key: t1.a, ((((t1.*)::em1))::text)
+        ->  Result
+              ->  Append
+                    ->  Seq Scan on em1_p1 t1_1
+                    ->  Seq Scan on em1_p2 t1_2
+  ->  Sort
+        Sort Key: t2.b, ((((t2.*)::em2))::text)
+        ->  Result
+              ->  Append
+                    ->  Seq Scan on em2_p1 t2_1
+                    ->  Seq Scan on em2_p2 t2_2
+-- EXPLAIN
+
+> SELECT t1.a, t2.b FROM em1 t1, em2 t2 WHERE t1::text = t2::text AND t1.a = t2.b ORDER BY t1.a
+a:int4 | b:int4
+0 | 0
+6 | 6
+12 | 12
+18 | 18
+24 | 24
+-- SELECT 5
+
+> EXPLAIN (COSTS OFF)
+> SELECT ep1.a, ep2.b FROM ep1, ep2 WHERE ep1.a + ep1.b = ep2.b + ep2.a ORDER BY ep1.a, ep2.b
+QUERY PLAN:text
+Sort
+  Sort Key: ep1.a, ep2.b
+  ->  Merge Join
+        Merge Cond: (((ep2.b + ep2.a)) = ((ep1.a + ep1.b)))
+        ->  Sort
+              Sort Key: ((ep2.b + ep2.a))
+              ->  Seq Scan on ep2
+        ->  Sort
+              Sort Key: ((ep1.a + ep1.b))
+              ->  Seq Scan on ep1
+-- EXPLAIN
+
+> SELECT count(*), sum(ep1.a), sum(ep2.b) FROM ep1, ep2 WHERE ep1.a + ep1.b = ep2.b + ep2.a
+count:int8 | sum:int8 | sum:int8
+200 | 24400 | 20100
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF)
+> SELECT ep1.a FROM ep1, ep2 WHERE ep1.a * 2 = ep2.b - 1 AND ep1.b = ep2.a
+QUERY PLAN:text
+Merge Join
+  Merge Cond: ((ep1.b = ep2.a) AND (((ep1.a * 2)) = ((ep2.b - 1))))
+  ->  Sort
+        Sort Key: ep1.b, ((ep1.a * 2))
+        ->  Seq Scan on ep1
+  ->  Sort
+        Sort Key: ep2.a, ((ep2.b - 1))
+        ->  Seq Scan on ep2
+-- EXPLAIN
+
+> SELECT count(*) FROM ep1, ep2 WHERE ep1.a * 2 = ep2.b - 1 AND ep1.b = ep2.a
+count:int8
+1
+-- SELECT 1
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_nestloop
+-- RESET
+
+> EXPLAIN (COSTS OFF)
+> SELECT ep1.a FROM ep1, ep2 WHERE ep1.a + ep1.b = ep2.b + ep2.a
+QUERY PLAN:text
+Merge Join
+  Merge Cond: (((ep2.b + ep2.a)) = ((ep1.a + ep1.b)))
+  ->  Sort
+        Sort Key: ((ep2.b + ep2.a))
+        ->  Seq Scan on ep2
+  ->  Sort
+        Sort Key: ((ep1.a + ep1.b))
+        ->  Seq Scan on ep1
+-- EXPLAIN
+

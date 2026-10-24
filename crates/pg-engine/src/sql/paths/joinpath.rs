@@ -897,6 +897,10 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
         if let Some(g) = key_col(e) {
             return Some(self.ec[g]);
         }
+        // (A member of a class of expressions only: its own class.)
+        if let Some(m) = self.xm.iter().find(|m| m.expr.same_as(key_operand(e)) && m.ec >= usize::MAX / 2) {
+            return Some(m.ec);
+        }
         let ec = self.clauses.iter().filter(|c| c.mergeable).find_map(|c| {
             let (a, b, _, _) = c.eq.as_ref()?;
             if a.same_as(e) {
@@ -927,6 +931,13 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
                 }
             }
             None
+        })
+        // (Or a class of expressions only, `t1::text = t2::text`: its member over them.)
+        .or_else(|| {
+            self.xm
+                .iter()
+                .find(|m| m.ec == ec && m.expr.columns().iter().all(|g| layout.contains(g)))
+                .map(|m| m.expr.clone())
         })
     }
 
@@ -7928,9 +7939,13 @@ impl Planner<'_, '_> {
                     // (Merging needs the sides' orders: plain columns here, or a column and
                     // an expression of the other side's columns, sorted by it: a pathkey of
                     // the column's class.)
+                    // (Or two expressions, each of one FROM item's columns: a class of
+                    // them, each side sorted by its own, `t1::text = t2::text`.)
+                    let one_leaf = |x: &Expr| s.leaves_of(x).count_ones() == 1;
                     let cols = (key_col(a).is_some() && key_col(b).is_some())
                         || (key_col(a).is_some() && merge_expr(b))
-                        || (key_col(b).is_some() && merge_expr(a));
+                        || (key_col(b).is_some() && merge_expr(a))
+                        || (merge_expr(a) && merge_expr(b) && one_leaf(a) && one_leaf(b));
                     match user {
                         Some((merges, hashes, comm)) => {
                             commutes = comm;
@@ -8045,6 +8060,45 @@ impl Planner<'_, '_> {
             // computed below the join that nulls them (its nullingrels); a column there is
             // a member as before.)
             if outer_join || s.sjs.iter().any(|j| j.kind != JoinKind::Semi) {
+                continue;
+            }
+            // Two expressions, each of one FROM item's columns: members of one class
+            // (process_equivalence with neither side a Var), each sorting its side.
+            let usable = |s: &Search, x: &Expr| {
+                let x = key_operand(x);
+                key_col(x).is_none()
+                    && s.leaves_of(x).count_ones() == 1
+                    && merge_expr(x)
+                    && !crate::sql::explain::expr_volatile_deep(x)
+                    && !x.columns().iter().any(|&h| s.phv(h).is_some() || h >= s.ec.len())
+            };
+            if c.mergeable && usable(&s, a) && usable(&s, b) {
+                let (x, y) = (key_operand(a).clone(), key_operand(b).clone());
+                let find = |s: &Search, e: &Expr| s.xm.iter().position(|m| m.expr.same_as(e));
+                let fresh = usize::MAX / 2 + s.xm.len();
+                let ec = find(&s, &x).or_else(|| find(&s, &y)).map_or(fresh, |k| s.xm[k].ec);
+                for e in [&x, &y] {
+                    match find(&s, e) {
+                        Some(k) if s.xm[k].ec != ec => {
+                            let old = s.xm[k].ec;
+                            for g in s.ec.iter_mut() {
+                                if *g == old {
+                                    *g = ec;
+                                }
+                            }
+                            for m in s.xm.iter_mut() {
+                                if m.ec == old {
+                                    m.ec = ec;
+                                }
+                            }
+                        }
+                        Some(_) => {}
+                        None => {
+                            let leaf = s.leaves_of(e).trailing_zeros() as usize;
+                            s.xm.push(XMember { expr: e.clone(), leaf, ec });
+                        }
+                    }
+                }
                 continue;
             }
             for (col, x) in [(a, b), (b, a)] {

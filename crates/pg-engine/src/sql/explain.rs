@@ -4579,6 +4579,17 @@ impl Builder<'_, '_> {
             };
             let mut more: Vec<Name> = cols.to_vec();
             let e = top_down(e.clone(), &mut |x| {
+                // (Cast itself, a converted row is no simple operand: get_coercion_expr's
+                // get_rule_expr_paren puts it in parentheses of its own,
+                // `(((t1.*)::prt1))::text`.)
+                if let Expr::Cast(inner, from, to, f) = x
+                    && let Some(q) = whole_row_of(inner)
+                    && let Some(tn) = converted(&inner.ty())
+                {
+                    more.push(Name::same(format!("(({q}.*)::{tn})")));
+                    let col = Expr::Col(more.len() - 1, inner.ty());
+                    return Some(Expr::Cast(Box::new(col), from.clone(), to.clone(), *f));
+                }
                 let q = whole_row_of(x)?;
                 more.push(Name::same(match converted(&x.ty()) {
                     Some(tn) => format!("({q}.*)::{tn}"),
@@ -6964,6 +6975,23 @@ impl Builder<'_, '_> {
                     self.node(input)
                 };
                 self.order_hint = saved_hint;
+                // A key computed over an inheritance tree's Append (a merge clause's
+                // expression, `t1::text`): the Append can't project, so a Result computes it
+                // under the Sort (prepare_sort_from_pathkeys / inject_projection_plan, with
+                // the subplan's costs).
+                if matches!(&**input, Plan::Append { inh: Some(_), .. })
+                    && c.node.node_type == "Append"
+                    && keys.iter().any(|k| !matches!(k.expr, Expr::Col(..)))
+                {
+                    let app = std::mem::replace(&mut c.node, ExNode::new("Result"));
+                    c.node.rows = app.rows;
+                    c.node.width = app.width;
+                    c.node.startup_cost = app.startup_cost;
+                    c.node.total_cost = app.total_cost;
+                    c.node.cols = app.cols.clone();
+                    c.node.output = app.output.clone();
+                    c.node.children.push(app.child("Outer"));
+                }
                 // (VERBOSE: a projection over an inheritance tree merged in order is its
                 // members' to compute, each over its own columns; a Result above returns
                 // the query's columns when those aren't the members'.)
