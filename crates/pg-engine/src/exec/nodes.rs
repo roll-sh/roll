@@ -1425,6 +1425,18 @@ struct DistinctNode {
     out: Option<std::vec::IntoIter<Row>>,
 }
 
+/// A plan's column types as far as its nodes say (`col_types`, through a UNION ALL's first
+/// arm too), for comparing its rows.
+fn row_types(p: &Plan) -> Vec<crate::types::DataType> {
+    match p {
+        Plan::Append { inputs, .. } if !inputs.is_empty() => row_types(&inputs[0]),
+        Plan::Filter { input, .. } | Plan::Sort { input, .. } | Plan::Limit { input, .. } | Plan::Barrier { input, .. } => {
+            row_types(input)
+        }
+        _ => crate::sql::paths::analyzejoins::col_types(p),
+    }
+}
+
 /// Rows deduplicated through a TupleHashTable sized for `plan`'s estimate, in the
 /// table's iteration order (the first row of each group).
 fn hashed_distinct(
@@ -1527,6 +1539,12 @@ impl Node for DistinctNode {
                 Plan::Distinct { input, .. } => input.clone(),
                 _ => plan.clone(),
             };
+            // (Whole rows compare as their columns do: bpchar without trailing spaces.)
+            let norms: Vec<Option<super::agg::KeyNorm>> = row_types(&input)
+                .iter()
+                .map(|t| matches!(t, crate::types::DataType::Bpchar(_)).then_some(super::agg::KeyNorm::Bpchar(None)))
+                .collect();
+            let whole = |r: &Row| super::agg::group_key(r, &norms);
             // (Grouped on keys, the rest passed through: each group's first row whole.)
             let out = if let Some(on) = &self.on {
                 let colls = super::agg::nondeterministic_keys(on, ctx);
@@ -1542,7 +1560,7 @@ impl Node for DistinctNode {
                 let mut seen: HashMap<Row, ()> = HashMap::default();
                 let mut out: Vec<Row> = Vec::new();
                 for r in rows {
-                    if seen.insert(r.clone(), ()).is_none() {
+                    if seen.insert(whole(&r), ()).is_none() {
                         out.push(r);
                     }
                 }
@@ -1550,7 +1568,7 @@ impl Node for DistinctNode {
                 out
             } else {
                 let types = output_types(&input, rows.first());
-                hashed_distinct(rows, |r| r.clone(), types, &plan, ctx)?
+                hashed_distinct(rows, whole, types, &plan, ctx)?
             };
             self.out = Some(out.into_iter());
         }
@@ -1656,20 +1674,23 @@ impl SetOpNode {
             (collect(&self.left, ctx, None)?, collect(&self.right, ctx, None)?)
         };
         // Rows compare by their keys: strings under a nondeterministic collation by what it
-        // finds equal.
-        let colls: Vec<Option<Arc<crate::types::collation::Collation>>> = if self.nondet.is_empty()
-        {
-            Vec::new()
-        } else {
-            let cat = ctx.catalog();
-            self.nondet
-                .iter()
-                .map(|n| {
-                    n.as_ref()
-                        .and_then(|n| crate::types::collation::by_name(&cat, n))
-                })
-                .collect()
-        };
+        // finds equal, bpchar without trailing spaces.
+        let types = row_types(&self.left);
+        let width = types.len().max(self.nondet.len());
+        let cat = (!self.nondet.is_empty()).then(|| ctx.catalog());
+        let colls: Vec<Option<super::agg::KeyNorm>> = (0..width)
+            .map(|i| {
+                let c = match (&cat, self.nondet.get(i)) {
+                    (Some(cat), Some(Some(n))) => crate::types::collation::by_name(cat, n),
+                    _ => None,
+                };
+                if matches!(types.get(i), Some(crate::types::DataType::Bpchar(_))) {
+                    Some(super::agg::KeyNorm::Bpchar(c))
+                } else {
+                    super::agg::KeyNorm::of(c)
+                }
+            })
+            .collect();
         let key = |r: &Row| -> Row { super::agg::group_key(r, &colls) };
         let mut out = Vec::new();
         match self.kind {
@@ -2315,11 +2336,20 @@ fn value_type(v: &Value) -> crate::types::DataType {
 /// rows, at least 1024).
 /// Hash join keys of the integer family compared across types (int4 = int8): as one
 /// type, so equal values meet.
-fn int_keys(k: Vec<Value>) -> Vec<Value> {
+/// Join keys as equality sees them: integers of any width alike, bpchar without its
+/// trailing spaces (bpchareq; `char(2)` 'a ' equals `char(4)` 'a   ').
+fn int_keys(k: Vec<Value>, keys: &[Expr]) -> Vec<Value> {
     k.into_iter()
-        .map(|v| match v {
+        .zip(keys.iter().map(Some).chain(std::iter::repeat(None)))
+        .map(|(v, e)| match v {
             Value::Int2(x) => Value::Int8(x as i64),
             Value::Int4(x) => Value::Int8(x as i64),
+            Value::Text(s)
+                if e.is_some_and(|e| matches!(e.ty(), crate::types::DataType::Bpchar(_)))
+                    && s.ends_with(' ') =>
+            {
+                Value::text(s.trim_end_matches(' '))
+            }
             v => v,
         })
         .collect()
@@ -2345,7 +2375,7 @@ fn build_hash(
         let h = super::pghash::combine(&k, &types, Some(&cat));
         tuples.push((i, h, 0));
         if !null {
-            by_key.push((int_keys(k), i));
+            by_key.push((int_keys(k, keys), i));
         }
     }
     let nb = nbuckets.unwrap_or_else(|| (tuples.len() as u32).max(1024));
@@ -2525,11 +2555,11 @@ impl HashJoinNode {
             .collect();
         let okeys: Vec<Vec<Value>> = outer
             .iter()
-            .map(|r| eval_all(&self.lkeys, r, ctx).map(int_keys))
+            .map(|r| eval_all(&self.lkeys, r, ctx).map(|k| int_keys(k, &self.lkeys)))
             .collect::<Result<_>>()?;
         let ikeys: Vec<Vec<Value>> = inner
             .iter()
-            .map(|r| eval_all(&self.rkeys, r, ctx).map(int_keys))
+            .map(|r| eval_all(&self.rkeys, r, ctx).map(|k| int_keys(k, &self.rkeys)))
             .collect::<Result<_>>()?;
         let cmp = |a: &[Value], b: &[Value]| -> Result<Ordering> {
             for (i, k) in sort_keys.iter().enumerate() {
@@ -2644,7 +2674,7 @@ impl Node for HashJoinNode {
                 match next {
                     Some(l) => {
                         ctx.check()?;
-                        let k = int_keys(eval_all(&self.lkeys, &l, ctx)?);
+                        let k = int_keys(eval_all(&self.lkeys, &l, ctx)?, &self.lkeys);
                         let cands = if k.iter().any(Value::is_null) {
                             Vec::new()
                         } else {
@@ -2743,7 +2773,7 @@ impl RightSemiNode {
         let mut right = open(&self.right, ctx)?;
         while let Some(r) = right.next(ctx)? {
             ctx.check()?;
-            let k = int_keys(eval_all(&self.rkeys, &r, ctx)?);
+            let k = int_keys(eval_all(&self.rkeys, &r, ctx)?, &self.rkeys);
             if k.iter().any(Value::is_null) {
                 continue;
             }

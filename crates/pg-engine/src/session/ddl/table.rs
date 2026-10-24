@@ -3416,7 +3416,7 @@ impl Ddl<'_, '_> {
                 Err(e) => return Ok(Some(e)),
             };
             if ix.unique && (ix.nulls_not_distinct || !vals.iter().any(Value::is_null)) {
-                let k = key_bytes(&crate::exec::agg::group_key(&vals, &nondet));
+                let k = key_bytes(&crate::exec::agg::group_key(&vals, &nondet.iter().cloned().map(crate::exec::agg::KeyNorm::of).collect::<Vec<_>>()));
                 if let Some(first) = seen.get(&k) {
                     let first: &Vec<Value> = first;
                     return Ok(Some(self.duplicate_key(t, &bix, first, &ix.name)));
@@ -3474,7 +3474,7 @@ impl Ddl<'_, '_> {
                 continue;
             };
             if ix.unique && (ix.nulls_not_distinct || !vals.iter().any(Value::is_null)) {
-                let k = key_bytes(&crate::exec::agg::group_key(&vals, &nondet));
+                let k = key_bytes(&crate::exec::agg::group_key(&vals, &nondet.iter().cloned().map(crate::exec::agg::KeyNorm::of).collect::<Vec<_>>()));
                 if let Some(first) = seen.get(&k) {
                     let first: &Vec<Value> = first;
                     return Err(self.duplicate_key(t, &bix, first, &ix.name));

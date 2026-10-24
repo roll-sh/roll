@@ -89,6 +89,15 @@ evaluated, or folded while planning, differs), `error_message`, `notice`, `tag`,
 | first (before fixes) | 60 × 120 | 7,063 | 6,067 | 1,669 | wrong_rows 1, wrong_state 2, engine_error 136, missing_error 142, wrong_error 73, error_message 80, error_detail 148 |
 | after batch 1 | 60 × 120 | 7,158 | 6,145 | 1,693 | wrong_rows 2, wrong_state 1, engine_error 16, missing_error 138, wrong_error 57, eval_error 148, error_message 80, error_detail 152 |
 | smoke after batch 2 | 25 × 80 | 2,000 | 1,701 | 468 | wrong_rows 1, engine_error 7, missing_error 11, wrong_error 12, eval_error 34, error_message 15, error_detail 45 |
+| wider grammar (round 2), seeds 100–299, batch 3 engine | 200 × 150 | 29,422 | 25,047 | 7,080 | wrong_rows 11, wrong_state 10, engine_error 83, missing_error 153, wrong_error 237, eval_error 744, error_message 122, error_detail 548 |
+| smoke, round 2 grammar | 25 × 80 | 1,937 | 1,654 | 486 | wrong_rows 1, wrong_state 1, engine_error 9, missing_error 6, wrong_error 12, eval_error 34, error_message 10, error_detail 29 |
+
+Round 2 of the grammar added DELETE ... USING, data-modifying CTEs, window frames with
+EXCLUDE, ordered-set aggregates (percentile_disc, mode), more jsonb and integer functions.
+About a quarter of the statements error on both sides (the generator's waste; the run prints
+the most common such errors): array_length / jsonb functions over jsonb scalars, unknown
+literals to polymorphic functions, aggregates in WHERE / JOIN ON, LATERAL-less references to
+FROM items.
 
 `smoke_known.txt` lists the smoke run's remaining mismatches above `error_message` (62): the
 smoke test fails only on one not in it.
@@ -129,8 +138,27 @@ Batch 2 (`a35_parse_errors`):
   list skips an item naming an entry it has (`SELECT DISTINCT ON (1) b, 1, b ... ORDER BY 1,
   2, 3` is valid).
 
+Batch 3 (`a35_equal_values`):
+
+- **Wrong rows**: `max` / `min` kept the first of two values that compare equal but differ;
+  PostgreSQL's `X_larger` / `X_smaller` keep the newer (`1.0` vs `1.00`, `'1 mon'` vs
+  `'30 days'`, `0` vs `-0`, arrays and rows of those, strings a nondeterministic collation
+  finds equal), bpchar's and tid's the older:
+  `SELECT max(x) FROM (VALUES (1.0), (1.00)) v(x)` is `1.00`.
+- **Wrong rows**: bpchar compared with its trailing spaces in merge joins, grouping,
+  DISTINCT, DISTINCT ON, count(DISTINCT), UNION / INTERSECT / EXCEPT and max / min:
+  `char(2)` joined with `char(4)` on equal values returned no rows under a merge join
+  (`SELECT * FROM ca JOIN cb ON x = y`), `SELECT x FROM ca UNION SELECT y FROM cb` kept both
+  `'a '` and `'a   '`.
+
 ## Open
 
+- **Wrong rows**: a pseudoconstant qual (an uncorrelated sub-select, an InitPlan) of an
+  inner join on the nullable side of an outer join gates the whole outer join instead of the
+  inner join: `SELECT * FROM c LEFT JOIN (a JOIN b ON (SELECT false)) ON a.x = c.z` returns no
+  rows (PostgreSQL: c's rows null-extended). Same with `NOT EXISTS (SELECT 1 FROM t)`.
+- More wrong_rows / wrong_state cases of the round 2 sweep are recorded but not yet reduced
+  (seeds 134, 152, 163, 176, 198, 205; DML seeds 116, 179, 211, 216).
 - FROM sub-selects' unused outputs, unreferenced CTEs and `false AND ...` arguments: PostgreSQL
   drops them before it folds constants (left to right in AND / OR), the engine folds while
   binding and reports the error (`SELECT 1 FROM (SELECT 1 / 0 AS c FROM t) s`,

@@ -500,6 +500,17 @@ impl Accum for MinMax {
                         }
                     }
                     None => {
+                        // (bpchar_larger / bpchar_smaller: bpcharcmp, trailing spaces aside.)
+                        if let (T::Bpchar(_), Value::Text(x), Value::Text(y)) = (&self.ty, v, b) {
+                            let ord = x.trim_end_matches(' ').cmp(y.trim_end_matches(' '));
+                            return {
+                                let replace = if self.max { ord == Ordering::Greater } else { ord == Ordering::Less };
+                                if replace {
+                                    self.best = Some(v.clone());
+                                }
+                                Ok(())
+                            };
+                        }
                         // (array_larger / array_smaller over anyarray: btarraycmp.)
                         if let (Value::Array(x), Value::Array(y)) = (v, b)
                             && !x.elem.same_base(&y.elem)
@@ -512,10 +523,11 @@ impl Accum for MinMax {
                         v.cmp_total(b)
                     }
                 };
-                // text_larger / text_smaller keep the new value on a tie (one a
-                // nondeterministic collation can find between different strings).
-                let tie = ord == Ordering::Equal
-                    && self.lt.as_ref().is_some_and(|l| l.coll.is_some());
+                // The X_larger / X_smaller transition functions keep the new value on a tie
+                // (`cmp > 0 ? old : new`), which values that compare equal show: 1.0 and
+                // 1.00, '1 mon' and '30 days', 0 and -0, strings a nondeterministic
+                // collation finds equal. Only bpchar's and tid's keep the old one (`>=`).
+                let tie = ord == Ordering::Equal && !matches!(self.ty, T::Bpchar(_) | T::Tid);
                 tie || if self.max {
                     ord == Ordering::Greater
                 } else {
@@ -2671,7 +2683,7 @@ impl AggNode {
         sets: &[Vec<usize>],
         rows: &[Row],
         fulls: &[Vec<Value>],
-        colls: &[Option<Arc<crate::types::collation::Collation>>],
+        colls: &[Option<KeyNorm>],
         ctx: &ExecCtx,
     ) -> Result<Vec<Row>> {
         let input = match self.plan.as_deref() {
@@ -2746,7 +2758,7 @@ impl AggNode {
         sets: &[Vec<usize>],
         rows: Vec<Row>,
         fulls: Vec<Vec<Value>>,
-        colls: &[Option<Arc<crate::types::collation::Collation>>],
+        colls: &[Option<KeyNorm>],
         ctx: &ExecCtx,
     ) -> Result<Vec<Row>> {
         let mut items: Vec<(Row, Vec<Value>)> = rows.into_iter().zip(fulls).collect();
@@ -3014,37 +3026,65 @@ pub fn peek(_call: &AggCall, st: &mut AggState, ctx: &ExecCtx) -> Result<Value> 
     st.acc.result(ctx)
 }
 
-/// The nondeterministic collations of grouping keys (the binder marks such a key with its
-/// collation as a COLLATE).
+/// How a grouping key's values compare for hashing and equality, when not by their bytes.
+#[derive(Clone)]
+pub(crate) enum KeyNorm {
+    /// Strings under a nondeterministic collation: by their sort keys.
+    Coll(Arc<crate::types::collation::Collation>),
+    /// bpchar: without trailing spaces (bpchareq, hashbpchar), then under the collation.
+    Bpchar(Option<Arc<crate::types::collation::Collation>>),
+}
+
+impl KeyNorm {
+    pub(crate) fn of(c: Option<Arc<crate::types::collation::Collation>>) -> Option<KeyNorm> {
+        c.map(KeyNorm::Coll)
+    }
+}
+
+/// The grouping keys' normalizations: a nondeterministic collation's (the binder marks such
+/// a key with its collation as a COLLATE), bpchar's.
 pub(crate) fn nondeterministic_keys(
     keys: &[crate::sql::expr::Expr],
     ctx: &ExecCtx,
-) -> Vec<Option<Arc<crate::types::collation::Collation>>> {
+) -> Vec<Option<KeyNorm>> {
     let mut cat = None;
     keys.iter()
-        .map(|k| match k {
-            crate::sql::expr::Expr::Collate(_, name, _) => {
-                let cat = cat.get_or_insert_with(|| ctx.catalog());
-                crate::types::collation::by_name(cat, name).filter(|c| !c.deterministic)
+        .map(|k| {
+            let coll = match k {
+                crate::sql::expr::Expr::Collate(_, name, _) => {
+                    let cat = cat.get_or_insert_with(|| ctx.catalog());
+                    crate::types::collation::by_name(cat, name).filter(|c| !c.deterministic)
+                }
+                _ => None,
+            };
+            if matches!(k.ty(), T::Bpchar(_)) {
+                Some(KeyNorm::Bpchar(coll))
+            } else {
+                coll.map(KeyNorm::Coll)
             }
-            _ => None,
         })
         .collect()
 }
 
-/// A grouping key as hashing and equality see it: strings under a nondeterministic
-/// collation by their sort keys.
-pub(crate) fn group_key(
-    key: &[Value],
-    colls: &[Option<Arc<crate::types::collation::Collation>>],
-) -> Vec<Value> {
+/// A grouping key as hashing and equality see it (`KeyNorm`).
+pub(crate) fn group_key(key: &[Value], colls: &[Option<KeyNorm>]) -> Vec<Value> {
     if colls.iter().all(Option::is_none) {
         return key.to_vec();
     }
     key.iter()
         .zip(colls.iter().chain(std::iter::repeat(&None)))
         .map(|(v, c)| match c {
-            Some(c) => crate::types::collation::key_value(c, v),
+            Some(KeyNorm::Coll(c)) => crate::types::collation::key_value(c, v),
+            Some(KeyNorm::Bpchar(c)) => {
+                let v = match v {
+                    Value::Text(s) if s.ends_with(' ') => Value::text(s.trim_end_matches(' ')),
+                    v => v.clone(),
+                };
+                match c {
+                    Some(c) => crate::types::collation::key_value(c, &v),
+                    None => v,
+                }
+            }
             None => v.clone(),
         })
         .collect()

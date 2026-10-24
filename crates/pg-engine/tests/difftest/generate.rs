@@ -557,6 +557,13 @@ impl<'a> Gen<'a> {
                     .aggregate(cx, Jsonb, d)
                     .unwrap_or_else(|| self.leaf(cx, Jsonb)),
                 5 => format!("jsonb_strip_nulls({})", self.expr(cx, Jsonb, d)),
+                6 if self.rng.chance(0.5) => match self.rng.below(5) {
+                    0 => format!("jsonb_path_query_first({}, '$.a')", self.expr(cx, Jsonb, d)),
+                    1 => format!("jsonb_set({}, '{{a}}', {})", self.expr(cx, Jsonb, d), self.expr(cx, Jsonb, d)),
+                    2 => format!("({} #> '{{a,b}}')", self.expr(cx, Jsonb, d)),
+                    3 => format!("jsonb_insert('{{\"z\": 0}}', '{{y}}', {})", self.expr(cx, Jsonb, d)),
+                    _ => format!("(jsonb_build_array({}, {}) -> 1)", self.expr(cx, Jsonb, d), self.expr(cx, Num, d)),
+                },
                 _ => format!("({} - 'a')", self.expr(cx, Jsonb, d)),
             },
             Json => match self.rng.below(3) {
@@ -609,6 +616,14 @@ impl<'a> Gen<'a> {
             21 => format!("width_bucket({}, 0, 10, 4)", self.expr(cx, Num, d)),
             22 => format!("({} & {})", self.expr(cx, Int, d), self.expr(cx, Int, d)),
             23 if cx.agg.is_some() => self.aggregate(cx, Int, d).unwrap_or_else(|| self.leaf(cx, Int)),
+            23 => match self.rng.below(6) {
+                0 => format!("strpos({}, 'a')", self.expr(cx, Text, d)),
+                1 => format!("(date_part('month', {}))::int", self.expr(cx, Ts, d)),
+                2 => format!("array_position({}, {})", self.expr(cx, IntArr, d), self.expr(cx, Int, d)),
+                3 => format!("gcd({}, 6)", self.expr(cx, Int, d)),
+                4 => format!("({} << 1)", self.expr(cx, Int, d)),
+                _ => format!("num_nonnulls({}, {})", self.expr(cx, Int, d), self.expr(cx, Text, d)),
+            },
             _ => format!("char_length({})", self.expr(cx, Text, d)),
         }
     }
@@ -825,7 +840,13 @@ impl<'a> Gen<'a> {
                 _ if ty == Int => format!("(count(*){filter})::int"),
                 _ => format!("count({distinct}{}){filter}", self.expr(&inner, Int, d)),
             },
-            Num => match self.rng.below(4) {
+            Num => match self.rng.below(6) {
+                4 => format!(
+                    "percentile_disc({}) WITHIN GROUP (ORDER BY {}){filter}",
+                    self.rng.pick(&["0", "0.25", "0.5", "1"]),
+                    self.expr(&inner, Num, d)
+                ),
+                5 => format!("mode() WITHIN GROUP (ORDER BY {}){filter}", self.expr(&inner, Num, d)),
                 0 => format!("sum({distinct}{}){filter}", self.expr(&inner, Num, d)),
                 1 => format!("avg({distinct}{}){filter}", {
                     let t = *self.rng.pick(&[Int, Num, Big]);
@@ -915,6 +936,9 @@ impl<'a> Gen<'a> {
                     " RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
                     " GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING",
                     " RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING",
+                    " RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE GROUP",
+                    " GROUPS BETWEEN CURRENT ROW AND 1 FOLLOWING EXCLUDE TIES",
+                    " GROUPS BETWEEN 2 PRECEDING AND CURRENT ROW EXCLUDE GROUP",
                 ]);
                 let arg = if base.agg.is_some() { "count(*)".to_string() } else { self.expr(&base, Int, d.min(1)) };
                 format!("sum({arg}) OVER ({part}ORDER BY {ord}{frame})")
@@ -1575,10 +1599,32 @@ impl<'a> Gen<'a> {
                 let w = if self.rng.chance(0.8) { format!(" WHERE {}", self.expr(&cx, Bool, 3)) } else { String::new() };
                 format!("UPDATE {} {a} SET {}{w}{ret}", t.name, sets.join(", "))
             }
-            4 => {
-                let w = format!(" WHERE {}", self.expr(&cx, Bool, 3));
-                format!("DELETE FROM {} {a}{w}{ret}", t.name)
-            }
+            4 => match self.rng.below(4) {
+                // DELETE ... USING another relation.
+                0 => {
+                    let other = self.schema.tables[self.rng.below(self.schema.tables.len())].clone();
+                    let oscope: Vec<SCol> = other
+                        .cols
+                        .iter()
+                        .map(|c| SCol { expr: format!("u.{}", c.name), ty: c.ty, coll: c.coll })
+                        .collect();
+                    let cond = self.join_cond(&scope, &oscope, &[]);
+                    format!("DELETE FROM {} {a} USING {} u WHERE {cond}{ret}", t.name, other.name)
+                }
+                // A data-modifying CTE read by the query after it.
+                1 => {
+                    let w = self.expr(&cx, Bool, 2);
+                    let r = if ret.is_empty() { " RETURNING x.*".to_string() } else { ret.clone() };
+                    format!(
+                        "WITH d AS (DELETE FROM {} {a} WHERE {w}{r}) SELECT count(*) FROM d",
+                        t.name
+                    )
+                }
+                _ => {
+                    let w = format!(" WHERE {}", self.expr(&cx, Bool, 3));
+                    format!("DELETE FROM {} {a}{w}{ret}", t.name)
+                }
+            },
             5 if t.key.is_some() => {
                 // UPDATE ... FROM a sub-select keyed by id: one source row per target row.
                 let c = (*noncols.get(self.rng.below(noncols.len().max(1)))?).clone();
