@@ -1,0 +1,647 @@
+> CREATE TABLE a18_i8 (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> INSERT INTO a18_i8 VALUES (123, 456), (123, 4567890123456789), (4567890123456789, 123),
+>   (4567890123456789, 4567890123456789), (4567890123456789, -4567890123456789)
+-- INSERT 0 5
+
+> ANALYZE a18_i8
+-- ANALYZE
+
+> CREATE TABLE a18_g5 (id integer PRIMARY KEY, v integer)
+-- CREATE TABLE
+
+> INSERT INTO a18_g5 SELECT i, i FROM generate_series(1, 5) i
+-- INSERT 0 5
+
+> ANALYZE a18_g5
+-- ANALYZE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT q2 + 1, count(*) FROM a18_i8 GROUP BY q1, q2 + 1 ORDER BY 1
+QUERY PLAN:text
+Sort
+  Output: ((q2 + 1)), (count(*)), q1
+  Sort Key: ((a18_i8.q2 + 1))
+  ->  HashAggregate
+        Output: ((q2 + 1)), count(*), q1
+        Group Key: (a18_i8.q2 + 1), a18_i8.q1
+        ->  Seq Scan on public.a18_i8
+              Output: (q2 + 1), q1
+-- EXPLAIN
+
+> SELECT q2 + 1, count(*) FROM a18_i8 GROUP BY q1, q2 + 1 ORDER BY 1
+?column?:int8 | count:int8
+-4567890123456788 | 1
+124 | 1
+457 | 1
+4567890123456790 | 1
+4567890123456790 | 1
+-- SELECT 5
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT count(*) FROM a18_i8 GROUP BY q1 ORDER BY sum(q2)
+QUERY PLAN:text
+Sort
+  Output: (count(*)), (sum(q2)), q1
+  Sort Key: (sum(a18_i8.q2))
+  ->  HashAggregate
+        Output: count(*), sum(q2), q1
+        Group Key: a18_i8.q1
+        ->  Seq Scan on public.a18_i8
+              Output: q1, q2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT count(*) FROM a18_i8 GROUP BY q1 LIMIT 2
+QUERY PLAN:text
+Limit
+  Output: (count(*)), q1
+  ->  HashAggregate
+        Output: count(*), q1
+        Group Key: a18_i8.q1
+        ->  Seq Scan on public.a18_i8
+              Output: q1, q2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT DISTINCT count(*) FROM a18_i8 GROUP BY q1
+QUERY PLAN:text
+Unique
+  Output: (count(*)), q1
+  ->  Sort
+        Output: (count(*)), q1
+        Sort Key: (count(*))
+        ->  HashAggregate
+              Output: count(*), q1
+              Group Key: a18_i8.q1
+              ->  Seq Scan on public.a18_i8
+                    Output: q1, q2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT count(*), row_number() OVER () FROM a18_i8 GROUP BY q1
+QUERY PLAN:text
+WindowAgg
+  Output: (count(*)), row_number() OVER w1, q1
+  Window: w1 AS (ROWS UNBOUNDED PRECEDING)
+  ->  HashAggregate
+        Output: q1, count(*)
+        Group Key: a18_i8.q1
+        ->  Seq Scan on public.a18_i8
+              Output: q1, q2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM (SELECT count(*) c FROM a18_i8 GROUP BY q1 OFFSET 0) s WHERE c > 0
+QUERY PLAN:text
+Subquery Scan on s
+  Output: s.c
+  Filter: (s.c > 0)
+  ->  HashAggregate
+        Output: count(*), a18_i8.q1
+        Group Key: a18_i8.q1
+        ->  Seq Scan on public.a18_i8
+              Output: a18_i8.q1, a18_i8.q2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT (SELECT count(*) FROM a18_i8 b WHERE b.q2 = a.q1 GROUP BY b.q1 ORDER BY 1 LIMIT 1) FROM a18_i8 a
+QUERY PLAN:text
+Seq Scan on public.a18_i8 a
+  Output: (SubPlan 1)
+  SubPlan 1
+    ->  Limit
+          Output: (count(*)), b.q1
+          ->  Sort
+                Output: (count(*)), b.q1
+                Sort Key: (count(*))
+                ->  HashAggregate
+                      Output: count(*), b.q1
+                      Group Key: b.q1
+                      ->  Seq Scan on public.a18_i8 b
+                            Output: b.q1, b.q2
+                            Filter: (b.q2 = a.q1)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT count(*) FROM a18_i8 GROUP BY q2, q1 ORDER BY 1
+QUERY PLAN:text
+Sort
+  Output: (count(*)), q2, q1
+  Sort Key: (count(*))
+  ->  HashAggregate
+        Output: count(*), q2, q1
+        Group Key: a18_i8.q2, a18_i8.q1
+        ->  Seq Scan on public.a18_i8
+              Output: q1, q2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT q1 FROM a18_i8 GROUP BY q1, q2 ORDER BY q1
+QUERY PLAN:text
+Group
+  Output: q1, q2
+  Group Key: a18_i8.q1, a18_i8.q2
+  ->  Sort
+        Output: q1, q2
+        Sort Key: a18_i8.q1, a18_i8.q2
+        ->  Seq Scan on public.a18_i8
+              Output: q1, q2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT generate_series(1, a) AS g, a + b AS ab FROM (VALUES (1, 1), (2, 2)) AS t (a, b)
+> GROUP BY ROLLUP(a, ab) ORDER BY 1, 2
+QUERY PLAN:text
+Sort
+  Output: (generate_series(1, "*VALUES*".column1)), (("*VALUES*".column1 + "*VALUES*".column2)), "*VALUES*".column1
+  Sort Key: (generate_series(1, "*VALUES*".column1)), (("*VALUES*".column1 + "*VALUES*".column2))
+  ->  ProjectSet
+        Output: generate_series(1, "*VALUES*".column1), (("*VALUES*".column1 + "*VALUES*".column2)), "*VALUES*".column1
+        ->  MixedAggregate
+              Output: "*VALUES*".column1, (("*VALUES*".column1 + "*VALUES*".column2))
+              Hash Key: "*VALUES*".column1, ("*VALUES*".column1 + "*VALUES*".column2)
+              Hash Key: "*VALUES*".column1
+              Group Key: ()
+              ->  Values Scan on "*VALUES*"
+                    Output: ("*VALUES*".column1 + "*VALUES*".column2), "*VALUES*".column1
+-- EXPLAIN
+
+> SELECT generate_series(1, a) AS g, a + b AS ab FROM (VALUES (1, 1), (2, 2)) AS t (a, b)
+> GROUP BY ROLLUP(a, ab) ORDER BY 1, 2
+g:int4 | ab:int4
+1 | 2
+1 | 4
+1 | NULL
+1 | NULL
+2 | 4
+2 | NULL
+-- SELECT 6
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT generate_series(1, a) AS g, a + b AS ab FROM (VALUES (1, 1), (2, 2)) AS t (a, b)
+> GROUP BY a, ab ORDER BY 1, 2
+QUERY PLAN:text
+Sort
+  Output: (generate_series(1, "*VALUES*".column1)), (("*VALUES*".column1 + "*VALUES*".column2)), "*VALUES*".column1
+  Sort Key: (generate_series(1, "*VALUES*".column1)), (("*VALUES*".column1 + "*VALUES*".column2))
+  ->  ProjectSet
+        Output: generate_series(1, "*VALUES*".column1), (("*VALUES*".column1 + "*VALUES*".column2)), "*VALUES*".column1
+        ->  Group
+              Output: "*VALUES*".column1, (("*VALUES*".column1 + "*VALUES*".column2))
+              Group Key: "*VALUES*".column1, (("*VALUES*".column1 + "*VALUES*".column2))
+              ->  Sort
+                    Output: (("*VALUES*".column1 + "*VALUES*".column2)), "*VALUES*".column1
+                    Sort Key: "*VALUES*".column1, (("*VALUES*".column1 + "*VALUES*".column2))
+                    ->  Values Scan on "*VALUES*"
+                          Output: ("*VALUES*".column1 + "*VALUES*".column2), "*VALUES*".column1
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT generate_series(1, 3), count(*) FROM a18_i8 GROUP BY GROUPING SETS (q1, q2) ORDER BY 1
+QUERY PLAN:text
+Sort
+  Output: (generate_series(1, 3)), (count(*)), q1, q2
+  Sort Key: (generate_series(1, 3))
+  ->  ProjectSet
+        Output: generate_series(1, 3), (count(*)), q1, q2
+        ->  HashAggregate
+              Output: count(*), q1, q2
+              Hash Key: a18_i8.q1
+              Hash Key: a18_i8.q2
+              ->  Seq Scan on public.a18_i8
+                    Output: q1, q2
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT grouping(q1), q1 FROM a18_i8 GROUP BY q1
+QUERY PLAN:text
+HashAggregate
+  Output: GROUPING(q1), q1
+  Group Key: a18_i8.q1
+  ->  Seq Scan on public.a18_i8
+        Output: q1, q2
+-- EXPLAIN
+
+> SELECT grouping(q1), q1 FROM a18_i8 GROUP BY q1 ORDER BY 2
+grouping:int4 | q1:int8
+0 | 123
+0 | 4567890123456789
+-- SELECT 2
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT grouping(q1) + 1 FROM a18_i8 GROUP BY q1 HAVING grouping(q1) = 0
+QUERY PLAN:text
+HashAggregate
+  Output: (GROUPING(q1) + 1), q1
+  Group Key: a18_i8.q1
+  Filter: (GROUPING(a18_i8.q1) = 0)
+  ->  Seq Scan on public.a18_i8
+        Output: q1, q2
+-- EXPLAIN
+
+> SELECT grouping(q1) + 1 FROM a18_i8 GROUP BY q1 HAVING grouping(q1) = 0
+?column?:int4
+1
+1
+-- SELECT 2
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT (SELECT grouping(q1)) FROM a18_i8 GROUP BY q1
+QUERY PLAN:text
+HashAggregate
+  Output: (SubPlan 1), a18_i8.q1
+  Group Key: a18_i8.q1
+  ->  Seq Scan on public.a18_i8
+        Output: a18_i8.q1, a18_i8.q2
+  SubPlan 1
+    ->  Result
+          Output: GROUPING(a18_i8.q1)
+-- EXPLAIN
+
+> SELECT (SELECT grouping(q1)) FROM a18_i8 GROUP BY q1
+grouping:int4
+0
+0
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(*) FROM a18_i8 GROUP BY 1 + 1
+QUERY PLAN:text
+GroupAggregate
+  ->  Seq Scan on a18_i8
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(*) FROM a18_i8 GROUP BY (SELECT 1)
+QUERY PLAN:text
+GroupAggregate
+  InitPlan 1
+    ->  Result
+  ->  Seq Scan on a18_i8
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT 1 FROM a18_i8 GROUP BY (SELECT 1)
+QUERY PLAN:text
+Group
+  InitPlan 1
+    ->  Result
+  ->  Seq Scan on a18_i8
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(*) FROM a18_i8 GROUP BY q1, (SELECT 1)
+QUERY PLAN:text
+HashAggregate
+  Group Key: a18_i8.q1
+  InitPlan 1
+    ->  Result
+  ->  Seq Scan on a18_i8
+-- EXPLAIN
+
+> SELECT count(*) FROM a18_i8 GROUP BY q1, (SELECT 1) ORDER BY 1
+count:int8
+2
+3
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF)
+> SELECT count(*) FROM a18_i8 GROUP BY q1, 1 + 1 ORDER BY 1
+QUERY PLAN:text
+Sort
+  Sort Key: (count(*))
+  ->  HashAggregate
+        Group Key: q1
+        ->  Seq Scan on a18_i8
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT (SELECT grouping(v1)) FROM (VALUES ((SELECT 1))) v(v1) GROUP BY CUBE(v1)
+QUERY PLAN:text
+MixedAggregate
+  Hash Key: (InitPlan 3).col1
+  Group Key: ()
+  InitPlan 1
+    ->  Result
+  InitPlan 3
+    ->  Result
+  ->  Result
+  SubPlan 2
+    ->  Result
+-- EXPLAIN
+
+> SELECT (SELECT grouping(v1)) FROM (VALUES ((SELECT 1))) v(v1) GROUP BY CUBE(v1)
+grouping:int4
+0
+1
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF)
+> SELECT (SELECT grouping(v1)) FROM (VALUES ((SELECT 1))) v(v1) GROUP BY v1
+QUERY PLAN:text
+GroupAggregate
+  InitPlan 1
+    ->  Result
+  InitPlan 3
+    ->  Result
+  ->  Result
+  SubPlan 2
+    ->  Result
+-- EXPLAIN
+
+> SELECT (SELECT grouping(v1)) FROM (VALUES ((SELECT 1))) v(v1) GROUP BY v1
+grouping:int4
+0
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT grouping((SELECT t1.v FROM a18_g5 t2 WHERE id = t1.id)),
+>        (SELECT t1.v FROM a18_g5 t2 WHERE id = t1.id) AS s
+> FROM a18_g5 t1
+> GROUP BY GROUPING SETS(v, s)
+> ORDER BY CASE WHEN grouping((SELECT t1.v FROM a18_g5 t2 WHERE id = t1.id)) = 0
+>               THEN (SELECT t1.v FROM a18_g5 t2 WHERE id = t1.id)
+>               ELSE NULL END NULLS FIRST
+QUERY PLAN:text
+Sort
+  Output: (GROUPING((SubPlan 1))), ((SubPlan 3)), (CASE WHEN (GROUPING((SubPlan 2)) = 0) THEN ((SubPlan 3)) ELSE NULL::integer END), t1.v
+  Sort Key: (CASE WHEN (GROUPING((SubPlan 2)) = 0) THEN ((SubPlan 3)) ELSE NULL::integer END) NULLS FIRST
+  ->  HashAggregate
+        Output: GROUPING((SubPlan 1)), ((SubPlan 3)), CASE WHEN (GROUPING((SubPlan 2)) = 0) THEN ((SubPlan 3)) ELSE NULL::integer END, t1.v
+        Hash Key: t1.v
+        Hash Key: (SubPlan 3)
+        ->  Seq Scan on public.a18_g5 t1
+              Output: (SubPlan 3), t1.v, t1.id
+              SubPlan 3
+                ->  Seq Scan on public.a18_g5 t2
+                      Output: t1.v
+                      Filter: (t2.id = t1.id)
+-- EXPLAIN
+
+> SELECT grouping((SELECT t1.v FROM a18_g5 t2 WHERE id = t1.id)),
+>        (SELECT t1.v FROM a18_g5 t2 WHERE id = t1.id) AS s
+> FROM a18_g5 t1
+> GROUP BY GROUPING SETS(v, s)
+> ORDER BY CASE WHEN grouping((SELECT t1.v FROM a18_g5 t2 WHERE id = t1.id)) = 0
+>               THEN (SELECT t1.v FROM a18_g5 t2 WHERE id = t1.id)
+>               ELSE NULL END NULLS FIRST
+grouping:int4 | s:int4
+1 | NULL
+1 | NULL
+1 | NULL
+1 | NULL
+1 | NULL
+0 | 1
+0 | 2
+0 | 3
+0 | 4
+0 | 5
+-- SELECT 10
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT grouping(ss.x) FROM a18_i8 i1 CROSS JOIN LATERAL (SELECT (SELECT i1.q1) AS x) ss GROUP BY ss.x
+QUERY PLAN:text
+HashAggregate
+  Output: GROUPING((SubPlan 1)), ((SubPlan 2))
+  Group Key: (SubPlan 2)
+  ->  Seq Scan on public.a18_i8 i1
+        Output: (SubPlan 2), i1.q1
+        SubPlan 2
+          ->  Result
+                Output: i1.q1
+-- EXPLAIN
+
+> SELECT grouping(ss.x) FROM a18_i8 i1 CROSS JOIN LATERAL (SELECT (SELECT i1.q1) AS x) ss GROUP BY ss.x
+grouping:int4
+0
+0
+-- SELECT 2
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT (SELECT grouping(ss.x)) FROM a18_i8 i1 CROSS JOIN LATERAL (SELECT (SELECT i1.q1) AS x) ss GROUP BY ss.x
+QUERY PLAN:text
+HashAggregate
+  Output: (SubPlan 2), ((SubPlan 3))
+  Group Key: (SubPlan 3)
+  ->  Seq Scan on public.a18_i8 i1
+        Output: (SubPlan 3), i1.q1
+        SubPlan 3
+          ->  Result
+                Output: i1.q1
+  SubPlan 2
+    ->  Result
+          Output: GROUPING((SubPlan 1))
+-- EXPLAIN
+
+> SELECT (SELECT grouping(ss.x)) FROM a18_i8 i1 CROSS JOIN LATERAL (SELECT (SELECT i1.q1) AS x) ss GROUP BY ss.x
+grouping:int4
+0
+0
+-- SELECT 2
+
+> SET enable_hashagg = off
+-- SET
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT (SELECT grouping(ss.x)) FROM a18_i8 i1 CROSS JOIN LATERAL (SELECT (SELECT i1.q1) AS x) ss GROUP BY ss.x
+QUERY PLAN:text
+GroupAggregate
+  Output: (SubPlan 2), ((SubPlan 3))
+  Group Key: ((SubPlan 3))
+  ->  Sort
+        Output: ((SubPlan 3)), i1.q1
+        Sort Key: ((SubPlan 3))
+        ->  Seq Scan on public.a18_i8 i1
+              Output: (SubPlan 3), i1.q1
+              SubPlan 3
+                ->  Result
+                      Output: i1.q1
+  SubPlan 2
+    ->  Result
+          Output: GROUPING((SubPlan 1))
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT q2 + 1, count(*) FROM a18_i8 GROUP BY q1, q2 + 1 ORDER BY 1
+QUERY PLAN:text
+GroupAggregate
+  Output: ((q2 + 1)), count(*), q1
+  Group Key: ((a18_i8.q2 + 1)), a18_i8.q1
+  ->  Sort
+        Output: ((q2 + 1)), q1
+        Sort Key: ((a18_i8.q2 + 1)), a18_i8.q1
+        ->  Seq Scan on public.a18_i8
+              Output: (q2 + 1), q1
+-- EXPLAIN
+
+> RESET enable_hashagg
+-- RESET
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT ss.x FROM a18_i8 i1 CROSS JOIN LATERAL (SELECT (SELECT i1.q1) AS x) ss
+QUERY PLAN:text
+Seq Scan on public.a18_i8 i1
+  Output: (SubPlan 1)
+  SubPlan 1
+    ->  Result
+          Output: i1.q1
+-- EXPLAIN
+
+> SELECT ss.x FROM a18_i8 i1 CROSS JOIN LATERAL (SELECT (SELECT i1.q1) AS x) ss ORDER BY 1
+x:int8
+123
+123
+4567890123456789
+4567890123456789
+4567890123456789
+-- SELECT 5
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT ss.x FROM a18_i8 i1 CROSS JOIN (SELECT (SELECT 1) AS x) ss
+QUERY PLAN:text
+Seq Scan on public.a18_i8 i1
+  Output: (InitPlan 1).col1
+  InitPlan 1
+    ->  Result
+          Output: 1
+-- EXPLAIN
+
+> SELECT ss.x, ss.x FROM a18_i8 i1 CROSS JOIN LATERAL (SELECT (SELECT i1.q1) AS x) ss ORDER BY 1
+x:int8 | x:int8
+123 | 123
+123 | 123
+4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789
+4567890123456789 | 4567890123456789
+-- SELECT 5
+
+> SELECT * FROM a18_i8 i1 LEFT JOIN LATERAL (SELECT (SELECT i1.q1 WHERE i1.q1 > 200) AS x) ss
+>   ON ss.x IS NOT NULL ORDER BY 1, 2
+q1:int8 | q2:int8 | x:int8
+123 | 456 | NULL
+123 | 4567890123456789 | NULL
+4567890123456789 | -4567890123456789 | 4567890123456789
+4567890123456789 | 123 | 4567890123456789
+4567890123456789 | 4567890123456789 | 4567890123456789
+-- SELECT 5
+
+> CREATE TABLE a18_hj1 (a text, b int, id int, c bool)
+-- CREATE TABLE
+
+> CREATE TABLE a18_hj2 (a bool, id int, b text, c int)
+-- CREATE TABLE
+
+> INSERT INTO a18_hj1 VALUES ('text', 2, 1, false), ('text', 1, 2, false), ('text', 20, 1, false),
+>   ('text', 1, 1, false)
+-- INSERT 0 4
+
+> INSERT INTO a18_hj2 VALUES (true, 1, 'another', 2), (true, 3, 'another', 7), (true, 1, 'another', 90),
+>   (true, 1, 'another', 3), (true, 1, 'text', 1)
+-- INSERT 0 5
+
+> BEGIN
+-- BEGIN
+
+> SET LOCAL enable_sort = off
+-- SET
+
+> SET LOCAL from_collapse_limit = 1
+-- SET
+
+> EXPLAIN (COSTS OFF, VERBOSE)
+> SELECT a18_hj1.a a1, a18_hj2.a a2, a18_hj1.tableoid::regclass t1, a18_hj2.tableoid::regclass t2
+> FROM a18_hj1, a18_hj2
+> WHERE a18_hj1.id = (SELECT 1 WHERE a18_hj2.id = 1)
+>   AND (SELECT a18_hj1.b * 5) = (SELECT a18_hj2.c * 5)
+>   AND (SELECT a18_hj1.b * 5) < 50
+>   AND (SELECT a18_hj2.c * 5) < 55
+>   AND a18_hj1.a <> a18_hj2.b
+QUERY PLAN:text
+Hash Join
+  Output: a18_hj1.a, a18_hj2.a, (a18_hj1.tableoid)::regclass, (a18_hj2.tableoid)::regclass
+  Hash Cond: ((a18_hj1.id = (SubPlan 1)) AND ((SubPlan 2) = (SubPlan 3)))
+  Join Filter: (a18_hj1.a <> a18_hj2.b)
+  ->  Seq Scan on public.a18_hj1
+        Output: a18_hj1.a, a18_hj1.tableoid, a18_hj1.id, a18_hj1.b
+        Filter: ((SubPlan 4) < 50)
+        SubPlan 4
+          ->  Result
+                Output: (a18_hj1.b * 5)
+  ->  Hash
+        Output: a18_hj2.a, a18_hj2.tableoid, a18_hj2.id, a18_hj2.c, a18_hj2.b
+        ->  Seq Scan on public.a18_hj2
+              Output: a18_hj2.a, a18_hj2.tableoid, a18_hj2.id, a18_hj2.c, a18_hj2.b
+              Filter: ((SubPlan 5) < 55)
+              SubPlan 5
+                ->  Result
+                      Output: (a18_hj2.c * 5)
+        SubPlan 1
+          ->  Result
+                Output: 1
+                One-Time Filter: (a18_hj2.id = 1)
+        SubPlan 3
+          ->  Result
+                Output: (a18_hj2.c * 5)
+  SubPlan 2
+    ->  Result
+          Output: (a18_hj1.b * 5)
+-- EXPLAIN
+
+> SELECT a18_hj1.a a1, a18_hj2.a a2, a18_hj1.tableoid::regclass t1, a18_hj2.tableoid::regclass t2
+> FROM a18_hj1, a18_hj2
+> WHERE a18_hj1.id = (SELECT 1 WHERE a18_hj2.id = 1)
+>   AND (SELECT a18_hj1.b * 5) = (SELECT a18_hj2.c * 5)
+>   AND (SELECT a18_hj1.b * 5) < 50
+>   AND (SELECT a18_hj2.c * 5) < 55
+>   AND a18_hj1.a <> a18_hj2.b
+a1:text | a2:bool | t1:regclass | t2:regclass
+text | t | a18_hj1 | a18_hj2
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF, VERBOSE)
+> SELECT a18_hj1.a a1, a18_hj2.a a2, a18_hj1.tableoid::regclass t1, a18_hj2.tableoid::regclass t2
+> FROM a18_hj2, a18_hj1
+> WHERE a18_hj1.id = (SELECT 1 WHERE a18_hj2.id = 1)
+>   AND (SELECT a18_hj1.b * 5) = (SELECT a18_hj2.c * 5)
+>   AND (SELECT a18_hj1.b * 5) < 50
+>   AND (SELECT a18_hj2.c * 5) < 55
+>   AND a18_hj1.a <> a18_hj2.b
+QUERY PLAN:text
+Hash Join
+  Output: a18_hj1.a, a18_hj2.a, (a18_hj1.tableoid)::regclass, (a18_hj2.tableoid)::regclass
+  Hash Cond: (((SubPlan 1) = a18_hj1.id) AND ((SubPlan 3) = (SubPlan 2)))
+  Join Filter: (a18_hj1.a <> a18_hj2.b)
+  ->  Seq Scan on public.a18_hj2
+        Output: a18_hj2.a, a18_hj2.tableoid, a18_hj2.id, a18_hj2.c, a18_hj2.b
+        Filter: ((SubPlan 5) < 55)
+        SubPlan 5
+          ->  Result
+                Output: (a18_hj2.c * 5)
+  ->  Hash
+        Output: a18_hj1.a, a18_hj1.tableoid, a18_hj1.id, a18_hj1.b
+        ->  Seq Scan on public.a18_hj1
+              Output: a18_hj1.a, a18_hj1.tableoid, a18_hj1.id, a18_hj1.b
+              Filter: ((SubPlan 4) < 50)
+              SubPlan 4
+                ->  Result
+                      Output: (a18_hj1.b * 5)
+        SubPlan 2
+          ->  Result
+                Output: (a18_hj1.b * 5)
+  SubPlan 1
+    ->  Result
+          Output: 1
+          One-Time Filter: (a18_hj2.id = 1)
+  SubPlan 3
+    ->  Result
+          Output: (a18_hj2.c * 5)
+-- EXPLAIN
+
+> ROLLBACK
+-- ROLLBACK
+
+> DROP TABLE a18_i8, a18_g5, a18_hj1, a18_hj2
+-- DROP TABLE
+

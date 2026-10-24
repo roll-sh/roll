@@ -6293,6 +6293,7 @@ impl Planner<'_, '_> {
                     call: None,
                     test_op: None,
                     names: Default::default(),
+                    qual: false,
                 }))
             })
             .collect();

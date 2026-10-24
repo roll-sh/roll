@@ -3442,7 +3442,7 @@ pub fn pseudo_constant(e: &Expr) -> bool {
     let mut vars = false;
     e.walk(&mut |x| {
         vars |= match x {
-            Expr::Col(..) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..) => true,
+            Expr::Col(..) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..) | Expr::Grouping(..) => true,
             Expr::Call(d, ..) => d.volatility == 'v',
             Expr::Subquery(s) => s.func == Some('v'),
             _ => false,

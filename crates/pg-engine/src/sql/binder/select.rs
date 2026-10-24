@@ -6592,9 +6592,11 @@ fn post_agg(
     }
     match e {
         Expr::Agg(j, t) => Ok(Expr::Col(ng + j, t)),
+        // (Without grouping sets every key is grouped in the one set: 0. A GroupingFunc
+        // all the same, over the keys, as Postgres keeps it: not a constant.)
         Expr::Grouping(pos) => Ok(match mask_col {
             Some(m) => grouping_expr(m, ng, &pos),
-            None => Expr::Const(Value::Int4(0), DataType::Int4),
+            None => grouping_of_keys(groups, &pos),
         }),
         Expr::Col(i, t) => {
             let name = scope
@@ -6675,6 +6677,30 @@ fn grouping_expr(mask_col: usize, ng: usize, pos: &[usize]) -> Expr {
             }
             Ok(Value::Int4(out as i32))
         },
+        min_args: 0,
+        srf: None,
+        out_cols: Vec::new(),
+        arg_names: Vec::new(),
+        defaults: vec![],
+        coll: None,
+    });
+    Expr::Call(def, args, DataType::Int4)
+}
+
+/// GROUPING(a, b) without grouping sets: over the keys (their columns of the aggregation's
+/// row), always 0.
+fn grouping_of_keys(groups: &[Expr], pos: &[usize]) -> Expr {
+    let args: Vec<Expr> = pos.iter().map(|&p| Expr::Col(p, groups.get(p).map_or(DataType::Unknown, |g| g.ty()))).collect();
+    let def = Arc::new(FuncDef {
+        oid: 0,
+        name: "GROUPING",
+        args: vec![],
+        variadic: false,
+        spread: false,
+        ret: crate::sql::func::Ret::Fixed(DataType::Int4),
+        strict: false,
+        volatility: 'i',
+        imp: |_, _| Ok(Value::Int4(0)),
         min_args: 0,
         srf: None,
         out_cols: Vec::new(),
@@ -7218,6 +7244,8 @@ fn having_to_where(
         p.walk(&mut |x| {
             sub |= match x {
                 Expr::Subquery(s) => s.func.is_none(),
+                // (A GROUPING() is the grouping's: contain_agg_clause.)
+                Expr::Call(d, ..) if d.oid == 0 && d.name == "GROUPING" => true,
                 Expr::Call(d, ..) | Expr::ArrayOp { op: d, .. } => d.name.starts_with('*') && d.name.len() > 1,
                 _ => false,
             }

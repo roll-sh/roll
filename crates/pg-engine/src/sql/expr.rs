@@ -61,6 +61,9 @@ pub struct Subquery {
     /// The sub-select's output column names (an IN / ANY sublink's; empty when not
     /// recorded): a subquery the semi join reads names them so.
     pub names: Arc<Vec<String>>,
+    /// Bound in a WHERE or JOIN ... ON clause (the join tree's quals, which
+    /// subquery_planner preprocesses in their order, the order they were bound in).
+    pub qual: bool,
 }
 
 /// A call of a user-defined function run as a subquery (`Subquery::func`), as the planner

@@ -743,6 +743,153 @@ struct Builder<'c, 'a> {
     /// computes the constructor of (by the Agg's address): the calls, their input's
     /// column names, and the group key count.
     json_aggs: HashMap<usize, (Vec<AggCall>, Vec<Name>, usize)>,
+    /// The levels' final target lists over their groupings (`group_tlists`).
+    gtl: std::rc::Rc<GroupTlists>,
+    /// The resjunk group keys a final target list's node returned (by its address), for the
+    /// nodes above it returning that list.
+    carried: HashMap<usize, Vec<String>>,
+    /// SubPlan numbers to give, by the order sub-selects are met (`renumbering`); none on
+    /// the first build.
+    renumber: Option<std::rc::Rc<Vec<usize>>>,
+    /// The numbers taken so far, in the order they are met.
+    events: Vec<PlanIdEvent>,
+    /// The query levels being converted (an id each), innermost last.
+    lvl_stack: Vec<usize>,
+    lvl_next: usize,
+    /// The sub-selects of the group keys of the aggregation being converted (by id).
+    key_sub_ids: std::collections::HashSet<usize>,
+    /// A group key that is a sub-select, by the names its aggregation's row shows it by.
+    key_subs: HashMap<String, Subquery>,
+    /// The copies of group keys' sub-selects GROUPING() arguments are, by the GROUPING
+    /// call (its definition's address, unique per call) and argument.
+    phantoms: HashMap<(usize, usize), SubplanLabel>,
+}
+
+/// A SubPlan number taken: the query level of the sub-select, whether it is a group key's
+/// (an RTE_GROUP expression), and the first number taken for the sub-selects inside it.
+#[derive(Clone, Copy)]
+struct PlanIdEvent {
+    level: usize,
+    key: bool,
+    start: usize,
+    /// The sub-select's id and whether it is a join tree qual's (`Subquery::qual`).
+    id: Option<usize>,
+    qual: bool,
+    /// Taken right after the one before, for the same sub-select (a hashed alternative).
+    follows: bool,
+}
+
+/// subquery_planner preprocesses a level's expressions in order: the target list (a
+/// GROUPING() argument's sub-selects too: copies of their own), the join tree's quals,
+/// HAVING, ..., the RTEs' expressions, the GROUP BY expressions last (Postgres 18's
+/// RTE_GROUP); each sub-select is planned (its own sub-selects numbered) before it takes its
+/// number (make_subplan / build_subplan). EXPLAIN meets the group keys' sub-selects first, in
+/// the scan computing them: their numbers (each with the ones inside it) move after the
+/// level's other own sub-selects. And it meets the quals' where the plan evaluates them (a
+/// scan's filter before the join clause above it), Postgres in the join tree's order, which
+/// is the order they were bound in: the quals' numbers go to them in that order. The
+/// number each sub-select met in turn gets (or none when nothing moves).
+/// Ids of the copies of group keys' sub-selects GROUPING() arguments are (below the
+/// MERGE source copies' and the planner's own).
+const GROUPING_COPY_BASE: usize = (1 << 39) + (1 << 37);
+
+fn renumbering(events: &[PlanIdEvent]) -> Option<Vec<usize>> {
+    let n = events.len();
+    let mut order: Vec<usize> = (0..n).collect();
+    let mut levels: Vec<usize> = events.iter().filter(|e| e.key).map(|e| e.level).collect();
+    levels.dedup();
+    let mut moved = false;
+    for l in levels {
+        let mut block = vec![false; n];
+        for (i, e) in events.iter().enumerate() {
+            if e.key && e.level == l {
+                for b in block.iter_mut().take(i + 1).skip(e.start) {
+                    *b = true;
+                }
+            }
+        }
+        let Some(last_own) = (0..n).rev().find(|&i| events[i].level == l && !events[i].key && !block[i]) else {
+            continue;
+        };
+        let Some(first_key) = (0..n).find(|&i| block[i]) else { continue };
+        if first_key > last_own {
+            continue;
+        }
+        let taken: Vec<usize> = order.iter().copied().filter(|&i| block[i]).collect();
+        order.retain(|&i| !block[i]);
+        let at = order.iter().position(|&i| i == last_own).map_or(order.len(), |p| p + 1);
+        order.splice(at..at, taken);
+        moved = true;
+    }
+    // (The quals': each with the sub-selects inside it, and its hashed alternative.)
+    let mut levels: Vec<usize> = events.iter().filter(|e| e.qual && !e.key).map(|e| e.level).collect();
+    levels.sort_unstable();
+    levels.dedup();
+    for l in levels {
+        let mut unit: Vec<Option<usize>> = vec![None; n];
+        let mut quals: Vec<usize> = Vec::new();
+        for (i, e) in events.iter().enumerate() {
+            if e.qual && !e.key && e.level == l && e.id.is_some() && unit[i].is_none() {
+                quals.push(i);
+                for u in unit.iter_mut().take(i + 1).skip(e.start) {
+                    *u = Some(i);
+                }
+                let mut j = i + 1;
+                while j < n && events[j].follows {
+                    unit[j] = Some(i);
+                    j += 1;
+                }
+            }
+        }
+        if quals.len() < 2 {
+            continue;
+        }
+        // (Runs of one qual's numbers, in the current order; the others stay.)
+        let mut segs: Vec<(Option<usize>, Vec<usize>)> = Vec::new();
+        for &i in &order {
+            match segs.last_mut() {
+                Some((u, v)) if unit[i].is_some() && *u == unit[i] => v.push(i),
+                _ => segs.push((unit[i], vec![i])),
+            }
+        }
+        let mut in_order: Vec<usize> = segs.iter().filter_map(|s| s.0).collect();
+        let mut by_id = in_order.clone();
+        by_id.sort_by_key(|&q| events[q].id);
+        // (A qual met in two places: left as it is.)
+        let mut uniq = in_order.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        if uniq.len() != in_order.len() || by_id == in_order {
+            continue;
+        }
+        let mut seg_of: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (u, v) in &segs {
+            if let Some(q) = u {
+                seg_of.insert(*q, v.clone());
+            }
+        }
+        let mut next = by_id.into_iter();
+        let mut rebuilt = Vec::with_capacity(n);
+        for (u, v) in segs {
+            match u {
+                Some(_) => rebuilt.extend(next.next().and_then(|q| seg_of.get(&q).cloned()).unwrap_or_default()),
+                None => rebuilt.extend(v),
+            }
+        }
+        in_order.clear();
+        if rebuilt.len() == order.len() {
+            order = rebuilt;
+            moved = true;
+        }
+    }
+    if !moved {
+        return None;
+    }
+    let mut num = vec![0; n];
+    for (pos, &i) in order.iter().enumerate() {
+        num[i] = pos + 1;
+    }
+    Some(num)
 }
 
 /// The resjunk GROUP BY keys a level's grouping returns go up through the sorts and limits
@@ -1297,6 +1444,59 @@ fn needed_masks(root: &Arc<Plan>) -> HashMap<usize, Vec<bool>> {
     out
 }
 
+/// The columns the GROUPING() calls over a grouping read (`GroupTlists::grouping_keys`):
+/// a key computed below is copied into the call, so the grouping's input returns the
+/// columns the copy reads (make_group_input_target's pull_var_clause recursing into
+/// GROUPING()'s arguments).
+fn grouping_needs(root: &Plan, gtl: &GroupTlists, out: &mut HashMap<usize, Vec<bool>>) {
+    fn go(p: &Plan, gtl: &GroupTlists, out: &mut HashMap<usize, Vec<bool>>) {
+        if let Plan::Agg { input, groups, .. } = p
+            && let Some(gk) = gtl.grouping_keys.get(&addr(p))
+        {
+            let mut chain: Vec<&Plan> = vec![&**input];
+            let mut q: &Plan = input;
+            while let Plan::Sort { input, .. } = q {
+                q = input;
+                chain.push(q);
+            }
+            if let Plan::Project { exprs, .. } = q {
+                for &k in gk {
+                    let Some(Expr::Col(j, _)) = groups.get(k) else { continue };
+                    let Some(e) = exprs.get(*j) else { continue };
+                    if matches!(e, Expr::Col(..)) {
+                        continue;
+                    }
+                    for c in e.columns() {
+                        if let Some(m) = exprs.iter().position(|x| matches!(x, Expr::Col(i, _) if *i == c)) {
+                            for n in &chain {
+                                let w = super::binder::plan_width(n);
+                                let mask = out.entry(addr(n)).or_insert_with(|| vec![true; w]);
+                                if let Some(x) = mask.get_mut(m) {
+                                    *x = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut es = Vec::new();
+        node_exprs(p, &mut es);
+        let mut sq = Vec::new();
+        for e in es {
+            subqueries_in(e, &mut sq);
+        }
+        for s in sq {
+            go(&s.plan, gtl, out);
+        }
+        if let Plan::With { ctes, .. } = p {
+            ctes.iter().for_each(|(_, c)| go(c, gtl, out));
+        }
+        plan_inputs(p).into_iter().for_each(|c| go(c, gtl, out));
+    }
+    go(root, gtl, out);
+}
+
 fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
     // The FROM subqueries a locking level marks by their whole row (ROW_MARK_COPY, `s.*`):
     // the Var reads every output, so none is removed (remove_unused_subquery_outputs keeps
@@ -1494,6 +1694,153 @@ fn level_keys(p: &Plan, sorted: Option<usize>) -> Vec<bool> {
         }
         _ => {}
     }
+    out
+}
+
+/// Where each query level's final target list is computed over its grouping: the GROUP BY
+/// keys the select list doesn't name are resjunk entries of it (the parser adds them,
+/// findTargetlistEntrySQL99), after the select list and the ORDER BY's resjunk entries, so
+/// every node returning that target list (the aggregation, a ProjectSet or WindowAgg
+/// computing it, the Sort, Limit, Unique above) returns them too; and the grouping's input
+/// computes its keys in the target list's order (make_group_input_target).
+#[derive(Default)]
+struct GroupTlists {
+    /// The node computing a level's final target list (a projection over the grouping, or a
+    /// ProjectSet) → the group keys (positions in the grouping's row) it carries as resjunk.
+    finals: HashMap<usize, Vec<usize>>,
+    /// The nodes above such a node returning its target list → that node.
+    chain: HashMap<usize, usize>,
+    /// An aggregation → its keys in the order of its level's target list.
+    order: HashMap<usize, Vec<usize>>,
+    /// An aggregation → the keys its level's GROUPING() calls (target list, HAVING, the
+    /// sub-selects' parameters there) test, in the order they come: its input returns what
+    /// they read (make_group_input_target's pull_var_clause recurses into the arguments).
+    grouping_keys: HashMap<usize, Vec<usize>>,
+}
+
+/// The group keys (positions) the GROUPING() calls in `e` test.
+fn grouping_call_keys(e: &Expr, out: &mut Vec<usize>) {
+    e.walk(&mut |x| {
+        if let Expr::Call(d, args, _) = x
+            && d.oid == 0
+        {
+            let keys: Vec<usize> = match d.name {
+                "grouping" => args
+                    .iter()
+                    .skip(2)
+                    .filter_map(|a| match a {
+                        Expr::Const(v, _) => v.as_i64().map(|k| k as usize),
+                        _ => None,
+                    })
+                    .collect(),
+                "GROUPING" => args.iter().filter_map(|a| match a { Expr::Col(k, _) => Some(*k), _ => None }).collect(),
+                _ => return,
+            };
+            for k in keys {
+                if !out.contains(&k) {
+                    out.push(k);
+                }
+            }
+        }
+    });
+}
+
+fn group_tlists(root: &Plan) -> GroupTlists {
+    fn agg_below(p: &Plan) -> Option<(&Plan, usize, Option<&Expr>)> {
+        match p {
+            Plan::Agg { groups, .. } => Some((p, groups.len(), None)),
+            // (A HAVING.)
+            Plan::Filter { input, pred, .. } => match &**input {
+                Plan::Agg { groups, .. } => Some((&**input, groups.len(), Some(pred))),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    fn found(fin: usize, exprs: &[Expr], below: (&Plan, usize, Option<&Expr>), above: &[usize], out: &mut GroupTlists) {
+        let (agg, ng, having) = below;
+        let mut gk = Vec::new();
+        exprs.iter().chain(having).for_each(|e| grouping_call_keys(e, &mut gk));
+        out.grouping_keys.insert(addr(agg), gk);
+        let mut order: Vec<usize> = Vec::new();
+        for e in exprs {
+            if let Expr::Col(j, _) = e
+                && *j < ng
+                && !order.contains(j)
+            {
+                order.push(*j);
+            }
+        }
+        let junk: Vec<usize> = (0..ng).filter(|j| !order.contains(j)).collect();
+        order.extend(&junk);
+        out.order.insert(addr(agg), order);
+        if !junk.is_empty() {
+            out.finals.insert(fin, junk);
+            for a in above {
+                out.chain.insert(*a, fin);
+            }
+        }
+    }
+    // (From a level's top through the nodes returning its target list.)
+    fn top(p: &Plan, above: &mut Vec<usize>, out: &mut GroupTlists) {
+        match p {
+            Plan::Context { input, .. } => top(input, above, out),
+            Plan::Sort { input, .. } | Plan::Limit { input, .. } | Plan::LockRows { input, .. } | Plan::Distinct { input, .. } => {
+                above.push(addr(p));
+                top(input, above, out);
+                above.pop();
+            }
+            // (The top projection dropping the resjunk columns: no node.)
+            Plan::Project { input, exprs }
+                if exprs.len() < super::binder::plan_width(input)
+                    && exprs.iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i))
+                    && matches!(&**input, Plan::Sort { .. } | Plan::Limit { .. } | Plan::LockRows { .. } | Plan::Distinct { .. }) =>
+            {
+                above.push(addr(p));
+                top(input, above, out);
+                above.pop();
+            }
+            Plan::Project { input, exprs } => {
+                let agg = match &**input {
+                    Plan::Window { input: wi, .. } => agg_below(wi),
+                    _ => agg_below(input),
+                };
+                if let Some(b) = agg {
+                    found(addr(p), exprs, b, above, out);
+                }
+            }
+            Plan::ProjectSet { input, exprs, .. } => {
+                if let Some(b) = agg_below(input) {
+                    found(addr(p), exprs, b, above, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn walk(p: &Plan, out: &mut GroupTlists) {
+        let mut es = Vec::new();
+        node_exprs(p, &mut es);
+        let mut sq = Vec::new();
+        for e in es {
+            subqueries_in(e, &mut sq);
+        }
+        for s in sq {
+            top(&s.plan, &mut Vec::new(), out);
+            walk(&s.plan, out);
+        }
+        match p {
+            Plan::With { ctes, .. } => ctes.iter().for_each(|(_, c)| {
+                top(c, &mut Vec::new(), out);
+                walk(c, out);
+            }),
+            Plan::Barrier { input, .. } => top(input, &mut Vec::new(), out),
+            _ => {}
+        }
+        plan_inputs(p).into_iter().for_each(|c| walk(c, out));
+    }
+    let mut out = GroupTlists::default();
+    top(root, &mut Vec::new(), &mut out);
+    walk(root, &mut out);
     out
 }
 
@@ -1962,7 +2309,11 @@ fn tlist_layout_at(top: &mut ExNode, locked: bool) {
         if n.is_scan() {
             // (Only a scan returning plain columns: one computing values returns them
             // as the level's target list has them.)
-            if (small_parent || locked) && n.node_type != "Index Only Scan" && n.output.iter().all(|o| rel_of(o).is_some()) {
+            // (Nor does one reading a system column: no physical target list.)
+            let sys = n.output.iter().any(|o| {
+                rel_of(o).is_some_and(|_| matches!(o.rsplit('.').next(), Some("tableoid" | "ctid" | "xmin" | "xmax" | "cmin" | "cmax")))
+            });
+            if (small_parent || locked || sys) && n.node_type != "Index Only Scan" && n.output.iter().all(|o| rel_of(o).is_some()) {
                 n.output.sort_by_key(rank);
             }
             return;
@@ -2759,6 +3110,31 @@ pub(crate) fn key_col_fixed(e: &Expr, fixed: &[bool]) -> bool {
 
 /// A grouping key that is a column, or a column carrying its nondeterministic collation
 /// (the binder's implicit COLLATE, no location).
+/// The group keys whose pathkeys are redundant (make_pathkeys_for_sortclauses_extended
+/// with remove_redundant, out of processed_groupClause): fixed to a constant by an equality,
+/// or a pseudoconstant expression (no Vars, nothing volatile: a constant, an InitPlan's
+/// output), its equivalence class holding a constant.
+fn fixed_group_keys(input: &Plan, groups: &[Expr]) -> Vec<bool> {
+    let fixed = super::paths::constant_columns(input);
+    // (A one-row VALUES list is pulled up: its expressions are the keys.)
+    let computed: Option<&Vec<Expr>> = match input {
+        Plan::Project { exprs, .. } => Some(exprs),
+        Plan::Values { rows, .. } if rows.len() == 1 => rows.first(),
+        _ => None,
+    };
+    let pseudo = |e: &Expr| crate::sql::binder::optimize::pseudo_constant(e);
+    groups
+        .iter()
+        .map(|g| match implicit_key_col(g) {
+            Some(j) => {
+                fixed.get(j).copied().unwrap_or(false)
+                    || computed.and_then(|es| es.get(j)).is_some_and(|e| !matches!(e, Expr::Col(..)) && pseudo(e))
+            }
+            None => pseudo(g),
+        })
+        .collect()
+}
+
 fn implicit_key_col(g: &Expr) -> Option<usize> {
     match g {
         Expr::Col(j, _) => Some(*j),
@@ -3192,11 +3568,10 @@ impl Builder<'_, '_> {
         // (A key fixed to a constant by an equality: a redundant pathkey, out of
         // processed_groupClause.)
         if sets.is_none() {
-            let fixed = super::paths::constant_columns(input);
-            let is_fixed = |g: &Expr| implicit_key_col(g).is_some_and(|j| fixed.get(j).copied().unwrap_or(false));
-            if !groups.iter().all(is_fixed) {
-                for (k, g) in groups.iter().enumerate() {
-                    if is_fixed(g) {
+            let fixed = fixed_group_keys(input, groups);
+            if !fixed.iter().all(|f| *f) {
+                for (k, f) in fixed.iter().enumerate() {
+                    if *f {
                         out[k] = true;
                     }
                 }
@@ -3364,10 +3739,60 @@ impl Builder<'_, '_> {
             return self.name(&e, &more, aggs);
         }
         // GROUPING(keys): a test of the grouping set mask column, shown by the keys.
+        // (Without grouping sets, GROUPING over the keys themselves: always 0.)
         let is_grouping = |x: &Expr| {
             matches!(x, Expr::Call(d, args, _) if d.oid == 0 && d.name == "grouping"
                 && matches!(args.first(), Some(Expr::Col(m, _)) if cols.get(*m).is_some_and(|n| n.plain == "GROUPING")))
+                || matches!(x, Expr::Call(d, args, _) if d.oid == 0 && d.name == "GROUPING"
+                    && args.iter().all(|a| matches!(a, Expr::Col(k, _) if *k < cols.len())))
         };
+        // (A GROUPING() argument that is a sub-select group key: a copy of its own, each
+        // call's, planned and numbered with the target list's expressions; an InitPlan of
+        // the level when uncorrelated, else a SubPlan nothing runs.)
+        let mut copies: HashMap<(usize, usize), String> = HashMap::new();
+        if !self.key_subs.is_empty() {
+            let mut calls: Vec<(usize, Vec<usize>)> = Vec::new();
+            e.walk(&mut |x| {
+                if is_grouping(x)
+                    && let Expr::Call(d, args, _) = x
+                    && d.name == "GROUPING"
+                {
+                    let keys = args.iter().filter_map(|a| match a { Expr::Col(k, _) => Some(*k), _ => None }).collect();
+                    calls.push((Arc::as_ptr(d) as usize, keys));
+                } else if is_grouping(x)
+                    && let Expr::Call(d, args, _) = x
+                {
+                    let keys = args[2..].iter().filter_map(|a| match a { Expr::Const(v, _) => v.as_i64().map(|k| k as usize), _ => None }).collect();
+                    calls.push((Arc::as_ptr(d) as usize, keys));
+                }
+            });
+            for (ptr, keys) in calls {
+                for (ai, k) in keys.into_iter().enumerate() {
+                    let Some(n) = cols.get(k) else { continue };
+                    let Some(s) = self.key_subs.get(&n.full).or_else(|| self.key_subs.get(&n.plain)).cloned() else {
+                        continue;
+                    };
+                    let label = match self.phantoms.get(&(ptr, ai)) {
+                        Some(l) => l.clone(),
+                        None => {
+                            let mut copy = s;
+                            copy.id = GROUPING_COPY_BASE + self.phantoms.len();
+                            copy.qual = false;
+                            let before = self.pending.len();
+                            self.subquery(&copy, &[]);
+                            let Some(l) = self.labels.get(&copy.id).cloned() else { continue };
+                            if !l.init {
+                                self.pending.truncate(before);
+                            }
+                            self.phantoms.insert((ptr, ai), l.clone());
+                            l
+                        }
+                    };
+                    let shown = if label.init { format!("({}).col1", label.name) } else { format!("({})", label.name) };
+                    copies.insert((ptr, ai), shown);
+                }
+            }
+        }
         let mut found = false;
         e.walk(&mut |x| found |= is_grouping(x));
         let (grouped, ext);
@@ -3379,15 +3804,31 @@ impl Builder<'_, '_> {
                     if !is_grouping(&x) {
                         return Ok(x);
                     }
-                    let Expr::Call(_, args, _) = &x else { unreachable!() };
-                    let keys: Vec<&Name> = args[2..]
-                        .iter()
-                        .filter_map(|a| match a {
-                            Expr::Const(v, _) => v.as_i64().and_then(|k| cols.get(k as usize)),
-                            _ => None,
-                        })
-                        .collect();
-                    let list = |f: &dyn Fn(&Name) -> &str| keys.iter().map(|k| f(k)).collect::<Vec<_>>().join(", ");
+                    let Expr::Call(d, args, _) = &x else { unreachable!() };
+                    let ptr = Arc::as_ptr(d) as usize;
+                    let keys: Vec<&Name> = if d.name == "GROUPING" {
+                        args.iter()
+                            .filter_map(|a| match a {
+                                Expr::Col(k, _) => cols.get(*k),
+                                _ => None,
+                            })
+                            .collect()
+                    } else {
+                        args[2..]
+                            .iter()
+                            .filter_map(|a| match a {
+                                Expr::Const(v, _) => v.as_i64().and_then(|k| cols.get(k as usize)),
+                                _ => None,
+                            })
+                            .collect()
+                    };
+                    let list = |f: &dyn Fn(&Name) -> &str| {
+                        keys.iter()
+                            .enumerate()
+                            .map(|(ai, k)| copies.get(&(ptr, ai)).map_or_else(|| f(k).to_string(), |c| c.clone()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
                     more.push(Name {
                         plain: format!("GROUPING({})", list(&|n| &n.plain)),
                         full: format!("GROUPING({})", list(&|n| &n.full)),
@@ -3514,7 +3955,32 @@ impl Builder<'_, '_> {
         }
     }
 
+    /// The next SubPlan number, for the sub-select `sub` (`start`: the first number taken
+    /// for the sub-selects inside it).
+    fn next_plan_id(&mut self, sub: Option<(usize, bool)>, start: usize, follows: bool) -> usize {
+        self.plan_ids += 1;
+        let met = self.plan_ids;
+        self.events.push(PlanIdEvent {
+            level: self.lvl_stack.last().copied().unwrap_or(0),
+            key: sub.is_some_and(|(i, _)| self.key_sub_ids.contains(&i)),
+            start,
+            id: sub.map(|(i, _)| i),
+            qual: sub.is_some_and(|(_, q)| q),
+            follows,
+        });
+        match &self.renumber {
+            Some(r) => r.get(met - 1).copied().unwrap_or(met),
+            None => met,
+        }
+    }
+
+    fn push_level(&mut self) {
+        self.lvl_next += 1;
+        self.lvl_stack.push(self.lvl_next);
+    }
+
     fn subquery(&mut self, s: &Subquery, cols: &[Name]) {
+        let block_start = self.events.len();
         let params: Vec<String> = s
             .params
             .iter()
@@ -3561,8 +4027,7 @@ impl Builder<'_, '_> {
             self.outer_depth.remove(0);
         }
         self.pending = saved;
-        self.plan_ids += 1;
-        let id = self.plan_ids;
+        let id = self.next_plan_id(Some((s.id, s.qual)), block_start, false);
         let correlated = match s.test_op {
             Some(n) => n > 0,
             None => level_param,
@@ -3671,8 +4136,7 @@ impl Builder<'_, '_> {
             let startup_h = hnode.total_cost + costs::CPU_OPERATOR_COST * hnode.rows;
             let per_h = costs::CPU_OPERATOR_COST * keys.len() as f64;
             // (The hashed alternative's number is taken whichever runs.)
-            self.plan_ids += 1;
-            let hashed_id = self.plan_ids;
+            let hashed_id = self.next_plan_id(None, self.events.len(), true);
             let left: Vec<Expr> = keys
                 .iter()
                 .map(|(o, _)| {
@@ -3743,7 +4207,9 @@ impl Builder<'_, '_> {
         let saved_depth = std::mem::take(&mut self.proj_depth);
         self.level_tops.insert(addr(p));
         self.group_tops.insert(grouping_top(p));
+        self.push_level();
         let mut node = self.node(p).node;
+        self.lvl_stack.pop();
         self.proj_depth = saved_depth;
         self.settle(&mut node);
         if self.o.verbose {
@@ -3754,6 +4220,16 @@ impl Builder<'_, '_> {
             lock_junk(&mut node);
         }
         let mut inits = self.inits.pop().unwrap_or_default();
+        // (SS_attach_initplans: in the order they were made, once renumbered.)
+        if self.renumber.is_some() {
+            inits.sort_by_key(|i| {
+                i.subplan_name
+                    .as_deref()
+                    .and_then(|n| n.strip_prefix("InitPlan "))
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(0)
+            });
+        }
         // SS_charge_for_initplans: the level's top node pays for its InitPlans.
         let cost: f64 = inits.iter().filter(|i| !i.charged).map(|i| i.init_charge()).sum();
         node.startup_cost += cost;
@@ -3885,7 +4361,13 @@ impl Builder<'_, '_> {
         let inits_before = self.inits.last().map_or(0, |v| v.len());
         let apart = matches!(&**p, Plan::Barrier { .. });
         self.depth += apart as usize;
+        if apart {
+            self.push_level();
+        }
         let mut b = self.convert(p);
+        if apart {
+            self.lvl_stack.pop();
+        }
         self.depth -= apart as usize;
         // (The MIN / MAX InitPlans the node's expressions run: their costs are its own.)
         if let Some(level) = self.inits.last_mut() {
@@ -3969,7 +4451,9 @@ impl Builder<'_, '_> {
             let marked = b.node.is_scan()
                 && (self.rowmarks.contains(&addr(p))
                     || matches!(&**p, Plan::Scan(s) if s.with_key && (UNDER_LOCK_ROWS.with(|u| u.get() > 0) || sys_read(s))));
-            let mut mask = (b.node.is_join() || b.node.node_type == "Index Only Scan" || b.node.node_type == "WindowAgg" || dummy || member || sorted_join || srf_target || marked)
+            // (Nor one returning the system columns it reads.)
+            let sys_cols = b.node.is_scan() && matches!(&**p, Plan::Scan(s) if s.sys && sys_read(s));
+            let mut mask = (b.node.is_join() || b.node.node_type == "Index Only Scan" || b.node.node_type == "WindowAgg" || dummy || member || sorted_join || srf_target || marked || sys_cols)
                 .then(|| self.needed.get(&addr(p)).cloned())
                 .flatten();
             if srf_target
@@ -3995,6 +4479,20 @@ impl Builder<'_, '_> {
             for pt in b.node.partials_mut() {
                 if pt.output.is_empty() {
                     pt.output = out.clone();
+                }
+            }
+        }
+        // (A node above the one computing its level's target list returns that list: the
+        // resjunk group keys too.)
+        if self.o.verbose
+            && let Some(fin) = self.gtl.chain.get(&addr(p))
+            && let Some(carried) = self.carried.get(fin)
+            && !b.node.output.is_empty()
+        {
+            for o in carried {
+                let o = refer_to(o);
+                if !b.node.output.contains(&o) {
+                    b.node.output.push(o);
                 }
             }
         }
@@ -5023,30 +5521,22 @@ impl Builder<'_, '_> {
                     for pt in c.node.partials_mut() {
                         pt.output = out.clone();
                     }
-                    // The statement's target list carries the GROUP BY keys its select list
-                    // doesn't name as resjunk entries (in their order).
-                    if self.group_tops.contains(&addr(p))
-                        && c.node.node_type == "Aggregate"
-                        && let Some(ng) = match &**input {
-                            Plan::Agg { groups, .. } => Some(groups.len()),
-                            Plan::Filter { input: fi, .. } => match &**fi {
-                                Plan::Agg { groups, .. } => Some(groups.len()),
-                                _ => None,
-                            },
-                            _ => None,
-                        }
-                    {
-                        for j in 0..ng {
-                            if !exprs.iter().any(|x| matches!(x, Expr::Col(i, _) if *i == j))
-                                && let Some(n) = c.internal.get(j)
-                            {
+                    // A level's target list carries the GROUP BY keys its select list
+                    // doesn't name as resjunk entries (in their order), up to the level's
+                    // top (`group_tlists`).
+                    if let Some(junk) = self.gtl.finals.get(&addr(p)).cloned() {
+                        let mut carried = Vec::new();
+                        for j in junk {
+                            if let Some(n) = c.internal.get(j) {
                                 let shown = self.pick(n, Cx::Output);
                                 if !c.node.output.contains(&shown) {
                                     c.node.output.push(shown.clone());
-                                    c.node.junk_keys.push(shown);
+                                    c.node.junk_keys.push(shown.clone());
                                 }
+                                carried.push(shown);
                             }
                         }
+                        self.carried.insert(addr(p), carried);
                     }
                     // The statement's target list carries its windows' PARTITION BY / ORDER
                     // BY columns as resjunk entries.
@@ -5203,6 +5693,92 @@ impl Builder<'_, '_> {
                     })
                     .collect();
                 n.width = exprs.iter().map(|e| type_width(&e.ty())).sum();
+                // Computing its level's target list over a grouping (split_pathtarget_at_srfs):
+                // the grouping returns what the expressions read of it, in the order they
+                // read it (its keys, aggregates and GROUPING() calls, not the grouping
+                // sets' mask), then the resjunk group keys; this node returns those too.
+                let over_agg = match &**input {
+                    Plan::Agg { .. } => true,
+                    Plan::Filter { input: fi, .. } => matches!(&**fi, Plan::Agg { .. }),
+                    _ => false,
+                };
+                if self.o.verbose && over_agg && matches!(c.node.node_type, "Aggregate" | "Group") {
+                    let junk = self.gtl.finals.get(&addr(p)).cloned().unwrap_or_default();
+                    let mut items: Vec<String> = Vec::new();
+                    let add = |s: String, items: &mut Vec<String>| {
+                        if !items.contains(&s) {
+                            items.push(s);
+                        }
+                    };
+                    // (A column past the input's is a call's value: what its arguments read.)
+                    let iw = c.exported.len();
+                    let read: Vec<Expr> = exprs
+                        .iter()
+                        .map(|e| {
+                            e.clone()
+                                .transform(&mut |x| {
+                                    Ok(match x {
+                                        Expr::Col(j, t) if j >= iw => match srfs.get(j - iw) {
+                                            Some(s) => Expr::Call(s.func.clone(), s.args.clone(), t),
+                                            None => Expr::Col(j, t),
+                                        },
+                                        x => x,
+                                    })
+                                })
+                                .unwrap_or_else(|_| e.clone())
+                        })
+                        .collect();
+                    for e in &read {
+                        let mut found: Vec<Expr> = Vec::new();
+                        let mut skip: Vec<*const Expr> = Vec::new();
+                        e.walk(&mut |x| {
+                            if skip.contains(&(x as *const Expr)) {
+                                return;
+                            }
+                            match x {
+                                Expr::Call(d, args, _) if d.oid == 0 && d.name == "grouping" => {
+                                    skip.extend(args.iter().map(|a| a as *const Expr));
+                                    found.push(x.clone());
+                                }
+                                Expr::Col(..) => found.push(x.clone()),
+                                _ => {}
+                            }
+                        });
+                        for f in found {
+                            let s = match &f {
+                                Expr::Col(j, _) => match c.internal.get(*j) {
+                                    Some(nm) => self.pick(nm, Cx::Output),
+                                    None => continue,
+                                },
+                                _ => {
+                                    let nm = self.name(&f, &c.internal, &[]);
+                                    self.pick(&nm, Cx::Output)
+                                }
+                            };
+                            add(s, &mut items);
+                        }
+                    }
+                    let mut carried = Vec::new();
+                    for j in junk {
+                        if let Some(nm) = c.internal.get(j) {
+                            let s = self.pick(nm, Cx::Output);
+                            add(s.clone(), &mut items);
+                            if let Some(e) = c.exported.get(j) {
+                                carried.push(self.pick(e, Cx::Output));
+                            }
+                        }
+                    }
+                    c.node.output = items;
+                    if !carried.is_empty() {
+                        n.output = internal.iter().map(|nm| self.pick(nm, Cx::Output)).collect();
+                        for s in &carried {
+                            if !n.output.contains(s) {
+                                n.output.push(s.clone());
+                            }
+                        }
+                        self.carried.insert(addr(p), n.output[internal.len()..].to_vec());
+                    }
+                }
                 n.children.push(c.node.child("Outer"));
                 Built {
                     node: n,
@@ -6227,8 +6803,16 @@ impl Builder<'_, '_> {
                             // (Its input's target list computed there: the Sort refers to
                             // each value, a computed one parenthesized, `((a + 1))`.)
                             let computed: Vec<String> = c.internal.iter().map(|n| self.pick(n, Cx::Output)).collect();
-                            if !physical && merged_none && computed == sn.output && c.exported.len() == computed.len() {
+                            // (Then the resjunk group keys its input carries, references too.)
+                            if !physical
+                                && merged_none
+                                && sn.output.len() >= computed.len()
+                                && sn.output[..computed.len()] == computed[..]
+                                && c.exported.len() == computed.len()
+                            {
+                                let rest: Vec<String> = sn.output[computed.len()..].iter().map(|o| refer_to(o)).collect();
                                 sn.output = c.exported.iter().map(|n| self.pick(n, Cx::Output)).collect();
+                                sn.output.extend(rest);
                             }
                         }
                         sn.order = ord.clone();
@@ -6906,7 +7490,7 @@ impl Builder<'_, '_> {
                     };
                     cte_push(name.clone(), node.rows, cols.clone(), plan_output_order(cte, self.ctx));
                     self.ctes.insert(name.clone(), (node.rows, cols));
-                    self.plan_ids += 1;
+                    self.next_plan_id(None, self.events.len(), false);
                     node.relationship = Some("InitPlan");
                     node.subplan_name = Some(format!("CTE {}", quote_ident(name)));
                     self.inits.last_mut().expect("query level").push(node);
@@ -10515,13 +11099,67 @@ impl Builder<'_, '_> {
     ) -> Built {
         let having = self.having.take();
         let my_key = self.agg_key.take();
+        // (GROUPING() makes the level an aggregating one: an Agg node, no Group.)
+        let no_aggs = aggs.is_empty()
+            && my_key.and_then(|k| self.gtl.grouping_keys.get(&k)).is_none_or(|g| g.is_empty());
         // (An ORDER BY above: the GROUP BY's keys in its order first, preprocess_groupclause.)
         let hint = self.group_order.take();
         let hint_full = self.group_order_full;
         let named = std::mem::take(&mut self.group_named);
         let saved_input = self.agg_input.replace(addr(input));
+        // (The group keys' sub-selects: RTE_GROUP expressions, numbered after the level's
+        // others; a key that is one sub-select, what a GROUPING() argument copies.)
+        let key_exprs: Vec<Expr> = {
+            let mut src: &Plan = input;
+            while let Plan::Sort { input, .. } = src {
+                src = input;
+            }
+            groups
+                .iter()
+                .map(|g| match (implicit_key_col(g), src) {
+                    (Some(j), Plan::Project { exprs, .. }) => exprs.get(j).unwrap_or(g).clone(),
+                    (Some(j), Plan::Values { rows, .. }) if rows.len() == 1 => rows[0].get(j).unwrap_or(g).clone(),
+                    _ => g.clone(),
+                })
+                .collect()
+        };
+        let mut key_ids = std::collections::HashSet::new();
+        for e in &key_exprs {
+            let mut sq = Vec::new();
+            subqueries_in(e, &mut sq);
+            key_ids.extend(sq.iter().map(|s| s.id));
+        }
+        let saved_keys = std::mem::replace(&mut self.key_sub_ids, key_ids);
         let mut c = self.node(input);
         self.agg_input = saved_input;
+        // (A projection computing a key: its target list is the grouping's input target,
+        // the keys first in the level's target list's order, make_group_input_target.)
+        if self.o.verbose
+            && let Plan::Project { exprs: pexprs, .. } = &**input
+            && (c.node.is_scan() || c.node.node_type == "Result")
+            && groups
+                .iter()
+                .any(|g| implicit_key_col(g).and_then(|j| pexprs.get(j)).is_some_and(|e| !matches!(e, Expr::Col(..) | Expr::Const(..))))
+        {
+            let order: Vec<usize> = my_key
+                .and_then(|k| self.gtl.order.get(&k))
+                .filter(|o| o.len() == groups.len())
+                .cloned()
+                .unwrap_or_else(|| (0..groups.len()).collect());
+            let mut front: Vec<String> = Vec::new();
+            for k in order {
+                if let Some(j) = implicit_key_col(&groups[k])
+                    && let Some(n) = c.internal.get(j)
+                {
+                    let t = self.pick(n, Cx::Output);
+                    if c.node.output.contains(&t) && !front.contains(&t) {
+                        front.push(t);
+                    }
+                }
+            }
+            let rest: Vec<String> = c.node.output.iter().filter(|o| !front.contains(o)).cloned().collect();
+            c.node.output = front.into_iter().chain(rest).collect();
+        }
         let mut part_in = c.node.partial.take();
         let mut part_others = std::mem::take(&mut c.node.partials);
         // A scan feeding the aggregation returns only the columns it uses.
@@ -10613,6 +11251,18 @@ impl Builder<'_, '_> {
             })
             .collect();
         let ng = groups.len();
+        // (The sub-selects of the keys: the input computing the keys runs them,
+        // make_group_input_target.)
+        if !self.pending.is_empty() && !self.key_sub_ids.is_empty() {
+            let target = if c.node.is_scan() || c.node.node_type == "Result" {
+                Some(&mut c.node)
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                t.subplans.append(&mut self.pending);
+            }
+        }
         // make_group_input_target: a GROUP BY expression is computed below the
         // aggregation (its input returns it, before the columns the aggregates read); the
         // nodes above it, a Sort between, refer to it.
@@ -10639,14 +11289,39 @@ impl Builder<'_, '_> {
             .zip(&computed)
             .map(|(g, &k)| if k { g.wrapped() } else { g.clone() })
             .collect();
+        for ((e, g), r) in key_exprs.iter().zip(&gnames).zip(&gref) {
+            if let Expr::Subquery(s) = e
+                && s.call.is_none()
+            {
+                for n in [g, r] {
+                    self.key_subs.insert(n.full.clone(), (**s).clone());
+                    self.key_subs.insert(n.plain.clone(), (**s).clone());
+                }
+            }
+        }
         // (A Sort over the input returns references to what the input computes.)
-        let computed_shown: Vec<(String, String)> = gnames
+        let mut computed_shown: Vec<(String, String)> = gnames
             .iter()
             .zip(&gref)
             .zip(&computed)
             .filter(|(_, k)| **k)
             .map(|((g, r), _)| (self.pick(g, Cx::Output), self.pick(r, Cx::Output)))
             .collect();
+        // (So are the keys a projection below computes: the input's values.)
+        if let Plan::Project { exprs: pexprs, .. } = &**input {
+            for g in groups {
+                if let Some(j) = implicit_key_col(g)
+                    && pexprs.get(j).is_some_and(|e| !matches!(e, Expr::Col(..) | Expr::Const(..)))
+                    && let (Some(i), Some(e)) = (c.internal.get(j), c.exported.get(j))
+                    && i.full != e.full
+                {
+                    let pair = (self.pick(i, Cx::Output), self.pick(e, Cx::Output));
+                    if !computed_shown.contains(&pair) {
+                        computed_shown.push(pair);
+                    }
+                }
+            }
+        }
         let sort_out = |o: &String| -> String {
             match computed_shown.iter().find(|(g, _)| g == o) {
                 Some((_, r)) => r.clone(),
@@ -10659,7 +11334,13 @@ impl Builder<'_, '_> {
             let mut out: Vec<String> = Vec::new();
             // (A relabelled column shows bare at the target list's top: an entry of its own.)
             let mut seen: Vec<String> = Vec::new();
-            for ((g, n), &r) in groups.iter().zip(&gnames).zip(&relabeled) {
+            // (In the order of the level's target list: make_group_input_target.)
+            let order: Vec<usize> = my_key
+                .and_then(|k| self.gtl.order.get(&k))
+                .filter(|o| o.len() == groups.len())
+                .cloned()
+                .unwrap_or_else(|| (0..groups.len()).collect());
+            for (g, n, &r) in order.iter().map(|&i| (&groups[i], &gnames[i], &relabeled[i])) {
                 if r && let Expr::Collate(x, ..) = g && let Expr::Col(j, _) = &**x {
                     if let Some(n) = c.exported.get(*j) {
                         out.push(self.pick(n, Cx::Output));
@@ -10678,6 +11359,16 @@ impl Builder<'_, '_> {
                 }
             }
             let mut cols: Vec<usize> = Vec::new();
+            // (What the GROUPING() arguments read: copies of the keys they test.)
+            if let Some(gk) = my_key.and_then(|k| self.gtl.grouping_keys.get(&k)) {
+                for &k in gk {
+                    if let Some(g) = groups.get(k)
+                        && !matches!(g, Expr::Col(..))
+                    {
+                        cols.extend(g.columns());
+                    }
+                }
+            }
             for a in aggs {
                 for e in a.args.iter().chain(&a.direct).chain(&a.filter).chain(a.order_by.iter().map(|k| &k.expr)) {
                     cols.extend(e.columns());
@@ -11250,14 +11941,11 @@ impl Builder<'_, '_> {
             }
             // Every key fixed by an equality with a constant (its group pathkeys all
             // redundant): a GroupAggregate of one group, no keys to compare.
-            None if {
-                let fixed = super::paths::constant_columns(input);
-                groups.iter().all(|g| implicit_key_col(g).is_some_and(|j| fixed.get(j).copied().unwrap_or(false)))
-            } =>
+            None if fixed_group_keys(input, groups).iter().all(|f| *f) =>
             {
                 n.strategy = Some("Sorted");
-                n.title = if aggs.is_empty() { "Group" } else { "GroupAggregate" }.into();
-                if aggs.is_empty() {
+                n.title = if no_aggs { "Group" } else { "GroupAggregate" }.into();
+                if no_aggs {
                     n.node_type = "Group";
                     n.strategy = None;
                     n.partial_mode = None;
@@ -11330,10 +12018,7 @@ impl Builder<'_, '_> {
         // fixes them all.)
         let kept: Vec<Expr> = if sets.is_some() {
             groups.to_vec()
-        } else if {
-            let fixed = super::paths::constant_columns(input);
-            groups.iter().all(|g| implicit_key_col(g).is_some_and(|j| fixed.get(j).copied().unwrap_or(false)))
-        } {
+        } else if fixed_group_keys(input, groups).iter().all(|f| *f) {
             Vec::new()
         } else {
             groups
@@ -11586,7 +12271,7 @@ impl Builder<'_, '_> {
                 ga.startup_cost = input.startup_cost;
                 // (Over this input path's rows: a Gather Merge returns the relation's.)
                 let in_rows = if cheapest { in_rows } else { input.rows };
-                if aggs.is_empty() {
+                if no_aggs {
                     // cost_group.
                     ga.title = "Group".into();
                     ga.node_type = "Group";
@@ -11760,6 +12445,7 @@ impl Builder<'_, '_> {
                 n = pw;
             }
         }
+        self.key_sub_ids = saved_keys;
         Built {
             node: n,
             internal,
@@ -13613,6 +14299,50 @@ impl Builder<'_, '_> {
                         }
                     }
                 }
+            }
+        }
+        // (The outer side's scan reading a system column has no physical target list
+        // either, use_physical_tlist refusing: its reltarget, the columns used above, then
+        // the keys' and the quals'.)
+        if self.o.verbose
+            && method == JoinMethod::Hash
+            && l.node.is_scan()
+            && l.node.output.iter().any(|o| {
+                !o.contains(['(', ' ', '\'', ':'])
+                    && matches!(o.rsplit('.').next(), Some("tableoid" | "ctid" | "xmin" | "xmax" | "cmin" | "cmax"))
+            })
+        {
+            let nleft = if swapped { r.exported.len() } else { l.exported.len() };
+            let outer_off = if swapped { nleft } else { 0 };
+            let width = l.internal.len();
+            let mut order: Vec<usize> = Vec::new();
+            let add = |i: usize, order: &mut Vec<usize>| {
+                if i < width && !order.contains(&i) {
+                    order.push(i);
+                }
+            };
+            if let Some(need) = self.needed.get(&at) {
+                for i in 0..width {
+                    if need.get(outer_off + i).copied().unwrap_or(true) {
+                        add(i, &mut order);
+                    }
+                }
+            }
+            for (a, b) in &keys {
+                let ok = if swapped { b } else { a };
+                for c in ok.columns() {
+                    add(c, &mut order);
+                }
+            }
+            for q in &others {
+                for c in q.columns() {
+                    if c >= outer_off && c < outer_off + width {
+                        add(c - outer_off, &mut order);
+                    }
+                }
+            }
+            if !order.is_empty() && order.len() < width {
+                l.node.output = order.iter().map(|&i| self.pick(&l.internal[i], Cx::Output)).collect();
             }
         }
         n.children.push(l.node.child("Outer"));
@@ -15609,6 +16339,15 @@ fn estimate_builder<'c, 'a>(plan: &Arc<Plan>, ctx: &'c ExecCtx<'a>, o: &'c Optio
         level_tops: std::collections::HashSet::new(),
         group_tops: std::collections::HashSet::new(),
         json_aggs: HashMap::new(),
+        gtl: Default::default(),
+        carried: HashMap::new(),
+        renumber: None,
+        events: Vec::new(),
+        lvl_stack: Vec::new(),
+        lvl_next: 0,
+        key_sub_ids: Default::default(),
+        key_subs: HashMap::new(),
+        phantoms: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
@@ -16145,6 +16884,15 @@ pub fn setop_shape(left: &Arc<Plan>, right: &Arc<Plan>, intersect: bool, ctx: &E
         level_tops: std::collections::HashSet::new(),
         group_tops: std::collections::HashSet::new(),
         json_aggs: HashMap::new(),
+        gtl: Default::default(),
+        carried: HashMap::new(),
+        renumber: None,
+        events: Vec::new(),
+        lvl_stack: Vec::new(),
+        lvl_next: 0,
+        key_sub_ids: Default::default(),
+        key_subs: HashMap::new(),
+        phantoms: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
@@ -16226,6 +16974,15 @@ pub fn set_group_estimates(
         level_tops: std::collections::HashSet::new(),
         group_tops: std::collections::HashSet::new(),
         json_aggs: HashMap::new(),
+        gtl: Default::default(),
+        carried: HashMap::new(),
+        renumber: None,
+        events: Vec::new(),
+        lvl_stack: Vec::new(),
+        lvl_next: 0,
+        key_sub_ids: Default::default(),
+        key_subs: HashMap::new(),
+        phantoms: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
@@ -16316,6 +17073,15 @@ pub fn agg_redundant_keys(
         level_tops: std::collections::HashSet::new(),
         group_tops: std::collections::HashSet::new(),
         json_aggs: HashMap::new(),
+        gtl: Default::default(),
+        carried: HashMap::new(),
+        renumber: None,
+        events: Vec::new(),
+        lvl_stack: Vec::new(),
+        lvl_next: 0,
+        key_sub_ids: Default::default(),
+        key_subs: HashMap::new(),
+        phantoms: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
@@ -16386,6 +17152,15 @@ pub fn sets_sorted(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
         level_tops: std::collections::HashSet::new(),
         group_tops: std::collections::HashSet::new(),
         json_aggs: HashMap::new(),
+        gtl: Default::default(),
+        carried: HashMap::new(),
+        renumber: None,
+        events: Vec::new(),
+        lvl_stack: Vec::new(),
+        lvl_next: 0,
+        key_sub_ids: Default::default(),
+        key_subs: HashMap::new(),
+        phantoms: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
@@ -16479,6 +17254,15 @@ fn level_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> ExNode {
         level_tops: std::collections::HashSet::new(),
         group_tops: std::collections::HashSet::new(),
         json_aggs: HashMap::new(),
+        gtl: Default::default(),
+        carried: HashMap::new(),
+        renumber: None,
+        events: Vec::new(),
+        lvl_stack: Vec::new(),
+        lvl_next: 0,
+        key_sub_ids: Default::default(),
+        key_subs: HashMap::new(),
+        phantoms: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
@@ -16894,6 +17678,8 @@ pub fn explain(
     let mut pw_named = false;
     let mut orders: Vec<Vec<usize>> = Vec::new();
     let mut ordered = false;
+    let gtl = std::rc::Rc::new(group_tlists(plan));
+    let mut renumber: Option<std::rc::Rc<Vec<usize>>> = None;
     let root = loop {
     let (refnames, results) = assign_refnames_skip(plan, Some(ctx), &skip, &orders);
     // ON CONFLICT DO UPDATE's EXCLUDED is a range table entry of its own.
@@ -16925,7 +17711,11 @@ pub fn explain(
         inits: Vec::new(),
         params,
         ctes: HashMap::new(),
-        needed: needed_masks(plan),
+        needed: {
+            let mut n = needed_masks(plan);
+            grouping_needs(plan, &gtl, &mut n);
+            n
+        },
         num_exec: None,
         top: 0,
         // (standard_planner: a parallel unsafe function anywhere in the query means no
@@ -16945,6 +17735,15 @@ pub fn explain(
         level_tops: std::collections::HashSet::new(),
         group_tops: std::collections::HashSet::new(),
         json_aggs: HashMap::new(),
+        gtl: gtl.clone(),
+        carried: HashMap::new(),
+        renumber: renumber.clone(),
+        events: Vec::new(),
+        lvl_stack: Vec::new(),
+        lvl_next: 0,
+        key_sub_ids: Default::default(),
+        key_subs: HashMap::new(),
+        phantoms: HashMap::new(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
@@ -16983,6 +17782,13 @@ pub fn explain(
             orders = o2;
             continue;
         }
+    }
+    // (Again with the SubPlans numbered in the order Postgres plans them.)
+    if renumber.is_none()
+        && let Some(r) = renumbering(&b.events)
+    {
+        renumber = Some(std::rc::Rc::new(r));
+        continue;
     }
     let root = b.single_copy(plan, root);
     break if o.scroll && !backward_ok(&root) { b.materialize_top(root) } else { root };

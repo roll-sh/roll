@@ -3699,6 +3699,7 @@ impl Binder<'_, '_> {
                 call: None,
                 test_op: None,
                 names: Default::default(),
+                qual: self.binding_qual(),
             }));
             let rs = if one {
                 vec![sq]
@@ -3726,6 +3727,7 @@ impl Binder<'_, '_> {
             call: None,
             test_op: None,
             names: Default::default(),
+            qual: self.binding_qual(),
         })))
     }
 
@@ -3804,6 +3806,7 @@ impl Binder<'_, '_> {
                 call: None,
                 test_op: None,
                 names: Default::default(),
+                qual: self.binding_qual(),
             }))),
             T::ExprSublink => {
                 if cols.len() != 1 {
@@ -3837,6 +3840,7 @@ impl Binder<'_, '_> {
                     call: None,
                     test_op: None,
                     names: Default::default(),
+                    qual: self.binding_qual(),
                 })))
             }
             T::ArraySublink => {
@@ -3869,6 +3873,7 @@ impl Binder<'_, '_> {
                     call: None,
                     test_op: None,
                     names: Default::default(),
+                    qual: self.binding_qual(),
                 })))
             }
             T::AnySublink | T::AllSublink => {
@@ -3930,6 +3935,7 @@ impl Binder<'_, '_> {
                             call: None,
                             test_op: Some(own_params),
                             names: Default::default(),
+                            qual: self.binding_qual(),
                         })));
                     }
                 }
@@ -3952,6 +3958,7 @@ impl Binder<'_, '_> {
                     call: None,
                     test_op: None,
                     names: Arc::new(cols.iter().map(|c| c.name.clone()).collect()),
+                    qual: self.binding_qual(),
                 })))
             }
             _ => Err(crate::error::unsupported("this kind of subquery")),
@@ -7336,6 +7343,7 @@ impl Binder<'_, '_> {
             })),
             test_op: None,
             names: Default::default(),
+            qual: self.binding_qual(),
         }));
         // evaluate_function: an immutable call over constants is its value (a composite one
         // a constant of its type). (One that fails runs, and fails, when executed.)

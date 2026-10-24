@@ -739,6 +739,11 @@ impl<'b, 'a> Binder<'b, 'a> {
         self.levels.last().unwrap().clause
     }
 
+    /// A sub-select bound now is in a WHERE or JOIN ... ON clause (`Subquery::qual`).
+    pub(crate) fn binding_qual(&self) -> bool {
+        matches!(self.clause(), Clause::Where | Clause::JoinOn)
+    }
+
     /// Run `f` with `clause` as the current clause.
     pub(crate) fn in_clause<T>(
         &mut self,

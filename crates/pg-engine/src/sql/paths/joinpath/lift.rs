@@ -46,6 +46,25 @@ fn movable(e: &Expr) -> bool {
     ok
 }
 
+/// An output of a FROM-less subquery no outer join nulls that may move up: `movable`, or
+/// with sub-selects (is_simple_subquery takes them, nothing volatile in them:
+/// contain_volatile_functions looks into sub-selects), each place reading it computing it
+/// (pullup_replace_vars).
+fn movable_fromless(e: &Expr) -> bool {
+    if movable(e) {
+        return true;
+    }
+    let mut ok = !crate::sql::explain::expr_volatile_deep(e);
+    e.walk(&mut |x| match x {
+        Expr::Subquery(s) => ok &= s.call.is_none(),
+        Expr::Agg(..) | Expr::Window(..) | Expr::Grouping(_) | Expr::Srf(..) => ok = false,
+        Expr::Outer(d, ..) if *d != 1 => ok = false,
+        Expr::Param(..) | Expr::Default(_) | Expr::CaseTest(_) => ok = false,
+        _ => {}
+    });
+    ok
+}
+
 /// The LATERAL values (`Outer(1, i)`) an expression reads.
 fn outer_refs(e: &Expr) -> Vec<usize> {
     let mut out = Vec::new();
@@ -809,7 +828,9 @@ fn lift(
         // they're read, those an outer join of the group nulls staying computed in it
         // (PlaceHolderVars evaluated at the empty relation).
         Plan::Project { input, exprs }
-            if matches!(&**input, Plan::One) && !exprs.is_empty() && exprs.iter().all(movable) =>
+            if matches!(&**input, Plan::One)
+                && !exprs.is_empty()
+                && exprs.iter().all(|e| movable(e) || nulled == 0 && movable_fromless(e)) =>
         {
             if exprs.iter().any(|e| !outer_refs(e).is_empty()) && lateral.is_none() {
                 return identity(p, cx);
