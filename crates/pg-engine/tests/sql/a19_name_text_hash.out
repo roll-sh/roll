@@ -1,0 +1,177 @@
+> CREATE TABLE a19_nk (s name, v int)
+-- CREATE TABLE
+
+> CREATE TABLE a19_tx (i text, w int)
+-- CREATE TABLE
+
+> INSERT INTO a19_nk SELECT 'A' || g, g FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> INSERT INTO a19_tx SELECT 'A' || g, g FROM generate_series(1, 1000, 3) g
+-- INSERT 0 334
+
+> INSERT INTO a19_tx VALUES ('A5', -5), (NULL, 0), ('a5', 7), ('A5 ', 8)
+-- INSERT 0 4
+
+> ANALYZE a19_nk
+-- ANALYZE
+
+> ANALYZE a19_tx
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a19_nk nk JOIN a19_tx tx ON nk.s = tx.i
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (nk.s = (tx.i)::text)
+  ->  Seq Scan on a19_nk nk
+  ->  Hash
+        ->  Seq Scan on a19_tx tx
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a19_nk nk JOIN a19_tx tx ON tx.i = nk.s
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (nk.s = (tx.i)::text)
+  ->  Seq Scan on a19_nk nk
+  ->  Hash
+        ->  Seq Scan on a19_tx tx
+-- EXPLAIN
+
+> SELECT count(*), sum(v), sum(w) FROM a19_nk nk JOIN a19_tx tx ON nk.s = tx.i
+count:int8 | sum:int8 | sum:int8
+335 | 167172 | 167162
+-- SELECT 1
+
+> SELECT * FROM a19_nk nk JOIN a19_tx tx ON tx.i = nk.s WHERE v < 12 ORDER BY v, w
+s:name | v:int4 | i:text | w:int4
+A1 | 1 | A1 | 1
+A4 | 4 | A4 | 4
+A5 | 5 | A5 | -5
+A7 | 7 | A7 | 7
+A10 | 10 | A10 | 10
+-- SELECT 5
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a19_nk nk LEFT JOIN a19_tx tx ON nk.s = tx.i
+QUERY PLAN:text
+Hash Left Join
+  Hash Cond: (nk.s = tx.i)
+  ->  Seq Scan on a19_nk nk
+  ->  Hash
+        ->  Seq Scan on a19_tx tx
+-- EXPLAIN
+
+> SELECT count(*), count(w) FROM a19_nk nk LEFT JOIN a19_tx tx ON nk.s = tx.i
+count:int8 | count:int8
+1000 | 335
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM a19_nk nk WHERE EXISTS (SELECT 1 FROM a19_tx tx WHERE tx.i = nk.s)
+QUERY PLAN:text
+Aggregate
+  ->  Hash Semi Join
+        Hash Cond: (nk.s = (tx.i)::text)
+        ->  Seq Scan on a19_nk nk
+        ->  Hash
+              ->  Seq Scan on a19_tx tx
+-- EXPLAIN
+
+> SELECT count(*) FROM a19_nk nk WHERE EXISTS (SELECT 1 FROM a19_tx tx WHERE tx.i = nk.s)
+count:int8
+335
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM a19_tx tx WHERE tx.i IN (SELECT s FROM a19_nk)
+QUERY PLAN:text
+Aggregate
+  ->  Hash Right Semi Join
+        Hash Cond: (a19_nk.s = (tx.i)::text)
+        ->  Seq Scan on a19_nk
+        ->  Hash
+              ->  Seq Scan on a19_tx tx
+-- EXPLAIN
+
+> SELECT count(*) FROM a19_tx tx WHERE tx.i IN (SELECT s FROM a19_nk)
+count:int8
+335
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a19_nk nk JOIN a19_tx tx ON nk.s = tx.i AND nk.s = 'A5'
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a19_nk nk
+        Filter: (s = 'A5'::name)
+  ->  Seq Scan on a19_tx tx
+        Filter: ((i)::text = 'A5'::name)
+-- EXPLAIN
+
+> SELECT * FROM a19_nk nk JOIN a19_tx tx ON nk.s = tx.i AND nk.s = 'A5' ORDER BY w
+s:name | v:int4 | i:text | w:int4
+A5 | 5 | A5 | -5
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a19_nk nk JOIN a19_tx tx ON nk.s = tx.i WHERE tx.i = 'A5'
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (nk.s = (tx.i)::text)
+  ->  Seq Scan on a19_nk nk
+  ->  Hash
+        ->  Seq Scan on a19_tx tx
+              Filter: (i = 'A5'::text)
+-- EXPLAIN
+
+> SELECT * FROM a19_nk nk JOIN a19_tx tx ON nk.s = tx.i WHERE tx.i = 'A5' ORDER BY w
+s:name | v:int4 | i:text | w:int4
+A5 | 5 | A5 | -5
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a19_tx tx JOIN a19_nk nk ON tx.i = nk.s WHERE nk.s = 'A7'
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a19_tx tx
+        Filter: ((i)::text = 'A7'::name)
+  ->  Seq Scan on a19_nk nk
+        Filter: (s = 'A7'::name)
+-- EXPLAIN
+
+> SELECT * FROM a19_tx tx JOIN a19_nk nk ON tx.i = nk.s WHERE nk.s = 'A7'
+i:text | w:int4 | s:name | v:int4
+A7 | 7 | A7 | 7
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a19_tx tx JOIN a19_nk nk ON tx.i = nk.s WHERE tx.i = 'A7'::name
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a19_tx tx
+        Filter: ((i)::text = 'A7'::name)
+  ->  Seq Scan on a19_nk nk
+        Filter: (s = 'A7'::name)
+-- EXPLAIN
+
+> SELECT * FROM a19_tx tx JOIN a19_nk nk ON tx.i = nk.s WHERE tx.i = 'A7'::name
+i:text | w:int4 | s:name | v:int4
+A7 | 7 | A7 | 7
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a19_tx WHERE i = current_user
+QUERY PLAN:text
+Seq Scan on a19_tx
+  Filter: (i = CURRENT_USER)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a19_tx WHERE i = 'A7'::name
+QUERY PLAN:text
+Seq Scan on a19_tx
+  Filter: (i = 'A7'::name)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a19_tx WHERE i = (w::text)::name
+QUERY PLAN:text
+Seq Scan on a19_tx
+  Filter: (i = ((w)::text)::name)
+-- EXPLAIN
+
+> SELECT * FROM a19_tx WHERE i = 'A7'::name
+i:text | w:int4
+A7 | 7
+-- SELECT 1
+

@@ -6783,7 +6783,8 @@ impl Planner<'_, '_> {
                             (hashes, merges && cols)
                         }
                         None => (
-                            same && crate::sql::binder::optimize::hashable_type(&ta),
+                            (same && crate::sql::binder::optimize::hashable_type(&ta))
+                                || crate::sql::binder::optimize::name_text_pair(&ta, &tb),
                             same && mergeable(&ta) && cols,
                         ),
                     }

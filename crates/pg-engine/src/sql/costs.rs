@@ -500,6 +500,9 @@ impl Est<'_> {
     fn var(&self, e: &Expr) -> Option<VarRef> {
         match strip(e) {
             Expr::Col(i, _) => (self.vars)(*i),
+            // (A COLLATE is a RelabelType once constants are folded, which examine_variable
+            // looks through.)
+            Expr::Collate(x, ..) => self.var(x),
             // (Postgres compares a bpchar through bpchar operators: no cast.)
             Expr::Cast(x, DataType::Bpchar(_), DataType::Text, false) => self.var(x),
             e => self

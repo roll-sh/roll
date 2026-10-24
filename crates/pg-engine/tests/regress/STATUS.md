@@ -419,7 +419,47 @@ What changed:
   (remove_result_refs); a FROM-less left side's Result gates on them, unfolded
   (`One-Time Filter: (1 = 1)`, create_resultscan_plan). join 366.
 
-Goldens: `a19_phv_lateral_ec`, `a19_result_semijoin`.
+- Second batch (full runs before and after, unit by unit): `name = text` joins (nameeqtext /
+  texteqname, in the hash text_ops family: hashname and hashtext hash equal strings alike)
+  are hash keys (`optimize::name_text_pair`), Hash / Hash Semi / Hash Right Semi Joins as
+  Postgres's, an inner or semi join's key showing the text column relabeled to the class's
+  C collation (`Hash Cond: (nk.s = (tx.i)::text)`), an outer join's as written. Their class
+  carries a constant the name side is equated with to the text side (`(i)::text =
+  'A5'::name`, texteqname: select_equality_operator), dropping the join clause; a text
+  side's `i = 'A7'::name` (under C) joins the class too, both sides compared with the
+  constant, its own clause relabeled; its `i = 'A5'` (its column's collation) is a class of
+  its own that stays on its side. A scan's own `text = name` restriction reading no other
+  relation shows as written, against a column of its own too (`name = (passwd)::name`;
+  agent 15 did it for pseudo-constants, select_views 25–39); one derived from the class
+  comes relabeled. examine_variable looks through a COLLATE (a RelabelType once folded)
+  for statistics.
+
+Goldens: `a19_phv_lateral_ec`, `a19_result_semijoin`, `a19_name_text_hash`.
+
+Still open, and why:
+
+- `name = text` as a merge key: Postgres sorts the text side under the class's C collation
+  (`Sort Key: tx.i COLLATE "C"`); the merge paths here sort a side's columns by their own
+  collations, so the clause stays a hash key only (a merge join shows only with hash joins
+  off or presorted inputs).
+- join 368: the dummy Result's target list is information_schema.column_udt_usage's
+  expressions (`(c.relname)::information_schema.sql_identifier`). The engine reads that view
+  as a virtual catalog computed by running its query apart, so the plan has no expressions
+  of it to show; binding the view's definition in the query instead would change every
+  query over information_schema (plans, row orders), and splicing its pg_get_viewdef text in
+  for this case only isn't the planner's route. Left.
+- join 345 (the PlaceHolderVar `64::cardinal_number` computed in the LATERAL subquery's scan
+  `ss0`, the whole inner side parameterized by `t3`), 360 (a UNION ALL with a FROM-less arm
+  as a parameterized appendrel: its arm a Result gated on the join's parameter, `((1) = 0)`,
+  and the PlaceHolderVar `COALESCE(t.i, (1))` computed in a Result over it), 362 / 363
+  (PlaceHolderVars with sub-selects: a copy of the InitPlan per place, the PlaceHolderVar
+  recomputed above a join that doesn't carry it, the join order around the LATERAL `ss4`),
+  partition_join 41 / 204 (the LATERAL subquery is a join: the partitionwise join of three
+  relations, each child's inner join parameterized; here the inner join becomes a
+  partitionwise join of its own first, the LATERAL clause a filter over it, and the
+  non-partitioned plan also differs, a LEFT JOIN's ON clause acting as a class constant
+  inside the LATERAL side (`t1.a = t3.b` derived) and the inner join costed differently).
+  join 744 left to agent 17 (LATERAL parameterized join relations).
 
 ## Round 16, agent 14 (parallel join inputs, partial DISTINCT orders, hash table sizing, inherited DML row marks, combine functions)
 
@@ -1196,7 +1236,8 @@ Goldens added: `tests/sql/a8_phv_join.sql`, `a8_sublink_lateral.sql`, `a8_dummy_
 
 Still open from this list, and why:
 
-- join 366: a semi join over a full join of RESULT relations, all removed by Postgres. Here
+- join 366 (done in round 16, agent 19, after reduce_outer_joins on the plan before the
+  walk): a semi join over a full join of RESULT relations, all removed by Postgres. Here
   the IN's sub-select (a join) stays a Barrier ("ANY_subquery") planned as a level of its own
   during the outer level's walk, after the outer join group was lifted, so the semi join's
   FROM-less right side can't be removed with it: it needs the sub-select pulled up into the
@@ -1212,6 +1253,7 @@ Still open from this list, and why:
 - Found with 328: a hash join on `name = text` isn't costed here (Postgres hashes both as
   text), and an equivalence class doesn't carry a constant across `name = text`
   (`nk.s = tx.i and nk.s = 'A5'` gives tx `Filter: ((i)::text = 'A5'::name)` in Postgres).
+  Both done in round 16, agent 19 (not as a merge key yet).
 - A one-row VALUES under a left join that stays one (`i left join (select v.x, 5 as c from
   (values (0, 1)) v(x, y)) s on s.x = i.f1`): Postgres's join clause reads `0` itself
   (`Join Filter: (0 = i.f1)`, a Nested Loop over the Result); here `x` is a PlaceHolderVar of

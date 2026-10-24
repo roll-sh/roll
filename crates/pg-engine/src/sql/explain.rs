@@ -85,10 +85,14 @@ fn ec_relabel(e: &Expr) -> Expr {
 /// the comparison's collation is the `name` side's C (a non-default implicit collation beats
 /// the default), so canonicalize_ec_expression relabels the other operand, a text-family
 /// expression reading columns, to it, which shows as a cast. (An outer join's clause keeps
-/// its form; a sub-select's value, a parameter, or a constant shows as it is.)
-fn name_text_relabel(e: &Expr) -> Expr {
+/// its form; a sub-select's value, a parameter, or a constant shows as it is.) A scan's own
+/// restriction (`scan`, reading no other relation's value) is the clause as written: a class
+/// of two members from one clause gives it back (generate_base_implied_equalities_const);
+/// one the class derived comes relabeled already (`optimize::ec_constants`).
+fn name_text_relabel(e: &Expr, scan: bool) -> Expr {
     match e {
-        Expr::And(list) => Expr::And(list.iter().map(name_text_relabel).collect()),
+        Expr::And(list) => Expr::And(list.iter().map(|x| name_text_relabel(x, scan)).collect()),
+        Expr::Call(..) if scan && !e.has_outer_refs() => e.clone(),
         Expr::Call(d, args, ty) if d.name == "=" && args.len() == 2 => {
             let texty = |a: &Expr| {
                 matches!(a.ty(), DataType::Text | DataType::Varchar(_))
@@ -3377,7 +3381,7 @@ impl Builder<'_, '_> {
         };
         let relabeled2;
         let e = if cx != Cx::Output && !OUTER_JOIN_SIDE.with(|o| o.get()) {
-            relabeled2 = name_text_relabel(e);
+            relabeled2 = name_text_relabel(e, cx == Cx::Scan);
             &relabeled2
         } else {
             e
@@ -13141,6 +13145,24 @@ impl Builder<'_, '_> {
                 None => side(self, ib, inner_names, inner_cols),
             };
             let b = if sorted_expr(ib, &r.node) { format!("({b})") } else { b };
+            // (An inner or semi join's `name = text` key pair comes out of its equivalence
+            // class, whose collation is the name side's C: canonicalize_ec_expression relabels
+            // the text column to it, a cast (`name_text_relabel`); an outer join's keeps its
+            // form.)
+            let (a, b) = {
+                let (ka, kb) = (crate::sql::binder::hash_key_operand(oa).0, crate::sql::binder::hash_key_operand(ib).0);
+                let text_col = |k: &Expr| matches!(k, Expr::Col(..)) && matches!(k.ty(), DataType::Text);
+                let name = |k: &Expr| matches!(k.ty(), DataType::Name);
+                if !matches!(kind, JoinKind::Inner | JoinKind::Semi) || OUTER_JOIN_SIDE.with(|o| o.get()) {
+                    (a, b)
+                } else if name(&ka) && text_col(&kb) {
+                    (a, format!("({b})::text"))
+                } else if name(&kb) && text_col(&ka) {
+                    (format!("({a})::text"), b)
+                } else {
+                    (a, b)
+                }
+            };
             // (The inner keys are the Hash's to compute: their SubPlans are its.)
             if method == JoinMethod::Hash && self.pending.len() > before {
                 hash_subplans.extend(self.pending.drain(before..));

@@ -1674,6 +1674,32 @@ fn ec_constants(
             .transform(&mut |e| Ok(if e.same_as(from) { to.clone() } else { e }))
             .unwrap_or_else(|_| clause.clone())
     };
+    // (Across a `name = text` join clause, whose class has the name side's C collation: a
+    // constant the name side is equated with gives the text side `text = k` (texteqname,
+    // select_equality_operator), the text column relabeled to the class's collation
+    // (canonicalize_ec_expression: `(i)::text`); the text side's `= k` joins the class when
+    // it compares under C too (with a name, `i = 'x'::name`: then it comes back relabeled
+    // itself, the second value), else it is of its column's collation, a class of its own
+    // that stays on its side.)
+    let relabel = |x: &Expr| Expr::Collate(Box::new(x.clone()), String::new(), -1);
+    let cross = |clause: &Expr, from: &Expr, to: &Expr, k: &Expr| -> Option<(Expr, Option<Expr>)> {
+        if !name_text_pair(&from.ty(), &to.ty()) {
+            return Some((derive(clause, from, to), None));
+        }
+        let name = |t: DataType| t.without_typmod() == DataType::Name;
+        let r = crate::sql::func::resolve_binop("=", &to.ty(), &k.ty()).ok()?;
+        if name(from.ty()) {
+            return Some((Expr::Call(r.def, vec![relabel(to), k.clone()], DataType::Bool), None));
+        }
+        if !name(k.ty()) {
+            return None;
+        }
+        let source = clause
+            .clone()
+            .transform(&mut |e| Ok(if e.same_as(from) { relabel(&e) } else { e }))
+            .ok()?;
+        Some((Expr::Call(r.def, vec![to.clone(), k.clone()], DataType::Bool), Some(source)))
+    };
     // (A made type's `=` with the constant's type must exist in the family: else the
     // class is broken and the join clause stays.)
     let derivable = |target: &Expr, k: &Expr| {
@@ -1719,10 +1745,16 @@ fn ec_constants(
             if !direct && !lclass.iter().any(|m| m.same_as(x)) {
                 continue;
             }
-            if derivable(b, k) {
-                let d = derive(clause, x, b);
+            if derivable(b, k)
+                && let Some((d, source)) = cross(clause, x, b, k)
+            {
                 if !rpush.iter().chain(rhave).any(|e| e.same_as(&d)) {
                     rpush.push(d);
+                }
+                if let Some(s) = source
+                    && let Some(c) = lpush.iter_mut().find(|e| e.same_as(clause))
+                {
+                    *c = s;
                 }
                 used |= derivable(a, k);
             }
@@ -1757,10 +1789,16 @@ fn ec_constants(
             if !direct && !rclass.iter().any(|m| m.same_as(x)) {
                 continue;
             }
-            if derivable(a, k) {
-                let d = derive(clause, x, a);
+            if derivable(a, k)
+                && let Some((d, source)) = cross(clause, x, a, k)
+            {
                 if !lpush.iter().chain(lhave).any(|e| e.same_as(&d)) {
                     lpush.push(d);
+                }
+                if let Some(s) = source
+                    && let Some(c) = rpush.iter_mut().find(|e| e.same_as(clause))
+                {
+                    *c = s;
                 }
                 used |= derivable(b, k);
             }
@@ -3101,7 +3139,9 @@ fn equi_key(e: &Expr, nleft: usize) -> Option<(Expr, Expr)> {
     let (ta, tb) = (a.ty(), b.ty());
     // (integer_ops hashes int2, int4 and int8 alike: a cross-type `=` hashes too.)
     let int = |t: &DataType| matches!(t, DataType::Int2 | DataType::Int4 | DataType::Int8);
-    if !hashable(&ta) || (ta.without_typmod() != tb.without_typmod() && !(int(&ta) && int(&tb))) {
+    if !hashable(&ta)
+        || (ta.without_typmod() != tb.without_typmod() && !(int(&ta) && int(&tb)) && !name_text_pair(&ta, &tb))
+    {
         return None;
     }
     // Keys without a collation fail as they're hashed.
@@ -3122,6 +3162,16 @@ fn builtin_eq(def: &crate::sql::func::FuncDef, l: &DataType, r: &DataType) -> bo
 /// Both operands of built-in types: an `=` over them that isn't the built-in one is a user's.
 fn func_is_builtin_for_builtin_types(_def: &crate::sql::func::FuncDef, l: &DataType, r: &DataType) -> bool {
     l.oid() < crate::catalog::FIRST_USER_OID && r.oid() < crate::catalog::FIRST_USER_OID
+}
+
+/// `name = text` / `text = name` (nameeqtext, texteqname): the hash text_ops family has
+/// both, hashname and hashtext hashing equal strings alike, so a hash join takes it. (Not
+/// a merge key here: the text side would sort under the name side's C collation.)
+pub(crate) fn name_text_pair(a: &DataType, b: &DataType) -> bool {
+    matches!(
+        (a.without_typmod(), b.without_typmod()),
+        (DataType::Name, DataType::Text) | (DataType::Text, DataType::Name)
+    )
 }
 
 /// Types a hash join can use (hashing agrees with their `=`).
