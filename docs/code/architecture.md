@@ -142,20 +142,30 @@ on refs and lazily elsewhere. Clients never see the internals.
 
 ### Metadata
 
-SQLite (`<home>/code/code.db`), WAL mode: repos' storage records, changesets, git mapping, git
-trees (small, hot), which blobs a repo has (and their sizes), annotated tags, refs, the path
-index and per-minute landing counts. A ref update is a compare-and-swap on one row. There's one
-writer connection and a pool of reader connections, so reads don't queue behind writes. The
-schema is plain SQL so it can move to roll Postgres for multi-node.
+`code_sql::Db` (`crates/code-sql`): SQLite (`<home>/code/code.db`, WAL mode) on one node, or a
+Postgres schema shared by every node of a cluster (`Store::open_db`, docs/code/cluster.md). It
+holds repos' storage records, changesets, git mapping, git trees (small, hot), which blobs a repo
+has (and their sizes), annotated tags, refs, the path index, per-minute landing counts and the
+land log. The schema is one SQLite definition (`code-store/src/db.rs`) that code-sql translates
+for Postgres. A ref update is a compare-and-swap on one row: its head, version and path-index
+floor. On SQLite there's one writer connection and a pool of reader connections, so reads don't
+queue behind writes.
 
-**Durability** (`code-store/src/durable.rs`). Commits use `synchronous=NORMAL`: they append to the
-WAL without an fsync, which survives the process crashing but not the machine. So a landing (a
-lander batch, `Store::advance`, a ref update) is acknowledged and published only after the WAL is
-fsynced past its commit. That's group commit: one `fdatasync` covers every commit made before it
-started, from any writer, and it runs outside the writer's lock. Checkpoints run on a background
-thread with its own connection every 50 ms, so their fsyncs never happen inside a commit that
-holds the writer lock; the writer only checkpoints itself past 8,192 WAL pages, as a backstop.
-Blobs are as durable as the object store: S3 is, but the local directory store doesn't fsync.
+**Durability.** Every write is durable when `Db::write` returns, so nothing is acknowledged or
+published before it is. Postgres commits synchronously. SQLite commits with
+`synchronous=NORMAL`, appending to the WAL without an fsync, and then waits for a group-committed
+`fdatasync` of the WAL past its commit (`code-sql/src/durable.rs`): one covers every commit made
+before it started, from any writer, and it runs outside the writer's lock. Checkpoints run on a
+background thread with its own connection every 50 ms, so their fsyncs never happen inside a
+commit that holds the writer lock; the writer only checkpoints itself past 8,192 WAL pages, as a
+backstop. Blobs are as durable as the object store: S3 is, but the local directory store doesn't
+fsync.
+
+**The land log** is read by sequence number, so numbers must become visible in order. With one
+SQLite writer they do. On Postgres, concurrent transactions take numbers in one order and can
+commit in another, so a landing's transaction takes a transaction-scoped advisory lock (one per
+schema) right before appending, as its last statements: whoever takes a later number commits
+later, and a reader paging by `seq` never skips a row.
 
 Paths are UTF-8. An import rejects a tree with a non-UTF-8 file name. A commit whose bytes
 don't come back from derivation (unusual header order, legacy tree modes such as `100664`) keeps
@@ -168,7 +178,7 @@ exact.
 That's easy as long as landing touches only metadata and costs O(files in the change).
 
 Each `(repo, ref)` has one **lander** task. It's an in-process actor fed by an mpsc channel.
-The critical section is short and does no I/O except one SQLite transaction per batch. CI is
+The critical section is short and does no I/O except one transaction per batch. CI is
 never inside it.
 
 For each batch the lander drains up to N queued requests. For each request, with change `C`
@@ -196,8 +206,14 @@ The lander also handles these cases:
 - A rebase drops `gpgsig` and `mergetag` headers.
 - Merged blobs are uploaded together before the batch commits.
 
-At the end of the batch, one SQLite transaction writes the changesets, trees, mappings and
-path index rows and CASes the ref from the batch's starting head. Waiters get their results,
+At the end of the batch, one transaction CASes the ref from the batch's starting head (head,
+version and path-index floor) and writes the changesets, trees, mappings, path index rows and land
+log. On Postgres that's four round trips: `BEGIN`, the CAS, one pipeline of multi-row inserts,
+`COMMIT`; the path index entries a batch needs are read up front, a few queries per batch. If the
+CAS fails because another lander moved the ref (another node, while a repo's lease changes
+hands), the batch is rebuilt on the new head and committed again. If the database can't say
+whether the commit happened (`CommitUnknown`), the lander asks (`pg_xact_status`, else the ref)
+before anyone hears back. Waiters get their results,
 and events go out on the repo's broadcast channel, which feeds the dashboard landing feed and SSE.
 
 On a laptop the target is >1,000 merges per second, which means 40,000 merges in under a
@@ -220,7 +236,12 @@ the columns with each other, not with that.
 
 The single SQLite writer is the limit. Agents creating changesets compete with the lander for it.
 
-Multi-node later: the ref CAS keeps correctness, and a lease per `(repo, ref)` picks the node
+On Postgres (2026-10-24, the same host at load 35–60, so all of these were slower than above;
+interleaved runs, 40,000 changes): SQLite tmpfs 383–420 merges/s (before the port: 400–419),
+SQLite on disk 572 (before: 461), Postgres 18 with fsync off 432, Postgres 18 durable (fsync on,
+in Docker on the same disk) 414–551.
+
+Multi-node: the ref CAS keeps correctness, and a lease per `(repo, ref)` picks the node
 that runs the lander.
 
 ### Gating: post-merge or the merge queue
