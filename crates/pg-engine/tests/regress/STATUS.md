@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51075 (**99.85%**) |
-| units differing | 75 |
+| units matching | 51078 (**99.86%**) |
+| units differing | 72 |
 | files fully matching | 224 |
 | engine output == expected/*.out (pg_regress "ok") | 185 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 75 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 72 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 75 units
-join (48), partition_join (15), partition_prune (2), groupingsets (7), join_hash (2), returning (1)
+### EXPLAIN (group C1) — 72 units
+join (45), partition_join (15), partition_prune (2), groupingsets (7), join_hash (2), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -106,6 +106,62 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 22 (a FROM subquery's several paths, class clauses' first making)
+
+Measured in subset runs of the planner-heavy files (test_setup, create_misc, create_index,
+create_view, select, union, subselect, join, aggregates, inherit, partition_join,
+partition_prune, partition_aggregate, equivclass, memoize, with, rowsecurity, updatable_views,
+select_distinct, groupingsets, incremental_sort, merge, returning, rules, insert_conflict,
+join_hash, select_parallel, rangefuncs, tsrf, limit, window, stats_ext, sqljson_jsontable),
+unit by unit against a baseline run of the same subset on 9b0ac33 (13099 -> 13102 of 13180),
+then again after rebasing onto b963500 against its own baseline (13105 -> 13108): 3 units
+fixed, none broken, no other agent's units moved.
+
+| file | fixed units |
+|---|---|
+| join | 123, 502, 503 |
+
+What changed:
+
+- **A FROM subquery's several paths** (set_subquery_pathlist; join 502 / 503). Postgres makes
+  a Subquery Scan path of each of the subquery's final paths, and its grouping keeps a sorted
+  path beside the cheapest hashed one (add_paths_to_grouping_rel over every input path, a
+  presorted index scan's too; create_final_distinct_paths): a merge join may read the Group
+  over the index scan, or the Unique over the sorted scan, while the hashed one is cheaper on
+  its own. The join search now gives a subquery leaf (`Plan::Barrier`, not LATERAL) those
+  paths when one of its columns is useful for a merge join or the query's order: its plan as
+  planned and one per index path of its table that leads with a grouping key
+  (`Planner::grouping_variants`), each costed with the paths EXPLAIN keeps beside the
+  cheapest (`explain::subquery_paths`). The path the search takes is recorded in the plan,
+  not chosen again: `Plan::Barrier`'s new `path` (`plan::SubPath`: its keys, cheapest or
+  cheapest to start); EXPLAIN shows that one of the subquery's paths (`take_sub_path`), and
+  the executor returns the subquery's rows in its order.
+- examine_simple_variable through a subquery (`explain::subquery_var_stats`): a subquery with
+  set operations or grouping sets passes nothing about its outputs to the query above, one
+  with DISTINCT or GROUP BY only that its sole such key is unique (as many values as rows).
+  The engine passed the grouped column's statistics up, unique index included, so the outer
+  join over `group by b.id, b.c_id` was sized as unique on `s.id` (2260 rows for Postgres's
+  25538) and hashed.
+- **ec_derives** (join 123): a class's join clause keeps the operand order of its first making
+  (create_join_clause finds an earlier one either way round). Besides the index paths' clauses
+  before the search (round 14), the search notes each class clause as it makes it
+  (`Search::derives`): a new join relation's (build_joinrel_restrictlist, as shown already)
+  and a parameterized join path's for a class whose clause the inner path enforces
+  (get_joinrel_parampathinfo's dropped classes: the parameters' member first). That order is
+  put on the clause after the search: `sum(i4b.f1) = (sum(i4a.f1) + 1)`, first made for `t`'s
+  index scan parameterized by both subqueries, joined to `a`.
+
+Goldens: `tests/sql/a22_subquery_paths.sql`, `a22_ec_derives.sql`.
+
+Looked at and left (why):
+
+- A trivial Subquery Scan's cost: Postgres charges cpu_tuple_cost per row when the outer query
+  reads fewer columns than the subquery returns (cost_subqueryscan, trivial_pathtarget), even
+  where setrefs then removes the scan; the engine charges nothing for one EXPLAIN doesn't show
+  (costs only: join 502's Merge Right Join total 634.93 for 657.53).
+- A Subquery Scan under a Hash (`Hash -> Subquery Scan on s -> HashAggregate`) Postgres keeps
+  and the engine drops; seen while testing, not this round's.
 
 ## Round 16, agent 20, second batch (agent 15's row-mark leftovers: locks over unique-ified semi joins, RETURNING sub-selects, SET costs)
 
@@ -2895,7 +2951,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 877 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (48) |
+| join | 925 | 880 | 95% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (45) |
 | aggregates | 556 | 556 | 100% | yes | no |  |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |

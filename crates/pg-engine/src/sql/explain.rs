@@ -4073,7 +4073,6 @@ impl Builder<'_, '_> {
                         .collect(),
                     None => (0..c.exported.len()).collect(),
                 };
-                let mut c = c;
                 if let Some(sp) = path {
                     self.take_sub_path(&mut c, &map, sp);
                 }
