@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51116 (**99.93%**) |
-| units differing | 34 |
+| units matching | 51120 (**99.94%**) |
+| units differing | 30 |
 | files fully matching | 226 |
 | engine output == expected/*.out (pg_regress "ok") | 187 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 34 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 30 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 34 units
-join (23), partition_join (9), partition_prune (1), returning (1)
+### EXPLAIN (group C1) — 30 units
+join (19), partition_join (9), partition_prune (1), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -497,13 +497,42 @@ What changed:
 
 Golden: `tests/sql/a26_pw_parallel_sublinks.sql`.
 
+Second batch (the same subset against the first batch's binary on 35d7dbb: 13146 -> 13150,
+none lost; plus 33 other files with joins, create_table, collate.icu.utf8, create_table_like,
+gin, gist, indexing, jsonpath, numeric, tablesample, plpgsql, stats_import, tidrangescan,
+arrays, json, jsonb, sqljson, xml, foreign_key, triggers, update, delete, privileges,
+create_view, select_views, join_hash, write_parallel, explain, tuplesort, generated_virtual,
+select_distinct_on, create_function_sql: unchanged):
+
+| file | fixed units |
+|---|---|
+| join | 662, 663, 671, 706 |
+
+- **join_collapse_limit** (deconstruct_recurse): an inner join written as JOIN syntax
+  (`JoinMeta::explicit`, set by the binder) whose sides together are more items than
+  join_collapse_limit isn't folded into the join problem above it; a side of several items is
+  a leaf of its own, planned as its group (`joinpath::gather`, `joinlist_len`). At 1, join
+  662 / 663 keep `(k1 ⋈ k2) ⋈ j2`, j1 removed by self-join elimination inside its sub-problem.
+  (A FROM list's items are folded within from_collapse_limit, still not read: the suite's
+  uses of it don't show a difference.)
+- **Self-join elimination runs a group again while a pass removes a relation**
+  (remove_self_joins_recurse's loop): join 671's c2 goes into c3, and the clause
+  `c3.id * c3.id = c1.id * c1.id` then pairs c1 with c3 on the unique index over `(id * id)`,
+  `Filter: ((id * id) IS NOT NULL)` on the one scan left. (A small change in agent 23's
+  `self_joins`; their units are unchanged.)
+- **neqjoinsel**: a built-in `<>` between two items' values is one minus the negator's
+  eqjoinsel (for a semi / anti join, one minus the outer side's null fraction), not
+  `1 - DEFAULT_EQ_SEL` (`Search::clause_sel_raw`): `n1.a <> n2.a` sizes the join 3 rows, not 4.
+- **make_rels_by_clauseless_joins**: a rel with no join clause joins every base rel at the
+  first level, those before it too (make_rels_by_clause_joins alone starts past it), in an
+  inner group or one whose make_join_rel checks join_is_legal; a two-item outer join keeps its
+  sides' order (trying the other order there swapped an anti join's sides: wrong rows the subset
+  run caught). join 706: `sl ⋈ n2` first, 2.15 for 2.17.
+
+Golden: `tests/sql/a26_collapse_sje_neq.sql`.
+
 Looked at and left (why):
 
-- join 662 / 663: `join_collapse_limit` is never read (`joinpath.rs` `COLLAPSE_LIMIT` is a
-  fixed 8); at 1 Postgres keeps the explicit JOINs' tree, `(k1 ⋈ k2) ⋈ j2` once SJE removed
-  j1 (with the limit at 8 the engine's plan is Postgres's). Needs explicit JOINs told apart
-  from FROM lists (deconstruct_recurse: join_collapse_limit for JoinExprs, from_collapse_limit
-  for FromExprs) and the unflattened side planned as a group of its own.
 - join 674 / 681: Postgres removes the self join although one side is a pulled-up subquery
   computing a PlaceHolderVar ("PHVs should not impose any constraints"); the engine's pair
   test takes plain scans only (its leaf is the PlaceHolderVar projection over the scan).
@@ -3713,7 +3742,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 902 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (23) |
+| join | 925 | 906 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (19) |
 | aggregates | 556 | 556 | 100% | yes | no |  |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
