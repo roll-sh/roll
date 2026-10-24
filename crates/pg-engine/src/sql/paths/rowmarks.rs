@@ -300,6 +300,11 @@ fn key(p: &Plan) -> Option<Keyed> {
         | Plan::CteScan { .. }
         | Plan::WorkScan { .. }
         | Plan::EnrScan { .. } => (p.clone(), ident(w), Vec::new()),
+        // A semi join's inner side unique-ified (create_unique_path; no DISTINCT of the level
+        // itself takes a lock): like a semi join's inner side, its relations' reference marks
+        // are nothing to lock (Postgres's HashAggregate carries their ctids through
+        // ungrouped, for EvalPlanQual), so the level's rows are locked above the join.
+        Plan::Distinct { input, on: None, .. } if !has_marks(input) => (p.clone(), ident(w), Vec::new()),
         Plan::Filter { input, pred } => {
             let (i, map, keys) = key(input)?;
             let pred = remap(pred, &map);

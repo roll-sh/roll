@@ -107,12 +107,67 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
 
+## Round 16, agent 20, second batch (agent 15's row-mark leftovers: locks over unique-ified semi joins, RETURNING sub-selects, SET costs)
+
+No regress unit changes (none of these failed one); checked in the full runs below the first
+batch's section and with a golden. Agent 15's leftovers, one by one:
+
+- **Wrong locks: a semi join unique-ified under FOR UPDATE** (`rowmarks::key`): the level's
+  rows were locked by its scan of the outer relation below the join, so every row that scan read
+  was locked, the ones the join discards too (`SELECT * FROM t1 WHERE a IN (SELECT x FROM t2)
+  FOR UPDATE` locked all of t1). A Distinct of the level (only a unique-ified semi join's inner
+  side can be one: a DISTINCT of the level itself takes no lock) is now keyed as a semi join's
+  inner side is: its relations' reference marks are nothing to lock, so the LockRows goes on
+  top of the join and locks only the joined rows (checked with a second session's `FOR UPDATE
+  NOWAIT`, as Postgres). EXPLAIN VERBOSE shows Postgres's HashAggregate carrying `t2.ctid`
+  through, ungrouped (`lock_level_marks`). No pass-through column in `Plan::Distinct` was needed:
+  the executor's recheck (EvalPlanQual) treats the inner side as it does a semi join's.
+- A LIMIT subquery with a pushed-down lock: since agent 15's LockRows work its rows are locked
+  under the Limit, as Postgres (a second session can lock the rows the Limit discards); its
+  Subquery Scan's Limit now returns the marks' ctids too when no Sort is between
+  (`lock_junk`).
+- **RETURNING's sub-selects** show without VERBOSE (`SubPlan 1` under the Insert / Update /
+  Delete; they only showed with it).
+- **An UPDATE's SET costs**: the node computing the new values (the scan, or the join) pays
+  for their sub-selects per row (cost_subplan in the target list's cost, as a SELECT list's:
+  124.17 where the engine showed 1.06) and for their operators by cost_qual_eval (an I/O cast
+  is two calls: `SET v = k::text` 1.09).
+- MERGE per-row SubPlan costs: Postgres charges nothing for the actions' target lists (the
+  ModifyTable's cost is its source's, create_modifytable_path), and the engine matches it (a
+  MERGE whose UPDATE SET or WHEN condition has a correlated sub-select: the same 22.95 in
+  both). The difference agent 9 saw was the plain UPDATE's, above.
+
+Goldens: `tests/sql/a20_lock_returning_costs.sql`.
+
+Left, and why:
+
+- returning 105: the rule action's range table (rewriteRuleAction puts the rule's relations
+  after the statement's, so the view's `foo` is `foo_2` and the target `foo_1` in Postgres),
+  then a different join order and the NEW values computed in the ModifyTable's target list.
+  That is the rule rewriter's range table and the action's own join planning, not names.
+- A whole-row-marked subquery's width in the planner and EXPLAIN (set_rel_width: a whole-row
+  Var is 24 bytes plus its columns' widths, which can swap a hash join's sides), and the width
+  of an UPDATE / DELETE join's target list (Postgres: the new values, then 6 per ctid and a
+  whole row's width per whole-row mark, 44 where the engine shows 10): the paths
+  (`joinpath::width_of`) don't know the row marks, and EXPLAIN knows the whole-row marks'
+  junk only under VERBOSE. Also agent 15's row estimate over a locked subquery's key.
+- A LockRows level's marks put the whole rows after every ctid; Postgres orders the relations
+  not locked at the level by range table index (`s.*, t2.ctid` for `FROM (...) s, t2 FOR
+  UPDATE OF s`). The engine's non-table leaves (subqueries, CTEs, functions, VALUES) carry no
+  range table index to order by.
+
 ## Round 16, agent 20 (untyped literals in a select list are text; DML subqueries' whole-row marks)
 
 Two full runs of the schedule in one database (`PGREGRESS_TIMEOUT=300`), f8c1317's engine and
 f8c1317 plus this batch: 51042 -> 51045, the units below fixed, no unit broken (compared unit by
 unit). Both runs share the full-run artifacts the table doesn't count (oidjoins, domain 482 and
-alter_table time out; select_views' 8 units over the catalog earlier files leave).
+alter_table time out; select_views' 8 units over the catalog earlier files leave). Re-checked
+after each rebase with this round's second batch: full runs on 77bc60e, 5cfa72a and 68498b3,
+unit by unit against the run before (only the rebased commits' units changed; the last one
+measured 51075 once tablespace and stats are counted from a subset run: a concurrent run
+dropped `regress_tblspace` on the reference mid-run, 165 units, and select_parallel 112 once
+differed on the reference's side, a Gather worker starting late: `loops=49`), then on 3fb95cb
+the crate tests and a 55-file subset run.
 
 | file | fixed units |
 |---|---|

@@ -994,6 +994,9 @@ pub(crate) fn lock_level_marks<'p>(p: &'p Plan, inner: bool, semi: &mut Vec<usiz
             let semi_join = matches!(kind, JoinKind::Semi | JoinKind::Anti);
             lock_level_marks(right, inner || semi_join, semi, copies);
         }
+        // (A semi join's inner side unique-ified: its HashAggregate / Unique carries the
+        // relations' ctids through, ungrouped.)
+        Plan::Distinct { input, on: None, .. } => lock_level_marks(input, true, semi, copies),
         _ => {}
     }
 }
@@ -3987,10 +3990,14 @@ impl Builder<'_, '_> {
                 // (Its reference name: the alias made unique, `*SELECT* 1_1` under a UNION
                 // ALL whose parent entry is `*SELECT* 1`.)
                 let alias = &self.refnames.get(&key).cloned().unwrap_or_else(|| alias.clone());
-                let c = match junk {
+                let mut c = match junk {
                     Some((pin, _)) => self.node(pin),
                     None => self.node(input),
                 };
+                // (Its level's LockRows returns its rows' marks, and so do the Limits over it.)
+                if self.o.verbose {
+                    lock_junk(&mut c.node);
+                }
                 let map: Vec<usize> = match junk {
                     Some((_, exprs)) => exprs
                         .iter()
@@ -4013,7 +4020,6 @@ impl Builder<'_, '_> {
                     };
                     self.subquery_order(&tmp, &map, &names, *sorted, needed.as_ref())
                 });
-                let mut c = c;
                 let alt = c.node.alt.take();
                 let child_cols = c.node.cols.clone();
                 let info = Arc::new((alias.clone(), cols.clone()));
@@ -7061,15 +7067,20 @@ impl Builder<'_, '_> {
                 }
                 let mut n = self.modify("Insert", t, &refname, &c.node);
                 self.check_option_subplans(&mut n, &ip.rules.view_checks, t, &refname);
-                if self.o.verbose && !returning.is_empty() {
+                // (RETURNING's sub-selects show without VERBOSE too: its list is shown to
+                // find them.)
+                if !returning.is_empty() {
                     let names = self.table_names(t, &refname);
                     // (The source is a range table entry of its own: columns qualified.)
                     let names: Vec<Name> = names.into_iter().map(|n| Name::same(n.full)).collect();
                     let names = old_new_names(names, ip.old_new.as_ref(), t);
-                    n.output = returning
+                    let out = returning
                         .iter()
                         .map(|e| self.show(&old_new_rows(e, ip.old_new.as_ref()), &names, Cx::Output))
                         .collect();
+                    if self.o.verbose {
+                        n.output = out;
+                    }
                 }
                 if let Some(oc) = &ip.on_conflict {
                     let names = self.table_names(t, &refname);
@@ -7120,6 +7131,17 @@ impl Builder<'_, '_> {
                     .map(|s| self.refname(s))
                     .or_else(|| self.refnames.get(&key).cloned())
                     .unwrap_or_else(|| up.alias.clone().unwrap_or_else(|| t.name.clone()));
+                // (The node computing the new values pays for their sub-selects, per row:
+                // its target list's cost_subplan, as a SELECT list's.)
+                if c.node.is_scan() || c.node.is_join() {
+                    let sets: Vec<Expr> = up.sets.iter().map(|(_, e)| e.clone()).collect();
+                    let (sp_startup, sp_per) = subplan_costs(&sets, self.ctx);
+                    c.node.startup_cost += sp_startup;
+                    c.node.total_cost += sp_startup + c.node.rows * sp_per;
+                    // (And for their operators, cost_qual_eval.)
+                    let per: f64 = sets.iter().map(costs::qual_cost).sum();
+                    c.node.total_cost += c.node.rows * per;
+                }
                 // A scan computes the new values, then the row's ctid.
                 if c.node.is_scan() {
                     let cat = self.ctx.catalog();
@@ -7134,8 +7156,6 @@ impl Builder<'_, '_> {
                         })
                         .sum();
                     c.node.width = w + 6;
-                    let ops: usize = up.sets.iter().map(|(_, e)| costs::ops(e)).sum();
-                    c.node.total_cost += c.node.rows * costs::CPU_OPERATOR_COST * ops as f64;
                     // VERBOSE: the new values (in column order), then the row's ctid.
                     if self.o.verbose && up.route.is_none() {
                         let mut sets: Vec<&(usize, Expr)> = up.sets.iter().collect();
@@ -7278,7 +7298,7 @@ impl Builder<'_, '_> {
                 let mut n = self.modify("Update", t, &refname, &c.node);
                 self.check_option_subplans(&mut n, &up.rules.view_checks, t, &refname);
                 self.returning(&mut n, &returning, t, &c.node);
-                if self.o.verbose && !returning.is_empty() {
+                if !returning.is_empty() {
                     let mut names = self.table_names(t, &refname);
                     if inherited {
                         names = names.into_iter().map(|n| Name::same(n.full)).collect();
@@ -7288,10 +7308,13 @@ impl Builder<'_, '_> {
                     names.extend(c.exported.iter().skip(t.columns.len()).cloned());
                     let names = old_new_names(names, up.old_new.as_ref(), t);
                     let cx = if up.old_new.is_some() { Cx::Upper } else { Cx::Output };
-                    n.output = returning
+                    let out = returning
                         .iter()
                         .map(|e| self.show(&old_new_rows(e, up.old_new.as_ref()), &names, cx))
                         .collect();
+                    if self.o.verbose {
+                        n.output = out;
+                    }
                 }
                 n.children.push(c.node.child("Outer"));
                 Built::passthrough(n, Vec::new())
@@ -7338,7 +7361,7 @@ impl Builder<'_, '_> {
                 }
                 let mut n = self.modify("Delete", t, &refname, &c.node);
                 self.returning(&mut n, &returning, t, &c.node);
-                if self.o.verbose && !returning.is_empty() {
+                if !returning.is_empty() {
                     let exported = if none_read {
                         let mut names: Vec<Name> = t
                             .columns
@@ -7357,10 +7380,13 @@ impl Builder<'_, '_> {
                     };
                     let names = old_new_names(exported, dp.old_new.as_ref(), t);
                     let cx = if dp.old_new.is_some() { Cx::Upper } else { Cx::Output };
-                    n.output = returning
+                    let out = returning
                         .iter()
                         .map(|e| self.show(&old_new_rows(e, dp.old_new.as_ref()), &names, cx))
                         .collect();
+                    if self.o.verbose {
+                        n.output = out;
+                    }
                 }
                 n.children.push(c.node.child("Outer"));
                 Built::passthrough(n, Vec::new())
@@ -8020,7 +8046,7 @@ impl Builder<'_, '_> {
         self.returning(&mut n, returning, pt, &child);
         // RETURNING over the first result relation's row (as the plan has it), then its
         // key, system columns and the other relations' columns.
-        if self.o.verbose && !returning.is_empty() {
+        if !returning.is_empty() {
             let r = all[0].1.clone();
             let mut names = qualified(&r);
             names.push(Name::same(format!("{}.ctid", quote_ident(&r))));
@@ -8034,10 +8060,13 @@ impl Builder<'_, '_> {
             names.extend(app.exported.iter().skip(skip).cloned());
             let names = old_new_names(names, old_new, pt);
             let cx = if old_new.is_some() { Cx::Upper } else { Cx::Output };
-            n.output = returning
+            let out = returning
                 .iter()
                 .map(|e| self.show(&old_new_rows(e, old_new), &names, cx))
                 .collect();
+            if self.o.verbose {
+                n.output = out;
+            }
         }
         n.details.push(Detail::Targets(targets));
         n.children.push(child.child("Outer"));
