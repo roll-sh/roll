@@ -128,6 +128,20 @@ function EndpointPanel({ view, className }: { view: StorageApiView; className?: 
             still apply once it is.
           </p>
         )}
+        {view.cdn_endpoint && (
+          <div className="space-y-1">
+            <p className="text-[12px] text-subtle">CDN</p>
+            <div className="flex items-center gap-1 rounded-lg border border-line bg-bg px-2.5 py-2">
+              <code className="min-w-0 flex-1 truncate font-mono text-[11px]">{view.cdn_endpoint}</code>
+              <CopyButton id="cdn" text={view.cdn_endpoint} copied={copied} onCopy={copy} />
+            </div>
+            <p className="text-[11px] text-subtle">
+              Public and signed downloads and resized images from Cloudflare&apos;s edge (buckets with the CDN on), purged on change.
+              Pass it as <span className="font-mono">cdnUrl</span> to <span className="font-mono">@roll/storage</span>; uploads and signed-in
+              requests stay on the endpoint above.
+            </p>
+          </div>
+        )}
         <div className="space-y-1">
           <p className="text-[12px] text-subtle">Project</p>
           <div className="flex items-center gap-1 rounded-lg border border-line bg-bg px-2.5 py-2">
@@ -144,7 +158,7 @@ function EndpointPanel({ view, className }: { view: StorageApiView; className?: 
 function QuickstartPanel({ view, className }: { view: StorageApiView; className?: string }) {
   const [client, setClient] = useState<DevApiClient>("@roll/storage");
   const { copied, copy } = useCopy();
-  const code = devApiSnippet(client, view.endpoint ?? "<endpoint>", view.anon_key);
+  const code = devApiSnippet(client, view.endpoint ?? "<endpoint>", view.anon_key, view.cdn_endpoint);
   return (
     <Panel title="Quickstart" className={className}>
       <div className="p-4">

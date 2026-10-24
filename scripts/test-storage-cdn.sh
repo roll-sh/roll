@@ -6,14 +6,17 @@
 #   Cloudflare API, usage reports (in process);
 # - crates/s3-server/tests/cdn_worker.rs: the Worker in workerd (Miniflare, in a node
 #   container on the host network) in front of roll: edge token checks, caching, purge on
-#   change, immutable and mutable URLs, cached egress.
+#   change, immutable and mutable URLs, cached egress;
+# - crates/s3-api/tests/render.rs: the developer API's image routes and its CDN origin checks;
+# - crates/s3-api/tests/cdn_worker.rs: the Worker in front of the developer API: its public and
+#   signed reads and renditions at the edge, tokens checked there, purges of renditions.
 #
 # Only runs when something CDN-related changed since the last green run; `--force` runs
 # regardless. Needs Docker and pnpm.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PATHS=(crates/s3-proto crates/s3-store crates/s3-server crates/s3-control apps/cdn-worker/src apps/cdn-worker/test
+PATHS=(crates/s3-proto crates/s3-store crates/s3-server crates/s3-control crates/s3-api crates/s3-image apps/cdn-worker/src apps/cdn-worker/test
        apps/cdn-worker/package.json apps/cdn-worker/wrangler.toml Cargo.toml Cargo.lock pnpm-lock.yaml scripts/test-storage-cdn.sh)
 STAMP=target/.test-storage-cdn.hash
 IMAGE=node:22-bookworm-slim
@@ -43,6 +46,8 @@ pnpm --filter @roll/cdn-worker typecheck
 pnpm --filter @roll/cdn-worker test
 cargo test -p s3-server --test cdn
 ROLL_CDN_REQUIRED=1 cargo test -p s3-server --test cdn_worker
+cargo test -p s3-api --test render
+ROLL_CDN_REQUIRED=1 cargo test -p s3-api --test cdn_worker
 
 mkdir -p target && echo "$hash" > "$STAMP"
 echo "storage-cdn: all green"

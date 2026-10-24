@@ -4,10 +4,13 @@
 # hostname routes to this Worker. Secrets (never in this file):
 #
 #   wrangler secret put ROLL_CDN_ORIGIN_SECRET   # shared with roll: sent as X-Roll-CDN-Auth
-#   wrangler secret put ROLL_CDN_JWT_SECRET      # HS256 key of signed-URL tokens (?token=)
+#   wrangler secret put ROLL_CDN_JWT_SECRET      # HS256 key of signed-URL tokens (?token=): the
+#                                                # storage API's is hex:<64 hex digits>
 #   wrangler secret put ROLL_CDN_JWT_ES256_JWK   # or: the ES256 public key, a JWK (JSON)
 #   wrangler secret put ROLL_CDN_PRESIGN_KEY_ID  # the access key roll presigns CDN URLs with
 #   wrangler secret put ROLL_CDN_PRESIGN_SECRET  # and its secret (SigV4 presigned URLs)
+#
+# `GET /v1/storage/cdn/worker?secrets=true` (or `roll storage cdn --worker`) prints them all.
 
 name = "roll-cdn"
 main = "src/index.ts"
@@ -18,6 +21,8 @@ compatibility_date = "2026-07-01"
 [vars]
 # roll's S3 endpoint (public reads and the website endpoint), as Cloudflare reaches it.
 ROLL_ORIGIN = "https://s3.example.com"
+# roll's storage developer API (Supabase-Storage-compatible, /storage/v1), for routes with `api`.
+ROLL_API_ORIGIN = "https://storage-api.example.com"
 # Seconds a mutable (/<bucket>/<key>) object stays at the edge when roll doesn't say; changes
 # are purged by roll anyway.
 ROLL_CDN_DEFAULT_TTL = "60"
@@ -29,18 +34,21 @@ ROLL_CDN_USAGE_FLUSH_MS = "10000"
 # Origin routing by path prefix (longest wins). Keep it the same as roll's CDN `routes`
 # (PATCH /v1/storage/cdn): roll purges every URL form these routes cache an object under.
 # `roll storage cdn --worker` prints the values roll expects. kind: s3 (/<bucket>/<key>),
-# immutable (/v/<version>/<bucket>/<key>, cached for a year), bucket-key
+# immutable (<prefix><version>/<bucket>/<key>, cached for a year, its query kept), bucket-key
 # (<prefix><bucket>/<key>, its non-credential query is part of the cache key), website
-# (<prefix><key> of the route's `bucket`, origin = its website endpoint). auth: any, public (credentials ignored) or
-# token (a signed token or presigned URL is required). origin overrides ROLL_ORIGIN;
-# forward_token sends ?token= on to the origin; cache = "none" never stores.
+# (<prefix><key> of the route's `bucket`, origin = its website endpoint), none (404 here).
+# auth: any, public (credentials ignored) or token (a signed token or presigned URL is
+# required). origin overrides ROLL_ORIGIN; api routes go to ROLL_API_ORIGIN; forward_token sends
+# ?token= on to the origin; vary_accept keys copies by WebP support; cache = "none" never stores.
 ROLL_ROUTES = '''
 [
-  { "prefix": "/", "kind": "s3", "auth": "any" },
-  { "prefix": "/v/", "kind": "immutable", "auth": "any" },
-  { "prefix": "/storage/v1/object/public/", "kind": "bucket-key", "auth": "public", "origin": "https://storage-api.example.com" },
-  { "prefix": "/storage/v1/object/sign/", "kind": "bucket-key", "auth": "token", "forward_token": true, "origin": "https://storage-api.example.com" },
-  { "prefix": "/storage/v1/render/image/public/", "kind": "bucket-key", "auth": "public", "origin": "https://storage-api.example.com" },
-  { "prefix": "/storage/v1/render/image/sign/", "kind": "bucket-key", "auth": "token", "forward_token": true, "origin": "https://storage-api.example.com" }
+  { "prefix": "/v/", "kind": "immutable" },
+  { "prefix": "/", "kind": "s3" },
+  { "prefix": "/storage/v1/", "kind": "none", "auth": "public", "api": true },
+  { "prefix": "/storage/v1/object/public/", "kind": "bucket-key", "auth": "public", "api": true },
+  { "prefix": "/storage/v1/object/sign/", "kind": "bucket-key", "auth": "token", "forward_token": true, "api": true },
+  { "prefix": "/storage/v1/render/image/public/", "kind": "bucket-key", "auth": "public", "api": true, "vary_accept": true },
+  { "prefix": "/storage/v1/render/image/sign/", "kind": "bucket-key", "auth": "token", "forward_token": true, "api": true, "vary_accept": true },
+  { "prefix": "/storage/v1/v/", "kind": "immutable", "auth": "public", "api": true }
 ]
 '''

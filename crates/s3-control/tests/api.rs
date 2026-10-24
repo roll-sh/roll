@@ -32,12 +32,14 @@ async fn start_with(store_cfg: impl FnOnce(&mut StoreConfig), control_cfg: impl 
     let s3 = format!("http://127.0.0.1:{}", s3_listener.local_addr().unwrap().port());
     let server = s3_server::Server::new(store.clone(), s3_server::Config { spool_dir: dir.path().to_path_buf(), ..Default::default() });
     let notifier = server.notifier.clone();
+    let srv = server.clone();
     tokio::spawn(async move { s3_server::serve(s3_listener, server).await.unwrap() });
 
     let mut cc = ControlConfig::local(s3.clone());
     control_cfg(&mut cc);
     let control = Control::new(store.clone(), cc).await.unwrap();
     control.set_notifier(notifier);
+    control.set_server(srv);
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://127.0.0.1:{}", api_listener.local_addr().unwrap().port());
     tokio::spawn(async move { axum::serve(api_listener, s3_control::api::router(control)).await.unwrap() });
@@ -1409,4 +1411,42 @@ async fn cdn_settings_urls_and_cached_egress() {
     let b = t.ok("PATCH", "/v1/storage/buckets/media", Some(json!({ "cdn": null }))).await;
     assert_eq!(b["cdn"]["enabled"], false);
     assert_eq!(b["public_url"], b["url"]);
+}
+
+/// The dashboard's image previews: small renditions, made like any other, not billed as
+/// transformations; and where the developer API serves a bucket's objects.
+#[tokio::test]
+async fn thumbnails_and_developer_api_urls() {
+    use image::ImageEncoder;
+    let t = start().await;
+    t.bucket("pics").await;
+    let img = image::RgbImage::from_fn(800, 400, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 0]));
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut jpeg).write_image(img.as_raw(), 800, 400, image::ExtendedColorType::Rgb8).unwrap();
+    t.upload("pics", "a b.jpg", &jpeg, &[("content-type", "image/jpeg")]).await;
+    t.upload("pics", "note.txt", b"text", &[("content-type", "text/plain")]).await;
+
+    let r = t.http.get(t.url("/v1/storage/buckets/pics/thumbnail?key=a%20b.jpg")).header("accept", "image/webp,*/*").send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers()["content-type"], "image/webp");
+    assert_eq!(r.headers()["cache-control"], "private, max-age=300");
+    let img = image::load_from_memory(&r.bytes().await.unwrap()).unwrap();
+    assert_eq!((img.width(), img.height()), (200, 100));
+    let r = t.http.get(t.url("/v1/storage/buckets/pics/thumbnail?key=a%20b.jpg&width=100")).send().await.unwrap();
+    assert_eq!(r.headers()["content-type"], "image/jpeg", "no WebP without Accept");
+    let b = t.store.bucket("pics").unwrap();
+    assert!(t.store.image_usage(Some(&b.id), "0000-00").unwrap().is_empty(), "previews aren't billed as transformations");
+    assert_eq!(t.err("GET", "/v1/storage/buckets/pics/thumbnail?key=note.txt", None).await, StatusCode::BAD_REQUEST);
+    assert_eq!(t.err("GET", "/v1/storage/buckets/pics/thumbnail?key=missing.jpg", None).await, StatusCode::NOT_FOUND);
+    assert_eq!(t.err("GET", "/v1/storage/buckets/pics/thumbnail", None).await, StatusCode::BAD_REQUEST);
+
+    // The developer API's URLs: none without its endpoint, the CDN's when the bucket has it on.
+    let v = t.ok("GET", "/v1/storage/buckets/pics", None).await;
+    assert_eq!(v["api_public_url"], Value::Null);
+    assert_eq!(v["api_cdn"], false);
+    t.ok("PATCH", "/v1/storage/cdn", Some(json!({ "base_url": "https://cdn.test/" }))).await;
+    let v = t.ok("PATCH", "/v1/storage/buckets/pics", Some(json!({ "public": true, "cdn": { "enabled": true, "mode": "mutable" } }))).await;
+    assert_eq!(v["api_public_url"], "https://cdn.test/storage/v1/object/public/pics");
+    assert_eq!(v["api_cdn"], true);
+    assert_eq!(t.ok("GET", "/v1/storage/api", None).await["cdn_endpoint"], "https://cdn.test/storage/v1");
 }

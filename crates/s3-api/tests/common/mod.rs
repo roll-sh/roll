@@ -37,20 +37,31 @@ pub fn store_config(dir: &std::path::Path) -> StoreConfig {
 }
 
 pub async fn start() -> T {
+    start_with(|_| {}).await
+}
+
+/// A server whose S3 server configuration `f` changes.
+pub async fn start_with(f: impl FnOnce(&mut s3_server::Config)) -> T {
     let dir = tempfile::tempdir().unwrap();
     let backend = s3_store::test_backend("s3-api").await;
-    start_on(dir, backend).await
+    start_on_with(dir, backend, f).await
 }
 
 /// A server over `dir`'s metadata and `backend` (again, after a "restart").
 pub async fn start_on(dir: tempfile::TempDir, backend: Arc<dyn Backend>) -> T {
+    start_on_with(dir, backend, |_| {}).await
+}
+
+pub async fn start_on_with(dir: tempfile::TempDir, backend: Arc<dyn Backend>, f: impl FnOnce(&mut s3_server::Config)) -> T {
     let store = Store::open(store_config(dir.path()), backend.clone()).await.unwrap();
     store.ensure_key(ACCESS, ACCESS_SECRET, "admin").await.unwrap();
     let account = store.default_account_id();
     let project = store.set_api_auth(&account, AuthUpdate { jwt_secret: Some(Some(Secret::new(SECRET))), ..Default::default() }).await.unwrap();
     let spool = dir.path().join("spool");
     std::fs::create_dir_all(&spool).unwrap();
-    let server = s3_server::Server::new(store.clone(), s3_server::Config { spool_dir: spool.clone(), ..Default::default() });
+    let mut cfg = s3_server::Config { spool_dir: spool.clone(), ..Default::default() };
+    f(&mut cfg);
+    let server = s3_server::Server::new(store.clone(), cfg);
     let api = s3_api::Api::new(server.clone(), s3_api::Config { spool_dir: spool, sweep_interval: None, ..Default::default() });
     let s3l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let apil = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -93,6 +104,22 @@ pub fn user_token(sub: &str, extra: Value) -> String {
         }
     }
     s3_store::api::jwt::sign_hs256(SECRET.as_bytes(), &claims)
+}
+
+/// A `w`×`h` JPEG.
+pub fn jpeg(w: u32, h: u32) -> Vec<u8> {
+    use image::ImageEncoder;
+    let img = image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8]));
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90).write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgb8).unwrap();
+    out
+}
+
+/// An image's format and size.
+pub fn image_of(bytes: &[u8]) -> (image::ImageFormat, u32, u32) {
+    let f = image::guess_format(bytes).unwrap();
+    let img = image::load_from_memory_with_format(bytes, f).unwrap();
+    (f, img.width(), img.height())
 }
 
 pub fn now_s() -> i64 {

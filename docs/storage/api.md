@@ -64,12 +64,24 @@ import { createClient } from "@roll/storage";
 const storage = createClient("http://127.0.0.1:59001/storage/v1", ANON_KEY, {
   // A user's JWT (or a function returning one, resolved per request). Defaults to the key.
   accessToken: async () => (await auth.getSession()).data.session?.access_token ?? null,
+  // Optional: the CDN in front of the API (the deployment's CDN base URL).
+  cdnUrl: "https://cdn.example.com",
 });
 
 await storage.from("avatars").upload(`${userId}/avatar.png`, file, { contentType: "image/png", upsert: true });
 const { data } = await storage.from("avatars").createSignedUrl(`${userId}/avatar.png`, 3600);
 
+// Image transformations, exactly as storage-js does them
+await storage.from("avatars").createSignedUrl(`${userId}/avatar.png`, 3600, { transform: { width: 200, height: 200 } });
+await storage.from("avatars").download(`${userId}/avatar.png`, { transform: { width: 64, format: "origin" } });
+storage.from("public-media").getPublicUrl("hero.jpg", { transform: { width: 1200, quality: 70 } });
+
+// Through the CDN (with cdnUrl): public and transformed URLs, and any API URL the CDN serves
+storage.getPublicUrl("public-media", "hero.jpg", { transform: { width: 1200 } }); // https://cdn.example.com/storage/v1/render/image/public/...
+storage.cdn(data.signedUrl);                                                      // the signed URL, from the edge
+
 // roll's extras: all return { data, error }, like storage-js
+await storage.roll.publicUrl("public-media", "hero.jpg", { immutable: true, transform: { width: 400 } });
 await storage.roll.versions("avatars", { prefix: `${userId}/`, limit: 100, cursor: null });
 await storage.roll.trash("avatars");
 await storage.roll.restore("avatars", `${userId}/avatar.png`, item.deleted_at);
@@ -258,7 +270,11 @@ Folder = { name, id: null, updated_at: null, created_at: null, last_accessed_at:
   signed with a key derived from the deployment's key and bound to its path and scope. A
   download token without a scope (Supabase's older format) is accepted for downloads only.
 - An upload through a signed URL belongs to the signer (`owner` in the token).
-- `transform` in the body makes the URL a `/render/image/sign/...` URL (501 for now).
+- `transform` in the body (`{width, height, resize, quality, format}`, checked like the render
+  route's query) makes the URL a `/render/image/sign/...` URL whose token binds the
+  transformation: a `transformations` claim in Supabase's `name:value,…` form
+  (`width:200,height:100,resize:contain`), only what was given. An empty `transform` (or
+  `width: 0`) signs a plain URL. See [Image transformations](#image-transformations).
 
 ### Resumable uploads (TUS 1.0)
 
@@ -291,11 +307,85 @@ Folder = { name, id: null, updated_at: null, created_at: null, last_accessed_at:
 
 ### Image transformations
 
-`GET /render/image/{public|authenticated|sign}/{bucket}/{key}?width=&height=&resize=cover|contain|fill&quality=&format=origin|avif|webp`
+| route | auth | query | answer |
+|---|---|---|---|
+| `GET\|HEAD /render/image/public/{bucket}/{key}` | none (the bucket's public flag or policy) | the options, `download`, `cacheNonce` | the image |
+| `GET\|HEAD /render/image/authenticated/{bucket}/{key}` | key or user token (`s3:GetObject`) | the options, `versionId`, `download` | the image |
+| `GET\|HEAD /render/image/sign/{bucket}/{key}` | `?token=` from `POST /object/sign` with `transform` | `download` | the image (with `Expires`) |
+| `GET\|HEAD /v/{token}/{bucket}/{key}` | none (public) | the options, optional | the object or its rendition, immutable |
 
-The routes are reserved, and their parameters and auth are checked (width and height 1–2500,
-quality 20–100, a signed render URL's token). The transform itself answers a real
-`501 NotImplemented` until the image engine is wired in.
+storage-js's `getPublicUrl(path, { transform })`, `download(path, { transform })` and
+`createSignedUrl(path, expiresIn, { transform })` use them unchanged.
+
+- **Options** (Supabase's): `width` and `height` 1–2500 px (`0` or empty: not given), `resize`
+  `cover` (default: fill the box, crop the overflow), `contain` (fit inside) or `fill` (stretch),
+  `quality` 20–100 (80; PNG is lossless). `format`: none means **WebP when the client's `Accept`
+  lists it**, else the source's format (`Vary: Accept`), as Supabase optimizes; `origin` keeps
+  the source's format; roll also converts to `webp`, `avif`, `jpeg` and `png`. Bad options are
+  `400 InvalidRequest`. Sources: JPEG, PNG, WebP and GIF (animated ones pass through unchanged
+  unless a format is asked for).
+- **Authorization** is the matching object route's, through the one evaluator: `public` is the
+  anonymous requester (a private bucket is `404 NoSuchBucket`), `authenticated` the caller's key
+  or token and the bucket's rules (an object the caller can't read is `404 NoSuchKey`), `sign`
+  only the token.
+- **Signed renditions** take their transformation from the token. The URL's query may repeat it
+  but not change it (`400 InvalidSignature`); a token edited to ask for another one fails its
+  signature (`InvalidJWT`). A rendition's token doesn't open the original at `/object/sign`, and a
+  plain token at `/render/image/sign` renders the original (no options).
+- **Answers**: `Content-Type` of the output; an `ETag` of the source blob and the
+  transformation (`If-None-Match` answers 304); `Cache-Control` the object's own (an hour when it
+  has none; a year and `immutable` for a named version or an immutable URL);
+  `x-roll-transform-cache: hit | miss`.
+- **Limits** are the renderer's: sources up to 25 MiB, bounded pixels
+  and time, at most `ROLL_S3_IMAGE_CONCURRENCY` at once (a request waits up to 10 s, then gets
+  `503 SlowDown`). Objects encrypted with SSE-C can't be transformed (roll never holds their
+  keys): `400 InvalidImage`, like an object that isn't an image.
+- **Caching**: each rendition is made once per source blob and transformation and kept as a
+  derived image, so the same URL again is a cache read. An overwrite is a new blob: new
+  renditions, never a stale one.
+- **Metering**: a class B request and its egress, like a download (Requester Pays as on S3:
+  anonymous requests to a Requester Pays bucket are refused); each source image counts once a
+  month however many renditions are made ([pricing](pricing.md#image-transformations)).
+- **Immutable URLs** (`/v/<token>/<bucket>/<key>`, `token` = 20 hex digits naming the object's
+  blob) only serve the object while it's that blob (`404` once it's overwritten or deleted), with
+  `Cache-Control: public, max-age=31536000, immutable`; with options they serve that blob's
+  rendition. Get one from `POST /roll/url/{bucket}` (below).
+
+### CDN
+
+With the deployment's CDN on (Cloudflare and the Worker in `apps/cdn-worker`, see
+[architecture](architecture.md#cdn-cloudflare)) and a bucket's `cdn.enabled`, these API routes
+are served from the edge at `<CDN>/storage/v1/...`:
+
+| route at the edge | edge check | cached as |
+|---|---|---|
+| `object/public/{bucket}/{key}` | none (anonymous at the origin; credentials ignored) | path + query |
+| `object/sign/{bucket}/{key}?token=` | the token's signature, `url`, `exp` | path + query without the token, + the token's `versionId`, private namespace |
+| `render/image/public/{bucket}/{key}?…` | none | path + query + whether the client accepts WebP |
+| `render/image/sign/{bucket}/{key}?token=` | the token | path + query without the token, + its `transformations`, + WebP support, private namespace |
+| `v/{token}/{bucket}/{key}[?…]` | none | path + query (+ WebP support with options), a year |
+| anything else under `/storage/v1/` | — | not served: `404` at the edge |
+
+- **Authenticated requests never touch the edge.** `object/authenticated`,
+  `render/image/authenticated`, uploads, lists and every other route stay on the API's own URL;
+  the CDN answers them 404, and the origin refuses CDN requests for them too.
+- **Tokens are checked at the edge** with the API's signed-URL key (published to the Worker as
+  `ROLL_CDN_JWT_SECRET`, `hex:<64 hex digits>`): a bad, expired or other object's token is 403
+  there and never reaches roll. The origin checks it again.
+- **The origin** is this API, reached with `X-Roll-CDN-Auth` (the shared secret, or 403). Such a
+  request is anonymous or token-only (an `apikey` or `Authorization` is dropped, so a copy never
+  depends on who first asked), only for the routes above, only for buckets with the CDN on; its
+  bytes are an origin pull, not egress, and the response carries the edge's TTL
+  (`CDN-Cache-Control: public, max-age=<mutable_ttl_s>`, or a year for `/v/`).
+- **Changes are purged** through any API (S3, this one, TUS, the control plane): the object's
+  `rk-` cache tag, which every cached copy carries, so every rendition, token and `Accept`
+  variant goes at once. Immutable URLs don't need it (a new version is a new URL), but a delete
+  purges them too.
+- **Cached egress** is what the edge served, reported per bucket by the Worker and billed at the
+  CDN rate.
+
+`@roll/storage`'s `cdnUrl` option makes `getPublicUrl` hand out the CDN's URLs, and
+`storage.cdn(url)` moves any API URL the CDN serves (a signed URL from `createSignedUrl`) onto it.
 
 ### roll extras (`/roll/...`)
 
@@ -310,8 +400,13 @@ quality 20–100, a signed render URL's token). The transform itself answers a r
 | `PUT /roll/policy/{bucket}` | service | the policy document (≤ 20 KB) | `{message}` |
 | `DELETE /roll/policy/{bucket}` | service | | `{message}` |
 | `POST /roll/rules/{bucket}` | service | `{preset}` | `{policy}` (the policy it set) |
+| `POST /roll/url/{bucket}` | `s3:GetObject` on the path | `{path, transform?, immutable?}` | `{publicUrl, cdn, immutable}` |
 
 - `deleted_at` and `expires_at` are Unix ms.
+- `/roll/url` is the public URL to hand out for an object: the CDN's when the bucket has it on
+  (else this API's), a rendition's with `transform`, and with `immutable` (default: the bucket's
+  CDN mode) a `/v/<token>/…` URL of the object's current version. It works for anyone when the
+  bucket is public.
 - Policies are checked as `PutBucketPolicy` checks them. Bad ones are `MalformedPolicy`.
 
 ### Utility
@@ -333,7 +428,7 @@ Errors have Supabase's shape:
 - **Client errors are HTTP 400.** The body's `statusCode` carries the real status, which is
   where storage-js reads it from (`error.statusCode`).
 - **Server errors** use their real status: 500 `InternalError`, 503 `ServiceUnavailable`.
-- **TUS answers** use the real status. So do 304, 416 and the renderer's 501.
+- **TUS answers** use the real status. So do 304 and 416.
 - HEAD responses have no body.
 
 | `statusCode` | `code` | when |
@@ -609,13 +704,15 @@ This API meters like the S3 API (`s3-server`'s `Meter`), per bucket:
 - **class A:** uploads (each upload, and each TUS request that carries bytes), lists, copies,
   moves, bucket creates and updates, branch creation, policy writes, trash and version lists,
   and restores
-- **class B:** downloads, `info`, and signing download or upload URLs
+- **class B:** downloads, renders, `info`, public URLs, and signing download or upload URLs
 - **free:** deletes
 - **bytes in:** uploaded bytes
-- **egress:** downloaded bytes, counted as **internal** when the peer is inside roll
-  (`ROLL_S3_INTERNAL_CIDRS`) and as **internet** otherwise
+- **egress:** downloaded and rendered bytes, counted as **internal** when the peer is inside
+  roll (`ROLL_S3_INTERNAL_CIDRS`) and as **internet** otherwise; bytes the CDN fetched are origin
+  pulls (not billed), and what the edge serves is **cached egress**
+- **image transformations:** each source image once a month per bucket, however many renditions
 
-Prices are the S3 API's ([pricing](README.md#pricing)).
+Prices are the S3 API's ([pricing](pricing.md)).
 
 ## Control plane and dashboard
 
@@ -625,7 +722,7 @@ one account, as everywhere else there.
 
 ```text
 GET    /v1/storage/api
-  → { account_id, endpoint, anon_key, service_key, key_generation, keys_issued_at,
+  → { account_id, endpoint, cdn_endpoint /* <CDN>/storage/v1, when it's routed */, anon_key, service_key, key_generation, keys_issued_at,
       auth: { jwt_secret_set, jwt_issuer, jwt_audience, oidc: [OidcProvider] },
       presets: [{ id, name, description }] }
 POST   /v1/storage/api/keys/rotate                         → the same view, new keys
@@ -642,11 +739,17 @@ PATCH  /v1/storage/buckets/{name}  { …, file_size_limit?: number | string | nu
 - `/v1/storage/api` and its key and auth routes are the operator's. A signed-in IAM user gets
   403 `OperatorOnly`. The rules routes are authorized as `s3:GetBucketPolicy` and
   `s3:PutBucketPolicy` on the bucket.
-- `Bucket` includes `file_size_limit` and `allowed_mime_types`.
-- The dashboard's **Storage → API** page (`/dashboard/storage/-/api`) shows the endpoint, a
-  quickstart for `@roll/storage` and storage-js, and the keys (masked, copyable, rotatable). It
-  also sets the JWT secret and OIDC issuers and applies rule presets to buckets. Each bucket's
-  settings have an **Upload limits** panel.
+- `Bucket` includes `file_size_limit`, `allowed_mime_types`, and `api_public_url` (where this
+  API serves the bucket's public objects, the CDN's when `api_cdn`).
+- `GET /v1/storage/buckets/{name}/thumbnail?key=&width=200` is a small rendition for the
+  dashboard's previews (WebP when the browser takes it; `s3:GetObject` for signed-in users). It's
+  made and cached like any rendition, metered as a request, and not counted as a transformation.
+- The dashboard's **Storage → API** page (`/dashboard/storage/-/api`) shows the endpoint, the CDN
+  endpoint when there is one, a quickstart for `@roll/storage` and storage-js, and the keys
+  (masked, copyable, rotatable). It also sets the JWT secret and OIDC issuers and applies rule
+  presets to buckets. Each bucket's settings have an **Upload limits** panel, its **Connect** tab
+  shows the API's (or CDN's) URL for its objects, and the object browser previews images with a
+  200 px rendition.
 
 ## Migrating from Supabase Storage
 
@@ -807,9 +910,11 @@ PATCH  /v1/storage/buckets/{name}  { …, file_size_limit?: number | string | nu
   `recover_days`. It answers once the bucket is empty or after 10 s, whichever comes first, and
   keeps going in the background. Deletes in general go to the trash too, and trashed bytes are
   billed as storage.
-- **Image transformations answer 501** until the image engine is wired in. That covers
-  `/render/image/...`, and `createSignedUrl` with `transform` makes such URLs.
-- **There are no `/cdn` purge routes,** and the API doesn't serve S3 under `/storage/v1/s3`.
+- **Image transformations** convert to more formats (`webp`, `avif`, `jpeg`, `png` besides
+  `origin`), and a signed rendition's query can't change its transformation (Supabase ignores
+  the query; roll refuses a different one). A rendition's token doesn't download the original.
+- **The CDN purges itself** on every change (any API); there are no `/cdn` purge routes
+  (`purgeCache` answers 404), and the API doesn't serve S3 under `/storage/v1/s3`.
   roll's S3 API is its own listener (`:59000`).
 - **Analytics (Iceberg) and vector buckets aren't supported.** A `type` other than `STANDARD` is
   409 `FeatureNotEnabled`.

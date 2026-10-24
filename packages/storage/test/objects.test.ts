@@ -169,10 +169,11 @@ describe("objects", { skip, concurrency: true }, () => {
     fails(await env.anon.from(priv).download("x.txt"), "404", "anon reading a private object");
   });
 
-  it("image transformations aren't supported", async () => {
+  it("a transformed download of something that isn't an image", async () => {
     const pub = await env.bucket({ public: true });
     const files = env.service.from(pub);
     ok(await files.upload("p.png", new Uint8Array([0x89, 0x50, 0x4e, 0x47]), { contentType: "image/png" }));
-    fails(await files.download("p.png", { transform: { width: 10, height: 10 } }), "501", "a transformed download");
+    // Transformations work (render.test.ts); a broken image is a 400.
+    fails(await files.download("p.png", { transform: { width: 10, height: 10 } }), "400", "a transformed download");
   });
 });

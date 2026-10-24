@@ -253,6 +253,12 @@ export interface Bucket {
   cdn?: { enabled: boolean; mode: "mutable" | "immutable" };
   /** Where the bucket's objects are public: the CDN's base when it's on, else `url`. */
   public_url?: string;
+  /**
+   * Where the developer API serves the bucket's public objects (`<url>/<key>`; image renditions
+   * under `render/image/public/`), through the CDN when `api_cdn`; `null` when the API isn't served.
+   */
+  api_public_url?: string | null;
+  api_cdn?: boolean;
   tags: Record<string, string>;
   website: WebsiteConfig | null;
   /** `<scheme>://<bucket>.<website domain>`, when the deployment has one and the bucket a website. */
@@ -342,6 +348,8 @@ export interface StorageApiView {
   account_id: string;
   /** e.g. `http://host:59001/storage/v1`; `null` when the API listener isn't running. */
   endpoint: string | null;
+  /** The API's public and signed reads (and image renditions) through the CDN: `<CDN>/storage/v1`. */
+  cdn_endpoint?: string | null;
   /** Public: safe in browsers; requests act as `anon` unless a user token is sent. */
   anon_key: string;
   /** Secret: full access, for servers only. */
@@ -605,6 +613,9 @@ export const storageApi = {
   /** Direct link to the bytes (served with `Content-Disposition: attachment`). */
   downloadUrl: (name: string, key: string, versionId?: string | null) =>
     `${ROLL_API}${bucket(name)}/download${q({ key, version_id: versionId, ...accountQuery() })}`,
+  /** A small rendition of an image (WebP when the browser takes it), for previews. */
+  thumbnailUrl: (name: string, key: string, width = 200, versionId?: string | null) =>
+    `${ROLL_API}${bucket(name)}/thumbnail${q({ key, width, version_id: versionId, ...accountQuery() })}`,
   presign: (name: string, key: string, method: "GET" | "PUT" = "GET", expires_s = 3600) =>
     call<{ url: string; method: string; expires_at: number }>("POST", `${bucket(name)}/presign`, { key, method, expires_s }),
 
@@ -1243,10 +1254,21 @@ export const DEV_API_CLIENTS = ["@roll/storage", "@supabase/storage-js"] as cons
 export type DevApiClient = (typeof DEV_API_CLIENTS)[number];
 
 /** Quickstart code for a developer-API client. */
-export function devApiSnippet(client: DevApiClient, endpoint: string, anonKey: string): string {
+export function devApiSnippet(client: DevApiClient, endpoint: string, anonKey: string, cdnEndpoint?: string | null): string {
   const upload = "const { data, error } = await storage.from('avatars').upload('public/avatar.png', file)";
   if (client === "@roll/storage") {
-    return ["import { createClient } from '@roll/storage'", "", `const storage = createClient('${endpoint}', '${anonKey}')`, "", upload].join("\n");
+    const cdn = cdnEndpoint?.replace(/\/storage\/v1\/?$/, "");
+    const create = cdn ? `createClient('${endpoint}', '${anonKey}', { cdnUrl: '${cdn}' })` : `createClient('${endpoint}', '${anonKey}')`;
+    return [
+      "import { createClient } from '@roll/storage'",
+      "",
+      `const storage = ${create}`,
+      "",
+      upload,
+      "",
+      `// A 200 px thumbnail${cdn ? " from the CDN" : ""}`,
+      "const { data: thumb } = storage.getPublicUrl('avatars', 'public/avatar.png', { transform: { width: 200 } })",
+    ].join("\n");
   }
   return [
     "import { StorageClient } from '@supabase/storage-js'",

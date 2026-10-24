@@ -74,16 +74,22 @@ struct SignBody {
     version_id: Option<String>,
 }
 
-/// The transformations a signed render URL carries (Supabase's `transformations` claim).
-fn transformations(t: &Map<String, Value>) -> String {
-    let mut out = Vec::new();
-    for (k, name) in [("width", "width"), ("height", "height"), ("resize", "resize"), ("quality", "quality"), ("format", "format")] {
-        if let Some(v) = t.get(k).filter(|v| !v.is_null()) {
-            let s = v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
-            out.push(format!("{name}:{s}"));
+/// The transformation a signed render URL carries (Supabase's `transformations` claim): the
+/// request's `transform` checked as the render route checks its query, in canonical form
+/// (`width:200,height:100,resize:contain,quality:70,format:webp`, only what was given). Empty:
+/// no transformation (a plain signed URL).
+fn transformations(t: &Map<String, Value>) -> ApiResult<String> {
+    let mut pairs = Vec::new();
+    for k in ["width", "height", "resize", "quality", "format"] {
+        match t.get(k) {
+            None | Some(Value::Null) => {}
+            Some(Value::String(s)) => pairs.push((k, s.clone())),
+            Some(v @ Value::Number(_)) => pairs.push((k, v.to_string())),
+            Some(_) => return Err(ApiError::invalid(format!("transform.{k} must be a number or a string"))),
         }
     }
-    out.join(",")
+    let p = s3_image::Params::from_query(pairs.iter().map(|(k, v)| (*k, v.as_str()))).map_err(|e| ApiError::invalid(format!("transform: {e}")))?;
+    Ok(crate::render::spec(&p))
 }
 
 /// `POST /object/sign/{bucket}/{key}`: `{"signedURL": "/object/sign/<bucket>/<key>?token=…"}`.
@@ -98,7 +104,7 @@ pub(crate) async fn sign(r: &Req, rest: &str, body: Body) -> ApiResult<Response>
     r.store().meter.request(&b.id, Class::B);
     let url = format!("{}/{key}", b.name);
     let mut claims = Map::new();
-    let render = q.transform.as_ref().map(transformations).filter(|t| !t.is_empty());
+    let render = q.transform.as_ref().map(transformations).transpose()?.filter(|t| !t.is_empty());
     if let Some(t) = &render {
         claims.insert("transformations".into(), json!(t));
     }
@@ -159,7 +165,12 @@ pub(crate) async fn signed_download(r: &Req, rest: &str) -> ApiResult<Response> 
     let (bucket, key) = object_path(rest)?;
     let token = r.q("token").filter(|t| !t.is_empty()).ok_or_else(|| ApiError::missing("token"))?;
     let claims = verify_token(r, token, &format!("{bucket}/{key}"), DOWNLOAD).await?;
+    // A rendition's token opens the rendition, never the original.
+    if claims.get("transformations").and_then(Value::as_str).is_some_and(|t| !t.is_empty()) {
+        return Err(ApiError::invalid_signature("This token is for a transformed image: use it with /render/image/sign"));
+    }
     let b = r.store().bucket(&bucket)?;
+    r.cdn_allows(&b)?;
     let version = claims.get("versionId").and_then(Value::as_str);
     let meta = r.store().get_object_version(&b.name, &key, version)?;
     let exp = claims.get("exp").and_then(Value::as_i64);

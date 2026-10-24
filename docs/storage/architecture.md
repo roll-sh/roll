@@ -732,9 +732,24 @@ and `s3-store/src/cdn.rs`.
 - **Routes by path prefix** (the Worker's `ROLL_ROUTES`, the same list as the deployment's
   `routes`): `s3` (`/<bucket>/<key>`, S3 GET semantics), `immutable`
   (`/v/<token>/<bucket>/<key>`), `bucket-key` (`<prefix><bucket>/<key>` of another API, e.g. the
-  storage REST API's `/storage/v1/object/public/`), and `website` (`<prefix><key>` of one
-  bucket's website endpoint). Each route can have its own origin, so new public read APIs plug
-  in by adding a route.
+  storage REST API's `/storage/v1/object/public/`), `website` (`<prefix><key>` of one
+  bucket's website endpoint), and `none` (404 at the edge). Each route can have its own origin,
+  so new public read APIs plug in by adding a route. Immutable routes keep a transformation's
+  query in the cache key (a rendition of that one blob; the developer API's keep their whole
+  query), and pass anything else uncached.
+- **The developer API behind the CDN.** The default routes include its reads (`api: true`, origin
+  `ROLL_API_ORIGIN`): `/storage/v1/object/public/`, `/object/sign/`, `/render/image/public/`,
+  `/render/image/sign/` and `/v/` (immutable), and `/storage/v1/` itself as `none`, so
+  authenticated requests (a user's JWT), uploads and lists never touch the edge. Signed-URL
+  tokens are checked at the edge with the API's signed-URL key (`ROLL_CDN_JWT_SECRET`,
+  `hex:…`), and what a valid one binds besides its object (a rendition's `transformations`, a
+  `versionId`) is part of the cache key (internal `roll-cdn-*` parameters, which clients can't
+  set). Rendition routes (`vary_accept`) and any request asking for a transformation are keyed
+  by whether the client accepts WebP, and the origin sees only that as `Accept` (Cloudflare's
+  cache ignores `Vary`). At the origin (`s3-api`), a request with the shared secret is
+  anonymous or token-only (its `apikey` and `Authorization` are dropped), allowed only on
+  those routes and for buckets with the CDN on, metered as an origin pull, and answered with
+  the edge's TTL (`s3_server::cdn::cache_headers`).
 - **Edge checks.** Public objects pass. Signed URLs are verified at the edge, so a cached
   private object is never served without a valid one: SigV4 presigned URLs made with the CDN
   presigning key (`RKROLLCDNPRESIGN0000`, its secret published to the Worker as
@@ -755,7 +770,10 @@ and `s3-store/src/cdn.rs`.
   serve the object whose current blob the token names, with
   `Cache-Control: public, max-age=31536000, immutable`. Overwriting or deleting the object makes
   the URL 404 at the origin; copies already at the edge go with a tag purge, but browsers keep
-  them for a year, so they're for content that never needs unpublishing quickly.
+  them for a year, so they're for content that never needs unpublishing quickly. With
+  `?x-roll-transform=` (or the developer API's options) such a URL serves a rendition of exactly
+  that blob (`RenderRequest::expect_blob`), and through the CDN the S3 extension checks the
+  bucket's CDN setting and the token like a plain GET.
 - **Purge on change** ("Smart CDN"). A change to an object of a bucket with the CDN on (a new
   version, a delete or delete marker, an ACL change, lifecycle expiration, a trash restore)
   queues a `cdn_purge` row in the outbox in the same transaction (`events::emit`); so do changes
@@ -767,6 +785,17 @@ and `s3-store/src/cdn.rs`.
   matching `website` route, public and credentialed namespaces); `purge: tags` purges its
   `rk-<hash>` cache tag, which covers immutable URLs too. A bucket-wide purge sends its
   `rb-<hash>` tag and route prefixes.
+- **Renditions and other variants are purged by tag.** The developer API's copies vary with the
+  transformation, a token's bound claims, `?download=` and WebP support: URLs nobody can list.
+  So whenever the routes include the API's, an object's purge also sends its `rk-` tag, which
+  every copy carries, whatever the `purge` mode (Cloudflare purges by tag on every plan). The
+  alternative, putting the source's blob in every derived URL so it never needs purging, can't
+  work for the URLs storage-js builds client-side (`getPublicUrl` with `transform`) or for signed
+  URLs (Supabase's keep serving the current object), so it's offered as an option instead:
+  immutable URLs (`/storage/v1/v/<token>/<bucket>/<key>?width=…`, from `POST /roll/url`) name the
+  blob, are cached for a year and never go stale; a delete still purges them by tag. Overwrites,
+  deletes and restores through any path (S3, the developer API, TUS, the control plane) queue
+  the purge in the store's own transaction, so there's nothing per-API to forget.
 - **Usage.** The Worker counts bytes served per bucket and posts them to
   `POST /_roll/cdn/usage` (on the S3 port, with the shared secret) as
   `{"batch": <uuid>, "entries": [{"bucket", "bytes", "requests", "hits"}]}`; a failed batch is
@@ -1255,9 +1284,20 @@ the rules, the migration guide and the differences from Supabase are in [api.md]
   - An upload completes into one blob like any multipart upload.
 - **Metering** is the S3 API's `Meter`:
   - class A: uploads, lists, copies and bucket writes
-  - class B: reads and signing
+  - class B: reads, renders and signing
   - free: deletes
-  - plus bytes in and egress (internal or internet by the peer)
+  - plus bytes in and egress (internal or internet by the peer; an origin pull when the CDN
+    fetched it)
+- **Image transformations** (`s3-api/src/render.rs`): `/render/image/{public|authenticated|sign}`
+  authorize exactly like the matching object route (the anonymous requester, the caller through
+  the one evaluator, or a signed token), then call `s3_server::render::render`, which is
+  authorization-agnostic and does the rest: the derived-image cache, limits, SSE-C refusal,
+  metering and per-source billing. A signed rendition's token carries its transformation
+  (`transformations`, canonical `name:value` pairs), so the URL can't ask for another, and its
+  token doesn't open the original at `/object/sign`.
+- **Behind the CDN** (`s3-api/src/cdn.rs`): see [CDN](#cdn-cloudflare). Immutable URLs
+  (`/v/<token>/<bucket>/<key>[?<transformation>]`) serve one blob for a year; `POST /roll/url`
+  hands out the URL to use (the CDN's when the bucket has it on).
 
 ## Control-plane API (`s3-control`, `/v1/storage`)
 

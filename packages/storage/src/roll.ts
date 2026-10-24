@@ -46,6 +46,23 @@ export type PolicyDocument = Record<string, unknown>;
 
 export type RulesPreset = "public-read" | "authenticated-read" | "user-folders" | "owner-only";
 
+export interface PublicUrlRequest {
+  /** Transform the image: a rendition's URL. */
+  transform?: { width?: number; height?: number; resize?: "cover" | "contain" | "fill"; quality?: number; format?: "origin" | "webp" | "avif" | "jpeg" | "png" };
+  /**
+   * An immutable URL of the object's current version (`/storage/v1/v/<token>/…`): cached for a
+   * year, never stale (a new version is a new URL). Default: the bucket's CDN mode.
+   */
+  immutable?: boolean;
+}
+
+export interface PublicUrl {
+  publicUrl: string;
+  /** The URL is the CDN's (the bucket has it on). */
+  cdn: boolean;
+  immutable: boolean;
+}
+
 /** What the extras need from the client; read on every call so `setHeader` and friends apply. */
 export interface Connection {
   url: string;
@@ -92,6 +109,15 @@ export class RollApi {
 
   deletePolicy(bucket: string): Promise<Result<{ message: string }>> {
     return this.request("DELETE", `/roll/policy/${seg(bucket)}`);
+  }
+
+  /**
+   * The URL to hand out for an object (the caller must be able to read it): the CDN's when the
+   * bucket has it on, optionally immutable or of a transformed image. Public buckets' URLs work
+   * for anyone.
+   */
+  publicUrl(bucket: string, path: string, options: PublicUrlRequest = {}): Promise<Result<PublicUrl>> {
+    return this.request("POST", `/roll/url/${seg(bucket)}`, { path, ...options });
   }
 
   /** Replace the bucket's policy with a preset; returns the policy it wrote. */

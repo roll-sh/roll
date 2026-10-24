@@ -200,12 +200,14 @@ pub(crate) fn content_disposition(download: &str) -> String {
     format!("attachment; filename={fallback}; filename*=UTF-8''{}", s3_proto::http::uri_encode(download, true))
 }
 
-/// Counts bytes handed to the client, metered as egress when the response ends.
+/// Counts bytes handed to the client, metered as egress when the response ends (an origin pull
+/// when the CDN fetched them: the edge reports what it serves as cached egress).
 pub(crate) struct Metered {
     pub inner: ByteStream,
     pub store: Arc<Store>,
     pub bucket_id: String,
     pub internal: bool,
+    pub cdn: bool,
     pub sent: u64,
 }
 
@@ -223,7 +225,11 @@ impl Stream for Metered {
 
 impl Drop for Metered {
     fn drop(&mut self) {
-        self.store.meter.egress(&self.bucket_id, self.sent, self.internal);
+        if self.cdn {
+            self.store.meter.cdn_origin(&self.bucket_id, self.sent);
+        } else {
+            self.store.meter.egress(&self.bucket_id, self.sent, self.internal);
+        }
     }
 }
 

@@ -4,9 +4,14 @@
 //! `@supabase/storage-js` works against it unchanged (`<host>/storage/v1`): buckets, uploads
 //! (raw bodies and forms, `x-upsert`), downloads (public, authenticated, signed, ranges,
 //! `?download=`), object info, lists, moves, copies, deletes, signed download and upload URLs,
-//! TUS resumable uploads (`/upload/resumable`) and the image renderer's routes (`/render/image`,
-//! 501 until the transform engine is wired in, [`render::render_image`]). roll's extras (versions,
-//! the trash, branches, bucket policies and rule presets) are under `/roll/...`.
+//! TUS resumable uploads (`/upload/resumable`) and image transformations (`/render/image/{public|
+//! authenticated|sign}`, `render.rs`, over `s3_server::render`; signed URLs bind their
+//! transformation). roll's extras (versions, the trash, branches, bucket policies, rule presets
+//! and public URLs) are under `/roll/...`.
+//!
+//! - **CDN** (`cdn.rs`): Cloudflare's Worker fetches the public and signed reads with the
+//!   shared secret (anonymous or token-only; metered as origin pulls), and immutable URLs
+//!   (`/v/<token>/<bucket>/<key>`) serve one blob for a year.
 //!
 //! - **Auth** (`auth.rs`): `apikey` and `Authorization: Bearer`. A project (an account) has an
 //!   anon key and a service key (HS256 JWTs signed by a deployment key, [`s3_store::api`]); user
@@ -28,11 +33,12 @@
 
 mod auth;
 mod bucket;
+mod cdn;
 mod error;
 mod extras;
 mod form;
 mod object;
-pub mod render;
+mod render;
 mod req;
 mod sign;
 mod tus;

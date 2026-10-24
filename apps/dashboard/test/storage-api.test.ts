@@ -313,6 +313,15 @@ describe("storageApi requests", () => {
     assert.equal(url.hash, "");
   });
 
+  it("thumbnailUrl asks for a 200 px rendition", () => {
+    const url = new URL(storageApi.thumbnailUrl("pics", "a b/c #1.png"));
+    assert.equal(`${url.origin}${url.pathname}`, `${ROLL_API}/v1/storage/buckets/pics/thumbnail`);
+    assert.deepEqual(Object.fromEntries(url.searchParams), { key: "a b/c #1.png", width: "200" });
+    const v = new URL(storageApi.thumbnailUrl("pics", "k", 64, "7ffffe6b2c3d4e5fabcdefghijklmnop"));
+    assert.deepEqual(Object.fromEntries(v.searchParams), { key: "k", width: "64", version_id: "7ffffe6b2c3d4e5fabcdefghijklmnop" });
+    assert.equal(new URL(storageApi.thumbnailUrl("pics", "k", 200, "")).searchParams.has("version_id"), false);
+  });
+
   it("deleteObject returns what was deleted", async () => {
     const marker: DeletedObject = { deleted: "k", version_id: "7ffffe6b2c3d4e5fabcdefghijklmnop", delete_marker: true };
     assert.deepEqual((await one(() => storageApi.deleteObject("ver", "k"), marker)).result, marker);
@@ -1444,6 +1453,10 @@ describe("developer API and upload limits", () => {
     const roll = devApiSnippet("@roll/storage", "http://h/storage/v1", "ANON");
     assert.match(roll, /import \{ createClient \} from '@roll\/storage'/);
     assert.match(roll, /createClient\('http:\/\/h\/storage\/v1', 'ANON'\)/);
+    assert.match(roll, /getPublicUrl\('avatars', 'public\/avatar.png', \{ transform: \{ width: 200 \} \}\)/);
+    const cdn = devApiSnippet("@roll/storage", "http://h/storage/v1", "ANON", "https://cdn.example/storage/v1");
+    assert.match(cdn, /createClient\('http:\/\/h\/storage\/v1', 'ANON', \{ cdnUrl: 'https:\/\/cdn.example' \}\)/);
+    assert.match(cdn, /thumbnail from the CDN/);
     const supa = devApiSnippet("@supabase/storage-js", "http://h/storage/v1", "ANON");
     assert.match(supa, /new StorageClient\('http:\/\/h\/storage\/v1', \{/);
     assert.match(supa, /apikey: 'ANON'/);

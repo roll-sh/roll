@@ -56,22 +56,40 @@ impl Control {
         }))
     }
 
-    /// `cdn` and `public_url` of a bucket view.
+    /// `cdn` and `public_url` of a bucket view, and `api_public_url`: where the developer API
+    /// serves the bucket's public objects (`<url>/<key>`, image renditions under
+    /// `render/image/public/`), the CDN's when the bucket has it on.
     pub(crate) fn cdn_bucket_view(&self, b: &s3_store::Bucket, v: &mut Value) {
         let cdn = self.store.bucket_cdn(&b.name).ok().flatten().unwrap_or_default();
         v["cdn"] = json!(cdn);
-        let base = self.store.cdn_routing().ok().and_then(|s| s.base().map(str::to_string));
-        v["public_url"] = match base {
+        let routing = self.store.cdn_routing().ok();
+        let base = routing.as_ref().and_then(|s| s.base().map(str::to_string));
+        v["public_url"] = match &base {
             Some(base) if cdn.enabled => json!(format!("{base}/{}", b.name)),
             _ => v["url"].clone(),
         };
+        let api_on_cdn = cdn.enabled && routing.as_ref().is_some_and(|s| s.routes.iter().any(|r| r.api && r.kind == "bucket-key"));
+        let bucket = s3_proto::http::uri_encode(&b.name, true);
+        v["api_public_url"] = match (&base, self.api_endpoint.get()) {
+            (Some(base), _) if api_on_cdn => json!(format!("{base}{}object/public/{bucket}", s3_store::cdn::API_PREFIX)),
+            (_, Some(api)) => json!(format!("{}/object/public/{bucket}", api.trim_end_matches('/'))),
+            _ => Value::Null,
+        };
+        v["api_cdn"] = json!(api_on_cdn);
+    }
+
+    /// The developer API's base URL through the CDN (`<CDN>/storage/v1`), if it's routed there.
+    pub(crate) fn api_cdn_url(&self) -> Option<String> {
+        let s = self.store.cdn_routing().ok()?;
+        let base = s.base()?.to_string();
+        s.routes.iter().any(|r| r.api && r.kind != "none").then(|| format!("{base}{}", s3_store::cdn::API_PREFIX.trim_end_matches('/')))
     }
 }
 
 async fn show(State(c): State<AppState>) -> Result<Json<Value>> {
     let s = c.store.cdn_settings()?;
     let mut v = c.cdn_view(&s);
-    v["worker"] = s3_server::cdn::worker_env(&c.store, &c.cfg.endpoint, false).await?;
+    v["worker"] = s3_server::cdn::worker_env(&c.store, &c.cfg.endpoint, c.api_endpoint.get().map(String::as_str), false).await?;
     v["margin"] = c.cdn_margin(30)?;
     if let Some(server) = c.server.get() {
         v["stats"] = json!(server.cdn.stats());
@@ -94,7 +112,7 @@ struct WorkerQ {
 
 /// What to configure the Worker with; `?secrets=true` includes the presigning key's secret.
 async fn worker(State(c): State<AppState>, Query(q): Query<WorkerQ>) -> Result<Json<Value>> {
-    Ok(Json(s3_server::cdn::worker_env(&c.store, &c.cfg.endpoint, q.secrets).await?))
+    Ok(Json(s3_server::cdn::worker_env(&c.store, &c.cfg.endpoint, c.api_endpoint.get().map(String::as_str), q.secrets).await?))
 }
 
 #[derive(Deserialize)]

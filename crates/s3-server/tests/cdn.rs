@@ -348,6 +348,37 @@ async fn immutable_urls_serve_only_their_blob() {
 }
 
 #[tokio::test]
+async fn transformed_images_from_the_cdn_follow_its_rules() {
+    use image::ImageEncoder;
+    let (t, _s) = cdn_server(|_| {}).await;
+    settings(&t, CdnSettingsPatch { base_url: Some("https://cdn.test".into()), ..Default::default() }).await;
+    let img = image::RgbImage::from_fn(80, 40, |x, y| image::Rgb([x as u8, y as u8, 0]));
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut jpeg).write_image(img.as_raw(), 80, 40, image::ExtendedColorType::Rgb8).unwrap();
+    for b in ["pub", "off"] {
+        t.store.create_bucket(b, s3_store::BucketOptions { public: Some(true), ..Default::default() }).await.unwrap();
+        put(&t, b, "a.jpg", jpeg.clone()).await;
+    }
+    t.store.set_bucket_cdn("pub", Some(&BucketCdn { enabled: true, mode: CdnMode::Mutable })).await.unwrap();
+    let meta = t.store.get_object("pub", "a.jpg").unwrap();
+    let token = s3_store::cdn::immutable_token(&meta.blob_id);
+    let h = http();
+    let get = |path: String| h.get(format!("{}{path}?x-roll-transform=width%3A20%2Cformat%3Apng", t.endpoint)).header(SECRET_HEADER, ORIGIN_SECRET).send();
+    let r = get("/pub/a.jpg".into()).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["content-type"], "image/png");
+    assert_eq!(r.headers()["cdn-cache-control"], "public, max-age=60");
+    let r = get(format!("/v/{token}/pub/a.jpg")).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["cache-control"], "public, max-age=31536000, immutable");
+    // Only the blob the token names, and only buckets with the CDN on.
+    assert_eq!(get(format!("/v/{}/pub/a.jpg", "0".repeat(20))).await.unwrap().status(), 404);
+    assert_eq!(get("/off/a.jpg".into()).await.unwrap().status(), 403);
+    put(&t, "pub", "a.jpg", jpeg).await;
+    assert_eq!(get(format!("/v/{token}/pub/a.jpg")).await.unwrap().status(), 404);
+}
+
+#[tokio::test]
 async fn presigned_cdn_urls_are_checked_again_at_the_origin() {
     let (t, _s) = cdn_server(|_| {}).await;
     settings(&t, CdnSettingsPatch { base_url: Some("http://cdn.test:8787".into()), ..Default::default() }).await;
@@ -437,19 +468,26 @@ async fn changes_are_purged_through_the_outbox_in_batches_and_retried() {
     assert_eq!(t.store.events_backlog().unwrap(), 3, "one purge per change of a CDN bucket's object (tags don't change what's served)");
     drain(&s).await;
     let calls = cf.calls.lock().unwrap().clone();
-    assert!(calls.len() >= 4, "three batches of two, one failed and sent again: {calls:?}");
+    assert!(calls.len() >= 6, "three batches of two files and two of tags, one failed and sent again: {calls:?}");
     let mut purged = std::collections::BTreeSet::new();
+    let mut tags = std::collections::BTreeSet::new();
     for (i, (zone, auth, body)) in calls.iter().enumerate() {
         assert_eq!(zone, "zone1");
         assert_eq!(auth, "Bearer cf-token");
-        let files = body["files"].as_array().unwrap();
-        assert!(files.len() <= 2);
+        let (items, into) = match body.get("files") {
+            Some(f) => (f.as_array().unwrap(), &mut purged),
+            None => (body["tags"].as_array().unwrap(), &mut tags),
+        };
+        assert!(items.len() <= 2);
         if i > 0 {
-            purged.extend(files.iter().map(|f| f.as_str().unwrap().to_string()));
+            into.extend(items.iter().map(|f| f.as_str().unwrap().to_string()));
         }
     }
     let want: std::collections::BTreeSet<String> = ["a.png", "b%20c.png", "d.png"].iter().flat_map(|k| [format!("https://cdn.test/pics/{k}"), format!("https://cdn.test/pics/{k}?roll-cdn-ns=private")]).collect();
     assert_eq!(purged, want);
+    // The storage API's copies (transformations, tokens, Accept) go by the object's tag.
+    let want: std::collections::BTreeSet<String> = ["a.png", "b c.png", "d.png"].iter().map(|k| s3_store::cdn::object_tag("pics", k)).collect();
+    assert_eq!(tags, want);
     assert_eq!(s.cdn.stats().purge_failures, 1);
 
     // By tag: one tag per object, every URL form at once (immutable ones too).
@@ -469,7 +507,10 @@ async fn changes_are_purged_through_the_outbox_in_batches_and_retried() {
     let calls = cf.calls.lock().unwrap().clone();
     let bodies: Vec<&Value> = calls.iter().map(|c| &c.2).collect();
     assert!(bodies.contains(&&json!({ "tags": [s3_store::cdn::bucket_tag("pics")] })), "{bodies:?}");
-    assert!(bodies.contains(&&json!({ "prefixes": ["cdn.test/pics/"] })), "{bodies:?}");
+    let prefixes: Vec<&str> = bodies.iter().filter_map(|b| b.get("prefixes")).flat_map(|p| p.as_array().unwrap()).filter_map(Value::as_str).collect();
+    for p in ["cdn.test/pics/", "cdn.test/storage/v1/object/public/pics/", "cdn.test/storage/v1/render/image/sign/pics/"] {
+        assert!(prefixes.contains(&p), "{p}: {prefixes:?}");
+    }
 }
 
 #[tokio::test]
@@ -491,7 +532,7 @@ async fn purges_wait_for_a_token_and_vanish_without_a_cdn() {
     assert!(left[0].error.as_deref().unwrap().contains("API token"));
     settings(&t, CdnSettingsPatch { api_token: Some(s3_store::Secret::new("tok")), ..Default::default() }).await;
     drain(&s).await;
-    assert_eq!(cf.calls.lock().unwrap().len(), 1);
+    assert_eq!(cf.calls.lock().unwrap().len(), 2, "the S3 routes' URLs, and the developer API's copies by tag");
     // The token is sealed at rest and never shown.
     let shown = t.store.update_cdn_settings(Default::default()).await.unwrap();
     assert!(shown.api_token.is_none());

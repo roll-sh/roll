@@ -10,6 +10,8 @@
 import {
   type Route,
   type Target,
+  acceptsWebp,
+  asksTransform,
   cacheKey,
   cacheTags,
   credentialOf,
@@ -27,6 +29,8 @@ import {
 
 export interface Env {
   ROLL_ORIGIN: string;
+  /** The storage developer API (its routes have `api`), e.g. `https://storage-api.example.com`. */
+  ROLL_API_ORIGIN?: string;
   ROLL_CDN_ORIGIN_SECRET: string;
   ROLL_ROUTES?: string;
   ROLL_CDN_JWT_SECRET?: string;
@@ -55,7 +59,7 @@ function routes(env: Env): Route[] {
 }
 
 function origin(env: Env, route: Route): string {
-  return (route.origin ?? env.ROLL_ORIGIN ?? "").replace(/\/+$/, "");
+  return (route.origin ?? (route.api ? env.ROLL_API_ORIGIN : env.ROLL_ORIGIN) ?? "").replace(/\/+$/, "");
 }
 
 function num(v: string | undefined, dflt: number): number {
@@ -170,7 +174,7 @@ function forClient(r: Response, status: CacheStatus, opts: { head?: boolean; res
 
 function denied(route: Route | undefined, status: number, reason: string): Response {
   const h = { "x-roll-cdn-cache": "PASS" };
-  if (route?.kind === "bucket-key") {
+  if (route?.kind === "bucket-key" || route?.api) {
     return Response.json({ statusCode: String(status), error: status === 403 ? "Unauthorized" : "Error", message: reason }, { status, headers: h });
   }
   const code = status === 403 ? "AccessDenied" : status === 404 ? "NoSuchKey" : status === 405 ? "MethodNotAllowed" : "InvalidRequest";
@@ -266,9 +270,14 @@ function storable(r: Response, route: Route, env: Env): boolean {
   return !/\b(no-store|private)\b/.test(edge);
 }
 
-async function put(cache: Cache, key: string, copy: Response): Promise<void> {
+/** Test hooks only: what's stored, with its tags (Cloudflare purges by tag and prefix itself). */
+const stored = new Map<string, string[]>();
+
+async function put(cache: Cache, key: string, copy: Response, env: Env): Promise<void> {
+  const tags = (copy.headers.get("cache-tag") ?? "").split(",").filter((t) => t);
   try {
     await cache.put(key, copy);
+    if (env.ROLL_TEST_HOOKS === "1") stored.set(key, tags);
   } catch (e) {
     console.warn(`roll cdn: caching ${key} failed: ${e}`);
   }
@@ -282,10 +291,16 @@ interface Asked {
   url: URL;
   host: string;
   credential: { kind: "none" } | { kind: "token"; token: string } | { kind: "presigned" };
+  /** A rendition keyed by the client's WebP support: the origin sees only that, as `Accept`. */
+  webp?: boolean;
 }
 
 function originRequest(env: Env, a: Asked, method: string, query: string, extra: Record<string, string> = {}): Request {
   const h = new Headers(extra);
+  if (a.webp !== undefined) {
+    if (a.webp) h.set("accept", "image/webp");
+    else h.delete("accept");
+  }
   h.set("x-roll-cdn-auth", env.ROLL_CDN_ORIGIN_SECRET ?? "");
   h.set("x-roll-cdn-host", a.host);
   if (a.credential.kind === "token") h.set("x-roll-cdn-token", a.credential.token);
@@ -296,14 +311,19 @@ function originRequest(env: Env, a: Asked, method: string, query: string, extra:
 
 /** The query sent to the origin when filling the cache. */
 function fillQuery(a: Asked): string {
-  if (a.route.kind !== "bucket-key") return "";
-  if (a.route.forward_token) return a.url.search.slice(1);
+  if (a.route.kind !== "bucket-key" && a.route.kind !== "immutable") return "";
+  if (a.route.forward_token) return joinPairs(nonAuthPairs(a.url.search).concat(tokenPair(a)));
   return joinPairs(nonAuthPairs(a.url.search));
+}
+
+/** The verified `?token=` for the origin (it checks it again). */
+function tokenPair(a: Asked): [string, string][] {
+  return a.credential.kind === "token" ? [["token", encodeURIComponent(a.credential.token)]] : [];
 }
 
 function passHeaders(req: Request): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const name of ["range", "if-none-match", "if-modified-since", "if-match", "if-unmodified-since", "origin", "access-control-request-method", "access-control-request-headers"]) {
+  for (const name of ["range", "if-none-match", "if-modified-since", "if-match", "if-unmodified-since", "accept", "origin", "access-control-request-method", "access-control-request-headers"]) {
     const v = req.headers.get(name);
     if (v !== null) out[name] = v;
   }
@@ -316,10 +336,17 @@ async function testHook(req: Request, env: Env, path: string): Promise<Response 
   if (env.ROLL_TEST_HOOKS !== "1" || !path.startsWith("/__roll_test/")) return null;
   if (req.method !== "POST" || !safeEqual(req.headers.get("x-roll-cdn-auth") ?? "", env.ROLL_CDN_ORIGIN_SECRET ?? "")) return new Response("forbidden", { status: 403 });
   if (path === "/__roll_test/purge") {
-    const body = (await req.json()) as { files?: (string | { url: string })[] };
+    // Cloudflare's purge_cache: files (URLs), tags (Cache-Tag) and prefixes (host/path).
+    const body = (await req.json()) as { files?: (string | { url: string })[]; tags?: string[]; prefixes?: string[] };
+    const keys = new Set<string>((body.files ?? []).map((f) => (typeof f === "string" ? f : f.url)));
+    const tags = new Set(body.tags ?? []);
+    for (const [key, t] of stored) {
+      if (t.some((x) => tags.has(x)) || (body.prefixes ?? []).some((p) => key.replace(/^https?:\/\//, "").startsWith(p))) keys.add(key);
+    }
     let deleted = 0;
-    for (const f of body.files ?? []) {
-      if (await caches.default.delete(typeof f === "string" ? f : f.url)) deleted++;
+    for (const k of keys) {
+      stored.delete(k);
+      if (await caches.default.delete(k)) deleted++;
     }
     return Response.json({ deleted });
   }
@@ -340,6 +367,9 @@ export default {
 
     const route = matchRoute(routes(env), url.pathname);
     if (!route) return denied(undefined, 404, "no route for this path");
+    // Paths the CDN doesn't serve (the storage API's authenticated and write routes: use the
+    // API itself).
+    if (route.kind === "none") return denied(route, 404, "this path isn't served through the CDN; use the API's own URL");
     const head = req.method === "HEAD";
     if (req.method === "OPTIONS") {
       // CORS preflights go to the origin as they are.
@@ -362,6 +392,8 @@ export default {
 
     // Credentials, checked here: an invalid one never reaches the origin.
     let credential: Asked["credential"] = { kind: "none" };
+    // What a valid token binds besides its object keys the copy (internal `roll-cdn-*` pairs).
+    const bound: [string, string][] = [];
     if (route.auth !== "public") {
       const c = credentialOf(url.search, req.headers.has("authorization"));
       if (c.kind === "unsupported") return denied(route, 403, c.reason);
@@ -371,6 +403,8 @@ export default {
         const v = await verifyJwt(c.token, { hs256: env.ROLL_CDN_JWT_SECRET, es256Jwk: env.ROLL_CDN_JWT_ES256_JWK }, `${target!.bucket}/${target!.key}`, nowS);
         if (!v.ok) return denied(route, 403, v.reason);
         credential = { kind: "token", token: c.token };
+        if (v.bound.transformations !== undefined) bound.push(["roll-cdn-t", v.bound.transformations]);
+        if (v.bound.versionId !== undefined) bound.push(["roll-cdn-vid", v.bound.versionId]);
       } else if (c.kind === "presigned") {
         const v = await verifyPresigned({
           method: req.method,
@@ -389,17 +423,26 @@ export default {
     const a: Asked = { route, target, url, host: req.headers.get("host") ?? url.host, credential };
 
     // Never cached: bucket-level paths, and S3 requests with other parameters (versionId,
-    // response-* overrides, subresources).
+    // response-* overrides, subresources). Immutable URLs keep a rendition's query (they can only
+    // ever serve one blob's), and the storage API's keep theirs (download names, cache busters).
     const extra = nonAuthPairs(url.search);
-    const pass = !target || (!target.key && route.kind !== "website") || (route.kind !== "bucket-key" && extra.length > 0);
+    const queryKept = route.kind === "bucket-key" || (route.kind === "immutable" && (route.api || asksTransform(extra)));
+    const pass = !target || (!target.key && route.kind !== "website") || (!queryKept && extra.length > 0);
     if (pass) {
-      const query = route.kind === "bucket-key" && route.forward_token ? url.search.slice(1) : joinPairs(extra);
+      const query = route.kind === "bucket-key" && route.forward_token ? joinPairs(extra.concat(tokenPair(a))) : joinPairs(extra);
       const r = await fetch(originRequest(env, a, req.method, query, passHeaders(req)));
       return metered(forClient(r, "PASS", { head }), target, req.method, false, env, ctx);
     }
 
+    // A rendition whose format may come from `Accept`: one copy for clients that take WebP, one
+    // for the rest (the edge cache ignores `Vary`).
+    if (route.vary_accept || asksTransform(extra)) {
+      a.webp = acceptsWebp(req.headers.get("accept"));
+      bound.push(["roll-cdn-accept", a.webp ? "webp" : "any"]);
+    }
+
     const cache = caches.default;
-    const publicKey = cacheKey(route, a.host, url.pathname, url.search);
+    const publicKey = cacheKey(route, a.host, url.pathname, url.search, bound);
     const key = credential.kind === "none" ? publicKey : privateKey(publicKey);
     const range = req.headers.get("range");
     const inm = req.headers.get("if-none-match");
@@ -430,7 +473,7 @@ export default {
       const r = await fetch(originRequest(env, a, "GET", fillQuery(a)));
       if (!storable(r, route, env)) return r;
       const [mine, theirs] = r.body!.tee();
-      ctx.waitUntil(storedCopy(r, theirs, route, target!, env).then((copy) => put(cache, key, copy)));
+      ctx.waitUntil(storedCopy(r, theirs, route, target!, env).then((copy) => put(cache, key, copy, env)));
       return new Response(mine, r);
     };
     if (head || range) {
@@ -438,7 +481,7 @@ export default {
       if (range && !head) {
         const background = async () => {
           const f = await fetch(originRequest(env, a, "GET", fillQuery(a)));
-          if (storable(f, route, env)) await put(cache, key, await storedCopy(f, f.body, route, target!, env));
+          if (storable(f, route, env)) await put(cache, key, await storedCopy(f, f.body, route, target!, env), env);
           else await f.body?.cancel();
         };
         ctx.waitUntil(background().catch(() => {}));

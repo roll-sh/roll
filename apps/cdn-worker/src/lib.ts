@@ -1,8 +1,8 @@
 // Pure helpers of the roll CDN Worker: routes, paths, cache keys, edge credential checks (JWT
 // and SigV4 presigned URLs) and cache tags. WebCrypto only, so they run in workerd and Node.
 
-/** How a path prefix is served. */
-export type RouteKind = "s3" | "immutable" | "bucket-key" | "website";
+/** How a path prefix is served (`none`: not through the CDN, 404 here). */
+export type RouteKind = "s3" | "immutable" | "bucket-key" | "website" | "none";
 /** `any`: anonymous or credentialed; `public`: credentials ignored; `token`: a credential is required. */
 export type RouteAuth = "any" | "public" | "token";
 
@@ -10,7 +10,7 @@ export interface Route {
   prefix: string;
   kind: RouteKind;
   auth: RouteAuth;
-  /** Overrides `ROLL_ORIGIN` for this prefix. */
+  /** Overrides `ROLL_ORIGIN` (or `ROLL_API_ORIGIN`) for this prefix. */
   origin?: string;
   /** `none`: never stored at the edge. */
   cache?: string;
@@ -18,6 +18,10 @@ export interface Route {
   forward_token?: boolean;
   /** website routes: the bucket whose website this is (paths are its keys). */
   bucket?: string;
+  /** The storage developer API's route: its origin is `ROLL_API_ORIGIN`. */
+  api?: boolean;
+  /** Image renditions: copies are keyed by whether the client accepts WebP. */
+  vary_accept?: boolean;
 }
 
 export const DEFAULT_ROUTES: Route[] = [
@@ -35,7 +39,7 @@ export function parseRoutes(json: string | undefined): Route[] {
     const prefix = o.prefix;
     if (typeof prefix !== "string" || !prefix.startsWith("/")) throw new Error(`ROLL_ROUTES[${i}].prefix must start with /`);
     const kind = o.kind ?? "s3";
-    if (kind !== "s3" && kind !== "immutable" && kind !== "bucket-key" && kind !== "website") throw new Error(`ROLL_ROUTES[${i}].kind is invalid`);
+    if (kind !== "s3" && kind !== "immutable" && kind !== "bucket-key" && kind !== "website" && kind !== "none") throw new Error(`ROLL_ROUTES[${i}].kind is invalid`);
     if ((kind === "website") !== (typeof o.bucket === "string" && o.bucket !== "")) throw new Error(`ROLL_ROUTES[${i}]: website routes (and only they) name their bucket`);
     const auth = o.auth ?? "any";
     if (auth !== "any" && auth !== "public" && auth !== "token") throw new Error(`ROLL_ROUTES[${i}].auth is invalid`);
@@ -43,6 +47,8 @@ export function parseRoutes(json: string | undefined): Route[] {
     if (typeof o.origin === "string" && o.origin) route.origin = o.origin.replace(/\/+$/, "");
     if (typeof o.cache === "string") route.cache = o.cache;
     if (o.forward_token === true) route.forward_token = true;
+    if (o.api === true) route.api = true;
+    if (o.vary_accept === true) route.vary_accept = true;
     if (kind === "website") {
       route.bucket = o.bucket as string;
       // A website is anonymous: credentials mean nothing there.
@@ -159,11 +165,37 @@ export function parsePath(route: Route, pathname: string): Target | null {
 
 /** The internal cache namespace parameter; never accepted from clients. */
 export const NS_PARAM = "roll-cdn-ns";
+/** Every internal cache-key parameter starts with this (clients' are dropped). */
+export const INTERNAL_PREFIX = "roll-cdn-";
 
-/** Parameters that carry credentials (left out of cache keys). */
+/** Parameters that carry credentials or are internal (left out of cache keys and the origin's query). */
 export function isAuthParam(rawName: string): boolean {
   const n = percentDecode(rawName).toLowerCase();
-  return n === "token" || n.startsWith("x-amz-") || n === NS_PARAM;
+  return n === "token" || n.startsWith("x-amz-") || n.startsWith(INTERNAL_PREFIX);
+}
+
+/** Query parameters that ask for an image transformation (the storage API's and roll's S3 extension). */
+const TRANSFORM_PARAMS = new Set(["width", "height", "resize", "quality", "format", "x-roll-transform"]);
+
+export function asksTransform(pairs: [string, string][]): boolean {
+  return pairs.some(([k]) => TRANSFORM_PARAMS.has(percentDecode(k).toLowerCase()));
+}
+
+/**
+ * Whether an `Accept` header lists `image/webp` with a non-zero q: what roll's renderer decides
+ * a rendition's format by when none is given. Copies of renditions are keyed by it, since the
+ * edge cache ignores `Vary: Accept`.
+ */
+export function acceptsWebp(accept: string | null): boolean {
+  if (!accept) return false;
+  return accept.split(",").some((item) => {
+    const [media, ...params] = item.split(";");
+    if (media.trim().toLowerCase() !== "image/webp") return false;
+    return !params.some((p) => {
+      const m = /^\s*q\s*=\s*([0-9.]+)\s*$/i.exec(p);
+      return m !== null && Number(m[1]) <= 0;
+    });
+  });
 }
 
 /** The query without credentials and the internal namespace (raw pairs, in order). */
@@ -177,13 +209,15 @@ export function joinPairs(pairs: [string, string][]): string {
 
 /**
  * The public cache key of a request: `https://<host><path>`, plus the sorted non-credential
- * query for bucket-key routes.
+ * query for bucket-key and immutable routes, plus `extra` (decoded internal `roll-cdn-*` pairs:
+ * a token's bound claims, the client's WebP support), which clients can't set.
  */
-export function cacheKey(route: Route, host: string, pathname: string, rawQuery: string): string {
+export function cacheKey(route: Route, host: string, pathname: string, rawQuery: string, extra: [string, string][] = []): string {
   // The path in S3's encoding, however the client encoded it: what roll purges.
   const base = `https://${host}${canonicalUri(pathname)}`;
-  if (route.kind !== "bucket-key") return base;
-  const pairs = nonAuthPairs(rawQuery).map(([k, v]): [string, string] => [uriEncode(percentDecode(k), true), uriEncode(percentDecode(v), true)]);
+  const query = route.kind === "bucket-key" || route.kind === "immutable" ? nonAuthPairs(rawQuery) : [];
+  const pairs = query.map(([k, v]): [string, string] => [uriEncode(percentDecode(k), true), uriEncode(percentDecode(v), true)]);
+  for (const [k, v] of extra) pairs.push([uriEncode(k, true), uriEncode(v, true)]);
   pairs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
   return pairs.length ? `${base}?${pairs.map(([k, v]) => `${k}=${v}`).join("&")}` : base;
 }
@@ -233,6 +267,16 @@ export async function cacheTags(bucket: string, key: string): Promise<string> {
 
 export type Verdict = { ok: true } | { ok: false; reason: string };
 
+/** What a valid signed-URL token binds besides its object: they key the cached copy. */
+export interface Bound {
+  /** A rendition's transformation (the storage API's `transformations` claim). */
+  transformations?: string;
+  /** A version's download. */
+  versionId?: string;
+}
+
+export type TokenVerdict = { ok: true; bound: Bound } | { ok: false; reason: string };
+
 const MAX_TOKEN = 8192;
 
 function b64urlBytes(s: string): Uint8Array {
@@ -245,19 +289,32 @@ function b64urlBytes(s: string): Uint8Array {
 }
 
 export interface JwtKeys {
-  /** HS256 secret (raw text). */
+  /** HS256 secret: raw text, or `hex:<hex digits>` for a binary key (roll's storage API's). */
   hs256?: string;
   /** ES256 public key, a JWK as JSON. */
   es256Jwk?: string;
 }
 
-/** Verify a signed-URL token for `<bucket>/<key>`: HS256 or ES256, `url`, `exp`, optional `nbf`. */
-export async function verifyJwt(token: string, keys: JwtKeys, url: string, nowS: number): Promise<Verdict> {
+/** The bytes of an HS256 secret as configured. */
+export function hs256Key(secret: string): Uint8Array {
+  if (!secret.startsWith("hex:")) return enc.encode(secret);
+  const h = secret.slice(4).trim();
+  if (h.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(h)) throw new Error("ROLL_CDN_JWT_SECRET: hex: needs an even number of hex digits");
+  const out = new Uint8Array(h.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+/**
+ * Verify a signed-URL token for `<bucket>/<key>`: HS256 or ES256, `url`, `exp`, optional `nbf`.
+ * Returns what it binds besides the object (a transformation, a version).
+ */
+export async function verifyJwt(token: string, keys: JwtKeys, url: string, nowS: number): Promise<TokenVerdict> {
   if (token.length > MAX_TOKEN) return { ok: false, reason: "token too long" };
   const parts = token.split(".");
   if (parts.length !== 3) return { ok: false, reason: "malformed token" };
   let header: { alg?: unknown };
-  let claims: { url?: unknown; exp?: unknown; nbf?: unknown };
+  let claims: { url?: unknown; exp?: unknown; nbf?: unknown; transformations?: unknown; versionId?: unknown };
   let sig: Uint8Array;
   try {
     header = JSON.parse(dec.decode(b64urlBytes(parts[0])));
@@ -270,7 +327,7 @@ export async function verifyJwt(token: string, keys: JwtKeys, url: string, nowS:
   let valid = false;
   try {
     if (header.alg === "HS256" && keys.hs256) {
-      const k = await crypto.subtle.importKey("raw", enc.encode(keys.hs256), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+      const k = await crypto.subtle.importKey("raw", hs256Key(keys.hs256), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
       valid = await crypto.subtle.verify("HMAC", k, sig, signed);
     } else if (header.alg === "ES256" && keys.es256Jwk) {
       const j = JSON.parse(keys.es256Jwk) as JsonWebKey;
@@ -288,7 +345,10 @@ export async function verifyJwt(token: string, keys: JwtKeys, url: string, nowS:
   if (claims.exp <= nowS) return { ok: false, reason: "token expired" };
   if (claims.nbf !== undefined && (typeof claims.nbf !== "number" || claims.nbf > nowS)) return { ok: false, reason: "token not yet valid" };
   if (claims.url !== url) return { ok: false, reason: "token is for another object" };
-  return { ok: true };
+  const bound: Bound = {};
+  if (typeof claims.transformations === "string" && claims.transformations !== "") bound.transformations = claims.transformations;
+  if (typeof claims.versionId === "string" && claims.versionId !== "") bound.versionId = claims.versionId;
+  return { ok: true, bound };
 }
 
 // ---- SigV4 presigned URLs ----

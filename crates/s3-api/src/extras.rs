@@ -7,6 +7,8 @@
 //! - `GET /roll/branches/{bucket}`, `POST /roll/branches/{bucket}` `{name}` (service key)
 //! - `GET|PUT|DELETE /roll/policy/{bucket}` (service key)
 //! - `POST /roll/rules/{bucket}` `{preset}` (service key): set a preset's policy
+//! - `POST /roll/url/{bucket}` `{path, transform?, immutable?}`: the public URL to hand out (the
+//!   CDN's when the bucket has it on; `s3:GetObject`)
 
 use crate::auth;
 use crate::error::{ApiError, ApiResult};
@@ -36,6 +38,7 @@ pub(crate) async fn route(r: &Req, m: &Method, rest: &str, body: Body) -> ApiRes
         ("versions", &Method::POST, "") => versions(r, &caller, &b, body).await,
         ("trash", &Method::POST, "") => trash(r, &caller, &b, body).await,
         ("trash", &Method::POST, "restore") => restore(r, &caller, &b, body).await,
+        ("url", &Method::POST, "") => crate::cdn::url(r, &caller, &b, body).await,
         ("branches", &Method::GET, "") => branches(r, &caller, &b),
         ("branches", &Method::POST, "") => branch(r, &caller, &b, body).await,
         ("policy", &Method::GET, "") => {

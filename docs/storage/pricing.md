@@ -166,6 +166,49 @@ one source in a month. `image_usage.variants` counts the variants made per sourc
 bounded by `ROLL_S3_IMAGE_CONCURRENCY` (half the cores, at most 4, by default) whatever the
 request rate, with requests waiting at most 10 s for a slot before `SlowDown`.
 
+The dashboard's own previews (the object browser's 200 px thumbnails) are renditions like any
+other, cached the same way, but aren't counted as transformations: browsing a bucket shouldn't
+cost anything.
+
+### A transformed image served from the CDN, end to end
+
+The developer API's renditions (`/storage/v1/render/image/...`, `getPublicUrl(path, {transform})`)
+go through the CDN like its plain public reads ([api.md](api.md#cdn)). Who pays what, for one
+hero image (an 8 MP JPEG source, served as a 1200-wide WebP of **73 KB**) requested **1M times a
+month** through the CDN:
+
+| step | customer pays | our cost |
+|---|---|---|
+| make the rendition, once per source blob and transformation | $0.005 (one source image a month, after 100 free) | ~$0.00006 (0.2 CPU-s, a PUT, a month of 73 KB) |
+| each edge miss (an origin pull) | a class B request, $0.40/M | origin egress 73 KB × $0.05–0.09/GB, plus a GET of the derived blob (gateway cache: often none) |
+| each edge hit | 73 KB of cached egress at $0.03/GB | Cloudflare at ~$0.005/GB (assumed, above) + Workers requests |
+
+At 1M requests that's 73 GB served: **$2.19 of cached egress + $0.005** for the transformation,
+plus class B for the misses. Our cost is ~$0.37 of Cloudflare plus the misses' egress, so the
+margin is the cached-egress margin above, driven by the byte hit rate. What sets the hit rate
+for renditions:
+
+- **Copies per edge location.** Each transformation is its own copy, and with no `format`
+  (WebP by `Accept`) each has two (WebP and the source's format; the edge keys them apart, as
+  Cloudflare's cache ignores `Vary`). A few hundred locations × 2 copies is ~600 misses for a
+  hot image: 99.9%+ at 1M requests.
+- **TTL.** Mutable URLs live `mutable_ttl_s` at the edge (60 s by default): a busy location
+  refetches each copy every minute. Changes are purged by tag anyway, so raising it (an hour, a
+  day) costs no freshness; at 60 s and 1M requests a month spread thinly, misses can reach
+  tens of percent. **Immutable URLs** (`/storage/v1/v/<token>/…?width=`, from `roll.publicUrl(…,
+  {immutable: true})`) stay a year and never need a purge: misses are just the first request per
+  location and copy.
+- **Signed renditions** are cached in a private namespace per transformation (tokens don't split
+  copies, their bound transformation does), so many users' signed URLs for the same thumbnail
+  share one copy.
+
+Worked example at volume egress ($0.05/GB) for the 73 KB WebP: with immutable URLs (~600 misses,
+44 MB pulled) our cost is $0.37 of Cloudflare + $0.002 of origin egress against $2.195 billed
+(**~83%**); with 60 s mutable URLs at a 90% byte hit rate it's $0.37 + $0.37 against $2.19 + $0.04
+of class B (**~67%**); a rendition requested once per location per minute (a 50% hit rate) is
+break-even, as for any cached egress. The transformation itself is never the problem: $0.005
+against $0.00006.
+
 ### Derived images aren't billed as storage
 
 They're our cache, not the customer's data: we decide when to drop them (30 days unused,

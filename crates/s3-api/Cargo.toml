@@ -16,6 +16,7 @@ getrandom.workspace = true
 hex.workspace = true
 md-5.workspace = true
 memchr.workspace = true
+s3-image.workspace = true
 s3-proto.workspace = true
 s3-server.workspace = true
 s3-store.workspace = true
@@ -28,6 +29,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 aws-sdk-s3.workspace = true
+image.workspace = true
 reqwest = { workspace = true, features = ["stream", "multipart"] }
 ring.workspace = true
 tracing-subscriber.workspace = true

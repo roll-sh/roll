@@ -50,7 +50,7 @@ pub(crate) fn bucket_for(r: &Req, caller: &AppCaller, name: &str) -> ApiResult<B
 
 /// A refused read: anonymous callers don't learn about private buckets, others don't learn
 /// about objects they can't see (Supabase's row-level security hides the row).
-fn read_denied(e: S3Error, caller: &AppCaller) -> ApiError {
+pub(crate) fn read_denied(e: S3Error, caller: &AppCaller) -> ApiError {
     match e.code {
         Code::AccessDenied if caller.is_anonymous() => ApiError::no_such_bucket(),
         Code::AccessDenied => ApiError::no_such_key(),
@@ -73,7 +73,7 @@ fn valid_key(key: &str) -> ApiResult<()> {
     Ok(())
 }
 
-fn version_param(r: &Req) -> ApiResult<Option<&str>> {
+pub(crate) fn version_param(r: &Req) -> ApiResult<Option<&str>> {
     match r.q("versionId").filter(|v| !v.is_empty()) {
         Some(v) if !s3_proto::versioning::valid_version_id(v) => Err(ApiError::invalid(format!("Invalid versionId {v}"))),
         v => Ok(v),
@@ -87,6 +87,7 @@ pub(crate) async fn download(r: &Req, rest: &str, access: Access) -> ApiResult<R
     let caller = caller_for(r, access).await?;
     let b = bucket_for(r, &caller, &bucket)?;
     r.checker(&caller).allows("s3:GetObject", &b.name, Some(&key)).map_err(|e| read_denied(e, &caller))?;
+    r.cdn_allows(&b)?;
     let meta = r.store().get_object_version(&b.name, &key, version_param(r)?)?;
     serve(r, &b, &meta, None).await
 }
@@ -138,7 +139,7 @@ pub(crate) async fn serve(r: &Req, b: &Bucket, meta: &ObjectMeta, expires_at_s: 
         return Ok(resp);
     }
     let (_, stream) = store.open_blob(meta, open).await?;
-    let metered = Metered { inner: stream, store: store.clone(), bucket_id: b.id.clone(), internal: r.internal(), sent: 0 };
+    let metered = Metered { inner: stream, store: store.clone(), bucket_id: b.id.clone(), internal: r.internal(), cdn: r.cdn, sent: 0 };
     *resp.body_mut() = Body::from_stream(metered);
     Ok(resp)
 }

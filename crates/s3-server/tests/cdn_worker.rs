@@ -109,7 +109,7 @@ struct Cf {
 async fn purge_cache(State(cf): State<Cf>, Path(_zone): Path<String>, Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
     cf.calls.lock().unwrap().push(body.clone());
     let worker = cf.worker.lock().unwrap().clone();
-    let r = cf.http.post(format!("{worker}/__roll_test/purge")).header("x-roll-cdn-auth", ORIGIN_SECRET).json(&json!({ "files": body["files"].clone() })).send().await;
+    let r = cf.http.post(format!("{worker}/__roll_test/purge")).header("x-roll-cdn-auth", ORIGIN_SECRET).json(&body).send().await;
     match r {
         Ok(r) if r.status().is_success() => (StatusCode::OK, Json(json!({ "success": true, "errors": [] }))),
         _ => (StatusCode::BAD_GATEWAY, Json(json!({ "success": false, "errors": [{ "code": 1, "message": "edge unreachable" }] }))),
@@ -199,7 +199,7 @@ async fn edge() -> Option<Edge> {
         .await
         .unwrap();
     let (key_id, key_secret) = s3_server::cdn::presign_key(&t.store).await.unwrap();
-    let env = s3_server::cdn::worker_env(&t.store, &t.endpoint, false).await.unwrap();
+    let env = s3_server::cdn::worker_env(&t.store, &t.endpoint, None, false).await.unwrap();
     let routes = env["vars"]["ROLL_ROUTES"].as_str().unwrap().to_string();
     let w = start_worker(
         port,

@@ -3,10 +3,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   DEFAULT_ROUTES,
+  acceptsWebp,
+  asksTransform,
   cacheKey,
   cacheTags,
   canonicalQuery,
   credentialOf,
+  hs256Key,
+  isAuthParam,
   matchRoute,
   parsePath,
   parseRange,
@@ -33,7 +37,7 @@ const SECRET = "super-secret-jwt-key-for-tests";
 test("HS256 tokens: valid, expired, not yet valid, wrong object, bad signature", async () => {
   const keys = { hs256: SECRET };
   const ok = await hs256({ url: "media/a b/c.png", exp: NOW + 60 }, SECRET);
-  assert.deepEqual(await verifyJwt(ok, keys, "media/a b/c.png", NOW), { ok: true });
+  assert.deepEqual(await verifyJwt(ok, keys, "media/a b/c.png", NOW), { ok: true, bound: {} });
   assert.equal((await verifyJwt(ok, keys, "media/a b/other.png", NOW)).ok, false);
   assert.equal((await verifyJwt(ok, keys, "media/a b/c.png", NOW + 60)).ok, false, "exp is exclusive");
   const nbf = await hs256({ url: "m/k", exp: NOW + 60, nbf: NOW + 10 }, SECRET);
@@ -66,7 +70,7 @@ test("ES256 tokens verify against the published JWK", async () => {
   const head = `${b64url(JSON.stringify({ alg: "ES256", typ: "JWT" }))}.${b64url(JSON.stringify({ url: "b/k.txt", exp: NOW + 5 }))}`;
   const sig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, enc.encode(head)));
   const token = `${head}.${b64url(sig)}`;
-  assert.deepEqual(await verifyJwt(token, { es256Jwk: jwk }, "b/k.txt", NOW), { ok: true });
+  assert.deepEqual(await verifyJwt(token, { es256Jwk: jwk }, "b/k.txt", NOW), { ok: true, bound: {} });
   assert.equal((await verifyJwt(token, { es256Jwk: jwk }, "b/k.txt", NOW + 5)).ok, false);
   assert.equal((await verifyJwt(token, { hs256: SECRET }, "b/k.txt", NOW)).ok, false, "ES256 needs the JWK");
   const other = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
@@ -170,6 +174,59 @@ test("cache keys strip credentials and keep namespaces apart", () => {
   assert.equal(cacheKey(bk, "cdn", "/render/b/k", "?a=%7e&a=1"), "https://cdn/render/b/k?a=1&a=~");
   assert.equal(privateKey("https://cdn/b/k"), "https://cdn/b/k?roll-cdn-ns=private");
   assert.equal(privateKey("https://cdn/render/b/k?w=1"), "https://cdn/render/b/k?w=1&roll-cdn-ns=private");
+});
+
+test("the storage API's tokens: binary keys, bound claims", async () => {
+  const key = new Uint8Array(32).map((_, i) => i * 7);
+  const head = `${b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }))}.${b64url(JSON.stringify({ url: "imgs/a b.png", scope: "download", exp: NOW + 60, transformations: "width:200,format:webp", versionId: "v1" }))}`;
+  const k = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const token = `${head}.${b64url(new Uint8Array(await crypto.subtle.sign("HMAC", k, enc.encode(head))))}`;
+  const hexKey = `hex:${Buffer.from(key).toString("hex")}`;
+  assert.deepEqual(await verifyJwt(token, { hs256: hexKey }, "imgs/a b.png", NOW), { ok: true, bound: { transformations: "width:200,format:webp", versionId: "v1" } });
+  assert.equal((await verifyJwt(token, { hs256: hexKey.replace(/.$/, "0") }, "imgs/a b.png", NOW)).ok, false, "another key");
+  assert.equal((await verifyJwt(token, { hs256: "hex:zz" }, "imgs/a b.png", NOW)).ok, false, "a malformed key");
+  assert.equal(hs256Key("plain").length, 5);
+  // A transformation tampered with in the token fails its signature.
+  const [h, p, s] = token.split(".");
+  const claims = JSON.parse(Buffer.from(p, "base64url").toString());
+  claims.transformations = "width:2000";
+  assert.equal((await verifyJwt(`${h}.${b64url(JSON.stringify(claims))}.${s}`, { hs256: hexKey }, "imgs/a b.png", NOW)).ok, false);
+});
+
+test("internal parameters, bound claims and Accept in cache keys", () => {
+  const bk = { prefix: "/storage/v1/render/image/sign/", kind: "bucket-key", auth: "token" };
+  const im = { prefix: "/v/", kind: "immutable", auth: "any" };
+  // Clients can't set internal parameters; what the edge adds is keyed.
+  assert.equal(cacheKey(bk, "cdn", "/storage/v1/render/image/sign/b/k", "?token=t&roll-cdn-t=width:1&download="), "https://cdn/storage/v1/render/image/sign/b/k?download=");
+  assert.equal(
+    cacheKey(bk, "cdn", "/storage/v1/render/image/sign/b/k", "?token=t", [["roll-cdn-t", "width:200,format:webp"], ["roll-cdn-accept", "webp"]]),
+    "https://cdn/storage/v1/render/image/sign/b/k?roll-cdn-accept=webp&roll-cdn-t=width%3A200%2Cformat%3Awebp",
+  );
+  assert.ok(isAuthParam("roll-cdn-anything") && isAuthParam("Roll-CDN-NS") && !isAuthParam("width"));
+  // Immutable URLs keep their query (a rendition of that one blob).
+  assert.equal(cacheKey(im, "cdn", "/v/tok/b/k", "?x-roll-transform=width%3A10"), "https://cdn/v/tok/b/k?x-roll-transform=width%3A10");
+  assert.ok(asksTransform([["width", "10"]]) && asksTransform([["x-roll-transform", "w"]]) && !asksTransform([["download", ""]]));
+  assert.ok(acceptsWebp("image/avif,image/webp,image/apng,*/*;q=0.8"));
+  assert.ok(acceptsWebp("IMAGE/WEBP;q=0.5"));
+  assert.ok(!acceptsWebp("image/webp;q=0, image/png"));
+  assert.ok(!acceptsWebp("image/*") && !acceptsWebp(null));
+});
+
+test("the storage API's routes", () => {
+  const routes = parseRoutes(
+    JSON.stringify([
+      { prefix: "/", kind: "s3" },
+      { prefix: "/storage/v1/", kind: "none", api: true },
+      { prefix: "/storage/v1/render/image/sign/", kind: "bucket-key", auth: "token", forward_token: true, api: true, vary_accept: true },
+      { prefix: "/storage/v1/v/", kind: "immutable", auth: "public", api: true },
+    ]),
+  );
+  assert.equal(matchRoute(routes, "/storage/v1/object/authenticated/b/k").kind, "none");
+  assert.equal(matchRoute(routes, "/storage/v1/object/b/k").kind, "none");
+  const sign = matchRoute(routes, "/storage/v1/render/image/sign/b/k.png");
+  assert.equal(sign.api && sign.vary_accept && sign.forward_token, true);
+  const v = matchRoute(routes, "/storage/v1/v/0123/imgs/a%20b.png");
+  assert.deepEqual(parsePath(v, "/storage/v1/v/0123/imgs/a%20b.png"), { bucket: "imgs", key: "a b.png", version: "0123" });
 });
 
 test("cache tags", async () => {

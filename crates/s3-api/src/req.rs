@@ -20,6 +20,8 @@ pub(crate) struct Req {
     pub query: Vec<(String, String)>,
     pub headers: HeaderMap,
     pub peer: Option<IpAddr>,
+    /// The CDN fetched this (a miss at the edge), with the shared secret (`cdn.rs`).
+    pub cdn: bool,
 }
 
 impl Req {
@@ -54,6 +56,14 @@ impl Req {
     /// A checker of what `caller` may do, for this request.
     pub fn checker(&self, caller: &s3_server::app::AppCaller) -> s3_server::app::Checker {
         caller.checker(&self.api.server, self.peer, &self.headers)
+    }
+
+    /// The CDN only serves buckets that have it on.
+    pub fn cdn_allows(&self, b: &s3_store::Bucket) -> ApiResult<()> {
+        if !self.cdn || self.store().bucket_cdn(&b.name)?.is_some_and(|c| c.enabled) {
+            return Ok(());
+        }
+        Err(ApiError::denied("The CDN isn't enabled for this bucket."))
     }
 }
 
@@ -96,24 +106,34 @@ pub(crate) fn object_path(rest: &str) -> ApiResult<(String, String)> {
 }
 
 pub(crate) async fn dispatch(api: Arc<Api>, peer: Option<IpAddr>, req: Request) -> Response {
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
+    // From the CDN: the shared secret checked; then anonymous or a signed URL's token, never a
+    // caller's key (what the edge keeps must not depend on who first asked for it).
+    let cdn = match api.server.cdn.origin_request(&parts.method, &mut parts.headers) {
+        Ok(c) => c,
+        Err(e) => return ApiError::denied(e.message).real().into_response_for(false),
+    };
+    if cdn {
+        parts.headers.remove("authorization");
+        parts.headers.remove("apikey");
+    }
     let raw = parts.uri.path();
     let (mount, path) = match raw.strip_prefix(PREFIX) {
         Some(rest) if rest.is_empty() || rest.starts_with('/') => (PREFIX, rest),
         _ => ("", raw),
     };
-    let r = Req {
-        api: api.clone(),
-        method: parts.method.clone(),
-        path: path.trim_start_matches('/').to_string(),
-        mount,
-        query: s3_proto::http::parse_query(parts.uri.query().unwrap_or_default()),
-        headers: parts.headers,
-        peer,
-    };
+    let mut query = s3_proto::http::parse_query(parts.uri.query().unwrap_or_default());
+    if cdn {
+        query.retain(|(k, _)| k != "apikey");
+    }
+    let r = Req { api: api.clone(), method: parts.method.clone(), path: path.trim_start_matches('/').to_string(), mount, query, headers: parts.headers, peer, cdn };
     let head = r.method == Method::HEAD;
     let origin = s3_store::Origin { source_ip: peer.map(|p| p.to_string()), request_id: Some(request_id()), ..Default::default() };
-    let result = s3_store::events::with_origin(origin, route(&r, body)).await;
+    let result = if cdn && !crate::cdn::routable(&r.method, &r.path) {
+        Err(ApiError::denied("This route isn't served through the CDN"))
+    } else {
+        s3_store::events::with_origin(origin, route(&r, body)).await
+    };
     let ok = result.is_ok();
     let mut resp = match result {
         Ok(resp) => resp,
@@ -124,6 +144,9 @@ pub(crate) async fn dispatch(api: Arc<Api>, peer: Option<IpAddr>, req: Request) 
             e.into_response_for(head)
         }
     };
+    if cdn && ok && matches!(resp.status().as_u16(), 200 | 206 | 304) {
+        s3_server::cdn::cache_headers(api.store(), resp.headers_mut(), crate::cdn::mode_of(&r.path));
+    }
     if ok && !matches!(r.method, Method::GET | Method::HEAD | Method::OPTIONS) {
         api.server.notifier.wake();
     }
@@ -155,7 +178,10 @@ async fn route(r: &Req, body: Body) -> ApiResult<Response> {
         return object_route(r, &m, rest, body).await;
     }
     if let Some(rest) = after(p, "render/image") {
-        return Ok(render::route(r, &m, rest).await);
+        return render::route(r, &m, rest).await;
+    }
+    if let Some(rest) = after(p, "v") {
+        return crate::cdn::immutable(r, &m, rest).await;
     }
     if let Some(rest) = after(p, "upload/resumable") {
         return tus::route(r, &m, rest, body).await;

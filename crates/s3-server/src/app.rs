@@ -256,6 +256,12 @@ impl Checker {
         access::authorize_as(&self.ctx, self.ctx.who(), bucket, None, "s3:ListBucket", Need::Read, Some(prefix)).is_ok()
     }
 
+    /// Requester Pays: who pays for what this request does on `bucket_id`, as decided by the
+    /// checks so far (`None`: the bucket's owner).
+    pub fn payer(&self, bucket_id: &str) -> Option<String> {
+        self.ctx.payer(bucket_id)
+    }
+
     /// Forget the cached rules of `bucket` (after changing its policy or flags).
     pub fn forget(&self, bucket: &str) {
         self.ctx.forget_access(bucket);

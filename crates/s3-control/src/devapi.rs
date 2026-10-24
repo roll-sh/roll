@@ -36,6 +36,8 @@ fn view(c: &Control, p: &ApiProject) -> Value {
     json!({
         "account_id": p.account,
         "endpoint": c.api_endpoint.get(),
+        // Public and signed reads (and image renditions) through the CDN, when it's set up.
+        "cdn_endpoint": c.api_cdn_url(),
         "anon_key": p.anon_key.expose(),
         "service_key": p.service_key.expose(),
         "key_generation": p.generation,

@@ -411,6 +411,15 @@ function ConnectTab({ bucket, info }: { bucket: Bucket; info: StorageInfo }) {
     ...(bucket.cdn?.enabled && bucket.public_url
       ? [{ label: "Public URL (CDN)", value: bucket.public_url, hint: `served by Cloudflare, ${bucket.cdn.mode === "immutable" ? "by version" : "purged on change"}` }]
       : []),
+    ...(bucket.api_public_url
+      ? [
+          {
+            label: bucket.api_cdn ? "Developer API, public objects (CDN)" : "Developer API, public objects",
+            value: bucket.api_public_url,
+            hint: `<url>/<key>; resized images at ${bucket.api_cdn ? "the CDN's " : ""}…/render/image/public/${bucket.name}/<key>?width=200${bucket.api_cdn ? ", purged on change" : ""}`,
+          },
+        ]
+      : []),
     { label: "Region", value: info.region, hint: "any region name is accepted when signing" },
   ];
   return (

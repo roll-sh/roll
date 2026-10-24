@@ -105,6 +105,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/storage/buckets/{name}/object", get(object_info).delete(delete_object))
         .route("/v1/storage/buckets/{name}/delete", post(delete_many))
         .route("/v1/storage/buckets/{name}/download", get(download))
+        .route("/v1/storage/buckets/{name}/thumbnail", get(thumbnail))
         .route("/v1/storage/buckets/{name}/upload", put(upload))
         .route("/v1/storage/buckets/{name}/presign", post(presign))
         .route("/v1/storage/buckets/{name}/trash", get(trash))
@@ -416,6 +417,47 @@ async fn download(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<Str
     set(h, header::CONTENT_DISPOSITION, &attachment(&key));
     set(h, header::ETAG, &s3_proto::http::quote_etag(&meta.etag));
     Ok(r)
+}
+
+#[derive(Deserialize)]
+struct ThumbQ {
+    key: Option<String>,
+    version_id: Option<String>,
+    /// Pixels wide (default 200, at most 800).
+    width: Option<u32>,
+}
+
+/// `GET /buckets/{name}/thumbnail?key=&width=200`: a small rendition of an image for the
+/// dashboard's previews (WebP when the browser takes it), made and cached like any other
+/// (`s3_server::render`): the derived image is kept, the request and its bytes are metered,
+/// and it isn't counted as a transformation (the dashboard's own previews are free).
+async fn thumbnail(State(c): State<AppState>, Acct(a): Acct, Path(name): Path<String>, Params(q): Params<ThumbQ>, headers: HeaderMap) -> Result<Response, ControlError> {
+    let kq = KeyQ { key: q.key, version_id: q.version_id };
+    let key = kq.key()?;
+    c.bucket_in(&a, &name)?;
+    let server = c.server.get().ok_or_else(|| ControlError::Unavailable("the S3 server isn't running".into()))?;
+    let width = q.width.unwrap_or(200).clamp(16, 800);
+    let req = s3_server::render::RenderRequest {
+        bucket: &name,
+        key: &key,
+        version: kq.version()?,
+        params: s3_image::Params { width: Some(width), quality: Some(70), ..Default::default() },
+        accept: headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()),
+        if_none_match: headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()),
+        internal: true,
+        unbilled: true,
+        ..Default::default()
+    };
+    let r = s3_server::render::render(server, &req).await.map_err(|e| match e.code {
+        s3_proto::Code::NoSuchKey | s3_proto::Code::NoSuchBucket | s3_proto::Code::NoSuchVersion => ControlError::NotFound(e.message),
+        s3_proto::Code::InternalError => ControlError::Internal(anyhow::anyhow!("rendering a thumbnail failed")),
+        s3_proto::Code::SlowDown => ControlError::Unavailable(e.message),
+        _ => ControlError::Invalid(e.message),
+    })?;
+    let mut resp = r.into_response();
+    // The browser keeps it for a while; it's private to whoever's signed in.
+    resp.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("private, max-age=300"));
+    Ok(resp)
 }
 
 /// The object headers of an upload: the standard ones, `x-amz-meta-*` and `x-amz-tagging`.

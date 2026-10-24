@@ -25,7 +25,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::Response;
 use s3_proto::http::uri_encode;
 use s3_proto::{Code, S3Error};
-use s3_store::cdn::{BucketCdn, CdnMode, CdnSettings, PurgeMode, PurgeTask, bucket_tag, immutable_token, object_tag};
+use s3_store::cdn::{API_PREFIX, BucketCdn, CdnMode, CdnSettings, PurgeMode, PurgeTask, bucket_tag, immutable_token, object_tag};
 use s3_store::{ObjectMeta, PendingEvent, Store};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -164,7 +164,7 @@ impl Cdn {
         let mut req = CdnRequest::default();
         let mut path = raw_path.to_string();
         let settings = store.cdn_routing().map_err(crate::error::store_error)?;
-        for r in settings.routes.iter().filter(|r| r.kind == "immutable") {
+        for r in settings.routes.iter().filter(|r| r.kind == "immutable" && !r.api) {
             if let Some(rest) = raw_path.strip_prefix(r.prefix.as_str()) {
                 let (token, rest) = rest.split_once('/').ok_or_else(|| S3Error::new(Code::NoSuchKey))?;
                 req.token = Some(token.to_string());
@@ -173,6 +173,27 @@ impl Cdn {
             }
         }
         Ok(Some((path, req)))
+    }
+
+    /// A request of another API (the storage developer API) from the Worker: `Ok(false)` when it
+    /// doesn't claim to come from the CDN, `Ok(true)` when it does with the shared secret (the
+    /// CDN's headers are removed and it's counted as an origin request), `AccessDenied` when its
+    /// secret is wrong or none is configured. Only reads may come from the CDN.
+    pub fn origin_request(&self, method: &Method, headers: &mut HeaderMap) -> Result<bool, S3Error> {
+        if !headers.contains_key(AUTH_HEADER) {
+            return Ok(false);
+        }
+        if !self.authorized(headers) {
+            return Err(S3Error::msg(Code::AccessDenied, "This request claims to come from the CDN, but its credentials are wrong."));
+        }
+        if !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
+            return Err(S3Error::new(Code::MethodNotAllowed));
+        }
+        self.counters.origin_requests.fetch_add(1, Ordering::Relaxed);
+        for h in [AUTH_HEADER, TOKEN_HEADER, HOST_HEADER, PRESIGNED_HEADER] {
+            headers.remove(h);
+        }
+        Ok(true)
     }
 
     /// `POST /_roll/cdn/usage`: a batch of what the edge served.
@@ -336,11 +357,15 @@ pub(crate) fn purge_items(s: &CdnSettings, host: &str, task: &PurgeTask, key: &s
         }
         return out;
     }
-    if s.purge == PurgeMode::Tags {
+    // The developer API's copies vary with transformations, tokens' bound claims and `Accept`:
+    // not URLs anyone can list, so they go by the object's tag, which every copy carries.
+    if s.purge == PurgeMode::Tags || s.routes.iter().any(|r| r.api && r.kind != "none") {
         out.push(("tags", object_tag(&task.bucket, key)));
+    }
+    if s.purge == PurgeMode::Tags {
         return out;
     }
-    for r in &s.routes {
+    for r in s.routes.iter().filter(|r| !r.api) {
         let path = match r.kind.as_str() {
             "s3" | "bucket-key" => bucket_key_path(&r.prefix, &task.bucket, key),
             "website" if r.bucket.as_deref() == Some(task.bucket.as_str()) => format!("{}{}", r.prefix, uri_encode(key, false)),
@@ -376,18 +401,30 @@ pub(crate) fn set_headers(ctx: &Ctx, r: &mut Response, mode: CdnMode) {
     if ctx.cdn.is_none() {
         return;
     }
+    cache_headers(ctx.store(), r.headers_mut(), mode);
+}
+
+/// Set a response's caching headers for the CDN: an immutable URL's a year everywhere; a
+/// mutable one `CDN-Cache-Control: public, max-age=<mutable_ttl_s>` at the edge (`no-store` if
+/// its own `Cache-Control` is `private` or `no-store`), its `Cache-Control` left for browsers.
+pub fn cache_headers(store: &Store, h: &mut HeaderMap, mode: CdnMode) {
+    let put = |h: &mut HeaderMap, name: &'static str, v: &str| {
+        if let Ok(v) = axum::http::HeaderValue::from_str(v) {
+            h.insert(name, v);
+        }
+    };
     if mode == CdnMode::Immutable {
-        set(r, "cache-control", IMMUTABLE);
-        set(r, "cdn-cache-control", IMMUTABLE);
+        put(h, "cache-control", IMMUTABLE);
+        put(h, "cdn-cache-control", IMMUTABLE);
         return;
     }
-    let own = r.headers().get("cache-control").and_then(|v| v.to_str().ok()).unwrap_or_default().to_ascii_lowercase();
+    let own = h.get("cache-control").and_then(|v| v.to_str().ok()).unwrap_or_default().to_ascii_lowercase();
     if own.contains("no-store") || own.contains("private") {
-        set(r, "cdn-cache-control", "no-store");
+        put(h, "cdn-cache-control", "no-store");
         return;
     }
-    let ttl = ctx.store().cdn_routing().map(|s| s.mutable_ttl_s).unwrap_or(60);
-    set(r, "cdn-cache-control", &format!("public, max-age={ttl}"));
+    let ttl = store.cdn_routing().map(|s| s.mutable_ttl_s).unwrap_or(60);
+    put(h, "cdn-cache-control", &format!("public, max-age={ttl}"));
 }
 
 // ---- URLs ----
@@ -421,7 +458,7 @@ pub async fn object_url(store: &Store, bucket: &str, meta: &ObjectMeta, immutabl
     let Some(base) = s.base() else { return Ok(None) };
     let path = match immutable {
         true => {
-            let Some(r) = s.routes.iter().find(|r| r.kind == "immutable") else { return Ok(None) };
+            let Some(r) = s.routes.iter().find(|r| r.kind == "immutable" && !r.api) else { return Ok(None) };
             format!("{}{}/{}/{}", r.prefix, immutable_token(&meta.blob_id), bucket, meta.key)
         }
         false => {
@@ -439,8 +476,10 @@ pub async fn object_url(store: &Store, bucket: &str, meta: &ObjectMeta, immutabl
 }
 
 /// What the Worker needs configured (`wrangler.toml` vars and secrets), for `origin` (how the
-/// Worker reaches roll). Secrets are only named, except the presigning key's when `secrets`.
-pub async fn worker_env(store: &Store, origin: &str, secrets: bool) -> s3_store::Result<Value> {
+/// Worker reaches roll's S3 API) and `api_origin` (how it reaches the storage developer API:
+/// its URL, with or without `/storage/v1`). Secrets are only named, except the presigning key's
+/// and the developer API's signed-URL key when `secrets`.
+pub async fn worker_env(store: &Store, origin: &str, api_origin: Option<&str>, secrets: bool) -> s3_store::Result<Value> {
     let s = store.cdn_routing()?;
     let routes = serde_json::to_string(&s.routes)?;
     let mut vars = json!({
@@ -449,13 +488,43 @@ pub async fn worker_env(store: &Store, origin: &str, secrets: bool) -> s3_store:
         "ROLL_CDN_DEFAULT_TTL": s.mutable_ttl_s.to_string(),
         "ROLL_CDN_PRESIGN_KEY_ID": CDN_KEY_ID,
     });
-    let mut secret_names = vec!["ROLL_CDN_ORIGIN_SECRET (= rolld's ROLL_CDN_ORIGIN_SECRET)", "ROLL_CDN_PRESIGN_SECRET", "ROLL_CDN_JWT_SECRET (optional: signed-URL tokens of the storage REST API)"];
+    if let Some(a) = api_origin {
+        vars["ROLL_API_ORIGIN"] = json!(api_origin_of(a));
+    }
+    let mut secret_names = vec!["ROLL_CDN_ORIGIN_SECRET (= rolld's ROLL_CDN_ORIGIN_SECRET)", "ROLL_CDN_PRESIGN_SECRET", "ROLL_CDN_JWT_SECRET (the storage developer API's signed-URL key, hex:<64 hex digits>)"];
     if secrets {
         let (_, secret) = presign_key(store).await?;
         vars["ROLL_CDN_PRESIGN_SECRET"] = json!(secret);
-        secret_names.retain(|n| !n.starts_with("ROLL_CDN_PRESIGN_SECRET"));
+        vars["ROLL_CDN_JWT_SECRET"] = json!(format!("hex:{}", hex::encode(store.api_url_key().await?)));
+        secret_names.retain(|n| !n.starts_with("ROLL_CDN_PRESIGN_SECRET") && !n.starts_with("ROLL_CDN_JWT_SECRET"));
     }
     Ok(json!({ "vars": vars, "secrets": secret_names }))
+}
+
+/// The developer API's origin (`scheme://host[:port]`) from its URL (`…/storage/v1`).
+fn api_origin_of(url: &str) -> String {
+    let u = url.trim_end_matches('/');
+    u.strip_suffix(API_PREFIX.trim_end_matches('/')).unwrap_or(u).to_string()
+}
+
+/// The CDN URL of the developer API for an object of `bucket` (CDN on), `None` without a CDN or
+/// API routes: `/storage/v1/object/public/<bucket>/<key>`, or with `transform` (a query of
+/// transformation parameters) `/storage/v1/render/image/public/...?<transform>`; with
+/// `immutable_blob`, the immutable URL of that blob (`/storage/v1/v/<token>/<bucket>/<key>`,
+/// `?<transform>` for a rendition), cached for a year and never stale.
+pub fn api_url(store: &Store, bucket: &str, key: &str, immutable_blob: Option<&str>, transform: &str) -> s3_store::Result<Option<String>> {
+    let s = store.cdn_routing()?;
+    let Some(base) = s.base() else { return Ok(None) };
+    let has = |prefix: &str, kind: &str| s.routes.iter().any(|r| r.api && r.kind == kind && r.prefix == format!("{API_PREFIX}{prefix}"));
+    let object = format!("{}/{}", uri_encode(bucket, true), uri_encode(key, false));
+    let query = if transform.is_empty() { String::new() } else { format!("?{transform}") };
+    let path = match (immutable_blob, transform.is_empty()) {
+        (Some(blob), _) if has("v/", "immutable") => format!("{API_PREFIX}v/{}/{object}{query}", immutable_token(blob)),
+        (None, true) if has("object/public/", "bucket-key") => format!("{API_PREFIX}object/public/{object}"),
+        (None, false) if has("render/image/public/", "bucket-key") => format!("{API_PREFIX}render/image/public/{object}{query}"),
+        _ => return Ok(None),
+    };
+    Ok(Some(format!("{base}{path}")))
 }
 
 /// The response to a request the CDN made that this module answers itself (usage reports);
@@ -479,7 +548,9 @@ mod tests {
 
     #[test]
     fn purge_urls() {
-        let mut s = CdnSettings { base_url: Some("https://cdn.example.com/".into()), ..Default::default() };
+        // The S3 routes only (the defaults' developer API routes are purged by tag, below).
+        let routes = vec![CdnRoute::new("/v/", "immutable"), CdnRoute::new("/", "s3")];
+        let mut s = CdnSettings { base_url: Some("https://cdn.example.com/".into()), routes, ..Default::default() };
         s.routes.push(CdnRoute { prefix: "/storage/v1/object/public/".into(), kind: "bucket-key".into(), auth: Some("public".into()), ..Default::default() });
         s.routes.push(CdnRoute { prefix: "/".into(), kind: "website".into(), bucket: Some("site".into()), ..Default::default() });
         let host = s.host().unwrap();
@@ -500,5 +571,13 @@ mod tests {
         assert_eq!(purge_items(&s, &host, &task, "k"), [("tags", object_tag("b", "k"))]);
         let all = purge_items(&s, &host, &PurgeTask { bucket: "b".into(), all: true }, "");
         assert_eq!(all, [("tags", bucket_tag("b")), ("prefixes", "cdn.example.com/b/".into()), ("prefixes", "cdn.example.com/storage/v1/object/public/b/".into())]);
+
+        // With the developer API's routes (the defaults): its copies go by the object's tag, in
+        // files mode too, and its URLs aren't listed as files.
+        let api = CdnSettings { base_url: Some("https://cdn.example.com/".into()), ..Default::default() };
+        let items = purge_items(&api, &host, &task, "k");
+        assert_eq!(items[0], ("tags", object_tag("b", "k")));
+        assert!(items.iter().all(|(_, v)| !v.contains("/storage/v1/")), "{items:?}");
+        assert!(items.iter().any(|(k, v)| *k == "files" && v == "https://cdn.example.com/b/k"));
     }
 }

@@ -3,6 +3,7 @@ import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { deflateSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -167,3 +168,55 @@ export function fails(res: { data: unknown; error: unknown }, statusCode: string
 }
 
 export const sha256 = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
+
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+
+function crc32(b: Uint8Array): number {
+  let c = 0xffffffff;
+  for (const x of b) c = CRC_TABLE[(c ^ x) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+/** A `w`×`h` RGB PNG (a gradient), made without image libraries. */
+export function png(w: number, h: number): Uint8Array {
+  const raw = Buffer.alloc((w * 3 + 1) * h);
+  for (let y = 0; y < h; y++) {
+    raw[y * (w * 3 + 1)] = 0;
+    for (let x = 0; x < w; x++) raw.set([x & 0xff, y & 0xff, (x + y) & 0xff], y * (w * 3 + 1) + 1 + x * 3);
+  }
+  const chunk = (type: string, data: Buffer) => {
+    const td = Buffer.concat([Buffer.from(type, "latin1"), data]);
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(td));
+    return Buffer.concat([len, td, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr.set([8, 2, 0, 0, 0], 8);
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  return new Uint8Array(Buffer.concat([sig, chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]));
+}
+
+/** A PNG's or WebP's format and size, read from its header. */
+export function imageSize(b: Uint8Array): { format: "png" | "webp" | "jpeg" | "other"; width: number; height: number } {
+  const buf = Buffer.from(b);
+  if (buf.subarray(1, 4).toString("latin1") === "PNG") return { format: "png", width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+  if (buf.subarray(0, 4).toString("latin1") === "RIFF" && buf.subarray(8, 12).toString("latin1") === "WEBP") {
+    const kind = buf.subarray(12, 16).toString("latin1");
+    if (kind === "VP8 ") return { format: "webp", width: buf.readUInt16LE(26) & 0x3fff, height: buf.readUInt16LE(28) & 0x3fff };
+    if (kind === "VP8L") {
+      const bits = buf.readUInt32LE(21);
+      return { format: "webp", width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 };
+    }
+    if (kind === "VP8X") return { format: "webp", width: buf.readUIntLE(24, 3) + 1, height: buf.readUIntLE(27, 3) + 1 };
+  }
+  if (buf[0] === 0xff && buf[1] === 0xd8) return { format: "jpeg", width: 0, height: 0 };
+  return { format: "other", width: 0, height: 0 };
+}

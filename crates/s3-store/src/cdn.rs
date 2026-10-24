@@ -77,8 +77,9 @@ pub enum PurgeMode {
 pub struct CdnRoute {
     pub prefix: String,
     /// `s3` (`<prefix><bucket>/<key>`, S3 semantics), `immutable` (`<prefix><token>/<bucket>/<key>`),
-    /// `bucket-key` (`<prefix><bucket>/<key>`, another API's semantics) or `website`
-    /// (`<prefix><key>` of one bucket's website).
+    /// `bucket-key` (`<prefix><bucket>/<key>`, another API's semantics), `website`
+    /// (`<prefix><key>` of one bucket's website) or `none` (never served through the CDN: 404
+    /// at the edge).
     pub kind: String,
     /// `any`, `public` or `token`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -95,6 +96,15 @@ pub struct CdnRoute {
     /// `none`: never stored at the edge.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache: Option<String>,
+    /// A route of the storage developer API (`/storage/v1/…`): its origin is the Worker's
+    /// `ROLL_API_ORIGIN` unless `origin` is set, and its copies are purged by cache tag (their
+    /// URLs vary with transformations, tokens and `Accept`, so they can't be listed).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub api: bool,
+    /// Image renditions: the edge keys copies by whether the client accepts WebP (no `format`
+    /// means WebP when it's accepted), as Cloudflare's cache ignores `Vary: Accept`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub vary_accept: bool,
 }
 
 impl CdnRoute {
@@ -104,13 +114,46 @@ impl CdnRoute {
 
     /// Whether credentialed copies may be cached under this route (a private namespace).
     pub fn credentialed(&self) -> bool {
-        self.auth.as_deref() != Some("public") && self.kind != "website"
+        self.auth.as_deref() != Some("public") && !matches!(self.kind.as_str(), "website" | "none")
+    }
+
+    /// A route of the storage developer API, under [`API_PREFIX`].
+    fn api_route(prefix: &str, kind: &str, auth: &str) -> Self {
+        Self { prefix: format!("{API_PREFIX}{prefix}"), kind: kind.into(), auth: Some(auth.into()), api: true, ..Default::default() }
     }
 }
 
-/// The routes when none are configured: immutable URLs under `/v/`, S3 paths for the rest.
+/// Where the storage developer API is mounted (`s3_api::PREFIX`, with its `/`).
+pub const API_PREFIX: &str = "/storage/v1/";
+
+/// The developer API's routes: public and signed reads of objects and image renditions, and
+/// immutable URLs (`/storage/v1/v/<token>/<bucket>/<key>`). Nothing else under the API is served
+/// at the edge: authenticated requests (a user's JWT) never go through the CDN.
+pub fn api_routes() -> Vec<CdnRoute> {
+    let token = |mut r: CdnRoute| {
+        r.forward_token = true;
+        r
+    };
+    let images = |mut r: CdnRoute| {
+        r.vary_accept = true;
+        r
+    };
+    vec![
+        CdnRoute::api_route("", "none", "public"),
+        CdnRoute::api_route("object/public/", "bucket-key", "public"),
+        token(CdnRoute::api_route("object/sign/", "bucket-key", "token")),
+        images(CdnRoute::api_route("render/image/public/", "bucket-key", "public")),
+        images(token(CdnRoute::api_route("render/image/sign/", "bucket-key", "token"))),
+        CdnRoute::api_route("v/", "immutable", "public"),
+    ]
+}
+
+/// The routes when none are configured: immutable URLs under `/v/`, S3 paths for the rest, and
+/// the developer API's reads ([`api_routes`]).
 pub fn default_routes() -> Vec<CdnRoute> {
-    vec![CdnRoute::new("/v/", "immutable"), CdnRoute::new("/", "s3")]
+    let mut r = vec![CdnRoute::new("/v/", "immutable"), CdnRoute::new("/", "s3")];
+    r.extend(api_routes());
+    r
 }
 
 /// The deployment's CDN settings.
@@ -181,8 +224,11 @@ impl CdnSettings {
             if !r.prefix.starts_with('/') || r.prefix.len() > 256 {
                 return bad(format!("route prefix {:?} must start with /", r.prefix));
             }
-            if !matches!(r.kind.as_str(), "s3" | "immutable" | "bucket-key" | "website") {
-                return bad(format!("route kind {:?} is s3, immutable, bucket-key or website", r.kind));
+            if !matches!(r.kind.as_str(), "s3" | "immutable" | "bucket-key" | "website" | "none") {
+                return bad(format!("route kind {:?} is s3, immutable, bucket-key, website or none", r.kind));
+            }
+            if r.api && matches!(r.kind.as_str(), "s3" | "website") {
+                return bad(format!("route {:?}: the developer API's routes are bucket-key, immutable or none", r.prefix));
             }
             if !matches!(r.auth.as_deref(), None | Some("any" | "public" | "token")) {
                 return bad("route auth is any, public or token".into());
@@ -425,6 +471,14 @@ mod tests {
     fn settings_are_checked() {
         let ok = CdnSettings { base_url: Some("https://cdn.example.com/".into()), zone_id: Some("abc123".into()), ..Default::default() };
         ok.check().unwrap();
+        // The defaults front the developer API's reads, and nothing else under it.
+        let api: Vec<&CdnRoute> = ok.routes.iter().filter(|r| r.api).collect();
+        assert!(api.iter().any(|r| r.prefix == "/storage/v1/" && r.kind == "none"));
+        assert!(api.iter().any(|r| r.prefix == "/storage/v1/render/image/sign/" && r.forward_token && r.vary_accept && r.credentialed()));
+        assert!(!api.iter().any(|r| r.prefix.contains("authenticated")));
+        let mut bad = ok.clone();
+        bad.routes.push(CdnRoute { api: true, ..CdnRoute::new("/storage/v1/x/", "s3") });
+        assert!(bad.check().is_err(), "the API's routes aren't S3's");
         assert_eq!(ok.host().as_deref(), Some("cdn.example.com"));
         assert_eq!(ok.base(), Some("https://cdn.example.com"));
         assert_eq!(CdnSettings { base_url: Some("http://127.0.0.1:8787/".into()), ..Default::default() }.host().as_deref(), Some("127.0.0.1:8787"));

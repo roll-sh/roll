@@ -289,13 +289,13 @@ async fn signed_urls() {
 }
 
 #[tokio::test]
-async fn render_is_reserved() {
+async fn render_routes_answer() {
+    // The routes in depth: tests/render.rs.
     let t = start().await;
     t.bucket("img-a", true).await;
     t.upload("img-a", "a.png", As::Service, "image/png", b"png").await;
-    let r = t.get("/render/image/public/img-a/a.png?width=100&resize=cover", As::Nobody).await;
-    assert_eq!((r.status, r.code()), (501, "501".into()));
-    assert_error(&t.get("/render/image/public/img-a/a.png?width=0", As::Nobody).await, "400", "InvalidRequest");
+    assert_error(&t.get("/render/image/public/img-a/a.png?width=100&resize=cover", As::Nobody).await, "400", "InvalidImage");
+    assert_error(&t.get("/render/image/public/img-a/a.png?width=0x", As::Nobody).await, "400", "InvalidRequest");
     assert_error(&t.get("/render/image/authenticated/img-a/a.png", As::Nobody).await, "403", "AccessDenied");
     assert_error(&t.get("/render/image/sign/img-a/a.png?token=x", As::Nobody).await, "400", "InvalidJWT");
 }

@@ -214,7 +214,7 @@ pub(crate) fn checks(method: &Method, route: &str, path: &str, query: &[(String,
             v
         }
         ("POST", "/v1/storage/buckets/{name}/branches") => vec![check("s3:ListBucket", b, None), Check { identity: true, ..check("s3:CreateBucket", Some(field("name").unwrap_or_default()), None) }],
-        ("GET", "/v1/storage/buckets/{name}/object") | ("GET", "/v1/storage/buckets/{name}/download") => vec![check(if versioned { "s3:GetObjectVersion" } else { "s3:GetObject" }, b, Some(key.unwrap_or_default()))],
+        ("GET", "/v1/storage/buckets/{name}/object") | ("GET", "/v1/storage/buckets/{name}/download") | ("GET", "/v1/storage/buckets/{name}/thumbnail") => vec![check(if versioned { "s3:GetObjectVersion" } else { "s3:GetObject" }, b, Some(key.unwrap_or_default()))],
         ("DELETE", "/v1/storage/buckets/{name}/object") => vec![check(if versioned { "s3:DeleteObjectVersion" } else { "s3:DeleteObject" }, b, Some(key.unwrap_or_default()))],
         ("PUT", "/v1/storage/buckets/{name}/upload") => vec![check("s3:PutObject", b, Some(key.unwrap_or_default()))],
         ("POST", "/v1/storage/buckets/{name}/delete") => {

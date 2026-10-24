@@ -27,7 +27,7 @@ import {
   type ObjectSummary,
   type ObjectVersion,
 } from "@/lib/storage-api";
-import { sessionDownload } from "@/lib/storage-session";
+import { sessionDownload, storageHeaders } from "@/lib/storage-session";
 import { Drawer, iconBtn, LoadMore, Section, Spinner } from "../tasks/ui";
 import { btn, danger, ErrorNote, input, panel, primary, useCopy } from "../ui";
 import { Progress, Segmented } from "./shared";
@@ -774,6 +774,63 @@ const EXPIRIES = [
   { label: "7d", value: 604_800 },
 ];
 
+/** Images roll can render (and so preview). */
+const PREVIEWABLE = /^image\/(jpeg|jpg|png|webp|gif)\b/i;
+const PREVIEW_WIDTH = 200;
+
+/**
+ * A small rendition of an image (200 px wide, WebP when the browser takes it), made by the image
+ * renderer and cached as a derived image: the original is never downloaded to preview it.
+ */
+function ImagePreview({ bucket, objectKey, versionId }: { bucket: string; objectKey: string; versionId?: string | null }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    let href: string | null = null;
+    setSrc(null);
+    setFailed(null);
+    (async () => {
+      const res = await fetch(storageApi.thumbnailUrl(bucket, objectKey, PREVIEW_WIDTH, versionId), { headers: storageHeaders() });
+      if (!res.ok) {
+        let msg = `${res.status} ${res.statusText}`.trim();
+        try {
+          msg = ((await res.json()) as { error?: string }).error ?? msg;
+        } catch {
+          // keep the status
+        }
+        throw new Error(msg);
+      }
+      href = URL.createObjectURL(await res.blob());
+      if (alive) setSrc(href);
+    })().catch((e) => alive && setFailed(e instanceof Error ? e.message : String(e)));
+    return () => {
+      alive = false;
+      if (href) URL.revokeObjectURL(href);
+    };
+  }, [bucket, objectKey, versionId]);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex h-[200px] items-center justify-center overflow-hidden rounded-lg border border-line bg-bg">
+        {src ? (
+          // A blob: URL of a rendition; next/image has nothing to optimize here.
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={src} alt={`Preview of ${objectKey}`} className="rise max-h-full max-w-full object-contain" />
+        ) : failed ? (
+          <p className="px-4 text-center text-[12px] text-subtle">No preview: {failed}</p>
+        ) : (
+          <span className="shimmer text-[12px] text-subtle">Rendering preview…</span>
+        )}
+      </div>
+      <p className="text-[11px] text-subtle">
+        A {PREVIEW_WIDTH} px rendition, made once and cached. Previews aren&apos;t billed as transformations.
+      </p>
+    </div>
+  );
+}
+
 function ObjectDrawer({
   bucket,
   objectKey,
@@ -814,7 +871,14 @@ function ObjectDrawer({
     }
   };
 
-  const publicUrl = bucket.public ? `${bucket.url.replace(/\/$/, "")}/${objectKey.split("/").map(encodeURIComponent).join("/")}` : null;
+  const encodedKey = objectKey.split("/").map(encodeURIComponent).join("/");
+  const publicUrl = bucket.public ? `${bucket.url.replace(/\/$/, "")}/${encodedKey}` : null;
+  const isImage = !!info && PREVIEWABLE.test(info.content_type ?? "");
+  // The developer API's resized rendition of a public image (through the CDN when it's on).
+  const imageUrl =
+    isImage && bucket.public && bucket.api_public_url
+      ? `${bucket.api_public_url.replace("/object/public/", "/render/image/public/")}/${encodedKey}?width=${PREVIEW_WIDTH}`
+      : null;
   const rows: [string, string | number | null | undefined][] = info
     ? [
         ["Size", `${formatBytes(info.size)} (${info.size.toLocaleString("en-US")} bytes)`],
@@ -864,6 +928,11 @@ function ObjectDrawer({
       )}
       {info && (
         <>
+          {isImage && (
+            <Section title="Preview">
+              <ImagePreview bucket={bucket.name} objectKey={objectKey} versionId={info.version_id !== "null" ? info.version_id : null} />
+            </Section>
+          )}
           <Section title="Object">
             <dl className="space-y-1.5 text-[12px]">
               {rows
@@ -903,6 +972,19 @@ function ObjectDrawer({
                     <code className="min-w-0 flex-1 truncate font-mono text-[11px]">{publicUrl}</code>
                     <button onClick={() => copy("public", publicUrl)} className={iconBtn} aria-label="Copy public URL">
                       {copied === "public" ? <span className="font-mono text-[10px] text-ok">copied</span> : <Link2 className="size-3.5" />}
+                    </button>
+                  </div>
+                </div>
+              )}
+              {imageUrl && (
+                <div className="space-y-1">
+                  <p className="text-[11px] text-subtle">
+                    Resized image — {PREVIEW_WIDTH} px wide{bucket.api_cdn ? ", served by the CDN" : ""}; change width, height, quality or format
+                  </p>
+                  <div className="flex items-center gap-1 rounded-lg border border-line bg-bg px-2.5 py-2">
+                    <code className="min-w-0 flex-1 truncate font-mono text-[11px]">{imageUrl}</code>
+                    <button onClick={() => copy("image", imageUrl)} className={iconBtn} aria-label="Copy resized image URL">
+                      {copied === "image" ? <span className="font-mono text-[10px] text-ok">copied</span> : <Link2 className="size-3.5" />}
                     </button>
                   </div>
                 </div>

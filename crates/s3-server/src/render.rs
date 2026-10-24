@@ -42,6 +42,7 @@ use s3_image::{ImageError, Params, Plan, Rendered};
 use s3_proto::http::quote_etag;
 use s3_proto::time::http_date;
 use s3_proto::{Code, S3Error};
+use s3_store::cdn::CdnMode;
 use s3_store::{ByteStream, Class, Derived, Encryption, NewDerived, ObjectMeta, Store, StoreError};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -88,6 +89,12 @@ pub struct RenderRequest<'a> {
     pub payer: Option<&'a str>,
     /// Fetched by the CDN (a miss at the edge): its bytes are an origin pull, not egress.
     pub cdn: bool,
+    /// Only render the object if this is its blob (an immutable URL's): `NoSuchKey` otherwise,
+    /// so a URL naming one blob never serves another's rendition.
+    pub expect_blob: Option<&'a str>,
+    /// Not counted as a transformation (the dashboard's own previews); the request and its
+    /// bytes are still metered.
+    pub unbilled: bool,
 }
 
 /// A rendered image: status 200 with a body, or 304 without.
@@ -142,6 +149,9 @@ pub async fn render(server: &Server, req: &RenderRequest<'_>) -> Result<Renditio
     let store = &server.store;
     let bucket = store.bucket(req.bucket).s3()?;
     let (meta, enc) = store.get_version_encryption(req.bucket, req.key, req.version).s3()?;
+    if req.expect_blob.is_some_and(|b| b != meta.blob_id) {
+        return Err(S3Error::new(Code::NoSuchKey).with("Key", req.key.to_string()));
+    }
     store.meter.request_by(&bucket.id, req.payer, Class::B);
     if matches!(enc, Some(Encryption::Customer { .. })) {
         return Err(S3Error::msg(Code::InvalidRequest, "Objects encrypted with a customer-provided key (SSE-C) can't be transformed."));
@@ -182,7 +192,9 @@ pub async fn render(server: &Server, req: &RenderRequest<'_>) -> Result<Renditio
             Made::New { bytes, content_type, transformed } => (content_type, bytes.len() as u64, s3_store::bytes_body(bytes), false, transformed),
         },
     };
-    if let Err(e) = store.record_transform(&bucket.id, &meta.blob_id, made).await {
+    if !req.unbilled
+        && let Err(e) = store.record_transform(&bucket.id, &meta.blob_id, made).await
+    {
         // Billing is durable: a render that can't be counted fails.
         return Err(crate::error::store_error(e));
     }
@@ -319,6 +331,16 @@ pub(crate) async fn get(ctx: &mut Ctx, bucket: &s3_store::Bucket) -> Reply {
     let params = Params::parse_spec(&spec).map_err(image_error)?;
     let vid = crate::versioning::version_id(ctx)?;
     let payer = ctx.payer(&bucket.id);
+    // Through the CDN: the bucket must have it on, and an immutable URL's token must name the
+    // object's blob (which is then the only one rendered).
+    let (mode, blob) = match &ctx.cdn {
+        Some(_) => {
+            let meta = ctx.store().get_object_version(&bucket.name, ctx.key_name(), vid.as_deref()).s3()?;
+            let mode = crate::cdn::check(ctx, bucket, &meta)?;
+            (mode, (mode == CdnMode::Immutable).then_some(meta.blob_id))
+        }
+        None => (CdnMode::Mutable, None),
+    };
     let req = RenderRequest {
         bucket: &bucket.name,
         key: ctx.key_name(),
@@ -329,6 +351,10 @@ pub(crate) async fn get(ctx: &mut Ctx, bucket: &s3_store::Bucket) -> Reply {
         internal: ctx.internal(),
         payer: payer.as_deref(),
         cdn: ctx.cdn.is_some(),
+        expect_blob: blob.as_deref(),
+        unbilled: false,
     };
-    Ok(render(&ctx.server, &req).await?.into_response())
+    let mut r = render(&ctx.server, &req).await?.into_response();
+    crate::cdn::set_headers(ctx, &mut r, mode);
+    Ok(r)
 }
