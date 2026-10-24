@@ -336,6 +336,21 @@ What changed:
 Goldens: `tests/sql/a32_index_operand_cost.sql`, `a32_subplan_copy_keys.sql`,
 `a32_anti_join_consts.sql`, `a32_subplan_numbering.sql` (rows checked beside every plan).
 
+Second batch (subset run against the first batch's on e958e87: no unit fixed or broken;
+select_parallel 112 / 116 / 195 differed in one run by the reference's parallel workers
+launching late, `Workers Launched: 3`, and match in the next):
+
+- **Join clauses over a sub-select** (cost_qual_eval of a SubPlan, cost_subplan): EXPLAIN's
+  join costs charge a SubPlan in a hash, merge or join clause its runs (a hash join's per
+  probe: 3.13 -> 24.24 for Postgres's plan's alternative), as the join search already did.
+- **A Memoize keyed by a sub-select** (paraminfo_get_equal_hashops): a clause over a
+  sub-select isn't volatile to it (contain_volatile_functions looks at a SubPlan's
+  arguments, `expr_volatile_deep`, as param_paths has it): `t.a = (SELECT min(..) .. outer.b)`
+  is a Nested Loop over a `Memoize` with `Cache Key: (SubPlan 2)` over the parameterized index
+  scan, Postgres's plan (the engine made a Hash Join).
+
+Golden: `a32_subselect_join_clause.sql`.
+
 Left, and why:
 
 - EXPLAIN ANALYZE loops of a copied EXISTS used as an index condition (item 4): the engine
@@ -353,10 +368,8 @@ Left, and why:
   (`junk_only` in EXPLAIN); a projection carrying ORDER BY's resjunk keys over an ordered index
   scan has the same shape and must keep them. Needs the binder to mark which projection is a
   pulled-up subquery's.
-- A hash join's clause over a sub-select: EXPLAIN's hash clause cost leaves out the SubPlan's
-  run (cost_qual_eval per probe: 15.80 vs 11.53), and a Memoize keyed by a sub-select
-  (`Cache Key: (SubPlan 2)`) isn't made (the clause's outer side reads its leaf only through
-  the sub-select's parameters): Postgres's Nested Loop over a Memoize, the engine's Hash Join.
+- A hash join's clause cost over a sub-select output of a pulled-up subquery is a little
+  under Postgres's (15.75 for 15.80 in `a32_subselect_join_clause`); costs only.
 - A qual `a = (InitPlan 2).col1` (a pseudo-constant equality, an equivalence class's) is
   ordered after the other restrictions in Postgres's baserestrictinfo; the engine keeps the
   written order.

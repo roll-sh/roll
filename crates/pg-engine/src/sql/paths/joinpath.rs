@@ -4424,7 +4424,9 @@ impl Search<'_, '_, '_> {
         let mut binary = false;
         for &c in enforced {
             let cl = &self.clauses[c];
-            if cl.expr.is_volatile() {
+            // (contain_volatile_functions: a SubPlan by its arguments, as param_paths has
+            // it, so a clause over a sub-select caches by the sub-select's value.)
+            if crate::sql::explain::expr_volatile_deep(&cl.expr) {
                 return None;
             }
             // paraminfo_get_equal_hashops: the clause's outer side, hashable.

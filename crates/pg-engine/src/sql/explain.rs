@@ -14630,6 +14630,11 @@ impl Builder<'_, '_> {
             })
             .sum();
         let other_cost: f64 = others.iter().map(costs::qual_cost).sum();
+        // (cost_qual_eval: a SubPlan in them costs its runs too, cost_subplan.)
+        let key_exprs: Vec<Expr> = keys.iter().flat_map(|(a, b)| [a.clone(), b.clone()]).collect();
+        let (key_sub_startup, key_sub) = subplan_costs(&key_exprs, self.ctx);
+        let (other_sub_startup, other_sub) = subplan_costs(&others, self.ctx);
+        let (key_cost, other_cost) = (key_cost + key_sub, other_cost + other_sub);
         let input = |x: &ExNode| In {
             rows: x.rows,
             startup: x.startup_cost,
@@ -14734,11 +14739,11 @@ impl Builder<'_, '_> {
                     let info = joins::HashInfo {
                         nclauses: pairs.len(),
                         hash_quals: QualCost {
-                            startup: 0.0,
+                            startup: key_sub_startup,
                             per_tuple: key_cost,
                         },
                         other_quals: QualCost {
-                            startup: 0.0,
+                            startup: other_sub_startup,
                             per_tuple: other_cost,
                         },
                         bucket: (!meta.unique_inner).then_some(bucket),
@@ -14813,11 +14818,11 @@ impl Builder<'_, '_> {
                 let msel: f64 = inner_sel;
                 let info = joins::MergeInfo {
                     merge_quals: QualCost {
-                        startup: 0.0,
+                        startup: key_sub_startup,
                         per_tuple: key_cost,
                     },
                     other_quals: QualCost {
-                        startup: 0.0,
+                        startup: other_sub_startup,
                         per_tuple: other_cost,
                     },
                     scansel: meta.scansel.unwrap_or((0.0, 1.0, 0.0, 1.0)),
@@ -14849,7 +14854,7 @@ impl Builder<'_, '_> {
             }
             JoinMethod::NestLoop => {
                 let quals = QualCost {
-                    startup: 0.0,
+                    startup: key_sub_startup + other_sub_startup,
                     per_tuple: key_cost + other_cost,
                 };
                 let nl_cost = |outer: &ExNode, inner: &ExNode, sw: bool, uniq: bool, mat: bool| {

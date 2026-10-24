@@ -1,0 +1,161 @@
+> create table sjc_a (a int, b int)
+-- CREATE TABLE
+
+> create table sjc_b (a int, b int)
+-- CREATE TABLE
+
+> insert into sjc_a select g, g % 5 from generate_series(1, 30) g
+-- INSERT 0 30
+
+> insert into sjc_b select g, g % 3 from generate_series(1, 30) g
+-- INSERT 0 30
+
+> create index on sjc_b (a)
+-- CREATE INDEX
+
+> analyze sjc_a, sjc_b
+-- ANALYZE
+
+> explain
+> select sjc_b.a from sjc_a join sjc_b on sjc_b.a = (select min(a) from sjc_b x where x.b = sjc_a.b)
+QUERY PLAN:text
+Nested Loop  (cost=1.55..13.49 rows=30 width=4)
+  ->  Seq Scan on sjc_a  (cost=0.00..1.30 rows=30 width=4)
+  ->  Memoize  (cost=1.55..1.97 rows=1 width=4)
+        Cache Key: (SubPlan 2)
+        Cache Mode: logical
+        ->  Index Only Scan using sjc_b_a_idx on sjc_b  (cost=1.54..1.96 rows=1 width=4)
+              Index Cond: (a = (SubPlan 2))
+              SubPlan 2
+                ->  Result  (cost=1.40..1.41 rows=1 width=4)
+                      InitPlan 1
+                        ->  Limit  (cost=0.14..1.40 rows=1 width=4)
+                              ->  Index Scan using sjc_b_a_idx on sjc_b x  (cost=0.14..12.74 rows=10 width=4)
+                                    Index Cond: (a IS NOT NULL)
+                                    Filter: (b = sjc_a.b)
+-- EXPLAIN
+
+> select sjc_b.a from sjc_a join sjc_b on sjc_b.a = (select min(a) from sjc_b x where x.b = sjc_a.b) order by 1
+a:int4
+1
+1
+1
+1
+1
+1
+2
+2
+2
+2
+2
+2
+3
+3
+3
+3
+3
+3
+-- SELECT 18
+
+> set enable_hashjoin = off
+-- SET
+
+> explain
+> select sjc_b.a from sjc_a join sjc_b on sjc_b.a = (select min(a) from sjc_b x where x.b = sjc_a.b)
+QUERY PLAN:text
+Nested Loop  (cost=1.55..13.49 rows=30 width=4)
+  ->  Seq Scan on sjc_a  (cost=0.00..1.30 rows=30 width=4)
+  ->  Memoize  (cost=1.55..1.97 rows=1 width=4)
+        Cache Key: (SubPlan 2)
+        Cache Mode: logical
+        ->  Index Only Scan using sjc_b_a_idx on sjc_b  (cost=1.54..1.96 rows=1 width=4)
+              Index Cond: (a = (SubPlan 2))
+              SubPlan 2
+                ->  Result  (cost=1.40..1.41 rows=1 width=4)
+                      InitPlan 1
+                        ->  Limit  (cost=0.14..1.40 rows=1 width=4)
+                              ->  Index Scan using sjc_b_a_idx on sjc_b x  (cost=0.14..12.74 rows=10 width=4)
+                                    Index Cond: (a IS NOT NULL)
+                                    Filter: (b = sjc_a.b)
+-- EXPLAIN
+
+> reset enable_hashjoin
+-- RESET
+
+> set enable_memoize = off
+-- SET
+
+> explain (costs off)
+> select sjc_b.a from sjc_a join sjc_b on sjc_b.a = (select min(a) from sjc_b x where x.b = sjc_a.b)
+QUERY PLAN:text
+Hash Join
+  Hash Cond: ((SubPlan 2) = sjc_b.a)
+  ->  Seq Scan on sjc_a
+  ->  Hash
+        ->  Seq Scan on sjc_b
+  SubPlan 2
+    ->  Result
+          InitPlan 1
+            ->  Limit
+                  ->  Index Scan using sjc_b_a_idx on sjc_b x
+                        Index Cond: (a IS NOT NULL)
+                        Filter: (b = sjc_a.b)
+-- EXPLAIN
+
+> select sjc_b.a from sjc_a join sjc_b on sjc_b.a = (select min(a) from sjc_b x where x.b = sjc_a.b) order by 1
+a:int4
+1
+1
+1
+1
+1
+1
+2
+2
+2
+2
+2
+2
+3
+3
+3
+3
+3
+3
+-- SELECT 18
+
+> reset enable_memoize
+-- RESET
+
+> explain (costs off)
+> select ss.x, sjc_b.a from (select (select min(a) from sjc_b where sjc_b.b = sjc_a.b) as x from sjc_a where sjc_a.a < 8) ss
+> join sjc_b on sjc_b.a = ss.x
+QUERY PLAN:text
+Hash Join
+  Hash Cond: ((SubPlan 4) = sjc_b.a)
+  ->  Seq Scan on sjc_a
+        Filter: (a < 8)
+  ->  Hash
+        ->  Seq Scan on sjc_b
+  SubPlan 2
+    ->  Result
+          InitPlan 1
+            ->  Limit
+                  ->  Index Scan using sjc_b_a_idx on sjc_b sjc_b_1
+                        Index Cond: (a IS NOT NULL)
+                        Filter: (b = sjc_a.b)
+  SubPlan 4
+    ->  Result
+          InitPlan 3
+            ->  Limit
+                  ->  Index Scan using sjc_b_a_idx on sjc_b sjc_b_2
+                        Index Cond: (a IS NOT NULL)
+                        Filter: (b = sjc_a.b)
+-- EXPLAIN
+
+> drop table sjc_a
+-- DROP TABLE
+
+> drop table sjc_b
+-- DROP TABLE
+
