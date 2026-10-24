@@ -25,7 +25,6 @@ pub(crate) mod analyzejoins;
 mod reducejoins;
 pub(crate) use reducejoins::strict_cols;
 pub(crate) use joinpath::user_eq_props;
-pub(crate) use joinpath::lateral_pullable;
 mod pullup;
 mod pathkeys;
 pub use pathkeys::{column_classes, constant_columns};
@@ -3411,14 +3410,6 @@ impl Planner<'_, '_> {
                 }
             }
         }
-        // (check_index_only reads the reltarget: a join clause's columns stay there though
-        // the clause went, an equivalence class with a constant or self-join elimination
-        // replacing it.)
-        for &c in s.reltarget.0.iter() {
-            if c < ncols {
-                need[c] = true;
-            }
-        }
         let mut indexes = index_infos(self.ctx, &t, size.tuples);
         if s.with_key || s.mark.is_some() {
             indexes.iter_mut().for_each(|ii| ii.target = true);
@@ -4806,10 +4797,6 @@ impl Planner<'_, '_> {
         if matches!(p, Plan::Join { .. }) && self.plan_joins_limited(p, needed, lim) {
             return;
         }
-        // (A LATERAL subquery left to be pulled up that no group took in: planned apart.)
-        if matches!(p, Plan::Join { .. }) {
-            self.settle_laterals(p);
-        }
         if matches!(p, Plan::Filter { .. }) && self.plan_filtered_join(p, needed) {
             return;
         }
@@ -6125,7 +6112,6 @@ fn plan_level_ordered(
     joinpath::whole_rows(plan, &mut p.whole_rows.borrow_mut());
     p.null_unused_level_outputs(plan, needed);
     p.drop_unused_outputs(plan, needed);
-    let bound = bound_join_tree(plan);
     p.walk(plan, needed, lim);
     if !p.lifted.borrow().is_empty() {
         p.lifted_into_aggs(plan);
@@ -6142,109 +6128,7 @@ fn plan_level_ordered(
     } else {
         *plan = Arc::try_unwrap(whole).unwrap_or_else(|a| (*a).clone());
     }
-    if let Some(b) = bound {
-        note_bound_join_tree(ctx, plan, b);
-    }
     p.removed.get()
-}
-
-/// The range table indexes of a plan's scans (sorted; None when one isn't known) and its
-/// width.
-pub(crate) fn join_tree_key(p: &Plan) -> Option<(Vec<usize>, usize)> {
-    fn go(p: &Plan, out: &mut Vec<usize>) -> bool {
-        if let Plan::Scan(sp) = p {
-            if sp.rti.0 == 0 {
-                return false;
-            }
-            out.push(sp.rti.0);
-        }
-        crate::sql::explain::plan_inputs(p).into_iter().all(|c| go(c, out))
-    }
-    let mut rtis = Vec::new();
-    if !go(p, &mut rtis) || rtis.is_empty() {
-        return None;
-    }
-    rtis.sort_unstable();
-    Some((rtis, crate::sql::binder::plan_width(p)))
-}
-
-/// A FROM subquery's join tree with semi / anti joins (pull_up_sublinks' EXISTS / IN) as
-/// its level had it before planning, kept for the query above (`ExecCtx::bound_trees`):
-/// pull_up_simple_subquery pulls the subquery's join tree up before anything is planned.
-/// The planned tree that took its place is its top join marked `JoinMeta::bound` (`id`),
-/// under the projection `glue` (the planned row put back in the tree's order), if any.
-#[derive(Clone, Debug)]
-pub struct BoundTree {
-    pub id: u64,
-    pub tree: Arc<Plan>,
-    pub glue: Option<Vec<Expr>>,
-    /// The relations (`join_tree_key`) both trees have.
-    pub key: (Vec<usize>, usize),
-}
-
-static BOUND_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-/// A level's plan before planning: the projections of its select list over a join tree
-/// with a semi or anti join among its inner and outer joins. The projections, and the tree.
-type LevelTree = (Vec<Vec<Expr>>, Plan);
-
-fn bound_join_tree(p: &Plan) -> Option<LevelTree> {
-    fn has_semi(p: &Plan) -> bool {
-        match p {
-            Plan::Join { kind, left, right, params, meta, .. } if params.is_empty() && meta.from_call.is_none() => {
-                matches!(kind, JoinKind::Semi | JoinKind::Anti) || has_semi(left) || has_semi(right)
-            }
-            Plan::Filter { input, .. } => matches!(&**input, Plan::Join { .. }) && has_semi(input),
-            _ => false,
-        }
-    }
-    let mut projs = Vec::new();
-    let mut cur = p;
-    while let Plan::Project { input, exprs } = cur {
-        projs.push(exprs.clone());
-        cur = input;
-    }
-    let j = match cur {
-        Plan::Filter { input, .. } => &**input,
-        j => j,
-    };
-    (!projs.is_empty() && matches!(j, Plan::Join { .. }) && has_semi(j)).then(|| (projs, cur.clone()))
-}
-
-/// Keep a level's join tree as it was before planning (`bound_join_tree`) for the query
-/// above, marking the planned tree that took its place: under the same projections, a
-/// join (perhaps under a projection) of the same relations, of the same width.
-fn note_bound_join_tree(ctx: &ExecCtx, plan: &mut Plan, (projs, tree): LevelTree) {
-    let mut cur = plan;
-    for exprs in &projs {
-        match cur {
-            Plan::Project { input, exprs: e2 } if e2.len() == exprs.len() && e2.iter().zip(exprs.iter()).all(|(a, b)| a.same_as(b)) => {
-                cur = Arc::make_mut(input);
-            }
-            _ => return,
-        }
-    }
-    let Some(key) = join_tree_key(&tree) else { return };
-    if join_tree_key(cur).as_ref() != Some(&key) {
-        return;
-    }
-    let (join, glue) = match cur {
-        Plan::Project { input, exprs } if matches!(&**input, Plan::Join { .. }) => {
-            let glue = exprs.clone();
-            (Arc::make_mut(input), Some(glue))
-        }
-        j @ Plan::Join { .. } => (j, None),
-        _ => return,
-    };
-    let Plan::Join { meta, .. } = join else { return };
-    let id = BOUND_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    meta.bound = id;
-    ctx.bound_trees.borrow_mut().push(BoundTree {
-        id,
-        tree: Arc::new(tree),
-        glue,
-        key,
-    });
 }
 
 /// Subqueries the planner makes (MIN / MAX InitPlans): ids apart from the binder's.

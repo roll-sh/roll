@@ -218,13 +218,9 @@ impl Ddl<'_, '_> {
                         expr,
                         no_inherit: false,
                     } => {
-                        let tc = Arc::new(t.clone());
-                        let same = t.constraints.iter().find(|c| c.name == pc.name).is_some_and(|c| {
-                            matches!(&c.kind, ConstraintKind::Check { expr: e, .. } if self.same_check(&tc, e, expr))
-                        });
                         if let Some(c) = t.constraints.iter_mut().find(|c| c.name == pc.name) {
                             match &c.kind {
-                                ConstraintKind::Check { .. } if same => {
+                                ConstraintKind::Check { expr: e, .. } if e == expr => {
                                     // (MergeCheckConstraint: enforced if any parent's is.)
                                     if pc.enforced && !c.enforced {
                                         c.enforced = true;
@@ -799,11 +795,13 @@ impl Ddl<'_, '_> {
             A::AtAddColumn if recurse && t.columns.len() > before.columns.len() => {
                 self.add_column_children(before, t, cmd)?
             }
-            // (ALTER COLUMN SET / RESET ( options ) and SET COMPRESSION never recurse.)
             A::AtAlterColumnType
             | A::AtColumnDefault
             | A::AtSetStatistics
+            | A::AtSetOptions
+            | A::AtResetOptions
             | A::AtSetStorage
+            | A::AtSetCompression
             | A::AtSetExpression
             | A::AtDropExpression
                 if recurse =>
@@ -987,12 +985,8 @@ impl Ddl<'_, '_> {
                 // it has).
                 for pc in new_cons.iter().filter(|c| matches!(c.kind, ConstraintKind::Check { .. })) {
                     let ConstraintKind::Check { expr, .. } = &pc.kind else { continue };
-                    let tc = Arc::new(child.clone());
-                    let same = child.constraints.iter().find(|c| c.name == pc.name).is_some_and(|c| {
-                        matches!(&c.kind, ConstraintKind::Check { expr: e, .. } if self.same_check(&tc, e, expr))
-                    });
                     if let Some(c) = child.constraints.iter_mut().find(|c| c.name == pc.name) {
-                        if same {
+                        if matches!(&c.kind, ConstraintKind::Check { expr: e, .. } if e == expr) {
                             self.notice(format!(
                                 "merging constraint \"{}\" with inherited definition",
                                 pc.name
@@ -1139,13 +1133,9 @@ impl Ddl<'_, '_> {
             return Ok(());
         };
         for mut child in self.child_tables(parent) {
-            let tc = Arc::new(child.clone());
-            let same = child.constraints.iter().find(|c| c.name == con.name).is_some_and(|c| {
-                matches!(&c.kind, ConstraintKind::Check { expr: e, .. } if self.same_check(&tc, e, expr))
-            });
             if let Some(c) = child.constraints.iter_mut().find(|c| c.name == con.name) {
                 match &c.kind {
-                    ConstraintKind::Check { no_inherit, .. } if same => {
+                    ConstraintKind::Check { expr: e, no_inherit } if e == expr => {
                         // (MergeWithExistingConstraint, for an inherited copy.)
                         let what = if *no_inherit {
                             Some("non-inherited")

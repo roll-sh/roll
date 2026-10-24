@@ -50,7 +50,8 @@ impl Session {
             K::VarSetMulti => {
                 match s.name.as_str() {
                     "TRANSACTION" => self.set_transaction(&s.args)?,
-                    // ImportSnapshot: one pg_export_snapshot() exported in another session.
+                    // ImportSnapshot: no snapshots are exported, so a well-formed one is
+                    // never found.
                     "TRANSACTION SNAPSHOT" => {
                         let id = s
                             .args
@@ -64,9 +65,7 @@ impl Session {
                             ));
                         }
                         if let Some(t) = &self.txn
-                            && (t.borrow().in_savepoint()
-                                || t.borrow().has_writes()
-                                || t.borrow().xid_if_assigned().is_some())
+                            && (t.borrow().in_savepoint() || t.borrow().has_writes())
                         {
                             return Err(Error::new(
                                 code::ACTIVE_SQL_TRANSACTION,
@@ -90,10 +89,10 @@ impl Session {
                                 format!("invalid snapshot identifier: \"{id}\""),
                             ));
                         }
-                        self.ensure_txn();
-                        if let Some(t) = &self.txn {
-                            t.borrow_mut().import_snapshot(&id)?;
-                        }
+                        return Err(Error::new(
+                            code::UNDEFINED_OBJECT,
+                            format!("snapshot \"{id}\" does not exist"),
+                        ));
                     }
                     "SESSION CHARACTERISTICS" => {
                         let (mut iso, mut ro) = self.default_txn_opts();

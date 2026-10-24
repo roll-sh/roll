@@ -4,8 +4,8 @@
 //!     bench --target wire --port 5433 <workload> [options]
 //!     bench --target inproc --data <dir> <workload> [options]
 //!
-//! Workloads: oltp-load, oltp, analytic-load, analytic, tpch-load, tpch, bulk, ddl, idle,
-//! startup. Results are printed as `RESULT\t<label>\t<workload>\t<case>\t<k=v>...` lines.
+//! Workloads: oltp-load, oltp, analytic-load, analytic, tpch-load, tpch, bulk, ddl, scale, idle,
+//! startup, startup-catalog. Results are printed as `RESULT\t<label>\t<workload>\t<case>\t<k=v>...` lines.
 
 mod tpch;
 
@@ -801,38 +801,58 @@ fn bulk(cx: &Ctx) {
 fn ddl(cx: &Ctx) {
     let tables: usize = cx.opt("tables", 500);
     let reps: usize = cx.opt("reps", 20);
-    // (only=<query names>: just those catalog queries, for profiling.)
+    // (only=<query names>: just those catalog queries, for profiling; setup=0: over the
+    // tables a run with keep=1 left, and keep=1: leave them.)
     let only: String = cx.opt("only", String::new());
+    let setup: usize = cx.opt("setup", 1);
+    let keep: usize = cx.opt("keep", 0);
     let mut c = cx.conn();
-    run_script(c.as_mut(), "DROP SCHEMA IF EXISTS ddl CASCADE; CREATE SCHEMA ddl");
+    if setup != 0 {
+        ddl_setup(cx, c.as_mut(), tables);
+    }
+    ddl_queries(cx, c.as_mut(), tables, reps, &only);
+    if keep == 0 {
+        ddl_drop(cx, c.as_mut(), tables);
+    }
+}
+
+fn ddl_each(cx: &Ctx, c: &mut dyn Conn, what: &str, n: usize, f: &mut dyn FnMut(&mut dyn Conn, usize) -> Res<()>) {
+    let t = Instant::now();
+    for i in 0..n {
+        must(f(c, i), what);
+    }
+    let s = t.elapsed().as_secs_f64();
+    cx.report(
+        "ddl",
+        what,
+        &[
+            ("n", n.to_string()),
+            ("total_s", format!("{s:.3}")),
+            ("per_op_ms", format!("{:.3}", s * 1000.0 / n as f64)),
+        ],
+    );
+}
+
+fn ddl_setup(cx: &Ctx, c: &mut dyn Conn, tables: usize) {
+    run_script(c, "DROP SCHEMA IF EXISTS ddl CASCADE; CREATE SCHEMA ddl");
     let each = |c: &mut dyn Conn, what: &str, n: usize, f: &mut dyn FnMut(&mut dyn Conn, usize) -> Res<()>| {
-        let t = Instant::now();
-        for i in 0..n {
-            must(f(c, i), what);
-        }
-        let s = t.elapsed().as_secs_f64();
-        cx.report(
-            "ddl",
-            what,
-            &[
-                ("n", n.to_string()),
-                ("total_s", format!("{s:.3}")),
-                ("per_op_ms", format!("{:.3}", s * 1000.0 / n as f64)),
-            ],
-        );
+        ddl_each(cx, c, what, n, f)
     };
-    each(c.as_mut(), "create_table", tables, &mut |c, i| {
+    each(c, "create_table", tables, &mut |c, i| {
         c.simple(&format!(
             "CREATE TABLE ddl.t{i} (id serial PRIMARY KEY, a int NOT NULL, b text, c timestamptz DEFAULT now(), d numeric(10,2) CHECK (d >= 0))"
         ))
         .map(drop)
     });
-    each(c.as_mut(), "create_index", tables, &mut |c, i| {
+    each(c, "create_index", tables, &mut |c, i| {
         c.simple(&format!("CREATE INDEX ON ddl.t{i} (a, b)")).map(drop)
     });
-    each(c.as_mut(), "alter_add_column", tables, &mut |c, i| {
+    each(c, "alter_add_column", tables, &mut |c, i| {
         c.simple(&format!("ALTER TABLE ddl.t{i} ADD COLUMN e int")).map(drop)
     });
+}
+
+fn ddl_queries(cx: &Ctx, c: &mut dyn Conn, tables: usize, reps: usize, only: &str) {
     let mid = tables / 2;
     let queries: Vec<(&str, String)> = vec![
         ("information_schema_columns", format!("SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'ddl' AND table_name = 't{mid}' ORDER BY ordinal_position")),
@@ -843,6 +863,9 @@ fn ddl(cx: &Ctx) {
         ("pg_class_join_attribute", "SELECT count(*) FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid WHERE c.relnamespace = 'ddl'::regnamespace".into()),
         ("orm_constraints", "SELECT con.conname, con.contype, cl.relname, pg_get_constraintdef(con.oid) FROM pg_constraint con JOIN pg_class cl ON cl.oid = con.conrelid JOIN pg_namespace n ON n.oid = cl.relnamespace WHERE n.nspname = 'ddl' ORDER BY cl.relname, con.conname".into()),
         ("regclass_cast", format!("SELECT 'ddl.t{mid}'::regclass::oid > 0")),
+        // (After DDL: the catalog's rows generated again for the new catalog.)
+        ("psql_d_columns_after_ddl", format!("COMMENT ON TABLE ddl.t{mid} IS 'c'; SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) FROM pg_catalog.pg_attrdef d WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef), a.attnotnull FROM pg_catalog.pg_attribute a WHERE a.attrelid = 'ddl.t{mid}'::regclass AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum")),
+        ("psql_d_lookup_after_ddl", format!("COMMENT ON TABLE ddl.t{mid} IS 'c'; SELECT c.oid, n.nspname, c.relname FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relname OPERATOR(pg_catalog.~) '^(t{mid})$' COLLATE pg_catalog.default AND n.nspname OPERATOR(pg_catalog.~) '^(ddl)$' COLLATE pg_catalog.default ORDER BY 2, 3")),
     ];
     for (name, sql) in &queries {
         if !only.is_empty() && !only.split(',').any(|o| o == *name) {
@@ -862,10 +885,151 @@ fn ddl(cx: &Ctx) {
             ],
         );
     }
-    each(c.as_mut(), "drop_table", tables, &mut |c, i| {
+}
+
+fn ddl_drop(cx: &Ctx, c: &mut dyn Conn, tables: usize) {
+    ddl_each(cx, c, "drop_table", tables, &mut |c, i| {
         c.simple(&format!("DROP TABLE ddl.t{i}")).map(drop)
     });
-    run_script(c.as_mut(), "DROP SCHEMA ddl CASCADE");
+    run_script(c, "DROP SCHEMA ddl CASCADE");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Many tables: DDL and catalog queries as the catalog grows
+
+fn scale(cx: &Ctx) {
+    let tables: usize = cx.opt("tables", 10_000);
+    let schemas: usize = cx.opt("schemas", 10).max(1);
+    let parts: usize = cx.opt("parts", 1_000);
+    let step: usize = cx.opt("step", 1_000).max(1);
+    let reps: usize = cx.opt("reps", 10);
+    // (keep=1: leave the objects, for a later in-process `startup` run.)
+    let keep: usize = cx.opt("keep", 0);
+    let mut c = cx.conn();
+    for s in 0..schemas {
+        run_script(c.as_mut(), &format!("DROP SCHEMA IF EXISTS sc{s} CASCADE; CREATE SCHEMA sc{s}"));
+    }
+    run_script(c.as_mut(), "DROP SCHEMA IF EXISTS scp CASCADE; CREATE SCHEMA scp");
+    // Created in steps; each step's time per statement shows how DDL grows with the catalog.
+    let steps = |c: &mut dyn Conn, what: &str, n: usize, f: &dyn Fn(usize) -> String| {
+        let mut done = 0;
+        while done < n {
+            let m = step.min(n - done);
+            let t = Instant::now();
+            for i in done..done + m {
+                must(c.simple(&f(i)), what);
+            }
+            let s = t.elapsed().as_secs_f64();
+            done += m;
+            cx.report(
+                "scale",
+                what,
+                &[
+                    ("objects", done.to_string()),
+                    ("per_op_ms", format!("{:.3}", s * 1000.0 / m as f64)),
+                ],
+            );
+        }
+    };
+    steps(c.as_mut(), "create_table", tables, &|i| {
+        format!(
+            "CREATE TABLE sc{}.t{i} (id int PRIMARY KEY, a text NOT NULL, b int DEFAULT 0)",
+            i % schemas
+        )
+    });
+    must(
+        c.simple("CREATE TABLE scp.p (id int, k int NOT NULL) PARTITION BY RANGE (k)"),
+        "partitioned",
+    );
+    steps(c.as_mut(), "create_partition", parts, &|j| {
+        format!(
+            "CREATE TABLE scp.p{j} PARTITION OF scp.p FOR VALUES FROM ({}) TO ({})",
+            j * 10,
+            j * 10 + 10
+        )
+    });
+    let mid = tables / 2;
+    let ms = mid % schemas;
+    let few = 200.min(tables);
+    let each = |c: &mut dyn Conn, what: &str, f: &dyn Fn(usize) -> String| {
+        let t = Instant::now();
+        for i in 0..few {
+            must(c.simple(&f(i)), what);
+        }
+        let s = t.elapsed().as_secs_f64();
+        cx.report(
+            "scale",
+            what,
+            &[
+                ("objects", tables.to_string()),
+                ("per_op_ms", format!("{:.3}", s * 1000.0 / few as f64)),
+            ],
+        );
+    };
+    each(c.as_mut(), "alter_add_column", &|i| {
+        format!("ALTER TABLE sc{}.t{i} ADD COLUMN c int", i % schemas)
+    });
+    each(c.as_mut(), "create_index", &|i| {
+        format!("CREATE INDEX ON sc{}.t{i} (b)", i % schemas)
+    });
+    let queries: Vec<(&str, String)> = vec![
+        ("psql_d_lookup", format!("SELECT c.oid, n.nspname, c.relname FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relname OPERATOR(pg_catalog.~) '^(t{mid})$' COLLATE pg_catalog.default AND n.nspname OPERATOR(pg_catalog.~) '^(sc{ms})$' COLLATE pg_catalog.default ORDER BY 2, 3")),
+        ("psql_d_columns", format!("SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) FROM pg_catalog.pg_attrdef d WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef), a.attnotnull FROM pg_catalog.pg_attribute a WHERE a.attrelid = 'sc{ms}.t{mid}'::regclass AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum")),
+        ("psql_dt_schema", format!("SELECT n.nspname, c.relname, CASE c.relkind WHEN 'r' THEN 'table' WHEN 'p' THEN 'partitioned table' END, pg_catalog.pg_get_userbyid(c.relowner) FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','p','') AND n.nspname OPERATOR(pg_catalog.~) '^(sc{ms})$' COLLATE pg_catalog.default ORDER BY 1, 2")),
+        ("information_schema_columns", format!("SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sc{ms}' AND table_name = 't{mid}' ORDER BY ordinal_position")),
+        ("pg_class_count", "SELECT count(*) FROM pg_class".into()),
+        ("regclass_cast", format!("SELECT 'sc{ms}.t{mid}'::regclass::oid > 0")),
+        ("select_from_table", format!("SELECT * FROM sc{ms}.t{mid} WHERE id = 1")),
+    ];
+    for (name, sql) in &queries {
+        let (_, total) = timed(|| {
+            for _ in 0..reps {
+                must(c.simple(sql), name);
+            }
+        });
+        cx.report(
+            "scale",
+            name,
+            &[
+                ("objects", tables.to_string()),
+                ("per_query_ms", format!("{:.3}", total * 1000.0 / reps as f64)),
+            ],
+        );
+    }
+    if keep == 0 {
+        each(c.as_mut(), "drop_table", &|i| {
+            format!("DROP TABLE sc{}.t{i}", i % schemas)
+        });
+        let t = Instant::now();
+        for s in 0..schemas {
+            must(c.simple(&format!("DROP SCHEMA sc{s} CASCADE")), "drop schema");
+        }
+        must(c.simple("DROP SCHEMA scp CASCADE"), "drop schema");
+        cx.report(
+            "scale",
+            "drop_schemas",
+            &[("objects", tables.to_string()), ("total_s", format!("{:.3}", t.elapsed().as_secs_f64()))],
+        );
+    }
+}
+
+/// In-process, after `Engine::open` (reported at startup): the first connection to the
+/// database and its first catalog query, then a second connection's.
+fn startup_catalog(cx: &Ctx) {
+    for what in ["first", "second"] {
+        let (mut c, s) = timed(|| cx.conn());
+        let (_, q) = timed(|| must(c.simple("SELECT count(*) FROM pg_class"), "pg_class"));
+        let (_, q2) = timed(|| must(c.simple("SELECT 1"), "select 1"));
+        cx.report(
+            "startup",
+            what,
+            &[
+                ("connect_s", format!("{s:.4}")),
+                ("pg_class_count_s", format!("{q:.4}")),
+                ("select1_s", format!("{q2:.5}")),
+            ],
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -874,7 +1038,10 @@ fn ddl(cx: &Ctx) {
 fn idle(cx: &Ctx) {
     let sessions: usize = cx.opt("sessions", 100);
     let dbs: usize = cx.opt("dbs", 10);
-    let settle = || std::thread::sleep(Duration::from_millis(500));
+    // (settle-ms: how long sessions sit idle before memory is read; the engine server gives
+    // an idle connection's free memory back after 2 s.)
+    let settle_ms: u64 = cx.opt("settle-ms", 500);
+    let settle = || std::thread::sleep(Duration::from_millis(settle_ms));
     // Connection setup.
     let n = 50;
     let (_, s) = timed(|| {
@@ -998,6 +1165,8 @@ fn main() {
             "tpch" => run_queries(&cx, "tpch", tpch::QUERIES),
             "bulk" => bulk(&cx),
             "ddl" => ddl(&cx),
+            "scale" => scale(&cx),
+            "startup-catalog" => startup_catalog(&cx),
             "idle" => idle(&cx),
             "startup" => {
                 let (c, s) = timed(|| cx.conn());

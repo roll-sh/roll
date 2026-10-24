@@ -124,41 +124,14 @@ fn col_of(e: &Expr) -> Option<usize> {
 }
 
 /// Take in the equalities among `pred`'s conjuncts (column = column, column = constant).
-fn absorb(c: &mut Classes, pred: &Expr, ps: Params) {
-    absorb_in(c, pred, &|_| None, ps)
-}
-
-/// The parameters of the nested loop whose inner side a plan is (its `Outer(1, k)` are
-/// those values of the outer row), None outside one.
-type Params<'a> = Option<&'a [Expr]>;
-
-/// A value of no column the same for every row: a pseudo-constant, but not a nested loop
-/// parameter that is a column of the outer side (a join clause the inner side enforces).
-fn constant_value(k: &Expr, ps: Params) -> bool {
-    if !k.columns().is_empty() || !pseudo_constant(k) {
-        return false;
-    }
-    let Some(ps) = ps else { return true };
-    // (A parameter reading an enclosing nested loop's parameters is left alone: not known
-    // constant here.)
-    let reads_params = |v: &Expr| {
-        let mut any = false;
-        v.walk(&mut |x| any |= matches!(x, Expr::Outer(1, ..)));
-        any
-    };
-    let mut ok = true;
-    k.walk(&mut |x| {
-        if let Expr::Outer(1, j, _) = x {
-            ok &= ps.get(*j).is_some_and(|v| v.columns().is_empty() && pseudo_constant(v) && !reads_params(v));
-        }
-    });
-    ok
+fn absorb(c: &mut Classes, pred: &Expr) {
+    absorb_in(c, pred, &|_| None)
 }
 
 /// `absorb`, knowing the columns' collations: a column equated with a constant under its
 /// own nondeterministic collation is a class with that constant (its pathkeys, of that
 /// collation, are redundant), though no class joins columns under one.
-fn absorb_in(c: &mut Classes, pred: &Expr, coll: &dyn Fn(usize) -> Option<String>, ps: Params) {
+fn absorb_in(c: &mut Classes, pred: &Expr, coll: &dyn Fn(usize) -> Option<String>) {
     let mut parts = Vec::new();
     conjuncts(pred.clone(), &mut parts);
     for q in parts {
@@ -166,7 +139,7 @@ fn absorb_in(c: &mut Classes, pred: &Expr, coll: &dyn Fn(usize) -> Option<String
         // (An expression equated with a constant, of whatever types.)
         if def.name == "=" && args.len() == 2 && !q.is_volatile() && col_of(&args[0]).is_none() && col_of(&args[1]).is_none() {
             for (e, k) in [(&args[0], &args[1]), (&args[1], &args[0])] {
-                if !e.columns().is_empty() && constant_value(k, ps) {
+                if !e.columns().is_empty() && k.columns().is_empty() && pseudo_constant(k) {
                     c.const_exprs.push(e.clone());
                 }
             }
@@ -179,10 +152,10 @@ fn absorb_in(c: &mut Classes, pred: &Expr, coll: &dyn Fn(usize) -> Option<String
         {
             let own = |k: usize| coll(k).as_deref() == Some(dc.name.as_str());
             match (col_of(&args[0]), col_of(&args[1])) {
-                (Some(a), None) if constant_value(&args[1], ps) && own(a) => {
+                (Some(a), None) if args[1].columns().is_empty() && pseudo_constant(&args[1]) && own(a) => {
                     c.set_const(a)
                 }
-                (None, Some(b)) if constant_value(&args[0], ps) && own(b) => {
+                (None, Some(b)) if args[0].columns().is_empty() && pseudo_constant(&args[0]) && own(b) => {
                     c.set_const(b)
                 }
                 _ => {}
@@ -202,11 +175,11 @@ fn absorb_in(c: &mut Classes, pred: &Expr, coll: &dyn Fn(usize) -> Option<String
         }
         match (col_of(&args[0]), col_of(&args[1])) {
             (Some(a), Some(b)) => c.union(a, b),
-            (Some(a), None) if constant_value(&args[1], ps) => c.set_const(a),
-            (None, Some(b)) if constant_value(&args[0], ps) => c.set_const(b),
+            (Some(a), None) if args[1].columns().is_empty() && pseudo_constant(&args[1]) => c.set_const(a),
+            (None, Some(b)) if args[0].columns().is_empty() && pseudo_constant(&args[0]) => c.set_const(b),
             (None, None) => {
                 for (e, k) in [(&args[0], &args[1]), (&args[1], &args[0])] {
-                    if !e.columns().is_empty() && constant_value(k, ps) {
+                    if !e.columns().is_empty() && k.columns().is_empty() && pseudo_constant(k) {
                         c.const_exprs.push(e.clone());
                     }
                 }
@@ -301,17 +274,12 @@ fn import(c: &mut Classes, inner: &mut Classes, off: usize) {
 }
 
 fn classes(p: &Plan) -> Classes {
-    classes_in(p, None)
-}
-
-/// `classes` of a plan that is (inside) a nested loop's parameterized inner side (`ps`).
-fn classes_in(p: &Plan, ps: Params) -> Classes {
     let w = crate::sql::binder::plan_width(p);
     match p {
         Plan::Scan(s) => {
             let mut c = Classes::new(w);
             if let Some(f) = &s.filter {
-                absorb_in(&mut c, f, &|i| s.table.columns.get(i).and_then(|col| col.collation.clone()), ps);
+                absorb_in(&mut c, f, &|i| s.table.columns.get(i).and_then(|col| col.collation.clone()));
             }
             c
         }
@@ -327,17 +295,17 @@ fn classes_in(p: &Plan, ps: Params) -> Classes {
             c
         }
         Plan::Filter { input, pred } => {
-            let mut c = classes_in(input, ps);
+            let mut c = classes(input);
             // (A HAVING makes no equivalence classes.)
             if !matches!(&**input, Plan::Agg { .. }) {
-                absorb_in(&mut c, pred, &|i| crate::sql::binder::optimize::output_collation(input, i), ps);
+                absorb_in(&mut c, pred, &|i| crate::sql::binder::optimize::output_collation(input, i));
             }
             c
         }
-        Plan::Sort { input, .. } | Plan::Limit { input, .. } | Plan::Context { input, .. } => classes_in(input, ps),
+        Plan::Sort { input, .. } | Plan::Limit { input, .. } | Plan::Context { input, .. } => classes(input),
         // (A subquery scan's outputs are its Vars: one member wherever they are read.)
         Plan::Barrier { input, .. } => {
-            let mut c = classes_in(input, ps);
+            let mut c = classes(input);
             c.subsel.iter_mut().for_each(|f| *f = false);
             c
         }
@@ -377,7 +345,7 @@ fn classes_in(p: &Plan, ps: Params) -> Classes {
             let mut members: Vec<Classes> = inputs
                 .iter()
                 .filter(|i| !matches!(&***i, Plan::Empty { .. }))
-                .map(|i| classes_in(i, ps))
+                .map(|i| classes(i))
                 .collect();
             if members.is_empty() {
                 return c;
@@ -393,13 +361,13 @@ fn classes_in(p: &Plan, ps: Params) -> Classes {
         }
         // A grouping's keys keep their classes (the aggregates make none).
         Plan::Agg { input, groups, sets: None, .. } => {
-            let mut inner = classes_in(input, ps);
+            let mut inner = classes(input);
             let mut map: Vec<Option<usize>> = groups.iter().map(col_of).collect();
             map.resize(w, None);
             Classes::mapped(&mut inner, &map)
         }
         Plan::Project { input, exprs } => {
-            let mut inner = classes_in(input, ps);
+            let mut inner = classes(input);
             let map: Vec<Option<usize>> = exprs.iter().map(col_of).collect();
             let mut out = Classes::new(map.len());
             for (i, e) in exprs.iter().enumerate() {
@@ -425,32 +393,28 @@ fn classes_in(p: &Plan, ps: Params) -> Classes {
             cond,
             hash,
             nleft,
-            params,
             ..
         } => {
             let nl = *nleft;
-            // (The inner side of a nested loop passing it parameters: its equalities with
-            // them are join clauses, not constants.)
-            let rps = if params.is_empty() { ps } else { Some(&params[..]) };
             let mut c = Classes::new(w);
             // (An outer join's nullable side's columns aren't its input's any more.)
             match kind {
                 JoinKind::Right => {
-                    let mut rc = classes_in(right, rps);
+                    let mut rc = classes(right);
                     import(&mut c, &mut rc, nl);
                 }
                 JoinKind::Full => {}
                 _ => {
-                    let mut lc = classes_in(left, ps);
+                    let mut lc = classes(left);
                     import(&mut c, &mut lc, 0);
                     c.const_exprs.append(&mut lc.const_exprs);
                 }
             }
             if *kind == JoinKind::Inner {
-                let mut rc = classes_in(right, rps);
+                let mut rc = classes(right);
                 import(&mut c, &mut rc, nl);
                 if let Some(e) = cond {
-                    absorb(&mut c, e, ps);
+                    absorb(&mut c, e);
                 }
                 if let Some((lk, rk)) = hash {
                     for (a, b) in lk.iter().zip(rk) {

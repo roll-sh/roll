@@ -1,6 +1,7 @@
 //! The catalog: schemas, relations (tables, views, sequences, indexes), constraints and types.
 //! It is one immutable value per version; DDL clones it, edits the clone inside the
-//! transaction, and the commit stores it under a single MVCC key so DDL is transactional.
+//! transaction, and the commit stores the objects it changed (`persist`) with the
+//! transaction's data, so DDL is transactional.
 
 pub mod acl;
 pub mod btsim;
@@ -11,6 +12,7 @@ pub mod hashidx;
 pub mod heapsim;
 pub mod jsonbin;
 pub mod lz4;
+pub mod persist;
 pub mod pglz;
 pub mod identify;
 pub mod names;
@@ -43,7 +45,7 @@ pub const PG_TOAST_OID: u32 = 99;
 pub const FIRST_USER_OID: u32 = 16384;
 pub const BOOTSTRAP_SUPERUSER_OID: u32 = 10;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Schema {
     pub oid: u32,
     pub name: String,
@@ -532,7 +534,7 @@ impl ForeignTableDef {
 }
 
 /// One pg_statistic row.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ColStats {
     pub attnum: i16,
     pub inherit: bool,
@@ -543,7 +545,7 @@ pub struct ColStats {
 }
 
 /// A pg_statistic slot (stakindN, staopN, stacollN, stanumbersN, stavaluesN).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct StatSlot {
     pub kind: i16,
     pub op: u32,
@@ -558,6 +560,11 @@ thread_local! {
     /// `pg_temp` names.
     static SESSION_TEMP_SCHEMA: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// The temporary schema `pg_temp` means on this thread (`set_session_temp_schema`).
+pub fn session_temp_schema() -> Option<String> {
+    SESSION_TEMP_SCHEMA.with(|t| t.borrow().clone())
 }
 
 /// Make `pg_temp` mean `schema` for lookups on this thread (the session about to run).
@@ -797,9 +804,6 @@ pub struct ViewDef {
     /// Per column: ALTER VIEW ... ALTER COLUMN ... SET DEFAULT's expression (SQL).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub defaults: Vec<Option<String>>,
-    /// Per column: the pg_attrdef oid of its default (0: none).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub default_oids: Vec<u32>,
     /// The columns of FROM functions' named composite results the query reads, as they
     /// were when the view was made: (the composite type's relation, attnum, name, type).
     /// Postgres's stored query holds them by number and type, so a column dropped or
@@ -1163,9 +1167,6 @@ pub struct RangeDef {
     /// SUBTYPE_OPCLASS, when given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtype_opclass: Option<String>,
-    /// SUBTYPE_OPCLASS's pg_opclass oid (rngsubopc; 0: the subtype's default btree class).
-    #[serde(default)]
-    pub subtype_opc: u32,
 }
 
 impl Catalog {
@@ -1373,15 +1374,6 @@ pub struct Function {
     /// A C function's library (probin); `body` is its symbol (prosrc).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probin: Option<String>,
-    /// The planner support function (prosupport; 0: none).
-    #[serde(default)]
-    pub support: u32,
-    /// WINDOW (prokind 'w').
-    #[serde(default)]
-    pub window: bool,
-    /// TRANSFORM FOR TYPE ... (protrftypes).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub trftypes: Vec<u32>,
 }
 
 fn parallel_unsafe() -> char {
@@ -1491,9 +1483,6 @@ impl Function {
             sql_body: None,
             atomic_returns: Vec::new(),
             probin: None,
-            support: 0,
-            window: false,
-            trftypes: Vec::new(),
         }))
     }
 
@@ -1530,7 +1519,7 @@ impl Function {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Role {
     pub oid: u32,
     pub name: String,
@@ -1710,6 +1699,9 @@ pub struct ExtensionInfo {
     pub requires: Vec<u32>,
 }
 
+/// (The maps with an entry per relation or function are shared by a catalog's copies until
+/// one changes them, `Arc::make_mut`: a DDL statement copies the catalog a few times, which
+/// grew with the catalog.)
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Catalog {
     /// The index key format the database's indexes are in (`storage::keys::
@@ -1722,13 +1714,23 @@ pub struct Catalog {
     /// values). Opening a database of an older one re-keys those tables' rows.
     #[serde(default)]
     pub storage_format: u32,
+    /// The format the catalog was stored in (`persist::CATALOG_FORMAT`; 0: one JSON value),
+    /// as loaded: the header record writes its own.
+    #[serde(default, skip_serializing)]
+    pub catalog_format: u32,
     pub version: u64,
     pub next_oid: u32,
+    #[serde(default)]
     pub schemas: BTreeMap<u32, Schema>,
-    pub tables: BTreeMap<u32, Arc<Table>>,
-    pub indexes: BTreeMap<u32, Arc<Index>>,
-    pub views: BTreeMap<u32, Arc<ViewDef>>,
-    pub sequences: BTreeMap<u32, Arc<Sequence>>,
+    #[serde(default)]
+    pub tables: Arc<BTreeMap<u32, Arc<Table>>>,
+    #[serde(default)]
+    pub indexes: Arc<BTreeMap<u32, Arc<Index>>>,
+    #[serde(default)]
+    pub views: Arc<BTreeMap<u32, Arc<ViewDef>>>,
+    #[serde(default)]
+    pub sequences: Arc<BTreeMap<u32, Arc<Sequence>>>,
+    #[serde(default)]
     pub enums: BTreeMap<u32, Arc<EnumType>>,
     #[serde(default)]
     pub composites: BTreeMap<u32, Arc<CompositeType>>,
@@ -1746,10 +1748,14 @@ pub struct Catalog {
     /// CREATE TYPE ... AS RANGE.
     #[serde(default)]
     pub ranges: BTreeMap<u32, Arc<RangeDef>>,
+    #[serde(default)]
     pub domains: BTreeMap<u32, Arc<Domain>>,
-    pub functions: BTreeMap<u32, Arc<Function>>,
+    #[serde(default)]
+    pub functions: Arc<BTreeMap<u32, Arc<Function>>>,
+    #[serde(default)]
     pub roles: BTreeMap<u32, Role>,
     /// (object oid, sub-id, text): `COMMENT ON`.
+    #[serde(default)]
     pub comments: Vec<(u32, i32, String)>,
     /// Installed extensions: (oid, name, schema, version).
     #[serde(default)]
@@ -1782,7 +1788,7 @@ pub struct Catalog {
     /// pg_class.relpages / reltuples / relallvisible of tables and indexes, as VACUUM,
     /// ANALYZE, CREATE INDEX and TRUNCATE last set them (absent: as created).
     #[serde(default)]
-    pub relstats: BTreeMap<u32, RelStats>,
+    pub relstats: Arc<BTreeMap<u32, RelStats>>,
     /// CREATE STATISTICS objects.
     #[serde(default)]
     pub statistics: BTreeMap<u32, Arc<StatExt>>,
@@ -1870,7 +1876,7 @@ pub struct Catalog {
     /// tables), as full transaction ids; one missing (made before they were kept) shows the
     /// first normal xid.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub frozen_xids: BTreeMap<u32, u64>,
+    pub frozen_xids: Arc<BTreeMap<u32, u64>>,
     /// pg_class.relfilenode of relations whose storage was replaced (TRUNCATE, a rewrite,
     /// REINDEX, ...), where it no longer equals the oid.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1885,11 +1891,13 @@ pub struct Catalog {
     /// The cluster's oid counter, when the database runs in one.
     #[serde(skip)]
     pub oids: Option<Arc<shared::OidGen>>,
+    /// (Shared by a catalog's copies until one changes it: copying it per DDL statement grew
+    /// with the catalog.)
     #[serde(skip)]
-    names: HashMap<(u32, String), (RelKind, u32)>,
+    names: Arc<HashMap<(u32, String), (RelKind, u32)>>,
     /// Parent oid → its direct children, in oid order.
     #[serde(skip)]
-    children: HashMap<u32, Vec<u32>>,
+    children: Arc<HashMap<u32, Vec<u32>>>,
     /// Where tables' and materialized views' pg_class rows lie in pg_class's heap, as a
     /// sequence: a new row goes last, and so does a row updated other than in place (an
     /// in-place update, of relpages or relhasindex say, leaves it). REINDEX DATABASE /
@@ -1909,7 +1917,7 @@ pub struct Catalog {
     /// relfilenodes leave LP_DEAD, not reused before VACUUM), and the other pages' line
     /// pointers and free space for when page 0 is full.
     #[serde(default)]
-    pub class_order: BTreeMap<u32, u64>,
+    pub class_order: Arc<BTreeMap<u32, u64>>,
     #[serde(default)]
     pub class_tick: u64,
     /// Relations whose relhastriggers is set (it stays set once a trigger was made).
@@ -1931,6 +1939,46 @@ pub struct Catalog {
     /// Counts the copies of catalogs made on this thread (`catalog_copies`).
     #[serde(skip)]
     pub copies: CopyTally,
+    /// Lookups by key that otherwise scan a map, for a catalog that no longer changes
+    /// (`freeze`).
+    #[serde(skip)]
+    lookups: Lookups,
+}
+
+/// `Catalog::lookups`: hashes built on first use, only for a frozen catalog (one published
+/// in an `Arc`, which nothing changes any more: a copy, which DDL edits, starts unfrozen,
+/// and its lookups scan).
+#[derive(Default)]
+struct Lookups {
+    frozen: bool,
+    /// TOAST table or index → (its table, whether the index).
+    toast: std::sync::OnceLock<HashMap<u32, (u32, bool)>>,
+    /// A composite type's relation → the type (the first, by oid).
+    composite_rels: std::sync::OnceLock<HashMap<u32, u32>>,
+    /// Schema name → oid (the first, by oid).
+    schema_names: std::sync::OnceLock<HashMap<String, u32>>,
+    /// (class, oid, sub) → the first in `acls`.
+    acls: std::sync::OnceLock<HashMap<(u32, u32, i32), usize>>,
+    /// Tables' and views' row types (false) and their array types (true).
+    rowtypes: std::sync::OnceLock<HashMap<u32, bool>>,
+    /// `user_type_name`'s answers.
+    user_types: std::sync::OnceLock<HashMap<u32, (u32, String, bool)>>,
+    /// `rls_named`'s: by name, the tables with row-level security (oids) and whether a
+    /// security barrier view has it.
+    rls_names: std::sync::OnceLock<HashMap<String, (Vec<u32>, bool)>>,
+}
+
+impl Clone for Lookups {
+    fn clone(&self) -> Self {
+        // (A copy may be edited.)
+        Lookups::default()
+    }
+}
+
+impl std::fmt::Debug for Lookups {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Lookups")
+    }
 }
 
 thread_local! {
@@ -2016,6 +2064,7 @@ impl Catalog {
             next_oid: FIRST_USER_OID,
             index_key_format: crate::storage::keys::INDEX_KEY_FORMAT,
             storage_format: crate::storage::keys::STORAGE_FORMAT,
+            catalog_format: persist::CATALOG_FORMAT,
             ..Default::default()
         };
         for (oid, name) in [
@@ -2156,7 +2205,7 @@ impl Catalog {
         {
             let mut t = (*self.tables[&oid]).clone();
             (t.rowtype, t.rowarray) = self.alloc_rowtype();
-            self.tables.insert(oid, Arc::new(t));
+            std::sync::Arc::make_mut(&mut self.tables).insert(oid, Arc::new(t));
         }
         for oid in self
             .views
@@ -2167,7 +2216,7 @@ impl Catalog {
         {
             let mut v = (*self.views[&oid]).clone();
             (v.rowtype, v.rowarray) = self.alloc_rowtype();
-            self.views.insert(oid, Arc::new(v));
+            std::sync::Arc::make_mut(&mut self.views).insert(oid, Arc::new(v));
         }
         // Catalogs from before defaults had pg_attrdef oids.
         for oid in self
@@ -2187,15 +2236,15 @@ impl Catalog {
                     c.def_oid = self.alloc_oid();
                 }
             }
-            self.tables.insert(oid, Arc::new(t));
+            std::sync::Arc::make_mut(&mut self.tables).insert(oid, Arc::new(t));
         }
-        self.names.clear();
-        self.children.clear();
+        Arc::make_mut(&mut self.names).clear();
+        Arc::make_mut(&mut self.children).clear();
         for t in self.tables.values() {
-            self.names
+            Arc::make_mut(&mut self.names)
                 .insert((t.schema, t.name.clone()), (RelKind::Table, t.oid));
             for p in &t.inherits {
-                self.children.entry(*p).or_default().push(t.oid);
+                Arc::make_mut(&mut self.children).entry(*p).or_default().push(t.oid);
             }
         }
         for v in self.views.values() {
@@ -2204,10 +2253,10 @@ impl Catalog {
             } else {
                 RelKind::View
             };
-            self.names.insert((v.schema, v.name.clone()), (kind, v.oid));
+            Arc::make_mut(&mut self.names).insert((v.schema, v.name.clone()), (kind, v.oid));
         }
         for s in self.sequences.values() {
-            self.names
+            Arc::make_mut(&mut self.names)
                 .insert((s.schema, s.name.clone()), (RelKind::Sequence, s.oid));
         }
         for i in self.indexes.values() {
@@ -2215,7 +2264,7 @@ impl Catalog {
                 .index_table(i.table)
                 .map(|t| t.schema)
                 .unwrap_or(PUBLIC_OID);
-            self.names
+            Arc::make_mut(&mut self.names)
                 .insert((schema, i.name.clone()), (RelKind::Index, i.oid));
         }
     }
@@ -2269,8 +2318,6 @@ impl Catalog {
             || self.views.contains_key(&oid)
             || self.indexes.contains_key(&oid)
             || self.sequences.contains_key(&oid)
-            // (A composite type's pg_class entry.)
-            || self.composites.values().any(|c| c.relid == oid)
         {
             REL
         } else if self.schemas.contains_key(&oid) {
@@ -2409,7 +2456,21 @@ impl Catalog {
         if name == "pg_temp"
             && let Some(t) = SESSION_TEMP_SCHEMA.with(|t| t.borrow().clone())
         {
-            return self.schemas.values().find(|s| s.name == t);
+            return self.schema_named(&t);
+        }
+        self.schema_named(name)
+    }
+
+    fn schema_named(&self, name: &str) -> Option<&Schema> {
+        if self.lookups.frozen {
+            let m = self.lookups.schema_names.get_or_init(|| {
+                let mut m = HashMap::new();
+                for s in self.schemas.values() {
+                    m.entry(s.name.clone()).or_insert(s.oid);
+                }
+                m
+            });
+            return self.schemas.get(m.get(name)?);
         }
         self.schemas.values().find(|s| s.name == name)
     }
@@ -2824,6 +2885,31 @@ impl Catalog {
 
     /// An enum or composite type, or its array type, by oid: (schema, name, is the array type).
     pub fn user_type_name(&self, oid: u32) -> Option<(u32, &str, bool)> {
+        if self.lookups.frozen {
+            let m = self.lookups.user_types.get_or_init(|| {
+                let mut m = HashMap::new();
+                for (o, a, s, n) in self.user_type_entries() {
+                    // (The first that has it, as the scan below finds it.)
+                    if o != 0 {
+                        m.entry(o).or_insert((s, n.to_string(), false));
+                        if a != 0 {
+                            m.entry(a).or_insert((s, n.to_string(), true));
+                        }
+                    }
+                }
+                m
+            });
+            return m.get(&oid).map(|(s, n, a)| (*s, n.as_str(), *a));
+        }
+        self.user_type_entries()
+            // (A shell type has no array type: array oid 0 names nothing.)
+            .find(|(o, a, _, _)| *o != 0 && (*o == oid || (*a == oid && oid != 0)))
+            .map(|(o, _, s, n)| (s, n, o != oid))
+    }
+
+    /// The types `user_type_name` names: (oid, array oid, schema, name), in the order it
+    /// looks.
+    fn user_type_entries(&self) -> impl Iterator<Item = (u32, u32, u32, &str)> + '_ {
         let enums = self
             .enums
             .values()
@@ -2866,9 +2952,6 @@ impl Catalog {
             .chain(ranges)
             .chain(tables)
             .chain(views)
-            // (A shell type has no array type: array oid 0 names nothing.)
-            .find(|(o, a, _, _)| *o != 0 && (*o == oid || (*a == oid && oid != 0)))
-            .map(|(o, _, s, n)| (s, n, o != oid))
     }
 
     /// Every oid `user_type_name` knows (types and their array types).
@@ -3073,8 +3156,7 @@ impl Catalog {
             }
         }
         self.assign_attrdefs(&mut t);
-        self.names
-            .insert((t.schema, t.name.clone()), (RelKind::Table, t.oid));
+        self.put_name(t.schema, &t.name, RelKind::Table, t.oid);
         let old = self
             .tables
             .get(&t.oid)
@@ -3089,7 +3171,7 @@ impl Catalog {
         if old != t.inherits {
             self.unlink_children(t.oid, &old);
             for p in &t.inherits {
-                let v = self.children.entry(*p).or_default();
+                let v = Arc::make_mut(&mut self.children).entry(*p).or_default();
                 if let Err(i) = v.binary_search(&t.oid) {
                     v.insert(i, t.oid);
                 }
@@ -3105,7 +3187,7 @@ impl Catalog {
                     .eq(t.live_columns().map(|(_, c)| (&c.name, &c.ty)))
         });
         let (oid, rowtype) = (t.oid, t.rowtype);
-        self.tables.insert(t.oid, Arc::new(t));
+        std::sync::Arc::make_mut(&mut self.tables).insert(t.oid, Arc::new(t));
         if row_changed && let Some(new) = self.row_type_of(oid) {
             self.retype_signatures(rowtype, &new);
         }
@@ -3131,7 +3213,7 @@ impl Catalog {
             .map(|f| f.oid)
             .collect();
         for oid in uses {
-            let Some(f) = self.functions.get_mut(&oid) else {
+            let Some(f) = std::sync::Arc::make_mut(&mut self.functions).get_mut(&oid) else {
                 continue;
             };
             let f = Arc::make_mut(f);
@@ -3181,7 +3263,7 @@ impl Catalog {
     /// last in pg_class's heap.
     pub fn class_moved(&mut self, oid: u32) {
         self.class_tick += 1;
-        self.class_order.insert(oid, self.class_tick);
+        std::sync::Arc::make_mut(&mut self.class_order).insert(oid, self.class_tick);
     }
 
     /// A trigger was made on relation `oid`: the first sets relhastriggers.
@@ -3318,9 +3400,121 @@ impl Catalog {
 
     /// The table a TOAST table or TOAST index belongs to: (table, is the index).
     pub fn toast_owner(&self, oid: u32) -> Option<(&Arc<Table>, bool)> {
+        if self.lookups.frozen {
+            let m = self.lookups.toast.get_or_init(|| {
+                let mut m = HashMap::new();
+                for t in self.toasted() {
+                    // (The first, as the scan below finds it.)
+                    m.entry(t.toast).or_insert((t.oid, false));
+                    m.entry(t.toast + 1).or_insert((t.oid, true));
+                }
+                m
+            });
+            let &(rel, index) = m.get(&oid)?;
+            let t = match self.tables.get(&rel) {
+                Some(t) => t,
+                None => self.views.get(&rel)?.storage.as_ref()?,
+            };
+            return Some((t, index));
+        }
         self.toasted()
             .find(|t| t.toast == oid || t.toast + 1 == oid)
             .map(|t| (t, t.toast != oid))
+    }
+
+    /// Mark the catalog as one that no longer changes (it is about to be published in an
+    /// `Arc`): its lookups may keep hashes.
+    pub fn freeze(&mut self) {
+        self.lookups.frozen = true;
+    }
+
+    /// `acls` by object, for a frozen catalog (`Catalog::acl`).
+    fn acl_lookup(&self) -> Option<&HashMap<(u32, u32, i32), usize>> {
+        if !self.lookups.frozen {
+            return None;
+        }
+        Some(self.lookups.acls.get_or_init(|| {
+            let mut m = HashMap::with_capacity(self.acls.len());
+            for (i, a) in self.acls.iter().enumerate() {
+                m.entry((a.class, a.oid, a.sub)).or_insert(i);
+            }
+            m
+        }))
+    }
+
+    /// Whether `oid` is a table's or view's row type (Some(false)) or the array type of one
+    /// (Some(true)).
+    pub fn rel_rowtype(&self, oid: u32) -> Option<bool> {
+        let scan = || -> Option<bool> {
+            let tables = self.tables.values().map(|t| (t.rowtype, t.array_type()));
+            let views = self.views.values().map(|v| (v.rowtype, v.array_type()));
+            let mut all = tables.chain(views).filter(|(r, _)| *r != 0);
+            if all.clone().any(|(r, _)| r == oid) {
+                return Some(false);
+            }
+            all.any(|(_, a)| a == oid).then_some(true)
+        };
+        if !self.lookups.frozen {
+            return scan();
+        }
+        let m = self.lookups.rowtypes.get_or_init(|| {
+            let mut m = HashMap::new();
+            let tables = self.tables.values().map(|t| (t.rowtype, t.array_type()));
+            let views = self.views.values().map(|v| (v.rowtype, v.array_type()));
+            for (r, a) in tables.chain(views).filter(|(r, _)| *r != 0) {
+                m.entry(a).or_insert(true);
+                m.insert(r, false);
+            }
+            m
+        });
+        m.get(&oid).copied()
+    }
+
+    /// The tables named `name` (in any schema) with row-level security on, and whether a
+    /// view of that name is a security barrier: what makes a statement naming it run its
+    /// quals at another security level.
+    pub fn rls_named(&self, name: &str) -> (Vec<&Arc<Table>>, bool) {
+        let scan = || {
+            let tables: Vec<&Arc<Table>> =
+                self.tables.values().filter(|t| t.rls && t.name == name).collect();
+            let barrier = self
+                .views
+                .values()
+                .any(|v| v.name == name && v.option("security_barrier"));
+            (tables, barrier)
+        };
+        if !self.lookups.frozen {
+            return scan();
+        }
+        let m = self.lookups.rls_names.get_or_init(|| {
+            let mut m: HashMap<String, (Vec<u32>, bool)> = HashMap::new();
+            for t in self.tables.values().filter(|t| t.rls) {
+                m.entry(t.name.clone()).or_default().0.push(t.oid);
+            }
+            for v in self.views.values().filter(|v| v.option("security_barrier")) {
+                m.entry(v.name.clone()).or_default().1 = true;
+            }
+            m
+        });
+        match m.get(name) {
+            Some((oids, barrier)) => (oids.iter().filter_map(|o| self.tables.get(o)).collect(), *barrier),
+            None => (Vec::new(), false),
+        }
+    }
+
+    /// The composite type (CREATE TYPE ... AS) whose relation is `relid`.
+    pub fn composite_of_rel(&self, relid: u32) -> Option<&Arc<CompositeType>> {
+        if self.lookups.frozen {
+            let m = self.lookups.composite_rels.get_or_init(|| {
+                let mut m = HashMap::new();
+                for c in self.composites.values() {
+                    m.entry(c.relid).or_insert(c.oid);
+                }
+                m
+            });
+            return self.composites.get(m.get(&relid)?);
+        }
+        self.composites.values().find(|c| c.relid == relid)
     }
 
     /// The schema a table's TOAST table is in: pg_toast, or for a temporary table its
@@ -3362,10 +3556,10 @@ impl Catalog {
 
     fn unlink_children(&mut self, child: u32, parents: &[u32]) {
         for p in parents {
-            if let Some(v) = self.children.get_mut(p) {
+            if let Some(v) = Arc::make_mut(&mut self.children).get_mut(p) {
                 v.retain(|c| *c != child);
                 if v.is_empty() {
-                    self.children.remove(p);
+                    Arc::make_mut(&mut self.children).remove(p);
                 }
             }
         }
@@ -3483,14 +3677,14 @@ impl Catalog {
         } else {
             RelKind::View
         };
-        self.names.insert((v.schema, v.name.clone()), (kind, v.oid));
-        self.views.insert(v.oid, Arc::new(v));
+        Arc::make_mut(&mut self.names).insert((v.schema, v.name.clone()), (kind, v.oid));
+        std::sync::Arc::make_mut(&mut self.views).insert(v.oid, Arc::new(v));
     }
 
     pub fn put_sequence(&mut self, s: Sequence) {
-        self.names
+        Arc::make_mut(&mut self.names)
             .insert((s.schema, s.name.clone()), (RelKind::Sequence, s.oid));
-        self.sequences.insert(s.oid, Arc::new(s));
+        std::sync::Arc::make_mut(&mut self.sequences).insert(s.oid, Arc::new(s));
     }
 
     pub fn put_index(&mut self, i: Index) {
@@ -3498,32 +3692,42 @@ impl Catalog {
             .index_table(i.table)
             .map(|t| t.schema)
             .unwrap_or(PUBLIC_OID);
-        self.names
-            .insert((schema, i.name.clone()), (RelKind::Index, i.oid));
-        self.indexes.insert(i.oid, Arc::new(i));
+        self.put_name(schema, &i.name, RelKind::Index, i.oid);
+        std::sync::Arc::make_mut(&mut self.indexes).insert(i.oid, Arc::new(i));
+    }
+
+    /// Record a relation's name (the shared map is copied only when it changes).
+    fn put_name(&mut self, schema: u32, name: &str, kind: RelKind, oid: u32) {
+        let key = (schema, name.to_string());
+        if self.names.get(&key).is_none_or(|e| e.0 != kind || e.1 != oid) {
+            Arc::make_mut(&mut self.names).insert(key, (kind, oid));
+        }
     }
 
     pub fn remove_name(&mut self, schema: u32, name: &str) {
-        self.names.remove(&(schema, name.to_string()));
+        let key = (schema, name.to_string());
+        if self.names.contains_key(&key) {
+            Arc::make_mut(&mut self.names).remove(&key);
+        }
     }
 
     pub fn drop_table(&mut self, oid: u32) -> Option<Arc<Table>> {
-        let t = self.tables.remove(&oid)?;
+        let t = std::sync::Arc::make_mut(&mut self.tables).remove(&oid)?;
         self.array_names.remove(&t.array_type());
-        self.class_order.remove(&oid);
+        std::sync::Arc::make_mut(&mut self.class_order).remove(&oid);
         self.class_has_triggers.remove(&oid);
         self.remove_name(t.schema, &t.name);
-        self.relstats.remove(&oid);
+        std::sync::Arc::make_mut(&mut self.relstats).remove(&oid);
         self.colstats.remove(&oid);
         self.statistics.retain(|_, x| x.table != oid);
         if let Some(p) = t.pkey_index {
-            self.relstats.remove(&p);
+            std::sync::Arc::make_mut(&mut self.relstats).remove(&p);
         }
         self.unlink_children(oid, &t.inherits);
         for i in &t.indexes {
-            self.relstats.remove(i);
+            std::sync::Arc::make_mut(&mut self.relstats).remove(i);
             self.colstats.remove(i);
-            if let Some(idx) = self.indexes.remove(i) {
+            if let Some(idx) = std::sync::Arc::make_mut(&mut self.indexes).remove(i) {
                 self.remove_name(t.schema, &idx.name);
             }
         }
@@ -3535,12 +3739,12 @@ impl Catalog {
             .map(|s| s.oid)
             .collect();
         for s in owned {
-            if let Some(seq) = self.sequences.remove(&s) {
+            if let Some(seq) = std::sync::Arc::make_mut(&mut self.sequences).remove(&s) {
                 self.remove_name(seq.schema, &seq.name);
             }
         }
         if let Some(r) = t.rowid_seq
-            && let Some(seq) = self.sequences.remove(&r)
+            && let Some(seq) = std::sync::Arc::make_mut(&mut self.sequences).remove(&r)
         {
             self.remove_name(seq.schema, &seq.name);
         }

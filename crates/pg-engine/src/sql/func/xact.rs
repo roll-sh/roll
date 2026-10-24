@@ -56,12 +56,6 @@ fn current_snapshot(_: &[Value], c: &FnCtx) -> Result<Value> {
     )))
 }
 
-/// pg_export_snapshot(): the transaction's snapshot, for SET TRANSACTION SNAPSHOT elsewhere.
-fn export_snapshot(_: &[Value], c: &FnCtx) -> Result<Value> {
-    let id = c.exec.txn.borrow_mut().export_snapshot(c.exec.sess.pid)?;
-    Ok(text(id))
-}
-
 fn snapshot_xmin(a: &[Value], _: &FnCtx) -> Result<Value> {
     Ok(Value::Xid8(snap(&a[0])?.xmin))
 }
@@ -167,7 +161,6 @@ pub fn register(r: &mut Registry) {
     r.from_pg(5060, Some(current_xact_id_if_assigned), None);
     r.from_pg(2943, Some(txid_current), None);
     r.from_pg(3348, Some(txid_current_if_assigned), None);
-    r.from_pg(3809, Some(export_snapshot), None);
     r.from_pg(5061, Some(current_snapshot), None);
     r.from_pg(2944, Some(current_snapshot), None);
     r.from_pg(5062, Some(snapshot_xmin), None);

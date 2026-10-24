@@ -11,7 +11,7 @@ use crate::types::datetime::TimeZone;
 use crate::types::text::{FormatCtx, IntervalStyle};
 use crate::{bail, err};
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 /// The unit an integer or real parameter's value is kept in.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -401,6 +401,8 @@ struct Derived {
     /// Unique in the process for this set of values: what was derived from other values has
     /// another (caches of what the settings shape compare it).
     generation: u64,
+    /// The values themselves (`values_key`).
+    values_key: Arc<ValuesKey>,
     /// `format_ctx` (without a clock or names).
     fmt: FormatCtx,
     lex: crate::sql::scs::LexOpts,
@@ -433,6 +435,11 @@ impl Clone for PathMemo {
 
 #[derive(Clone, Default)]
 struct DerivedCache(OnceLock<Box<Derived>>);
+
+/// The settings' values set in a session or by its role / database defaults, by canonical
+/// name, sorted (`Settings::values_key`); the rest have their built-in defaults.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ValuesKey(Vec<(String, String)>);
 
 impl std::fmt::Debug for DerivedCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1150,14 +1157,30 @@ impl Settings {
         self.derived().generation
     }
 
+    /// The values every setting has now (but those `touched` leaves out), which caches
+    /// shared by sessions are keyed by: equal keys mean equal settings, as equal generations
+    /// do within a session.
+    pub fn values_key(&self) -> Arc<ValuesKey> {
+        self.derived().values_key.clone()
+    }
+
     fn derived(&self) -> &Derived {
         self.derived.0.get_or_init(|| {
             static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
             let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut fmt = self.build_format_ctx();
             fmt.settings = generation;
+            let mut values: Vec<(String, String)> = self
+                .values
+                .iter()
+                .chain(self.defaults.iter().filter(|(k, _)| !self.values.contains_key(*k)))
+                .filter(|(k, _)| !NOT_DERIVED.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            values.sort();
             Box::new(Derived {
                 generation,
+                values_key: Arc::new(ValuesKey(values)),
                 fmt,
                 lex: crate::sql::scs::LexOpts::from_settings(
                     self.bool("standard_conforming_strings"),

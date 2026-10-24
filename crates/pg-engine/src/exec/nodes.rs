@@ -35,6 +35,9 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
             if let Some(rows) = sys_rescan(*table, filter.as_ref(), path.as_deref(), ctx)? {
                 return Ok(Box::new(VecNode::new(rows)));
             }
+            if let Some(node) = sys_shared_scan(*table, filter.as_ref(), path.as_deref(), ctx)? {
+                return Ok(node);
+            }
             let rows = crate::catalog::system::rows(*table, ctx)?;
             let mut deferred = crate::catalog::system::deferred_errors(*table, ctx, &rows);
             // An index path a sort relies on: the rows in that index's order.
@@ -581,10 +584,6 @@ impl Node for ValuesNode {
     }
 }
 
-/// A system view scan where some rows' columns are errors (`system::deferred_errors`): as
-/// Postgres computes a view column only for the rows it returns and when the query reads it,
-/// an error is raised when its row passes the filter and the column is read (or when the
-/// filter reads it).
 /// A catalog's rows as one statement scans it again and again (`sys_rescan`).
 pub struct SysRescan {
     /// The catalog and the role they were generated for.
@@ -592,12 +591,69 @@ pub struct SysRescan {
     role: u32,
     /// None: the catalog has errors deferred until a column is read (it is scanned whole
     /// each time, as before).
-    rows: Option<Rc<Vec<Row>>>,
-    /// Per column: the rows holding each value.
-    by_col: RefCell<HashMap<usize, Rc<HashMap<Value, Vec<usize>>>>>,
-    /// Per column and kind of value: whether every row's value is of that kind (or NULL),
-    /// so the hash serves an equality with it (checked once, not per outer row).
-    hashable: RefCell<HashMap<(usize, std::mem::Discriminant<Value>), bool>>,
+    rows: Option<Arc<crate::catalog::system::SysRows>>,
+}
+
+/// The first `column = value` among `f`'s conjuncts (only the first conjunct with
+/// `first_only`) that a hash on the column can serve: a built-in `=` over an integer, oid or
+/// "char" column, or a name / text column under a deterministic collation (whose equality is
+/// the bytes'), with a value (constant, or of outer references) of the column's own type.
+/// Its column, and the rows whose value equals it, in row order (None: the value is NULL, and
+/// the strict `=` is true for no row).
+fn sys_equality(
+    f: &Expr,
+    rows: &crate::catalog::system::SysRows,
+    first_only: bool,
+    ctx: &ExecCtx,
+) -> Result<Option<(usize, Option<Vec<u32>>)>> {
+    fn split<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+        match e {
+            Expr::And(items) => items.iter().for_each(|i| split(i, out)),
+            e => out.push(e),
+        }
+    }
+    let mut conj = Vec::new();
+    split(f, &mut conj);
+    if first_only {
+        conj.truncate(1);
+    }
+    for c in conj {
+        let Expr::Call(d, args, _) = c else { continue };
+        if d.name != "=" || args.len() != 2 || d.oid >= crate::catalog::FIRST_USER_OID {
+            continue;
+        }
+        if d.coll.as_ref().is_some_and(|c| !c.deterministic) {
+            continue;
+        }
+        let (k, other) = match (&args[0], &args[1]) {
+            (Expr::Col(k, _), o) | (o, Expr::Col(k, _)) => (*k, o),
+            _ => continue,
+        };
+        let mut sub = false;
+        other.walk(&mut |e| sub |= matches!(e, Expr::Subquery(_)));
+        if sub || !other.columns().is_empty() || other.is_volatile() {
+            continue;
+        }
+        let v = crate::sql::expr::eval(other, &[], ctx)?;
+        if v.is_null() {
+            return Ok(Some((k, None)));
+        }
+        let same = |x: &Value| {
+            matches!(
+                (x, &v),
+                (Value::Oid(_), Value::Oid(_))
+                    | (Value::Int2(_), Value::Int2(_))
+                    | (Value::Int4(_), Value::Int4(_))
+                    | (Value::Int8(_), Value::Int8(_))
+                    | (Value::Char(_), Value::Char(_))
+                    | (Value::Text(_), Value::Text(_))
+            )
+        };
+        if let Some(ix) = rows.lookup(k, &v, &same) {
+            return Ok(Some((k, Some(ix))));
+        }
+    }
+    Ok(None)
 }
 
 /// The rows of a catalog scan run once per outer row (a nested loop's parameterized inner
@@ -609,9 +665,10 @@ pub struct SysRescan {
 /// whole, which per outer row made a join over a full run's catalogs quadratic
 /// (information_schema.column_domain_usage, oidjoins' checks: minutes). So a catalog's rows
 /// are generated once per statement (for its catalog and role: the rows as of the statement's
-/// start, which is what its snapshot gives Postgres's scans), and an equality between a column
-/// and an outer value (`pk.oid = fk.atttypid`) finds the rows it matches through a hash on
-/// that column, as the index would; the whole filter is still checked on each.
+/// start, which is what its snapshot gives Postgres's scans; a cacheable catalog's are its
+/// database's shared ones, `system::rows_shared`), and an equality between a column and an
+/// outer value (`pk.oid = fk.atttypid`) finds the rows it matches through a hash on that
+/// column, as the index would; the whole filter is still checked on each.
 fn sys_rescan(
     table: crate::catalog::system::SysTable,
     filter: Option<&Expr>,
@@ -635,92 +692,30 @@ fn sys_rescan(
     let entry = match cached {
         Some(e) => e,
         None => {
-            let rows = crate::catalog::system::rows(table, ctx)?;
-            let deferred = crate::catalog::system::deferred_errors(table, ctx, &rows);
-            let e = Rc::new(SysRescan {
-                cat,
-                role,
-                rows: deferred.is_empty().then(|| Rc::new(rows)),
-                by_col: RefCell::default(),
-                hashable: RefCell::default(),
-            });
+            let rows = if crate::catalog::system::rows_cacheable(table) {
+                Some(crate::catalog::system::rows_shared(table, ctx)?)
+            } else {
+                let rows = crate::catalog::system::rows(table, ctx)?;
+                let deferred = crate::catalog::system::deferred_errors(table, ctx, &rows);
+                deferred
+                    .is_empty()
+                    .then(|| Arc::new(crate::catalog::system::SysRows::new(rows)))
+            };
+            let e = Rc::new(SysRescan { cat, role, rows });
             ctx.sys_rescans.borrow_mut().insert(table.oid(), e.clone());
             e
         }
     };
     let Some(all) = &entry.rows else { return Ok(None) };
-    // The first `column = outer value` the hash can serve: a built-in `=` over an integer,
-    // oid or "char" column, or a name / text column under a deterministic collation (whose
-    // equality is the bytes'), the value of the column's own type.
-    fn split<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
-        match e {
-            Expr::And(items) => items.iter().for_each(|i| split(i, out)),
-            e => out.push(e),
-        }
-    }
-    let mut conj = Vec::new();
-    split(f, &mut conj);
-    let mut picked: Option<Vec<usize>> = None;
-    for c in conj {
-        let Expr::Call(d, args, _) = c else { continue };
-        if d.name != "=" || args.len() != 2 || d.oid >= crate::catalog::FIRST_USER_OID {
-            continue;
-        }
-        if d.coll.as_ref().is_some_and(|c| !c.deterministic) {
-            continue;
-        }
-        let (k, other) = match (&args[0], &args[1]) {
-            (Expr::Col(k, _), o) | (o, Expr::Col(k, _)) => (*k, o),
-            _ => continue,
-        };
-        let mut sub = false;
-        other.walk(&mut |e| sub |= matches!(e, Expr::Subquery(_)));
-        if sub || !other.columns().is_empty() || other.is_volatile() {
-            continue;
-        }
-        let v = crate::sql::expr::eval(other, &[], ctx)?;
-        if v.is_null() {
-            // (A strict `=`: no row matches.)
-            return Ok(Some(Vec::new()));
-        }
-        let same = |x: &Value| {
-            matches!(
-                (x, &v),
-                (Value::Oid(_), Value::Oid(_))
-                    | (Value::Int2(_), Value::Int2(_))
-                    | (Value::Int4(_), Value::Int4(_))
-                    | (Value::Int8(_), Value::Int8(_))
-                    | (Value::Char(_), Value::Char(_))
-                    | (Value::Text(_), Value::Text(_))
-            )
-        };
-        if !same(&v) {
-            continue;
-        }
-        let kind = (k, std::mem::discriminant(&v));
-        let ok = *entry.hashable.borrow_mut().entry(kind).or_insert_with(|| {
-            all.iter().all(|r| r.get(k).is_some_and(|x| x.is_null() || same(x)))
-        });
-        if !ok {
-            continue;
-        }
-        let map = entry
-            .by_col
-            .borrow_mut()
-            .entry(k)
-            .or_insert_with(|| {
-                let mut m: HashMap<Value, Vec<usize>> = HashMap::default();
-                for (i, r) in all.iter().enumerate() {
-                    if !r[k].is_null() {
-                        m.entry(r[k].clone()).or_default().push(i);
-                    }
-                }
-                Rc::new(m)
-            })
-            .clone();
-        picked = Some(map.get(&v).cloned().unwrap_or_default());
-        break;
-    }
+    let found = match sys_index_equality(path, all, ctx)? {
+        Some(e) => Some(e),
+        None => sys_equality(f, all, false, ctx)?,
+    };
+    let picked = match found {
+        Some((_, None)) => return Ok(Some(Vec::new())),
+        Some((_, Some(ix))) => Some(ix),
+        None => None,
+    };
     let mut out = Vec::new();
     let mut check = |r: &Row| -> Result<()> {
         ctx.check()?;
@@ -730,8 +725,8 @@ fn sys_rescan(
         Ok(())
     };
     match &picked {
-        Some(ix) => ix.iter().try_for_each(|&i| check(&all[i]))?,
-        None => all.iter().try_for_each(&mut check)?,
+        Some(ix) => ix.iter().try_for_each(|&i| check(&all.rows[i as usize]))?,
+        None => all.rows.iter().try_for_each(&mut check)?,
     }
     // An index path a sort relies on: the rows in that index's order.
     if let Some(sp) = path.filter(|sp| sp.ordered) {
@@ -740,6 +735,123 @@ fn sys_rescan(
     Ok(Some(out))
 }
 
+/// The rows an index scan's equality conditions (`Access::Index` quals: the index's key
+/// column `=` a value) select, as `sys_equality`'s: Postgres's index scan reads only those
+/// (and checks the filter on them alone).
+fn sys_index_equality(
+    path: Option<&crate::sql::plan::SysPath>,
+    rows: &crate::catalog::system::SysRows,
+    ctx: &ExecCtx,
+) -> Result<Option<(usize, Option<Vec<u32>>)>> {
+    let Some(sp) = path else { return Ok(None) };
+    let crate::sql::plan::Access::Index { quals, .. } = &sp.scan.access else {
+        return Ok(None);
+    };
+    let conds: Vec<Expr> = quals.iter().map(|q| q.expr.clone()).collect();
+    if conds.is_empty() {
+        return Ok(None);
+    }
+    sys_equality(&Expr::And(conds), rows, false, ctx)
+}
+
+/// A scan of a cacheable catalog (`system::rows_cacheable`): its database's shared rows,
+/// each copied only once it is a candidate, read a row at a time as the filter over the
+/// whole rows was. An index scan's equality conditions (`sys_index_equality`) give the
+/// candidates, as Postgres's index scan reads only those; otherwise, when the filter's first
+/// conjunct is an equality a hash on the column serves, only the rows it is true or NULL for
+/// are checked (for the others the conjunction is false before anything else in it is
+/// evaluated, as it was). In an index's order when a sort relies on it.
+fn sys_shared_scan(
+    table: crate::catalog::system::SysTable,
+    filter: Option<&Expr>,
+    path: Option<&crate::sql::plan::SysPath>,
+    ctx: &ExecCtx,
+) -> Result<Option<BoxNode>> {
+    if !crate::catalog::system::rows_cacheable(table) {
+        return Ok(None);
+    }
+    let rows = crate::catalog::system::rows_shared(table, ctx)?;
+    let picked = match sys_index_equality(path, &rows, ctx)? {
+        Some((_, ix)) => Some(ix.unwrap_or_default()),
+        None => match filter {
+            Some(f) => match sys_equality(f, &rows, true, ctx)? {
+                Some((k, ix)) => {
+                    let nulls = rows.nulls(k);
+                    let mut all: Vec<u32> = ix.unwrap_or_default();
+                    if !nulls.is_empty() {
+                        all.extend(nulls.iter().copied());
+                        all.sort_unstable();
+                    }
+                    Some(all)
+                }
+                None => None,
+            },
+            None => None,
+        },
+    };
+    // An index path a sort relies on: the candidates in that index's order.
+    if let Some(sp) = path.filter(|sp| sp.ordered) {
+        let cand: Vec<Row> = match &picked {
+            Some(ix) => ix.iter().map(|&i| rows.rows[i as usize].clone()).collect(),
+            None => rows.rows.clone(),
+        };
+        let sorted = crate::sql::paths::sys_index_order(cand, &sp.scan, ctx)?.0;
+        let node: BoxNode = Box::new(VecNode::new(sorted));
+        return Ok(Some(match filter {
+            Some(f) => Box::new(FilterNode {
+                input: node,
+                pred: f.clone(),
+            }),
+            None => node,
+        }));
+    }
+    Ok(Some(Box::new(SharedRowsNode {
+        rows,
+        picked,
+        i: 0,
+        filter: filter.cloned(),
+    })))
+}
+
+/// `sys_shared_scan`'s node.
+struct SharedRowsNode {
+    rows: Arc<crate::catalog::system::SysRows>,
+    /// The rows to check, in order (None: all).
+    picked: Option<Vec<u32>>,
+    i: usize,
+    filter: Option<Expr>,
+}
+
+impl Node for SharedRowsNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        loop {
+            let at = match &self.picked {
+                Some(ix) => match ix.get(self.i) {
+                    Some(&r) => r as usize,
+                    None => return Ok(None),
+                },
+                None if self.i < self.rows.rows.len() => self.i,
+                None => return Ok(None),
+            };
+            self.i += 1;
+            let r = &self.rows.rows[at];
+            match &self.filter {
+                Some(f) => {
+                    ctx.check()?;
+                    if eval_bool(f, r, ctx)? {
+                        return Ok(Some(r.clone()));
+                    }
+                }
+                None => return Ok(Some(r.clone())),
+            }
+        }
+    }
+}
+
+/// A system view scan where some rows' columns are errors (`system::deferred_errors`): as
+/// Postgres computes a view column only for the rows it returns and when the query reads it,
+/// an error is raised when its row passes the filter and the column is read (or when the
+/// filter reads it).
 struct SysScanNode {
     rows: std::iter::Enumerate<std::vec::IntoIter<Row>>,
     /// (row, column, error).

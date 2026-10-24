@@ -582,13 +582,6 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             let (old_wk, old_phv) = (meta.written_kind, (meta.phv_eval, meta.phv_join));
             let (lcoll, rcoll) = (|c: usize| output_collation(&left, c), |c: usize| output_collation(&right, c));
             let mut rewrites = Vec::new();
-            // (A LATERAL subquery left for the group to pull up, or the join tree of one:
-            // still so.)
-            let old_lat = (
-                meta.lateral_sub,
-                !params.is_empty() && (meta.lateral_held || crate::sql::plan::deferred_lateral(&right)),
-                meta.lateral_flat,
-            );
             let broken = ec_constants(
                 cat,
                 &mut lpush,
@@ -635,12 +628,11 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 r = push_lateral(cat, r, rpush, &params, &nonnull);
             }
             BROKEN_DUPS.with(|b| *b.borrow_mut() = saved);
-            let mut j = join_lateral(cat, kind, l, r, and_all(cond_parts), params, nleft, nright, old_lat.1);
+            let mut j = join(cat, kind, l, r, and_all(cond_parts), params, nleft, nright);
             if let Plan::Join { meta, .. } = &mut j {
                 meta.kept = kept;
                 meta.written_kind = old_wk;
                 (meta.phv_eval, meta.phv_join) = old_phv;
-                (meta.lateral_sub, meta.lateral_held, meta.lateral_flat) = old_lat;
                 for c in old_pushed.into_iter().chain(const_keyed) {
                     if !meta.pushed.contains(&c) {
                         meta.pushed.push(c);
@@ -953,7 +945,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 // (A FROM-less one: its clauses over the values are its gating quals, when
                 // they read an enclosing query's values; constant ones fold, as below.)
                 | Plan::One
-            ) && parts.iter().any(|p| projectable(p, &exprs, matches!(&*input, Plan::Join { .. })))
+            ) && parts.iter().any(|p| projectable(p, &exprs))
                 && (!matches!(&*input, Plan::One)
                     || parts.iter().all(|p| {
                         let mut sub = false;
@@ -963,7 +955,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                     })) =>
         {
             let (down, up): (Vec<Expr>, Vec<Expr>) =
-                parts.into_iter().partition(|p| projectable(p, &exprs, matches!(&*input, Plan::Join { .. })));
+                parts.into_iter().partition(|p| projectable(p, &exprs));
             let inner_cols: Vec<usize> = down.iter().flat_map(|p| p.columns()).collect();
             let inner = and_all(down)
                 .unwrap()
@@ -1509,19 +1501,13 @@ pub(crate) fn contain_nonstrict(e: &Expr) -> bool {
     ns
 }
 
-fn projectable(p: &Expr, exprs: &[Expr], over_join: bool) -> bool {
+fn projectable(p: &Expr, exprs: &[Expr]) -> bool {
     let phv = PHV_OUTPUTS.with(|f| f.get());
     p.columns().iter().all(|&c| {
         exprs.get(c).is_some_and(|e| {
             // (A PlaceHolderVar over the subquery's own columns is evaluated above its
             // scan; a strict expression of them needs none, pullup_replace_vars_callback.)
             if phv && !matches!(e, Expr::Col(..)) && !e.columns().is_empty() && contain_nonstrict(e) {
-                return false;
-            }
-            // (One of none of its columns over a join, a constant or a lateral reference, is
-            // evaluated at the join of all its relations (ph_eval_at its phrels): a qual
-            // reading it is a join clause of them, not any one relation's.)
-            if phv && over_join && !matches!(e, Expr::Col(..)) && e.columns().is_empty() {
                 return false;
             }
             // (A sub-select, nothing volatile in it, outside PlaceHolderVar semantics: the
@@ -3413,26 +3399,6 @@ pub fn join(
     nleft: usize,
     nright: usize,
 ) -> Plan {
-    let deferred = !params.is_empty() && crate::sql::plan::deferred_lateral(&right);
-    join_lateral(cat, kind, left, right, cond, params, nleft, nright, deferred)
-}
-
-/// `join`, `deferred` saying whether the right side is a LATERAL subquery left unplanned
-/// for the join group above to pull up (`JoinMeta::lateral_sub`): an outer join's ON
-/// clauses stay the join's then (the group distributes them as Postgres does after
-/// pull_up_subqueries, outer-join clauses: no equivalence class of them).
-#[allow(clippy::too_many_arguments)]
-pub fn join_lateral(
-    cat: &Catalog,
-    kind: JoinKind,
-    left: Plan,
-    right: Plan,
-    cond: Option<Expr>,
-    params: Vec<Expr>,
-    nleft: usize,
-    nright: usize,
-    deferred: bool,
-) -> Plan {
     let mut parts = Vec::new();
     if let Some(c) = cond {
         conjuncts(c, &mut parts);
@@ -3449,10 +3415,6 @@ pub fn join_lateral(
     let mut rest = Vec::new();
     let mut lpush = Vec::new();
     let mut rpush = Vec::new();
-    // (A LATERAL subquery the join group above pulls up takes none of an outer join's
-    // clauses: they are the group's, as Postgres distributes them after pull_up_subqueries.)
-    let deferred = deferred && !params.is_empty();
-    let hold = deferred && !matches!(kind, JoinKind::Inner);
     for p in parts {
         if p.is_volatile() && p.columns().is_empty() {
             rest.push(p);
@@ -3467,8 +3429,7 @@ pub fn join_lateral(
                 if matches!(
                     kind,
                     JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti
-                ) && right_pushable(&p, &params)
-                    && !hold =>
+                ) && right_pushable(&p, &params) =>
             {
                 rpush.push(p.shift_cols(-(nleft as isize)))
             }
@@ -3479,7 +3440,7 @@ pub fn join_lateral(
     // into it (its parameterized path's clauses), reading the left side's columns as
     // params too.
     let mut params = params;
-    if !params.is_empty() && !hold && matches!(kind, JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti) {
+    if !params.is_empty() && matches!(kind, JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti) {
         // (Only those over the relations its LATERAL references read: the clauses of its
         // parameterized path, whose required relations are its lateral_relids
         // (get_baserel_parampathinfo). The others are the join's.)
@@ -3643,7 +3604,6 @@ pub fn join_lateral(
             pushed,
             hash_swapped,
             kept,
-            lateral_held: deferred,
             ..Default::default()
         }),
     }

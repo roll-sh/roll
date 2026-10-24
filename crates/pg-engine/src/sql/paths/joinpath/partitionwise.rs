@@ -76,16 +76,6 @@ fn substitute(p: &Plan, top: bool, repl: &mut std::vec::IntoIter<Plan>) -> Optio
 /// `substitute` for a group with outer joins inside: its leaves as `outerjoins::walk`
 /// finds them (through every join but a full one, and the filters over joins).
 fn substitute_general(p: &Plan, repl: &mut std::vec::IntoIter<Plan>) -> Option<Plan> {
-    // (A pulled-up subquery's join computing PlaceHolderVars: the projection stays over
-    // the join of the partitions, the child join computing its own.)
-    if let Some((input, _, _)) = crate::sql::plan::phv_projection(p)
-        && let Plan::Project { exprs, .. } = p
-    {
-        return Some(Plan::Project {
-            input: Arc::new(substitute_general(input, repl)?),
-            exprs: exprs.clone(),
-        });
-    }
     match p {
         Plan::Join {
             kind,
@@ -97,7 +87,7 @@ fn substitute_general(p: &Plan, repl: &mut std::vec::IntoIter<Plan>) -> Option<P
             nleft,
             nright,
             meta,
-        } if (params.is_empty() || meta.lateral_flat) && *kind != JoinKind::Full => {
+        } if params.is_empty() && *kind != JoinKind::Full => {
             let l = substitute_general(left, repl)?;
             let r = substitute_general(right, repl)?;
             Some(Plan::Join {
@@ -106,15 +96,14 @@ fn substitute_general(p: &Plan, repl: &mut std::vec::IntoIter<Plan>) -> Option<P
                 right: Arc::new(r),
                 cond: cond.clone(),
                 hash: hash.clone(),
-                params: params.clone(),
+                params: Vec::new(),
                 nleft: *nleft,
                 nright: *nright,
                 meta: meta.clone(),
             })
         }
         Plan::Filter { input, pred }
-            if (matches!(&**input, Plan::Join { kind, params, .. } if *kind != JoinKind::Full && params.is_empty())
-                || crate::sql::plan::phv_projection(input).is_some())
+            if matches!(&**input, Plan::Join { kind, params, .. } if *kind != JoinKind::Full && params.is_empty())
                 && super::outerjoins::absorbable(pred) =>
         {
             Some(Plan::Filter {

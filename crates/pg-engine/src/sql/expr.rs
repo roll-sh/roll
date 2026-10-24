@@ -1215,19 +1215,6 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
                             None => Value::Null,
                         }
                     }
-                    Value::Text(t) if matches!(base.ty(), DataType::Name) => {
-                        // name: one 0-based subscript into its NAMEDATALEN bytes (NUL-padded),
-                        // else NULL.
-                        let [(Some(e), _, false)] = &idx[..] else {
-                            return Ok(Value::Null);
-                        };
-                        match eval(e, row, ctx)?.as_i64() {
-                            Some(i @ 0..NAMEDATALEN) => {
-                                Value::Char(t.as_bytes().get(i as usize).copied().unwrap_or(0))
-                            }
-                            _ => Value::Null,
-                        }
-                    }
                     Value::Geo(g) => {
                         // Fixed-length: one 0-based subscript, else NULL.
                         let [(Some(e), _, false)] = &idx[..] else {
@@ -1318,9 +1305,6 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
                     }
                 };
                 bounds.push((int(lo)?, int(hi)?, *slice));
-            }
-            if matches!(ty, DataType::Name) {
-                return name_assign(cur, &bounds, v);
             }
             if ty.fixed_elem().is_some() {
                 let Value::Geo(g) = cur else { return Ok(cur) };
@@ -1641,31 +1625,6 @@ fn array_assign(
     }
     rec(&mut a, &ranges, &strides, 0, 0, &mut src);
     Ok(Value::Array(Arc::new(a)))
-}
-
-/// The bytes a name holds (with its terminating NUL).
-const NAMEDATALEN: i64 = 64;
-
-/// `name_col[i] := c` (raw_array_subscript_handler): one 0-based subscript into the name's
-/// NAMEDATALEN bytes; a NULL element (or a NULL name) leaves it as it was.
-fn name_assign(cur: Value, bounds: &[(Option<i64>, Option<i64>, bool)], v: Value) -> Result<Value> {
-    if bounds.len() != 1 {
-        bail!(ARRAY_SUBSCRIPT_ERROR, "wrong number of array subscripts");
-    }
-    let (Value::Text(t), Value::Char(c)) = (&cur, &v) else {
-        return Ok(cur);
-    };
-    let i = bounds[0].0.unwrap_or(0);
-    if !(0..NAMEDATALEN).contains(&i) {
-        bail!(ARRAY_SUBSCRIPT_ERROR, "array subscript out of range");
-    }
-    let mut b = t.as_bytes().to_vec();
-    b.resize(NAMEDATALEN as usize, 0);
-    b[i as usize] = *c;
-    // A name ends at its first NUL.
-    let end = b.iter().position(|&x| x == 0).unwrap_or(b.len());
-    b.truncate(end);
-    Ok(Value::text(String::from_utf8_lossy(&b).into_owned()))
 }
 
 fn array_slice(a: &ArrayValue, bounds: &[(Option<i64>, Option<i64>, bool)]) -> Value {

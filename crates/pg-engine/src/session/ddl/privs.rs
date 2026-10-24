@@ -1377,13 +1377,7 @@ impl Ddl<'_, '_> {
                             Some(crate::types::DataType::Row(r)) => r.fields.clone(),
                             _ => Vec::new(),
                         };
-                        // (Its system columns too: ctid is -1, tableoid -6.)
-                        let sys = crate::exec::scan::SYS_COLS
-                            .iter()
-                            .position(|(n, _)| n == col)
-                            .map(|k| -(k as i32) - 1);
-                        let pos = fields.iter().position(|f| &f.0 == col).map(|i| i as i32 + 1);
-                        let Some(attnum) = pos.or(sys) else {
+                        let Some(i) = fields.iter().position(|f| &f.0 == col) else {
                             return Err(Error::new(
                                 code::UNDEFINED_COLUMN,
                                 format!(
@@ -1394,7 +1388,7 @@ impl Ddl<'_, '_> {
                         };
                         self.grant_one(
                             &t,
-                            attnum,
+                            i as i32 + 1,
                             Some(col),
                             *bit,
                             false,
@@ -2775,7 +2769,7 @@ impl Ddl<'_, '_> {
                     self.reown_acls(ObjKind::Function, f.oid, f.owner, new);
                     let mut nf = (*f).clone();
                     nf.owner = new;
-                    self.cat.functions.insert(f.oid, Arc::new(nf));
+                    std::sync::Arc::make_mut(&mut self.cat.functions).insert(f.oid, Arc::new(nf));
                 }
             }
             O::ObjectType | O::ObjectDomain => {
@@ -3110,7 +3104,7 @@ impl Ddl<'_, '_> {
                     t.owner = new;
                     c.put_table(t);
                 } else if let Some(v) = c.views.get(&oid).cloned() {
-                    c.views.insert(
+                    std::sync::Arc::make_mut(&mut c.views).insert(
                         oid,
                         Arc::new(crate::catalog::ViewDef {
                             owner: new,
@@ -3118,7 +3112,7 @@ impl Ddl<'_, '_> {
                         }),
                     );
                 } else if let Some(q) = c.sequences.get(&oid).cloned() {
-                    c.sequences.insert(
+                    std::sync::Arc::make_mut(&mut c.sequences).insert(
                         oid,
                         Arc::new(crate::catalog::Sequence {
                             owner: new,
@@ -3129,7 +3123,7 @@ impl Ddl<'_, '_> {
             }
             ObjKind::Function => {
                 if let Some(f) = c.functions.get(&oid).cloned() {
-                    c.functions.insert(
+                    std::sync::Arc::make_mut(&mut c.functions).insert(
                         oid,
                         Arc::new(crate::catalog::Function {
                             owner: new,
@@ -3203,7 +3197,7 @@ impl Ddl<'_, '_> {
         txn.release_savepoint(SP)?;
         drop(txn);
         if r.is_err() {
-            self.reload_catalog();
+            self.cat = (*self.ctx.catalog()).clone();
         }
         r
     }
@@ -3482,7 +3476,7 @@ impl Ddl<'_, '_> {
             let parsed = crate::sql::parse::parse(&sql)?;
             for st in parsed {
                 if let Some(n) = st.stmt.as_deref().and_then(|n| n.node.as_ref()) {
-                    self.reload_catalog();
+                    self.cat = (*self.ctx.catalog()).clone();
                     let before = self.ctx.notices.borrow().len();
                     self.run(n)?;
                     let notices: Vec<_> = self.ctx.notices.borrow_mut().drain(before..).collect();

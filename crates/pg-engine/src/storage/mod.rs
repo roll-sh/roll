@@ -385,7 +385,7 @@ impl Store {
         check: impl FnOnce(&Store) -> Result<()>,
     ) -> Result<u64> {
         if !self.opts.sync {
-            return self.commit_with(writes, |s, _| check(s), |_| {});
+            return self.commit_with(writes, check, |_| {});
         }
         let rotate;
         let ts;
@@ -446,11 +446,10 @@ impl Store {
 
     /// Like `commit`, and `after(ts)` runs under the commit lock once the writes are visible
     /// (used to publish a new catalog atomically with the data).
-    /// (`check` may also change the writes: a catalog carried onto the current one.)
     pub fn commit_with(
         self: &Arc<Self>,
-        mut writes: Vec<(Vec<u8>, Option<Bytes>)>,
-        check: impl FnOnce(&Store, &mut Vec<(Vec<u8>, Option<Bytes>)>) -> Result<()>,
+        writes: Vec<(Vec<u8>, Option<Bytes>)>,
+        check: impl FnOnce(&Store) -> Result<()>,
         after: impl FnOnce(u64),
     ) -> Result<u64> {
         let rotate;
@@ -462,7 +461,7 @@ impl Store {
             if self.closed.load(Ordering::Acquire) {
                 return Err(internal("database is closed"));
             }
-            check(self, &mut writes)?;
+            check(self)?;
             if writes.is_empty() {
                 return Ok(self.visible_ts());
             }

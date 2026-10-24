@@ -433,13 +433,17 @@ pub fn const_text(v: &Value, ty: &DataType, fmt: &crate::types::text::FormatCtx)
         return "NULL".into();
     }
     let s = crate::types::text::format_value(v, ty, fmt);
-    // Only a non-negative integer, and a numeric that looks like a float constant, go
-    // without quotes (int2, int8 and floats are quoted).
-    match (v, ty) {
-        (Value::Bool(b), _) => (if *b { "true" } else { "false" }).into(),
-        (Value::Int4(_), DataType::Int4) if !s.starts_with('-') => s,
-        (Value::Numeric(_), DataType::Numeric(_))
-            if s.starts_with(|c: char| c.is_ascii_digit()) && s.contains(['e', 'E', '.']) =>
+    match v {
+        Value::Bool(b) => (if *b { "true" } else { "false" }).into(),
+        Value::Int2(_)
+        | Value::Int4(_)
+        | Value::Int8(_)
+        | Value::Numeric(_)
+        | Value::Float4(_)
+        | Value::Float8(_)
+            if !s.starts_with('-')
+                && s.chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | 'e' | 'E' | '.')) =>
         {
             s
         }

@@ -48,6 +48,22 @@ pub fn mark() {
     });
 }
 
+/// The part of this thread's declared stack (`set_limit`) below the current frame, less a
+/// margin, page-aligned: (low, high) addresses no frame uses now, which an idle thread may
+/// give back to the system (deep statements touched it; it reads as zeros when touched again).
+pub fn unused_range() -> Option<(usize, usize)> {
+    const PAGE: usize = 4096;
+    const MARGIN: usize = 256 << 10;
+    let (base, limit) = BASE.with(|b| b.get());
+    let sp = here();
+    if base == 0 || sp > base || base - sp > limit {
+        return None;
+    }
+    let lo = (base - limit).div_ceil(PAGE) * PAGE;
+    let hi = (sp.checked_sub(MARGIN)? / PAGE) * PAGE;
+    (hi > lo).then_some((lo, hi))
+}
+
 pub fn check() -> Result<()> {
     let (base, limit) = BASE.with(|b| b.get());
     if base != 0 && base.abs_diff(here()) > limit {

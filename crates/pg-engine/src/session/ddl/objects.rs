@@ -1089,11 +1089,6 @@ impl Ddl<'_, '_> {
                 .views
                 .get(&oid)
                 .map_or_else(Vec::new, |v| v.defaults.clone()),
-            default_oids: self
-                .cat
-                .views
-                .get(&oid)
-                .map_or_else(Vec::new, |v| v.default_oids.clone()),
             materialized: false,
             check_option,
             storage: None,
@@ -1293,12 +1288,6 @@ impl Ddl<'_, '_> {
                             if nv.defaults.len() < nv.columns.len() {
                                 nv.defaults.resize(nv.columns.len(), None);
                             }
-                            if nv.default_oids.len() < nv.columns.len() {
-                                nv.default_oids.resize(nv.columns.len(), 0);
-                            }
-                            // (A new default is a new pg_attrdef row.)
-                            nv.default_oids[i] =
-                                if sql.is_some() { self.cat.alloc_oid() } else { 0 };
                             nv.defaults[i] = sql;
                         }
                         A::AtSetRelOptions | A::AtResetRelOptions if !v.materialized => {
@@ -1646,7 +1635,7 @@ impl Ddl<'_, '_> {
     /// Drop a view and (recursively) the views built on it.
     pub(super) fn drop_view_cascade(&mut self, oid: u32) -> Result<()> {
         // Out of the catalog first: views that read each other (a cycle) end here.
-        let Some(view) = self.cat.views.remove(&oid) else {
+        let Some(view) = std::sync::Arc::make_mut(&mut self.cat.views).remove(&oid) else {
             return Ok(());
         };
         self.cat.rules.retain(|_, x| x.table != oid);
@@ -1668,14 +1657,14 @@ impl Ddl<'_, '_> {
                 crate::exec::dml::truncate(st, self.ctx)?;
                 self.ctx.sess.db.reset_seq(st.oid, None)?;
                 for i in &st.indexes {
-                    if let Some(ix) = self.cat.indexes.remove(i) {
+                    if let Some(ix) = std::sync::Arc::make_mut(&mut self.cat.indexes).remove(i) {
                         self.cat.remove_name(v.schema, &ix.name);
                         self.cat.comments.retain(|(o, _, _)| o != i);
                     }
-                    self.cat.relstats.remove(i);
+                    std::sync::Arc::make_mut(&mut self.cat.relstats).remove(i);
                     self.cat.colstats.remove(i);
                 }
-                self.cat.relstats.remove(&oid);
+                std::sync::Arc::make_mut(&mut self.cat.relstats).remove(&oid);
                 self.cat.colstats.remove(&oid);
                 let stats: Vec<u32> = self
                     .cat
@@ -1789,7 +1778,7 @@ impl Ddl<'_, '_> {
                 nq.unlogged = Some(cmd.subtype == pb::AlterTableType::AtSetUnLogged as i32);
             }
         }
-        self.cat.sequences.insert(nq.oid, Arc::new(nq));
+        std::sync::Arc::make_mut(&mut self.cat.sequences).insert(nq.oid, Arc::new(nq));
         self.save()?;
         Ok("ALTER SEQUENCE".into())
     }
@@ -2469,7 +2458,6 @@ impl Ddl<'_, '_> {
         let mut multi: Option<Vec<String>> = None;
         let mut opclass = false;
         let mut subtype_opclass: Option<String> = None;
-        let mut subtype_opc = 0u32;
         let mut seen: Vec<&str> = Vec::new();
         for d in def_elems(&s.params) {
             if seen.contains(&d.defname.as_str()) {
@@ -2510,12 +2498,7 @@ impl Ddl<'_, '_> {
                 "multirange_type_name" => multi = Some(qualified()),
                 "subtype_opclass" => {
                     opclass = true;
-                    let parts = qualified();
-                    subtype_opc = self
-                        .cat
-                        .find_opclass(403, &parts, self.search_path())?
-                        .map_or(0, |c| c.oid);
-                    subtype_opclass = parts.last().cloned();
+                    subtype_opclass = qualified().last().cloned();
                 }
                 other => {
                     return Err(Error::new(
@@ -2617,7 +2600,6 @@ impl Ddl<'_, '_> {
             fn_oids,
             subtype_domain,
             subtype_opclass,
-            subtype_opc,
         };
         self.cat.ranges.insert(oid, Arc::new(def));
         if multi_schema != schema {
@@ -3376,8 +3358,6 @@ impl Ddl<'_, '_> {
         // A C function's `AS 'file', 'symbol'`: the symbol.
         let mut link_symbol: Option<String> = None;
         let mut as_items = 0usize;
-        let mut support = 0u32;
-        let mut transform: Option<&pb::DefElem> = None;
         let mut volatility = 'v';
         let mut strict = false;
         let mut security_definer = false;
@@ -3406,8 +3386,7 @@ impl Ddl<'_, '_> {
                 ));
             }
             match d.defname.as_str() {
-                "support" => support = self.check_support_function(d)?,
-                "transform" => transform = Some(d),
+                "support" => self.check_support_function(d)?,
                 "cost" => {
                     cost = def_number(d);
                     if cost <= 0.0 {
@@ -3716,19 +3695,6 @@ impl Ddl<'_, '_> {
                 .map(atomic_returns)
                 .unwrap_or_default(),
             probin,
-            support,
-            window: def_elems(&s.options).any(|d| {
-                d.defname == "window"
-                    && d.arg.as_deref().and_then(crate::sql::binder::ast::ival) != Some(0)
-            }),
-            trftypes: Vec::new(),
-        };
-        let f = match transform {
-            Some(d) => Function {
-                trftypes: self.transform_types(d, &f.language)?,
-                ..f
-            },
-            None => f,
         };
         // A BEGIN ATOMIC body is analyzed as it is parsed; a string body by the language's
         // validator, once the function is in place (ProcedureCreate), so it may call itself.
@@ -4034,7 +4000,7 @@ impl Ddl<'_, '_> {
             None => self.cat.alloc_oid(),
         };
         let func = Arc::new(func);
-        self.cat.functions.insert(func.oid, func.clone());
+        std::sync::Arc::make_mut(&mut self.cat.functions).insert(func.oid, func.clone());
         self.save()?;
         if let Some(shape) = validate {
             self.validate_function(&func, false, shape)?;
@@ -4348,48 +4314,15 @@ impl Ddl<'_, '_> {
     /// ALTER FUNCTION / PROCEDURE / ROUTINE … action…
     /// SUPPORT name (interpret_func_support): a function `name(internal)` returning
     /// internal.
-    /// TRANSFORM FOR TYPE ...: the types' oids, each with a transform for `language`
-    /// (interpret_AS_clause's get_transform_oid).
-    fn transform_types(&self, d: &pb::DefElem, language: &str) -> Result<Vec<u32>> {
-        let Some(NodeEnum::List(l)) = d.arg.as_deref().and_then(inner) else {
-            return Ok(Vec::new());
-        };
-        let lang = self.cat.languages.values().find(|x| x.name == language).map(|x| x.oid).unwrap_or(match language {
-            "internal" => 12,
-            "c" => 13,
-            "sql" => 14,
-            "plpgsql" => crate::catalog::depend::PLPGSQL_LANG,
-            _ => 0,
-        });
-        let mut out = Vec::new();
-        for n in &l.items {
-            let Some(NodeEnum::TypeName(tn)) = inner(n) else { continue };
-            let (ty, domain) = resolve_type_name(&self.cat, self.search_path(), tn)?;
-            let oid = domain.unwrap_or_else(|| system::type_oid(&self.cat, &ty));
-            if !self.cat.transforms.values().any(|t| t.ty == oid && t.lang == lang) {
-                return Err(Error::new(
-                    code::UNDEFINED_OBJECT,
-                    format!(
-                        "transform for type {} language \"{language}\" does not exist",
-                        self.cat.format_type(&ty, domain, self.search_path())
-                    ),
-                ));
-            }
-            out.push(oid);
-        }
-        Ok(out)
-    }
-
-    /// The support function SUPPORT names (its oid), checked as Postgres does.
-    fn check_support_function(&self, d: &pb::DefElem) -> Result<u32> {
+    fn check_support_function(&self, d: &pb::DefElem) -> Result<()> {
         let parts: Vec<String> = match d.arg.as_deref().and_then(inner) {
             Some(NodeEnum::List(l)) => names(&l.items),
             Some(NodeEnum::String(x)) => vec![x.sval.clone()],
             Some(NodeEnum::TypeName(tn)) => names(&tn.names),
-            _ => return Ok(0),
+            _ => return Ok(()),
         };
         let Some(name) = parts.last() else {
-            return Ok(0);
+            return Ok(());
         };
         const INTERNAL: u32 = 2281;
         let user = self.cat.functions.values().find(|f| {
@@ -4399,12 +4332,12 @@ impl Ddl<'_, '_> {
                 && (parts.len() < 2 || self.cat.schema_name(f.schema) == parts[parts.len() - 2])
         });
         let ret = match user {
-            Some(f) => Some((f.ret.oid(), f.oid)),
+            Some(f) => Some(f.ret.oid()),
             None if parts.len() < 2 || parts[parts.len() - 2] == "pg_catalog" => {
                 crate::catalog::system::builtin_proc_sigs()
                     .iter()
                     .find(|p| p.name == name && p.args == [INTERNAL])
-                    .map(|p| (p.ret, p.oid))
+                    .map(|p| p.ret)
             }
             None => None,
         };
@@ -4413,11 +4346,11 @@ impl Ddl<'_, '_> {
                 code::UNDEFINED_FUNCTION,
                 format!("function {}(internal) does not exist", parts.join(".")),
             )),
-            Some((r, _)) if r != INTERNAL => Err(Error::new(
+            Some(r) if r != INTERNAL => Err(Error::new(
                 code::INVALID_OBJECT_DEFINITION,
                 format!("support function {} must return type internal", parts.join(".")),
             )),
-            Some((_, oid)) => Ok(oid),
+            Some(_) => Ok(()),
         }
     }
 
@@ -4464,7 +4397,7 @@ impl Ddl<'_, '_> {
                 ));
             }
             match d.defname.as_str() {
-                "support" => nf.support = self.check_support_function(d)?,
+                "support" => self.check_support_function(d)?,
                 "volatility" => {
                     nf.volatility = match def_arg_str(d).as_deref() {
                         Some("immutable") => 'i',
@@ -4518,7 +4451,7 @@ impl Ddl<'_, '_> {
                 _ => {}
             }
         }
-        self.cat.functions.insert(nf.oid, Arc::new(nf));
+        std::sync::Arc::make_mut(&mut self.cat.functions).insert(nf.oid, Arc::new(nf));
         self.save()?;
         Ok(tag)
     }
@@ -5544,8 +5477,8 @@ impl Ddl<'_, '_> {
             let mut t = (*t).clone();
             t.indexes.retain(|i| *i != ix.oid);
             self.delete_index_rows(&t, ix)?;
-            self.cat.indexes.remove(&ix.oid);
-            self.cat.relstats.remove(&ix.oid);
+            std::sync::Arc::make_mut(&mut self.cat.indexes).remove(&ix.oid);
+            std::sync::Arc::make_mut(&mut self.cat.relstats).remove(&ix.oid);
             self.cat.colstats.remove(&ix.oid);
             self.cat.remove_name(t.schema, &ix.name);
             self.cat.put_storage(t);
@@ -5829,7 +5762,7 @@ impl Ddl<'_, '_> {
                     }
                 }
                 Dep::Function(o) => {
-                    self.cat.functions.remove(&o);
+                    std::sync::Arc::make_mut(&mut self.cat.functions).remove(&o);
                 }
             }
         }
@@ -5853,7 +5786,7 @@ impl Ddl<'_, '_> {
             }
         }
         if let Some(p) = t.pkey_index
-            && let Some(ix) = self.cat.indexes.remove(&p)
+            && let Some(ix) = std::sync::Arc::make_mut(&mut self.cat.indexes).remove(&p)
         {
             self.cat.remove_name(t.schema, &ix.name);
         }
@@ -5919,7 +5852,12 @@ impl Ddl<'_, '_> {
         cascade: bool,
     ) -> Result<()> {
         use crate::catalog::depend::{self, Report};
-        let cat = Arc::new(self.cat.clone());
+        // (A copy nothing changes: its lookups may hash.)
+        let cat = {
+            let mut c = self.cat.clone();
+            c.freeze();
+            Arc::new(c)
+        };
         let deps = depend::depends(self.ctx, &cat);
         let sp = self.search_path().to_vec();
         let required = |r: depend::Required| {
@@ -5973,11 +5911,15 @@ impl Ddl<'_, '_> {
                 }
             },
         }
-        let whole: Vec<(u32, u32)> = targets
-            .iter()
-            .filter(|t| t.obj.2 == 0)
-            .map(|t| (t.obj.0, t.obj.1))
-            .collect();
+        let whole = Deleted {
+            whole: targets
+                .iter()
+                .filter(|t| t.obj.2 == 0)
+                .map(|t| (t.obj.0, t.obj.1))
+                .collect(),
+            owners: Default::default(),
+            before: cat.clone(),
+        };
         // What sql_drop event triggers will see.
         super::event_trigger::note_dropped(
             &cat,
@@ -5994,10 +5936,10 @@ impl Ddl<'_, '_> {
     fn delete_object(
         &mut self,
         (class, oid, sub): crate::catalog::depend::Addr,
-        whole: &[(u32, u32)],
+        whole: &Deleted,
     ) -> Result<()> {
         use crate::catalog::depend::*;
-        let gone = |c: u32, o: u32| whole.contains(&(c, o));
+        let gone = |c: u32, o: u32| whole.whole.contains(&(c, o));
         match class {
             REL if sub > 0 => {
                 if gone(REL, oid) {
@@ -6028,7 +5970,7 @@ impl Ddl<'_, '_> {
                     self.drop_table_now(&t)?;
                 } else if self.cat.views.contains_key(&oid) {
                     self.drop_view_cascade(oid)?;
-                } else if let Some(q) = self.cat.sequences.remove(&oid) {
+                } else if let Some(q) = std::sync::Arc::make_mut(&mut self.cat.sequences).remove(&oid) {
                     self.cat.remove_name(q.schema, &q.name);
                     self.cat.comments.retain(|(o, _, _)| *o != oid);
                     self.ctx.sess.db.reset_seq(oid, None)?;
@@ -6054,16 +5996,19 @@ impl Ddl<'_, '_> {
                 }
             }
             PROC => {
-                if self.cat.functions.remove(&oid).is_some() {
+                if std::sync::Arc::make_mut(&mut self.cat.functions).remove(&oid).is_some() {
                     self.cat.comments.retain(|(o, _, _)| *o != oid);
                 }
             }
             CONSTRAINT => {
-                let owner = self
-                    .cat
-                    .tables
-                    .values()
-                    .find(|t| t.constraints.iter().any(|c| c.oid == oid))
+                // (The table that had it when the deletion began has it still: deleting
+                // other objects doesn't move constraints.)
+                let owner = whole
+                    .owners()
+                    .0
+                    .get(&oid)
+                    .and_then(|t| self.cat.tables.get(t))
+                    .filter(|t| t.constraints.iter().any(|c| c.oid == oid))
                     .cloned();
                 if let Some(t) = owner {
                     if gone(REL, t.oid) {
@@ -6098,7 +6043,15 @@ impl Ddl<'_, '_> {
                 }
             }
             ATTRDEF => {
-                for t in self.cat.tables.values().cloned().collect::<Vec<_>>() {
+                let tables: Vec<Arc<crate::catalog::Table>> = whole
+                    .owners()
+                    .1
+                    .get(&oid)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|t| self.cat.tables.get(t).cloned())
+                    .collect();
+                for t in tables {
                     if gone(REL, t.oid) {
                         continue;
                     }
@@ -6797,4 +6750,33 @@ fn system_class_kind(name: &str) -> Option<char> {
             Some(crate::types::Value::Char(c)) => Some(*c as char),
             _ => text_at(r, 17).chars().next(),
         })
+}
+
+/// The objects `drop_objects` deletes, for `delete_object`: whole objects (class, oid), and,
+/// looked up once, which tables had each constraint and default when the deletion began.
+struct Deleted {
+    whole: std::collections::HashSet<(u32, u32)>,
+    owners: std::cell::OnceCell<(std::collections::HashMap<u32, u32>, std::collections::HashMap<u32, Vec<u32>>)>,
+    before: Arc<crate::catalog::Catalog>,
+}
+
+impl Deleted {
+    /// (constraint → its table, default's pg_attrdef oid → the tables with a column of it).
+    fn owners(&self) -> &(std::collections::HashMap<u32, u32>, std::collections::HashMap<u32, Vec<u32>>) {
+        self.owners.get_or_init(|| {
+            let mut cons = std::collections::HashMap::new();
+            let mut defs: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+            for t in self.before.tables.values() {
+                for c in &t.constraints {
+                    cons.entry(c.oid).or_insert(t.oid);
+                }
+                for c in &t.columns {
+                    if c.def_oid != 0 {
+                        defs.entry(c.def_oid).or_default().push(t.oid);
+                    }
+                }
+            }
+            (cons, defs)
+        })
+    }
 }

@@ -961,9 +961,47 @@ pub fn triggered_tables(
     sticky: bool,
 ) -> std::collections::HashSet<u32> {
     let mut out: std::collections::HashSet<u32> = cat.triggers.values().map(|t| t.table).collect();
-    out.extend(internal_triggers(cat).into_iter().map(|r| r.trig.table));
+    out.extend(internal_trigger_tables(cat));
+    debug_assert_eq!(
+        internal_trigger_tables(cat).into_iter().collect::<std::collections::BTreeSet<u32>>(),
+        internal_triggers(cat).into_iter().map(|r| r.trig.table).collect(),
+        "internal_trigger_tables must name internal_triggers' tables"
+    );
     if sticky {
         out.extend(cat.had_triggers.iter().copied());
+    }
+    out
+}
+
+/// The tables `internal_triggers` puts triggers on, without making the triggers: every DDL
+/// statement asks (`triggered_tables`).
+fn internal_trigger_tables(cat: &crate::catalog::Catalog) -> Vec<u32> {
+    use crate::catalog::{Catalog, ConstraintKind};
+    let mut out = Vec::new();
+    for t in cat.tables.values() {
+        for con in &t.constraints {
+            if let ConstraintKind::ForeignKey { ref_table, .. } = &con.kind {
+                if !con.enforced {
+                    continue;
+                }
+                let derived = Catalog::fk_is_derived(t, con);
+                // (As `ri_triggers`: a clone's action triggers are its parent key's.)
+                let clone = con.parent != 0 && !derived;
+                if !clone {
+                    out.push(*ref_table);
+                }
+                if !derived {
+                    out.push(t.oid);
+                }
+            }
+        }
+    }
+    for t in cat.tables.values() {
+        for con in &t.constraints {
+            if con.kind.index().is_some() && con.deferrable {
+                out.push(t.oid);
+            }
+        }
     }
     out
 }
@@ -989,20 +1027,24 @@ pub struct RiTrigger {
 pub fn ri_triggers(cat: &crate::catalog::Catalog, only: Option<u32>) -> Vec<RiTrigger> {
     use crate::catalog::{Catalog, ConstraintKind, FkAction};
     let mut out = Vec::new();
-    // A key a partitioned table's key was cloned to: its check triggers come first.
-    let is_clone = |oid: u32| {
-        cat.tables.values().any(|t| {
-            t.constraints
-                .iter()
-                .any(|c| c.oid == oid && Catalog::fk_is_clone(t, c))
+    // Constraints by oid: (ri_check of the first with it, whether one is a clone). (Built
+    // on first use: looking each key up by scanning every table was quadratic.)
+    let by_oid = std::cell::OnceCell::new();
+    let by_oid = || {
+        by_oid.get_or_init(|| {
+            let mut m: std::collections::HashMap<u32, (u32, bool)> = Default::default();
+            for t in cat.tables.values() {
+                for c in &t.constraints {
+                    let e = m.entry(c.oid).or_insert((c.ri_check, false));
+                    e.1 |= Catalog::fk_is_clone(t, c);
+                }
+            }
+            m
         })
     };
-    let check_base = |oid: u32| {
-        cat.tables
-            .values()
-            .find_map(|t| t.constraints.iter().find(|c| c.oid == oid))
-            .map_or(0, |c| c.ri_check)
-    };
+    // A key a partitioned table's key was cloned to: its check triggers come first.
+    let is_clone = |oid: u32| by_oid().get(&oid).is_some_and(|e| e.1);
+    let check_base = |oid: u32| by_oid().get(&oid).map_or(0, |e| e.0);
     for t in cat.tables.values() {
         for con in &t.constraints {
             let ConstraintKind::ForeignKey {

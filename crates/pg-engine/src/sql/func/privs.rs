@@ -573,20 +573,14 @@ fn parse_aclitem(v: &Value, cat: &Catalog) -> Result<AclItem> {
 
 fn acldefault(a: &[Value], c: &FnCtx) -> Result<Value> {
     let cat = c.exec.catalog();
-    // The argument is a "char".
-    let letter = match &a[0] {
-        Value::Char(b) => Some(*b as char),
-        v => str_of(v).chars().next(),
-    };
-    let kind = letter
+    let kind = str_of(&a[0])
+        .chars()
+        .next()
         .and_then(ObjKind::from_letter)
         .ok_or_else(|| {
             Error::new(
                 code::INTERNAL_ERROR,
-                format!(
-                    "unrecognized object type abbreviation: {}",
-                    letter.map(String::from).unwrap_or_default()
-                ),
+                format!("unrecognized object type abbreviation: {}", str_of(&a[0])),
             )
         })?;
     let owner = a[1].as_i64().unwrap_or(0) as u32;

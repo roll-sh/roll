@@ -37,9 +37,9 @@ harness and score in `tests/`:
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,142 of 51,150 statements match (99.98%).** 8 differ. The full
+- **Regression suite: 51,135 of 51,150 statements match (99.97%).** 15 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - All 13 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
+  - All 15 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
     order since round 16, agent 17: join relations parameterized by LATERAL references).
   - None differs by design any more (aggregates `balk` matches since round 16, agent 14: a
     Finalize Aggregate runs the user-defined combine functions).
@@ -69,6 +69,17 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   and TPC-H (5–20x: a row-at-a-time executor over decoded `Value` rows, no parallel query),
   bulk loads and DDL. In-process (how roll embeds it) OLTP is 2–27x PostgreSQL's over the wire.
   TPC-H SF1 takes 2.4x less disk. BENCH.md's "Where it is still slower" is the to-do list.
+  Round 17, agent 44 (catalog, DDL, sessions; BENCH.md "Catalog, DDL and sessions"): the
+  catalog is stored as a record per object (`catalog/persist.rs`, catalog format 1: older
+  databases are rewritten when first opened), so a DDL commit writes only what changed; its
+  per-object maps are shared by its copies until changed; system catalogs' rows are shared by
+  a database's sessions and looked up through hashes; quadratic catalog paths (TOAST owners,
+  row types, ACLs, cascaded drops' dependency walk, ...) are hashed. At 500 tables CREATE
+  TABLE / INDEX now beat PostgreSQL (0.7 / 0.9 ms vs 4.0 / 1.3), psql's `\d` queries take
+  1.3–2.5 ms (PostgreSQL 0.5–0.9), DROP SCHEMA CASCADE over 10,000 tables 3 s (PostgreSQL
+  16 s); an idle session holds 0.5 MB (PostgreSQL 1.5 MB). Still slower: every DDL statement
+  is O(catalog) (0.02–0.3x PostgreSQL at 10,000 tables), and the first catalog query after
+  DDL regenerates the catalog's rows.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
@@ -83,20 +94,6 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   results: a pseudoconstant qual of an inner join under an outer join gating the outer join
   (`c LEFT JOIN (a JOIN b ON (SELECT false)) ON ...` loses c's rows), and the empty grouping
   set over no input rows (constants equal to keys).
-- **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
-  PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified
-  (`pg_dump_tap`, through stand-ins for its Perl test modules in `tests/pg_dump/perl`), round
-  trips of the regression database in every format and the common options with restores
-  both ways (`pg_dump_roundtrip`; `pg_regress` keeps its databases with `PGREGRESS_KEEP=1`),
-  and psql's backslash commands (`pg_psql_meta`). Scores, the fixes and what is open:
-  `tests/pg_dump/STATUS.md`. pg_dump couldn't start before; 002_pg_dump.pl passes 14,603 of
-  14,609 checks and parallel dump / restore works. Fixes with effects beyond pg_dump:
-  concurrent DDL in different sessions commits (the catalog is merged onto the current one,
-  `txn/catmerge.rs`; it used to fail, or silently drop the other transaction's DDL when that
-  committed while a command ran), stored expressions are qualified when stored (they kept
-  working only under the search_path they were made in), snapshot export
-  (`pg_export_snapshot`, `SET TRANSACTION SNAPSHOT`), and `roll-engine` shuts down cleanly on
-  SIGTERM keeping sequence positions.
 
 ## Repository layout
 
@@ -268,7 +265,12 @@ Prefix scratch objects, and drop scratch databases and roles afterwards.
   match the surrounding style and comment density, don't run `cargo fmt` on others' files.
 - Stored data must stay loadable. Format changes need a migration: see
   `Catalog::index_key_format` and `Catalog::storage_format` with `Engine::upgrade_storage` in
-  `src/engine.rs` (batched, resumable, tested by `tests/storage_upgrade_batches.rs`).
+  `src/engine.rs` (batched, resumable, tested by `tests/storage_upgrade_batches.rs`), and
+  `Catalog::catalog_format` (`catalog/persist.rs`: a database's catalog is a header and a
+  record per object; `Database::open` rewrites a catalog stored as one value). A field added to
+  `Catalog` must be listed in `persist.rs`'s `stored_fields!` (as a map, a set or in the header;
+  the macro's exhaustive destructuring doesn't compile otherwise), with a record tag never used
+  before.
 - Every fix gets a golden recorded against PostgreSQL. Correctness (results, errors, data)
   before EXPLAIN text.
 - Commit only verified states: the whole `cargo test -p pg-engine` passes first.
@@ -301,13 +303,25 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
     catalog and the search path, started over by every `remember_equalities`.
   - `SYS_ROWS` (`explain::sys_tuples`, a system catalog's row count): by the catalog's address
     with a `Weak` holding it.
-  - `SessionState::sys_rows` (`catalog::system::rows`, round 17 agent 36: the generated rows
-    of `pg_class`, `pg_attribute`, `pg_attrdef`, `pg_type`, `pg_namespace`, `pg_index`,
-    `pg_constraint`, `pg_proc`, the catalogs whose rows read nothing but the catalog, roles,
-    path and settings): by a `Weak` to the catalog, current and session user, search path and
-    `Settings::generation` (unique per set of setting values). Only catalogs generated from
-    those alone may join the list (`rows_cacheable`): not statistics, locks, sequences, large
-    objects or other databases.
+  - `Database::sys_rows` (`catalog::system::rows_shared`, round 17 agents 36 and 44: the
+    generated rows of `pg_class`, `pg_attribute`, `pg_attrdef`, `pg_type`, `pg_namespace`,
+    `pg_index`, `pg_constraint`, `pg_proc`, the catalogs whose rows read nothing but the
+    catalog, roles, path and settings, shared by all the database's sessions, with hashes on
+    the columns equalities looked up, `SysRows::lookup`): by a `Weak` to the catalog, current
+    and session user, the session's login name, search path, the session's temporary schema
+    and `Settings::values_key` (the values themselves, equal for sessions whose settings are:
+    `Settings::generation` is unique per session). Only catalogs generated from those alone
+    may join the list (`rows_cacheable`): not statistics, locks, sequences, large objects or
+    other databases. (Agent 36 kept them per session, keyed by `Settings::generation`; every
+    session then held its own copies.)
+  - `Catalog::lookups` (round 17 agent 44: hashes for lookups that scan a map otherwise:
+    TOAST owners, composite types by relation, schemas by name, ACLs, row types, user type
+    names, row-level security tables by name): part of one catalog value, built on first
+    use only once it is frozen (`Catalog::freeze`, as `Txn` and `Database` publish it in an
+    `Arc`, after which nothing changes it); a copy (what DDL edits) starts unfrozen and
+    empty, and its lookups scan. Static tables read per row (`type_procs`'s built-ins,
+    `SysTable::by_oid`, built-in operator classes, catalog indexes) are hashed once per
+    process. Golden `catalog_lookups`.
   - `sql::parse` `PARSED` (parse trees, per thread): by the text and the parser options (a
     pure function); `ast::parse_exprs` / `parse_stmt` (stored texts) under tags of their own.
   - `costs::SLOT_VALUES` (statistics slots' parsed values, per thread): by
@@ -407,8 +421,8 @@ All remaining work is planner/EXPLAIN (`src/sql/paths*`, `src/sql/binder/optimiz
 numbers refer to the regress harness's per-file unit counter; `tests/regress/STATUS.md` lists
 them all with the "Fixed in round N" sections describing what was already tried.
 
-1. **PlaceHolderVars evaluated at joins** (join 360, 362/363, 368, 783, 808;
-   partition_join 204). Round 14 (agent 8) evaluates them at joins: a pulled-up subquery's
+1. **PlaceHolderVars evaluated at joins** (join 360, 362/363, 368;
+   partition_join 41). Round 14 (agent 8) evaluates them at joins: a pulled-up subquery's
    outputs an outer join nulls (as written) are PlaceHolderVars the join group computes at the
    lowest relation of their ph_eval_at (`lift.rs` `flatten_join_subquery`, `plan::phv_projection`,
    `joinpath.rs` `Phv` / `with_phvs`), so 328/343/388 match. Left: remove_useless_result_rtes
@@ -419,12 +433,10 @@ them all with the "Fixed in round N" sections describing what was already tried.
    a parameterized appendrel (360: a FROM-less UNION ALL arm as an appendrel member),
    PlaceHolderVars with sub-selects (362/363), a dummy Result showing a view's expressions
    (368), a LATERAL subquery over a join pulled up with PlaceHolderVars carrying ph_lateral
-   (join 332 / 675 / 676 / 776, partition_join 41: done in round 16, agent 33; left 783, a
-   pulled-up subquery with a LATERAL item of its own, and 808 / partition_join 204, output
-   lists and relabelings; STATUS.md round 16, agent 33). (744, a hash join
+   (join 332, partition_join 41 / 204; STATUS.md round 16, agent 30). (744, a hash join
    parameterized by a LATERAL inner side: done in round 16, agent 17; 426, a JOIN USING alias
    as a PlaceHolderVar at its join: round 16, agent 30.)
-2. **Remaining join / partition_join / partition_prune plan shapes** (join 6, partition_join 1,
+2. **Remaining join / partition_join / partition_prune plan shapes** (join 12, partition_join 2,
    partition_prune 1 unit; round 14's agent 5 and round 16's agent 12 sections in STATUS.md have
    what changed and why the rest is open; round 16's agent 17 section has join relations
    parameterized by LATERAL references and why partition_prune 410 stays open (265 and 442 done in
@@ -436,14 +448,13 @@ them all with the "Fixed in round N" sections describing what was already tried.
    SubPlan classes, semi join unique-ification, join target list order; join 345/560/620/674
    done in round 16, agent 28: the join search's enumeration (classes with constants across semi
    joins, replaced equalities in min_lefthand), scans' reltargets (`ScanPlan::reltarget`),
-   (715 and 681 done in round 16, agent 41: a FROM subquery's semi joins pulled up into its
-   parent's join problem as bound, check_index_only over the reltarget); join 662/663/671/706/781, partition_join 52/234/553/588/608 done in round
+   with why 715 stays open (a FROM subquery holding a semi join is planned as a group of its
+   own, not flattened into its parent's); join 662/663/671/706/781, partition_join 52/234/553/588/608 done in round
    16, agent 26, whose section lists the causes of the rest of join 674–808 and
    partition_join 98–300; join 691/765, partition_join 138/210/300 done in round 16, agent 40:
    class clauses made in range table order, child joins of partitioned join relations only,
    partitionwise paths of join relations inside outer-join groups, DML sublinks pulled up over
-   inheritance targets, whole-row Vars passed up): a LATERAL nested loop's rows (join 783,
-   STATUS.md round 16, agent 41),
+   inheritance targets, whole-row Vars passed up): cost-driven choices (join 715),
    partitionwise LATERAL joins left (partition_join 48/207 done in round 16, agent 19; 204:
    a PlaceHolderVar), partition_prune 410. (partition_join 86, a unique-ified side passing
    non-key columns through, done in round 16, agent 31: a hashed Distinct with pass-through

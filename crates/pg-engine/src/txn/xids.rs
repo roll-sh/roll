@@ -15,21 +15,6 @@ pub const INITDB_XID: u64 = 745;
 /// How many aborted transactions to remember (older ones read as committed).
 const ABORTED_KEPT: usize = 65536;
 
-/// An exported snapshot (ExportSnapshot's file): what SET TRANSACTION SNAPSHOT installs and
-/// checks.
-pub struct Exported {
-    /// The exporting transaction: its database (`Database::instance`) and lock owner id.
-    pub db: u64,
-    pub owner: u64,
-    /// The database's oid (what "a different database" compares).
-    pub db_oid: u32,
-    pub ts: u64,
-    pub serializable: bool,
-    pub read_only: bool,
-    /// Keeps the snapshot's versions while it's exported.
-    pub pin: crate::storage::SnapshotPin,
-}
-
 struct State {
     next: u64,
     /// Ids below this may have been handed out (persisted ahead of `next`).
@@ -43,9 +28,6 @@ struct State {
 
 pub struct Xids {
     state: Mutex<State>,
-    /// The snapshots pg_export_snapshot() exported, by identifier, until the exporting
-    /// transaction ends (cluster-wide, like Postgres's pg_snapshots directory).
-    exported: Mutex<std::collections::HashMap<String, Exported>>,
     /// Ids before this (and after the special ones) have no status any more.
     oldest: u64,
     persist: Box<dyn Fn(u64) + Send + Sync>,
@@ -72,7 +54,6 @@ impl Xids {
                 aborted: BTreeSet::new(),
                 latest_completed: next - 1,
             }),
-            exported: Mutex::new(std::collections::HashMap::new()),
             oldest: FIRST_NORMAL_XID,
             persist: Box::new(persist),
         }
@@ -159,35 +140,6 @@ impl Xids {
             .min()
             .unwrap_or(xmax);
         Snapshot { xmin, xmax, xip }
-    }
-
-    /// Register an exported snapshot under `id`.
-    pub fn export(&self, id: String, e: Exported) {
-        self.exported.lock().insert(id, e);
-    }
-
-    /// The exported snapshot `id`: (database oid, timestamp, serializable, read only).
-    pub fn exported(&self, id: &str) -> Option<(u32, u64, bool, bool)> {
-        self.exported
-            .lock()
-            .get(id)
-            .map(|e| (e.db_oid, e.ts, e.serializable, e.read_only))
-    }
-
-    /// How many snapshots transaction `owner` of database `db` exported.
-    pub fn exported_by(&self, db: u64, owner: u64) -> usize {
-        self.exported
-            .lock()
-            .values()
-            .filter(|e| e.db == db && e.owner == owner)
-            .count()
-    }
-
-    /// The exporting transaction ended: its snapshots go.
-    pub fn unexport(&self, db: u64, owner: u64) {
-        self.exported
-            .lock()
-            .retain(|_, e| !(e.db == db && e.owner == owner));
     }
 
     /// pg_xact_status(): in progress, committed or aborted.

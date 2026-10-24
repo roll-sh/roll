@@ -311,8 +311,6 @@ pub fn with_typmod(t: DataType, m: i32) -> DataType {
         Interval(_) => Interval(m),
         Bit(_) => Bit(m),
         Varbit(_) => Varbit(m),
-        // (An array's modifier is its element's; rows store arrays without one.)
-        Array(e) => Array(Box::new(with_typmod(*e, m))),
         t => t,
     }
 }

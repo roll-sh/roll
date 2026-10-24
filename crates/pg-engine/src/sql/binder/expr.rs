@@ -2109,9 +2109,6 @@ impl Binder<'_, '_> {
         {
             deps.push((2617, o.oid));
         }
-        if schema.is_none() {
-            self.note_oper_ref(loc, o.oid);
-        }
         let mut args = Vec::new();
         for (a, t) in l.into_iter().chain([r]).zip(&res.arg_types) {
             args.push(self.coerce_implicit(a, t)?);
@@ -4365,9 +4362,6 @@ impl Binder<'_, '_> {
                     f.func_variadic,
                     f.location,
                 )?;
-                if schema.is_none() {
-                    self.note_func_ref(f.location, def.oid);
-                }
                 // A range over a domain: its constructor's bounds are of the domain.
                 if let DataType::Range(rt) = &ret
                     && let Some(d) = rt.subtype_domain
@@ -8736,72 +8730,17 @@ fn indeterminate_hash(args: &[Value], _: &func::FnCtx) -> Result<Value> {
 /// starts (setting up the key's sort support), before any row is read, so EXPLAIN does too;
 /// a nested loop compares (and fails comparing two values); a hash join fails hashing one.
 pub(crate) fn check_merge_keys(ctx: &crate::exec::ExecCtx, plan: &mut Plan) -> Result<()> {
-    // (Nothing to change: the plan stays as it is, its nodes too, as `ExecCtx::bound_trees`
-    // needs.)
-    if !has_indeterminate_keys(plan) {
-        return check_full_joins(ctx, plan);
-    }
-    check_merge_keys_mut(ctx, plan)
-}
-
-/// A constant-false restriction of a FULL JOIN's own join relation marks it dummy before any
-/// path is looked for (restriction_is_constant_false, after eval_const_expressions: `NOT
-/// NULL` too): it never runs.
-fn full_join_constant_false(ctx: &crate::exec::ExecCtx, e: &Expr) -> bool {
-    let mut plain = e.columns().is_empty() && e.is_immutable() && !e.has_outer_refs();
-    e.walk(&mut |x| plain &= !matches!(x, Expr::Subquery(_) | Expr::Param(..)));
-    plain && matches!(crate::sql::expr::eval(e, &[], ctx), Ok(Value::Bool(false) | Value::Null))
-}
-
-/// `check_merge_keys`' FULL JOIN check alone.
-fn check_full_joins(ctx: &crate::exec::ExecCtx, plan: &Plan) -> Result<()> {
-    if let Plan::Filter { input, pred } = plan
-        && let Plan::Join { kind: crate::sql::plan::JoinKind::Full, left, right, .. } = &**input
-        && full_join_constant_false(ctx, pred)
-    {
-        check_full_joins(ctx, left)?;
-        return check_full_joins(ctx, right);
-    }
-    if let Plan::Join { kind: crate::sql::plan::JoinKind::Full, cond, hash, nleft, params, .. } = plan
-        && params.is_empty()
-        && !super::optimize::full_join_supported(&ctx.catalog(), cond.as_ref(), hash.is_some(), *nleft)
-    {
-        return Err(Error::new(
-            code::FEATURE_NOT_SUPPORTED,
-            "FULL JOIN is only supported with merge-joinable or hash-joinable join conditions",
-        ));
-    }
-    match plan {
-        Plan::Join { left, right, .. } | Plan::SetOp { left, right, .. } => {
-            check_full_joins(ctx, left)?;
-            check_full_joins(ctx, right)
-        }
-        Plan::With { ctes, body, .. } => {
-            for (_, p) in ctes {
-                check_full_joins(ctx, p)?;
-            }
-            check_full_joins(ctx, body)
-        }
-        Plan::Filter { input, .. }
-        | Plan::Project { input, .. }
-        | Plan::ProjectSet { input, .. }
-        | Plan::Agg { input, .. }
-        | Plan::Window { input, .. }
-        | Plan::Sort { input, .. }
-        | Plan::Limit { input, .. }
-        | Plan::Distinct { input, .. }
-        | Plan::LockRows { input, .. }
-        | Plan::Barrier { input, .. } | Plan::Context { input, .. } => check_full_joins(ctx, input),
-        Plan::Append { inputs, .. } => inputs.iter().try_for_each(|p| check_full_joins(ctx, p)),
-        _ => Ok(()),
-    }
-}
-
-fn check_merge_keys_mut(ctx: &crate::exec::ExecCtx, plan: &mut Plan) -> Result<()> {
     let bad = |k: &Expr| matches!(k, Expr::Call(d, ..) if d.name == INDETERMINATE_HASH);
-    // (A FULL JOIN under a constant-false restriction of its own: `full_join_constant_false`.)
+    // (A constant-false restriction of the FULL JOIN's own join relation marks it dummy
+    // before any path is looked for (restriction_is_constant_false, after
+    // eval_const_expressions: `NOT NULL` too): it never runs.)
+    let constant_false = |e: &Expr| {
+        let mut plain = e.columns().is_empty() && e.is_immutable() && !e.has_outer_refs();
+        e.walk(&mut |x| plain &= !matches!(x, Expr::Subquery(_) | Expr::Param(..)));
+        plain && matches!(crate::sql::expr::eval(e, &[], ctx), Ok(Value::Bool(false) | Value::Null))
+    };
     if let Plan::Filter { input, pred } = plan
-        && full_join_constant_false(ctx, pred)
+        && constant_false(pred)
         && let Plan::Join { kind: crate::sql::plan::JoinKind::Full, left, right, .. } = Arc::make_mut(input)
     {
         check_merge_keys(ctx, Arc::make_mut(left))?;

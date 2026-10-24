@@ -811,15 +811,6 @@ impl DataType {
         }
     }
 
-    /// The type modifier as the catalogs show it (atttypmod, typtypmod): an array's is its
-    /// element's (`character(5)[]`: 9).
-    pub fn catalog_typmod(&self) -> i32 {
-        match self {
-            DataType::Array(e) => e.catalog_typmod(),
-            t => t.typmod(),
-        }
-    }
-
     /// The same type without a modifier.
     pub fn without_typmod(&self) -> DataType {
         use DataType::*;
@@ -890,8 +881,6 @@ impl DataType {
         match self {
             DataType::Point | DataType::Line => Some(DataType::Float8),
             DataType::Lseg | DataType::GBox => Some(DataType::Point),
-            // name is a fixed-length array of NAMEDATALEN "char"s (raw_array_subscript_handler).
-            DataType::Name => Some(DataType::Char),
             _ => None,
         }
     }

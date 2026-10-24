@@ -1,0 +1,218 @@
+> CREATE SCHEMA cl_a
+-- CREATE SCHEMA
+
+> CREATE TABLE cl_a.tt (id int PRIMARY KEY, body text)
+-- CREATE TABLE
+
+> CREATE TYPE cl_a.pair AS (x int, y text)
+-- CREATE TYPE
+
+> SET search_path = cl_a, public
+-- SET
+
+> SELECT c.relname = 'pg_toast_' || t.oid AS toast_named, n.nspname
+>   FROM pg_class c JOIN pg_class t ON c.oid = t.reltoastrelid
+>   JOIN pg_namespace n ON n.oid = c.relnamespace WHERE t.relname = 'tt'
+toast_named:bool | nspname:name
+t | pg_toast
+-- SELECT 1
+
+> SELECT format_type(t.oid, NULL), format_type(t.typarray, NULL), t.typtype, t.typinput
+>   FROM pg_type t WHERE t.typname IN ('tt', 'pair') ORDER BY 1
+format_type:text | format_type:text | typtype:char | typinput:regproc
+pair | pair[] | c | record_in
+tt | tt[] | c | record_in
+-- SELECT 2
+
+> SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+>   FROM pg_attribute a JOIN pg_type t ON t.typrelid = a.attrelid
+>   WHERE t.typname = 'pair' AND a.attnum > 0 ORDER BY a.attnum
+attname:name | format_type:text
+x | integer
+y | text
+-- SELECT 2
+
+> BEGIN
+-- BEGIN
+
+> ALTER SCHEMA cl_a RENAME TO cl_b
+-- ALTER SCHEMA
+
+> SELECT nspname FROM pg_namespace WHERE nspname LIKE 'cl_%' ORDER BY 1
+nspname:name
+cl_b
+-- SELECT 1
+
+> SELECT 'cl_b.tt'::regclass, 'cl_b.pair'::regtype, 'cl_b.pair[]'::regtype
+regclass:regclass | regtype:regtype | regtype:regtype
+cl_b.tt | cl_b.pair | cl_b.pair[]
+-- SELECT 1
+
+> SAVEPOINT s1
+-- SAVEPOINT
+
+> CREATE SCHEMA cl_a
+-- CREATE SCHEMA
+
+> CREATE TABLE cl_a.tt (z int)
+-- CREATE TABLE
+
+> SELECT n.nspname, c.relname, format_type(c.reltype, NULL)
+>   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+>   WHERE c.relname = 'tt' ORDER BY 1
+nspname:name | relname:name | format_type:text
+cl_a | tt | tt
+cl_b | tt | cl_b.tt
+-- SELECT 2
+
+> ROLLBACK TO SAVEPOINT s1
+-- ROLLBACK
+
+> SELECT nspname FROM pg_namespace WHERE nspname LIKE 'cl_%' ORDER BY 1
+nspname:name
+cl_b
+-- SELECT 1
+
+> ALTER TYPE cl_b.pair RENAME TO couple
+-- ALTER TYPE
+
+> SELECT format_type(t.oid, NULL), format_type(t.typarray, NULL)
+>   FROM pg_type t WHERE t.typname IN ('pair', 'couple', '_couple', '_pair') ORDER BY 1
+format_type:text | format_type:text
+cl_b.couple | cl_b.couple[]
+cl_b.couple[] | -
+-- SELECT 2
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT nspname FROM pg_namespace WHERE nspname LIKE 'cl_%' ORDER BY 1
+nspname:name
+cl_a
+-- SELECT 1
+
+> SELECT format_type(t.oid, NULL), format_type(t.typarray, NULL)
+>   FROM pg_type t WHERE t.typname IN ('pair', 'couple') ORDER BY 1
+format_type:text | format_type:text
+pair | pair[]
+-- SELECT 1
+
+> DROP ROLE IF EXISTS regress_cl_r
+NOTICE 00000: role "regress_cl_r" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE regress_cl_r
+-- CREATE ROLE
+
+> GRANT USAGE ON SCHEMA cl_a TO regress_cl_r
+-- GRANT
+
+> GRANT SELECT ON cl_a.tt TO regress_cl_r
+-- GRANT
+
+> INSERT INTO cl_a.tt VALUES (1, 'one'), (2, 'two')
+-- INSERT 0 2
+
+> SELECT relacl FROM pg_class WHERE relname = 'tt'
+relacl:1034
+{postgres=arwdDxtm/postgres,regress_cl_r=r/postgres}
+-- SELECT 1
+
+> SELECT has_table_privilege('regress_cl_r', 'cl_a.tt', 'SELECT')
+has_table_privilege:bool
+t
+-- SELECT 1
+
+> ALTER TABLE cl_a.tt ENABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> CREATE POLICY p_one ON cl_a.tt TO regress_cl_r USING (id = 1)
+-- CREATE POLICY
+
+> SET ROLE regress_cl_r
+-- SET
+
+> SELECT * FROM cl_a.tt ORDER BY id
+id:int4 | body:text
+1 | one
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> BEGIN
+-- BEGIN
+
+> DROP POLICY p_one ON cl_a.tt
+-- DROP POLICY
+
+> ALTER TABLE cl_a.tt DISABLE ROW LEVEL SECURITY
+-- ALTER TABLE
+
+> REVOKE SELECT ON cl_a.tt FROM regress_cl_r
+-- REVOKE
+
+> SELECT relacl, relrowsecurity FROM pg_class WHERE relname = 'tt'
+relacl:1034 | relrowsecurity:bool
+{postgres=arwdDxtm/postgres} | f
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT relacl, relrowsecurity FROM pg_class WHERE relname = 'tt'
+relacl:1034 | relrowsecurity:bool
+{postgres=arwdDxtm/postgres,regress_cl_r=r/postgres} | t
+-- SELECT 1
+
+> SET ROLE regress_cl_r
+-- SET
+
+> SELECT * FROM cl_a.tt ORDER BY id
+id:int4 | body:text
+1 | one
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> BEGIN
+-- BEGIN
+
+> ALTER TABLE cl_a.tt RENAME TO tt_old
+-- ALTER TABLE
+
+> CREATE TABLE cl_a.tt (w text)
+-- CREATE TABLE
+
+> SELECT c.relname, t.relname IS NOT NULL AS has_toast
+>   FROM pg_class t JOIN pg_class c ON c.reltoastrelid = t.oid
+>   WHERE c.relnamespace = 'cl_a'::regnamespace ORDER BY 1
+relname:name | has_toast:bool
+tt | t
+tt_old | t
+-- SELECT 2
+
+> COMMIT
+-- COMMIT
+
+> SELECT c.relname, format_type(c.reltype, NULL)
+>   FROM pg_class c WHERE c.relnamespace = 'cl_a'::regnamespace AND c.relkind = 'r' ORDER BY 1
+relname:name | format_type:text
+tt | tt
+tt_old | tt_old
+-- SELECT 2
+
+> RESET search_path
+-- RESET
+
+> DROP SCHEMA cl_a CASCADE
+NOTICE 00000: drop cascades to 3 other objects
+DETAIL: drop cascades to table cl_a.tt_old
+DETAIL: drop cascades to type cl_a.pair
+DETAIL: drop cascades to table cl_a.tt
+-- DROP SCHEMA
+
+> DROP ROLE regress_cl_r
+-- DROP ROLE
+

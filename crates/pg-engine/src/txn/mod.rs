@@ -1,12 +1,11 @@
 //! Databases and transactions: snapshots over the MVCC store, buffered writes, row locks,
 //! savepoints, sequences, and transactional catalog changes.
 
-mod catmerge;
 pub mod locks;
 pub mod xids;
 
-use crate::catalog::{Catalog, Sequence};
-use crate::error::{Error, Result, code, internal};
+use crate::catalog::{Catalog, Sequence, persist};
+use crate::error::{Error, Result, code};
 use crate::storage::{SnapshotPin, Store};
 use crate::{bail, err};
 use bytes::Bytes;
@@ -19,7 +18,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-/// Reserved keyspace (table oid 0).
+/// Reserved keyspace (table oid 0): the catalog's header record (its objects' records are
+/// under `persist::RECORD_PREFIX`).
 pub const CATALOG_KEY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 1];
 const SEQ_PREFIX: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 2];
 
@@ -103,6 +103,9 @@ pub struct Database {
     pub relfiles: Mutex<crate::exec::sizing::RelFiles>,
     /// The cumulative statistics (`exec::pgstat`).
     pub pgstat: Mutex<crate::exec::pgstat::Shared>,
+    /// System catalogs' rows generated for its sessions' statements, for the next ones that
+    /// read them under the same catalog, roles, path and settings (`catalog::system::rows`).
+    pub sys_rows: Mutex<crate::catalog::system::SysRowsCache>,
 }
 
 impl Database {
@@ -110,18 +113,30 @@ impl Database {
         let ts = store.visible_ts();
         let catalog = match store.get(CATALOG_KEY, ts)? {
             Some(b) => {
-                let mut c: Catalog = serde_json::from_slice(&b)
-                    .map_err(|e| internal(format!("corrupt catalog: {e}")))?;
+                let (from, to) = persist::record_range();
+                let stored = persist::load(&b, || {
+                    store.scan(from, to, ts).collect::<Result<Vec<_>>>()
+                })?;
+                let mut c = stored.clone();
                 c.reindex();
+                if c.catalog_format < persist::CATALOG_FORMAT {
+                    // Stored as one value (before catalog format 1): rewritten as records,
+                    // in one commit.
+                    c.catalog_format = persist::CATALOG_FORMAT;
+                    store.commit(persist::writes_new(&c)?, |_| Ok(()))?;
+                } else {
+                    // What `reindex` brought up to date (oids a catalog from before them
+                    // lacked) is stored now: later commits write only what they change.
+                    let w = persist::changed(&stored, &c)?;
+                    if !w.is_empty() {
+                        store.commit(w, |_| Ok(()))?;
+                    }
+                }
                 c
             }
             None => {
                 let c = Catalog::bootstrap(owner);
-                let blob = serde_json::to_vec(&c).map_err(|e| internal(e.to_string()))?;
-                store.commit(
-                    vec![(CATALOG_KEY.to_vec(), Some(Bytes::from(blob)))],
-                    |_| Ok(()),
-                )?;
+                store.commit(persist::writes_new(&c)?, |_| Ok(()))?;
                 c
             }
         };
@@ -132,6 +147,7 @@ impl Database {
             catalog.next_oid,
             |_| {},
         )));
+        catalog.freeze();
         let version = catalog.version;
         static INSTANCES: AtomicU64 = AtomicU64::new(1);
         Ok(Arc::new(Database {
@@ -152,6 +168,7 @@ impl Database {
             xids: RwLock::new(Arc::new(xids::Xids::local())),
             relfiles: Mutex::new(Default::default()),
             pgstat: Mutex::new(Default::default()),
+            sys_rows: Mutex::new(Default::default()),
         }))
     }
 
@@ -160,6 +177,7 @@ impl Database {
         let mut w = self.catalog.write();
         let mut c = (**w).clone();
         c.oids = Some(g);
+        c.freeze();
         *w = Arc::new(c);
     }
 
@@ -217,7 +235,6 @@ impl Database {
             sub_committed: Vec::new(),
             catalog: None,
             catalog_base: None,
-            catalog_base_cat: None,
             locks_held: HashSet::new(),
             savepoints: Vec::new(),
             cancel,
@@ -239,7 +256,6 @@ impl Database {
             seq_undo: Vec::new(),
             pgstat: Default::default(),
             db_owner_undo: Vec::new(),
-            exported: false,
         }
     }
 
@@ -457,20 +473,6 @@ impl Database {
         );
     }
 
-    /// A clean shutdown (`Engine::shutdown`, closing an idle database): the sequences'
-    /// positions as they are, not as far as values were logged ahead, as Postgres's
-    /// shutdown checkpoint writes their pages (only a crash skips values).
-    pub fn persist_sequences(&self) -> Result<()> {
-        let cat = self.catalog();
-        let seqs = self.seqs.lock();
-        for (oid, st) in seqs.iter() {
-            if st.logged_to != st.last && cat.sequences.contains_key(oid) {
-                self.log_seq(*oid, st.last, st.is_called)?;
-            }
-        }
-        Ok(())
-    }
-
     /// Forget sequence state (ALTER SEQUENCE … RESTART, DROP).
     pub fn reset_seq(&self, oid: u32, value: Option<i64>) -> Result<()> {
         let mut seqs = self.seqs.lock();
@@ -586,8 +588,6 @@ pub struct Txn {
     catalog: Option<Arc<Catalog>>,
     /// Catalog version this transaction's DDL started from.
     catalog_base: Option<u64>,
-    /// That catalog (what a commit after other DDL merges from: `catmerge`).
-    catalog_base_cat: Option<Arc<Catalog>>,
     locks_held: HashSet<Vec<u8>>,
     savepoints: Vec<Savepoint>,
     pub cancel: Arc<AtomicBool>,
@@ -630,8 +630,6 @@ pub struct Txn {
     /// Databases whose owner this transaction changed: (name, the previous owner), put
     /// back when it rolls back.
     pub db_owner_undo: Vec<(String, String)>,
-    /// It exported snapshots (pg_export_snapshot), which go when it ends.
-    exported: bool,
 }
 
 impl Txn {
@@ -715,17 +713,6 @@ impl Txn {
         self.wrote
     }
 
-    /// Replace the catalog (DDL), made from `from` (the catalog the command started from):
-    /// a first change records it as the base a commit merges from when other DDL committed
-    /// meanwhile (which may have happened while the command ran).
-    pub fn set_catalog_from(&mut self, c: Catalog, from: &Arc<Catalog>) -> Result<()> {
-        if self.catalog_base.is_none() && self.catalog.is_none() {
-            self.catalog_base = Some(from.version);
-            self.catalog_base_cat = Some(from.clone());
-        }
-        self.set_catalog(c)
-    }
-
     /// Replace the catalog (DDL). It's written at commit.
     pub fn set_catalog(&mut self, mut c: Catalog) -> Result<()> {
         if self.read_only {
@@ -735,24 +722,19 @@ impl Txn {
             );
         }
         if self.catalog_base.is_none() {
-            let base = self.db.catalog();
-            self.catalog_base = Some(base.version);
-            self.catalog_base_cat = Some(base);
+            self.catalog_base = Some(self.db.catalog().version);
         }
         c.bump();
-        let blob = serde_json::to_vec(&c).map_err(|e| internal(e.to_string()))?;
-        self.buffer(CATALOG_KEY.to_vec(), Some(Bytes::from(blob)));
+        // (A stand-in: the commit writes the records of what changed, `catalog_writes`.)
+        self.buffer(CATALOG_KEY.to_vec(), Some(Bytes::new()));
+        c.freeze();
         self.catalog = Some(Arc::new(c));
         Ok(())
     }
 
     /// Replace the catalog by in-place updates (plain VACUUM's statistics), which give the
     /// transaction no id.
-    pub fn set_catalog_inplace(&mut self, mut c: Catalog, from: &Arc<Catalog>) -> Result<()> {
-        if self.catalog_base.is_none() && self.catalog.is_none() {
-            self.catalog_base = Some(from.version);
-            self.catalog_base_cat = Some(from.clone());
-        }
+    pub fn set_catalog_inplace(&mut self, mut c: Catalog) -> Result<()> {
         if self.read_only {
             bail!(
                 READ_ONLY_SQL_TRANSACTION,
@@ -760,14 +742,12 @@ impl Txn {
             );
         }
         if self.catalog_base.is_none() {
-            let base = self.db.catalog();
-            self.catalog_base = Some(base.version);
-            self.catalog_base_cat = Some(base);
+            self.catalog_base = Some(self.db.catalog().version);
         }
         c.bump();
-        let blob = serde_json::to_vec(&c).map_err(|e| internal(e.to_string()))?;
-        self.record(CATALOG_KEY.to_vec(), Some(Bytes::from(blob)));
+        self.record(CATALOG_KEY.to_vec(), Some(Bytes::new()));
         self.wrote = true;
+        c.freeze();
         self.catalog = Some(Arc::new(c));
         Ok(())
     }
@@ -785,20 +765,17 @@ impl Txn {
             && let Some(base) = self.catalog_base
             && self.db.last_local.load(Ordering::Acquire) <= base
         {
-            let cur_cat = self.db.catalog();
-            let cur = cur_cat.version;
+            let cur = self.db.catalog().version;
             self.catalog_base = Some(cur);
-            self.catalog_base_cat = Some(cur_cat);
             // (A new version, unique as `bump` makes them: `cur + 1` may be one another
             // transaction's catalog already has, which caches keyed by the version take for
             // this one.)
             c.version = cur;
             c.bump();
         }
-        let blob = serde_json::to_vec(&c).map_err(|e| internal(e.to_string()))?;
         let cid = self.writes.get(CATALOG_KEY).and_then(|w| w.1);
-        self.writes
-            .insert(CATALOG_KEY.to_vec(), (Some(Bytes::from(blob)), cid));
+        self.writes.insert(CATALOG_KEY.to_vec(), (Some(Bytes::new()), cid));
+        c.freeze();
         self.catalog = Some(Arc::new(c));
         Ok(())
     }
@@ -1278,7 +1255,6 @@ impl Txn {
         self.catalog = catalog;
         if self.catalog.is_none() {
             self.catalog_base = None;
-            self.catalog_base_cat = None;
         }
         // Locks taken after the savepoint are released, as Postgres does for subtransactions.
         let release: Vec<Vec<u8>> = self.locks_held.difference(&keep_locks).cloned().collect();
@@ -1398,13 +1374,17 @@ impl Txn {
     }
 
     pub fn commit(mut self) -> Result<u64> {
-        let writes: Vec<(Vec<u8>, Option<Bytes>)> = std::mem::take(&mut self.writes)
-            .into_iter()
-            .map(|(k, (v, _))| (k, v))
-            .collect();
-        let catalog = RefCell::new(self.catalog.take());
+        let catalog = self.catalog.take();
+        let mut writes: Vec<(Vec<u8>, Option<Bytes>)> = Vec::with_capacity(self.writes.len());
+        let mut new_catalog = false;
+        for (k, (v, _)) in std::mem::take(&mut self.writes) {
+            if k.as_slice() == CATALOG_KEY {
+                new_catalog = true;
+            } else {
+                writes.push((k, v));
+            }
+        }
         let base = self.catalog_base;
-        let base_cat = self.catalog_base_cat.take();
         let start = self.start_ts;
         let strict = self.isolation.txn_snapshot();
         let keys: Vec<Vec<u8>> = if strict {
@@ -1412,34 +1392,30 @@ impl Txn {
         } else {
             Vec::new()
         };
+        if new_catalog && let Some(c) = &catalog {
+            // The records of what changed since the catalog the DDL started from (the one
+            // published now, unless the check below fails the commit).
+            match self.catalog_writes(c) {
+                Ok(w) => writes.extend(w),
+                Err(e) => {
+                    self.finish_xid(false);
+                    self.release_locks();
+                    return Err(e);
+                }
+            }
+        }
         let db = self.db.clone();
-        let check = |store: &Store, writes: &mut Vec<(Vec<u8>, Option<Bytes>)>| -> Result<()> {
-            // Other DDL committed since this transaction's began: its catalog changes are
-            // carried onto the current catalog (the commit lock is held, so it stays current).
+        let check = |store: &Store| -> Result<()> {
             if let Some(base) = base
                 && db.catalog().version != base
             {
-                let cur = db.catalog();
-                let (Some(b), Some(mine)) = (base_cat.as_deref(), catalog.borrow().clone()) else {
-                    return Err(Error::new(
-                        code::SERIALIZATION_FAILURE,
-                        "could not serialize access due to concurrent schema change",
-                    ));
-                };
-                let mut merged = catmerge::merge(b, &mine, &cur)?;
-                merged.version = cur.version;
-                merged.bump();
-                let blob = serde_json::to_vec(&merged).map_err(|e| internal(e.to_string()))?;
-                for w in writes.iter_mut().filter(|w| w.0.as_slice() == CATALOG_KEY) {
-                    w.1 = Some(Bytes::from(blob.clone()));
-                }
-                *catalog.borrow_mut() = Some(Arc::new(merged));
+                return Err(Error::new(
+                    code::SERIALIZATION_FAILURE,
+                    "could not serialize access due to concurrent schema change",
+                ));
             }
             if strict {
                 for k in &keys {
-                    if k.as_slice() == CATALOG_KEY {
-                        continue;
-                    }
                     if store.latest_version_ts(k)?.is_some_and(|ts| ts > start) {
                         return Err(Error::new(
                             code::SERIALIZATION_FAILURE,
@@ -1452,25 +1428,30 @@ impl Txn {
         };
         let result = if writes.is_empty() {
             Ok(self.db.store.visible_ts())
-        } else if catalog.borrow().is_some() {
+        } else {
             let db2 = self.db.clone();
             let publish = self.publish;
-            // A new catalog is published under the commit lock, with the data (`check` may
-            // have merged it onto the current one).
-            self.db.store.commit_with(writes, check, |_| {
-                if let Some(c) = catalog.borrow_mut().take() {
+            match catalog {
+                // A new catalog is published under the commit lock, with the data.
+                Some(c) => self.db.store.commit_with(writes, check, move |_| {
                     if !publish {
                         db2.last_local.store(c.version, Ordering::Release);
                     }
                     *db2.catalog.write() = c;
-                }
-            })
-        } else {
-            self.db.store.commit(writes, |s| check(s, &mut Vec::new()))
+                }),
+                None => self.db.store.commit(writes, check),
+            }
         };
         self.finish_xid(result.is_ok());
         self.release_locks();
         result
+    }
+
+    /// The writes storing catalog `c` over the one this transaction's DDL started from
+    /// (`persist::writes`).
+    fn catalog_writes(&self, c: &Catalog) -> Result<Vec<(Vec<u8>, Option<Bytes>)>> {
+        let cur = self.db.catalog();
+        persist::writes(&cur, c)
     }
 
     pub fn rollback(mut self) {
@@ -1483,67 +1464,6 @@ impl Txn {
             let keys: Vec<Vec<u8>> = self.locks_held.drain().collect();
             self.db.locks.release_all(self.id, keys);
         }
-    }
-
-    /// pg_export_snapshot(): export this transaction's current snapshot under a new
-    /// identifier (`%08X-%08X-%d`: the backend, the transaction, the count of exports so far
-    /// + 1) for SET TRANSACTION SNAPSHOT in other sessions, until this transaction ends.
-    pub fn export_snapshot(&mut self, backend: i32) -> Result<String> {
-        if self.in_savepoint() {
-            bail!(
-                ACTIVE_SQL_TRANSACTION,
-                "cannot export a snapshot from a subtransaction"
-            );
-        }
-        let xids = self.db.xids();
-        let n = xids.exported_by(self.db.instance, self.id) + 1;
-        let id = format!("{:08X}-{:08X}-{n}", backend as u32, self.id as u32);
-        xids.export(
-            id.clone(),
-            xids::Exported {
-                db: self.db.instance,
-                owner: self.id,
-                db_oid: self.db.oid,
-                ts: self.snapshot_ts,
-                serializable: self.isolation == Isolation::Serializable,
-                read_only: self.read_only,
-                pin: self.db.store.pin(self.snapshot_ts),
-            },
-        );
-        self.exported = true;
-        Ok(id)
-    }
-
-    /// SET TRANSACTION SNAPSHOT (ImportSnapshot): run on the exported snapshot `id`. The
-    /// caller checked this is a fresh REPEATABLE READ / SERIALIZABLE transaction.
-    pub fn import_snapshot(&mut self, id: &str) -> Result<()> {
-        let Some((db_oid, ts, serializable, read_only)) = self.db.xids().exported(id) else {
-            bail!(UNDEFINED_OBJECT, "snapshot \"{id}\" does not exist");
-        };
-        if self.isolation == Isolation::Serializable {
-            if !serializable {
-                bail!(
-                    FEATURE_NOT_SUPPORTED,
-                    "a serializable transaction cannot import a snapshot from a non-serializable transaction"
-                );
-            }
-            if read_only && !self.read_only {
-                bail!(
-                    FEATURE_NOT_SUPPORTED,
-                    "a non-read-only serializable transaction cannot import a snapshot from a read-only transaction"
-                );
-            }
-        }
-        if db_oid != self.db.oid {
-            bail!(
-                FEATURE_NOT_SUPPORTED,
-                "cannot import a snapshot from a different database"
-            );
-        }
-        self._pin = Some(self.db.store.pin(ts));
-        self.snapshot_ts = ts;
-        self.start_ts = ts;
-        Ok(())
     }
 
     pub fn check_cancel(&self) -> Result<()> {
@@ -1561,9 +1481,6 @@ impl Drop for Txn {
     fn drop(&mut self) {
         self.finish_xid(false);
         self.release_locks();
-        if std::mem::take(&mut self.exported) {
-            self.db.xids().unexport(self.db.instance, self.id);
-        }
     }
 }
 

@@ -336,33 +336,8 @@ pub fn default_acl(kind: ObjKind, owner: u32) -> Acl {
 pub fn initial_acl(kind: ObjKind, oid: u32, owner: u32) -> Acl {
     match kind {
         ObjKind::Function => builtin_proc_acl(oid).unwrap_or_else(|| default_acl(kind, owner)),
-        ObjKind::Table if oid < super::FIRST_USER_OID => {
-            builtin_rel_acl(oid).unwrap_or_else(|| default_acl(kind, owner))
-        }
         _ => default_acl(kind, owner),
     }
-}
-
-/// A system catalog's or view's relacl as initdb leaves it (pg_class's static rows).
-fn builtin_rel_acl(oid: u32) -> Option<Acl> {
-    use super::system::SysTable;
-    let rows = super::static_rows::rows(SysTable::PgClass);
-    let r = rows.iter().find(|r| super::static_rows::oid_at(r, 0) == oid)?;
-    let crate::types::Value::Array(a) = &r[31] else {
-        return None;
-    };
-    let lookup = |n: &str| {
-        if n == "postgres" {
-            return Some(BOOTSTRAP_SUPERUSER_OID);
-        }
-        super::PREDEFINED_ROLES.iter().find(|p| p.1 == n).map(|p| p.0)
-    };
-    let mut acl = Vec::new();
-    for v in a.items.iter() {
-        let text = super::static_rows::text_at(std::slice::from_ref(v), 0);
-        acl.push(parse_item(text, &lookup).ok()?.0);
-    }
-    Some(acl)
 }
 
 /// The object's ACL key in `Catalog::acls`: (class oid, object oid, column number or 0).
@@ -548,6 +523,11 @@ pub fn parse_item(s: &str, lookup: &dyn Fn(&str) -> Option<u32>) -> Result<(AclI
 impl Catalog {
     /// The stored ACL of an object (`None`: the default).
     pub fn acl(&self, kind: ObjKind, oid: u32, sub: i32) -> Option<&Acl> {
+        if let Some(m) = self.acl_lookup() {
+            return m
+                .get(&(kind.class_oid(), oid, sub))
+                .map(|&i| &self.acls[i].acl);
+        }
         self.acls
             .iter()
             .find(|a| a.class == kind.class_oid() && a.oid == oid && a.sub == sub)

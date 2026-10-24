@@ -326,67 +326,6 @@ pub struct JoinMeta {
     /// deconstruct_recurse folds its sides into one join problem only within
     /// join_collapse_limit.
     pub explicit: bool,
-    /// A FROM subquery's planned join tree whose level had semi / anti joins before
-    /// planning: the `ExecCtx::bound_trees` entry with that tree (0: none).
-    pub bound: u64,
-    /// The FROM join of a LATERAL subquery Postgres pulls up (pull_up_simple_subquery,
-    /// is_simple_subquery), the subquery left unplanned by the binder: the join group
-    /// above takes its relations in (`paths::joinpath::lift`).
-    pub lateral_sub: bool,
-    /// A LATERAL join whose right side is such a subquery (`lateral_sub`), or was before
-    /// the planner simplified it: its outer join's ON clauses are still its own (not
-    /// pushed into the subquery). Pulled up, or planned apart as the binder would have
-    /// planned it (`Planner::settle_laterals`).
-    pub lateral_held: bool,
-    /// A LATERAL join whose right side is such a subquery pulled up (`lift`): its
-    /// relations are the group's, the `Outer(1, k)` values read inside it this join's
-    /// parameters (the left side's Vars, lateral references and PlaceHolderVars'
-    /// ph_lateral).
-    pub lateral_flat: bool,
-}
-
-/// The FROM join of a LATERAL subquery left for the query above to pull up
-/// (`JoinMeta::lateral_sub`): the subquery's plan is its select list (and WHERE) over it.
-pub fn deferred_lateral(p: &Plan) -> bool {
-    let mut x = p;
-    loop {
-        match x {
-            Plan::Project { input, .. } | Plan::Filter { input, .. } => x = input,
-            Plan::Join { meta, .. } => return meta.lateral_sub,
-            _ => return false,
-        }
-    }
-}
-
-/// Mark a LATERAL subquery's FROM join as `deferred_lateral` (a select list of all the
-/// join's columns, which the binder leaves out, made a projection of its own first).
-pub fn mark_deferred_lateral(p: &mut Plan) {
-    if matches!(p, Plan::Join { .. } | Plan::Filter { .. }) {
-        let exprs = crate::sql::paths::analyzejoins::col_types(p)
-            .into_iter()
-            .enumerate()
-            .map(|(i, t)| crate::sql::expr::Expr::Col(i, t))
-            .collect();
-        let input = std::mem::replace(p, Plan::One);
-        *p = Plan::Project { input: Arc::new(input), exprs };
-    }
-    fn mark(p: &mut Plan) {
-        match p {
-            Plan::Project { input, .. } | Plan::Filter { input, .. } => mark(Arc::make_mut(input)),
-            Plan::Join { meta, .. } => meta.lateral_sub = true,
-            _ => {}
-        }
-    }
-    mark(p);
-}
-
-/// `p` with the mark of `deferred_lateral` taken off (planned apart, or pulled up).
-pub fn undefer_lateral(p: &mut Plan) {
-    match p {
-        Plan::Project { input, .. } | Plan::Filter { input, .. } => undefer_lateral(Arc::make_mut(input)),
-        Plan::Join { meta, .. } => meta.lateral_sub = false,
-        _ => {}
-    }
 }
 
 /// `p` with its join (if it is one) marked as computing PlaceHolderVars in the projection

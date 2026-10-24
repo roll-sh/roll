@@ -461,9 +461,9 @@ impl Ddl<'_, '_> {
     /// A table column whose type holds composite `oid` (directly, in an array or nested in
     /// another composite): (table, column).
     pub(super) fn column_using(&self, oid: u32) -> Option<(String, String)> {
-        let mut tables: Vec<_> = self.cat.tables.values().cloned().collect();
-        tables.sort_by_key(|t| t.oid);
-        let col = tables.iter().find_map(|t| {
+        // (In oid order, as the map keeps them.)
+        let tables = self.cat.tables.values();
+        let col = tables.clone().find_map(|t| {
             t.columns
                 .iter()
                 .find(|c| !c.dropped && c.ty.contains_row(oid))
@@ -475,10 +475,12 @@ impl Ddl<'_, '_> {
         // TABLE asks this, and a binder holds a copy of the catalog.)
         let mut ix_col: Option<(u32, String, String)> = None;
         let mut binder = None;
-        for t in &tables {
-            let has_expr = self.cat.table_indexes(t).iter().any(|ix| {
-                ix.columns.iter().any(|c| matches!(c.key, crate::catalog::IndexKey::Expr(_)))
-            });
+        for t in tables {
+            let has_expr = (t.indexes.iter())
+                .filter_map(|i| self.cat.indexes.get(i))
+                .any(|ix| {
+                    ix.columns.iter().any(|c| matches!(c.key, crate::catalog::IndexKey::Expr(_)))
+                });
             if !has_expr {
                 continue;
             }
@@ -645,7 +647,7 @@ impl Ddl<'_, '_> {
             self.cat.put_table(nt);
         }
         // Views, domains and function signatures.
-        for v in self.cat.views.values_mut() {
+        for v in std::sync::Arc::make_mut(&mut self.cat.views).values_mut() {
             if v.columns.iter().any(|(_, t)| subst(t, &types).is_some()) {
                 let mut nv = (**v).clone();
                 for (_, t) in &mut nv.columns {
@@ -663,7 +665,7 @@ impl Ddl<'_, '_> {
                 *d = Arc::new(nd);
             }
         }
-        for f in self.cat.functions.values_mut() {
+        for f in std::sync::Arc::make_mut(&mut self.cat.functions).values_mut() {
             let touches = subst(&f.ret, &types).is_some()
                 || f.args.iter().any(|(_, t)| subst(t, &types).is_some())
                 || f.out_cols.iter().any(|(_, t)| subst(t, &types).is_some());

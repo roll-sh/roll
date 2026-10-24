@@ -141,7 +141,7 @@ fn relation(cat: &Catalog, oid: u32) -> Option<(&'static str, String, String)> {
             ix.name.clone(),
         ));
     }
-    if let Some(c) = cat.composites.values().find(|c| c.relid == oid) {
+    if let Some(c) = cat.composite_of_rel(oid) {
         return Some(("composite type", s(c.schema), c.name.clone()));
     }
     if let Some((t, index)) = cat.toast_owner(oid) {
@@ -176,7 +176,7 @@ fn column(cat: &Catalog, rel: u32, attnum: i32) -> Option<String> {
     if let Some(v) = cat.views.get(&rel) {
         return v.columns.get(i).map(|c| c.0.clone());
     }
-    if let Some(c) = cat.composites.values().find(|c| c.relid == rel) {
+    if let Some(c) = cat.composite_of_rel(rel) {
         return c.fields.get(i).map(|f| f.0.clone());
     }
     if let Some((_, index)) = cat.toast_owner(rel) {
