@@ -60,6 +60,9 @@ const QUERIES: &[&str] = &[
     "SELECT g, sum(id * 100000) FROM big GROUP BY g",
     "SELECT s, count(*) FROM big WHERE id < 100 OR id > 419900 GROUP BY s",
     "SELECT sum(f), count(*) FROM big WHERE g = 1",
+    // min / max over values that compare equal but differ (3 and 3.00): which one a tie
+    // keeps shows.
+    "SELECT g, max(n), min(n), count(n) FROM big GROUP BY g",
 ];
 
 fn run_all(s: &mut Session) -> Vec<Vec<String>> {
@@ -76,12 +79,14 @@ fn parallel_scans_match_serial() {
     let engine = open(dir.path());
     let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
     s.query(
-        "CREATE TABLE big (id int NOT NULL, g int, x numeric(12,2), s text, f float8, c char(1))",
+        "CREATE TABLE big (id int NOT NULL, g int, x numeric(12,2), s text, f float8, c char(1), n numeric)",
     )
     .unwrap();
     s.query(
         "INSERT INTO big SELECT i, i % 97, CASE WHEN i % 11 = 0 THEN NULL ELSE (i % 1000) / 10.0 END, \
-         md5(i::text), i / 7.0, chr(97 + i % 3) FROM generate_series(1, 420000) i",
+         md5(i::text), i / 7.0, chr(97 + i % 3), \
+         CASE WHEN i % 2 = 0 THEN (i % 50)::numeric ELSE (i % 50)::numeric(10, 2) END \
+         FROM generate_series(1, 420000) i",
     )
     .unwrap();
     s.query("SET max_parallel_workers_per_gather = 0").unwrap();

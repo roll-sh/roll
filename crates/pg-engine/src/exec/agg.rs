@@ -611,14 +611,12 @@ impl Accum for MinMax {
     // (By the type's own order only. A part's best is its rows' best under the same rule,
     // so the parts' bests taken in order give the serial best, ties kept as they would be.)
     fn partial(&self) -> Option<Partial> {
-        self.lt.is_none().then(|| {
-            Partial::Best(super::partial::Best {
-                best: None,
-                max: self.max,
-                bpchar: matches!(self.ty, T::Bpchar(_)),
-                keep_old: matches!(self.ty, T::Bpchar(_) | T::Tid),
-            })
-        })
+        self.lt.is_none().then_some(Partial::Best(super::partial::Best {
+            best: None,
+            max: self.max,
+            bpchar: matches!(self.ty, T::Bpchar(_)),
+            keep_old: matches!(self.ty, T::Bpchar(_) | T::Tid),
+        }))
     }
     fn merge(&mut self, p: Partial) -> Result<()> {
         if let Partial::Best(mut b) = p
