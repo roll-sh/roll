@@ -54,6 +54,11 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   catalog once and looks rows up by the equality (`exec/nodes.rs` `sys_rescan`, round 16
   agent 15), and `ddl_scaling.rs` also counts the catalogs a query generates. A full run of
   that commit measured the table's 51,053 with no timeout.
+- **contrib extensions** (round 17, agent 39): CREATE / ALTER / DROP EXTENSION run the
+  extensions' own PostgreSQL 18.6 scripts (`src/ext/`, `session/ddl/extension.rs`), C
+  functions are native code by library and symbol; the contrib modules' regression tests run
+  with `pg_contrib` (`tests/pg_regress.rs`). Per-module scores and how it works:
+  `tests/contrib/STATUS.md`.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
