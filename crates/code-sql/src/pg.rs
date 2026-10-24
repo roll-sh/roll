@@ -24,8 +24,9 @@ use tokio_rustls::rustls::pki_types::pem::PemObject;
 const STATEMENTS: usize = 512;
 /// Times a write is re-run after serialization failures and deadlocks.
 const MAX_CONFLICT_RETRIES: u32 = 40;
-/// Times a read or a write is re-run after its connection dropped (before any commit).
-const MAX_CONNECTION_RETRIES: u32 = 5;
+/// Times a read or a write is re-run after its connection dropped (before any commit), backing
+/// off from 50 ms to 2 s: about 10 s in all, enough to ride out a Postgres failover or restart.
+const MAX_CONNECTION_RETRIES: u32 = 10;
 /// Rows pipelined at once by `execute_many`.
 const PIPELINE: usize = 1024;
 
@@ -110,6 +111,12 @@ fn tls_config(ca: Option<&std::path::Path>) -> Result<rustls::ClientConfig> {
         .with_no_client_auth())
 }
 
+enum Outcome {
+    Committed,
+    Aborted,
+    Unknown(String),
+}
+
 pub(crate) struct Pool {
     inner: Arc<PoolInner>,
 }
@@ -128,6 +135,9 @@ struct PoolInner {
 struct PoolState {
     idle: Vec<PgConn>,
     open: usize,
+    /// Bumped when a connection turns out dead: idle connections opened before then are dropped
+    /// rather than handed out (a server restart kills them all, and they don't know yet).
+    generation: u64,
 }
 
 impl Pool {
@@ -156,14 +166,14 @@ impl Pool {
                 schema: schema.to_string(),
                 opts,
                 url: redact(url),
-                state: Mutex::new(PoolState { idle: Vec::new(), open: 0 }),
+                state: Mutex::new(PoolState { idle: Vec::new(), open: 0, generation: 0 }),
                 freed: Condvar::new(),
                 listeners: Mutex::new(HashMap::new()),
             }),
         };
         // Connect now, so a bad URL fails at startup, and make sure the schema exists. Nodes
         // starting together may race to create it.
-        let first = pool.inner.open_conn(false)?;
+        let first = pool.inner.open_conn(false, 0)?;
         let create = format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(schema));
         if let Err(e) = wait(first.client.batch_execute(&create))
             && !matches!(e.code().map(|c| c.code()), Some("23505" | "42P06"))
@@ -184,15 +194,16 @@ impl Pool {
         let mut st = inner.state.lock();
         loop {
             while let Some(c) = st.idle.pop() {
-                if !c.client.is_closed() {
+                if !c.client.is_closed() && c.generation >= st.generation {
                     return Ok(Lease { pool: inner, conn: Some(c) });
                 }
                 st.open -= 1;
             }
             if st.open < inner.opts.max_connections.max(1) {
                 st.open += 1;
+                let generation = st.generation;
                 drop(st);
-                return match inner.open_conn(true) {
+                return match inner.open_conn(true, generation) {
                     Ok(c) => Ok(Lease { pool: inner, conn: Some(c) }),
                     Err(e) => {
                         inner.state.lock().open -= 1;
@@ -207,10 +218,28 @@ impl Pool {
         }
     }
 
+    /// A connection; `None` after a failed attempt to open one that's worth retrying (the
+    /// server restarting, a connection killed while it was being set up), having waited.
+    fn lease(&self, drops: &mut u32) -> Option<Result<Lease<'_>>> {
+        match self.get() {
+            Ok(l) => Some(Ok(l)),
+            Err(Error::Postgres(e)) if *drops < MAX_CONNECTION_RETRIES => {
+                *drops += 1;
+                tracing::warn!(db = %self.inner.url, attempt = *drops, error = %describe(&e), "can't open a database connection; retrying");
+                reconnect_backoff(*drops);
+                None
+            }
+            Err(e) => Some(Err(e)),
+        }
+    }
+
     pub(crate) fn read<T, E: From<Error>>(&self, mut f: impl FnMut(&PgConn) -> Result<T, E>) -> Result<T, E> {
         let mut attempt = 0;
         loop {
-            let lease = self.get()?;
+            let lease = match self.lease(&mut attempt) {
+                Some(l) => l?,
+                None => continue,
+            };
             let c = lease.conn();
             c.reset_flags();
             match f(c) {
@@ -220,7 +249,7 @@ impl Pool {
                         attempt += 1;
                         tracing::warn!(db = %self.inner.url, attempt, "database connection lost during a read; retrying");
                         drop(lease);
-                        backoff(attempt);
+                        reconnect_backoff(attempt);
                         continue;
                     }
                     return Err(e);
@@ -236,7 +265,10 @@ impl Pool {
         };
         let (mut conflicts, mut drops) = (0, 0);
         loop {
-            let lease = self.get()?;
+            let lease = match self.lease(&mut drops) {
+                Some(l) => l?,
+                None => continue,
+            };
             let c = lease.conn();
             c.reset_flags();
             let again = |c: &PgConn, conflicts: &mut u32, drops: &mut u32| -> bool {
@@ -250,15 +282,24 @@ impl Pool {
                     false
                 }
             };
-            if let Err(e) = wait(c.client.batch_execute(begin)) {
-                let e = c.note(e);
-                if again(c, &mut conflicts, &mut drops) {
-                    drop(lease);
-                    backoff(drops.max(conflicts));
-                    continue;
+            // The transaction's id comes back with BEGIN (one round trip), so if the connection
+            // drops during COMMIT we can ask whether it committed.
+            let xid = match wait(c.client.simple_query(&format!("{begin}; SELECT pg_current_xact_id()::text"))) {
+                Ok(msgs) => msgs.iter().find_map(|m| match m {
+                    tokio_postgres::SimpleQueryMessage::Row(r) => r.get(0).map(str::to_string),
+                    _ => None,
+                }),
+                Err(e) => {
+                    let e = c.note(e);
+                    if again(c, &mut conflicts, &mut drops) {
+                        let broken = c.broken.get();
+                        drop(lease);
+                        pause(broken, drops, conflicts);
+                        continue;
+                    }
+                    return Err(e.into());
                 }
-                return Err(e.into());
-            }
+            };
             c.in_tx.set(true);
             let out = f(c);
             let out = match out {
@@ -277,8 +318,18 @@ impl Pool {
                     Err(e) => {
                         let e = c.note(e);
                         if c.broken.get() {
-                            // The COMMIT may have reached the server.
-                            return Err(Error::CommitUnknown(e.to_string()).into());
+                            // The COMMIT may have reached the server: ask it, on another
+                            // connection, what became of the transaction.
+                            drop(lease);
+                            match self.commit_status(xid.as_deref()) {
+                                Outcome::Committed => return Ok(v),
+                                Outcome::Aborted if drops < MAX_CONNECTION_RETRIES => {
+                                    drops += 1;
+                                    continue;
+                                }
+                                Outcome::Aborted => return Err(e.into()),
+                                Outcome::Unknown(why) => return Err(Error::CommitUnknown(format!("{e}; {why}")).into()),
+                            }
                         }
                         // The server answered: the transaction was rolled back.
                         c.in_tx.set(false);
@@ -298,8 +349,9 @@ impl Pool {
                         }
                     }
                     if again(c, &mut conflicts, &mut drops) {
+                        let broken = c.broken.get();
                         drop(lease);
-                        backoff(drops.max(conflicts));
+                        pause(broken, drops, conflicts);
                         continue;
                     }
                     return Err(e);
@@ -313,12 +365,51 @@ impl Pool {
                 }
             }
             if again(c, &mut conflicts, &mut drops) {
+                let broken = c.broken.get();
                 drop(lease);
-                backoff(drops.max(conflicts));
+                pause(broken, drops, conflicts);
                 continue;
             }
             return out.map_err(E::from);
         }
+    }
+
+    /// What became of transaction `xid` whose COMMIT got no answer. Waits for the server for up
+    /// to about 15 s.
+    fn commit_status(&self, xid: Option<&str>) -> Outcome {
+        let Some(xid) = xid else { return Outcome::Unknown("its transaction id isn't known".into()) };
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut attempt = 0;
+        while Instant::now() < deadline {
+            attempt += 1;
+            let lease = match self.get() {
+                Ok(l) => l,
+                Err(_) => {
+                    reconnect_backoff(attempt);
+                    continue;
+                }
+            };
+            let c = lease.conn();
+            c.reset_flags();
+            let status = c.query("SELECT pg_xact_status(CAST(CAST(? AS TEXT) AS xid8))", &[ValueRef::Text(xid)]);
+            match status {
+                Ok(rows) => match rows.first().and_then(|r| r.get::<_, Option<&str>>(0)) {
+                    Some("committed") => return Outcome::Committed,
+                    Some("aborted") => return Outcome::Aborted,
+                    // Its backend is still finishing it.
+                    Some(_) => std::thread::sleep(Duration::from_millis(100)),
+                    None => return Outcome::Unknown(format!("Postgres no longer knows transaction {xid}")),
+                },
+                // A transaction id "in the future": this server never saw it (a failover to a
+                // replica that didn't get it), so it didn't commit here.
+                Err(e) if e.code() == Some("22023") => return Outcome::Aborted,
+                Err(_) => {
+                    drop(lease);
+                    reconnect_backoff(attempt);
+                }
+            }
+        }
+        Outcome::Unknown("couldn't reach Postgres to find out".into())
     }
 
     /// A read-committed write under the schema's advisory lock: schema changes and migrations,
@@ -425,6 +516,15 @@ fn schema_lock_key(schema: &str) -> i64 {
     h as i64
 }
 
+fn pause(broken: bool, drops: u32, conflicts: u32) {
+    if broken { reconnect_backoff(drops) } else { backoff(conflicts) }
+}
+
+/// Before re-running after a dropped connection: 50 ms doubling to 2 s.
+fn reconnect_backoff(attempt: u32) {
+    std::thread::sleep(Duration::from_millis((50u64 << attempt.saturating_sub(1).min(6)).min(2000)));
+}
+
 fn backoff(attempt: u32) {
     // Up to 100 ms, half of it random, so conflicting writers don't retry in step.
     let ms = (1u64 << attempt.min(7)).min(100);
@@ -433,7 +533,7 @@ fn backoff(attempt: u32) {
 }
 
 impl PoolInner {
-    fn open_conn(&self, pooled: bool) -> Result<PgConn> {
+    fn open_conn(&self, pooled: bool, generation: u64) -> Result<PgConn> {
         let (config, tls) = (self.config.clone(), self.tls.clone());
         let timeout = self.opts.statement_timeout.as_millis();
         let setup = format!(
@@ -459,7 +559,7 @@ impl PoolInner {
             client.batch_execute(&setup).await?;
             Ok::<_, tokio_postgres::Error>(client)
         })?;
-        Ok(PgConn::new(client))
+        Ok(PgConn::new(client, generation))
     }
 }
 
@@ -486,7 +586,10 @@ impl Drop for Lease<'_> {
         let mut st = self.pool.state.lock();
         // A connection still in a transaction (a panic in the closure) is dropped: the server
         // rolls it back.
-        if c.broken.get() || c.in_tx.get() || c.client.is_closed() {
+        if c.broken.get() || c.client.is_closed() {
+            st.open -= 1;
+            st.generation = st.generation.max(c.generation + 1);
+        } else if c.in_tx.get() {
             st.open -= 1;
         } else {
             st.idle.push(c);
@@ -498,6 +601,8 @@ impl Drop for Lease<'_> {
 
 pub(crate) struct PgConn {
     client: Client,
+    /// The pool's generation when this was opened.
+    generation: u64,
     statements: RefCell<HashMap<String, Statement>>,
     /// The connection is unusable (closed, or its state unknown).
     broken: Cell<bool>,
@@ -509,9 +614,10 @@ pub(crate) struct PgConn {
 }
 
 impl PgConn {
-    fn new(client: Client) -> PgConn {
+    fn new(client: Client, generation: u64) -> PgConn {
         PgConn {
             client,
+            generation,
             statements: RefCell::new(HashMap::new()),
             broken: Cell::new(false),
             conflict: Cell::new(false),
@@ -537,7 +643,7 @@ impl PgConn {
             }
             _ => {}
         }
-        if e.is_closed() || self.client.is_closed() {
+        if e.is_closed() || self.client.is_closed() || ends_session(&e) {
             self.broken.set(true);
         }
         let err = Error::Postgres(e);
@@ -611,6 +717,19 @@ impl PgConn {
 
     pub(crate) fn batch(&self, sql: &str) -> Result<()> {
         wait(self.client.batch_execute(sql)).map_err(|e| self.note(e))
+    }
+}
+
+/// Errors after which the session is gone even if the client hasn't noticed yet: connection
+/// exceptions (08…), the server shutting down or terminating the backend (57P…), and anything
+/// FATAL or PANIC.
+fn ends_session(e: &tokio_postgres::Error) -> bool {
+    match e.as_db_error() {
+        Some(db) => {
+            let code = db.code().code();
+            code.starts_with("08") || code.starts_with("57P") || matches!(db.severity(), "FATAL" | "PANIC")
+        }
+        None => false,
     }
 }
 

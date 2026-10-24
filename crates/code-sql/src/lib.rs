@@ -12,8 +12,14 @@
 //!   with one writer: read-then-write inside a closure is atomic.
 //! - A write is durable when `write` returns: Postgres commits synchronously, and SQLite group-
 //!   commits an fsync of the WAL after the transaction, outside the writer's lock
-//!   (`durable.rs`). If the connection drops during `COMMIT`, nobody knows whether it happened:
-//!   that's [`Error::CommitUnknown`], and the caller must look before retrying.
+//!   (`durable.rs`). If the connection drops during `COMMIT`, the pool asks Postgres on another
+//!   connection what became of the transaction (`pg_xact_status`; its id comes back with
+//!   `BEGIN`): committed is success, aborted is re-run. Only if Postgres can't be reached to
+//!   find out (about 15 s) is it [`Error::CommitUnknown`], and the caller must look before
+//!   retrying.
+//! - Connections that die (a Postgres restart or failover, a killed backend) are replaced, and
+//!   reads and uncommitted writes re-run, backing off for up to about 10 s. Idle connections
+//!   opened before one was found dead are dropped rather than reused.
 //!
 //! The API is synchronous and callable from any thread, async tasks included (as rusqlite
 //! was). Postgres connections are driven by a runtime of their own, so a caller blocking on one
