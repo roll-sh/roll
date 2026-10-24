@@ -103,6 +103,38 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - compaction: `tests/compaction.rs`
   - Set `ROLL_E2E_S3_BUCKET` (plus `ROLL_E2E_S3_ENDPOINT` and AWS credentials) to run the broker tests against S3.
   - `roll stream …` in `crates/roll-cli` and `/dashboard/streams` both use the HTTP API.
+- **Storage (S3-compatible):**
+  - `crates/s3-proto` is the wire protocol with no I/O: SigV4, SigV4a and SigV2 (headers, presigned, aws-chunked with trailers, POST policies), SSE headers, XML, checksums, ranges and conditionals, S3 error codes.
+  - `crates/s3-store` is the metadata (SQLite plus a durable log in object storage), branching, refcounts, trash, lifecycle, keys, metering, the blob backend (`aws-sdk-s3` or a local directory) and the GC/scrub jobs. It has no HTTP.
+  - `crates/s3-server` is the S3 HTTP API. `crates/s3-control` is `/v1/storage`, used by `roll storage …` and `/dashboard/storage`. `crates/s3-select` is S3 Select's SQL and CSV/JSON engine (no I/O, bounded memory).
+  - Directory buckets (S3 Express) are ordinary roll buckets named `<base>--<zone>--x-s3`; appends write a new blob (old bytes copied server-side, then the new ones) and commit it only if the object didn't move. Renames move a blob's reference in one transaction.
+  - The design is in `docs/storage/architecture.md`. Reliability comes first; keep these invariants:
+    - One customer object is one backend blob. Never pack objects together, and never compact or rewrite a blob.
+    - Blobs are immutable. Every upload gets a fresh blob id; never reuse one.
+    - Acknowledge a write only after its metadata log commit is in object storage. A failed commit fails the writes in it and fences the node.
+    - Never delete a blob that any `objects`, `versions` or `trash` row references. A version under Object Lock is never deleted for good. Deletes go to the trash (`recover_days`), then unreferenced blobs wait in a 24 h quarantine. The orphan scan only removes blobs with no metadata, no active upload and an age over 24 h. The scrub only reports.
+    - Writes to a bucket with branches push the old state down to the branches in the same transaction.
+    - Never size an allocation from a count or length a peer sent. Stream bodies, and cap XML bodies.
+    - SSE-C and SSE-KMS are the backing object store's: pass them through on the blob's requests, never re-encrypt bytes on S3, and never store a customer key (only its MD5). An encrypted write the backend doesn't confirm fails and keeps nothing.
+    - A change S3 can notify about records its events in its own transaction (`events::emit`), and the dispatcher only delivers rows `Store::due_events` returns (they're durable). Replication between roll buckets shares blobs (a new reference), never copies them; replication to a target outside roll copies the bytes and the target must match the blob's CRC32C before the version counts as replicated. A replication target's secret is only ever stored sealed.
+    - Temporary credentials (STS) are never stored: a session token is AES-256-GCM-sealed claims under the deployment key in `state` (`s3-store/src/sts.rs`). Never log or `Debug`-print a secret, session token, JWT or MFA seed; never echo a token in an error. A session never gets more than its role's identity policies allow within its boundary and session policies, except what a resource policy grants the session itself (AWS's rule). Only fetch OIDC keys from issuers in a role's trust, over HTTPS, with timeouts and size caps.
+    - Accounts and IAM (`s3-server/src/{identity,access}.rs`, `iam/`, `s3-store/src/{accounts,iam}.rs`) evaluate exactly as AWS does: explicit deny wins; same account, identity OR resource grant; cross account, both. Roll permission levels act as attached policies. An MFA code is accepted once (the device's last step is stored before the request goes on).
+    - Anything that decides access goes through that one evaluator (`Identity::verdict`, `Policy::evaluate`, `access::combine`): the policy simulator and the dashboard's signed-in requests too. Never copy it.
+    - Principals in resource and trust policies must exist when put, and are kept with their unique ids (`principals.rs`): read and evaluate a policy through `principals::rewrite`, so a deleted principal matches nobody.
+    - Passwords are only ever stored as argon2id hashes (`password.rs`); never log, echo or `Debug`-print a password or its hash. Failed MFA codes and passwords are counted durably with relaxed writes (`s3-store/src/throttle.rs`); only count attempts at things that exist.
+    - SAML (`sts/saml.rs`, `s3-proto/src/xmldsig.rs`): no DTDs or entities; exactly one assertion, a child of the response; a signature's reference must name its own parent by a unique ID, with exactly enveloped-signature then exclusive c14n; keys come only from the provider's metadata. Read the assertion from the node that was verified.
+    - A dashboard session (`console.rs`) is a bearer token of an IAM user's console session only; every control-plane operation it makes is authorized as the S3 action it stands for, and an operation without one is the operator's.
+  - After touching anything storage-related, run `pnpm test:storage`. It skips itself when nothing relevant changed and runs real S3 tools in Docker (`amazon/aws-cli`, `rclone/rclone`, MinIO's `mc` from `bitnamilegacy/minio-client`, `d3fk/s3cmd` for SigV2).
+  - `pnpm test:storage-aws` runs `crates/s3-server/tests/aws.rs` against LocalStack in Docker (no AWS account): SSE-KMS with the backing bucket on LocalStack, notifications to SQS/SNS/Lambda/EventBridge, replication to buckets outside roll, Object Lambda. Run it after touching SSE, notifications, replication targets or Object Lambda.
+  - `pnpm test:s3-conformance` runs the S3 conformance suite (ceph/s3-tests, pinned) in Docker against a fresh server (`crates/s3-server/examples/serve.rs`) and compares the outcome with `tests/s3-conformance/expected.txt`, which lists every test known not to pass and why. It fails on a regression and on an unexpected pass: after fixing something, remove its lines. Run it after changing S3 behaviour; it skips itself when nothing relevant changed. `pnpm test:s3-conformance-localstack` runs it with the backing bucket on LocalStack S3 and KMS (SSE-KMS, `ROLL_S3_SSE_S3_AT_REST`); a line whose category ends in `@local` or `@localstack` only applies to that backend.
+  - The gateway cache (`s3-server/src/cache.rs`) is keyed by blob id and chunk: never invalidate it or add TTLs for correctness. The CDN (`s3-server/src/cdn.rs`, `s3-store/src/cdn.rs`, the Worker in `apps/cdn-worker`) purges through the outbox. After touching either, run `pnpm test:storage-cdn` (the Worker in workerd/Miniflare in Docker, purges to a mock Cloudflare API).
+  - Put new tests in the matching place:
+    - protocol vectors and parsers: unit tests in `s3-proto`
+    - metadata, durability, branching and GC: `crates/s3-store/tests/`
+    - the S3 API through the AWS SDK: `crates/s3-server/tests/` (notifications, replication and inventory: `tests/events.rs`)
+    - real tools: `crates/s3-server/tests/tools.rs`
+    - `/v1/storage`: `crates/s3-control/tests/`
+  - Set `ROLL_E2E_S3_BUCKET` (plus `ROLL_E2E_S3_ENDPOINT` and AWS credentials) to run the store and server tests against S3.
 - **NoSQL (ScyllaDB / Cassandra compatible):**
   - The design is in `docs/nosql/`. Start with `contracts.md`.
   - The target is 1:1 client-visible behaviour with `scylladb/scylla:2026.3.3` and `cassandra:5.0.9`. Each database has a dialect (`scylla` or `cassandra`); where the two products differ, gate on `Dialect`, never on a guess.

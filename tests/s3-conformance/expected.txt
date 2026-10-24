@@ -1,0 +1,229 @@
+# ceph/s3-tests outcomes known not to pass against roll storage (scripts/test-s3-conformance.sh).
+# One test per line: `<file>::<test>  <category>: <reason>`. A failure not listed here, or a
+# listed test passing, fails the script: fix the regression, or remove the line.
+#
+# Categories: bug (a real incompatibility, not fixed yet), env (the test environment),
+# deliberate (an invariant wins), aws-default / aws (roll does what S3 does), gap (a feature
+# roll doesn't have), suite (the test or its RGW expectations).
+#
+# The script runs on two backends (`--backend local|localstack`). A category ending in
+# `@local` or `@localstack` (`env@local:`) only applies to that backend; the rest to both.
+
+
+# The local backend (`@local`): a local directory, with no AWS KMS behind it and no encryption
+# at rest. The LocalStack backend runs all of these. (62)
+test_s3.py::test_bucket_policy_put_obj_kms_noenc  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-c-sse-kms-STANDARD-STANDARD-1024]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-c-sse-kms-STANDARD-STANDARD-1048576]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-c-sse-kms-STANDARD-STANDARD-1]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-c-sse-kms-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-c-sse-s3-STANDARD-STANDARD-1024]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_enc[sse-c-sse-s3-STANDARD-STANDARD-1048576]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_enc[sse-c-sse-s3-STANDARD-STANDARD-1]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_enc[sse-c-sse-s3-STANDARD-STANDARD-8388608]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_enc[sse-kms-sse-c-STANDARD-STANDARD-1024]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-c-STANDARD-STANDARD-1048576]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-c-STANDARD-STANDARD-1]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-c-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-kms-STANDARD-STANDARD-1024]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-kms-STANDARD-STANDARD-1048576]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-kms-STANDARD-STANDARD-1]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-kms-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-s3-STANDARD-STANDARD-1024]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-s3-STANDARD-STANDARD-1048576]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-s3-STANDARD-STANDARD-1]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-kms-sse-s3-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-s3-sse-kms-STANDARD-STANDARD-1024]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-s3-sse-kms-STANDARD-STANDARD-1048576]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-s3-sse-kms-STANDARD-STANDARD-1]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-s3-sse-kms-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_enc[sse-s3-sse-s3-STANDARD-STANDARD-1024]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_enc[sse-s3-sse-s3-STANDARD-STANDARD-1048576]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_enc[sse-s3-sse-s3-STANDARD-STANDARD-1]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_enc[sse-s3-sse-s3-STANDARD-STANDARD-8388608]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_part_enc[sse-c-sse-kms-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_part_enc[sse-c-sse-s3-STANDARD-STANDARD-8388608]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_copy_part_enc[sse-kms-sse-c-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_part_enc[sse-kms-sse-kms-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_part_enc[sse-kms-sse-s3-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_part_enc[sse-s3-sse-kms-STANDARD-STANDARD-8388608]  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_copy_part_enc[sse-s3-sse-s3-STANDARD-STANDARD-8388608]  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_kms_default_post_object_authenticated_request  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_default_upload_1b  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_default_upload_1kb  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_default_upload_1mb  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_default_upload_8mb  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_method_head  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_multipart_invalid_chunks_1  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_multipart_invalid_chunks_2  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_multipart_upload  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_post_object_authenticated_request  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_present  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_transfer_13b  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_transfer_1MB  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_transfer_1b  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_kms_transfer_1kb  env@local: SSE-KMS needs AWS KMS behind the backing bucket; the conformance server uses a local directory (NotImplemented)
+test_s3.py::test_sse_s3_default_method_head  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_default_multipart_upload  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_default_post_object_authenticated_request  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_default_upload_1b  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_default_upload_1kb  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_default_upload_1mb  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_default_upload_8mb  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_encrypted_upload_1b  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_encrypted_upload_1kb  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_encrypted_upload_1mb  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+test_s3.py::test_sse_s3_encrypted_upload_8mb  env@local: SSE-S3 is reported on reads only where the backing store encrypts at rest (AWS S3); the conformance server uses a local directory
+
+# The LocalStack backend (`@localstack`): LocalStack's S3 and KMS standing in for AWS. (2)
+test_s3.py::test_copy_part_enc[sse-kms-sse-c-STANDARD-STANDARD-8388608]  env@localstack: LocalStack's UploadPartCopy ignores SSE-C (its provider leaves it a TODO), so roll refuses the unconfirmed encrypted part (NotImplemented) and keeps nothing
+test_s3.py::test_sse_kms_no_key  aws@localstack: aws:kms without a key id uses the AWS managed key (aws/s3), as on S3; RGW refuses it (on the local backend every SSE-KMS request is NotImplemented)
+
+# S3's current defaults, which the suite predates. (88)
+test_headers.py::test_object_acl_create_contentlength_none  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_100_continue  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_access_bucket_private_object_publicread  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_access_bucket_private_object_publicreadwrite  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_access_bucket_private_objectv2_publicread  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_access_bucket_private_objectv2_publicreadwrite  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_access_bucket_publicread_object_private  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_access_bucket_publicread_object_publicread  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_access_bucket_publicread_object_publicreadwrite  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_access_bucket_publicreadwrite_object_private  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_access_bucket_publicreadwrite_object_publicread  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_access_bucket_publicreadwrite_object_publicreadwrite  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_block_public_object_canned_acls  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_block_public_put_bucket_acls  aws-default: ACLs are off by default (BucketOwnerEnforced), so a public PutBucketAcl is AccessControlListNotSupported (400) before the block applies, as on S3
+test_s3.py::test_bucket_acl_canned  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_bucket_acl_canned_authenticatedread  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_bucket_acl_canned_publicreadwrite  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_bucket_acl_revoke_all  aws-default: with ACLs off (BucketOwnerEnforced) S3 only accepts an ACL giving the bucket owner full control: one with no grants is AccessControlListNotSupported
+test_s3.py::test_bucket_concurrent_set_canned_acl  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_bucket_list_objects_anonymous  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_bucket_listv2_objects_anonymous  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_bucket_policy_acl  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_bucket_policy_put_obj_copy_source  aws-default: expects the object writer ("alt", another account) to own what it writes into a bucket with the default BucketOwnerEnforced; on S3 since 2023 the bucket owner does
+test_s3.py::test_bucket_policy_put_obj_copy_source_meta  aws-default: expects the object writer ("alt", another account) to own what it writes into a bucket with the default BucketOwnerEnforced; on S3 since 2023 the bucket owner does
+test_s3.py::test_bucket_policy_put_obj_grant  aws-default: expects the object writer ("alt", another account) to own what it writes into a bucket with the default BucketOwnerEnforced; on S3 since 2023 the bucket owner does
+test_s3.py::test_bucket_recreate_new_acl  aws-default: an ACL at CreateBucket needs ObjectOwnership other than BucketOwnerEnforced (InvalidBucketAclWithObjectOwnership), as on S3
+test_s3.py::test_bucket_recreate_overwrite_acl  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_bucketv2_policy_acl  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_cors_header_option  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_cors_origin_response  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_cors_origin_wildcard  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_cors_presigned_get_object  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_cors_presigned_get_object_tenant  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023 ("tenant" is another account here)
+test_s3.py::test_cors_presigned_get_object_tenant_v2  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023 ("tenant" is another account here)
+test_s3.py::test_cors_presigned_get_object_v2  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_cors_presigned_put_object  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_cors_presigned_put_object_tenant  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023 ("tenant" is another account here)
+test_s3.py::test_cors_presigned_put_object_tenant_v2  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023 ("tenant" is another account here)
+test_s3.py::test_cors_presigned_put_object_tenant_with_acl  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023 ("tenant" is another account here)
+test_s3.py::test_cors_presigned_put_object_v2  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_cors_presigned_put_object_with_acl  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_delete_bucket_encryption_kms  aws-default: GetBucketEncryption returns the default AES256 rule, as S3 does since 2023
+test_s3.py::test_delete_bucket_encryption_s3  aws-default: GetBucketEncryption returns the default AES256 rule, as S3 does since 2023
+test_s3.py::test_expected_bucket_owner  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_get_authpublic_acl_bucket_policy_status  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_get_bucket_encryption_kms  aws-default: GetBucketEncryption returns the default AES256 rule, as S3 does since 2023
+test_s3.py::test_get_bucket_encryption_s3  aws-default: GetBucketEncryption returns the default AES256 rule, as S3 does since 2023
+test_s3.py::test_get_public_acl_bucket_policy_status  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_ignore_public_acls  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_list_multipart_upload_owner  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_acl_canned  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_acl_canned_authenticatedread  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_acl_canned_bucketownerfullcontrol  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_acl_canned_bucketownerread  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_acl_canned_during_create  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_acl_canned_publicreadwrite  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_acl_full_control_verify_attributes  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_anon_put_write_access  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_copy_canned_acl  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_copy_not_owned_object_bucket  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_delete_key_bucket_gone  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_raw_authenticated  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_raw_authenticated_bucket_acl  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_raw_authenticated_bucket_gone  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_raw_authenticated_object_acl  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_raw_authenticated_object_gone  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_raw_get  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_raw_get_bucket_acl  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_raw_get_bucket_gone  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_raw_get_object_acl  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_raw_get_object_gone  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_raw_get_x_amz_expires_not_expired  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_raw_get_x_amz_expires_not_expired_tenant  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023 ("tenant" is another account here)
+test_s3.py::test_object_raw_get_x_amz_expires_out_max_range  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_raw_get_x_amz_expires_out_positive_range  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_object_raw_get_x_amz_expires_out_range_zero  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_post_object_anonymous_request  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_post_object_authenticated_no_content_type  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_post_object_authenticated_request_bad_access_key  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_post_object_set_invalid_success_code  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_post_object_set_success_code  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_post_object_success_redirect_action  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_post_object_tags_anonymous_request  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_put_bucket_acl_grant_group_read  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_put_bucket_logging  aws-default: a target bucket with ACLs off (BucketOwnerEnforced, the default) takes no TargetGrants: S3 refuses them ("Target grants not allowed for bucket owner enforced buckets")
+test_s3.py::test_put_bucket_ownership_bucket_owner_enforced  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_versioned_object_acl  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+test_s3.py::test_versioned_object_acl_no_version_specified  aws-default: ACLs are off by default (BucketOwnerEnforced), as on S3 since April 2023
+
+# roll answers as S3 does; the suite expects RGW's answer. (12)
+test_s3.py::test_block_public_policy_with_principal  aws: its principal arn:aws:iam::s3tenant1:root names an RGW tenant, not an account; S3 refuses it as MalformedPolicy (Invalid principal in policy)
+test_s3.py::test_copy_part_enc[sse-c-sse-c-STANDARD-STANDARD-8388608]  aws: a part copy with another SSE-C key than its upload is 403 AccessDenied, as a wrong key on a read (RGW says 400)
+test_s3.py::test_copy_part_enc[sse-s3-sse-c-STANDARD-STANDARD-8388608]  aws: a part copy with another SSE-C key than its upload is 403 AccessDenied, as a wrong key on a read (RGW says 400)
+test_s3.py::test_encryption_sse_c_multipart_bad_download  aws: a read with the wrong SSE-C key is 403 AccessDenied on S3 (RGW says 400)
+test_s3.py::test_encryption_sse_c_multipart_invalid_chunks_1  aws: a part with another SSE-C key than its upload is 403 AccessDenied, as a wrong key on a read (RGW says 400)
+test_s3.py::test_encryption_sse_c_other_key  aws: a read with the wrong SSE-C key is 403 AccessDenied on S3 (RGW says 400)
+test_s3.py::test_get_bucket_policy_status  aws: GetBucketPolicyStatus without a policy is NoSuchBucketPolicy, as on S3
+test_s3.py::test_get_nonpublicpolicy_principal_bucket_policy_status  aws: its principal arn:aws:iam::s3tenant1:root names an RGW tenant, not an account; S3 refuses it as MalformedPolicy (Invalid principal in policy)
+test_s3.py::test_get_nonpublicpolicy_acl_bucket_policy_status  aws: GetBucketPolicyStatus without a policy is NoSuchBucketPolicy, as on S3
+test_s3.py::test_get_publicpolicy_acl_bucket_policy_status  aws: GetBucketPolicyStatus without a policy is NoSuchBucketPolicy, as on S3
+test_s3.py::test_post_object_upload_checksum  aws: every POST form field (x-amz-checksum-* too) must have a policy condition, as S3 documents; the test's policy has none for it
+test_s3.py::test_put_bucket_logging_policy_wildcard  aws: its log-delivery policy repeats a Sid, which S3 refuses as MalformedPolicy; and S3 refuses a target bucket another account owns (InvalidTargetBucketForLogging)
+
+# The suite itself: RGW-specific expectations or tests that can't pass on S3 as written.
+test_headers.py::test_bucket_create_bad_authorization_empty  suite: botocore signs after the test's header hook, replacing the bad Authorization (fails_on_rgw too)
+test_headers.py::test_bucket_create_bad_authorization_invalid_aws2  suite: botocore signs after the test's header hook, replacing the bad Authorization (fails_on_rgw too)
+test_headers.py::test_bucket_create_bad_authorization_none  suite: botocore signs after the test's header hook, so the request is valid (fails_on_rgw too)
+test_headers.py::test_bucket_create_bad_date_none_aws2  suite: SigV2 requests carry a Date header besides x-amz-date, so removing x-amz-date leaves a valid request (fails_on_rgw too)
+test_headers.py::test_object_create_bad_authorization_empty  suite: botocore signs after the test's header hook, replacing the bad Authorization (fails_on_rgw too)
+test_headers.py::test_object_create_bad_authorization_incorrect_aws2  suite: botocore signs after the test's header hook, replacing the bad Authorization (fails_on_rgw too)
+test_headers.py::test_object_create_bad_authorization_invalid_aws2  suite: botocore signs after the test's header hook, replacing the bad Authorization (fails_on_rgw too)
+test_headers.py::test_object_create_bad_authorization_none  suite: botocore signs after the test's header hook, so the request is valid (fails_on_rgw too)
+test_headers.py::test_object_create_bad_contentlength_none  suite: the HTTP stack puts Content-Length back, so the request is valid (fails_on_rgw too)
+test_headers.py::test_object_create_bad_date_none_aws2  suite: SigV2 requests carry a Date header besides x-amz-date, so removing x-amz-date leaves a valid request (fails_on_rgw too)
+test_s3.py::test_bucket_list_prefix_unreadable  suite: S3 url-encodes Prefix in ListObjects (v1) with encoding-type=url, which botocore doesn't decode
+test_s3.py::test_bucket_logging_owner  suite: puts a policy statement without Resource, which S3 refuses as MalformedPolicy
+test_s3.py::test_bucket_policy_different_tenant  suite: RGW tenants (`:bucket` and `tenant:bucket` names); AWS has no tenant-qualified bucket names (names are global), so this is RGW-only
+test_s3.py::test_bucket_policy_put_obj_request_obj_tag  suite: the test adds x-amz-tagging to the main client, not to alt's request it checks (see its TODO)
+test_s3.py::test_bucket_policy_set_condition_operator_end_with_IfExists  suite: expects the bucket owner to be refused when an Allow statement doesn't match; on S3 (and roll) the owner's own permission still allows it
+test_s3.py::test_bucket_policy_tenanted_bucket  suite: RGW tenants (`:bucket` and `tenant:bucket` names); AWS has no tenant-qualified bucket names (names are global), so this is RGW-only
+test_s3.py::test_delete_marker_expiration  suite: needs RGW's accelerated lifecycle clock (lc_debug_interval); lifecycle runs daily on S3 and roll, so it can't pass on S3 either
+test_s3.py::test_delete_marker_nonversioned  suite: RGW sends x-amz-delete-marker: false for missing keys in unversioned buckets; S3 and roll send no such header
+test_s3.py::test_multipart_get_part  suite: RGW answers 400 InvalidPart for a partNumber past the last part; S3 and roll answer 416 (not satisfiable)
+test_s3.py::test_multipart_resend_first_finishes_last  suite: lists part 1 twice in CompleteMultipartUpload, which S3 refuses as InvalidPartOrder (parts must ascend)
+test_s3.py::test_multipart_single_get_part  suite: RGW answers 400 InvalidPart for a partNumber past the last part; S3 and roll answer 416 (not satisfiable)
+test_s3.py::test_multipart_sse_c_get_part  suite: completes with the ETag of the first of two uploads of a part; SSE-C part ETags are opaque and new on every upload, so only the latest is valid (and the out-of-range part check expects RGW's 400)
+test_s3.py::test_non_multipart_get_part  suite: RGW answers 400 InvalidPart for a partNumber past the last part; S3 and roll answer 416 (not satisfiable)
+test_s3.py::test_non_multipart_sse_c_get_part  suite: RGW answers 400 InvalidPart for a partNumber past the last part; S3 and roll answer 416 (not satisfiable)
+test_s3.py::test_object_checksum_crc64nvme  suite: expects BadDigest for a malformed checksum value; roll answers InvalidRequest (400) and keeps BadDigest for a well-formed value that doesn't match
+test_s3.py::test_object_checksum_sha256  suite: expects BadDigest for a malformed checksum value; roll answers InvalidRequest (400) and keeps BadDigest for a well-formed value that doesn't match
+test_s3.py::test_object_lock_put_obj_lock_invalid_days  suite: expects RGW's InvalidRetentionPeriod for a zero default retention; roll answers InvalidArgument (400)
+test_s3.py::test_object_lock_put_obj_lock_invalid_years  suite: expects RGW's InvalidRetentionPeriod for a zero default retention; roll answers InvalidArgument (400)
+test_s3.py::test_object_raw_put_authenticated_expired  suite: a presigned URL with a negative X-Amz-Expires is malformed (400 AuthorizationQueryParametersError), as on S3, not expired (403)
+test_s3.py::test_object_read_unreadable  suite: written for Python 2, where the key went out as raw Latin-1 bytes (not UTF-8, which S3 and roll refuse as InvalidURI); botocore sends it as UTF-8 (C1 control characters), a valid key: 404
+test_s3.py::test_object_set_get_unicode_metadata  suite: roll returns non-ASCII metadata as the UTF-8 bytes it got; botocore reads response headers as Latin-1 (S3 RFC 2047-encodes them, which botocore doesn't decode either)
+test_s3.py::test_object_write_with_chunked_transfer_encoding  suite: a PUT with Transfer-Encoding: chunked and no length; S3 needs Content-Length (or aws-chunked with x-amz-decoded-content-length) too
+test_s3.py::test_put_bucket_logging_errors  suite: RGW answers NoSuchKey for a missing target bucket; S3 (and roll) answer InvalidTargetBucketForLogging
+test_s3.py::test_put_bucket_logging_permissions  suite: RGW checks the target bucket's policy at PutBucketLogging; roll writes logs as the deployment (no logging service principal to grant)
+test_s3.py::test_get_object_torrent  suite: decodes the torrent as UTF-8 text; a metainfo file's SHA-1 pieces are binary (S3's too), so a real torrent fails the test's own decode
+
+# S3 Select: the suite's Ceph-RGW dialect where it disagrees with AWS S3 Select. (6)
+test_s3select.py::test_count_json_operation  suite: expects RGW's bare value (`1`) from a JSON-output query; AWS S3 Select writes JSON records ({"_1":1})
+test_s3select.py::test_json_column_sum_min_max  suite: expects RGW's bare values from JSON-output aggregates; AWS S3 Select writes JSON records ({"_1":…})
+test_s3select.py::test_csv_parser  suite: expects RGW's text `null` for empty CSV fields; AWS S3 Select writes an empty field
+test_s3select.py::test_in_expressions  suite: compares with `_1 like "_3"`, where a double-quoted "_3" is column 3 in S3 Select (RGW reads it as a string)
+test_s3select.py::test_like_expressions  suite: LIKE '%y[y-z]' uses RGW's bracket character classes; SQL and S3 Select LIKE have only % and _
+test_s3select.py::test_schema_definition  suite: expects RGW's own error messages ("alias {c11} or column not exist in schema", ProcessingTimeError); S3 Select answers with its codes (MissingHeaders)

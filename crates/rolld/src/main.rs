@@ -17,9 +17,10 @@ const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
 mod nosql;
 mod queues;
+mod storage_events;
 
-/// roll daemon: serverless Postgres, serverless Redis, Kafka-compatible streams, tasks, RabbitMQ-compatible queues and
-/// ScyllaDB/Cassandra-compatible nosql on your machine (or an EC2 host).
+/// roll daemon: serverless Postgres, serverless Redis, S3-compatible storage, Kafka-compatible streams, tasks,
+/// RabbitMQ-compatible queues and ScyllaDB/Cassandra-compatible nosql on your machine (or an EC2 host).
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -110,6 +111,103 @@ struct Args {
     /// Run only roll queues (no Postgres control plane or proxy): broker nodes on AWS.
     #[arg(long, env = "ROLL_QUEUES_ONLY", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     queues_only: bool,
+    /// S3-compatible storage listen address.
+    #[arg(long, env = "ROLL_S3", default_value = "127.0.0.1:59000")]
+    s3: SocketAddr,
+    /// `<bucket>.<domain>` addresses a bucket (virtual-host style); path style always works.
+    #[arg(long, env = "ROLL_S3_DOMAIN")]
+    s3_domain: Option<String>,
+    /// `<bucket>.<domain>` serves the bucket's static website (S3 website endpoint semantics).
+    #[arg(long, env = "ROLL_S3_WEBSITE_DOMAIN")]
+    s3_website_domain: Option<String>,
+    /// Block public access to every bucket (all four S3 Block Public Access settings, on top of
+    /// each bucket's own).
+    #[arg(long, env = "ROLL_S3_BLOCK_PUBLIC_ACCESS", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    s3_block_public_access: bool,
+    /// Storage class of stored objects (default: INTELLIGENT_TIERING on AWS S3, STANDARD on a
+    /// custom endpoint; ignored for a local directory).
+    #[arg(long, env = "ROLL_S3_STORAGE_CLASS")]
+    s3_storage_class: Option<String>,
+    /// Peers in these comma-separated CIDRs are inside roll: their egress is free (default:
+    /// loopback and the private ranges).
+    #[arg(long, env = "ROLL_S3_INTERNAL_CIDRS")]
+    s3_internal_cidrs: Option<String>,
+    /// Pass SSE-KMS requests through to the backing bucket (default: on for AWS S3 without a
+    /// custom endpoint, off otherwise; a local directory can't).
+    #[arg(long, env = "ROLL_S3_KMS")]
+    s3_kms: Option<bool>,
+    /// Declare that the backing store encrypts every object at rest, so objects without SSE-C or
+    /// SSE-KMS are reported as SSE-S3 (`AES256`), as S3 does (default: on for AWS S3 without a
+    /// custom endpoint, off otherwise). roll doesn't encrypt them itself: only set it when the
+    /// backing store (or the disk under a local directory) really does.
+    #[arg(long, env = "ROLL_S3_SSE_S3_AT_REST")]
+    s3_sse_s3_at_rest: Option<bool>,
+    /// An admin access key to create at startup (local dev and tests), with ROLL_S3_SECRET_KEY.
+    #[arg(long, env = "ROLL_S3_ACCESS_KEY", requires = "s3_secret_key")]
+    s3_access_key: Option<String>,
+    #[arg(long, env = "ROLL_S3_SECRET_KEY", requires = "s3_access_key", hide_env_values = true)]
+    s3_secret_key: Option<String>,
+    /// Deliver storage event notifications to AWS (SQS, SNS, Lambda, EventBridge) with this
+    /// host's AWS credentials. Off, AWS destinations fail validation.
+    #[arg(long, env = "ROLL_S3_NOTIFY_AWS", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    s3_notify_aws: bool,
+    /// Reach AWS services for storage notifications, Object Lambda and replication checks at
+    /// this endpoint instead of AWS (LocalStack, a VPC endpoint).
+    #[arg(long, env = "ROLL_S3_NOTIFY_AWS_ENDPOINT")]
+    s3_notify_aws_endpoint: Option<String>,
+    /// Per-service endpoints, `sqs=<url>,sns=<url>,lambda=<url>,events=<url>` (win over
+    /// ROLL_S3_NOTIFY_AWS_ENDPOINT).
+    #[arg(long, env = "ROLL_S3_NOTIFY_AWS_ENDPOINTS")]
+    s3_notify_aws_endpoints: Option<String>,
+    /// Publish storage replication metrics (S3's `ReplicationLatency`, `BytesPendingReplication`,
+    /// `OperationsPendingReplication`, `OperationsFailedReplication`) to CloudWatch every minute,
+    /// in the `roll/S3` namespace (needs ROLL_S3_NOTIFY_AWS).
+    #[arg(long, env = "ROLL_S3_REPLICATION_METRICS_CLOUDWATCH", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    s3_replication_metrics_cloudwatch: bool,
+    /// How Object Lambda functions reach the S3 API (`inputS3Url`); default
+    /// `http://<public host>:<S3 port>`.
+    #[arg(long, env = "ROLL_S3_PUBLIC_ENDPOINT")]
+    s3_public_endpoint: Option<String>,
+    /// roll storage's developer API (Supabase-Storage-compatible REST, `/storage/v1`) listen
+    /// address.
+    #[arg(long, env = "ROLL_STORAGE_API", default_value = "127.0.0.1:59001")]
+    storage_api: SocketAddr,
+    /// The developer API's public URL (`https://storage.example.com/storage/v1`): resumable
+    /// upload URLs and the dashboard; default `http://<public host>:<port>/storage/v1`.
+    #[arg(long, env = "ROLL_STORAGE_API_PUBLIC_URL")]
+    storage_api_public_url: Option<String>,
+    /// More endpoints SAML assertions may be for (comma-separated `Recipient`/`Audience`
+    /// values), besides `https://signin.aws.amazon.com/saml`.
+    #[arg(long, env = "ROLL_S3_SAML_AUDIENCES")]
+    s3_saml_audiences: Option<String>,
+    /// Let storage webhooks reach loopback and private addresses (single-tenant installs).
+    #[arg(long, env = "ROLL_S3_WEBHOOK_ALLOW_PRIVATE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    s3_webhook_allow_private: bool,
+    /// Storage's hot-object cache in memory (`256MiB`, `1GiB`; `0` turns the cache off).
+    #[arg(long, env = "ROLL_S3_CACHE_MEMORY", default_value = "256MiB")]
+    s3_cache_memory: String,
+    /// Its disk tier (`10GiB`; `0`: memory only), under ROLL_S3_CACHE_DIR.
+    #[arg(long, env = "ROLL_S3_CACHE_DISK", default_value = "10GiB")]
+    s3_cache_disk: String,
+    /// Where the disk tier lives (default: <home>/storage/cache). Local NVMe is best.
+    #[arg(long, env = "ROLL_S3_CACHE_DIR")]
+    s3_cache_dir: Option<PathBuf>,
+    /// Objects larger than this bypass the cache.
+    #[arg(long, env = "ROLL_S3_CACHE_MAX_OBJECT", default_value = "256MiB")]
+    s3_cache_max_object: String,
+    /// Cache SSE-KMS objects too (S3 would check KMS access on every read; off by default).
+    #[arg(long, env = "ROLL_S3_CACHE_KMS", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    s3_cache_kms: bool,
+    /// The secret the CDN Worker sends in `X-Roll-CDN-Auth` (set the Worker's
+    /// ROLL_CDN_ORIGIN_SECRET to the same). Without it, CDN requests are refused.
+    #[arg(long, env = "ROLL_CDN_ORIGIN_SECRET", hide_env_values = true)]
+    cdn_origin_secret: Option<String>,
+    /// Cloudflare's API, for purges (tests point it at a mock).
+    #[arg(long, env = "ROLL_CDN_CLOUDFLARE_API", default_value = "https://api.cloudflare.com/client/v4")]
+    cdn_cloudflare_api: String,
+    /// Don't run roll storage (the S3 API).
+    #[arg(long, env = "ROLL_NO_STORAGE", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
+    no_storage: bool,
     #[command(flatten)]
     queues: queues::QueuesArgs,
     #[command(flatten)]
@@ -140,11 +238,13 @@ async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,redis_server=info,redis_control=info,stream_broker=info,tasks=info,mq_core=info,mq_amqp=info,mq_cluster=info,mq_mgmt=info,mq_http=info,mq_mqtt=info,mq_stomp=info,mq_shovel=info,nosql_server=info,nosql_control=info,nosql_storage=info".into()),
+                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,redis_server=info,redis_control=info,stream_broker=info,tasks=info,mq_core=info,mq_amqp=info,mq_cluster=info,mq_mgmt=info,mq_http=info,mq_mqtt=info,mq_stomp=info,mq_shovel=info,nosql_server=info,nosql_control=info,nosql_storage=info,s3_store=info,s3_server=info,s3_control=info".into()),
         )
         .init();
     let args = Args::parse();
     let home = std::path::absolute(&args.home)?;
+    let home_abs = home.clone();
+    let storage_opts = StorageOpts::from(&args);
 
     // Object storage shared by the products (S3, or a directory under --home).
     let mut storage = Config::local(home.clone()).storage;
@@ -232,6 +332,12 @@ async fn run() -> anyhow::Result<()> {
     info!(resp = %args.redis, http = %args.redis_http, tls = tls.is_some(), "redis listening");
     let redis_opts = redis_server::net::ListenOptions { tls, proxy_protocol: args.redis_proxy_protocol };
 
+    let (storage_svc, s3_listener) = if args.no_storage {
+        (None, None)
+    } else {
+        let (st, l) = start_storage(&storage_opts, &home_abs, &storage).await?;
+        (Some(st), Some(l))
+    };
     // roll nosql: same object storage, its own node.
     let nosql = if args.nosql.nosql_disabled { None } else { Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage).await?) };
 
@@ -243,6 +349,12 @@ async fn run() -> anyhow::Result<()> {
     }
     broker.txns.recover(&broker).await?;
     let kafka = tokio::net::TcpListener::bind(args.kafka).await?;
+    // Storage event notifications into roll queues and streams, in process.
+    if let Some(st) = &storage_svc {
+        let sink = storage_events::RollSink { queues: queues.as_ref().map(|q| q.broker.clone()), streams: broker.clone() };
+        st.server.notifier.set_sink(std::sync::Arc::new(sink));
+        st.control.set_server(st.server.clone());
+    }
 
     let listener = tokio::net::TcpListener::bind(args.api).await?;
     info!(addr = %args.api, "control API listening");
@@ -253,6 +365,18 @@ async fn run() -> anyhow::Result<()> {
     if let Some(q) = &queues {
         router = router.merge(q.router());
     }
+    if let Some(st) = &storage_svc {
+        router = router.merge(s3_control::api::router(st.control.clone()));
+    }
+    let storage_serve = async {
+        match (&storage_svc, s3_listener) {
+            (Some(st), Some((l, api))) => tokio::select! {
+                r = s3_server::serve(l, st.server.clone()) => r,
+                r = s3_api::serve(api, st.api.clone()) => r,
+            },
+            _ => std::future::pending().await,
+        }
+    };
     if let Some(n) = &nosql {
         router = router.merge(n.router());
     }
@@ -275,6 +399,7 @@ async fn run() -> anyhow::Result<()> {
         r = redis_server::net::serve(redis_listener, redis_dir.clone(), redis_opts) => r?,
         r = redis_server::http::serve_http(redis_http, redis_dir) => r?,
         r = queues_serve => r?,
+        r = storage_serve => r?,
         r = nosql_serve => r?,
         r = stream_broker::server::serve_on(broker.clone(), kafka) => r?,
         _ = reconciler::run(control.clone()) => {}
@@ -292,9 +417,163 @@ async fn run() -> anyhow::Result<()> {
     if let Some(q) = &queues {
         q.shutdown().await;
     }
+    if let Some(st) = &storage_svc {
+        // Commit pending metadata and usage before exiting.
+        st.server.store.close().await;
+    }
     tasks_worker.shutdown().await;
     broker.sync_all().await;
     Ok(())
+}
+
+/// roll storage: its store (metadata under `<home>/storage`, blobs next to everything else's
+/// durable state), the S3 API and the control plane.
+struct Storage {
+    server: std::sync::Arc<s3_server::Server>,
+    control: std::sync::Arc<s3_control::Control>,
+    /// The developer API (`s3-api`).
+    api: std::sync::Arc<s3_api::Api>,
+}
+
+/// rolld's storage flags (taken before the other products consume theirs).
+struct StorageOpts {
+    s3: SocketAddr,
+    public_host: String,
+    node: String,
+    s3_domain: Option<String>,
+    s3_website_domain: Option<String>,
+    s3_block_public_access: bool,
+    s3_storage_class: Option<String>,
+    s3_internal_cidrs: Option<String>,
+    s3_kms: Option<bool>,
+    s3_sse_s3_at_rest: Option<bool>,
+    s3_access_key: Option<String>,
+    s3_secret_key: Option<String>,
+    s3_notify_aws: bool,
+    s3_notify_aws_endpoint: Option<String>,
+    s3_notify_aws_endpoints: Option<String>,
+    s3_replication_metrics_cloudwatch: bool,
+    s3_public_endpoint: Option<String>,
+    storage_api: SocketAddr,
+    storage_api_public_url: Option<String>,
+    s3_saml_audiences: Option<String>,
+    s3_webhook_allow_private: bool,
+    s3_cache_memory: String,
+    s3_cache_disk: String,
+    s3_cache_dir: Option<PathBuf>,
+    s3_cache_max_object: String,
+    s3_cache_kms: bool,
+    cdn_origin_secret: Option<String>,
+    cdn_cloudflare_api: String,
+}
+
+impl From<&Args> for StorageOpts {
+    fn from(a: &Args) -> Self {
+        Self {
+            s3: a.s3,
+            public_host: a.public_host.clone(),
+            node: a.node.clone(),
+            s3_domain: a.s3_domain.clone(),
+            s3_website_domain: a.s3_website_domain.clone(),
+            s3_block_public_access: a.s3_block_public_access,
+            s3_storage_class: a.s3_storage_class.clone(),
+            s3_internal_cidrs: a.s3_internal_cidrs.clone(),
+            s3_kms: a.s3_kms,
+            s3_sse_s3_at_rest: a.s3_sse_s3_at_rest,
+            s3_access_key: a.s3_access_key.clone(),
+            s3_secret_key: a.s3_secret_key.clone(),
+            s3_notify_aws: a.s3_notify_aws,
+            s3_notify_aws_endpoint: a.s3_notify_aws_endpoint.clone(),
+            s3_notify_aws_endpoints: a.s3_notify_aws_endpoints.clone(),
+            s3_replication_metrics_cloudwatch: a.s3_replication_metrics_cloudwatch,
+            s3_public_endpoint: a.s3_public_endpoint.clone(),
+            storage_api: a.storage_api,
+            storage_api_public_url: a.storage_api_public_url.clone(),
+            s3_saml_audiences: a.s3_saml_audiences.clone(),
+            s3_webhook_allow_private: a.s3_webhook_allow_private,
+            s3_cache_memory: a.s3_cache_memory.clone(),
+            s3_cache_disk: a.s3_cache_disk.clone(),
+            s3_cache_dir: a.s3_cache_dir.clone(),
+            s3_cache_max_object: a.s3_cache_max_object.clone(),
+            s3_cache_kms: a.s3_cache_kms,
+            cdn_origin_secret: a.cdn_origin_secret.clone().filter(|s| !s.is_empty()),
+            cdn_cloudflare_api: a.cdn_cloudflare_api.clone(),
+        }
+    }
+}
+
+async fn start_storage(args: &StorageOpts, home: &std::path::Path, storage: &StorageConfig) -> anyhow::Result<(Storage, (tokio::net::TcpListener, tokio::net::TcpListener))> {
+    let class = args.s3_storage_class.clone().or_else(|| match storage {
+        StorageConfig::S3 { endpoint: None, .. } => Some("INTELLIGENT_TIERING".into()),
+        StorageConfig::S3 { endpoint: Some(_), .. } => Some("STANDARD".into()),
+        StorageConfig::Local(_) => None,
+    });
+    let class = class.filter(|_| matches!(storage, StorageConfig::S3 { .. }));
+    // Bind first: a node that can't serve shouldn't take over the metadata log.
+    let listener = tokio::net::TcpListener::bind(args.s3).await?;
+    let api_listener = tokio::net::TcpListener::bind(args.storage_api).await?;
+    let backend = s3_store::from_config(storage, class.as_deref()).await?;
+    let mut scfg = s3_server::Config {
+        virtual_host_domain: args.s3_domain.clone(),
+        website_domain: args.s3_website_domain.clone(),
+        spool_dir: home.join("storage").join("spool"),
+        ..Default::default()
+    };
+    scfg.notify.aws = args.s3_notify_aws;
+    if args.s3_replication_metrics_cloudwatch {
+        scfg.notify.replication_metrics_interval = Some(std::time::Duration::from_secs(60));
+    }
+    scfg.notify.webhook_allow_private = args.s3_webhook_allow_private;
+    let size = |name: &str, v: &str| s3_server::cache::parse_size(v).map_err(|e| anyhow::anyhow!("{name}: {e}"));
+    scfg.cache = s3_server::CacheConfig {
+        memory_bytes: size("ROLL_S3_CACHE_MEMORY", &args.s3_cache_memory)?,
+        disk_bytes: size("ROLL_S3_CACHE_DISK", &args.s3_cache_disk)?,
+        dir: Some(args.s3_cache_dir.clone().unwrap_or_else(|| home.join("storage").join("cache"))),
+        max_object_bytes: size("ROLL_S3_CACHE_MAX_OBJECT", &args.s3_cache_max_object)?,
+        kms: args.s3_cache_kms,
+        ..Default::default()
+    };
+    scfg.cdn.origin_secret = args.cdn_origin_secret.clone();
+    scfg.cdn.cloudflare_api = args.cdn_cloudflare_api.clone();
+    scfg.notify.aws_endpoint = args.s3_notify_aws_endpoint.clone().filter(|e| !e.is_empty());
+    for pair in args.s3_notify_aws_endpoints.as_deref().unwrap_or_default().split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (service, url) = pair.split_once('=').ok_or_else(|| anyhow::anyhow!("ROLL_S3_NOTIFY_AWS_ENDPOINTS: {pair} isn't <service>=<url>"))?;
+        scfg.notify.aws_endpoints.insert(service.trim().to_string(), url.trim().to_string());
+    }
+    scfg.public_endpoint = Some(args.s3_public_endpoint.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.s3.port())));
+    scfg.torrent_announce = std::env::var("ROLL_S3_TORRENT_ANNOUNCE").ok().filter(|a| !a.trim().is_empty());
+    scfg.saml_audiences = args.s3_saml_audiences.as_deref().unwrap_or_default().split(',').map(str::trim).filter(|a| !a.is_empty()).map(str::to_string).collect();
+    let mut cfg = s3_store::StoreConfig::new(home.join("storage"));
+    cfg.node = args.node.clone();
+    cfg.block_public_access = args.s3_block_public_access;
+    cfg.region = scfg.region.clone();
+    cfg.kms = args.s3_kms;
+    cfg.sse_s3_at_rest = args.s3_sse_s3_at_rest;
+    if let Some(d) = std::env::var("ROLL_S3_DERIVED_EXPIRY_DAYS").ok().filter(|v| !v.trim().is_empty()) {
+        cfg.derived_expiry_days = d.trim().parse().map_err(|_| anyhow::anyhow!("ROLL_S3_DERIVED_EXPIRY_DAYS: {d} isn't a number of days"))?;
+    }
+    if let Some(n) = std::env::var("ROLL_S3_IMAGE_CONCURRENCY").ok().filter(|v| !v.trim().is_empty()) {
+        scfg.image_concurrency = n.trim().parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(|| anyhow::anyhow!("ROLL_S3_IMAGE_CONCURRENCY: {n} isn't a positive number"))?;
+    }
+    let store = s3_store::Store::open(cfg, backend).await?;
+    if let (Some(id), Some(secret)) = (&args.s3_access_key, &args.s3_secret_key) {
+        store.ensure_key(id, secret, "ROLL_S3_ACCESS_KEY").await?;
+    }
+    std::fs::create_dir_all(&scfg.spool_dir)?;
+    if let Some(c) = &args.s3_internal_cidrs {
+        scfg.internal_cidrs = s3_server::parse_cidrs(c)?;
+    }
+    let endpoint = format!("http://{}:{}", args.public_host, args.s3.port());
+    let ccfg = s3_control::ControlConfig { endpoint, region: scfg.region.clone(), virtual_host_domain: args.s3_domain.clone(), website_domain: args.s3_website_domain.clone(), storage_class: class, pricing: Default::default() };
+    let control = s3_control::Control::new(store.clone(), ccfg).await?;
+    let spool = scfg.spool_dir.clone();
+    let server = s3_server::Server::new(store, scfg);
+    info!(s3 = %args.s3, storage = %server.store.describe(), "storage (S3 API) listening");
+    let api_url = args.storage_api_public_url.clone().unwrap_or_else(|| format!("http://{}:{}{}", args.public_host, args.storage_api.port(), s3_api::PREFIX));
+    control.set_api_endpoint(api_url.clone());
+    let api = s3_api::Api::new(server.clone(), s3_api::Config { public_url: args.storage_api_public_url.clone(), spool_dir: spool, ..Default::default() });
+    info!(api = %args.storage_api, url = api_url, "storage developer API listening");
+    Ok((Storage { server, control, api }, (listener, api_listener)))
 }
 
 /// Ctrl-C, or SIGTERM from a supervisor (systemd, ECS, Kubernetes) during a rolling upgrade.
