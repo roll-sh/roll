@@ -26,6 +26,7 @@ pub(super) fn pull_up(
     ctx: &crate::exec::ExecCtx,
     plan: Plan,
     pred: Expr,
+    unplanned: &Unplanned,
 ) -> (Plan, Option<Expr>) {
     let mut parts = Vec::new();
     conjuncts(pred, &mut parts);
@@ -49,7 +50,7 @@ pub(super) fn pull_up(
         };
         match sub.kind {
             SubqueryKind::Exists => exists_join(cat, plan, sub, anti).is_some(),
-            SubqueryKind::Any if !anti => any_join(cat, plan, sub).is_some(),
+            SubqueryKind::Any if !anti => any_join(cat, plan, sub, unplanned).is_some(),
             _ => false,
         }
     };
@@ -63,14 +64,14 @@ pub(super) fn pull_up(
         }
         Some(f) => {
             // (Kept above the joins.)
-            let (p, rest) = pull_up_parts(cat, plan, subs);
+            let (p, rest) = pull_up_parts(cat, plan, subs, unplanned);
             let mut r: Vec<Expr> = rest.into_iter().collect();
             r.push(f);
             return (p, and_all(r));
         }
         None => plan,
     };
-    let (p, rest) = pull_up_parts(cat, plan, subs);
+    let (p, rest) = pull_up_parts(cat, plan, subs, unplanned);
     plan = p;
     (plan, rest)
 }
@@ -79,11 +80,15 @@ pub(super) fn pull_up(
 pub(super) fn pull_up_only(cat: &Catalog, plan: Plan, pred: Expr) -> (Plan, Option<Expr>) {
     let mut parts = Vec::new();
     conjuncts(pred, &mut parts);
-    pull_up_parts(cat, plan, parts)
+    pull_up_parts(cat, plan, parts, &Unplanned::new())
 }
 
+/// IN / ANY sub-selects' plans as bound, before their levels were planned, by subquery id
+/// (`Binder::unplanned_subs`).
+pub(super) type Unplanned = std::collections::HashMap<usize, Arc<Plan>>;
+
 /// The sublinks `parts` turned into joins over `plan`, in order; the ones that weren't.
-fn pull_up_parts(cat: &Catalog, plan: Plan, parts: Vec<Expr>) -> (Plan, Option<Expr>) {
+fn pull_up_parts(cat: &Catalog, plan: Plan, parts: Vec<Expr>, unplanned: &Unplanned) -> (Plan, Option<Expr>) {
     let mut plan = plan;
     let mut rest = Vec::new();
     for p in parts {
@@ -103,7 +108,7 @@ fn pull_up_parts(cat: &Catalog, plan: Plan, parts: Vec<Expr>) -> (Plan, Option<E
         };
         let joined = match sub.kind {
             SubqueryKind::Exists => exists_join(cat, &plan, sub, anti),
-            SubqueryKind::Any if !anti => any_join(cat, &plan, sub),
+            SubqueryKind::Any if !anti => any_join(cat, &plan, sub, unplanned),
             _ => None,
         }
         .map(|j| reduce_unique(cat, j));
@@ -563,6 +568,16 @@ fn sub_join(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
                     meta: meta.clone(),
                 })
             }
+            // An inheritance / partition tree's member scans (`sub_rel`): its clauses
+            // reading the outer query move up with the rest.
+            Plan::Append { inh: Some(_), .. } => {
+                let (c, rhs, _, limited) = sub_rel(p)?;
+                if limited || (!c.is_empty() && !pull) {
+                    return None;
+                }
+                out.extend(c.into_iter().map(|e| e.shift_cols(off as isize)));
+                Some(rhs)
+            }
             // A merge join input's sort (the subquery planned already): the pulled-up
             // tree is planned again as one group, and an EXISTS needs no order.
             Plan::Sort { input, .. } if pull => go(input, off, pull, out),
@@ -971,7 +986,7 @@ fn outer_to_params(e: Expr, params: &[Expr]) -> Option<Expr> {
 /// convert_ANY_sublink_to_join: `left op ANY (SELECT exprs FROM t WHERE …)`; the WHERE
 /// clauses reading this query's columns (a correlated one, as Postgres 18 pulls up) join
 /// along with the comparisons.
-fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
+fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -> Option<Plan> {
     if sub.left.is_empty()
         || sub.left.len() != sub.ops.len()
         // (Several columns compare as rows: only `=` is a conjunction of joinable ones.)
@@ -997,32 +1012,31 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
         return Some(j);
     }
     // The select list (through the binder's casting projection) over one table scan.
-    let mut exprs: Option<Vec<Expr>> = None;
-    let mut p: &Plan = &sub.plan;
-    while let Plan::Project { input, exprs: ex } = p {
-        if ex.iter().any(|e| has_sublink(e) || e.is_volatile()) {
-            return None;
-        }
-        exprs = Some(match exprs {
-            None => ex.clone(),
-            Some(outer) => outer
-                .into_iter()
-                .map(|e| {
-                    e.transform(&mut |x| {
-                        Ok(match x {
-                            Expr::Col(i, t) => ex.get(i).cloned().unwrap_or(Expr::Col(i, t)),
-                            x => x,
-                        })
-                    })
-                    .unwrap()
-                })
-                .collect(),
-        });
-        p = input;
-    }
+    let (mut exprs, p) = select_list(&sub.plan)?;
     let mut lateral: Vec<Expr> = Vec::new();
+    // A join tree (is_simple_subquery): pulled up with the sub-select, its relations the
+    // semi join's right side (pull_up_simple_subquery over convert_ANY_sublink_to_join's
+    // subquery RTE), from the sub-select as bound (pull_up_sublinks comes before any
+    // planning: a partitioned join isn't joined partitionwise yet).
+    let tree = || {
+        if let Some(u) = unplanned.get(&sub.id)
+            && let Some((ex, up)) = select_list(u)
+            && let Some((corr, rhs)) = sub_join(up)
+        {
+            return Some((ex, corr, rhs));
+        }
+        let (corr, rhs) = sub_join(p)?;
+        Some((None, corr, rhs))
+    };
     let (corr, rhs, types, scan_limited) = match sub_rel(p) {
         Some(x) => x,
+        None if let Some((ex, corr, rhs)) = tree() => {
+            if ex.is_some() {
+                exprs = ex;
+            }
+            let types = crate::sql::paths::analyzejoins::col_types(&rhs);
+            (corr, rhs, types, false)
+        }
         // Any other uncorrelated subquery joins as it is: a VALUES list pulled up
         // (pull_up_simple_values), else a subquery of its own ("ANY_subquery").
         None if sub.params.is_empty()
@@ -1163,6 +1177,35 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
         nleft,
         nright,
     ))
+}
+
+/// A sub-select's select list (its projections composed, None without one) and the plan
+/// below it; None when the list has a sublink or a volatile call.
+fn select_list(plan: &Plan) -> Option<(Option<Vec<Expr>>, &Plan)> {
+    let mut exprs: Option<Vec<Expr>> = None;
+    let mut p: &Plan = plan;
+    while let Plan::Project { input, exprs: ex } = p {
+        if ex.iter().any(|e| has_sublink(e) || e.is_volatile()) {
+            return None;
+        }
+        exprs = Some(match exprs {
+            None => ex.clone(),
+            Some(outer) => outer
+                .into_iter()
+                .map(|e| {
+                    e.transform(&mut |x| {
+                        Ok(match x {
+                            Expr::Col(i, t) => ex.get(i).cloned().unwrap_or(Expr::Col(i, t)),
+                            x => x,
+                        })
+                    })
+                    .unwrap()
+                })
+                .collect(),
+        });
+        p = input;
+    }
+    Some((exprs, p))
 }
 
 /// `any_join` for an uncorrelated sub-select whose select list returns a set (a

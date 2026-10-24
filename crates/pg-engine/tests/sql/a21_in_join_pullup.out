@@ -1,0 +1,252 @@
+> CREATE TABLE inj1 (a int, b int, c varchar) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE inj1_p1 PARTITION OF inj1 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE inj1_p2 PARTITION OF inj1 FOR VALUES FROM (250) TO (600)
+-- CREATE TABLE
+
+> INSERT INTO inj1 SELECT i, i % 25, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 2 = 0
+-- INSERT 0 300
+
+> CREATE INDEX inj1_p1_a ON inj1_p1 (a)
+-- CREATE INDEX
+
+> CREATE INDEX inj1_p2_a ON inj1_p2 (a)
+-- CREATE INDEX
+
+> CREATE TABLE inj2 (a int, b int, c varchar) PARTITION BY RANGE (b)
+-- CREATE TABLE
+
+> CREATE TABLE inj2_p1 PARTITION OF inj2 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE inj2_p2 PARTITION OF inj2 FOR VALUES FROM (250) TO (600)
+-- CREATE TABLE
+
+> INSERT INTO inj2 SELECT i % 25, i, to_char(i, 'FM0000') FROM generate_series(0, 599) i WHERE i % 3 = 0
+-- INSERT 0 200
+
+> CREATE TABLE inj3 (a int, b int, c int) PARTITION BY RANGE (((a + b) / 2))
+-- CREATE TABLE
+
+> CREATE TABLE inj3_p1 PARTITION OF inj3 FOR VALUES FROM (0) TO (250)
+-- CREATE TABLE
+
+> CREATE TABLE inj3_p2 PARTITION OF inj3 FOR VALUES FROM (250) TO (600)
+-- CREATE TABLE
+
+> INSERT INTO inj3 SELECT i, i, i % 25 FROM generate_series(0, 599, 2) i
+-- INSERT 0 300
+
+> ANALYZE inj1, inj2, inj3
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.* FROM inj1_p1 t1 WHERE t1.a IN (SELECT t1.b FROM inj2_p1 t1 WHERE t1.b IN (SELECT (t1.a + t1.b) / 2 FROM inj3_p1 t1 WHERE t1.c = 0)) AND t1.b = 0 ORDER BY t1.a
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a
+  ->  Nested Loop
+        ->  HashAggregate
+              Group Key: t1_1.b
+              ->  Hash Semi Join
+                    Hash Cond: (t1_1.b = ((t1_2.a + t1_2.b) / 2))
+                    ->  Seq Scan on inj2_p1 t1_1
+                    ->  Hash
+                          ->  Seq Scan on inj3_p1 t1_2
+                                Filter: (c = 0)
+        ->  Index Scan using inj1_p1_a on inj1_p1 t1
+              Index Cond: (a = t1_1.b)
+              Filter: (b = 0)
+-- EXPLAIN
+
+> SELECT t1.* FROM inj1_p1 t1 WHERE t1.a IN (SELECT t1.b FROM inj2_p1 t1 WHERE t1.b IN (SELECT (t1.a + t1.b) / 2 FROM inj3_p1 t1 WHERE t1.c = 0)) AND t1.b = 0 ORDER BY t1.a
+a:int4 | b:int4 | c:varchar
+0 | 0 | 0000
+150 | 0 | 0150
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.* FROM inj1 t1 WHERE t1.a IN (SELECT t1.b FROM inj2 t1 WHERE t1.b IN (SELECT (t1.a + t1.b) / 2 FROM inj3 t1 WHERE t1.c = 0)) AND t1.b = 0 ORDER BY t1.a
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a
+  ->  Nested Loop
+        ->  HashAggregate
+              Group Key: t1_1.b
+              ->  Hash Semi Join
+                    Hash Cond: (t1_1.b = ((t1_2.a + t1_2.b) / 2))
+                    ->  Append
+                          ->  Seq Scan on inj2_p1 t1_5
+                          ->  Seq Scan on inj2_p2 t1_6
+                    ->  Hash
+                          ->  Append
+                                ->  Seq Scan on inj3_p1 t1_7
+                                      Filter: (c = 0)
+                                ->  Seq Scan on inj3_p2 t1_8
+                                      Filter: (c = 0)
+        ->  Append
+              ->  Index Scan using inj1_p1_a on inj1_p1 t1_3
+                    Index Cond: (a = t1_1.b)
+                    Filter: (b = 0)
+              ->  Index Scan using inj1_p2_a on inj1_p2 t1_4
+                    Index Cond: (a = t1_1.b)
+                    Filter: (b = 0)
+-- EXPLAIN
+
+> SELECT t1.* FROM inj1 t1 WHERE t1.a IN (SELECT t1.b FROM inj2 t1 WHERE t1.b IN (SELECT (t1.a + t1.b) / 2 FROM inj3 t1 WHERE t1.c = 0)) AND t1.b = 0 ORDER BY t1.a
+a:int4 | b:int4 | c:varchar
+0 | 0 | 0000
+150 | 0 | 0150
+300 | 0 | 0300
+450 | 0 | 0450
+-- SELECT 4
+
+> SET enable_partitionwise_join = true
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.* FROM inj1 t1 WHERE t1.a IN (SELECT t1.b FROM inj2 t1 WHERE t1.b IN (SELECT (t1.a + t1.b) / 2 FROM inj3 t1 WHERE t1.c = 0)) AND t1.b = 0 ORDER BY t1.a
+QUERY PLAN:text
+Sort
+  Sort Key: t1.a
+  ->  Append
+        ->  Nested Loop
+              ->  HashAggregate
+                    Group Key: t1_5.b
+                    ->  Hash Semi Join
+                          Hash Cond: (t1_5.b = ((t1_7.a + t1_7.b) / 2))
+                          ->  Seq Scan on inj2_p1 t1_5
+                          ->  Hash
+                                ->  Seq Scan on inj3_p1 t1_7
+                                      Filter: (c = 0)
+              ->  Index Scan using inj1_p1_a on inj1_p1 t1_3
+                    Index Cond: (a = t1_5.b)
+                    Filter: (b = 0)
+        ->  Nested Loop
+              ->  HashAggregate
+                    Group Key: t1_6.b
+                    ->  Hash Semi Join
+                          Hash Cond: (t1_6.b = ((t1_8.a + t1_8.b) / 2))
+                          ->  Seq Scan on inj2_p2 t1_6
+                          ->  Hash
+                                ->  Seq Scan on inj3_p2 t1_8
+                                      Filter: (c = 0)
+              ->  Index Scan using inj1_p2_a on inj1_p2 t1_4
+                    Index Cond: (a = t1_6.b)
+                    Filter: (b = 0)
+-- EXPLAIN
+
+> SELECT t1.* FROM inj1 t1 WHERE t1.a IN (SELECT t1.b FROM inj2 t1 WHERE t1.b IN (SELECT (t1.a + t1.b) / 2 FROM inj3 t1 WHERE t1.c = 0)) AND t1.b = 0 ORDER BY t1.a
+a:int4 | b:int4 | c:varchar
+0 | 0 | 0000
+150 | 0 | 0150
+300 | 0 | 0300
+450 | 0 | 0450
+-- SELECT 4
+
+> SELECT t1.* FROM inj1 t1 WHERE t1.a IN (SELECT t1.b FROM inj2 t1, inj3 t2 WHERE t1.a = 0 AND t1.b = (t2.a + t2.b) / 2) AND t1.b = 0 ORDER BY t1.a
+a:int4 | b:int4 | c:varchar
+0 | 0 | 0000
+150 | 0 | 0150
+300 | 0 | 0300
+450 | 0 | 0450
+-- SELECT 4
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_nestloop = off
+-- SET
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.* FROM inj1 t1 WHERE t1.a IN (SELECT t1.b FROM inj2 t1 WHERE t1.b IN (SELECT (t1.a + t1.b) / 2 FROM inj3 t1 WHERE t1.c = 0)) AND t1.b = 0 ORDER BY t1.a
+QUERY PLAN:text
+Merge Append
+  Sort Key: t1.a
+  ->  Merge Semi Join
+        Merge Cond: (t1_3.a = t1_5.b)
+        ->  Sort
+              Sort Key: t1_3.a
+              ->  Seq Scan on inj1_p1 t1_3
+                    Filter: (b = 0)
+        ->  Merge Semi Join
+              Merge Cond: (t1_5.b = (((t1_7.a + t1_7.b) / 2)))
+              ->  Sort
+                    Sort Key: t1_5.b
+                    ->  Seq Scan on inj2_p1 t1_5
+              ->  Sort
+                    Sort Key: (((t1_7.a + t1_7.b) / 2))
+                    ->  Seq Scan on inj3_p1 t1_7
+                          Filter: (c = 0)
+  ->  Merge Semi Join
+        Merge Cond: (t1_4.a = t1_6.b)
+        ->  Sort
+              Sort Key: t1_4.a
+              ->  Seq Scan on inj1_p2 t1_4
+                    Filter: (b = 0)
+        ->  Merge Semi Join
+              Merge Cond: (t1_6.b = (((t1_8.a + t1_8.b) / 2)))
+              ->  Sort
+                    Sort Key: t1_6.b
+                    ->  Seq Scan on inj2_p2 t1_6
+              ->  Sort
+                    Sort Key: (((t1_8.a + t1_8.b) / 2))
+                    ->  Seq Scan on inj3_p2 t1_8
+                          Filter: (c = 0)
+-- EXPLAIN
+
+> SELECT t1.* FROM inj1 t1 WHERE t1.a IN (SELECT t1.b FROM inj2 t1 WHERE t1.b IN (SELECT (t1.a + t1.b) / 2 FROM inj3 t1 WHERE t1.c = 0)) AND t1.b = 0 ORDER BY t1.a
+a:int4 | b:int4 | c:varchar
+0 | 0 | 0000
+150 | 0 | 0150
+300 | 0 | 0300
+450 | 0 | 0450
+-- SELECT 4
+
+> EXPLAIN (COSTS OFF)
+> SELECT t1.b FROM inj2_p1 t1 WHERE t1.b IN (SELECT t1.a + 0 FROM inj3_p1 t1 WHERE t1.c = 0)
+QUERY PLAN:text
+Merge Semi Join
+  Merge Cond: (t1.b = ((t1_1.a + 0)))
+  ->  Sort
+        Sort Key: t1.b
+        ->  Seq Scan on inj2_p1 t1
+  ->  Sort
+        Sort Key: ((t1_1.a + 0))
+        ->  Seq Scan on inj3_p1 t1_1
+              Filter: (c = 0)
+-- EXPLAIN
+
+> SELECT t1.b FROM inj2_p1 t1 WHERE t1.b IN (SELECT t1.a + 0 FROM inj3_p1 t1 WHERE t1.c = 0) ORDER BY 1
+b:int4
+0
+150
+-- SELECT 2
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_nestloop
+-- RESET
+
+> RESET enable_partitionwise_join
+-- RESET
+
+> SELECT count(*) FROM inj1 x WHERE x.a IN (SELECT t1.b FROM inj2 t1, inj3 t2 WHERE t1.b = t2.a AND t2.c = x.b)
+count:int8
+100
+-- SELECT 1
+
+> SELECT count(*) FROM inj1 x WHERE x.a NOT IN (SELECT t1.b FROM inj2 t1, inj3 t2 WHERE t1.b = t2.a)
+count:int8
+200
+-- SELECT 1
+
+> SELECT count(*) FROM inj1 x WHERE EXISTS (SELECT 1 FROM inj2 t1, inj3 t2 WHERE t1.b = t2.a AND t1.b = x.a)
+count:int8
+100
+-- SELECT 1
+

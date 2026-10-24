@@ -2368,7 +2368,7 @@ impl Binder<'_, '_> {
         if !plain_target {
             return super::optimize::add_filter(&self.cat, plan, pred);
         }
-        let (p, rest) = super::sublink::pull_up(&self.cat, self.ctx, plan, pred);
+        let (p, rest) = super::sublink::pull_up(&self.cat, self.ctx, plan, pred, &self.unplanned_subs);
         match rest {
             Some(r) => super::optimize::add_filter(&self.cat, p, r),
             None => p,

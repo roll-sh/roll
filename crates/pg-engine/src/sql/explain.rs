@@ -3301,7 +3301,161 @@ fn assign_refnames_skip(
             }
         }
     }
+    inherited_parents_in_order(root, &mut out);
     (out, results)
+}
+
+/// One range table entry of a query level (`inherited_parents_in_order`): a reference name,
+/// its place, the node named after it (None: a partitioned table joined partitionwise, no
+/// Append of its own), and its children (inheritance members) in the order they expand.
+struct LevelRte {
+    base: String,
+    rti: crate::sql::plan::Rti,
+    node: Option<usize>,
+    kids: Vec<(Vec<usize>, usize)>,
+}
+
+/// Relations of one query level that share a name with two or more inheritance parents
+/// among them (a pulled-up sub-select reusing an alias): Postgres names the level's range
+/// table entries in order (parents and plain relations), then the parents' children as
+/// expand_inherited_rtentry appends them, parent by parent, each in bound order.
+fn inherited_parents_in_order(root: &Plan, out: &mut HashMap<usize, String>) {
+    fn bound_path(s: &crate::sql::plan::ScanPlan) -> Vec<usize> {
+        let Some(levels) = &s.part else { return Vec::new() };
+        let mut path: Vec<usize> = levels
+            .iter()
+            .map(|lv| {
+                let mut bounds: Vec<&crate::catalog::PartBound> = lv.siblings.iter().collect();
+                bounds.push(&lv.bound);
+                let _g = crate::catalog::partition::under(lv.colls.clone());
+                bounds.sort_by(|a, b| crate::catalog::partition::bound_order(a, b));
+                bounds.iter().position(|b| **b == lv.bound).unwrap_or(0)
+            })
+            .collect();
+        path.reverse();
+        path
+    }
+    fn base_of(s: &crate::sql::plan::ScanPlan) -> String {
+        s.alias.clone().unwrap_or_else(|| s.table.name.clone())
+    }
+    // (`bad`: a shape this doesn't follow (a sub-partitioned member, a UNION ALL): the
+    // level is left as named.)
+    fn walk(p: &Plan, cur: usize, levels: &mut Vec<(Vec<LevelRte>, bool)>) {
+        match p {
+            Plan::Scan(s) if s.rti.0 != 0 => {
+                let base = base_of(s);
+                if s.part.is_none() {
+                    levels[cur].0.push(LevelRte { base, rti: s.rti, node: Some(addr(p)), kids: Vec::new() });
+                    return;
+                }
+                // (A partition joined partitionwise: a child of its parent's entry.)
+                let path = bound_path(s);
+                match levels[cur].0.iter_mut().find(|u| u.rti == s.rti && u.node.is_none()) {
+                    Some(u) => u.kids.push((path, addr(p))),
+                    None => levels[cur].0.push(LevelRte { base, rti: s.rti, node: None, kids: vec![(path, addr(p))] }),
+                }
+            }
+            Plan::Append { inh: Some(_), inputs, .. } => {
+                let mut kids = Vec::new();
+                let mut first: Option<(&crate::sql::plan::ScanPlan, usize)> = None;
+                for (k, m) in inputs.iter().enumerate() {
+                    let mut x: &Plan = m;
+                    while let Plan::Project { input, .. } | Plan::Filter { input, .. } = x {
+                        x = input;
+                    }
+                    match x {
+                        Plan::Scan(s) => {
+                            first.get_or_insert((s, addr(x)));
+                            kids.push((vec![k], addr(x)));
+                        }
+                        Plan::Empty { .. } => {}
+                        _ => levels[cur].1 = true,
+                    }
+                }
+                let Some((s, a)) = first else { return };
+                if inputs.len() < 2 {
+                    // (A single member's Append is dropped: the member takes the name.)
+                    levels[cur].0.push(LevelRte { base: base_of(s), rti: s.rti, node: Some(a), kids: Vec::new() });
+                    return;
+                }
+                levels[cur].0.push(LevelRte { base: base_of(s), rti: s.rti, node: Some(addr(p)), kids });
+            }
+            Plan::Barrier { input, .. } => {
+                levels.push((Vec::new(), false));
+                let n = levels.len() - 1;
+                walk(input, n, levels);
+            }
+            Plan::SetOp { .. } | Plan::Append { inh: None, alias: Some(_), .. } => levels[cur].1 = true,
+            _ => {
+                for c in plan_inputs(p) {
+                    walk(c, cur, levels);
+                }
+            }
+        }
+    }
+    let mut levels: Vec<(Vec<LevelRte>, bool)> = vec![(Vec::new(), false)];
+    walk(root, 0, &mut levels);
+    for (units, bad) in levels {
+        if bad {
+            continue;
+        }
+        let mut bases: Vec<&str> = Vec::new();
+        for u in &units {
+            if !bases.contains(&u.base.as_str()) {
+                bases.push(&u.base);
+            }
+        }
+        for base in bases {
+            let mut group: Vec<&LevelRte> = units.iter().filter(|u| u.base == base).collect();
+            // (Two entries of one place: a sub-partitioned tree, left as named.)
+            let mut rtis: Vec<crate::sql::plan::Rti> = group.iter().map(|u| u.rti).collect();
+            rtis.sort();
+            rtis.dedup();
+            if rtis.len() != group.len()
+                || group.iter().filter(|u| u.node.is_none() || !u.kids.is_empty()).count() < 2
+                || group.iter().flat_map(|u| u.node.iter().chain(u.kids.iter().map(|k| &k.1))).any(|a| !out.contains_key(a))
+            {
+                continue;
+            }
+            let num = |n: &str| -> usize {
+                n.strip_prefix(base)
+                    .and_then(|x| x.strip_prefix('_'))
+                    .and_then(|x| x.parse::<usize>().ok())
+                    .unwrap_or(0)
+            };
+            let mut names: Vec<String> = group
+                .iter()
+                .flat_map(|u| u.node.iter().chain(u.kids.iter().map(|k| &k.1)))
+                .map(|a| out[a].clone())
+                .collect();
+            // (Partitioned tables joined partitionwise take names too, the first ones free.)
+            let need = group.len() + group.iter().map(|u| u.kids.len()).sum::<usize>();
+            let mut k = 0;
+            while names.len() < need {
+                let cand = if k == 0 { base.to_string() } else { crate::catalog::suffixed_name(base, &format!("_{k}")) };
+                k += 1;
+                if !names.contains(&cand) && !out.values().any(|v| *v == cand) {
+                    names.push(cand);
+                }
+            }
+            names.sort_by_key(|n| num(n));
+            group.sort_by_key(|u| u.rti);
+            let mut it = names.into_iter();
+            for u in &group {
+                let n = it.next().expect("a name per entry");
+                if let Some(a) = u.node {
+                    out.insert(a, n);
+                }
+            }
+            for u in &group {
+                let mut kids = u.kids.clone();
+                kids.sort();
+                for (_, a) in kids {
+                    out.insert(a, it.next().expect("a name per child"));
+                }
+            }
+        }
+    }
 }
 
 /// The UNION ALL arms kept subqueries of each Append of the final plan, in its order.

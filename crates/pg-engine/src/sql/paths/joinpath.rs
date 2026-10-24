@@ -473,6 +473,20 @@ struct Search<'s, 'c, 'a> {
     /// equate with it (`a.x = 0 AND b.y = 0`: one class, no join clause), those items
     /// (have_relevant_eclass_joinclause counts them as joinable: the join is likely small).
     const_ecs: Vec<u32>,
+    /// The equivalence classes' expression members (`XMember`); as members they are
+    /// numbered after the group's columns (`ec.len() + k`).
+    xm: Vec<XMember>,
+}
+
+/// An equivalence class member that is an expression of one FROM item's columns, not a
+/// column (an EquivalenceMember whose em_expr is no Var: `t1.a = (t3.a + t3.b) / 2` puts
+/// `(t3.a + t3.b) / 2` in `t1.a`'s class, add_eq_member).
+struct XMember {
+    /// Over the group's row.
+    expr: Expr,
+    /// Its FROM item (em_relids).
+    leaf: usize,
+    ec: usize,
 }
 
 /// A PlaceHolderVar of the group (`plan::phv_projection`): its column of the group's
@@ -868,19 +882,65 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
         })
     }
 
-    /// The columns the equivalence class of a mergeable column equality clause has, in
-    /// the order its clauses brought them in (None: not such a clause).
+    /// The equivalence class member a clause side is: a group column, or an expression
+    /// member (`xm`, numbered after the columns).
+    fn mem_id(&self, e: &Expr) -> Option<usize> {
+        if let Some(g) = key_col(e) {
+            return Some(g);
+        }
+        if self.xm.is_empty() {
+            return None;
+        }
+        let e = key_operand(e);
+        self.xm.iter().position(|m| m.expr.same_as(e)).map(|k| self.ec.len() + k)
+    }
+
+    /// A member's class.
+    fn m_ec(&self, g: usize) -> usize {
+        match g.checked_sub(self.ec.len()) {
+            Some(k) => self.xm[k].ec,
+            None => self.ec[g],
+        }
+    }
+
+    /// A member's FROM item.
+    fn m_leaf(&self, g: usize) -> usize {
+        match g.checked_sub(self.ec.len()) {
+            Some(k) => self.xm[k].leaf,
+            None => self.leaf_of[g],
+        }
+    }
+
+    /// A member as an expression over the group's row (a column typed `ty`).
+    fn m_expr(&self, g: usize, ty: DataType) -> Expr {
+        match g.checked_sub(self.ec.len()) {
+            Some(k) => self.xm[k].expr.clone(),
+            None => Expr::Col(g, ty),
+        }
+    }
+
+    /// The equivalence class of a mergeable equality clause between two of its members
+    /// (None: not such a clause).
     fn clause_ec(&self, c: &Clause) -> Option<usize> {
         // (A semi join's own clause equates its sides as an inner join's does.)
         if !c.ecable || (c.on && !(self.kind == JoinKind::Semi && !self.general)) {
             return None;
         }
         let (a, b, _, _) = c.eq.as_ref()?;
-        let (x, y) = (key_col(a)?, key_col(b)?);
-        (self.ec[x] == self.ec[y]).then_some(self.ec[x])
+        let (x, y) = (self.mem_id(a)?, self.mem_id(b)?);
+        (self.m_ec(x) == self.m_ec(y)).then_some(self.m_ec(x))
     }
 
-    /// The equivalence class members (group columns) in the order their clauses list them.
+    /// Whether clause `c` is an equality between members `x` and `y` (either way round).
+    fn equates(&self, c: &Clause, x: usize, y: usize) -> bool {
+        c.eq.as_ref().is_some_and(|(p, q, _, _)| {
+            let (p, q) = (self.mem_id(p), self.mem_id(q));
+            (p == Some(x) && q == Some(y)) || (p == Some(y) && q == Some(x))
+        })
+    }
+
+    /// The equivalence class members (group columns, then expression members by their
+    /// numbers) in the order their clauses list them.
     fn ec_members(&self) -> Vec<usize> {
         let mut out: Vec<usize> = Vec::new();
         for c in self.clauses.iter().filter(|c| !c.derived) {
@@ -888,13 +948,33 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
                 continue;
             }
             let (a, b, _, _) = c.eq.as_ref().unwrap();
-            for g in [key_col(a), key_col(b)].into_iter().flatten() {
+            for g in [self.mem_id(a), self.mem_id(b)].into_iter().flatten() {
                 if !out.contains(&g) {
                     out.push(g);
                 }
             }
         }
         out
+    }
+
+    /// The member of class `e` in relation `set` a join clause equates
+    /// (generate_join_implied_equalities_normal): a Var (column) before an expression,
+    /// else the first in the class.
+    fn first_member(&self, members: &[usize], e: usize, set: u32) -> Option<usize> {
+        let mut it = members.iter().copied().filter(|&g| self.m_ec(g) == e && (1u32 << self.m_leaf(g)) & set != 0);
+        let first = it.next()?;
+        if first < self.ec.len() {
+            return Some(first);
+        }
+        Some(it.find(|&g| g < self.ec.len()).unwrap_or(first))
+    }
+
+    /// The group columns a member reads.
+    fn m_columns(&self, g: usize) -> Vec<usize> {
+        match g.checked_sub(self.ec.len()) {
+            Some(k) => self.xm[k].expr.columns(),
+            None => vec![g],
+        }
     }
 
     /// Add the equalities between equivalence class members of different FROM items the
@@ -905,22 +985,21 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
         let mut add = Vec::new();
         for (i, &x) in members.iter().enumerate() {
             for &y in &members[i + 1..] {
-                if self.ec[x] != self.ec[y] || self.leaf_of[x] == self.leaf_of[y] {
+                if self.m_ec(x) != self.m_ec(y) || self.m_leaf(x) == self.m_leaf(y) {
                     continue;
                 }
-                let exists = self.clauses[..n].iter().any(|c| {
-                    c.eq.as_ref().is_some_and(|(a, b, _, _)| {
-                        let (p, q) = (key_col(a), key_col(b));
-                        (p == Some(x) && q == Some(y)) || (p == Some(y) && q == Some(x))
-                    })
-                });
+                let exists = self.clauses[..n].iter().any(|c| self.equates(c, x, y));
                 if exists {
                     continue;
                 }
                 // The class's operator, from one of its clauses over the same types.
-                let (tx, ty) = (self.col_type(x), self.col_type(y));
+                let m_ty = |g: usize| match g.checked_sub(self.ec.len()) {
+                    Some(k) => self.xm[k].expr.ty(),
+                    None => self.col_type(g),
+                };
+                let (tx, ty) = (m_ty(x), m_ty(y));
                 let Some(template) = self.clauses[..n].iter().find(|c| {
-                    self.clause_ec(c) == Some(self.ec[x])
+                    self.clause_ec(c) == Some(self.m_ec(x))
                         && c.eq.as_ref().is_some_and(|(a, b, _, _)| {
                             a.ty().without_typmod() == tx.without_typmod()
                                 && b.ty().without_typmod() == ty.without_typmod()
@@ -931,16 +1010,18 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
                 let Expr::Call(def, _, rt) = &template.expr else {
                     continue;
                 };
-                let (ex, ey) = (Expr::Col(x, tx.clone()), Expr::Col(y, ty.clone()));
-                let (lx, ly) = (1u32 << self.leaf_of[x], 1u32 << self.leaf_of[y]);
+                let (ex, ey) = (self.m_expr(x, tx.clone()), self.m_expr(y, ty.clone()));
+                let (lx, ly) = (1u32 << self.m_leaf(x), 1u32 << self.m_leaf(y));
                 let expr = Expr::Call(def.clone(), vec![ex.clone(), ey.clone()], rt.clone());
+                // (The engine merges on a column against an expression, not two of them.)
+                let cols = key_col(&ex).is_some() || key_col(&ey).is_some();
                 add.push(Clause {
                     cost: costs::qual_cost(&expr),
                     expr,
                     leaves: lx | ly,
                     eq: Some((ex, ey, lx, ly)),
                     hashable: template.hashable,
-                    mergeable: template.mergeable,
+                    mergeable: template.mergeable && cols,
                     ecable: true,
                     commutes: template.commutes,
                     on: false,
@@ -981,13 +1062,13 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
             }
             let mut ecs: Vec<usize> = Vec::new();
             for &g in &members {
-                if self.leaf_of[g] == l && !ecs.contains(&self.ec[g]) {
-                    ecs.push(self.ec[g]);
+                if self.m_leaf(g) == l && !ecs.contains(&self.m_ec(g)) {
+                    ecs.push(self.m_ec(g));
                 }
             }
             for e in ecs {
-                let outer = members.iter().copied().find(|&g| self.ec[g] == e && self.leaf_of[g] != l);
-                let inner = members.iter().copied().find(|&g| self.ec[g] == e && self.leaf_of[g] == l);
+                let outer = members.iter().copied().find(|&g| self.m_ec(g) == e && self.m_leaf(g) != l);
+                let inner = members.iter().copied().find(|&g| self.m_ec(g) == e && self.m_leaf(g) == l);
                 if let (Some(x), Some(y)) = (outer, inner)
                     && !known(&oriented, x, y)
                 {
@@ -998,23 +1079,32 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
         // (match_eclass_clauses_to_index: the indexed member with every other one.)
         for l in 0..nleaves {
             let Some((_, rel)) = &self.leaves[l].scan else { continue };
-            let mut cols: Vec<usize> = Vec::new();
+            // (An expression index's key that is an expression member of the class too.)
+            let off = self.leaves[l].off;
+            let mut keyed: Vec<usize> = Vec::new();
             for ii in &rel.indexes {
                 if !matches!(ii.am, crate::sql::paths::Am::Btree | crate::sql::paths::Am::Hash) {
                     continue;
                 }
                 for k in &ii.keys {
-                    if let Expr::Col(c, _) = k
-                        && !cols.contains(c)
+                    let g = match k {
+                        Expr::Col(c, _) => leaf_cols(self, l, *c),
+                        k => self
+                            .xm
+                            .iter()
+                            .position(|m| m.leaf == l && m.expr.clone().shift_cols(-(off as isize)).same_as(k))
+                            .map(|x| self.ec.len() + x),
+                    };
+                    if let Some(g) = g
+                        && !keyed.contains(&g)
                     {
-                        cols.push(*c);
+                        keyed.push(g);
                     }
                 }
             }
-            for c in cols {
-                let Some(g) = leaf_cols(self, l, c) else { continue };
+            for g in keyed {
                 for &h in &members {
-                    if self.ec[h] == self.ec[g] && self.leaf_of[h] != l && !known(&oriented, g, h) {
+                    if self.m_ec(h) == self.m_ec(g) && self.m_leaf(h) != l && !known(&oriented, g, h) {
                         oriented.push((g, h));
                     }
                 }
@@ -1046,15 +1136,20 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
 
     /// The class clauses between the members of `oriented` pairs shown in that order.
     fn put_orientation(&mut self, oriented: &[(usize, usize)]) {
-        for c in self.clauses.iter_mut() {
-            if !c.ecable || c.on {
-                continue;
-            }
-            let Some((a, b, _, _)) = c.eq.clone() else { continue };
-            let (Some(x), Some(y)) = (key_col(&a), key_col(&b)) else { continue };
-            if !oriented.contains(&(y, x)) || a.ty().without_typmod() != b.ty().without_typmod() {
-                continue;
-            }
+        // (Members by `mem_id`: expression members' clauses too.)
+        let flips: Vec<usize> = (0..self.clauses.len())
+            .filter(|&i| {
+                let c = &self.clauses[i];
+                if !c.ecable || c.on {
+                    return false;
+                }
+                let Some((a, b, _, _)) = &c.eq else { return false };
+                let (Some(x), Some(y)) = (self.mem_id(a), self.mem_id(b)) else { return false };
+                oriented.contains(&(y, x)) && a.ty().without_typmod() == b.ty().without_typmod()
+            })
+            .collect();
+        for i in flips {
+            let c = &mut self.clauses[i];
             let Expr::Call(def, args, rt) = &c.expr else { continue };
             if args.len() != 2 {
                 continue;
@@ -1086,7 +1181,6 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
             return all;
         }
         let members = self.ec_members();
-        let in_set = |g: usize, s: u32| (1u32 << self.leaf_of[g]) & s != 0;
         let mut chosen: Vec<(usize, usize)> = Vec::new(); // (ec, clause)
         let mut out = Vec::new();
         for &i in &all {
@@ -1101,19 +1195,9 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
                 continue;
             }
             // generate_join_implied_equalities_normal: the first members on each side.
-            let first = |s: u32| {
-                members
-                    .iter()
-                    .copied()
-                    .find(|&g| self.ec[g] == e && in_set(g, s))
-            };
+            let first = |s: u32| self.first_member(&members, e, s);
             let pick = match (first(a), first(b)) {
-                (Some(x), Some(y)) => all.iter().copied().find(|&j| {
-                    self.clauses[j].eq.as_ref().is_some_and(|(p, q, _, _)| {
-                        let (p, q) = (key_col(p), key_col(q));
-                        (p == Some(x) && q == Some(y)) || (p == Some(y) && q == Some(x))
-                    })
-                }),
+                (Some(x), Some(y)) => all.iter().copied().find(|&j| self.equates(&self.clauses[j], x, y)),
                 _ => None,
             };
             match pick {
@@ -1899,16 +1983,10 @@ impl Search<'_, '_, '_> {
             // generate_join_implied_equalities: one clause per equivalence class, between its
             // first members on either side (the one the join's restriction list takes), when
             // that is a candidate here.
-            let in_set = |g: usize, s: u32| (1u32 << self.leaf_of[g]) & s != 0;
             let pick = |e: usize| -> Option<usize> {
-                let first = |s: u32| members.iter().copied().find(|&g| self.ec[g] == e && in_set(g, s));
+                let first = |s: u32| self.first_member(&members, e, s);
                 let (x, y) = (first(req)?, first(set)?);
-                used.iter().map(|c| c.3).find(|&j| {
-                    self.clauses[j].eq.as_ref().is_some_and(|(p, q, _, _)| {
-                        let (p, q) = (key_col(p), key_col(q));
-                        (p == Some(x) && q == Some(y)) || (p == Some(y) && q == Some(x))
-                    })
-                })
+                used.iter().map(|c| c.3).find(|&j| self.equates(&self.clauses[j], x, y))
             };
             let used: Vec<&(Expr, Expr, u32, usize)> = used
                 .iter()
@@ -1937,7 +2015,11 @@ impl Search<'_, '_, '_> {
                 // then index matching made it first, the column first
                 // (generate_implied_equalities_for_column).)
                 let index_key = r.indexes.iter().any(|ii| {
-                    ii.keys.iter().any(|k| matches!((k, col), (Expr::Col(a, _), Expr::Col(b, _)) if a == b))
+                    ii.keys.iter().any(|k| {
+                        matches!((k, col), (Expr::Col(a, _), Expr::Col(b, _)) if a == b)
+                            // (An expression member an index has as a key.)
+                            || (!matches!(col, Expr::Col(..)) && k.same_as(col))
+                    })
                 });
                 let symmetric = self.clause_ec(&self.clauses[*ci]).is_some()
                     && args.len() == 2
@@ -3024,7 +3106,7 @@ impl Search<'_, '_, '_> {
                             continue;
                         }
                         if let Some((a, b, al, _)) = &c.eq
-                            && let (Some(x), Some(y)) = (key_col(a), key_col(b))
+                            && let (Some(x), Some(y)) = (self.mem_id(a), self.mem_id(b))
                         {
                             let (x, y) = if *al & s1 != 0 { (x, y) } else { (y, x) };
                             self.note_derived(x, y, false);
@@ -3089,9 +3171,9 @@ impl Search<'_, '_, '_> {
         }
     }
 
-    /// The semi join's right side (one leaf) made unique on the columns its equality
-    /// clauses compare (create_unique_path): None when the clauses aren't all such
-    /// equalities, or every such column is equated to a constant.
+    /// The semi join's right side (a leaf, or a join of several) made unique on the
+    /// columns its equality clauses compare (create_unique_path): None when the clauses
+    /// aren't all such equalities, or every such column is equated to a constant.
     fn unique_rel(&self, r: usize, restrict: &[usize]) -> Option<JRel> {
         let rset = self.rels[r].set;
         if restrict.is_empty() {
@@ -3607,18 +3689,13 @@ impl Search<'_, '_, '_> {
                 }
             })
             .collect();
-        // (A semi or anti join merges on columns only: its unique-ified side, which
-        // Postgres would prefer, groups by columns here.)
-        let semi_like = matches!(jt, Jt::Semi | Jt::Anti | Jt::RightSemi | Jt::RightAnti);
+        // (A semi or anti join merges on an expression of its side too: select_mergejoin_clauses.)
         let merge: Vec<(usize, bool)> = sides
             .iter()
             .copied()
             .filter(|&(c, oa)| {
                 let cl = &self.clauses[c];
-                cl.mergeable
-                    && (oa || cl.commutes)
-                    && (!semi_like
-                        || cl.eq.as_ref().is_some_and(|(a, b, _, _)| key_col(a).is_some() && key_col(b).is_some()))
+                cl.mergeable && (oa || cl.commutes)
             })
             .collect();
         let hash: Vec<(usize, bool)> = sides
@@ -4257,26 +4334,21 @@ impl Search<'_, '_, '_> {
         // the parameters and the outer side's member (else nothing would equate those).
         {
             let members = self.ec_members();
-            let in_set = |g: usize, s: u32| (1u32 << self.leaf_of[g]) & s != 0;
+            let in_set = |g: usize, s: u32| (1u32 << self.m_leaf(g)) & s != 0;
             let mut ecs: Vec<usize> = Vec::new();
             for &g in &members {
-                if !ecs.contains(&self.ec[g]) {
-                    ecs.push(self.ec[g]);
+                if !ecs.contains(&self.m_ec(g)) {
+                    ecs.push(self.m_ec(g));
                 }
             }
             for e in ecs {
-                let first = |s: u32| members.iter().copied().find(|&g| self.ec[g] == e && in_set(g, s));
+                let first = |s: u32| self.first_member(&members, e, s);
                 let (Some(x), Some(y)) = (first(req_all), first(set)) else { continue };
                 if !in_set(y, ip.set) {
                     continue;
                 }
                 let Some(z) = first(op.set) else { continue };
-                let found = (0..self.clauses.len()).find(|&j| {
-                    self.clauses[j].eq.as_ref().is_some_and(|(p, q, _, _)| {
-                        let (p, q) = (key_col(p), key_col(q));
-                        (p == Some(x) && q == Some(z)) || (p == Some(z) && q == Some(x))
-                    })
-                });
+                let found = (0..self.clauses.len()).find(|&j| self.equates(&self.clauses[j], x, z));
                 if let Some(j) = found
                     && !quals.contains(&j)
                     && !enforced.contains(&j)
@@ -4333,6 +4405,18 @@ impl Search<'_, '_, '_> {
             return;
         }
         if !param_join && op.req != 0 {
+            return;
+        }
+        // (A unique-ified outer side returns its keys only: the inner side's parameters
+        // from it must be among them.)
+        if let JNode::Unique { cols, .. } = &op.node
+            && ip.req & op.set != 0
+            && self
+                .outer_params(ip)
+                .iter()
+                .flat_map(Expr::columns)
+                .any(|g| self.leaves_of(&Expr::Col(g, DataType::Unknown)) & op.set != 0 && !cols.contains(&g))
+        {
             return;
         }
         // have_dangerous_phv: a PlaceHolderVar the inner side reads as a parameter whose
@@ -5768,18 +5852,21 @@ impl Search<'_, '_, '_> {
                     let ec_leaves = |e: usize| {
                         members
                             .iter()
-                            .filter(|&&g| self.ec[g] == e)
-                            .fold(0u32, |m, &g| m | (1u32 << self.leaf_of[g]))
+                            .filter(|&&g| self.m_ec(g) == e)
+                            .fold(0u32, |m, &g| m | (1u32 << self.m_leaf(g)))
                     };
                     for &g in &members {
                         for side in [outer.set, inner.set] {
-                            let lg = 1u32 << self.leaf_of[g];
-                            if lg & side != 0
-                                && ec_leaves(self.ec[g]) & !side != 0
-                                && let Some(i) = pos(&both, g)
-                                && !kept.contains(&i)
-                            {
-                                kept.push(i);
+                            let lg = 1u32 << self.m_leaf(g);
+                            if lg & side != 0 && ec_leaves(self.m_ec(g)) & !side != 0 {
+                                // (An expression member: the columns it reads.)
+                                for c in self.m_columns(g) {
+                                    if let Some(i) = pos(&both, c)
+                                        && !kept.contains(&i)
+                                    {
+                                        kept.push(i);
+                                    }
+                                }
                             }
                         }
                     }
@@ -7234,6 +7321,7 @@ impl Planner<'_, '_> {
             derives: Default::default(),
             ppi: Default::default(),
             const_ecs: Vec::new(),
+            xm: Vec::new(),
         };
         s.needed.resize(gw, false);
         for (ci, (e, on)) in raw_clauses.into_iter().enumerate() {
@@ -7381,6 +7469,64 @@ impl Planner<'_, '_> {
                             *e = ex;
                         }
                     }
+                    for m in s.xm.iter_mut() {
+                        if m.ec == ey {
+                            m.ec = ex;
+                        }
+                    }
+                }
+                continue;
+            }
+            // A column equated with an expression of another FROM item's columns: the
+            // expression is a member of the column's class (process_equivalence /
+            // add_eq_member: em_expr any expression, em_relids its relations), the same
+            // expression in another clause the same member (merging their classes).
+            // (Not over an outer join: an expression of a nullable side's columns isn't
+            // computed below the join that nulls them (its nullingrels); a column there is
+            // a member as before.)
+            if outer_join || s.sjs.iter().any(|j| j.kind != JoinKind::Semi) {
+                continue;
+            }
+            for (col, x) in [(a, b), (b, a)] {
+                let Some(g) = key_col(col) else { continue };
+                if key_col(x).is_some() {
+                    continue;
+                }
+                let x = key_operand(x);
+                let xl = s.leaves_of(x);
+                if xl.count_ones() != 1
+                    || !merge_expr(x)
+                    || crate::sql::explain::expr_volatile_deep(x)
+                    || x.columns().iter().any(|&h| s.phv(h).is_some() || h >= s.ec.len())
+                {
+                    continue;
+                }
+                let eg = s.ec[g];
+                // (Classes of a nondeterministic collation stay apart.)
+                if ec_coll.get(&eg).is_some_and(|k| k.is_some()) {
+                    continue;
+                }
+                match s.xm.iter().position(|m| m.expr.same_as(x)) {
+                    Some(k) => {
+                        let ek = s.xm[k].ec;
+                        if ek != eg && !ec_coll.get(&ek).is_some_and(|k| k.is_some()) {
+                            for e in s.ec.iter_mut() {
+                                if *e == ek {
+                                    *e = eg;
+                                }
+                            }
+                            for m in s.xm.iter_mut() {
+                                if m.ec == ek {
+                                    m.ec = eg;
+                                }
+                            }
+                        }
+                    }
+                    None => s.xm.push(XMember {
+                        expr: x.clone(),
+                        leaf: xl.trailing_zeros() as usize,
+                        ec: eg,
+                    }),
                 }
             }
         }
@@ -7416,14 +7562,18 @@ impl Planner<'_, '_> {
         let mut leaves = leaves;
         if matches!(s.kind, JoinKind::Inner | JoinKind::Semi) && !s.general {
             let col_ty = |g: usize| {
+                if let Some(k) = g.checked_sub(s.ec.len()) {
+                    return Some(s.xm[k].expr.ty());
+                }
                 s.clauses.iter().find_map(|c| {
                     let (a, b, _, _) = c.eq.as_ref()?;
                     [a, b].into_iter().find(|x| key_col(x) == Some(g)).map(|x| x.ty())
                 })
             };
             let mut prev: Vec<(usize, usize, usize)> = Vec::new();
+            let mut drop_xm: Vec<usize> = Vec::new();
             for g in s.ec_members() {
-                let (l, e) = (s.leaf_of[g], s.ec[g]);
+                let (l, e) = (s.m_leaf(g), s.m_ec(g));
                 let Some(slot) = prev.iter().position(|(pe, pl, _)| *pe == e && *pl == l) else {
                     prev.push((e, l, g));
                     continue;
@@ -7441,17 +7591,33 @@ impl Planner<'_, '_> {
                                 && b.ty().without_typmod() == tg.without_typmod()
                         })
                 });
-                let Some(Clause {
-                    expr: Expr::Call(def, _, rt),
-                    ..
-                }) = template
-                else {
-                    continue;
+                // (An expression member: the class's operator family's `=` for the two
+                // types, as generate_base_implied_equalities_no_const finds it, when no
+                // clause has those types. The join keeps one clause per class, so the item
+                // must check it.)
+                let xm_op = (template.is_none() && (pg >= s.ec.len() || g >= s.ec.len()))
+                    .then(|| crate::sql::func::resolve_binop("=", &tp, &tg).ok())
+                    .flatten()
+                    .filter(|r| r.arg_types.len() == 2 && r.arg_types[0].same_base(&tp) && r.arg_types[1].same_base(&tg));
+                let (def, rt) = match (template, &xm_op) {
+                    (Some(Clause { expr: Expr::Call(def, _, rt), .. }), _) => (def.clone(), rt.clone()),
+                    (_, Some(r)) => (r.def.clone(), DataType::Bool),
+                    _ => {
+                        // (None to be had: the class keeps no expression members, its
+                        // clauses with them checked as written.)
+                        if pg >= s.ec.len() || g >= s.ec.len() {
+                            drop_xm.push(e);
+                        }
+                        continue;
+                    }
                 };
                 let off = leaves[l].1;
                 let q = Expr::Call(
                     def.clone(),
-                    vec![Expr::Col(pg - off, tp), Expr::Col(g - off, tg)],
+                    vec![
+                        s.m_expr(pg, tp).shift_cols(-(off as isize)),
+                        s.m_expr(g, tg).shift_cols(-(off as isize)),
+                    ],
                     rt.clone(),
                 );
                 // (Unless the item has it already: a partition join's partitions, their
@@ -7460,6 +7626,11 @@ impl Planner<'_, '_> {
                 if !has {
                     let plan = std::mem::replace(&mut leaves[l].0, Plan::One);
                     leaves[l].0 = crate::sql::binder::optimize::add_filter(&self.cat, plan, q);
+                }
+            }
+            for (k, m) in s.xm.iter_mut().enumerate() {
+                if drop_xm.contains(&m.ec) {
+                    m.ec = usize::MAX - k;
                 }
             }
         }
@@ -7800,7 +7971,9 @@ impl Planner<'_, '_> {
                 }
                 _ => (best.startup, best.total, best.rows),
             };
-            if frac(st, tot, rows) < frac(bst, btot, brows) {
+            // (add_path: a total fuzzily as cheap and a sooner start dominate too.)
+            let (mt, bt) = (frac(st, tot, rows), frac(bst, btot, brows));
+            if mt < bt || (mt <= bt * FUZZ && bst > st * FUZZ) {
                 let mut inputs = Vec::new();
                 for c in ordered.iter() {
                     let mut c = c.clone();

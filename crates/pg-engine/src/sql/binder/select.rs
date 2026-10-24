@@ -1743,7 +1743,7 @@ impl Binder<'_, '_> {
             let pred = if self.deparse {
                 Some(pred)
             } else {
-                let (p, rest) = super::sublink::pull_up(&self.cat, self.ctx, plan, pred);
+                let (p, rest) = super::sublink::pull_up(&self.cat, self.ctx, plan, pred, &self.unplanned_subs);
                 plan = p;
                 rest
             };
@@ -6111,7 +6111,7 @@ impl Binder<'_, '_> {
                 let pulled = (!subs.is_empty())
                     .then(|| {
                         let j = optimize::join(&self.cat, kind, lp.clone(), rp.clone(), stay_cond, Vec::new(), nleft, nright);
-                        let (p, rest) = super::sublink::pull_up(&self.cat, self.ctx, j, Expr::And(subs));
+                        let (p, rest) = super::sublink::pull_up(&self.cat, self.ctx, j, Expr::And(subs), &self.unplanned_subs);
                         rest.is_none().then_some(p)
                     })
                     .flatten();

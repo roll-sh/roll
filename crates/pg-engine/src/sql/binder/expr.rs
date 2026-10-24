@@ -3772,9 +3772,43 @@ impl Binder<'_, '_> {
         if kind == T::ExistsSublink {
             self.arm_limit = Some((self.levels.len() + 1, 1.0, 0.0));
         }
+        // An IN / ANY sub-select that is one plain SELECT: its level planned here, after
+        // binding, with the plan as bound kept for pull_up_sublinks (`unplanned_subs`).
+        let deferrable = kind == T::AnySublink
+            && row.is_none()
+            && !self.deparse
+            && !self.unplanned
+            && self.deps.is_none()
+            && self.refs.is_none()
+            && matches!(inner(s.subselect.as_deref().unwrap()), Some(NodeEnum::SelectStmt(q))
+                if matches!(
+                    pb::SetOperation::try_from(q.op).unwrap_or(pb::SetOperation::SetopNone),
+                    pb::SetOperation::SetopNone | pb::SetOperation::Undefined
+                ) && q.values_lists.is_empty()
+                    && q.locking_clause.is_empty()
+                    && q.with_clause.is_none());
+        let saved_defer = (self.defer_level.take(), std::mem::take(&mut self.deferred));
+        if deferrable {
+            self.defer_level = Some(self.levels.len() + 1);
+        }
         let r = self.bind_subquery(s.subselect.as_deref().unwrap());
+        let deferred = std::mem::take(&mut self.deferred);
+        (self.defer_level, self.deferred) = saved_defer;
         self.arm_limit = saved_limit;
         let (plan, cols, params) = r?;
+        let (plan, unplanned) = if deferred {
+            let unplanned = plan.clone();
+            let mut p = Arc::unwrap_or_clone(plan);
+            let _pushed = crate::scoped::set(&crate::sql::paths::PUSHED_LEVEL, false, "rowmarks::PUSHED_LEVEL");
+            let _own = crate::scoped::set(&crate::sql::paths::OWN_LOCK, false, "rowmarks::OWN_LOCK");
+            self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut p, None);
+            drop(_own);
+            drop(_pushed);
+            super::check_merge_keys(self.ctx, &mut p)?;
+            (Arc::new(p), Some(unplanned))
+        } else {
+            (plan, None)
+        };
         let id = self.fresh_id();
         if self.deparse {
             self.sublink_nodes
@@ -3945,8 +3979,24 @@ impl Binder<'_, '_> {
                         })));
                     }
                 }
+                let planned = plan.clone();
                 let (lefts, ops, plan) =
                     self.sublink_comparisons(&op, left, &cols, plan, params.is_empty(), all, loc)?;
+                // (The same casts over the plan as bound.)
+                if let Some(u) = unplanned
+                    && !all
+                {
+                    let u = match &*plan {
+                        _ if Arc::ptr_eq(&plan, &planned) => Some(u),
+                        Plan::Project { input, exprs } if Arc::ptr_eq(input, &planned) => {
+                            Some(Arc::new(Plan::Project { input: u, exprs: exprs.clone() }))
+                        }
+                        _ => None,
+                    };
+                    if let Some(u) = u {
+                        self.unplanned_subs.insert(id, u);
+                    }
+                }
                 Ok(Expr::Subquery(Box::new(Subquery {
                     id,
                     kind: if all {

@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51108 (**99.92%**) |
-| units differing | 42 |
+| units matching | 51111 (**99.92%**) |
+| units differing | 39 |
 | files fully matching | 226 |
 | engine output == expected/*.out (pg_regress "ok") | 187 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 42 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 39 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 42 units
-join (25), partition_join (15), partition_prune (1), returning (1)
+### EXPLAIN (group C1) — 39 units
+join (25), partition_join (12), partition_prune (1), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -106,6 +106,102 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 21 (expression members of equivalence classes; IN over a join pulled up, unique-ified joins)
+
+Measured in full runs of the whole schedule in one database (`PGREGRESS_TIMEOUT=400`), unit by
+unit: the base (9b0ac33) measured the table's 51069; the class change alone 51070 (partition_join
+74 fixed, nothing else moved); with the IN pull-up 51072 (88, 92 too), nothing broken; rebased
+onto b8a205b 51085 (the other agents' fixes plus these three, nothing that matched in the base
+broken); rebased onto cce1f9c and again onto e7e37e6 51105, the summary's count: these three over the
+others' 51102, nothing that matched in the base broken; rebased onto 01368ea, a subset run of the
+planner-heavy files (agent 17's list) unit by unit against the e7e37e6 run: only the other agents'
+fixes changed (join 424 430 440 450 548, partition_prune 265), so 51111. Crate tests and clippy
+on each.
+
+| file | fixed units |
+|---|---|
+| partition_join | 74, 88, 92 |
+
+What changed:
+
+- **Expression members** (`paths/joinpath.rs` `XMember`, equivclass.c's add_eq_member with a
+  non-Var em_expr): a mergeable `col = expr` clause whose expression reads one other FROM item
+  (nothing volatile, no PlaceHolderVar, no sub-select) puts the expression in the column's
+  class; the same expression in another such clause is the same member (the classes merge).
+  Members are numbered after the group's columns (`mem_id`, `m_ec`, `m_leaf`), so a class of
+  columns only behaves exactly as before. They take part in what classes drive:
+  generate_join_implied_equalities' derived clauses (`t2.b = (t3.a + t3.b) / 2` from `t1.a =
+  t2.b` and `t1.a = (t3.a + t3.b) / 2`), one join clause per class between the sides' best
+  members (a Var before an expression, generate_join_implied_equalities_normal's score),
+  generate_base_implied_equalities_no_const within one item, a parameterized index scan's
+  clauses on an expression index (match_eclass_clauses_to_index, the clause oriented indexed
+  member first, as its first derivation has it, also when the join search makes it first:
+  agent 22's `derives`), the columns kept up to a class's last join. Within one item a
+  restriction between an expression member and the member before it takes the `=` of their
+  types when no clause has them; failing that the class keeps no expression members (its
+  clauses stay as written), since the join takes one clause per class (a cross-type
+  `coalesce(thousand, 123) = q1` in `a5_oj_classes` lost its filter that way during
+  development). partition_join 74: the index scan of `prt1_e` is parameterized by `t2` (`Index Cond: (((a + b)
+  / 2) = t2_1.b)`) under the Join Filter on `t1_1.a`, as Postgres's.
+- **IN over a join** (`binder/sublink.rs` `any_join`, `binder/expr.rs`): an IN / ANY sub-select
+  that is one plain SELECT is planned right after binding, as before, but its plan as bound is
+  kept (`Binder::unplanned_subs`): pull_up_sublinks pulls a join tree up from that one
+  (Postgres pulls sublinks up before planning anything, so a partitioned join isn't joined
+  partitionwise yet), the sub-select's relations the semi join's right side
+  (pull_up_simple_subquery over convert_ANY_sublink_to_join's subquery entry); it was a
+  subquery of its own (`ANY_subquery`) or, planned partitionwise, a hashed SubPlan.
+  `sub_join` takes an inheritance / partition tree's members too (also for EXISTS).
+- **A unique-ified join**: the semi join's right side made unique when it is a join of
+  several items, and a semi join's clauses parameterizing its left side, landed in agent 23's
+  round 16 section while this was being verified (this round had the same create_unique_path
+  over a join relation and the same movability; its version is kept). Added here: a nested
+  loop over a unique-ified side takes as parameters only the side's keys (the Unique returns
+  nothing else: an inner path reading another of its columns, an expression member's, read a
+  column the side doesn't return). 88: Nested Loop over the HashAggregate of each partition's
+  `prt2 ⋉ prt1_e`, the index scan of `prt1` under it.
+- A semi or anti join merges on an expression of its side too (the engine kept them to columns
+  while it couldn't unique-ify on expressions): 92's inner `Merge Semi Join`.
+- A Merge Append of partitionwise child joins wins over sorting their Append when its total is
+  fuzzily as cheap and it starts sooner (add_path), 92's top.
+- EXPLAIN names (`explain.rs` `inherited_parents_in_order`): relations of one query level that
+  share a reference name with two or more inheritance parents among them (a pulled-up sub-select
+  reusing an alias) are named in range table order, parents (partitioned tables joined
+  partitionwise too, with no Append of their own) first, then each parent's children as
+  expand_inherited_rtentry appends them, parent by parent, in bound order (`t1`, `t1_1`, `t1_2`,
+  then `t1_3`…).
+
+Goldens: `tests/sql/a21_ec_expr_members.sql`, `a21_in_join_pullup.sql` (plans and rows,
+partitionwise and not, merge-only, correlated IN / NOT IN / EXISTS over joins).
+
+Left open, and why:
+
+- partition_join 86: now pulled up and joined partitionwise (names as Postgres's), but each
+  child is a Hash Right Semi Join where Postgres runs a Nested Loop over a HashAggregate of the
+  right side's join with an index scan parameterized by the expression member `(t2.a + t2.b) /
+  2`. Postgres's HashAggregate passes the non-key columns `t2.a`, `t2.b` through (a unique
+  path's target is the relation's reltarget); the engine's hashed Distinct compares every
+  column it returns (agent 15's note), so a unique-ified side returns only its keys and only
+  parameters among them may come from it. Needs a hashed DISTINCT ON (pass-through columns) in
+  Plan::Distinct, its executor, EXPLAIN and costs.
+- Expression members only in groups of inner and semi joins: with an outer or anti join in the
+  group none are made (an expression of a nullable side's columns would need its nullingrels
+  to stay above the join); the clauses stay as written there.
+- Class member order (agent 24's finding: `FROM t1, t2, t3 WHERE t2.x = t1.a AND t3.p = t1.a`
+  joins `{t1, t2}` to `t3` on Postgres's `t3.p = t2.x`, the engine's `t1.a = t3.p`): Postgres's
+  members come in the order the WHERE clauses as written added them, each clause's left
+  operand first (process_equivalence), and generate_join_implied_equalities_normal takes each
+  side's first. The join search gets the clauses rebuilt from the binder's join tree: an
+  inner join's equalities from its hash keys, the join's left side first, and the clauses of
+  the deepest joins first, not in WHERE order. Tried here: putting a clause written the other
+  way round (`hash_swapped`) back in its written order fixes that query but breaks
+  `a24_rowmark_order_widths` (`s.x = rm1.a AND rm3.p = rm1.a`, whose `rm3.p = rm1.a` sits in a
+  deeper join and so comes first) and `a22_ec_derives`. Needs each clause's place in the
+  WHERE list kept when `add_filter` distributes it (a per-key position in JoinMeta beside
+  `hash_swapped`), then members ordered by place and orientation.
+- Agent 10's nondeterministic-collation constant across a join: a constant, not an expression
+  member (`ec_constants`, binder side); classes of nondeterministic collations take no
+  expression members here.
 
 ## Round 16, agent 27 (SubPlan copies per place, AlternativeSubPlan choices per copy, numbering and naming order)
 
@@ -3602,7 +3698,7 @@ produces no units on Linux (skipped by the file itself).
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 307 | 100% | yes | yes |  |
 | xml | 281 | 281 | 100% | yes | yes |  |
-| partition_join | 614 | 599 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (15) |
+| partition_join | 614 | 602 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (12) |
 | partition_prune | 771 | 770 | 100% | yes | no | wrong result `SELECT: row count differs` (1) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |

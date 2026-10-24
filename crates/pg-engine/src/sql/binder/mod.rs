@@ -518,6 +518,10 @@ pub struct Binder<'b, 'a> {
     /// it is at, whose planning waits; `deferred` once it did.
     pub(crate) defer_level: Option<usize>,
     pub(crate) deferred: bool,
+    /// IN / ANY sub-selects as bound, before their level was planned (by subquery id):
+    /// pull_up_sublinks pulls a join tree up from these (Postgres pulls sublinks up before
+    /// planning anything); one that stays a SubPlan runs the plan made of it.
+    pub(crate) unplanned_subs: std::collections::HashMap<usize, Arc<Plan>>,
     /// Binding the arms of a CASE: a constant call that fails stays a call until the CASE
     /// knows which arms are reachable (eval_const_expressions never simplifies the others).
     pub(crate) defer_fold: bool,
@@ -656,6 +660,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             setop_coerced: false,
             defer_level: None,
             deferred: false,
+            unplanned_subs: Default::default(),
             defer_fold: false,
             fold_err: None,
             sql_fn_statement: false,
