@@ -279,6 +279,7 @@ fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bo
             alias: alias.clone(),
             cols: cols.clone(),
             secure: *secure,
+            path: None,
             sorted: *sorted,
         };
         return Some((corr, rhs, types, false));
@@ -1045,6 +1046,7 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
                     alias: "ANY_subquery".into(),
                     cols: (1..=n).map(|i| format!("column{i}")).collect(),
                     secure: false,
+                    path: None,
                     // (Its ORDER BY's order is of no use to the semi join above:
                     // truncate_useless_pathkeys.)
                     sorted: matches!(p, Plan::Sort { .. }).then_some(0),
@@ -1205,6 +1207,7 @@ fn any_join_srf(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
         alias: "ANY_subquery".into(),
         cols,
         secure: false,
+        path: None,
         sorted: None,
     };
     let nleft = width(plan);
@@ -1278,6 +1281,7 @@ fn any_join_lateral(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> 
         alias: "ANY_subquery".into(),
         cols,
         secure: false,
+        path: None,
         sorted: None,
     };
     let nleft = width(plan);

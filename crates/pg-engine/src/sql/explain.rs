@@ -1499,6 +1499,58 @@ fn level_keys(p: &Plan, sorted: Option<usize>) -> Vec<bool> {
 
 /// A FROM subquery's plan whose own top projection drops columns its upper nodes carry
 /// (resjunk sort or group keys): that projection's input and the columns it keeps.
+/// examine_simple_variable for a FROM subquery's output columns (`cols`, as its Subquery
+/// Scan returns them; `input` the subquery's plan): one with set operations or grouping
+/// sets says nothing of them, one with DISTINCT or GROUP BY only that its sole such key is
+/// unique (as many values as the subquery's rows, get_variable_numdistinct's isunique);
+/// any other passes its columns' statistics on.
+fn subquery_var_stats(input: &Plan, cols: &mut [ColInfo], rows: f64) {
+    // (Each output column's place in the current node's row, while it is a column.)
+    let mut map: Vec<Option<usize>> = (0..cols.len()).map(Some).collect();
+    let mut p = input;
+    let unique: Option<usize> = loop {
+        match p {
+            Plan::Project { input, exprs } => {
+                map = map
+                    .iter()
+                    .map(|m| m.and_then(|i| match exprs.get(i) {
+                        Some(Expr::Col(j, _)) => Some(*j),
+                        _ => None,
+                    }))
+                    .collect();
+                p = input;
+            }
+            Plan::Filter { input, .. }
+            | Plan::Sort { input, .. }
+            | Plan::Limit { input, .. }
+            | Plan::LockRows { input, .. }
+            | Plan::Window { input, .. } => p = input,
+            Plan::SetOp { .. } | Plan::Agg { sets: Some(_), .. } => break None,
+            Plan::Distinct { input, on, .. } => {
+                break match on {
+                    None => (super::binder::plan_width(input) == 1).then_some(0),
+                    Some(es) if es.len() == 1 => match &es[0] {
+                        Expr::Col(i, _) => Some(*i),
+                        _ => None,
+                    },
+                    Some(_) => None,
+                };
+            }
+            Plan::Agg { groups, sets: None, .. } if !groups.is_empty() => {
+                break (groups.len() == 1).then_some(0);
+            }
+            _ => return,
+        }
+    };
+    for (c, m) in cols.iter_mut().zip(&map) {
+        c.var = None;
+        c.distinct = match (unique, m) {
+            (Some(u), Some(i)) if u == *i => Some(costs::clamp_rows(rows)),
+            _ => None,
+        };
+    }
+}
+
 fn barrier_junk(input: &Plan, sorted: Option<usize>) -> Option<(&Arc<Plan>, &Vec<Expr>)> {
     match input {
         Plan::Project { input: pin, exprs }
@@ -3947,7 +3999,7 @@ impl Builder<'_, '_> {
             // computes but doesn't return (resjunk sort or group keys), or the node above
             // wants fewer columns than the subquery has (no physical target list then).
             // (A security barrier's too when a data-modifying statement's row mark keeps it.)
-            Plan::Barrier { input, alias, cols, secure, sorted }
+            Plan::Barrier { input, alias, cols, secure, sorted, path }
                 if !alias.is_empty() && (!*secure || self.shown.get(&key) == Some(&true)) =>
             {
                 let junk = barrier_junk(input, *sorted);
@@ -3955,7 +4007,12 @@ impl Builder<'_, '_> {
                     // (Its plan returns its resjunk columns as well, past the ones the
                     // query above reads.)
                     if let Some((pin, exprs)) = junk {
-                        let c = self.node(pin);
+                        let mut c = self.node(pin);
+                        if let Some(sp) = path {
+                            let map: Vec<usize> =
+                                exprs.iter().map(|e| if let Expr::Col(j, _) = e { *j } else { usize::MAX }).collect();
+                            self.take_sub_path(&mut c, &map, sp);
+                        }
                         let pick = |v: &Vec<Name>| -> Vec<Name> {
                             exprs
                                 .iter()
@@ -3975,14 +4032,22 @@ impl Builder<'_, '_> {
                                     _ => ColInfo::default(),
                                 })
                                 .collect();
+                            subquery_var_stats(input, &mut node.cols, node.rows);
                         }
                         return Built { node, internal, exported };
                     }
                     // (Its scan trivial, the order it offers is still the subquery's: its
                     // ORDER BY's keys, truncate_useless_pathkeys.)
                     let mut b = self.convert(input);
+                    if let Some(sp) = path {
+                        let map: Vec<usize> = (0..b.exported.len()).collect();
+                        self.take_sub_path(&mut b, &map, sp);
+                    }
                     if let Some(n) = sorted {
                         b.node.order.truncate(*n);
+                    }
+                    if b.node.cols.len() == cols.len() {
+                        subquery_var_stats(input, &mut b.node.cols, b.node.rows);
                     }
                     return b;
                 };
@@ -4008,6 +4073,10 @@ impl Builder<'_, '_> {
                         .collect(),
                     None => (0..c.exported.len()).collect(),
                 };
+                let mut c = c;
+                if let Some(sp) = path {
+                    self.take_sub_path(&mut c, &map, sp);
+                }
                 let names: Vec<Name> = cols.iter().map(|col| Name::col(alias, col)).collect();
                 let order = self.subquery_order(&c, &map, &names, *sorted, needed.as_ref());
                 // (The subquery's other path, in another order: its scan over that one, for
@@ -4036,6 +4105,7 @@ impl Builder<'_, '_> {
                 }
                 if child_cols.len() >= map.len() {
                     b.node.cols = map.iter().map(|&j| child_cols.get(j).cloned().unwrap_or_default()).collect();
+                    subquery_var_stats(input, &mut b.node.cols, b.node.rows);
                     if let Some(a) = &mut b.node.alt {
                         a.cols = b.node.cols.clone();
                     }
@@ -9774,6 +9844,37 @@ impl Builder<'_, '_> {
     /// The order a subquery's rows come in (`c`'s, its plan's), by the subquery's columns
     /// `names` (its column `i` is `c`'s column `map[i]`): convert_subquery_pathkeys, as
     /// far as the keys are columns it returns, at most its ORDER BY's `sorted` keys.
+    /// A FROM subquery read by one of its sorted paths (`Plan::Barrier`'s `path`): of its
+    /// node and the paths kept beside it (`alt`), the one the query above took (the
+    /// cheapest in the keys' order, or the cheapest to start); the others go. `map`: the
+    /// node's column of each of the subquery's.
+    fn take_sub_path(&self, c: &mut Built, map: &[usize], path: &super::plan::SubPath) {
+        let want: Option<Vec<String>> = path
+            .keys
+            .iter()
+            .map(|k| match &k.expr {
+                Expr::Col(j, _) => map
+                    .get(*j)
+                    .and_then(|m| c.exported.get(*m))
+                    .map(|n| self.pick(n, Cx::Upper) + &sort_suffix(k)),
+                _ => None,
+            })
+            .collect();
+        let mut forms = vec![std::mem::take(&mut c.node)];
+        let mut next = forms[0].alt.take();
+        while let Some(mut a) = next {
+            next = a.alt.take();
+            forms.push(*a);
+        }
+        let fits = |x: &ExNode| want.as_ref().is_some_and(|w| x.order.len() >= w.len() && x.order[..w.len()] == w[..]);
+        let cost = |x: &ExNode| (parallel::disabled_nodes(x), if path.fast { x.startup_cost } else { x.total_cost });
+        let pick = (0..forms.len())
+            .filter(|&i| fits(&forms[i]))
+            .min_by(|&a, &b| cost(&forms[a]).partial_cmp(&cost(&forms[b])).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or(0);
+        c.node = forms.swap_remove(pick);
+    }
+
     fn subquery_order(
         &self,
         c: &Built,
@@ -15413,6 +15514,76 @@ impl Render<'_> {
     }
 }
 
+/// EXPLAIN's options for the planner's estimates: costs only.
+fn estimate_options() -> Options {
+    Options {
+        analyze: false,
+        verbose: false,
+        costs: true,
+        buffers: false,
+        wal: false,
+        settings: false,
+        generic_plan: false,
+        scroll: false,
+        timing: false,
+        summary: false,
+        memory: false,
+        serialize: false,
+        serialize_binary: false,
+        format: Format::Text,
+    }
+}
+
+/// A builder making `plan`'s estimates.
+fn estimate_builder<'c, 'a>(plan: &Arc<Plan>, ctx: &'c ExecCtx<'a>, o: &'c Options) -> Builder<'c, 'a> {
+    let (refnames, _) = assign_refnames(plan);
+    Builder {
+        ctx,
+        o,
+        prefix: true,
+        refnames,
+        labels: HashMap::new(),
+        plan_ids: 0,
+        outer: Vec::new(),
+        outer_depth: Vec::new(),
+        depth: 0,
+        pending: Vec::new(),
+        inits: Vec::new(),
+        params: &[],
+        ctes: HashMap::new(),
+        needed: needed_masks(plan),
+        num_exec: None,
+        top: 0,
+        par: super::paths::parallel::ParCfg::read(ctx).enabled(),
+        member_scan: false,
+        group_order: None,
+        group_order_full: false,
+        group_named: Vec::new(),
+        whole_vars: HashMap::new(),
+        unplanned_cols: Default::default(),
+        sub_alias: None,
+        json_casts: Vec::new(),
+        proj_depth: 0,
+        level_tops: std::collections::HashSet::new(),
+        group_tops: std::collections::HashSet::new(),
+        json_aggs: HashMap::new(),
+        having: None,
+        pw_aggs: Vec::new(),
+        pw_partial: false,
+        join_force: None,
+        order_hint: None,
+        agg_key: None,
+        agg_input: None,
+        unique_sides: Default::default(),
+        plain_distinct: None,
+        shown: shown_subqueries(plan, &needed_masks(plan)),
+        rowmarks: Default::default(),
+        rowmark_junk: Default::default(),
+        alts: Default::default(),
+        dummy_target: None,
+    }
+}
+
 /// A plan's estimates as EXPLAIN makes them (the planner sizes FROM items it can't plan
 /// itself this way).
 pub struct PlanEstimate {
@@ -16285,68 +16456,8 @@ fn level_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> ExNode {
 }
 
 pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
-    let o = Options {
-        analyze: false,
-        verbose: false,
-        costs: true,
-        buffers: false,
-        wal: false,
-        settings: false,
-        generic_plan: false,
-        scroll: false,
-        timing: false,
-        summary: false,
-        memory: false,
-        serialize: false,
-        serialize_binary: false,
-        format: Format::Text,
-    };
-    let (refnames, _) = assign_refnames(plan);
-    let mut b = Builder {
-        ctx,
-        o: &o,
-        prefix: true,
-        refnames,
-        labels: HashMap::new(),
-        plan_ids: 0,
-        outer: Vec::new(),
-        outer_depth: Vec::new(),
-        depth: 0,
-        pending: Vec::new(),
-        inits: Vec::new(),
-        params: &[],
-        ctes: HashMap::new(),
-        needed: needed_masks(plan),
-        num_exec: None,
-        top: 0,
-        par: super::paths::parallel::ParCfg::read(ctx).enabled(),
-        member_scan: false,
-        group_order: None,
-        group_order_full: false,
-        group_named: Vec::new(),
-        whole_vars: HashMap::new(),
-        unplanned_cols: Default::default(),
-        sub_alias: None,
-        json_casts: Vec::new(),
-        proj_depth: 0,
-        level_tops: std::collections::HashSet::new(),
-        group_tops: std::collections::HashSet::new(),
-        json_aggs: HashMap::new(),
-        having: None,
-        pw_aggs: Vec::new(),
-        pw_partial: false,
-        join_force: None,
-        order_hint: None,
-        agg_key: None,
-        agg_input: None,
-        unique_sides: Default::default(),
-        plain_distinct: None,
-        shown: shown_subqueries(plan, &needed_masks(plan)),
-        rowmarks: Default::default(),
-        rowmark_junk: Default::default(),
-        alts: Default::default(),
-        dummy_target: None,
-    };
+    let o = estimate_options();
+    let mut b = estimate_builder(plan, ctx, &o);
     let n = b.level(plan);
     let width_of = super::binder::plan_width(plan);
     let cols = if n.cols.len() == width_of {
@@ -16375,6 +16486,72 @@ pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
         disabled: parallel::disabled_nodes(&n),
         cols,
     }
+}
+
+/// One of a FROM subquery's final paths, as the join search weighs it.
+pub struct SubPathCost {
+    pub startup: f64,
+    pub total: f64,
+    pub disabled: usize,
+    /// Its order over the subquery's output columns: (column, descending, nulls first).
+    pub order: Vec<(usize, bool, bool)>,
+}
+
+/// A FROM subquery's (`plan`, its `Barrier`) final paths, as set_subquery_pathlist makes
+/// a Subquery Scan path of each: its cheapest first, then the others its grouping or
+/// DISTINCT keeps beside it (add_path, `alt`), each with the cost of its scan.
+pub fn subquery_paths(plan: &Arc<Plan>, ctx: &ExecCtx) -> Vec<SubPathCost> {
+    let Plan::Barrier { input, sorted, path: None, .. } = &**plan else {
+        return Vec::new();
+    };
+    if barrier_junk(input, *sorted).is_some() {
+        return Vec::new();
+    }
+    let o = estimate_options();
+    let top = estimate_builder(plan, ctx, &o).level(plan);
+    let mut b = estimate_builder(plan, ctx, &o);
+    b.inits.push(Vec::new());
+    let c = b.node(input);
+    let names: Vec<String> = c.exported.iter().map(|n| b.pick(n, Cx::Upper)).collect();
+    let col_of = |o: &str| -> Option<(usize, bool, bool)> {
+        names.iter().enumerate().find_map(|(j, nm)| {
+            let rest = if o == nm { "" } else { o.strip_prefix(nm.as_str()).filter(|r| r.starts_with(' '))? };
+            let (desc, nulls_first) = match rest {
+                "" => (false, false),
+                " DESC" => (true, true),
+                " NULLS FIRST" => (false, true),
+                " DESC NULLS LAST" => (true, false),
+                _ => return None,
+            };
+            Some((j, desc, nulls_first))
+        })
+    };
+    let mut forms = vec![c.node];
+    let mut next = forms[0].alt.take();
+    while let Some(mut a) = next {
+        next = a.alt.take();
+        forms.push(*a);
+    }
+    // (The Subquery Scan over each: what it costs over the cheapest.)
+    let (ds, dt) = (top.startup_cost - forms[0].startup_cost, top.total_cost - forms[0].total_cost);
+    forms
+        .iter()
+        .map(|x| {
+            let mut order: Vec<(usize, bool, bool)> = Vec::new();
+            for k in &x.order {
+                match col_of(k) {
+                    Some(c) if !order.iter().any(|o| o.0 == c.0) => order.push(c),
+                    _ => break,
+                }
+            }
+            SubPathCost {
+                startup: x.startup_cost + ds,
+                total: x.total_cost + dt,
+                disabled: parallel::disabled_nodes(x),
+                order,
+            }
+        })
+        .collect()
 }
 
 /// The EXPLAIN output of `plan`: text lines, or one JSON / YAML / XML document. Planning

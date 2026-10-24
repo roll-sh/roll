@@ -981,7 +981,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
         }
         // A security barrier: only the clauses that can't leak its rows' values go into
         // it (leakproof, not volatile); the rest stay above.
-        Plan::Barrier { input, alias, cols, secure, sorted } => {
+        Plan::Barrier { input, alias, cols, secure, sorted, path } => {
             // (A subquery grouping by grouping sets takes none; one not pulled up for its
             // set-returning or volatile outputs, the clauses not reading them that aren't
             // volatile themselves: subquery_is_pushdown_safe.)
@@ -1030,7 +1030,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 let i = Arc::try_unwrap(input).unwrap_or_else(|a| (*a).clone());
                 Arc::new(if secure { add_filter(cat, i, Expr::And(down)) } else { push_into_level(cat, i, down) })
             };
-            let b = Plan::Barrier { input, alias, cols, secure, sorted };
+            let b = Plan::Barrier { input, alias, cols, secure, sorted, path };
             match and_all(up) {
                 Some(p) => Plan::Filter {
                     input: Arc::new(b),

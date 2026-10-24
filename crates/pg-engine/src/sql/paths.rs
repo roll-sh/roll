@@ -5406,6 +5406,91 @@ impl Planner<'_, '_> {
         }
     }
 
+    /// A FROM subquery (`barrier`) grouping or DISTINCT over a table scan: the subquery
+    /// with its scan read by each other index path whose order leads with a grouping key.
+    /// add_paths_to_grouping_rel and create_final_distinct_paths group every path of
+    /// their input relation in its useful orders, not only the cheapest one; the query
+    /// above may take such a sorted grouping (set_subquery_pathlist).
+    pub(super) fn grouping_variants(&self, barrier: &Plan) -> Vec<Plan> {
+        fn grouping(p: &mut Plan) -> Option<&mut Plan> {
+            if matches!(p, Plan::Agg { groups, sets: None, .. } if !groups.is_empty())
+                || matches!(p, Plan::Distinct { on: None, .. })
+            {
+                return Some(p);
+            }
+            match p {
+                Plan::Barrier { input, .. } | Plan::Project { input, .. } | Plan::Filter { input, .. } => {
+                    grouping(take(input))
+                }
+                _ => None,
+            }
+        }
+        fn scan_of(p: &mut Plan) -> Option<(&mut ScanPlan, Vec<Expr>, Vec<bool>)> {
+            let (keys, input) = match p {
+                Plan::Agg { groups, input, .. } => (groups.clone(), input),
+                Plan::Distinct { input, .. } => {
+                    let w = crate::sql::binder::plan_width(input);
+                    ((0..w).map(|i| Expr::Col(i, DataType::Unknown)).collect(), input)
+                }
+                _ => return None,
+            };
+            let w = crate::sql::binder::plan_width(input);
+            let needed = scan_needs(input, &vec![true; w]);
+            let (s, mapped) = sort_target(take(input), keys)?;
+            Some((s, mapped, needed))
+        }
+        let mut base = barrier.clone();
+        let Some((s, mapped, needed)) = grouping(&mut base).and_then(scan_of) else {
+            return Vec::new();
+        };
+        // (Its scan planned already, by the cheapest grouping: hinted_scan.)
+        if !matches!(s.access, Access::Seq | Access::Index { .. } | Access::Bitmap(..))
+            || s.sample.is_some()
+            || s.current_of.is_some()
+            || s.table.partkey.is_some()
+        {
+            return Vec::new();
+        }
+        let merge: Vec<Expr> = mapped
+            .into_iter()
+            .filter_map(|e| match e {
+                Expr::Col(i, _) if i < s.table.columns.len() => Some(Expr::Col(i, s.table.columns[i].ty.clone())),
+                _ => None,
+            })
+            .collect();
+        if merge.is_empty() {
+            return Vec::new();
+        }
+        let want = Want {
+            keys: Vec::new(),
+            limit: None,
+            merge,
+        };
+        let Some(rel) = self.rel(s, &needed) else {
+            return Vec::new();
+        };
+        let current = (s.access.clone(), s.index.as_ref().map(|(ix, _)| ix.oid));
+        let mut out = Vec::new();
+        for p in self.paths(&rel, &want) {
+            let leads = matches!(p.kind, PathKind::Index(_))
+                && p.keys
+                    .first()
+                    .is_some_and(|k| !k.desc && !k.nulls_first && want.merge.iter().any(|m| same_key(m, &k.expr)));
+            if !leads {
+                continue;
+            }
+            let mut v = barrier.clone();
+            let Some((vs, _, _)) = grouping(&mut v).and_then(scan_of) else { continue };
+            apply(&rel, vs, &p);
+            // (Not the path the subquery reads already.)
+            if format!("{:?}", (&vs.access, vs.index.as_ref().map(|(ix, _)| ix.oid))) == format!("{current:?}") {
+                continue;
+            }
+            out.push(v);
+        }
+        out
+    }
+
     /// A scan (through projections) whose order on `keys` (over its consumer's row) would
     /// be useful above: its index paths in that order considered, the cheapest taken.
     fn hinted_scan(&self, p: &mut Plan, needed: &[bool], keys: Vec<Expr>, distinct: bool) -> bool {

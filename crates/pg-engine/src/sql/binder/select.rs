@@ -1041,6 +1041,7 @@ impl Binder<'_, '_> {
                         alias: format!("*SELECT* {i}"),
                         cols: cols.iter().map(|c| c.name.clone()).collect(),
                         secure: false,
+                        path: None,
                         sorted: (!n.sort_clause.is_empty()).then_some(n.sort_clause.len()),
                     }
                 }
@@ -3596,6 +3597,7 @@ impl Binder<'_, '_> {
                         alias: name.clone(),
                         cols: cols.iter().map(|c| c.name.clone()).collect(),
                         secure: false,
+                        path: None,
                         sorted: match inner(rs.subquery.as_deref().unwrap()) {
                             Some(NodeEnum::SelectStmt(s)) if !s.sort_clause.is_empty() => Some(s.sort_clause.len()),
                             _ => None,
@@ -3768,6 +3770,7 @@ impl Binder<'_, '_> {
                 alias: alias.to_string(),
                 cols: names,
                 secure: true,
+                path: None,
                 sorted: None,
             };
         }
@@ -3784,6 +3787,7 @@ impl Binder<'_, '_> {
                 alias: alias.to_string(),
                 cols: names,
                 secure: false,
+                path: None,
                 sorted,
             };
         }
@@ -4349,6 +4353,7 @@ impl Binder<'_, '_> {
                         alias: name.clone(),
                         cols: rel.cols.iter().filter(|c| !c.hidden).map(|c| c.name.clone()).collect(),
                         secure: true,
+                        path: None,
                         sorted: None,
                     }
                 } else if v.storage.is_none()
@@ -4370,6 +4375,7 @@ impl Binder<'_, '_> {
                         alias: name.clone(),
                         cols: rel.cols.iter().filter(|c| !c.hidden).map(|c| c.name.clone()).collect(),
                         secure: false,
+                        path: None,
                         sorted,
                     }
                 } else {

@@ -324,6 +324,15 @@ pub fn phv_projection(p: &Plan) -> Option<(&Arc<Plan>, &[Expr], usize)> {
         .then(|| (input, &exprs[n..], n))
 }
 
+/// One of a FROM subquery's final paths (`Plan::Barrier`'s `path`): the cheapest of those
+/// sorted on `keys` (over the subquery's output columns), or with `fast` the one cheapest
+/// to start.
+#[derive(Clone, Debug)]
+pub struct SubPath {
+    pub keys: Vec<SortKey>,
+    pub fast: bool,
+}
+
 /// A function called in FROM whose body runs (not inlined), as EXPLAIN shows it.
 #[derive(Clone, Debug)]
 pub struct FromCall {
@@ -1045,6 +1054,10 @@ pub enum Plan {
         /// The subquery's ORDER BY keys, when it has one: its rows come in that order, as
         /// many of its plan's sort keys as the query above may use (its useful pathkeys).
         sorted: Option<usize>,
+        /// The subquery's path the query above took, when not its cheapest
+        /// (set_subquery_pathlist makes a Subquery Scan path of each of its final paths;
+        /// the join search picks one): its rows come in that path's order.
+        path: Option<Arc<SubPath>>,
     },
     /// `input` runs inside `frame` (a SQL function's statement), which errors and notices
     /// name in their CONTEXT, once it has the privileges `perms`.

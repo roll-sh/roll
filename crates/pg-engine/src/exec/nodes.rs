@@ -99,6 +99,16 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
             };
             Box::new(VecNode::new(rows))
         }
+        // (A subquery read by one of its sorted paths: its rows in that path's order, as
+        // its sorted grouping or Unique returns them.)
+        Plan::Barrier { input, path: Some(sp), .. } => Box::new(SortNode {
+            input: Some(open(input, ctx)?),
+            keys: sp.keys.clone(),
+            out: Vec::new().into_iter(),
+            bound: None,
+            presorted: 0,
+            key: 0,
+        }),
         Plan::Barrier { input, .. } => return open(input, ctx),
         Plan::Context {
             input,

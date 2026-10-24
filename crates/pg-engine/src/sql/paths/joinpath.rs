@@ -141,6 +141,9 @@ enum JNode {
         /// Merge Append path (generate_orderedappend_paths), whether its members were
         /// picked for a fast start.
         merged: Option<Rc<(Vec<SortKey>, bool)>>,
+        /// A FROM subquery read by another of its final paths than the cheapest
+        /// (set_subquery_pathlist): the item's plan for it (its `Barrier`'s `path` set).
+        sub: Option<Rc<Plan>>,
     },
     /// An inheritance Append leaf as parameterized scans of its members (in `members`
     /// order).
@@ -447,6 +450,11 @@ struct Search<'s, 'c, 'a> {
     /// PlaceHolderVars evaluated at joins of the group (a pulled-up subquery's outputs an
     /// outer join above nulls), innermost first.
     phvs: Vec<Phv>,
+    /// An equivalence class's join clauses made so far (ec_derives: create_join_clause
+    /// reuses one either way round, so its first making fixes its operands' order), by
+    /// their members in that order; and whether that order is still to be put on the
+    /// clause (one a parameterized join path made first).
+    derives: std::cell::RefCell<Vec<(usize, usize, bool)>>,
 }
 
 /// A PlaceHolderVar of the group (`plan::phv_projection`): its column of the group's
@@ -975,6 +983,32 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
                 }
             }
         }
+        self.derives.borrow_mut().extend(oriented.iter().map(|&(x, y)| (x, y, false)));
+        self.put_orientation(&oriented);
+    }
+
+    /// ec_derives during the join search: the class clause between members `x` and `y`
+    /// made now, in that order, unless one was made before; `apply`: the order to put on
+    /// the clause (else the clause as the search shows it already has it).
+    fn note_derived(&self, x: usize, y: usize, apply: bool) {
+        let mut d = self.derives.borrow_mut();
+        if !d.iter().any(|&(p, q, _)| (p == x && q == y) || (p == y && q == x)) {
+            d.push((x, y, apply));
+        }
+    }
+
+    /// The class clauses whose first making the join search found (a parameterized join
+    /// path's, `note_derived`) in that order.
+    fn orient_derived(&mut self) {
+        let pairs: Vec<(usize, usize)> =
+            self.derives.borrow().iter().filter(|d| d.2).map(|&(x, y, _)| (x, y)).collect();
+        if !pairs.is_empty() {
+            self.put_orientation(&pairs);
+        }
+    }
+
+    /// The class clauses between the members of `oriented` pairs shown in that order.
+    fn put_orientation(&mut self, oriented: &[(usize, usize)]) {
         for c in self.clauses.iter_mut() {
             if !c.ecable || c.on {
                 continue;
@@ -1195,7 +1229,12 @@ impl Search<'_, '_, '_> {
             }
             out.push(gk);
         }
-        // truncate_useless_pathkeys: for the query's order, or a merge join on a clause.
+        self.useful_leaf_keys(l, out)
+    }
+
+    /// truncate_useless_pathkeys for leaf `l`'s pathkeys: as far as the query's order or a
+    /// merge join on a clause goes.
+    fn useful_leaf_keys(&self, l: usize, mut out: Vec<GKey>) -> Vec<GKey> {
         let q = self.query_keys();
         let ordering = out.iter().zip(&q).take_while(|(a, b)| a == b).count();
         let merging = out
@@ -1242,6 +1281,7 @@ impl Search<'_, '_, '_> {
                         kind: leaf.kind,
                         params,
                         merged: None,
+                        sub: None,
                     },
                     rows: leaf.rows,
                     startup: leaf.startup,
@@ -1260,6 +1300,9 @@ impl Search<'_, '_, '_> {
                     for mp in self.merged_paths(l, width) {
                         add_jpath(&mut rel.paths, mp, self.startup);
                     }
+                    for sp in self.subquery_alt_paths(l, width) {
+                        add_jpath(&mut rel.paths, sp, self.startup);
+                    }
                     rel.param = self.append_param_paths(l, width);
                 }
             }
@@ -1273,6 +1316,7 @@ impl Search<'_, '_, '_> {
                         kind: leaf.kind,
                         params: Vec::new(),
                         merged: None,
+                        sub: None,
                     },
                     rows: leaf.rows,
                     startup: leaf.startup,
@@ -1407,6 +1451,7 @@ impl Search<'_, '_, '_> {
                         kind: InKind::NoMark,
                         params: Vec::new(),
                         merged: Some(Rc::new((keys.clone(), fast))),
+                        sub: None,
                     },
                     rows: leaf.rows,
                     startup: st,
@@ -1414,6 +1459,92 @@ impl Search<'_, '_, '_> {
                     width,
                     disabled,
                     keys: gk.clone(),
+                    req: 0,
+                    set,
+                });
+            }
+        }
+        out
+    }
+
+    /// The other final paths of a FROM subquery leaf (set_subquery_pathlist makes a
+    /// Subquery Scan path of each, add_path keeps those with a useful order): its sorted
+    /// grouping or DISTINCT beside the cheapest (hashed) one, over its cheapest input
+    /// sorted or over each index path of its table in a grouping key's order
+    /// (add_paths_to_grouping_rel, create_final_distinct_paths).
+    fn subquery_alt_paths(&self, l: usize, width: u32) -> Vec<JP> {
+        let leaf = &self.leaves[l];
+        if leaf.lateral.is_some()
+            || !matches!(&leaf.plan, Plan::Barrier { secure: false, alias, path: None, .. } if !alias.is_empty())
+        {
+            return Vec::new();
+        }
+        let set = 1u32 << l;
+        let q = self.query_keys();
+        if !(0..leaf.ncols).any(|k| self.ec_has_other(leaf.off + k, set) || q.iter().any(|x| x.ec == self.ec[leaf.off + k])) {
+            return Vec::new();
+        }
+        let mut variants = vec![leaf.plan.clone()];
+        variants.extend(self.pl.grouping_variants(&leaf.plan));
+        let mut out = Vec::new();
+        for (vi, v) in variants.into_iter().enumerate() {
+            let v = Arc::new(v);
+            let paths = crate::sql::explain::subquery_paths(&v, self.pl.ctx);
+            for (pi, p) in paths.iter().enumerate() {
+                // (The leaf's own cheapest path is there already.)
+                if (vi == 0 && pi == 0) || p.order.is_empty() {
+                    continue;
+                }
+                let mut gk: Vec<GKey> = Vec::new();
+                for &(c, desc, nulls_first) in &p.order {
+                    let k = GKey { ec: self.ec[leaf.off + c], desc, nulls_first };
+                    if !gk.iter().any(|x| x.ec == k.ec) {
+                        gk.push(k);
+                    }
+                }
+                let keys = self.useful_leaf_keys(l, gk);
+                if keys.is_empty() {
+                    continue;
+                }
+                // (The cheapest of the subquery's paths in this order, or the one cheapest
+                // to start: which one EXPLAIN shows and the executor runs.)
+                let covers = |o: &[(usize, bool, bool)]| o.len() >= p.order.len() && o[..p.order.len()] == p.order[..];
+                let fast = paths
+                    .iter()
+                    .any(|x| covers(&x.order) && (x.disabled, x.total) < (p.disabled, p.total));
+                let sort_keys: Vec<SortKey> = p
+                    .order
+                    .iter()
+                    .map(|&(c, desc, nulls_first)| SortKey {
+                        expr: Expr::Col(c, self.col_type(leaf.off + c)),
+                        desc,
+                        nulls_first,
+                        using: None,
+                    })
+                    .collect();
+                let Plan::Barrier { input, alias, cols, secure, sorted, .. } = &*v else { continue };
+                let plan = Plan::Barrier {
+                    input: input.clone(),
+                    alias: alias.clone(),
+                    cols: cols.clone(),
+                    secure: *secure,
+                    sorted: *sorted,
+                    path: Some(Arc::new(crate::sql::plan::SubPath { keys: sort_keys, fast })),
+                };
+                out.push(JP {
+                    node: JNode::Opaque {
+                        leaf: l,
+                        kind: leaf.kind,
+                        params: Vec::new(),
+                        merged: None,
+                        sub: Some(Rc::new(plan)),
+                    },
+                    rows: leaf.rows,
+                    startup: p.startup,
+                    total: p.total,
+                    width,
+                    disabled: p.disabled as u32,
+                    keys,
                     req: 0,
                     set,
                 });
@@ -2660,6 +2791,22 @@ impl Search<'_, '_, '_> {
         let ri = match self.rel_index(set) {
             Some(i) => i,
             None => {
+                // (build_joinrel_restrictlist: the class clauses joining the pair made now,
+                // as the search shows them, unless made before.)
+                if self.kind == JoinKind::Inner && !self.general {
+                    for &ci in &restrict {
+                        let c = &self.clauses[ci];
+                        if !c.ecable || c.on {
+                            continue;
+                        }
+                        if let Some((a, b, al, _)) = &c.eq
+                            && let (Some(x), Some(y)) = (key_col(a), key_col(b))
+                        {
+                            let (x, y) = if *al & s1 != 0 { (x, y) } else { (y, x) };
+                            self.note_derived(x, y, false);
+                        }
+                    }
+                }
                 // build_join_rel: the size from this first pair.
                 let rows = self.join_size(jt, r1, r2, &restrict);
                 self.rels.push(JRel {
@@ -3875,6 +4022,11 @@ impl Search<'_, '_, '_> {
                     && !enforced.contains(&j)
                 {
                     quals.push(j);
+                    // (generate_join_implied_equalities_for_ecs makes it the parameters'
+                    // member first, unless it was made before.)
+                    if self.kind == JoinKind::Inner && !self.general {
+                        self.note_derived(x, z, true);
+                    }
                 }
             }
         }
@@ -4787,9 +4939,12 @@ impl Search<'_, '_, '_> {
 
     fn build_path_node(&self, p: &JP) -> (Plan, Vec<usize>) {
         match &p.node {
-            JNode::Opaque { leaf, merged, .. } => {
+            JNode::Opaque { leaf, merged, sub, .. } => {
                 let l = &self.leaves[*leaf];
-                let mut plan = l.plan.clone();
+                let mut plan = match sub {
+                    Some(p) => (**p).clone(),
+                    None => l.plan.clone(),
+                };
                 if let Some(m) = merged {
                     // The members each in the order, under the Sort EXPLAIN shows as their
                     // Merge Append.
@@ -6727,6 +6882,7 @@ impl Planner<'_, '_> {
             lateral_supplied: Default::default(),
             loop_rows: self.pw_loop_rows.take(),
             phvs,
+            derives: Default::default(),
         };
         s.needed.resize(gw, false);
         for (ci, (e, on)) in raw_clauses.into_iter().enumerate() {
@@ -7208,6 +7364,7 @@ impl Planner<'_, '_> {
             }
         }
         let (best, sorted) = s.run()?;
+        s.orient_derived();
         // Partitionwise join, when it is cheaper. (Under a LIMIT without an order: its
         // child joins planned for the rows it reads, the two compared for them.)
         let lim = s.order.as_ref().filter(|o| o.keys.is_empty() && o.complete && !o.hint).and_then(|o| match o.limit {
