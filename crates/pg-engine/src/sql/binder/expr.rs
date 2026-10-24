@@ -149,6 +149,25 @@ impl Binder<'_, '_> {
                 };
                 let arg = self.bind_expr(t.arg.as_deref().unwrap())?;
                 let arg = self.coerce_bool_at(arg, what, t.arg.as_deref().unwrap())?;
+                // eval_const_expressions: a test of a constant is its result.
+                if !self.deparse
+                    && !self.unplanned
+                    && let Expr::Const(v, _) = &arg
+                {
+                    let b = match v {
+                        Value::Bool(b) => Some(*b),
+                        _ => None,
+                    };
+                    let r = match k {
+                        BoolTest::IsTrue => b == Some(true),
+                        BoolTest::IsNotTrue => b != Some(true),
+                        BoolTest::IsFalse => b == Some(false),
+                        BoolTest::IsNotFalse => b != Some(false),
+                        BoolTest::IsUnknown => b.is_none(),
+                        BoolTest::IsNotUnknown => b.is_some(),
+                    };
+                    return Ok(Expr::Const(Value::Bool(r), DataType::Bool));
+                }
                 Ok(Expr::BoolTest(Box::new(arg), k))
             }
             NodeEnum::SubLink(s) => self.bind_sublink(s),
@@ -1140,6 +1159,17 @@ impl Binder<'_, '_> {
                 }
             });
             let exists = r.exists_col;
+            let row_ty = r.row_ty.clone();
+            if r.scalar_row
+                && !self.deparse
+                && let [(_, e)] = cols.as_slice()
+            {
+                let e = e.clone();
+                for (t, a) in used {
+                    self.note_col(t, a);
+                }
+                return Ok(Some(self.lift(lvl, e)));
+            }
             self.whole_var_ref = r.whole_var;
             let row_ref = super::refs::RowRef {
                 loc,
@@ -1172,7 +1202,7 @@ impl Binder<'_, '_> {
                 cols.iter().map(|(n, e)| (n.clone(), e.ty())).collect();
             // A table's row has the table's row type (its column names, whatever aliases
             // the FROM item gave).
-            let ty = match table.and_then(|t| self.cat.row_type_of(t)) {
+            let ty = match table.and_then(|t| self.cat.row_type_of(t)).or(row_ty) {
                 Some(DataType::Row(rt)) if rt.oid != 0 && rt.fields.len() == fields.len() => {
                     let fields = rt
                         .fields
@@ -1615,6 +1645,8 @@ impl Binder<'_, '_> {
             join_rte: false,
             in_join: false,
             whole_var: false,
+            scalar_row: false,
+            row_ty: None,
         };
         let mut lvl = super::Level::new();
         lvl.barrier = true;
@@ -4589,6 +4621,33 @@ impl Binder<'_, '_> {
             }
         }
         .map_err(|e| with_pos(e, loc))?;
+        // enforce_generic_type_consistency: anyelement-family parameters whose inputs are
+        // all untyped literals have nothing to resolve from.
+        let family1 = |t: &DataType| {
+            matches!(
+                t,
+                DataType::AnyElement
+                    | DataType::AnyNonArray
+                    | DataType::AnyEnum
+                    | DataType::AnyArray
+                    | DataType::AnyRange
+                    | DataType::AnyMultirange
+            )
+        };
+        let poly: Vec<&DataType> = res
+            .def
+            .args
+            .iter()
+            .zip(&types)
+            .filter(|(p, _)| family1(p))
+            .map(|(_, i)| i)
+            .collect();
+        if !poly.is_empty() && poly.iter().all(|i| matches!(i, DataType::Unknown)) {
+            return Err(Error::new(
+                code::DATATYPE_MISMATCH,
+                "could not determine polymorphic type because input has type unknown",
+            ));
+        }
         let def = res.def.clone();
         let ret = res.ret.clone();
         let mut out = Vec::with_capacity(args.len());

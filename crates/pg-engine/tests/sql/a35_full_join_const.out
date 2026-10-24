@@ -1,0 +1,80 @@
+> CREATE TABLE ta (a int)
+-- CREATE TABLE
+
+> CREATE TABLE tb (b int)
+-- CREATE TABLE
+
+> INSERT INTO ta VALUES (1), (2)
+-- INSERT 0 2
+
+> INSERT INTO tb VALUES (3)
+-- INSERT 0 1
+
+> SELECT * FROM ta FULL JOIN tb ON false
+a:int4 | b:int4
+1 | NULL
+2 | NULL
+NULL | 3
+-- SELECT 3
+
+> SELECT * FROM ta FULL JOIN tb ON NULL IS FALSE
+a:int4 | b:int4
+1 | NULL
+2 | NULL
+NULL | 3
+-- SELECT 3
+
+> SELECT * FROM ta FULL JOIN tb ON NULL IS NOT TRUE AND a = b
+a:int4 | b:int4
+1 | NULL
+2 | NULL
+NULL | 3
+-- SELECT 3
+
+> SELECT * FROM ta FULL JOIN tb ON true IS UNKNOWN
+a:int4 | b:int4
+1 | NULL
+2 | NULL
+NULL | 3
+-- SELECT 3
+
+> SELECT * FROM ta FULL JOIN tb ON a = b AND false
+a:int4 | b:int4
+1 | NULL
+2 | NULL
+NULL | 3
+-- SELECT 3
+
+> SELECT * FROM ta FULL JOIN tb ON a < b AND false IS TRUE
+a:int4 | b:int4
+1 | NULL
+2 | NULL
+NULL | 3
+-- SELECT 3
+
+> SELECT * FROM ta FULL JOIN tb ON a < b
+ERROR 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+
+> SELECT * FROM (VALUES (1), (2)) s1 (u) FULL JOIN (VALUES (3)) t2 ON NULL
+u:int4 | column1:int4
+1 | NULL
+2 | NULL
+NULL | 3
+-- SELECT 3
+
+> SELECT NULL::bool IS TRUE, NULL::bool IS NOT TRUE, false IS FALSE, true IS NOT FALSE, NULL::bool IS UNKNOWN, false IS NOT UNKNOWN
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | t | t | t | t | t
+-- SELECT 1
+
+> SELECT a FROM ta WHERE NULL::bool IS NOT FALSE
+a:int4
+1
+2
+-- SELECT 2
+
+> EXPLAIN (COSTS OFF) SELECT a FROM ta WHERE NULL::bool IS UNKNOWN
+QUERY PLAN:text
+Seq Scan on ta
+-- EXPLAIN
+

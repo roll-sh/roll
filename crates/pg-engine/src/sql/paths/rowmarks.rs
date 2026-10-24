@@ -582,3 +582,57 @@ fn key(p: &Plan) -> Option<Keyed> {
         _ => return None,
     })
 }
+
+/// The lock of the first locked scan of the level under `p` (through its joins, appends and
+/// FROM subqueries; not a semi or anti join's inner side, a sub-select's).
+fn first_mark(p: &Plan) -> Option<RowMark> {
+    match p {
+        Plan::Scan(s) => s.mark.map(|m| m.0),
+        Plan::Filter { input, .. }
+        | Plan::Project { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Sort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Context { input, .. }
+        | Plan::Barrier { input, .. }
+        | Plan::With { body: input, .. } => first_mark(input),
+        Plan::Join { kind, left, right, .. } => first_mark(left).or_else(|| {
+            if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+                None
+            } else {
+                first_mark(right)
+            }
+        }),
+        Plan::Append { inputs, .. } => inputs.iter().find_map(|i| first_mark(i)),
+        _ => None,
+    }
+}
+
+/// make_outerjoininfo: the lock of a locked relation on the nullable side of one of the
+/// level's outer joins (the plan as reduce_outer_joins leaves it), lower joins first.
+pub(super) fn nullable_mark(p: &Plan) -> Option<RowMark> {
+    match p {
+        Plan::Filter { input, .. }
+        | Plan::Project { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Sort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Context { input, .. }
+        | Plan::Barrier { input, .. }
+        | Plan::With { body: input, .. } => nullable_mark(input),
+        Plan::Join { kind, left, right, .. } => {
+            let inner = !matches!(kind, JoinKind::Semi | JoinKind::Anti);
+            if let Some(m) = nullable_mark(left).or_else(|| inner.then(|| nullable_mark(right)).flatten()) {
+                return Some(m);
+            }
+            match kind {
+                JoinKind::Left => first_mark(right),
+                JoinKind::Right => first_mark(left),
+                JoinKind::Full => first_mark(left).or_else(|| first_mark(right)),
+                _ => None,
+            }
+        }
+        Plan::Append { inputs, .. } => inputs.iter().find_map(|i| nullable_mark(i)),
+        _ => None,
+    }
+}

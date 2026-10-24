@@ -6074,6 +6074,17 @@ pub fn plan_query_limited(ctx: &ExecCtx, plan: &mut Plan, lim: Option<(f64, f64)
     plan_level(ctx, plan, &vec![true; w], lim)
 }
 
+/// A locked relation of the level on the nullable side of an outer join, as planning
+/// (reduce_outer_joins, then make_outerjoininfo) finds it: its lock's strength.
+pub fn nullable_side_lock(ctx: &ExecCtx, plan: &Plan) -> Option<crate::sql::plan::RowMark> {
+    rowmarks::nullable_mark(plan)?;
+    let mut p = plan.clone();
+    let planner = Planner::new(ctx);
+    planner.pull_up_consts(&mut p);
+    planner.reduce_outer_joins(&mut p);
+    rowmarks::nullable_mark(&p)
+}
+
 /// A query level's plan, the columns of its output its consumers read being `needed`.
 fn plan_level(ctx: &ExecCtx, plan: &mut Plan, needed: &[bool], lim: Option<(f64, f64)>) -> usize {
     plan_level_ordered(ctx, plan, needed, lim, None)

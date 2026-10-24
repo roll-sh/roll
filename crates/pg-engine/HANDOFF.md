@@ -62,6 +62,12 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
+- **Differential random queries** (round 17, agent 35): `tests/difftest.rs` generates random
+  schemas, data, queries and DML from a seed, compares the engine with the reference
+  statement by statement, runs TLP / NoREC oracles and planner-setting variants, and reduces
+  failures to minimal reproducers. `smoke` (fixed seeds, a few minutes) is a regression check
+  against `tests/difftest/smoke_known.txt`. Score, what it found and fixed, and what is open:
+  `tests/difftest/STATUS.md`.
 
 ## Repository layout
 

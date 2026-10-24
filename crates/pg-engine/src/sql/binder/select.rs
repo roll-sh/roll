@@ -1903,18 +1903,53 @@ impl Binder<'_, '_> {
                     loc,
                 )
             };
+            // (Items are the same when they name the same target-list entry, by position or
+            // as the first entry equal to them (findTargetlistEntrySQL99), else when equal:
+            // `ORDER BY 3` is entry 3 even if entry 1 is written alike.)
+            let entry = |n: &Node, e: &Expr| -> Option<usize> {
+                if let Some(NodeEnum::AConst(c)) = inner(n)
+                    && let Some(pb::a_const::Val::Ival(i)) = &c.val
+                {
+                    return usize::try_from(i.ival - 1).ok();
+                }
+                targets.iter().position(|t| t.expr.same_as(e))
+            };
+            let on_entries: Vec<Option<usize>> =
+                s.distinct_clause.iter().zip(&distinct_on).map(|(n, e)| entry(n, e)).collect();
+            let order_entries: Vec<Option<usize>> = s
+                .sort_clause
+                .iter()
+                .filter_map(|sb| match inner(sb) {
+                    Some(NodeEnum::SortBy(sb)) => sb.node.as_deref(),
+                    _ => None,
+                })
+                .zip(&order)
+                .map(|(n, k)| entry(n, &k.expr))
+                .collect();
+            let same = |j: usize, i: usize| match (on_entries.get(j), order_entries.get(i)) {
+                (Some(Some(a)), Some(Some(b))) => a == b,
+                (Some(None), Some(None)) | (None, _) | (_, None) => distinct_on[j].same_as(&order[i].expr),
+                _ => false,
+            };
             let mut skipped = false;
-            for k in &order {
-                match distinct_on.iter().position(|d| d.same_as(&k.expr)) {
+            for i in 0..order.len() {
+                // (An item naming an entry the sort list has already isn't added again.)
+                let dup = (0..i).any(|p| match (order_entries.get(p), order_entries.get(i)) {
+                    (Some(Some(a)), Some(Some(b))) => a == b,
+                    (Some(None), Some(None)) => order[p].expr.same_as(&order[i].expr),
+                    _ => false,
+                });
+                if dup {
+                    continue;
+                }
+                match (0..distinct_on.len()).find(|&j| same(j, i)) {
                     Some(j) if skipped => return Err(mismatch(j)),
                     Some(_) => {}
                     None => skipped = true,
                 }
             }
             if skipped
-                && let Some(j) = distinct_on
-                    .iter()
-                    .position(|d| !order.iter().any(|k| k.expr.same_as(d)))
+                && let Some(j) = (0..distinct_on.len()).find(|&j| !(0..order.len()).any(|i| same(j, i)))
             {
                 return Err(mismatch(j));
             }
@@ -1942,6 +1977,10 @@ impl Binder<'_, '_> {
                 Some("HAVING clause")
             } else if !st.aggs.is_empty() {
                 Some("aggregate functions")
+            } else if !st.windows.is_empty() {
+                Some("window functions")
+            } else if !st.srfs.is_empty() {
+                Some("set-returning functions in the target list")
             } else {
                 None
             };
@@ -2001,6 +2040,7 @@ impl Binder<'_, '_> {
         }
         let mut windows = std::mem::take(&mut st.windows);
         let mut srfs = std::mem::take(&mut st.srfs);
+        let sub_params = std::mem::take(&mut st.sub_params);
 
         // Aggregation.
         let mut sets = sets;
@@ -2107,6 +2147,7 @@ impl Binder<'_, '_> {
             used.extend(having.iter());
             used.extend(order_exprs.iter());
             used.extend(on_exprs.iter());
+            used.extend(sub_params.iter());
             match &mut sets {
                 None => {
                     let extra = self.functionally_dependent(&groups, &groups, &used);
@@ -2158,10 +2199,13 @@ impl Binder<'_, '_> {
             };
             let scope = self.scope().clone();
             let tx = |e: Expr| {
-                post_agg(e, &groups, ng, mask_col, &scope).map_err(|err| ungrouped_pos(err, s))
+                post_agg(e, &groups, ng, mask_col, &scope, true).map_err(|err| ungrouped_pos(err, s))
             };
-            // A select-list item a GROUP BY item named is its own key.
-            let group_targets = std::mem::take(&mut st.group_targets);
+            // A select-list item a GROUP BY item named is its own key (and for a key without
+            // columns, the first item written as it is, `group_item`): only those take a
+            // variable-free key's place, which grouping sets null.
+            let mut group_targets = std::mem::take(&mut st.group_targets);
+            group_targets.resize(ng, None);
             tgt_exprs = tgt_exprs
                 .into_iter()
                 .enumerate()
@@ -2173,10 +2217,26 @@ impl Binder<'_, '_> {
                 })
                 .collect::<Result<_>>()?;
             if let Some(h) = having.take() {
-                having = Some(tx(h)?);
+                // (A key of outer references only is a Param to HAVING, which moves to WHERE:
+                // not nulled there, unlike in the select list.)
+                having = Some(
+                    post_agg(h, &groups, ng, mask_col, &scope, false)
+                        .map_err(|err| ungrouped_pos(err, s))?,
+                );
             }
-            order_exprs = order_exprs.into_iter().map(tx).collect::<Result<_>>()?;
-            on_exprs = on_exprs.into_iter().map(tx).collect::<Result<_>>()?;
+            // A sort key that is a constant names the select-list item equal to it (by
+            // position or findTargetlistEntrySQL99), a grouped key then.
+            let tx_key = |e: Expr| match &e {
+                Expr::Const(..) => match groups.iter().position(|g| g.same_as(&e)) {
+                    Some(k) if group_targets.get(k).is_some_and(|t| t.is_some()) => {
+                        Ok(Expr::Col(k, e.ty()))
+                    }
+                    _ => tx(e),
+                },
+                _ => tx(e),
+            };
+            order_exprs = order_exprs.into_iter().map(tx_key).collect::<Result<_>>()?;
+            on_exprs = on_exprs.into_iter().map(tx_key).collect::<Result<_>>()?;
             for w in &mut windows {
                 w.args = std::mem::take(&mut w.args)
                     .into_iter()
@@ -2184,10 +2244,10 @@ impl Binder<'_, '_> {
                     .collect::<Result<_>>()?;
                 w.partition_by = std::mem::take(&mut w.partition_by)
                     .into_iter()
-                    .map(tx)
+                    .map(tx_key)
                     .collect::<Result<_>>()?;
                 for k in &mut w.order_by {
-                    k.expr = tx(k.expr.clone())?;
+                    k.expr = tx_key(k.expr.clone())?;
                 }
                 if let crate::sql::plan::WinFunc::Agg(a) = &mut w.func {
                     // Aggregate window functions over grouped rows read the grouped columns.
@@ -2208,8 +2268,33 @@ impl Binder<'_, '_> {
             for a in &mut st.aggs {
                 a.direct = std::mem::take(&mut a.direct)
                     .into_iter()
-                    .map(|e| post_agg(e, &groups, ng, None, &scope).map_err(|err| ungrouped_pos(err.detail("Direct arguments of an ordered-set aggregate must use only grouped columns."), s)))
+                    .map(|e| post_agg(e, &groups, ng, None, &scope, true).map_err(|err| ungrouped_pos(err.detail("Direct arguments of an ordered-set aggregate must use only grouped columns."), s)))
                     .collect::<Result<_>>()?;
+            }
+            // Sub-selects' outer references as written (folding may have dropped the
+            // sub-select since): grouped, or the query fails as Postgres's parser fails it.
+            // (Not those of a sub-select that is a grouping key as a whole.)
+            let mut keyed: Vec<Vec<Expr>> = Vec::new();
+            for g in &groups {
+                g.walk(&mut |x| {
+                    if let Expr::Subquery(sq) = x {
+                        keyed.push(sq.params.clone());
+                    }
+                });
+            }
+            for p in &sub_params {
+                if keyed.iter().any(|k| k.iter().any(|x| x.same_as(p))) {
+                    continue;
+                }
+                post_agg(p.clone(), &groups, ng, mask_col, &scope, true).map_err(|mut e| {
+                    if e.code == code::GROUPING_ERROR
+                        && let Some(rest) = e.message.strip_prefix("column \"")
+                        && let Some((name, _)) = rest.split_once("\" must appear")
+                    {
+                        e.message = format!("subquery uses ungrouped column \"{name}\" from outer query");
+                    }
+                    ungrouped_pos(e, s)
+                })?;
             }
             // HAVING without GROUP BY or aggregates is degenerate grouping: one group whatever
             // the input, which isn't read at all (is_degenerate_grouping).
@@ -2739,6 +2824,21 @@ impl Binder<'_, '_> {
                 && self.pushed_lock.as_ref().is_some_and(|(l, _)| *l == self.levels.len());
             let _pushed = crate::scoped::set(&crate::sql::paths::PUSHED_LEVEL, pushed, "rowmarks::PUSHED_LEVEL");
             let own = !s.locking_clause.is_empty();
+            if (own || pushed)
+                && !self.unplanned
+                && let Some(m) = crate::sql::paths::nullable_side_lock(self.ctx, &plan)
+            {
+                let what = match m {
+                    RowMark::KeyShare => "FOR KEY SHARE",
+                    RowMark::Share => "FOR SHARE",
+                    RowMark::NoKeyUpdate => "FOR NO KEY UPDATE",
+                    RowMark::Update => "FOR UPDATE",
+                };
+                return Err(Error::new(
+                    code::FEATURE_NOT_SUPPORTED,
+                    format!("{what} cannot be applied to the nullable side of an outer join"),
+                ));
+            }
             let _own = crate::scoped::set(&crate::sql::paths::OWN_LOCK, own, "rowmarks::OWN_LOCK");
             self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut plan, lim);
             drop(_own);
@@ -3154,7 +3254,24 @@ impl Binder<'_, '_> {
         }
         let e = self.group_expr(g, targets)?;
         require_equality(&e.ty(), ast::location(g))?;
-        let tgt = self.group_target(g, targets);
+        let mut tgt = self.group_target(g, targets);
+        // findTargetlistEntrySQL99: a key without columns is the first select-list item
+        // written as it is (compared as written: folded, other expressions would look equal).
+        let star = targets.iter().any(|t| match inner(t) {
+            Some(NodeEnum::ResTarget(rt)) => matches!(
+                rt.val.as_deref().and_then(inner),
+                Some(NodeEnum::ColumnRef(_) | NodeEnum::AIndirection(_))
+            ) && format!("{:?}", rt.val).contains("AStar"),
+            _ => true,
+        });
+        if tgt.is_none() && !star && e.columns().is_empty() && !e.is_volatile() {
+            let text = |n: &Node| strip_locations(&format!("{n:?}"));
+            let want = text(g);
+            tgt = targets.iter().position(|t| match inner(t) {
+                Some(NodeEnum::ResTarget(rt)) => rt.val.as_deref().is_some_and(|v| text(v) == want),
+                _ => false,
+            });
+        }
         let st = &mut self.level().st;
         st.group_targets.resize(groups.len(), None);
         // An item named by alias or position is its own key; an expression is that of an
@@ -4660,6 +4777,15 @@ impl Binder<'_, '_> {
                 .map(|c| c.func.name.to_string())
                 .unwrap_or_default()
         });
+        // A user function's lone OUT parameter (`RETURNS TABLE (x int)`) or composite field
+        // names the column (a built-in's definition lists its OUT columns only when there are
+        // several).
+        let named_out = calls.first().is_some_and(|c| {
+            !c.func.out_cols.is_empty()
+                || self.cat.functions.get(&c.func.oid).is_some_and(|f| {
+                    f.out_cols.len() == 1 || matches!(f.ret, DataType::Row(_) | DataType::Record)
+                })
+        });
         if calls.len() == 1
             && calls[0].ncols == 1
             && calls[0].func.out_cols.len() <= 1
@@ -4667,10 +4793,10 @@ impl Binder<'_, '_> {
         {
             if let Some(a) = alias
                 && a.colnames.is_empty()
-                && calls[0].func.out_cols.is_empty()
+                && !named_out
             {
                 cols[0].name = a.aliasname.clone();
-            } else if alias.is_none() && calls[0].func.out_cols.is_empty() {
+            } else if alias.is_none() && !named_out {
                 cols[0].name = calls[0].func.name.to_string();
             }
         }
@@ -4688,6 +4814,10 @@ impl Binder<'_, '_> {
             c.name = n.clone();
         }
         let mut rel = derived_rel(&name, &cols, 0);
+        rel.scalar_row = calls.len() == 1
+            && calls[0].ncols == 1
+            && cols.len() == 1
+            && !matches!(calls[0].ty, DataType::Row(_) | DataType::Record);
         let results: Vec<(DataType, usize)> = calls.iter().map(|c| (c.ty.clone(), c.ncols)).collect();
         self.mark_rowtype_cols(&mut rel, &results);
         let names: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
@@ -4835,7 +4965,7 @@ impl Binder<'_, '_> {
                     input: Arc::new(Plan::One),
                     exprs: vec![e],
                 };
-                return Ok(Some((plan, cols, DataType::Unknown)));
+                return Ok(Some((plan, cols, DataType::Unknown, false, true)));
             }
             let place = if fdef.returns_set {
                 super::expr::FnPlace::FromSet
@@ -5099,9 +5229,13 @@ impl Binder<'_, '_> {
                     ..Default::default()
                 }),
             };
-            Ok(Some((plan, cols, fdef.ret.clone())))
+            // chooseScalarFunctionAlias: a lone OUT parameter (`RETURNS TABLE (x int)`) or a
+            // composite's field names the column; only a plain scalar takes the alias.
+            let named = !fdef.out_cols.is_empty() || matches!(fdef.ret, DataType::Row(_) | DataType::Record);
+            let scalar = fdef.out_cols.len() == 1 || !matches!(fdef.ret, DataType::Row(_) | DataType::Record);
+            Ok(Some((plan, cols, fdef.ret.clone(), named, scalar)))
         })?;
-        let Some((mut plan, mut cols, ret)) = r else {
+        let Some((mut plan, mut cols, ret, named, scalar)) = r else {
             return Ok(None);
         };
         let mut params = params;
@@ -5149,6 +5283,7 @@ impl Binder<'_, '_> {
             .unwrap_or_else(|| name.clone());
         if cols.len() == 1
             && colnames.is_empty()
+            && !named
             && let Some(a) = alias
         {
             cols[0].name = a.aliasname.clone();
@@ -5185,6 +5320,12 @@ impl Binder<'_, '_> {
             mark_subquery_windows(Arc::make_mut(right), &info);
         }
         let mut rel = derived_rel(&rel_name, &cols, 0);
+        rel.scalar_row = cols.len() == 1 && scalar;
+        if let DataType::Row(rt) = &ret
+            && rt.oid != 0
+        {
+            rel.row_ty = Some(ret.clone());
+        }
         self.mark_rowtype_cols(&mut rel, &[(ret, cols.len())]);
         Ok(Some((plan, Scope { rels: vec![rel] }, params)))
     }
@@ -6784,6 +6925,18 @@ fn json_references(v: &serde_json::Value, name: &str) -> bool {
     }
 }
 
+/// A node's debug text without its `location`s: two nodes written alike compare equal.
+fn strip_locations(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("location: ") {
+        out.push_str(&rest[..i + 10]);
+        rest = rest[i + 10..].trim_start_matches(|c: char| c.is_ascii_digit() || c == '-');
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Point an ungrouped-column error at the first mention of that column, checking the select
 /// list, then HAVING, then ORDER BY (the order Postgres checks them in).
 fn ungrouped_pos(e: Error, s: &pb::SelectStmt) -> Error {
@@ -6921,8 +7074,18 @@ fn post_agg(
     ng: usize,
     mask_col: Option<usize>,
     scope: &Scope,
+    outer_keys: bool,
 ) -> Result<Expr> {
-    if let Some(k) = groups.iter().position(|g| g.same_query_as(&e)) {
+    // (Constants are always acceptable: never a grouped column, so never nulled by a
+    // grouping set either. Nor is anything equal to a key without the level's columns,
+    // volatile functions or (`outer_keys`: in the select list) outer references: as the
+    // reference plans it, only the select-list item the key names reads such a key.)
+    let keyed = |g: &Expr| {
+        !g.columns().is_empty() || g.is_volatile() || (outer_keys && g.has_outer_refs())
+    };
+    if !matches!(e, Expr::Const(..))
+        && let Some(k) = groups.iter().position(|g| keyed(g) && g.same_query_as(&e))
+    {
         return Ok(Expr::Col(k, e.ty()));
     }
     match e {
@@ -6958,7 +7121,28 @@ fn post_agg(
                 ),
             ))
         }
-        e => e.map_children(&mut |c| post_agg(c, groups, ng, mask_col, scope)),
+        // A sub-select's outer references to ungrouped columns (check_ungrouped_columns at
+        // sublevels_up > 0): its own message. Its IN / ANY left operands are this level's.
+        Expr::Subquery(mut sq) => {
+            let tx = |c: Expr| post_agg(c, groups, ng, mask_col, scope, outer_keys);
+            sq.left = std::mem::take(&mut sq.left).into_iter().map(tx).collect::<Result<_>>()?;
+            sq.params = std::mem::take(&mut sq.params)
+                .into_iter()
+                .map(|c| {
+                    tx(c).map_err(|mut e| {
+                        if e.code == code::GROUPING_ERROR
+                            && let Some(rest) = e.message.strip_prefix("column \"")
+                            && let Some((name, _)) = rest.split_once("\" must appear")
+                        {
+                            e.message = format!("subquery uses ungrouped column \"{name}\" from outer query");
+                        }
+                        e
+                    })
+                })
+                .collect::<Result<_>>()?;
+            Ok(Expr::Subquery(sq))
+        }
+        e => e.map_children(&mut |c| post_agg(c, groups, ng, mask_col, scope, outer_keys)),
     }
 }
 

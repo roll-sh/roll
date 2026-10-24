@@ -147,6 +147,11 @@ pub struct ScopeRel {
     /// A relation the planner never pulls up (a CTE read by a CTE Scan): its whole row is a
     /// Var to it (`r.*`), its IS [NOT] NULL test not expanded.
     pub whole_var: bool,
+    /// A function in FROM returning a scalar (TYPEFUNC_SCALAR, a lone OUT parameter's
+    /// included): its whole-row reference is its one column's value.
+    pub scalar_row: bool,
+    /// A function in FROM returning a named composite: its whole-row reference's type.
+    pub row_ty: Option<DataType>,
 }
 
 /// `ScopeCol::attnum` of a recursive self-reference's SEARCH / CYCLE column: `merged` (not
@@ -326,6 +331,10 @@ pub(crate) struct SelectState {
     /// Deparse mode: each window function call as written (its name and OVER), by index.
     pub window_defs: Vec<(String, pb::WindowDef)>,
     pub in_agg: bool,
+    /// What the sub-selects of the select list, HAVING and ORDER BY read of this level
+    /// (their params), outside aggregate arguments: check_ungrouped_columns checks them as
+    /// written, before folding may drop the sub-select (`NULL BETWEEN (SELECT t.x) AND 1`).
+    pub sub_params: Vec<Expr>,
     pub in_window: bool,
     /// Inside CASE / COALESCE: set-returning functions are an error.
     pub srf_banned: Option<&'static str>,
@@ -800,6 +809,12 @@ impl<'b, 'a> Binder<'b, 'a> {
         let r = f(self);
         self.defer_fold = defer;
         let lvl = self.levels.pop().unwrap();
+        if let Some(parent) = self.levels.last_mut()
+            && matches!(parent.clause, Clause::Select | Clause::Having | Clause::OrderBy | Clause::DistinctOn)
+            && !parent.st.in_agg
+        {
+            parent.st.sub_params.extend(lvl.params.iter().cloned());
+        }
         Ok((r?, lvl.params))
     }
 
@@ -2076,6 +2091,8 @@ pub fn table_rel(t: &Arc<Table>, alias: &str, schema: Option<String>) -> ScopeRe
         join_rte: false,
         in_join: false,
         whole_var: false,
+        scalar_row: false,
+        row_ty: None,
     }
 }
 
@@ -2116,6 +2133,8 @@ pub fn derived_rel(alias: &str, cols: &[OutCol], offset: usize) -> ScopeRel {
         join_rte: false,
         in_join: false,
         whole_var: false,
+        scalar_row: false,
+        row_ty: None,
     }
 }
 
