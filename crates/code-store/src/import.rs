@@ -13,7 +13,7 @@ use crate::tree::Overlay;
 use crate::{Meta, Store, invalid};
 use bytes::Bytes;
 use futures::StreamExt;
-use rusqlite::{OptionalExtension, params};
+use code_sql::{OptionalExtension, ValueRef, params};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -69,18 +69,14 @@ impl Store {
         for (_, data) in &trees {
             git::parse_tree(data)?;
         }
-        {
-            let mut db = self.db.lock();
-            let tx = db.transaction()?;
-            Self::insert_trees_tx(&tx, repo, trees.iter().map(|(o, d)| (o, d)))?;
-            for (oid, data) in &tags {
-                tx.execute(
-                    "INSERT OR IGNORE INTO git_raw (repo, oid, kind, data) VALUES (?, ?, ?, ?)",
-                    params![repo, &oid.0[..], Kind::Tag.db_code(), &data[..]],
-                )?;
-            }
-            tx.commit()?;
-        }
+        self.db.write(|c| {
+            Self::insert_trees_tx(c, repo, trees.iter().map(|(o, d)| (o, d)))?;
+            c.execute_many(
+                "INSERT OR IGNORE INTO git_raw (repo, oid, kind, data) VALUES (?, ?, ?, ?)",
+                tags.iter().map(|(oid, data)| [ValueRef::Text(repo), ValueRef::Blob(&oid.0), ValueRef::Int(Kind::Tag.db_code()), ValueRef::Blob(data)]),
+            )?;
+            Ok::<_, code_sql::Error>(())
+        })?;
         drop(trees);
 
         // Commits, parents first.
@@ -176,13 +172,12 @@ impl Store {
         if rows.is_empty() {
             return Ok(());
         }
-        let mut db = self.db.lock();
-        let tx = db.transaction()?;
-        for (meta, oid, tree, raw) in rows.iter() {
-            Self::insert_changeset_tx(&tx, repo, meta)?;
-            Self::insert_git_tx(&tx, repo, &meta.id, oid, tree, raw)?;
-        }
-        tx.commit()?;
+        let changesets: Vec<crate::ChangesetRow> = rows.iter().map(|(meta, ..)| crate::ChangesetRow::new(meta)).collect();
+        let git: Vec<(ChangesetId, Oid, Oid, Bytes)> = rows.iter().map(|(meta, oid, tree, raw)| (meta.id, *oid, *tree, raw.clone())).collect();
+        self.db.write(|c| {
+            Self::insert_changesets_tx(c, repo, &changesets)?;
+            Self::insert_git_tx(c, repo, &git)
+        })?;
         rows.clear();
         Ok(())
     }
@@ -190,7 +185,7 @@ impl Store {
     /// A raw git object that isn't derived from changesets (annotated tags).
     pub(crate) fn raw_object(&self, repo: &str, oid: &Oid) -> anyhow::Result<Option<(Kind, Bytes)>> {
         let row = self
-            .read()
+            .db
             .query_row("SELECT kind, data FROM git_raw WHERE repo = ? AND oid = ?", params![repo, &oid.0[..]], |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
             })

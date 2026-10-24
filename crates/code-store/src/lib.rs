@@ -7,14 +7,14 @@
 //!   round-trip byte-for-byte.
 //! - **Landing** runs in one actor per `(repo, ref)`: batched, a trivial rebase when the change
 //!   doesn't overlap what landed since its base (found through the per-ref path index), a 3-way
-//!   merge per file when it does, and one SQLite transaction plus a ref compare-and-swap per batch.
+//!   merge per file when it does, and one transaction plus a ref compare-and-swap per batch.
 //!
-//! No network I/O except object storage (`pg_storage::Objects`).
+//! Metadata lives in a [`code_sql::Db`]: SQLite on one node, Postgres for many. No network I/O
+//! except object storage (`pg_storage::Objects`) and, on Postgres, the database.
 
 mod blame;
 mod checkout;
 mod db;
-mod durable;
 pub mod git;
 pub mod ids;
 mod import;
@@ -30,15 +30,15 @@ pub use blame::{Blame, BlameRange, MAX_BLAME_BYTES};
 pub use git::{Kind, TreeEntry};
 pub use ids::{ChangesetId, Oid};
 pub use import::ImportReport;
-pub use lander::{Conflict, ConflictKind, ConflictPath, Expect, LAND_LOG_RETENTION_MS, LandError, Landed};
+pub use lander::{CommitFault, Conflict, ConflictKind, ConflictPath, Expect, LAND_LOG_RETENTION_MS, LandError, Landed};
 pub use model::{Changeset, FileChange, Mode, Signature};
 pub use path::RepoPath;
 pub use read::{ChangesetInfo, DirEntry, EntryKind, FileContent, FileDiff, FileStatus, LogQuery, RefInfo, RepoStats};
 
 use bytes::Bytes;
+use code_sql::{Db, OptionalExtension, Target, ValueRef, params};
 use parking_lot::Mutex;
 use pg_storage::Objects;
-use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
@@ -86,16 +86,6 @@ pub fn full_ref(name: &str) -> String {
 /// A ref row: `(changeset, annotated tag, version, path-index floor generation)`.
 pub(crate) type RefRow = (ChangesetId, Option<Oid>, i64, u64);
 
-/// SQLite reader connections.
-const READERS: usize = 8;
-
-fn rand_slot() -> usize {
-    use std::hash::{BuildHasher, Hasher};
-    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-    h.write_usize(0);
-    h.finish() as usize
-}
-
 /// Hot blobs smaller than this are cached in memory.
 const BLOB_CACHE_MAX: usize = 1 << 20;
 
@@ -132,10 +122,10 @@ pub struct NewChangeset {
 }
 
 pub struct Store {
-    /// The one writer connection.
-    pub(crate) db: Mutex<Connection>,
-    /// Readers (WAL): reads don't queue behind writes.
-    readers: Vec<Mutex<Connection>>,
+    /// The metadata database. Every write is durable when it returns.
+    pub(crate) db: Db,
+    /// Postgres: the advisory lock that orders land log appends (see `lander::log_landed`).
+    pub(crate) land_log_lock: Option<i64>,
     pub(crate) objects: Objects,
     pub(crate) blob_cache: lru::Lru<(Arc<str>, Oid), Bytes>,
     pub(crate) tree_cache: lru::Lru<(Arc<str>, Oid), Arc<Vec<TreeEntry>>>,
@@ -145,19 +135,31 @@ pub struct Store {
     events: Mutex<HashMap<String, broadcast::Sender<Landed>>>,
     /// Every repo's landings, for services that watch all of them (post-merge checks, mirrors).
     all_events: broadcast::Sender<Landed>,
-    /// Landings are acknowledged only once the WAL is synced past their commit.
-    pub(crate) wal: durable::WalSync,
+    /// Test-only: make the lander's next batch commit report `CommitUnknown`.
+    pub(crate) commit_fault: Mutex<Option<CommitFault>>,
 }
 
 impl Store {
     /// Open (or create) the store: metadata in `<home>/code/code.db`, blobs in `objects`.
+    /// (Tests set `ROLL_CODE_TEST_DATABASE` to put the metadata in a fresh Postgres schema.)
     pub fn open(home: &Path, objects: Objects) -> anyhow::Result<Arc<Store>> {
         let path = home.join("code").join("code.db");
-        let db = db::open(&path)?;
-        let readers = (0..READERS).map(|_| db::open_reader(&path).map(Mutex::new)).collect::<anyhow::Result<_>>()?;
-        let store = Arc::new(Store {
-            db: Mutex::new(db),
-            readers,
+        let db = if std::env::var(code_sql::TEST_DATABASE_ENV).is_ok_and(|v| !v.is_empty()) {
+            Db::open_or_test(&Target::Sqlite(path), "store")?
+        } else {
+            Db::open_sqlite(&path, code_sql::SqliteOptions { readers: db::READERS, cache_kib: db::CACHE_KIB })?
+        };
+        Self::open_db(db, objects)
+    }
+
+    /// Open the store on a database: a configured Postgres (one schema per deployment, shared
+    /// by every node), or another handle to a database a store already uses.
+    pub fn open_db(db: Db, objects: Objects) -> anyhow::Result<Arc<Store>> {
+        db.ensure_schema(db::SCHEMA)?;
+        let land_log_lock = db.pg_schema().map(land_log_lock_key);
+        Ok(Arc::new(Store {
+            db,
+            land_log_lock,
             objects,
             blob_cache: lru::Lru::new(64 << 20),
             tree_cache: lru::Lru::new(64 << 20),
@@ -166,43 +168,35 @@ impl Store {
             landers: Mutex::new(HashMap::new()),
             events: Mutex::new(HashMap::new()),
             all_events: broadcast::channel(4096).0,
-            wal: durable::WalSync::new(&path),
-        });
-        durable::spawn_checkpointer(&path, Arc::downgrade(&store))?;
-        Ok(store)
+            commit_fault: Mutex::new(None),
+        }))
     }
 
-    /// Make every write committed so far durable (an fsync of the WAL, shared with whoever else
-    /// is waiting). Landings call this before they're acknowledged or published.
-    pub(crate) async fn sync_wal(self: &Arc<Self>) -> anyhow::Result<()> {
-        let store = self.clone();
-        tokio::task::spawn_blocking(move || store.wal.sync()).await??;
-        Ok(())
+    /// The metadata database (e.g. to open another store on it).
+    pub fn db(&self) -> &Db {
+        &self.db
     }
 
-    /// Sync requests that are durable so far (tests and diagnostics).
+    /// SQLite WAL syncs that reached the disk so far (tests and diagnostics; 0 on Postgres,
+    /// where every commit is durable by itself).
     pub fn wal_syncs(&self) -> u64 {
-        self.wal.synced()
+        self.db.syncs()
     }
 
-    /// A reader connection: the first free one, else this thread's.
-    pub(crate) fn read(&self) -> parking_lot::MutexGuard<'_, Connection> {
-        for r in &self.readers {
-            if let Some(g) = r.try_lock() {
-                return g;
-            }
-        }
-        thread_local! { static SLOT: usize = rand_slot(); }
-        self.readers[SLOT.with(|s| *s) % self.readers.len()].lock()
+    /// Test seam: the lander's next batch commit fails with `CommitUnknown`, after or without
+    /// committing (see [`CommitFault`]).
+    #[doc(hidden)]
+    pub fn inject_commit_fault(&self, fault: CommitFault) {
+        *self.commit_fault.lock() = Some(fault);
     }
 
     // ── repos ──
 
     pub fn create_repo(&self, repo: &str) -> anyhow::Result<()> {
-        if repo.is_empty() || repo.len() > 128 || repo.contains('/') {
-            return Err(invalid("repo id must be 1-128 characters without `/`"));
+        if repo.is_empty() || repo.len() > 128 || repo.contains('/') || repo.contains('\0') {
+            return Err(invalid("repo id must be 1-128 characters without `/` or NUL"));
         }
-        let n = self.db.lock().execute("INSERT OR IGNORE INTO repos (repo, created_at) VALUES (?, ?)", params![repo, now_ms()])?;
+        let n = self.db.execute("INSERT OR IGNORE INTO repos (repo, created_at) VALUES (?, ?)", params![repo, now_ms()])?;
         if n == 0 {
             return Err(invalid(format!("repo {repo} already exists")));
         }
@@ -210,7 +204,7 @@ impl Store {
     }
 
     pub fn repo_exists(&self, repo: &str) -> anyhow::Result<bool> {
-        Ok(self.read().query_row("SELECT 1 FROM repos WHERE repo = ?", [repo], |_| Ok(())).optional()?.is_some())
+        Ok(self.db.query_row("SELECT 1 FROM repos WHERE repo = ?", [repo], |_| Ok(())).optional()?.is_some())
     }
 
     pub(crate) fn check_repo(&self, repo: &str) -> anyhow::Result<()> {
@@ -221,14 +215,13 @@ impl Store {
     pub async fn delete_repo(&self, repo: &str) -> anyhow::Result<()> {
         self.landers.lock().retain(|(r, _), _| r != repo);
         self.events.lock().remove(repo);
-        {
-            let mut db = self.db.lock();
-            let tx = db.transaction()?;
-            for t in db::TABLES {
-                tx.execute(&format!("DELETE FROM {t} WHERE repo = ?"), [repo])?;
+        let deletes: Vec<String> = db::TABLES.iter().map(|t| format!("DELETE FROM {t} WHERE repo = ?")).collect();
+        self.db.write(|c| {
+            for d in &deletes {
+                c.execute(d, [repo])?;
             }
-            tx.commit()?;
-        }
+            Ok::<_, code_sql::Error>(())
+        })?;
         self.objects.delete_prefix(&format!("code/{repo}/")).await?;
         Ok(())
     }
@@ -257,10 +250,7 @@ impl Store {
             tokio::task::spawn_blocking(move || zstd::bulk::compress(&c, 3)).await??
         };
         self.objects.put(&Self::blob_key(repo, &oid), Bytes::from(compressed)).await?;
-        self.db.lock().execute(
-            "INSERT OR IGNORE INTO blobs (repo, oid, size) VALUES (?, ?, ?)",
-            params![repo, &oid.0[..], size as i64],
-        )?;
+        self.db.execute("INSERT OR IGNORE INTO blobs (repo, oid, size) VALUES (?, ?, ?)", params![repo, &oid.0[..], size as i64])?;
         if size <= BLOB_CACHE_MAX {
             self.blob_cache.insert((repo.into(), oid), content, size + 64);
         }
@@ -290,11 +280,11 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn insert_blobs_tx(tx: &rusqlite::Transaction<'_>, repo: &str, blobs: &HashMap<Oid, Bytes>) -> anyhow::Result<()> {
-        let mut st = tx.prepare_cached("INSERT OR IGNORE INTO blobs (repo, oid, size) VALUES (?, ?, ?)")?;
-        for (oid, data) in blobs {
-            st.execute(params![repo, &oid.0[..], data.len() as i64])?;
-        }
+    pub(crate) fn insert_blobs_tx(c: &code_sql::Conn<'_>, repo: &str, blobs: &HashMap<Oid, Bytes>) -> code_sql::Result<()> {
+        c.execute_many(
+            "INSERT OR IGNORE INTO blobs (repo, oid, size) VALUES (?, ?, ?)",
+            blobs.iter().map(|(oid, data)| [ValueRef::Text(repo), ValueRef::Blob(&oid.0), ValueRef::Int(data.len() as i64)]),
+        )?;
         Ok(())
     }
 
@@ -304,7 +294,7 @@ impl Store {
 
     pub fn blob_size(&self, repo: &str, oid: &Oid) -> anyhow::Result<Option<u64>> {
         Ok(self
-            .read()
+            .db
             .query_row("SELECT size FROM blobs WHERE repo = ? AND oid = ?", params![repo, &oid.0[..]], |r| r.get::<_, i64>(0))
             .optional()?
             .map(|s| s as u64))
@@ -335,7 +325,7 @@ impl Store {
             return Ok(Some(m));
         }
         let row = self
-            .read()
+            .db
             .query_row(
                 "SELECT generation, depth, skip, data FROM changesets WHERE repo = ? AND id = ?",
                 params![repo, &id.0[..]],
@@ -406,50 +396,47 @@ impl Store {
         Ok(Some(cur))
     }
 
-    pub(crate) fn insert_changeset_tx(tx: &rusqlite::Transaction<'_>, repo: &str, m: &Meta) -> anyhow::Result<()> {
-        tx.execute(
+    /// Insert changesets (new ones; existing ids are left alone).
+    pub(crate) fn insert_changesets_tx(c: &code_sql::Conn<'_>, repo: &str, rows: &[ChangesetRow]) -> code_sql::Result<()> {
+        c.execute_many(
             "INSERT OR IGNORE INTO changesets (repo, id, generation, depth, skip, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![
-                repo,
-                &m.id.0[..],
-                m.generation as i64,
-                m.depth as i64,
-                m.skip.as_ref().map(|s| s.0.to_vec()),
-                m.cs.encode(),
-                now_ms()
-            ],
+            rows.iter().map(|m| {
+                [
+                    ValueRef::Text(repo),
+                    ValueRef::Blob(&m.id.0),
+                    ValueRef::Int(m.generation as i64),
+                    ValueRef::Int(m.depth as i64),
+                    m.skip.as_ref().map_or(ValueRef::Null, |s| ValueRef::Blob(&s.0)),
+                    ValueRef::Blob(&m.data),
+                    ValueRef::Int(m.created_at),
+                ]
+            }),
         )?;
         Ok(())
     }
 
-    pub(crate) fn insert_git_tx(
-        tx: &rusqlite::Transaction<'_>,
-        repo: &str,
-        cs: &ChangesetId,
-        commit: &Oid,
-        tree: &Oid,
-        commit_data: &[u8],
-    ) -> anyhow::Result<()> {
-        tx.execute(
+    /// Insert derived git data: `(changeset, commit, tree, commit bytes)`.
+    pub(crate) fn insert_git_tx(c: &code_sql::Conn<'_>, repo: &str, rows: &[(ChangesetId, Oid, Oid, Bytes)]) -> code_sql::Result<()> {
+        c.execute_many(
             "INSERT OR IGNORE INTO cs_git (repo, cs, commit_oid, tree_oid) VALUES (?, ?, ?, ?)",
-            params![repo, &cs.0[..], &commit.0[..], &tree.0[..]],
+            rows.iter().map(|(cs, commit, tree, _)| [ValueRef::Text(repo), ValueRef::Blob(&cs.0), ValueRef::Blob(&commit.0), ValueRef::Blob(&tree.0)]),
         )?;
-        tx.execute(
+        c.execute_many(
             "INSERT OR IGNORE INTO git_commits (repo, oid, cs, data) VALUES (?, ?, ?, ?)",
-            params![repo, &commit.0[..], &cs.0[..], commit_data],
+            rows.iter().map(|(cs, commit, _, data)| [ValueRef::Text(repo), ValueRef::Blob(&commit.0), ValueRef::Blob(&cs.0), ValueRef::Blob(data)]),
         )?;
         Ok(())
     }
 
     pub(crate) fn insert_trees_tx<'a>(
-        tx: &rusqlite::Transaction<'_>,
+        c: &code_sql::Conn<'_>,
         repo: &str,
         trees: impl IntoIterator<Item = (&'a Oid, &'a Bytes)>,
-    ) -> anyhow::Result<()> {
-        let mut st = tx.prepare_cached("INSERT OR IGNORE INTO trees (repo, oid, data) VALUES (?, ?, ?)")?;
-        for (oid, data) in trees {
-            st.execute(params![repo, &oid.0[..], &data[..]])?;
-        }
+    ) -> code_sql::Result<()> {
+        c.execute_many(
+            "INSERT OR IGNORE INTO trees (repo, oid, data) VALUES (?, ?, ?)",
+            trees.into_iter().map(|(oid, data)| [ValueRef::Text(repo), ValueRef::Blob(&oid.0), ValueRef::Blob(data)]),
+        )?;
         Ok(())
     }
 
@@ -538,25 +525,22 @@ impl Store {
         let id = cs.id();
         if self.meta(repo, &id)?.is_some() {
             if !blobs.is_empty() {
-                let mut db = self.db.lock();
-                let tx = db.transaction()?;
-                Self::insert_blobs_tx(&tx, repo, blobs)?;
-                tx.commit()?;
+                self.db.write(|c| Self::insert_blobs_tx(c, repo, blobs))?;
             }
             return Ok(id);
         }
         let meta = Meta { id, cs, generation, depth, skip };
         let mut overlay = tree::Overlay::default();
         let (commit, tree, data) = self.derive_commit(repo, &meta, &mut overlay, &|p| self.derive_git(repo, p))?;
-        let mut db = self.db.lock();
-        let tx = db.transaction()?;
-        Self::insert_changeset_tx(&tx, repo, &meta)?;
-        Self::insert_blobs_tx(&tx, repo, blobs)?;
-        Self::insert_trees_tx(&tx, repo, overlay.trees.iter())?;
-        Self::insert_git_tx(&tx, repo, &id, &commit, &tree, &data)?;
-        tx.commit()?;
-        drop(db);
-        let size = meta.cs.encode().len() + 128;
+        let row = [ChangesetRow::new(&meta)];
+        let git = [(id, commit, tree, data)];
+        self.db.write(|c| {
+            Self::insert_changesets_tx(c, repo, &row)?;
+            Self::insert_blobs_tx(c, repo, blobs)?;
+            Self::insert_trees_tx(c, repo, overlay.trees.iter())?;
+            Self::insert_git_tx(c, repo, &git)
+        })?;
+        let size = row[0].data.len() + 128;
         self.meta_cache.insert((repo.into(), id), Arc::new(meta), size);
         self.git_cache.insert((repo.into(), id), (commit, tree), 128);
         Ok(id)
@@ -571,7 +555,7 @@ impl Store {
             return Ok(Some(v));
         }
         let row = self
-            .read()
+            .db
             .query_row(
                 "SELECT commit_oid, tree_oid FROM cs_git WHERE repo = ? AND cs = ?",
                 params![repo, &cs.0[..]],
@@ -587,7 +571,7 @@ impl Store {
     /// The changeset a git commit was derived from (or imported as).
     pub fn changeset_of_git(&self, repo: &str, commit: &Oid) -> anyhow::Result<Option<ChangesetId>> {
         Ok(self
-            .read()
+            .db
             .query_row("SELECT cs FROM git_commits WHERE repo = ? AND oid = ?", params![repo, &commit.0[..]], |r| {
                 r.get::<_, Vec<u8>>(0)
             })
@@ -621,11 +605,11 @@ impl Store {
             let (commit, tree, data) = self.derive_commit(repo, &meta, &mut overlay, &|p| {
                 self.git_of(repo, p)?.ok_or_else(|| anyhow::anyhow!("parent {} not derived", p.short()))
             })?;
-            let mut db = self.db.lock();
-            let tx = db.transaction()?;
-            Self::insert_trees_tx(&tx, repo, overlay.trees.iter())?;
-            Self::insert_git_tx(&tx, repo, &id, &commit, &tree, &data)?;
-            tx.commit()?;
+            let git = [(id, commit, tree, data)];
+            self.db.write(|c| {
+                Self::insert_trees_tx(c, repo, overlay.trees.iter())?;
+                Self::insert_git_tx(c, repo, &git)
+            })?;
         }
         self.git_of(repo, cs)?.ok_or_else(|| anyhow::anyhow!("derivation failed"))
     }
@@ -668,7 +652,7 @@ impl Store {
 
     pub(crate) fn ref_row(&self, repo: &str, name: &str) -> anyhow::Result<Option<RefRow>> {
         let row = self
-            .read()
+            .db
             .query_row(
                 "SELECT cs, tag, version, floor_gen FROM refs WHERE repo = ? AND name = ?",
                 params![repo, name],
@@ -707,18 +691,14 @@ impl Store {
             let id: ChangesetId = hex.parse()?;
             return Ok(self.meta(repo, &id)?.map(|_| id));
         }
-        let db = self.read();
         let prefix_match = |table: &str, col: &str, out: &str, width: usize| -> anyhow::Result<Vec<Vec<u8>>> {
             if hex.len() > width * 2 {
                 return Ok(vec![]);
             }
             let lo = hex::decode(format!("{hex:0<w$}", w = width * 2))?;
             let hi = hex::decode(format!("{hex:f<w$}", w = width * 2))?;
-            let mut st = db.prepare_cached(&format!(
-                "SELECT {out} FROM {table} WHERE repo = ? AND {col} >= ? AND {col} <= ? LIMIT 2"
-            ))?;
-            let rows = st.query_map(params![repo, lo, hi], |r| r.get::<_, Vec<u8>>(0))?.collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
+            let sql = format!("SELECT {out} FROM {table} WHERE repo = ? AND {col} >= ? AND {col} <= ? LIMIT 2");
+            Ok(self.db.query(&sql, params![repo, lo, hi], |r| r.get::<_, Vec<u8>>(0))?)
         };
         let mut found = prefix_match("changesets", "id", "id", 32)?;
         if !cs_only {
@@ -757,6 +737,33 @@ impl Store {
             let _ = tx.send(ev);
         }
     }
+}
+
+/// A changeset row, encoded for inserting.
+pub(crate) struct ChangesetRow {
+    pub id: ChangesetId,
+    pub generation: u64,
+    pub depth: u64,
+    pub skip: Option<ChangesetId>,
+    pub data: Vec<u8>,
+    pub created_at: i64,
+}
+
+impl ChangesetRow {
+    pub fn new(m: &Meta) -> ChangesetRow {
+        ChangesetRow { id: m.id, generation: m.generation, depth: m.depth, skip: m.skip, data: m.cs.encode(), created_at: now_ms() }
+    }
+}
+
+/// The advisory lock (Postgres) that orders land log appends in a schema.
+fn land_log_lock_key(schema: &str) -> i64 {
+    // FNV-1a: stable across builds and nodes.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in b"roll-code-land-log:".iter().chain(schema.as_bytes()) {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h as i64
 }
 
 /// The git commit of a changeset with a derived `tree` and its parents' commits:

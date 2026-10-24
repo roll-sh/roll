@@ -11,7 +11,7 @@ const REPO: &str = "repo_log";
 #[tokio::test]
 async fn every_published_landing_is_logged_in_order_and_survives_a_reopen() {
     let dir = tempfile::tempdir().unwrap();
-    let head0 = {
+    let (head0, old) = {
         let store = store(dir.path());
         store.create_repo(REPO).unwrap();
         assert_eq!(store.land_log_head().unwrap(), 0);
@@ -38,11 +38,11 @@ async fn every_published_landing_is_logged_in_order_and_survives_a_reopen() {
         assert!(log.iter().all(|(_, l)| l.repo == REPO && l.ref_name == "refs/heads/main" && !l.already));
         assert_eq!(log[3].1.changeset, s3.changeset);
         assert_eq!(log[3].1.git_commit, adv[1].git_commit);
-        store.land_log_head().unwrap()
+        (store.land_log_head().unwrap(), store)
     };
 
     // Durable: a reopened store still has it, and reading after a cursor returns only newer ones.
-    let store = store(dir.path());
+    let store = reopen(dir.path(), old);
     assert_eq!(store.land_log_head().unwrap(), head0);
     let all = store.land_log(0, 100).unwrap();
     assert_eq!(all.len(), 4);

@@ -207,6 +207,10 @@ async fn ref_compare_and_swap() {
 /// so only the checkpointer thread can have copied them into the database file.
 #[tokio::test]
 async fn landings_are_synced_before_they_are_acknowledged_and_checkpointed_in_the_background() {
+    if on_postgres() {
+        // Every Postgres commit is durable by itself; there's no WAL of ours to sync.
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let store = store(dir.path());
     let db = dir.path().join("code").join("code.db");

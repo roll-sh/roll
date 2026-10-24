@@ -4,16 +4,25 @@
 //! is an ancestor of the change. Otherwise it rebases the change's first-parent chain onto the
 //! head. Files that nothing landed on since the base are taken as they are (the per-ref path
 //! index finds them without reading trees). Overlapping files get a 3-way merge. A batch
-//! commits in one SQLite transaction with a compare-and-swap on the ref row. CI never runs here.
+//! commits in one transaction with a compare-and-swap on the ref row. CI never runs here.
+//!
+//! The compare-and-swap is what keeps landings correct when more than one lander can move a ref
+//! (several nodes on one Postgres, or two stores on one database): it checks the head, the ref's
+//! version and its path-index floor the batch was built on. If another lander moved the ref
+//! first, the batch is rebuilt on the new head and tried again. Nothing is acknowledged or
+//! published before its transaction is durable; if the database can't say whether a commit
+//! happened (`CommitUnknown`), the lander finds out before answering.
 
 use crate::ids::{ChangesetId, Oid};
 use crate::merge::Outcome;
 use crate::model::Changeset;
 use crate::path::RepoPath;
 use crate::tree::{Overlay, TreeConflict, TreeError};
-use crate::{Meta, Store, invalid, now_ms};
-use rusqlite::{OptionalExtension, params};
+use crate::{ChangesetRow, Meta, RefRow, Store, invalid, now_ms};
+use bytes::Bytes;
+use code_sql::{Backend, Isolation, OptionalExtension, ValueRef, params};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -27,6 +36,10 @@ const MAX_FF_WALK: usize = 10_000;
 /// A lander with nothing to do for this long stops (every branch an agent ever pushed would
 /// otherwise keep a task). The next request starts a fresh one, which reloads the ref.
 const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+/// Times a batch (or a ref update) is rebuilt after another lander moved the ref first.
+const MAX_MOVED_RETRIES: usize = 5;
+/// Times the lander asks whether a commit whose reply was lost happened (about 30 s in all).
+const RESOLVE_ATTEMPTS: u32 = 40;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Landed {
@@ -108,11 +121,23 @@ pub enum Expect {
     Is(ChangesetId),
 }
 
+/// A failure injected into the lander's next ref write (tests): the database then says it can't
+/// tell whether the commit happened ([`code_sql::Error::CommitUnknown`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitFault {
+    /// The transaction commits, but its reply is lost.
+    LostReply,
+    /// The transaction is rolled back, but that's not what the lander hears.
+    RolledBack,
+}
+
 pub(crate) enum Cmd {
     Land { cs: ChangesetId, reply: oneshot::Sender<Result<Landed, LandError>> },
     SetRef { expect: Expect, new: Option<(ChangesetId, Option<Oid>)>, reply: oneshot::Sender<anyhow::Result<()>> },
     Advance { expect: Option<ChangesetId>, new: ChangesetId, reply: oneshot::Sender<anyhow::Result<Vec<Landed>>> },
 }
+
+type LandReply = oneshot::Sender<Result<Landed, LandError>>;
 
 #[derive(Clone)]
 struct Head {
@@ -121,10 +146,26 @@ struct Head {
     tree: Oid,
 }
 
+/// A ref as committed: what a compare-and-swap on it expects.
+#[derive(Clone, Default)]
+struct RefState {
+    head: Option<Head>,
+    /// The path index's floor generation.
+    floor: u64,
+    /// The row's version; 0 when the ref doesn't exist.
+    version: i64,
+}
+
+impl RefState {
+    fn expect(&self) -> Option<(ChangesetId, i64, u64)> {
+        self.head.as_ref().map(|h| (h.meta.id, self.version, self.floor))
+    }
+}
+
 /// Work accumulated for one transaction.
 struct Batch {
-    /// The committed head at the start of the batch.
-    start: Option<Head>,
+    /// The committed ref at the start of the batch.
+    start: RefState,
     head: Option<Head>,
     /// The newest committed changeset in the head's history (the start, or the last
     /// fast-forward). Every committed ancestor of the head is an ancestor of it.
@@ -139,16 +180,15 @@ struct Batch {
     blobs: HashMap<Oid, bytes::Bytes>,
     paths: HashMap<RepoPath, u64>,
     fast_forwarded: HashSet<ChangesetId>,
-    replies: Vec<(oneshot::Sender<Result<Landed, LandError>>, Landed)>,
 }
 
 impl Batch {
-    fn new(start: Option<Head>, floor: u64) -> Batch {
+    fn new(start: RefState) -> Batch {
         Batch {
-            head: start.clone(),
-            anchor: start.as_ref().map(|h| h.meta.id),
+            head: start.head.clone(),
+            anchor: start.head.as_ref().map(|h| h.meta.id),
+            floor: start.floor,
             start,
-            floor,
             clear_index: false,
             metas: HashMap::new(),
             order: Vec::new(),
@@ -157,12 +197,15 @@ impl Batch {
             blobs: HashMap::new(),
             paths: HashMap::new(),
             fast_forwarded: HashSet::new(),
-            replies: Vec::new(),
         }
     }
 
-    fn is_empty(&self) -> bool {
-        self.replies.is_empty()
+    /// Whether committing the batch would change anything.
+    fn changes(&self) -> bool {
+        !self.order.is_empty()
+            || self.clear_index
+            || !self.paths.is_empty()
+            || self.head.as_ref().map(|h| h.meta.id) != self.start.head.as_ref().map(|h| h.meta.id)
     }
 }
 
@@ -173,6 +216,79 @@ struct Scratch {
     git: Vec<(ChangesetId, Oid, Oid, bytes::Bytes)>,
     paths: Vec<(RepoPath, u64)>,
     merged: Vec<RepoPath>,
+}
+
+/// One ref write: the compare-and-swap and everything committed with it. Built before the
+/// transaction (which only runs SQL, and may run more than once) and owned, so it can run on a
+/// blocking thread.
+struct RefWrite {
+    repo: String,
+    name: String,
+    /// `(head, version, floor)` the ref must still have; `None`: it must not exist.
+    expect: Option<(ChangesetId, i64, u64)>,
+    /// The new head and annotated tag; `None` deletes the ref.
+    new: Option<(ChangesetId, Option<Oid>)>,
+    floor: u64,
+    clear_index: bool,
+    /// Path index updates, sorted.
+    paths: Vec<(RepoPath, i64)>,
+    changesets: Vec<ChangesetRow>,
+    trees: Vec<(Oid, Bytes)>,
+    blobs: HashMap<Oid, Bytes>,
+    git: Vec<(ChangesetId, Oid, Oid, Bytes)>,
+    /// Published landings, `(at_ms, record)`: logged and counted.
+    log: Vec<(i64, String)>,
+}
+
+impl RefWrite {
+    fn new(repo: &str, name: &str, start: &RefState, new: Option<(ChangesetId, Option<Oid>)>) -> RefWrite {
+        RefWrite {
+            repo: repo.to_string(),
+            name: name.to_string(),
+            expect: start.expect(),
+            new,
+            floor: start.floor,
+            clear_index: false,
+            paths: Vec::new(),
+            changesets: Vec::new(),
+            trees: Vec::new(),
+            blobs: HashMap::new(),
+            git: Vec::new(),
+            log: Vec::new(),
+        }
+    }
+
+    /// The path index part of a batch.
+    fn index(mut self, batch: &Batch) -> RefWrite {
+        self.floor = batch.floor;
+        self.clear_index = batch.clear_index;
+        self.paths = batch.paths.iter().map(|(p, g)| (p.clone(), *g as i64)).collect();
+        self.paths.sort();
+        self
+    }
+
+    /// The row version after this write.
+    fn next_version(&self) -> i64 {
+        self.expect.map_or(1, |e| e.1 + 1)
+    }
+}
+
+/// How a ref write went.
+#[derive(Debug, PartialEq, Eq)]
+enum Written {
+    /// Committed. `exact`: the ref is known to be what the write left (else reload it).
+    Committed { exact: bool },
+    /// The ref no longer matched what the write expected; nothing was written.
+    Moved,
+}
+
+/// What a write whose commit reply was lost turned out to be.
+#[derive(Debug, PartialEq, Eq)]
+enum Resolved {
+    Committed { exact: bool },
+    NotCommitted,
+    /// The database is still running it: ask again.
+    Pending,
 }
 
 impl Store {
@@ -313,16 +429,16 @@ impl Store {
         Ok(false)
     }
 
-    fn load_head(&self, repo: &str, name: &str) -> anyhow::Result<(Option<Head>, u64)> {
-        let Some((cs, _, _, floor)) = self.ref_row(repo, name)? else { return Ok((None, 0)) };
+    fn load_head(&self, repo: &str, name: &str) -> anyhow::Result<RefState> {
+        let Some((cs, _, version, floor)) = self.ref_row(repo, name)? else { return Ok(RefState::default()) };
         let meta = self.meta_or_404(repo, &cs)?;
         let (commit, tree) = self.derive_git(repo, &cs)?;
-        Ok((Some(Head { meta, commit, tree }), floor))
+        Ok(RefState { head: Some(Head { meta, commit, tree }), floor, version })
     }
 
     fn path_gen(&self, repo: &str, name: &str, path: &RepoPath) -> anyhow::Result<Option<u64>> {
         Ok(self
-            .read()
+            .db
             .query_row(
                 "SELECT generation FROM path_index WHERE repo = ? AND ref = ? AND path = ?",
                 params![repo, name, path.as_str()],
@@ -369,54 +485,30 @@ struct Lander {
     store: Arc<Store>,
     repo: String,
     name: String,
-    /// Committed head and path-index floor; `None` until loaded (or after an error).
-    state: Option<(Option<Head>, u64)>,
+    /// The ref as last committed; `None` until loaded, and after an error or a move by
+    /// another lander.
+    state: Option<RefState>,
 }
 
 impl Lander {
     async fn process(&mut self, cmds: Vec<Cmd>) {
         let t0 = std::time::Instant::now();
         let n = cmds.len();
-        let mut batch = match self.batch() {
-            Ok(b) => b,
-            Err(e) => {
-                for cmd in cmds {
-                    fail(cmd, &e);
-                }
-                return;
-            }
-        };
+        let mut lands = Vec::new();
         for cmd in cmds {
             match cmd {
-                Cmd::Land { cs, reply } => match self.land(&mut batch, cs).await {
-                    Ok(landed) => batch.replies.push((reply, landed)),
-                    Err(e) => {
-                        let _ = reply.send(Err(e));
-                    }
-                },
+                Cmd::Land { cs, reply } => lands.push((cs, reply)),
                 Cmd::SetRef { expect, new, reply } => {
-                    self.flush(std::mem::replace(&mut batch, Batch::new(None, 0))).await;
-                    let mut r = self.set_ref(expect, new);
-                    if r.is_ok() {
-                        r = self.store.sync_wal().await;
-                    }
+                    self.land_all(std::mem::take(&mut lands)).await;
+                    let r = self.set_ref(expect, new).await;
                     if r.is_err() {
                         self.state = None;
                     }
                     let _ = reply.send(r);
-                    batch = match self.batch() {
-                        Ok(b) => b,
-                        Err(_) => Batch::new(None, 0),
-                    };
                 }
                 Cmd::Advance { expect, new, reply } => {
-                    self.flush(std::mem::replace(&mut batch, Batch::new(None, 0))).await;
-                    let mut r = self.advance(expect, new);
-                    if r.is_ok()
-                        && let Err(e) = self.store.sync_wal().await
-                    {
-                        r = Err(e);
-                    }
+                    self.land_all(std::mem::take(&mut lands)).await;
+                    let r = self.advance(expect, new).await;
                     match &r {
                         Ok(landed) => {
                             if !self.internal() {
@@ -428,24 +520,93 @@ impl Lander {
                         Err(_) => self.state = None,
                     }
                     let _ = reply.send(r);
-                    batch = match self.batch() {
-                        Ok(b) => b,
-                        Err(_) => Batch::new(None, 0),
-                    };
                 }
             }
         }
-        let t1 = std::time::Instant::now();
-        self.flush(batch).await;
-        tracing::debug!(repo = %self.repo, r#ref = %self.name, batch = n, process = ?(t1 - t0), commit = ?t1.elapsed(), "landed batch");
+        self.land_all(lands).await;
+        tracing::debug!(repo = %self.repo, r#ref = %self.name, batch = n, took = ?t0.elapsed(), "landed batch");
     }
 
     fn batch(&mut self) -> anyhow::Result<Batch> {
         if self.state.is_none() {
             self.state = Some(self.store.load_head(&self.repo, &self.name)?);
         }
-        let (head, floor) = self.state.clone().unwrap_or((None, 0));
-        Ok(Batch::new(head, floor))
+        Ok(Batch::new(self.state.clone().unwrap_or_default()))
+    }
+
+    /// Land requests as one batch built on the committed head, commit it, then answer every
+    /// request. If another lander moved the ref first, rebuild the batch on its new head.
+    async fn land_all(&mut self, requests: Vec<(ChangesetId, LandReply)>) {
+        if requests.is_empty() {
+            return;
+        }
+        let mut moved = 0;
+        loop {
+            let mut batch = match self.batch() {
+                Ok(b) => b,
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    for (_, reply) in requests {
+                        let _ = reply.send(Err(LandError::Other(anyhow::anyhow!("{msg}"))));
+                    }
+                    return;
+                }
+            };
+            let mut results = Vec::with_capacity(requests.len());
+            for (cs, _) in &requests {
+                results.push(self.land(&mut batch, *cs).await);
+            }
+            let written = if batch.changes() { self.commit(&batch, &results).await } else { self.sync().await };
+            match written {
+                Ok(Written::Committed { exact }) => {
+                    if batch.changes() {
+                        for m in batch.metas.values() {
+                            self.store.meta_cache.insert((self.repo.as_str().into(), m.id), m.clone(), m.cs.encode().len() + 128);
+                        }
+                        for (id, (c, t, _)) in &batch.git {
+                            self.store.git_cache.insert((self.repo.as_str().into(), *id), (*c, *t), 128);
+                        }
+                        let version = batch.start.version + 1;
+                        self.state = exact.then(|| RefState { head: batch.head.clone(), floor: batch.floor, version });
+                    }
+                    let internal = self.internal();
+                    for ((_, reply), result) in requests.into_iter().zip(results) {
+                        if let Ok(landed) = &result
+                            && !landed.already
+                            && !internal
+                        {
+                            self.store.publish(landed.clone());
+                        }
+                        let _ = reply.send(result);
+                    }
+                    return;
+                }
+                Ok(Written::Moved) if moved < MAX_MOVED_RETRIES => {
+                    moved += 1;
+                    self.state = None;
+                    tracing::debug!(repo = %self.repo, r#ref = %self.name, attempt = moved, "the ref moved underneath the lander; rebuilding the batch");
+                }
+                Ok(Written::Moved) => {
+                    self.state = None;
+                    let e = anyhow::anyhow!("{} kept moving underneath the lander ({moved} rebuilds); retry", self.name);
+                    fail_all(requests, results, &e);
+                    return;
+                }
+                Err(e) => {
+                    self.state = None;
+                    fail_all(requests, results, &e);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// A batch that changes nothing still answers only about durable state: the head it read
+    /// may have come from a commit whose sync hasn't finished (SQLite; a no-op on Postgres).
+    async fn sync(&self) -> anyhow::Result<Written> {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || store.db.sync()).await??;
+        Ok(Written::Committed { exact: true })
     }
 
     fn lookup<'a>(&'a self, batch: &'a Batch, scratch: &'a [Arc<Meta>]) -> impl Fn(&ChangesetId) -> anyhow::Result<Arc<Meta>> + 'a {
@@ -680,68 +841,20 @@ impl Lander {
         }
     }
 
-    /// Commit a batch: one transaction, CAS on the ref row. Then reply and publish.
-    async fn flush(&mut self, batch: Batch) {
-        if batch.is_empty() {
-            return;
-        }
-        let mut result = match self.store.upload_blobs(&self.repo, &batch.blobs).await {
-            Ok(()) => self.commit(&batch),
-            Err(e) => Err(e),
-        };
-        // Nothing is acknowledged or published before it's durable.
-        if result.is_ok() {
-            result = self.store.sync_wal().await;
-        }
-        match result {
-            Ok(()) => {
-                for m in batch.metas.values() {
-                    self.store.meta_cache.insert((self.repo.as_str().into(), m.id), m.clone(), m.cs.encode().len() + 128);
-                }
-                for (id, (c, t, _)) in &batch.git {
-                    self.store.git_cache.insert((self.repo.as_str().into(), *id), (*c, *t), 128);
-                }
-                self.state = Some((batch.head.clone(), batch.floor));
-                let internal = self.internal();
-                for (reply, landed) in batch.replies {
-                    if !landed.already && !internal {
-                        self.store.publish(landed.clone());
-                    }
-                    let _ = reply.send(Ok(landed));
-                }
-            }
-            Err(e) => {
-                self.state = None;
-                let msg = format!("{e:#}");
-                for (reply, _) in batch.replies {
-                    let _ = reply.send(Err(LandError::Other(anyhow::anyhow!("landing failed: {msg}"))));
-                }
-            }
-        }
-    }
-
-    fn commit(&self, batch: &Batch) -> anyhow::Result<()> {
-        let Some(head) = &batch.head else { return Ok(()) };
-        let repo = self.repo.as_str();
-        let mut db = self.store.db.lock();
-        let tx = db.transaction()?;
-        for id in &batch.order {
-            Store::insert_changeset_tx(&tx, repo, &batch.metas[id])?;
-        }
-        Store::insert_trees_tx(&tx, repo, batch.overlay.trees.iter())?;
-        Store::insert_blobs_tx(&tx, repo, &batch.blobs)?;
-        for (id, (c, t, d)) in &batch.git {
-            Store::insert_git_tx(&tx, repo, id, c, t, d)?;
-        }
-        write_index(&tx, repo, &self.name, batch.clear_index, &batch.paths)?;
-        cas_ref(&tx, repo, &self.name, batch.start.as_ref().map(|h| h.meta.id), Some((head.meta.id, None)), batch.floor)?;
+    /// Upload a batch's merged blobs, then commit it: one transaction, compare-and-swap on the
+    /// ref row from the batch's start.
+    async fn commit(&self, batch: &Batch, results: &[Result<Landed, LandError>]) -> anyhow::Result<Written> {
+        let Some(head) = &batch.head else { return Ok(Written::Committed { exact: true }) };
+        self.store.upload_blobs(&self.repo, &batch.blobs).await?;
+        let mut w = RefWrite::new(&self.repo, &self.name, &batch.start, Some((head.meta.id, None))).index(batch);
+        w.changesets = batch.order.iter().map(|id| ChangesetRow::new(&batch.metas[id])).collect();
+        w.trees = batch.overlay.trees.iter().map(|(o, d)| (*o, d.clone())).collect();
+        w.blobs = batch.blobs.clone();
+        w.git = batch.git.iter().map(|(id, (c, t, d))| (*id, *c, *t, d.clone())).collect();
         if !self.internal() {
-            let landed: Vec<&Landed> = batch.replies.iter().map(|(_, l)| l).filter(|l| !l.already).collect();
-            count_landed(&tx, repo, landed.len() as i64)?;
-            log_landed(&tx, repo, &landed)?;
+            w.log = log_records(results.iter().filter_map(|r| r.as_ref().ok()).filter(|l| !l.already))?;
         }
-        tx.commit()?;
-        Ok(())
+        write_ref(&self.store, w).await
     }
 
     /// A ref under `refs/roll/`: landings there are scratch work, not merges.
@@ -749,128 +862,361 @@ impl Lander {
         crate::is_internal_ref(&self.name)
     }
 
-    fn advance(&mut self, expect: Option<ChangesetId>, new: ChangesetId) -> anyhow::Result<Vec<Landed>> {
+    async fn advance(&mut self, expect: Option<ChangesetId>, new: ChangesetId) -> anyhow::Result<Vec<Landed>> {
         let store = self.store.clone();
-        let repo = self.repo.as_str();
-        let current = store.ref_row(repo, &self.name)?.map(|r| r.0);
-        if current != expect {
-            return Err(invalid(format!(
-                "{} moved: expected {}, found {}",
-                self.name,
-                expect.map(|c| c.short()).unwrap_or_else(|| "nothing".into()),
-                current.map(|c| c.short()).unwrap_or_else(|| "nothing".into()),
-            )));
-        }
-        // The first-parent chain from `new` down to `expect`, oldest first.
-        let mut chain = Vec::new();
-        let mut cur = store.meta_or_404(repo, &new)?;
-        loop {
-            if Some(cur.id) == expect {
-                break;
+        let repo = self.repo.clone();
+        let repo = repo.as_str();
+        for _ in 0..=MAX_MOVED_RETRIES {
+            let start = store.load_head(repo, &self.name)?;
+            let current = start.head.as_ref().map(|h| h.meta.id);
+            if current != expect {
+                return Err(invalid(format!(
+                    "{} moved: expected {}, found {}",
+                    self.name,
+                    expect.map(|c| c.short()).unwrap_or_else(|| "nothing".into()),
+                    current.map(|c| c.short()).unwrap_or_else(|| "nothing".into()),
+                )));
             }
-            if chain.len() >= MAX_FF_WALK {
-                return Err(invalid(format!("more than {MAX_FF_WALK} changesets to advance {}", self.name)));
+            // The first-parent chain from `new` down to `expect`, oldest first.
+            let mut chain = Vec::new();
+            let mut cur = store.meta_or_404(repo, &new)?;
+            loop {
+                if Some(cur.id) == expect {
+                    break;
+                }
+                if chain.len() >= MAX_FF_WALK {
+                    return Err(invalid(format!("more than {MAX_FF_WALK} changesets to advance {}", self.name)));
+                }
+                chain.push(cur.clone());
+                match cur.cs.parents.first() {
+                    Some(p) => cur = store.meta_or_404(repo, p)?,
+                    None if expect.is_none() => break,
+                    None => return Err(invalid(format!("{} isn't on top of {}", new.short(), self.name))),
+                }
             }
-            chain.push(cur.clone());
-            match cur.cs.parents.first() {
-                Some(p) => cur = store.meta_or_404(repo, p)?,
-                None if expect.is_none() => break,
-                None => return Err(invalid(format!("{} isn't on top of {}", new.short(), self.name))),
+            if chain.is_empty() {
+                return Ok(Vec::new());
             }
-        }
-        if chain.is_empty() {
-            return Ok(Vec::new());
-        }
-        chain.reverse();
-        let (cur_head, floor) = store.load_head(repo, &self.name)?;
-        let mut batch = Batch::new(cur_head, floor);
-        let tip = chain.last().cloned().expect("non-empty");
-        self.fast_forward(&mut batch, tip)?;
-        // Derive (and describe) every landing first: the land log is written in the same
-        // transaction as the ref move.
-        let mut out = Vec::with_capacity(chain.len());
-        let mut previous = expect;
-        for m in chain {
-            let (commit, _) = store.derive_git(repo, &m.id)?;
-            out.push(Landed {
-                repo: self.repo.clone(),
-                ref_name: self.name.clone(),
-                changeset: m.id,
-                git_commit: commit,
-                source: m.id,
-                previous,
-                generation: m.generation,
-                fast_forward: true,
-                already: false,
-                merged_paths: Vec::new(),
-                count: 1,
-                summary: m.cs.summary(),
-                author: m.cs.author.name(),
-                files: m.cs.files.len(),
-                at_ms: now_ms(),
-            });
-            previous = Some(m.id);
-        }
-        {
-            let mut db = store.db.lock();
-            let tx = db.transaction()?;
-            write_index(&tx, repo, &self.name, batch.clear_index, &batch.paths)?;
-            cas_ref(&tx, repo, &self.name, expect, Some((new, None)), batch.floor)?;
+            chain.reverse();
+            let mut batch = Batch::new(start.clone());
+            let tip = chain.last().cloned().expect("non-empty");
+            self.fast_forward(&mut batch, tip)?;
+            // Derive (and describe) every landing first: the land log is written in the same
+            // transaction as the ref move.
+            let mut out = Vec::with_capacity(chain.len());
+            let mut previous = expect;
+            for m in chain {
+                let (commit, _) = store.derive_git(repo, &m.id)?;
+                out.push(Landed {
+                    repo: self.repo.clone(),
+                    ref_name: self.name.clone(),
+                    changeset: m.id,
+                    git_commit: commit,
+                    source: m.id,
+                    previous,
+                    generation: m.generation,
+                    fast_forward: true,
+                    already: false,
+                    merged_paths: Vec::new(),
+                    count: 1,
+                    summary: m.cs.summary(),
+                    author: m.cs.author.name(),
+                    files: m.cs.files.len(),
+                    at_ms: now_ms(),
+                });
+                previous = Some(m.id);
+            }
+            let mut w = RefWrite::new(repo, &self.name, &start, Some((new, None))).index(&batch);
             if !self.internal() {
-                count_landed(&tx, repo, out.len() as i64)?;
-                log_landed(&tx, repo, &out.iter().collect::<Vec<_>>())?;
+                w.log = log_records(out.iter())?;
             }
-            tx.commit()?;
+            match write_ref(&store, w).await? {
+                Written::Committed { exact } => {
+                    let version = start.version + 1;
+                    self.state = exact.then(|| RefState { head: batch.head.clone(), floor: batch.floor, version });
+                    return Ok(out);
+                }
+                Written::Moved => self.state = None,
+            }
         }
-        self.state = Some((batch.head.clone(), batch.floor));
-        Ok(out)
+        Err(anyhow::anyhow!("{} kept moving concurrently; retry", self.name))
     }
 
-    fn set_ref(&mut self, expect: Expect, new: Option<(ChangesetId, Option<Oid>)>) -> anyhow::Result<()> {
-        let store = &self.store;
-        let current = store.ref_row(&self.repo, &self.name)?.map(|r| r.0);
-        match (expect, current) {
-            (Expect::Any, _) | (Expect::Absent, None) => {}
-            (Expect::Is(want), Some(cur)) if want == cur => {}
-            _ => return Err(invalid(format!("{} moved: expected {:?}, found {:?}", self.name, expect, current.map(|c| c.short())))),
+    async fn set_ref(&mut self, expect: Expect, new: Option<(ChangesetId, Option<Oid>)>) -> anyhow::Result<()> {
+        let store = self.store.clone();
+        let repo = self.repo.clone();
+        let repo = repo.as_str();
+        for _ in 0..=MAX_MOVED_RETRIES {
+            let start = store.load_head(repo, &self.name)?;
+            let current = start.head.as_ref().map(|h| h.meta.id);
+            match (expect, current) {
+                (Expect::Any, _) | (Expect::Absent, None) => {}
+                (Expect::Is(want), Some(cur)) if want == cur => {}
+                _ => return Err(invalid(format!("{} moved: expected {:?}, found {:?}", self.name, expect, current.map(|c| c.short())))),
+            }
+            let Some((cs, tag)) = new else {
+                if current.is_none() {
+                    self.state = Some(RefState::default());
+                    return Ok(());
+                }
+                match write_ref(&store, RefWrite::new(repo, &self.name, &start, None)).await? {
+                    Written::Committed { exact } => {
+                        self.state = exact.then(RefState::default);
+                        return Ok(());
+                    }
+                    Written::Moved => {
+                        self.state = None;
+                        continue;
+                    }
+                }
+            };
+            let meta = store.meta_or_404(repo, &cs)?;
+            let (commit, tree) = store.derive_git(repo, &cs)?;
+            let mut batch = Batch::new(start.clone());
+            // Path index: exact on a fast-forward, reset otherwise.
+            let ff = match current {
+                Some(cur) => store.is_ancestor(repo, &cur, &cs)?,
+                None => false,
+            };
+            if ff {
+                self.fast_forward(&mut batch, meta.clone())?;
+            } else {
+                batch.clear_index = true;
+                batch.paths.clear();
+                batch.floor = meta.generation;
+            }
+            match write_ref(&store, RefWrite::new(repo, &self.name, &start, Some((cs, tag))).index(&batch)).await? {
+                Written::Committed { exact } => {
+                    let version = start.version + 1;
+                    self.state = exact.then(|| RefState { head: Some(Head { meta, commit, tree }), floor: batch.floor, version });
+                    return Ok(());
+                }
+                Written::Moved => self.state = None,
+            }
         }
-        let repo = self.repo.as_str();
-        let Some((cs, tag)) = new else {
-            let db = store.db.lock();
-            db.execute("DELETE FROM refs WHERE repo = ? AND name = ?", params![repo, self.name])?;
-            db.execute("DELETE FROM path_index WHERE repo = ? AND ref = ?", params![repo, self.name])?;
-            self.state = Some((None, 0));
-            return Ok(());
-        };
-        let meta = store.meta_or_404(repo, &cs)?;
-        let (commit, tree) = store.derive_git(repo, &cs)?;
-        let (cur_head, floor) = store.load_head(repo, &self.name)?;
-        let mut batch = Batch::new(cur_head, floor);
-        // Path index: exact on a fast-forward, reset otherwise.
-        let ff = match current {
-            Some(cur) => store.is_ancestor(repo, &cur, &cs)?,
-            None => false,
-        };
-        if ff {
-            self.fast_forward(&mut batch, meta.clone())?;
-        } else {
-            batch.clear_index = true;
-            batch.floor = meta.generation;
-        }
-        let mut db = store.db.lock();
-        let tx = db.transaction()?;
-        write_index(&tx, repo, &self.name, batch.clear_index, &batch.paths)?;
-        cas_ref(&tx, repo, &self.name, current, Some((cs, tag)), batch.floor)?;
-        tx.commit()?;
-        self.state = Some((Some(Head { meta, commit, tree }), batch.floor));
-        Ok(())
+        Err(anyhow::anyhow!("{} kept moving concurrently; retry", self.name))
     }
 }
 
-fn count_landed(tx: &rusqlite::Transaction<'_>, repo: &str, landed: i64) -> anyhow::Result<()> {
-    tx.execute(
+/// Answer a batch that wasn't committed: what would have landed fails with `e`; requests that
+/// had failed already keep their own error.
+fn fail_all(requests: Vec<(ChangesetId, LandReply)>, results: Vec<Result<Landed, LandError>>, e: &anyhow::Error) {
+    let msg = format!("{e:#}");
+    for ((_, reply), result) in requests.into_iter().zip(results) {
+        let _ = reply.send(match result {
+            Ok(_) => Err(LandError::Other(anyhow::anyhow!("landing failed: {msg}"))),
+            Err(e) => Err(e),
+        });
+    }
+}
+
+fn log_records<'a>(landed: impl Iterator<Item = &'a Landed>) -> anyhow::Result<Vec<(i64, String)>> {
+    landed.map(|l| Ok((l.at_ms, serde_json::to_string(l)?))).collect()
+}
+
+/// Run a ref write on a blocking thread (the database API is synchronous, and on SQLite it
+/// waits for the WAL to be synced).
+async fn write_ref(store: &Arc<Store>, w: RefWrite) -> anyhow::Result<Written> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || write_ref_blocking(&store, &w)).await?
+}
+
+fn write_ref_blocking(store: &Store, w: &RefWrite) -> anyhow::Result<Written> {
+    let fault = store.commit_fault.lock().take();
+    // On Postgres, the id of the transaction's last attempt: if the reply to its COMMIT is lost,
+    // the server can still say whether it committed.
+    let xid = RefCell::new(None);
+    let mut r = apply(store, w, &xid, fault == Some(CommitFault::RolledBack));
+    match (&r, fault) {
+        (Ok(true), Some(CommitFault::LostReply)) => r = Err(code_sql::Error::CommitUnknown("injected: the reply to COMMIT was lost".into())),
+        (Err(_), Some(CommitFault::RolledBack)) => r = Err(code_sql::Error::CommitUnknown("injected: rolled back".into())),
+        _ => {}
+    }
+    match r {
+        Ok(true) => Ok(Written::Committed { exact: true }),
+        Ok(false) => Ok(Written::Moved),
+        Err(code_sql::Error::CommitUnknown(msg)) => {
+            tracing::warn!(repo = %w.repo, r#ref = %w.name, error = %msg, "lost the reply to a ref update's commit; asking the database whether it happened");
+            match resolve(store, w, xid.into_inner())? {
+                Resolved::Committed { exact } => Ok(Written::Committed { exact }),
+                Resolved::NotCommitted | Resolved::Pending => Err(anyhow::anyhow!("the commit didn't happen ({msg})")),
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The write's transaction. `Ok(false)`: the compare-and-swap failed, nothing was written.
+fn apply(store: &Store, w: &RefWrite, xid: &RefCell<Option<String>>, abort: bool) -> code_sql::Result<bool> {
+    let pg = store.db.backend() == Backend::Postgres;
+    store.db.write_with(Isolation::ReadCommitted, |c| {
+        // The ref row first: on Postgres its lock is then held to the commit, so a lander
+        // elsewhere that moves the ref waits for this transaction rather than racing it.
+        let Some(id) = cas_ref(c, w, pg)? else { return Ok(false) };
+        *xid.borrow_mut() = id;
+        if w.new.is_none() || w.clear_index {
+            c.execute("DELETE FROM path_index WHERE repo = ? AND ref = ?", params![w.repo, w.name])?;
+        }
+        if w.new.is_some() {
+            Store::insert_changesets_tx(c, &w.repo, &w.changesets)?;
+            Store::insert_trees_tx(c, &w.repo, w.trees.iter().map(|(o, d)| (o, d)))?;
+            Store::insert_blobs_tx(c, &w.repo, &w.blobs)?;
+            Store::insert_git_tx(c, &w.repo, &w.git)?;
+            write_index(c, w)?;
+        }
+        if !w.log.is_empty() {
+            count_landed(c, &w.repo, w.log.len() as i64)?;
+            log_landed(c, store.land_log_lock, &w.repo, &w.log)?;
+        }
+        if abort {
+            return Err(code_sql::Error::Other("injected fault: rolling back".into()));
+        }
+        Ok(true)
+    })
+}
+
+/// Find out whether a write whose commit reply was lost happened, asking until the database
+/// answers (the lander can't move on before it knows).
+fn resolve(store: &Store, w: &RefWrite, xid: Option<String>) -> anyhow::Result<Resolved> {
+    let mut last = String::from("no answer");
+    for attempt in 0..RESOLVE_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis((50u64 << attempt.min(4)).min(1000)));
+        }
+        let status = match &xid {
+            Some(x) => match store.db.query_row("SELECT pg_xact_status(CAST(CAST(? AS TEXT) AS xid8))", [x.as_str()], |r| r.get::<_, Option<String>>(0)) {
+                Ok(s) => s,
+                Err(e) => {
+                    last = format!("{e:#}");
+                    continue;
+                }
+            },
+            None => None,
+        };
+        let current = match store.ref_row(&w.repo, &w.name) {
+            Ok(r) => r,
+            Err(e) => {
+                last = format!("{e:#}");
+                continue;
+            }
+        };
+        let on_ref = |new: &ChangesetId, head: &ChangesetId| -> anyhow::Result<bool> {
+            // Not stored at all: nothing wrote it.
+            if store.meta(&w.repo, new)?.is_none() {
+                return Ok(false);
+            }
+            store.is_fp_ancestor(&w.repo, new, head)
+        };
+        match commit_outcome(status.as_deref(), current.as_ref(), w, on_ref) {
+            Ok(Resolved::Pending) => last = "the transaction is still in progress".into(),
+            Ok(r) => {
+                tracing::warn!(repo = %w.repo, r#ref = %w.name, outcome = ?r, "resolved a commit whose reply was lost");
+                return Ok(r);
+            }
+            Err(e) => last = format!("{e:#}"),
+        }
+    }
+    Err(anyhow::anyhow!("the connection to the database was lost while committing, and whether the commit happened is still unknown: {last}"))
+}
+
+/// Whether a write whose commit reply was lost happened. `xact` is the transaction's status on
+/// Postgres (`pg_xact_status`), which settles it. Without it the ref decides: the write happened
+/// if the ref is exactly what the write made it (head, version and floor), or if the write's
+/// head is in the ref's first-parent history now (`on_ref(new, head)`: another lander moved it
+/// on since). Otherwise it didn't.
+fn commit_outcome(
+    xact: Option<&str>,
+    current: Option<&RefRow>,
+    w: &RefWrite,
+    on_ref: impl FnOnce(&ChangesetId, &ChangesetId) -> anyhow::Result<bool>,
+) -> anyhow::Result<Resolved> {
+    match xact {
+        Some("committed") => return Ok(Resolved::Committed { exact: false }),
+        Some("aborted") => return Ok(Resolved::NotCommitted),
+        Some("in progress") => return Ok(Resolved::Pending),
+        _ => {}
+    }
+    let Some((new, _)) = w.new else {
+        // A delete happened if the ref is gone.
+        return Ok(if current.is_none() { Resolved::Committed { exact: true } } else { Resolved::NotCommitted });
+    };
+    let Some((head, _, version, floor)) = current else { return Ok(Resolved::NotCommitted) };
+    if *head == new && *version == w.next_version() && *floor == w.floor {
+        return Ok(Resolved::Committed { exact: true });
+    }
+    if w.expect.is_some_and(|e| e.0 == new) {
+        // The write didn't move the head (a ref update to where it was): the ref can't tell.
+        return Ok(Resolved::NotCommitted);
+    }
+    Ok(if on_ref(&new, head)? { Resolved::Committed { exact: false } } else { Resolved::NotCommitted })
+}
+
+/// Compare-and-swap the ref row. `None`: it no longer matches, nothing changed. `Some(xid)`:
+/// swapped; on Postgres, with the transaction's id.
+fn cas_ref(c: &code_sql::Conn<'_>, w: &RefWrite, pg: bool) -> code_sql::Result<Option<Option<String>>> {
+    let returning = if pg { " RETURNING CAST(pg_current_xact_id() AS TEXT)" } else { "" };
+    let now = now_ms();
+    let (sql, values): (&str, Vec<ValueRef<'_>>) = match (&w.expect, &w.new) {
+        (None, None) => return Ok(Some(None)),
+        (None, Some((cs, tag))) => (
+            "INSERT OR IGNORE INTO refs (repo, name, cs, tag, version, floor_gen, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
+            vec![
+                ValueRef::Text(&w.repo),
+                ValueRef::Text(&w.name),
+                ValueRef::Blob(&cs.0),
+                tag.as_ref().map_or(ValueRef::Null, |t| ValueRef::Blob(&t.0)),
+                ValueRef::Int(w.floor as i64),
+                ValueRef::Int(now),
+            ],
+        ),
+        (Some((old, version, floor)), Some((cs, tag))) => (
+            "UPDATE refs SET cs = ?, tag = ?, version = version + 1, floor_gen = ?, updated_at = ?
+             WHERE repo = ? AND name = ? AND cs = ? AND version = ? AND floor_gen = ?",
+            vec![
+                ValueRef::Blob(&cs.0),
+                tag.as_ref().map_or(ValueRef::Null, |t| ValueRef::Blob(&t.0)),
+                ValueRef::Int(w.floor as i64),
+                ValueRef::Int(now),
+                ValueRef::Text(&w.repo),
+                ValueRef::Text(&w.name),
+                ValueRef::Blob(&old.0),
+                ValueRef::Int(*version),
+                ValueRef::Int(*floor as i64),
+            ],
+        ),
+        (Some((old, version, floor)), None) => (
+            "DELETE FROM refs WHERE repo = ? AND name = ? AND cs = ? AND version = ? AND floor_gen = ?",
+            vec![
+                ValueRef::Text(&w.repo),
+                ValueRef::Text(&w.name),
+                ValueRef::Blob(&old.0),
+                ValueRef::Int(*version),
+                ValueRef::Int(*floor as i64),
+            ],
+        ),
+    };
+    if pg {
+        let ids = c.query(&format!("{sql}{returning}"), values.as_slice(), |r| r.get::<_, String>(0))?;
+        Ok(ids.into_iter().next().map(Some))
+    } else {
+        Ok((c.execute(sql, values.as_slice())? == 1).then_some(None))
+    }
+}
+
+fn write_index(c: &code_sql::Conn<'_>, w: &RefWrite) -> code_sql::Result<()> {
+    c.execute_many(
+        "INSERT INTO path_index (repo, ref, path, generation) VALUES (?, ?, ?, ?)
+         ON CONFLICT (repo, ref, path) DO UPDATE SET generation =
+             CASE WHEN excluded.generation > path_index.generation THEN excluded.generation ELSE path_index.generation END",
+        w.paths.iter().map(|(p, g)| [ValueRef::Text(&w.repo), ValueRef::Text(&w.name), ValueRef::Text(p.as_str()), ValueRef::Int(*g)]),
+    )?;
+    Ok(())
+}
+
+fn count_landed(c: &code_sql::Conn<'_>, repo: &str, landed: i64) -> code_sql::Result<()> {
+    c.execute(
         "INSERT INTO land_stats (repo, minute, count) VALUES (?, ?, ?)
-         ON CONFLICT (repo, minute) DO UPDATE SET count = count + excluded.count",
+         ON CONFLICT (repo, minute) DO UPDATE SET count = land_stats.count + excluded.count",
         params![repo, now_ms() / 60_000, landed],
     )?;
     Ok(())
@@ -879,75 +1225,80 @@ fn count_landed(tx: &rusqlite::Transaction<'_>, repo: &str, landed: i64) -> anyh
 /// How long the land log keeps a landing.
 pub const LAND_LOG_RETENTION_MS: i64 = 7 * 86_400_000;
 
-fn log_landed(tx: &rusqlite::Transaction<'_>, repo: &str, landed: &[&Landed]) -> anyhow::Result<()> {
-    if landed.is_empty() {
-        return Ok(());
+/// Append to the land log. Readers page through it by sequence number and must never skip
+/// one, so sequence numbers have to become visible in order. With one SQLite writer they do.
+/// On Postgres concurrent transactions take numbers in one order and may commit in another, so
+/// appends take a transaction-scoped lock first: whoever gets a later number commits later.
+/// It's held only for the append and the commit (the last statements of the transaction).
+fn log_landed(c: &code_sql::Conn<'_>, lock: Option<i64>, repo: &str, log: &[(i64, String)]) -> code_sql::Result<()> {
+    let Some(((last_at, last), rest)) = log.split_last() else { return Ok(()) };
+    if let Some(key) = lock {
+        c.execute("SELECT pg_advisory_xact_lock(?)", [key])?;
     }
-    let mut st = tx.prepare_cached("INSERT INTO land_log (repo, at_ms, record) VALUES (?, ?, ?)")?;
-    for l in landed {
-        st.execute(params![repo, l.at_ms, serde_json::to_string(l)?])?;
-    }
+    const INSERT: &str = "INSERT INTO land_log (repo, at_ms, record) VALUES (?, ?, ?)";
+    c.execute_many(INSERT, rest.iter().map(|(at, rec)| [ValueRef::Text(repo), ValueRef::Int(*at), ValueRef::Text(rec)]))?;
+    let seq: i64 = c.query_row(&format!("{INSERT} RETURNING seq"), params![repo, last_at, last], |r| r.get(0))?;
     // Prune now and then (roughly every 1024 landings), so the log stays a window.
-    let seq = tx.last_insert_rowid();
-    if seq % 1024 < landed.len() as i64 {
-        tx.execute("DELETE FROM land_log WHERE at_ms < ?", [now_ms() - LAND_LOG_RETENTION_MS])?;
+    if seq % 1024 < log.len() as i64 {
+        c.execute("DELETE FROM land_log WHERE at_ms < ?", [now_ms() - LAND_LOG_RETENTION_MS])?;
     }
     Ok(())
 }
 
-fn write_index(tx: &rusqlite::Transaction<'_>, repo: &str, name: &str, clear: bool, paths: &HashMap<RepoPath, u64>) -> anyhow::Result<()> {
-    if clear {
-        tx.execute("DELETE FROM path_index WHERE repo = ? AND ref = ?", params![repo, name])?;
-    }
-    let mut st = tx.prepare_cached(
-        "INSERT INTO path_index (repo, ref, path, generation) VALUES (?, ?, ?, ?)
-         ON CONFLICT (repo, ref, path) DO UPDATE SET generation = max(generation, excluded.generation)",
-    )?;
-    for (p, g) in paths {
-        st.execute(params![repo, name, p.as_str(), *g as i64])?;
-    }
-    Ok(())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Compare-and-swap the ref row from `expect` to `new`.
-fn cas_ref(
-    tx: &rusqlite::Transaction<'_>,
-    repo: &str,
-    name: &str,
-    expect: Option<ChangesetId>,
-    new: Option<(ChangesetId, Option<Oid>)>,
-    floor: u64,
-) -> anyhow::Result<()> {
-    let Some((cs, tag)) = new else { return Ok(()) };
-    let tag = tag.map(|t| t.0.to_vec());
-    let n = match expect {
-        None => tx.execute(
-            "INSERT OR IGNORE INTO refs (repo, name, cs, tag, version, floor_gen, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
-            params![repo, name, &cs.0[..], tag, floor as i64, now_ms()],
-        )?,
-        Some(old) => tx.execute(
-            "UPDATE refs SET cs = ?, tag = ?, version = version + 1, floor_gen = ?, updated_at = ?
-             WHERE repo = ? AND name = ? AND cs = ?",
-            params![&cs.0[..], tag, floor as i64, now_ms(), repo, name, &old.0[..]],
-        )?,
-    };
-    if n != 1 {
-        anyhow::bail!("{name} was moved concurrently; retry");
+    fn id(n: u8) -> ChangesetId {
+        ChangesetId([n; 32])
     }
-    Ok(())
-}
 
-fn fail(cmd: Cmd, e: &anyhow::Error) {
-    let msg = format!("{e:#}");
-    match cmd {
-        Cmd::Land { reply, .. } => {
-            let _ = reply.send(Err(LandError::Other(anyhow::anyhow!(msg))));
-        }
-        Cmd::SetRef { reply, .. } => {
-            let _ = reply.send(Err(anyhow::anyhow!(msg)));
-        }
-        Cmd::Advance { reply, .. } => {
-            let _ = reply.send(Err(anyhow::anyhow!(msg)));
-        }
+    fn write(expect: Option<(ChangesetId, i64, u64)>, new: Option<ChangesetId>, floor: u64) -> RefWrite {
+        let start = RefState::default();
+        let mut w = RefWrite::new("r", "refs/heads/main", &start, new.map(|n| (n, None)));
+        w.expect = expect;
+        w.floor = floor;
+        w
+    }
+
+    fn row(cs: ChangesetId, version: i64, floor: u64) -> RefRow {
+        (cs, None, version, floor)
+    }
+
+    fn never(_: &ChangesetId, _: &ChangesetId) -> anyhow::Result<bool> {
+        panic!("the ref's history shouldn't be needed")
+    }
+
+    #[test]
+    fn the_transaction_status_settles_a_lost_commit() {
+        let w = write(Some((id(1), 4, 0)), Some(id(2)), 0);
+        let moved_on = row(id(9), 7, 0);
+        assert_eq!(commit_outcome(Some("committed"), Some(&moved_on), &w, never).unwrap(), Resolved::Committed { exact: false });
+        assert_eq!(commit_outcome(Some("aborted"), Some(&row(id(2), 5, 0)), &w, never).unwrap(), Resolved::NotCommitted);
+        assert_eq!(commit_outcome(Some("in progress"), None, &w, never).unwrap(), Resolved::Pending);
+    }
+
+    #[test]
+    fn without_it_the_ref_decides() {
+        let w = write(Some((id(1), 4, 3)), Some(id(2)), 3);
+        // Exactly what the write made it.
+        assert_eq!(commit_outcome(None, Some(&row(id(2), 5, 3)), &w, never).unwrap(), Resolved::Committed { exact: true });
+        // Unchanged, or gone: it didn't happen.
+        assert_eq!(commit_outcome(None, Some(&row(id(1), 4, 3)), &w, |_, _| Ok(false)).unwrap(), Resolved::NotCommitted);
+        assert_eq!(commit_outcome(None, None, &w, never).unwrap(), Resolved::NotCommitted);
+        // Our head with another version: someone else wrote the row; it counts if our head is
+        // in the ref's history, as it is when a lander elsewhere built on it.
+        assert_eq!(commit_outcome(Some("unknown"), Some(&row(id(2), 9, 3)), &w, |n, h| Ok(n == h)).unwrap(), Resolved::Committed { exact: false });
+        assert_eq!(commit_outcome(None, Some(&row(id(7), 6, 3)), &w, |_, _| Ok(true)).unwrap(), Resolved::Committed { exact: false });
+        assert_eq!(commit_outcome(None, Some(&row(id(7), 6, 3)), &w, |_, _| Ok(false)).unwrap(), Resolved::NotCommitted);
+        // A write that didn't move the head can't be told from the ref.
+        let same = write(Some((id(1), 4, 3)), Some(id(1)), 3);
+        assert_eq!(commit_outcome(None, Some(&row(id(1), 6, 3)), &same, never).unwrap(), Resolved::NotCommitted);
+        // A new ref, and a delete.
+        let create = write(None, Some(id(2)), 0);
+        assert_eq!(commit_outcome(None, Some(&row(id(2), 1, 0)), &create, never).unwrap(), Resolved::Committed { exact: true });
+        let delete = write(Some((id(1), 4, 3)), None, 3);
+        assert_eq!(commit_outcome(None, None, &delete, never).unwrap(), Resolved::Committed { exact: true });
+        assert_eq!(commit_outcome(None, Some(&row(id(1), 4, 3)), &delete, never).unwrap(), Resolved::NotCommitted);
     }
 }

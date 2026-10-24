@@ -6,7 +6,7 @@ use crate::model::{FileChange, Mode};
 use crate::path::RepoPath;
 use crate::{EMPTY_TREE, Store};
 use bytes::Bytes;
-use rusqlite::{OptionalExtension, params};
+use code_sql::{OptionalExtension, params};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -63,7 +63,7 @@ impl Store {
             None if *oid == EMPTY_TREE => Bytes::new(),
             None => Bytes::from(
                 self
-                    .read()
+                    .db
                     .query_row("SELECT data FROM trees WHERE repo = ? AND oid = ?", params![repo, &oid.0[..]], |r| {
                         r.get::<_, Vec<u8>>(0)
                     })
@@ -80,7 +80,7 @@ impl Store {
     pub fn has_tree(&self, repo: &str, oid: &Oid) -> anyhow::Result<bool> {
         Ok(*oid == EMPTY_TREE
             || self
-                .read()
+                .db
                 .query_row("SELECT 1 FROM trees WHERE repo = ? AND oid = ?", params![repo, &oid.0[..]], |_| Ok(()))
                 .optional()?
                 .is_some())

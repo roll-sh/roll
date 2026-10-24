@@ -1424,12 +1424,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "code-sql",
  "diffy",
  "futures",
  "hex",
  "parking_lot",
  "pg-storage",
- "rusqlite",
  "serde",
  "serde_json",
  "sha1 0.10.7",
