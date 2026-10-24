@@ -293,6 +293,16 @@ pub struct JoinMeta {
     pub from_call: Option<Arc<FromCall>>,
     /// Per hash key: the clause was written `right = left` (its original orientation).
     pub hash_swapped: Vec<bool>,
+    /// The equalities as written that deconstruct_jointree distributes here, over the
+    /// join's row: an inner join's ON clause's, and the top join of a FROM list the WHERE's
+    /// (in their order). process_equivalence met them so: the join search's equivalence
+    /// classes list their members in that order (`Search::ec_members`).
+    pub ec_written: Vec<crate::sql::expr::Expr>,
+    /// A semi join's right side's columns its join relation's reltarget still has (an
+    /// equivalence class's member needed at a join above, generate_base_implied_equalities'
+    /// add_vars_to_targetlist over ec_relids): their widths, part of the join's width though
+    /// the engine's semi join returns its left row only.
+    pub semi_carried: u32,
     /// Per hash key of an inner join the planner built: the join clause it came from (an
     /// equivalence class's, of the join relation) has the right side's operand first, the
     /// sides having been put the other way round.

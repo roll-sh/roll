@@ -57,6 +57,14 @@ struct Leaf {
     /// A whole-row mark's width (ROW_MARK_COPY, `Planner::copy_marks`): set_rel_width's
     /// whole-row Var, part of the relation's reltarget and every join's above it.
     whole: u32,
+    /// The relation's own rows (rel->rows): a LATERAL item's `rows` are its parameterized
+    /// path's, after the join clauses moved into it (`moved`); else the same.
+    rel_rows: f64,
+    /// A LATERAL item's join clauses checked by its parameterized path (ppi_clauses): the
+    /// items besides it each reads and its selectivity where a join relation is sized
+    /// (set_joinrel_size_estimates counts them at the join that brings both sides
+    /// together); with the clause over the group's row.
+    moved: Vec<(u32, f64, Expr)>,
 }
 
 /// A UNION ALL arm without FROM computing plain values (`select 0`): its values.
@@ -516,6 +524,9 @@ struct Search<'s, 'c, 'a> {
     /// Per leaf, the LATERAL references PlaceHolderVars evaluated at it (direct) or at a
     /// join of it (indirect) read (create_lateral_join_info's ph_lateral pass).
     phv_lat: Vec<(u32, u32)>,
+    /// The equalities as written (`JoinMeta::ec_written`) that equate two members of one
+    /// class, in deconstruct_jointree's order: process_equivalence's (`ec_members`).
+    ec_written: Vec<(usize, usize)>,
 }
 
 /// An equivalence class member that is an expression of one FROM item's columns, not a
@@ -1064,19 +1075,41 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
     /// The equivalence class members (group columns, then expression members by their
     /// numbers) in the order their clauses list them.
     fn ec_members(&self) -> Vec<usize> {
-        let mut out: Vec<usize> = Vec::new();
+        // process_equivalence over the equalities as written, in deconstruct_jointree's
+        // order (`ec_written`), then the clauses the group has beyond them (a semi join's,
+        // made after the FROM list's): a clause's left member first; two classes merged
+        // keep the left member's class's members first (ec1's list_concat).
+        let mut lists: Vec<Vec<usize>> = Vec::new();
+        let add = |x: usize, y: usize, lists: &mut Vec<Vec<usize>>| {
+            let find = |g: usize, lists: &Vec<Vec<usize>>| lists.iter().position(|l| l.contains(&g));
+            match (find(x, lists), find(y, lists)) {
+                (None, None) if x == y => lists.push(vec![x]),
+                (None, None) => lists.push(vec![x, y]),
+                (Some(i), None) => lists[i].push(y),
+                (None, Some(j)) => lists[j].push(x),
+                (Some(i), Some(j)) if i != j => {
+                    let moved = std::mem::take(&mut lists[j]);
+                    lists[i].extend(moved);
+                    lists.remove(j);
+                }
+                _ => {}
+            }
+        };
+        for &(x, y) in &self.ec_written {
+            add(x, y, &mut lists);
+        }
         for c in self.clauses.iter().filter(|c| !c.derived) {
             if self.clause_ec(c).is_none() {
                 continue;
             }
             let (a, b, _, _) = c.eq.as_ref().unwrap();
-            for g in [self.mem_id(a), self.mem_id(b)].into_iter().flatten() {
-                if !out.contains(&g) {
-                    out.push(g);
-                }
+            match (self.mem_id(a), self.mem_id(b)) {
+                (Some(x), Some(y)) => add(x, y, &mut lists),
+                (Some(x), None) | (None, Some(x)) => add(x, x, &mut lists),
+                _ => {}
             }
         }
-        out
+        lists.concat()
     }
 
     /// The member of class `e` in relation `set` a join clause equates
@@ -1518,6 +1551,17 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
         {
             return true;
         }
+        // (generate_base_implied_equalities_no_const: an equivalence class's member Vars are
+        // needed at every join of the class's relations, its clause there may equate any
+        // of them: a semi join's right side's member comes out of it too.)
+        if self.kind == JoinKind::Inner
+            && self.semi_classes()
+            && let Some(&e) = self.ec.get(g)
+            && self.leaf_of.get(g).is_some_and(|&l| set >> l & 1 == 1)
+            && (0..self.ec.len()).any(|h| h != g && self.ec[h] == e && self.leaf_of.get(h).is_some_and(|&l| set >> l & 1 == 0))
+        {
+            return true;
+        }
         // (A PlaceHolderVar a clause checked above the relation reads (an outer join
         // delays it there): computed here, read there.)
         if self.phv(g).is_some()
@@ -1652,7 +1696,7 @@ impl Search<'_, '_, '_> {
         let leaf = &self.leaves[l];
         let mut rel = JRel {
             set,
-            rows: leaf.rows,
+            rows: leaf.rel_rows,
             width,
             paths: Vec::new(),
             param: Vec::new(),
@@ -3613,14 +3657,18 @@ impl Search<'_, '_, '_> {
                 if self.kind == JoinKind::Inner && self.ec_mode() {
                     for &ci in &restrict {
                         let c = &self.clauses[ci];
-                        if !c.ecable || c.on {
+                        // (A semi join's own clause is a class's in a group of semi joins:
+                        // generate_join_implied_equalities_normal makes the join's clause
+                        // anew (parent_ec set: never the source clause as written).)
+                        let semi = self.semi_classes() && c.sj.is_some();
+                        if !c.ecable || c.on && !semi {
                             continue;
                         }
                         if let Some((a, b, al, _)) = &c.eq
                             && let (Some(x), Some(y)) = (self.mem_id(a), self.mem_id(b))
                         {
                             let (x, y) = if *al & s1 != 0 { (x, y) } else { (y, x) };
-                            self.note_derived(x, y, c.derived);
+                            self.note_derived(x, y, c.derived || semi);
                         }
                     }
                 }
@@ -3990,7 +4038,65 @@ impl Search<'_, '_, '_> {
                 psel *= s;
             }
         }
-        joins::join_rows(jt, o.rows, i.rows, jsel, psel)
+        joins::join_rows(jt, o.rows, i.rows, jsel * self.moved_sel(o.set, i.set), psel)
+    }
+
+    /// The selectivity of the join clauses LATERAL items' parameterized paths check
+    /// (`Leaf::moved`) that a join of `a` and `b` brings together: in its restrictlist
+    /// (build_joinrel_restrictlist), so in the join relation's size.
+    fn moved_sel(&self, a: u32, b: u32) -> f64 {
+        let set = a | b;
+        let mut sel = 1.0;
+        for (l, leaf) in self.leaves.iter().enumerate() {
+            for (src, s, _) in &leaf.moved {
+                let span = src | (1u32 << l);
+                if span & !set == 0 && span & !a != 0 && span & !b != 0 {
+                    sel *= s;
+                }
+            }
+        }
+        sel
+    }
+
+    /// The join selectivity of the clauses moved into LATERAL items other than
+    /// subqueries (their RestrictInfos' first estimate is the join relation's).
+    fn moved_sels(&mut self) {
+        for l in 0..self.leaves.len() {
+            for k in 0..self.leaves[l].moved.len() {
+                if !self.leaves[l].moved[k].1.is_nan() {
+                    continue;
+                }
+                let e = self.leaves[l].moved[k].2.clone();
+                let leaves = self.leaves_of(&e);
+                let eq = match &e {
+                    Expr::Call(d, args, _)
+                        if d.name == "=" && args.len() == 2 && !crate::sql::explain::expr_volatile_deep(&e) =>
+                    {
+                        let (al, bl) = (self.leaves_of(&args[0]), self.leaves_of(&args[1]));
+                        (al != 0 && bl != 0 && al & bl == 0).then(|| (args[0].clone(), args[1].clone(), al, bl))
+                    }
+                    _ => None,
+                };
+                let c = Clause {
+                    expr: e,
+                    leaves,
+                    eq,
+                    hashable: false,
+                    mergeable: false,
+                    ecable: false,
+                    commutes: true,
+                    cost: 0.0,
+                    on: false,
+                    derived: false,
+                    sj: None,
+                    req: leaves,
+                    nullable: 0,
+                    sel_div: Vec::new(),
+                };
+                let s = self.clause_sel(&c, None);
+                self.leaves[l].moved[k].1 = s;
+            }
+        }
     }
 
     /// innerrel_is_unique: the inner relation is one table with a unique index whose every
@@ -4881,6 +4987,20 @@ impl Search<'_, '_, '_> {
                 let first = |s: u32| self.first_member(&members, e, s);
                 let (Some(x), Some(y)) = (first(req_all), first(set)) else { continue };
                 if !in_set(y, ip.set) {
+                    // (The class's clause between the parameters and the join's member: on
+                    // the outer side it is no clause the inner path enforces, and this join
+                    // checks it unless the outer path takes it, parameterized by them
+                    // (join_clause_is_movable_into).)
+                    if (1u32 << self.m_leaf(x)) & op.req == 0
+                        && let Some(j) = (0..self.clauses.len()).find(|&j| self.equates(&self.clauses[j], x, y))
+                        && !quals.contains(&j)
+                        && !enforced.contains(&j)
+                    {
+                        quals.push(j);
+                        if self.kind == JoinKind::Inner && self.ec_mode() {
+                            self.note_derived(x, y, true);
+                        }
+                    }
                     continue;
                 }
                 let Some(z) = first(op.set) else { continue };
@@ -4994,7 +5114,10 @@ impl Search<'_, '_, '_> {
                     [(a, *la), (b, *lb)].iter().any(|(e, m)| {
                         m & op.set != 0
                             && m & ip.set != 0
-                            && key_col(e).is_some_and(|g| self.phv(g).is_some())
+                            && (key_col(e).is_some_and(|g| self.phv(g).is_some())
+                                // (Or an expression member reading relations of each side,
+                                // `(a.x + b.y) = t.z`: one of the class's new_members here.)
+                                || cl.ecable && key_col(e).is_none())
                     })
                 })
         };
@@ -6743,6 +6866,23 @@ impl Search<'_, '_, '_> {
                         },
                         from_call: None,
                         hash_swapped: Vec::new(),
+                        ec_written: Vec::new(),
+                        semi_carried: if kind == JoinKind::Semi {
+                            let mut w = 0;
+                            for (l, leaf) in self.leaves.iter().enumerate() {
+                                if rnode.set >> l & 1 == 0 {
+                                    continue;
+                                }
+                                for k in 0..leaf.ncols {
+                                    if self.needed_above(leaf.off + k, p.set) {
+                                        w += leaf.cols[k].0;
+                                    }
+                                }
+                            }
+                            w
+                        } else {
+                            0
+                        },
                         key_flipped: if kind == JoinKind::Inner { key_flipped } else { Vec::new() },
                         written_kind: None,
                         phv_eval: false,
@@ -7018,6 +7158,61 @@ fn gather(
         return;
     }
     leaves.push((p.clone(), off));
+}
+
+/// The equalities as written its joins distribute (`JoinMeta::ec_written`), over the
+/// group's row, in deconstruct_jointree's order: a join's sides' before its own; a semi
+/// join's (pull_up_sublinks') own equalities at its place, its right side at the virtual
+/// columns `outerjoins::walk` gives it (`virt`, past the tree's row).
+fn written_eqs(p: &Plan, off: usize, virt: &mut usize, semis: bool, out: &mut Vec<Expr>) {
+    match p {
+        Plan::Join { kind, left, right, nleft, cond, hash, meta, .. } => {
+            written_eqs(left, off, virt, semis, out);
+            let semi = matches!(kind, JoinKind::Semi | JoinKind::Anti);
+            let roff = if semi {
+                let r = *virt;
+                *virt += crate::sql::binder::plan_width(right);
+                r
+            } else {
+                off + nleft
+            };
+            written_eqs(right, roff, virt, semis, out);
+            out.extend(meta.ec_written.iter().map(|e| e.clone().shift_cols(off as isize)));
+            if *kind == JoinKind::Semi && semis {
+                let nl = *nleft;
+                let map = |e: &Expr| {
+                    e.clone()
+                        .transform(&mut |x| {
+                            Ok(match x {
+                                Expr::Col(c, t) if c < nl => Expr::Col(off + c, t),
+                                Expr::Col(c, t) => Expr::Col(roff + (c - nl), t),
+                                x => x,
+                            })
+                        })
+                        .expect("a semi join's clause over the group's row")
+                };
+                if let Some(c) = cond {
+                    let mut parts = Vec::new();
+                    conjuncts(c.clone(), &mut parts);
+                    out.extend(crate::sql::binder::optimize::written_equalities(&parts).iter().map(map));
+                }
+                if let Some((lk, rk)) = hash {
+                    for (i, (a, b)) in lk.iter().zip(rk).enumerate() {
+                        let (a, _, _) = crate::sql::binder::hash_key_operand(a);
+                        let (b, _, _) = crate::sql::binder::hash_key_operand(b);
+                        let (a, b) = (a.shift_cols(off as isize), b.shift_cols(roff as isize));
+                        let (a, b) = if meta.hash_swapped.get(i) == Some(&true) { (b, a) } else { (a, b) };
+                        // (Only the operands matter here: `ec_members` reads them.)
+                        if let Some(eq) = equality_for(&a.ty()) {
+                            out.push(Expr::Call(eq, vec![a, b], DataType::Bool));
+                        }
+                    }
+                }
+            }
+        }
+        Plan::Filter { input, .. } => written_eqs(input, off, virt, semis, out),
+        _ => {}
+    }
 }
 
 /// The items of `p`'s joinlist as deconstruct_recurse makes it (`gather`'s leaves): an
@@ -8302,6 +8497,7 @@ impl Planner<'_, '_> {
             xm: Vec::new(),
             kept_at: group_kept,
             phv_lat: Vec::new(),
+            ec_written: Vec::new(),
         };
         s.phv_lat = vec![(0, 0); raw_leaves.len()];
         for p in &s.phvs {
@@ -8943,6 +9139,81 @@ impl Planner<'_, '_> {
                     .collect(),
                 _ => Vec::new(),
             };
+            let lateral = laterals
+                .iter()
+                .find(|(li, _)| *li == i)
+                .map(|(_, ps)| (ps.clone(), ps.iter().fold(0u32, |m, e| m | s.leaves_of(e))));
+            // A LATERAL item's join clauses moved into it (its Filter's clauses reading the
+            // values it is passed): the relation's own rows are its input's, and each clause
+            // sizes the join relation that brings its sides together. A subquery's
+            // (cost_subqueryscan) are estimated as restrictions over Vars of two relations,
+            // DEFAULT_EQ_SEL for `=`, and that estimate is the RestrictInfo's cached
+            // norm_selec the join relation's size takes too; another item's parameterized
+            // path is sized with the clauses' other side a constant
+            // (get_parameterized_baserel_size), which caches nothing: the join relation
+            // takes their join selectivity (`moved_sels`).
+            let mut rows = rows;
+            let mut rel_rows = rows;
+            let mut moved: Vec<(u32, f64, Expr)> = Vec::new();
+            if let Some((ps, _)) = &lateral
+                && scan.is_none()
+                && let Plan::Filter { input, pred } = &plan
+            {
+                let mut parts = Vec::new();
+                conjuncts(pred.clone(), &mut parts);
+                let reads = |e: &Expr| {
+                    let mut f = false;
+                    e.walk(&mut |x| f |= matches!(x, Expr::Outer(1, ..)));
+                    f
+                };
+                if !parts.is_empty() && parts.iter().all(reads) {
+                    let inner = crate::sql::explain::estimate(input, self.ctx);
+                    rel_rows = inner.rows;
+                    let to_group = |e: &Expr| -> Expr {
+                        e.clone()
+                            .transform(&mut |x| {
+                                Ok(match x {
+                                    Expr::Outer(1, k, t) => ps.get(k).cloned().unwrap_or(Expr::Outer(1, k, t)),
+                                    Expr::Col(c, t) => Expr::Col(c + off, t),
+                                    x => x,
+                                })
+                            })
+                            .expect("a moved clause over the group row")
+                    };
+                    let subquery = est.node_type == "Subquery Scan";
+                    let cat = self.ctx.catalog();
+                    let icols = inner.cols.clone();
+                    let vars = |k: usize| icols.get(k).and_then(|c| c.1.clone());
+                    let e = costs::Est {
+                        cat: &cat,
+                        fmt: self.ctx.fmt(),
+                        vars: &vars,
+                        exprs: &[],
+                        endpoint: None,
+                        distinct: None,
+                        user: None,
+                        same_rel: true,
+                    };
+                    let mut sel = 1.0;
+                    for p in &parts {
+                        let gp = to_group(p);
+                        let src = s.leaves_of(&gp) & !(1u32 << i);
+                        // (NaN: the join selectivity, once every item is known.)
+                        let ps = if subquery {
+                            e.clause(&costs::level_vars_hidden(p, &|d| d == 1))
+                        } else {
+                            f64::NAN
+                        };
+                        if subquery {
+                            sel *= ps;
+                        }
+                        moved.push((src, ps, gp));
+                    }
+                    if subquery {
+                        rows = costs::clamp_rows(rel_rows * sel);
+                    }
+                }
+            }
             s.leaves.push(Leaf {
                 plan,
                 off,
@@ -8955,17 +9226,58 @@ impl Planner<'_, '_> {
                 cols,
                 fromless,
                 members,
-                lateral: laterals
-                    .iter()
-                    .find(|(li, _)| *li == i)
-                    .map(|(_, ps)| (ps.clone(), ps.iter().fold(0u32, |m, e| m | s.leaves_of(e)))),
+                lateral,
                 proj,
                 sys,
                 whole,
+                rel_rows,
+                moved,
             });
         }
+        s.moved_sels();
         // generate_join_implied_equalities: in a group of inner joins, each pair of an
         // equivalence class's columns from different FROM items can be joined on.
+        // (The equalities as written, process_equivalence's order of the classes' members:
+        // over the group's row, a removed self-join relation's columns the kept one's.)
+        // (Kept for the planned join too: a level planned apart and read again by the level
+        // above as items of its group, a FROM subquery's join, passes them on.)
+        let mut planned_written: Vec<Expr> = Vec::new();
+        {
+            let mut written = Vec::new();
+            let mut virt = crate::sql::binder::plan_width(p);
+            written_eqs(p, 0, &mut virt, s.general, &mut written);
+            let members: Vec<usize> = {
+                let mut m = Vec::new();
+                for c in s.clauses.iter().filter(|c| !c.derived) {
+                    if s.clause_ec(c).is_none() {
+                        continue;
+                    }
+                    let (a, b, _, _) = c.eq.as_ref().unwrap();
+                    m.extend([s.mem_id(a), s.mem_id(b)].into_iter().flatten());
+                }
+                m
+            };
+            for e in written {
+                let e = e
+                    .transform(&mut |x| {
+                        Ok(match x {
+                            Expr::Col(g, t) if g < alias.len() => Expr::Col(alias[g], t),
+                            x => x,
+                        })
+                    })
+                    .expect("remapping a written equality");
+                let Expr::Call(_, args, _) = &e else { continue };
+                if let (Some(x), Some(y)) = (s.mem_id(&args[0]), s.mem_id(&args[1]))
+                    && x != y
+                    && members.contains(&x)
+                    && members.contains(&y)
+                    && s.m_ec(x) == s.m_ec(y)
+                {
+                    s.ec_written.push((x, y));
+                    planned_written.push(e.clone());
+                }
+            }
+        }
         let classes = s.kind == JoinKind::Inner && (!s.general || s.semi_classes());
         if classes && s.leaves.len() >= 3 {
             s.derive_equalities();
@@ -9177,6 +9489,21 @@ impl Planner<'_, '_> {
                     meta.kept.push(k);
                 }
             }
+            // (The equalities as written over the planned row, where its columns come out.)
+            meta.ec_written = planned_written
+                .iter()
+                .filter(|e| e.columns().iter().all(|c| layout.contains(c)))
+                .map(|e| {
+                    e.clone()
+                        .transform(&mut |x| {
+                            Ok(match x {
+                                Expr::Col(g, t) => Expr::Col(layout.iter().position(|h| *h == g).unwrap_or(g), t),
+                                x => x,
+                            })
+                        })
+                        .expect("an equality over the planned row")
+                })
+                .collect();
         }
         // Back to the group's column order.
         let w = layout.len();

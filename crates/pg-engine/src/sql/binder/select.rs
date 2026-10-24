@@ -1745,6 +1745,11 @@ impl Binder<'_, '_> {
                 optimize::conjuncts(pred.clone(), &mut parts);
                 (row_sources(&plan), parts)
             };
+            // (process_equivalence meets the WHERE's equalities after the FROM list's ON
+            // clauses, in their order: `JoinMeta::ec_written` of the FROM list's top join.)
+            if let Plan::Join { meta, .. } = &mut plan {
+                meta.ec_written.extend(optimize::written_equalities(&parts));
+            }
             // EXISTS / IN sublinks become semi / anti joins (pull_up_sublinks); with FOR
             // UPDATE too, its rows locked above the joins (`paths::rowmarks`).
             let pred = if self.deparse {
@@ -3632,7 +3637,36 @@ impl Binder<'_, '_> {
     }
 
     /// Bind the FROM list: sets the level's scope and returns the plan.
+    /// deconstruct_recurse's from_collapse_limit test for a subquery pulled up into the FROM
+    /// list being bound: its FROM items join the list's (one join problem) when the list's
+    /// other items and its own number at most from_collapse_limit, else they are a sub-list
+    /// planned as a join relation of its own first, as the engine plans a LATERAL subquery
+    /// that isn't pulled up.
+    fn lateral_collapses(&self, sub: &Node) -> bool {
+        let n = match inner(sub) {
+            Some(NodeEnum::SelectStmt(s)) => s.from_clause.len(),
+            _ => 1,
+        };
+        let parent = self.from_lens.last().copied().unwrap_or(1);
+        let limit = self
+            .ctx
+            .sess
+            .settings
+            .borrow()
+            .get_raw("from_collapse_limit")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(8);
+        n <= 1 || parent.saturating_sub(1) + n <= limit
+    }
+
     pub(crate) fn bind_from(&mut self, items: &[Node], locking: Option<&Locking>) -> Result<Plan> {
+        self.from_lens.push(items.len());
+        let r = self.bind_from_list(items, locking);
+        self.from_lens.pop();
+        r
+    }
+
+    fn bind_from_list(&mut self, items: &[Node], locking: Option<&Locking>) -> Result<Plan> {
         self.level().scope = Scope::default();
         if items.is_empty() {
             return Ok(Plan::One);
@@ -3902,7 +3936,7 @@ impl Binder<'_, '_> {
                     && rs.lateral
                     && !params.is_empty()
                     && !pushed
-                    && crate::sql::paths::lateral_pullable(&plan)
+                    && crate::sql::paths::lateral_pullable(&plan, self.lateral_collapses(rs.subquery.as_deref().unwrap()))
                 {
                     // A LATERAL subquery over a join Postgres pulls up
                     // (pull_up_simple_subquery: is_simple_subquery with its LATERAL
@@ -6446,6 +6480,14 @@ impl Binder<'_, '_> {
                 }
                 c => (rp, c),
             };
+            let on_written = match (&cond, kind) {
+                (Some(c), JoinKind::Inner) if !self.deparse => {
+                    let mut parts = Vec::new();
+                    optimize::conjuncts(c.clone(), &mut parts);
+                    optimize::written_equalities(&parts)
+                }
+                _ => Vec::new(),
+            };
             // (An inner join's right side, a join reading its left side's values:
             // reassociated, the ON clause checked over the whole.)
             let plan = if kind == JoinKind::Inner
@@ -6505,6 +6547,7 @@ impl Binder<'_, '_> {
                 && *nl == nleft
             {
                 meta.explicit = true;
+                meta.ec_written = on_written;
             }
             if !self.deparse {
                 self.note_semi_joins(&plan);

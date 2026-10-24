@@ -708,15 +708,47 @@ fn hoist_frame_quals(p: &Plan) -> (Plan, Vec<Expr>) {
                 q,
             )
         }
-        Plan::Filter { input, pred } if matches!(&**input, Plan::Join { .. }) => {
-            let (i, q) = hoist_frame_quals(input);
+        // (A LATERAL join of its own: its left side's scans are the subquery's relations as
+        // any; its right side reads the join's values, a frame further in.)
+        Plan::Join { kind: JoinKind::Inner, left, right, cond, hash, params, nleft, nright, meta } => {
+            let (l, q) = hoist_frame_quals(left);
             (
-                Plan::Filter {
-                    input: Arc::new(i),
-                    pred: pred.clone(),
+                Plan::Join {
+                    kind: JoinKind::Inner,
+                    left: Arc::new(l),
+                    right: right.clone(),
+                    cond: cond.clone(),
+                    hash: hash.clone(),
+                    params: params.clone(),
+                    nleft: *nleft,
+                    nright: *nright,
+                    meta: meta.clone(),
                 },
                 q,
             )
+        }
+        Plan::Filter { input, pred } if matches!(&**input, Plan::Join { .. }) => {
+            let (i, mut q) = hoist_frame_quals(input);
+            // (Over a LATERAL join of its own, which takes no clause pushed into its sides:
+            // the WHERE's clauses over the references are the query's as any.)
+            let mut keep = vec![pred.clone()];
+            if matches!(&**input, Plan::Join { params, .. } if !params.is_empty()) {
+                let mut parts = Vec::new();
+                conjuncts(pred.clone(), &mut parts);
+                let (out, rest): (Vec<Expr>, Vec<Expr>) = parts.into_iter().partition(frame_clause);
+                q.extend(out);
+                keep = rest;
+            }
+            match and_all(keep) {
+                Some(pred) => (
+                    Plan::Filter {
+                        input: Arc::new(i),
+                        pred,
+                    },
+                    q,
+                ),
+                None => (i, q),
+            }
         }
         Plan::Scan(sp)
             if sp.sample.is_none()
@@ -751,7 +783,7 @@ fn hoist_frame_quals(p: &Plan) -> (Plan, Vec<Expr>) {
 /// node of its own over the select list) and maybe its WHERE over a plain join tree, the
 /// references reading only the query right above, none in or under an outer join of its
 /// own (jointree_contains_lateral_outer_refs), none inside a sub-select.
-pub(crate) fn lateral_pullable(p: &Plan) -> bool {
+pub(crate) fn lateral_pullable(p: &Plan, collapses: bool) -> bool {
     // (`SELECT *` of the join: no projection of its own, `mark_deferred_lateral` gives it
     // one.)
     let mut x = p;
@@ -774,10 +806,10 @@ pub(crate) fn lateral_pullable(p: &Plan) -> bool {
         expr_frame_refs(e, 1, &mut r);
         plain_frame_refs(e) && !(restricted && r.0)
     }
-    fn tree(p: &Plan, top: bool, restricted: bool) -> bool {
+    fn tree(p: &Plan, top: bool, restricted: bool, collapses: bool) -> bool {
         match p {
             Plan::Filter { input, pred } if !top || matches!(&**input, Plan::Join { .. } | Plan::Filter { .. }) => {
-                qual(pred, restricted) && tree(input, false, restricted)
+                qual(pred, restricted) && tree(input, false, restricted, collapses)
             }
             Plan::Join { kind, left, right, cond, hash, params, meta, .. } => {
                 if !matches!(kind, JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full)
@@ -786,23 +818,25 @@ pub(crate) fn lateral_pullable(p: &Plan) -> bool {
                 {
                     return false;
                 }
-                // (A LATERAL item of its own: not taken. Postgres pulls the subquery up all
-                // the same, but this one's plan, once made, is gathered again above as its
-                // planned nested loops, not as the LATERAL item it was (join 355's
-                // PlaceHolderVar over `t2 × t3` then can't be planned under it).)
-                if !params.is_empty() {
+                // (A LATERAL item of its own: taken when the subquery's FROM items join the
+                // list it is pulled up into (`collapses`, deconstruct_recurse's
+                // from_collapse_limit), its relations then items of the group above with the
+                // LATERAL item among them (join 783). Else Postgres plans them as a sub-list,
+                // a join relation of their own first, as the engine plans the subquery that
+                // isn't pulled up (join 355 under from_collapse_limit 2).)
+                if !params.is_empty() && !collapses {
                     return false;
                 }
                 let restricted = restricted || meta.written_kind.unwrap_or(*kind) != JoinKind::Inner;
                 cond.as_ref().is_none_or(|c| qual(c, restricted))
                     && hash.as_ref().is_none_or(|(l, r)| l.iter().chain(r).all(|e| qual(e, restricted)))
-                    && tree(left, false, restricted)
-                    && tree(right, false, restricted)
+                    && tree(left, false, restricted, collapses)
+                    && tree(right, false, restricted, collapses)
             }
             _ if top => false,
             // (A subquery of its own, pulled up into it first: its select list may read
             // them, its quals are the tree's.)
-            Plan::Project { input, exprs } => exprs.iter().all(plain_frame_refs) && tree(input, false, restricted),
+            Plan::Project { input, exprs } => exprs.iter().all(plain_frame_refs) && tree(input, false, restricted, collapses),
             // (A FROM item: a scan's filter reading the references is a qual of the join
             // tree; anything else reading them a LATERAL item of the group.)
             Plan::Scan(sp) => sp.filter.as_ref().is_none_or(|f| qual(f, restricted)),
@@ -813,7 +847,7 @@ pub(crate) fn lateral_pullable(p: &Plan) -> bool {
             }
         }
     }
-    tree(x, true, false)
+    tree(x, true, false, collapses)
 }
 
 /// `nulled`: the outer joins above `p` (in the group) that null its rows, as written;
@@ -1118,6 +1152,8 @@ fn lift(
             let mut meta2 = (**meta).clone();
             meta2.kept = remap_cols(&meta.kept);
             meta2.pushed = remap_cols(&meta.pushed);
+            // (The equalities as written over the new row: a subquery's output its expression.)
+            meta2.ec_written = meta.ec_written.iter().map(|e| subst(e, &map)).collect();
             // (Its relations the group's now; a LATERAL subquery pulled up into the right
             // side, whose values its relations still read.)
             meta2.lateral_sub = false;
@@ -1348,6 +1384,7 @@ fn lift(
             let mut meta2 = (**meta).clone();
             meta2.kept = remap_cols(&meta.kept);
             meta2.pushed = remap_cols(&meta.pushed);
+            meta2.ec_written = meta.ec_written.iter().map(|e| subst(e, &map)).collect();
             (
                 Plan::Join {
                     kind: *kind,

@@ -351,6 +351,17 @@ fn strip_free_domains(e: Expr) -> Expr {
     .unwrap()
 }
 
+/// The equalities between columns among `parts` (process_equivalence's candidates whose
+/// members are relations' values), for `JoinMeta::ec_written`.
+pub fn written_equalities(parts: &[Expr]) -> Vec<Expr> {
+    parts
+        .iter()
+        .filter(|e| matches!(e, Expr::Call(d, a, _) if d.name == "=" && a.len() == 2
+            && !a[0].columns().is_empty() && !a[1].columns().is_empty()))
+        .cloned()
+        .collect()
+}
+
 pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
     let mut parts = Vec::new();
     conjuncts(strip_free_domains(pred), &mut parts);
@@ -580,6 +591,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             // (What the join was written as, and the PlaceHolderVars a projection over it
             // computes, stay with it.)
             let (old_wk, old_phv) = (meta.written_kind, (meta.phv_eval, meta.phv_join));
+            let old_written = meta.ec_written;
             let (lcoll, rcoll) = (|c: usize| output_collation(&left, c), |c: usize| output_collation(&right, c));
             let mut rewrites = Vec::new();
             // (A LATERAL subquery left for the group to pull up, or the join tree of one:
@@ -639,6 +651,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             if let Plan::Join { meta, .. } = &mut j {
                 meta.kept = kept;
                 meta.written_kind = old_wk;
+                meta.ec_written = old_written;
                 (meta.phv_eval, meta.phv_join) = old_phv;
                 (meta.lateral_sub, meta.lateral_held, meta.lateral_flat) = old_lat;
                 for c in old_pushed.into_iter().chain(const_keyed) {
@@ -1837,16 +1850,54 @@ fn ec_constants(
         let k = Expr::Collate(Box::new(uncollate(k).clone()), coll.to_string(), -1);
         Expr::Call(def.clone(), vec![m, k], ty.clone())
     };
+    // The collation an equality of operands `args` compares under (its inputcollid): an
+    // explicit COLLATE's, else its columns' (`coll_of`), else the default. process_equivalence
+    // keeps classes of different ec_collation apart, deterministic ones too: `a.x = b.x AND
+    // a.x = 'k' COLLATE "C"` is two classes, no `b.x = 'k'` derived.
+    let det_coll = |args: &[&Expr], coll_of: &dyn Fn(usize) -> Option<String>| -> String {
+        let norm = |n: Option<String>| n.filter(|n| !n.is_empty() && n != "default").unwrap_or_else(|| "default".into());
+        let mut implicit = None;
+        for a in args {
+            let mut x = *a;
+            loop {
+                match x {
+                    Expr::Collate(_, name, _) if !name.is_empty() => return norm(Some(name.clone())),
+                    Expr::Collate(y, ..) | Expr::Relabel(y, _) | Expr::Cast(y, ..) => x = y,
+                    _ => break,
+                }
+            }
+            if implicit.is_none()
+                && let Expr::Col(c, _) = x
+            {
+                implicit = coll_of(*c);
+            }
+        }
+        norm(implicit)
+    };
+    let pair_coll = |a: &Expr, b: &Expr| -> String {
+        let l = det_coll(&[a], lcoll);
+        if l != "default" {
+            return l;
+        }
+        det_coll(&[b], rcoll)
+    };
+    let const_coll = |clause: &Expr, coll_of: &dyn Fn(usize) -> Option<String>| -> String {
+        match clause {
+            Expr::Call(_, args, _) => det_coll(&args.iter().collect::<Vec<_>>(), coll_of),
+            _ => "default".into(),
+        }
+    };
     let mut broken_dups: Vec<Expr> = Vec::new();
     let mut used_pairs: Vec<usize> = Vec::new();
     for (n, (a, b, hi, pcoll)) in pairs.iter().enumerate() {
+        let dcoll = pair_coll(a, b);
         let mut used = false;
         let (a, b) = if pcoll.is_some() { (uncollate(a), uncollate(b)) } else { (a, b) };
         let (lclass, rclass) = (side_class(lpush, a), side_class(rpush, b));
         // (The join clause goes when both columns compare with the constant.)
         for (x, k, clause, old) in &lconst {
             // (A constant of another collation's class: not this one's.)
-            if nondet(clause) != *pcoll {
+            if nondet(clause) != *pcoll || pcoll.is_none() && const_coll(clause, lcoll) != dcoll {
                 continue;
             }
             let direct = x.same_as(a);
@@ -1911,7 +1962,7 @@ fn ec_constants(
             }
         }
         for (x, k, clause, old) in &rconst {
-            if nondet(clause) != *pcoll {
+            if nondet(clause) != *pcoll || pcoll.is_none() && const_coll(clause, rcoll) != dcoll {
                 continue;
             }
             let direct = x.same_as(b);

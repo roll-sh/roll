@@ -70,7 +70,7 @@ From the full run of commit `242734d` (2026-10-25 02:05 UTC, reference `a50-ref1
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 8 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 7 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -80,7 +80,8 @@ No difference is PostgreSQL nondeterminism: every remaining unit is reproducible
 
 ### EXPLAIN (group C1) — 8 units
 join (6), partition_join (1), partition_prune (1)
-(join 808 and partition_join 204 match since round 16, agent 47: 6 once a full run counts them.)
+(join 808 and partition_join 204 match since round 16, agent 47, and join 783 since round 16,
+agent 46: 5 once a full run counts them.)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -132,6 +133,130 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 46 (LATERAL join sizes, class member order, nested LATERAL pull-up, semi join widths, collation classes)
+
+Measured in subset runs of 45 planner-heavy files (test_setup, create_misc, create_index,
+create_view, select, union, subselect, join, aggregates, inherit, partition_join,
+partition_prune, partition_aggregate, equivclass, memoize, with, rowsecurity, updatable_views,
+select_distinct, groupingsets, incremental_sort, merge, returning, rules, insert_conflict,
+join_hash, select_parallel, rangefuncs, tsrf, limit, window, stats_ext, sqljson_jsontable,
+update, delete, insert, triggers, privileges, foreign_key, select_views, explain, collate,
+collate.icu.utf8, misc_functions, jsonb; 19764 units), unit by unit against a run of the base,
+the base run first: on 948d0e8 19756 -> 19757, on 3461c02 and 75986d8 19756 -> 19757, on
+bae6c68 19758 -> 19759 (exactly join 783; nothing lost; the member-order change alone first lost join
+123 and 715, agent 31's finding, fixed below). Crate tests, clippy and the difftest smoke
+pass.
+
+| file | fixed units |
+|---|---|
+| join | 783 |
+
+What changed:
+
+- **A LATERAL item's join clauses size its join relation** (join 783; `joinpath.rs` `Leaf::rel_rows`
+  / `moved`, `moved_sel`, `explain.rs` `lateral_moved`). The binder moves a LATERAL item's join
+  clauses into it (its parameterized path's ppi_clauses: a Subquery Scan's filter); the search
+  sized the item by its filtered rows and the join relation as outer rows times those, where
+  Postgres's set_joinrel_size_estimates takes the item's own rows (rel->rows) and the clauses'
+  selectivity at the join that brings both sides together. A subquery's clauses are estimated
+  by cost_subqueryscan (clauselist_selectivity with varRelid 0 and no SpecialJoinInfo:
+  restriction estimators over Vars of two relations, `t1.q1 = ss.q2` DEFAULT_EQ_SEL), and that
+  is the RestrictInfo's cached norm_selec the join's size takes too (`costs::level_vars_hidden`
+  for the Subquery Scan's own rows); another item's (a function scan's) clauses are sized by
+  their join selectivity. Two-item LATERAL joins (planned outside the search) do the same in
+  EXPLAIN. `FROM t1, LATERAL (SELECT t2.*, t1.q2 FROM t2 OFFSET 0) ss WHERE t1.q1 = ss.q2`:
+  rows 1 where the engine said 5.
+- **A LATERAL subquery with a LATERAL item of its own is pulled up** (join 783; `lift.rs`
+  `lateral_pullable`, `hoist_frame_quals`; `binder/select.rs` `lateral_collapses`): within
+  from_collapse_limit (deconstruct_recurse: the subquery's FROM items join the list it is
+  pulled up into when the list's other items and its own are at most the limit; else they are a
+  sub-list, a join relation of their own, as the engine plans the subquery when it isn't
+  pulled up: join 355 under from_collapse_limit 2 keeps its plan). Agent 33 refused the shape;
+  the frame clauses of the nested join's left side and of a WHERE over it are now hoisted as
+  for a plain join (without that, a WHERE pushed into the left side kept `Outer(1, k)` and failed
+  with "outer reference without an outer row"). 783's three items are one join problem: `t1`
+  outside the VALUES ⋈ ss2 nested loop parameterized by it, 40.62 as Postgres.
+- **Equivalence class members in process_equivalence's order** (item 2, agent 24's case;
+  `plan.rs` `JoinMeta::ec_written`, `joinpath.rs` `written_eqs`, `ec_members`). The binder keeps
+  each inner join's ON equalities and a FROM list's WHERE equalities as written on the join
+  (before `ec_const_order` rewrites them); the search replays process_equivalence over them in
+  deconstruct_jointree's order (a join's sides before its own, a semi join's equalities at its
+  place, its right side at `outerjoins::walk`'s virtual columns), the left member first and a
+  merged class keeping the left member's class first, then the group's other clauses. `FROM t1,
+  t2, t3 WHERE t3.p = t1.a AND t2.x = t1.a` joins `{t1, t2}` to `t3` on `t1.a = t3.p`. The member
+  order moved join 123 and 715 (agent 31's finding); both are Postgres's again with two fixes it
+  exposed:
+  - get_joinrel_parampathinfo's class clause between the parameters and the join's first
+    member when that member is on the outer side (`param_clauses`): the join checks it unless
+    the outer path is parameterized by them (join_clause_is_movable_into); the engine dropped it.
+  - generate_join_implied_equalities' new_members: a class member that is an expression over
+    relations of both sides of a join (`(a.f1 + b.f1 + 999) = t.tenthous`) makes a new clause
+    there, not the one a parameterized path below enforces (`try_nestloop`'s `split`, before only
+    for PlaceHolderVars): a nested loop over that path checks it again (join 123: Postgres's
+    `a ⋈ {b, t}` costs 6.49 for its `{a, b} ⋈ t` 6.48).
+- **Semi joins' class clauses and widths** (agent 41's leftover): in a group of semi joins a
+  semi join's own equality is a class clause made anew at the join (create_join_clause with
+  parent_ec, never the source as written: `t1.a = t2.x` for `EXISTS (... WHERE t2.x = t1.a ...)`);
+  its right side's class members needed at a join above stay in its reltarget
+  (generate_base_implied_equalities' add_vars_to_targetlist over ec_relids), so the semi join's
+  width counts them (`JoinMeta::semi_carried`; `Hash Semi Join ... width=8`). With the member
+  order the semi join's size uses Postgres's member too (`rows=10` for 1).
+- **A whole-row-marked subquery passes up only what is read** (agent 41's leftover;
+  `explain.rs` `drop_whole_only_columns`): the Sort or Materialize over its Subquery Scan lists
+  `s.x, s.*` (was `s.x, s.*, s.y, s.z`).
+- **Deterministic collations make classes of their own** (agent 31's finding;
+  `optimize::ec_constants`): process_equivalence keeps classes of different ec_collation
+  apart, deterministic ones too; `a.x = b.x AND a.x = 'a1' COLLATE "C"` keeps the join clause
+  and derives no `b.x = 'a1'`.
+- **A hash join on an expression key** (agent 31's finding): EXPLAIN's join selectivity of an
+  expression of one table's columns without statistics takes the table's tuples as its
+  distinct values (get_variable_numdistinct), as the search did: `t1.p = t2.x + 0` hashes 10
+  tuples, not 5 (3.83 as Postgres, was 3.77).
+- **Smaller cost items found on the way**: a Function Scan's startup costs its arguments
+  (cost_functionscan's cost_qual_eval_node over rte->functions: `generate_series(1,
+  t1.q2::int % 1000)` 0.01); a sub-select reading only enclosing levels' values is an InitPlan,
+  paid once by the node it hangs off, not per row (`Planner::quals_cost`, `estimate_subquery`);
+  GREATEST / LEAST cost one operator (cost_qual_eval_walker's MinMaxExpr); a date column's
+  histogram against a timestamp constant (TPC-H's `l_receiptdate < date '1994-01-01' +
+  interval '1' year`) on one scale (convert_timevalue_to_scalar): 272,254 rows of 600,587 at
+  TPC-H SF0.1 as Postgres, was all of them.
+
+Golden: `tests/sql/a46_lateral_sizes_classes.sql` (recorded from PostgreSQL 18.6).
+
+Looked at and left (why):
+
+- join 360 (the coordinator's, after agent 47's bae6c68): the FROM subquery `{t ∪ select 0,
+  (select 1 limit 1)}` is planned as a level first, and the level above reads that plan back:
+  the parameterized Append under its nested loop becomes a LATERAL item of the outer group
+  reading the Limit's value, its `i = j` an Index Cond, no clause of the group. So the outer
+  group sizes `{J, A}` as 1 × 2 (Postgres: 1 × 2551 × 1/200 = 13), and `{A, kl}` parameterized
+  by `J` (Postgres's plan) ties with `{J, A} ⋈ kl` at 8.26, kept the other way. Postgres has the
+  subquery's relations in the outer problem (pull_up_subqueries before the join search); the
+  engine needs the subquery's tree as bound, as agent 41's `bound_trees` keeps it for semi
+  joins, for any FROM subquery whose outputs a LATERAL item reads. Not done here: it changes
+  which subqueries are planned apart, a batch of its own.
+- Agent 31's partition children's physical target lists (VERBOSE): not reproduced on this head
+  (unique-ified partitioned sides, partitionwise joins with unique-ified sides).
+- A semi join's own equalities written inside the sublink (`EXISTS (SELECT ... FROM t2, t3
+  WHERE t3.p = t2.x AND t2.x = t1.a)`): the sublink's WHERE as written isn't recorded, so the
+  class's member order there is the gathered clauses' (`t1.a = t2.x` for Postgres's `t1.a =
+  t3.p`).
+- A pulled-up LATERAL subquery whose output PlaceHolderVar needs two of its relations without
+  from_collapse_limit (355's query at the default limit): Postgres computes it at the `t2 × t3`
+  join below the LATERAL item, the engine plans another order (it differed before too).
+- TPC-H (coordinator's request, measured at SF0.1 against a46-pg): relpages, reltuples, pkey
+  sizes and correlations match; left: (1) a COPY-loaded table's heap model, rebuilt from the
+  stored rows when the database reopens, is laid out as plain inserts (orders 2656 pages after
+  COPY, 2607 once rebuilt; Postgres keeps COPY's 2656), so the planner's current pages and
+  tuple density drift ~2%; an estimated (over 400k versions) heap is likewise a little small
+  (lineitem 11251 for 11300); (2) non-unique btree indexes are bigger than Postgres's
+  (l_shipdate 631 pages for 533, o_orderdate 147 for 129, c_nationkey 18 for 15; unique ones
+  match; deduplication is modelled, the cause not traced), which costs their scans higher.
+  With the date fix q12 at SF0.1 has Postgres's join (a Parallel Hash Join, 1322 lineitem rows
+  per worker for 1298) but aggregates with a Partial HashAggregate where Postgres sorts (Sort +
+  Partial GroupAggregate); not traced (the inputs' estimates differ slightly through (1)). Storage-model work (agents 36 / 43 / 44's
+  area), not changed here.
 
 ## Round 16, agent 47 (attr_needed target lists, resjunk sort columns, appendrel members' relabelings, FROM-less appendrel members)
 

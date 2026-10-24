@@ -1,0 +1,707 @@
+> create table a46_i8 (q1 int8, q2 int8) with (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> insert into a46_i8 values (123, 456), (123, 4567890123456789), (4567890123456789, 123),
+>   (4567890123456789, 4567890123456789), (4567890123456789, -4567890123456789)
+-- INSERT 0 5
+
+> vacuum a46_i8
+-- VACUUM
+
+> create table a46_big (q1 int8, q2 int8) with (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> insert into a46_big select g, g % 7 from generate_series(1, 100) g
+-- INSERT 0 100
+
+> vacuum a46_big
+-- VACUUM
+
+> create table a46_k (q1 int8, q2 int8) with (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> insert into a46_k select g, g % 7 from generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> vacuum a46_k
+-- VACUUM
+
+> explain select * from a46_i8 t1, lateral (select t2.*, t1.q2 as z from a46_i8 t2 offset 0) ss where t1.q1 = ss.q2
+QUERY PLAN:text
+Nested Loop  (cost=0.00..6.66 rows=1 width=40)
+  ->  Seq Scan on a46_i8 t1  (cost=0.00..1.05 rows=5 width=16)
+  ->  Subquery Scan on ss  (cost=0.00..1.11 rows=1 width=24)
+        Filter: (t1.q1 = ss.q2)
+        ->  Seq Scan on a46_i8 t2  (cost=0.00..1.05 rows=5 width=24)
+-- EXPLAIN
+
+> explain select * from a46_i8 t1, lateral (select t2.*, t1.q2 as z from a46_i8 t2 offset 0) ss where t1.q1 = ss.q2 and t1.q2 = ss.q1
+QUERY PLAN:text
+Nested Loop  (cost=0.00..6.72 rows=1 width=40)
+  ->  Seq Scan on a46_i8 t1  (cost=0.00..1.05 rows=5 width=16)
+  ->  Subquery Scan on ss  (cost=0.00..1.12 rows=1 width=24)
+        Filter: ((t1.q1 = ss.q2) AND (t1.q2 = ss.q1))
+        ->  Seq Scan on a46_i8 t2  (cost=0.00..1.05 rows=5 width=24)
+-- EXPLAIN
+
+> explain select * from a46_i8 t1, lateral (select t2.*, t1.q2 as z from a46_big t2 offset 0) ss where t1.q1 < ss.q2
+QUERY PLAN:text
+Nested Loop  (cost=0.00..18.95 rows=167 width=40)
+  ->  Seq Scan on a46_i8 t1  (cost=0.00..1.05 rows=5 width=16)
+  ->  Subquery Scan on ss  (cost=0.00..3.25 rows=33 width=24)
+        Filter: (t1.q1 < ss.q2)
+        ->  Seq Scan on a46_big t2  (cost=0.00..2.00 rows=100 width=24)
+-- EXPLAIN
+
+> explain select * from a46_i8 t1, lateral (select * from a46_big t2 where t2.q1 > t1.q2 offset 0) ss where t1.q1 = ss.q2
+QUERY PLAN:text
+Nested Loop  (cost=0.00..14.41 rows=1 width=32)
+  ->  Seq Scan on a46_i8 t1  (cost=0.00..1.05 rows=5 width=16)
+  ->  Subquery Scan on ss  (cost=0.00..2.66 rows=1 width=16)
+        Filter: (t1.q1 = ss.q2)
+        ->  Seq Scan on a46_big t2  (cost=0.00..2.25 rows=33 width=16)
+              Filter: (q1 > t1.q2)
+-- EXPLAIN
+
+> explain select * from a46_i8 t1, lateral (select t2.*, t1.q2 as z from a46_k t2 offset 0) ss where t1.q1 = ss.q2 and t1.q2 < ss.q1
+QUERY PLAN:text
+Nested Loop  (cost=0.00..156.15 rows=8 width=40)
+  ->  Seq Scan on a46_i8 t1  (cost=0.00..1.05 rows=5 width=16)
+  ->  Subquery Scan on ss  (cost=0.00..31.00 rows=2 width=24)
+        Filter: ((t1.q2 < ss.q1) AND (t1.q1 = ss.q2))
+        ->  Seq Scan on a46_k t2  (cost=0.00..16.00 rows=1000 width=24)
+-- EXPLAIN
+
+> explain select * from a46_i8 t1, lateral (select t2.*, t1.q2 as z from a46_k t2 offset 0) ss where t1.q1 = ss.q2 or t1.q2 = ss.q1
+QUERY PLAN:text
+Nested Loop  (cost=0.00..156.55 rows=50 width=40)
+  ->  Seq Scan on a46_i8 t1  (cost=0.00..1.05 rows=5 width=16)
+  ->  Subquery Scan on ss  (cost=0.00..31.00 rows=10 width=24)
+        Filter: ((t1.q1 = ss.q2) OR (t1.q2 = ss.q1))
+        ->  Seq Scan on a46_k t2  (cost=0.00..16.00 rows=1000 width=24)
+-- EXPLAIN
+
+> explain select * from a46_i8 t1, lateral generate_series(1, t1.q2::int % 1000) g where t1.q1 = g
+QUERY PLAN:text
+Nested Loop  (cost=0.01..63.81 rows=25 width=20)
+  ->  Seq Scan on a46_i8 t1  (cost=0.00..1.05 rows=5 width=16)
+  ->  Function Scan on generate_series g  (cost=0.01..12.51 rows=5 width=4)
+        Filter: (t1.q1 = g)
+-- EXPLAIN
+
+> explain (verbose)
+> select * from (values (0), (1)) v(id),
+> lateral (select * from a46_i8 t1,
+>          lateral (select * from
+>                     (select * from a46_i8 t2
+>                      where (q1, random() > 0) = any (select q2, random() > 0 from a46_i8 t3
+>                                      where q2 = (select greatest(t1.q1,t2.q2))
+>                                        and (select v.id=0))
+>                      offset 0) ss2) ss
+>          where t1.q1 = ss.q2) ss0
+QUERY PLAN:text
+Nested Loop  (cost=0.00..40.62 rows=1 width=36)
+  Output: "*VALUES*".column1, t1.q1, t1.q2, ss2.q1, ss2.q2
+  ->  Seq Scan on public.a46_i8 t1  (cost=0.00..1.05 rows=5 width=16)
+        Output: t1.q1, t1.q2
+  ->  Nested Loop  (cost=0.00..7.89 rows=2 width=20)
+        Output: "*VALUES*".column1, ss2.q1, ss2.q2
+        ->  Values Scan on "*VALUES*"  (cost=0.00..0.03 rows=2 width=4)
+              Output: "*VALUES*".column1
+        ->  Subquery Scan on ss2  (cost=0.00..3.92 rows=1 width=16)
+              Output: ss2.q1, ss2.q2
+              Filter: (t1.q1 = ss2.q2)
+              ->  Seq Scan on public.a46_i8 t2  (cost=0.00..3.90 rows=2 width=16)
+                    Output: t2.q1, t2.q2
+                    Filter: (ANY ((t2.q1 = (SubPlan 3).col1) AND ((random() > '0'::double precision) = (SubPlan 3).col2)))
+                    SubPlan 3
+                      ->  Result  (cost=0.03..1.09 rows=1 width=9)
+                            Output: t3.q2, (random() > '0'::double precision)
+                            One-Time Filter: (InitPlan 2).col1
+                            InitPlan 1
+                              ->  Result  (cost=0.00..0.01 rows=1 width=8)
+                                    Output: GREATEST(t1.q1, t2.q2)
+                            InitPlan 2
+                              ->  Result  (cost=0.00..0.01 rows=1 width=1)
+                                    Output: ("*VALUES*".column1 = 0)
+                            ->  Seq Scan on public.a46_i8 t3  (cost=0.00..1.06 rows=1 width=8)
+                                  Output: t3.q1, t3.q2
+                                  Filter: (t3.q2 = (InitPlan 1).col1)
+-- EXPLAIN
+
+> select * from (values (0), (1)) v(id),
+> lateral (select * from a46_i8 t1,
+>          lateral (select * from
+>                     (select * from a46_i8 t2
+>                      where (q1, random() > 0) = any (select q2, random() > 0 from a46_i8 t3
+>                                      where q2 = (select greatest(t1.q1,t2.q2))
+>                                        and (select v.id=0))
+>                      offset 0) ss2) ss
+>          where t1.q1 = ss.q2) ss0
+> order by 1, 2, 3, 4, 5
+id:int4 | q1:int8 | q2:int8 | q1:int8 | q2:int8
+0 | 4567890123456789 | -4567890123456789 | 4567890123456789 | 4567890123456789
+0 | 4567890123456789 | 123 | 4567890123456789 | 4567890123456789
+0 | 4567890123456789 | 4567890123456789 | 4567890123456789 | 4567890123456789
+-- SELECT 3
+
+> begin
+-- BEGIN
+
+> set local from_collapse_limit to 2
+-- SET
+
+> explain (verbose, costs off)
+> select * from a46_i8 t1
+>   left join
+>     (select coalesce(t2.q1 + x, 0) from a46_i8 t2,
+>        lateral (select t3.q1 as x from a46_i8 t3,
+>                   lateral (select t2.q1, t3.q1 offset 0) s))
+>   on true
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: t1.q1, t1.q2, (COALESCE((t2.q1 + t3.q1), '0'::bigint))
+  ->  Seq Scan on public.a46_i8 t1
+        Output: t1.q1, t1.q2
+  ->  Materialize
+        Output: (COALESCE((t2.q1 + t3.q1), '0'::bigint))
+        ->  Nested Loop
+              Output: COALESCE((t2.q1 + t3.q1), '0'::bigint)
+              ->  Seq Scan on public.a46_i8 t2
+                    Output: t2.q1, t2.q2
+              ->  Nested Loop
+                    Output: t3.q1
+                    ->  Seq Scan on public.a46_i8 t3
+                          Output: t3.q1, t3.q2
+                    ->  Result
+                          Output: NULL::bigint, NULL::bigint
+-- EXPLAIN
+
+> rollback
+-- ROLLBACK
+
+> create table a46_i4 (f1 int4) with (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> insert into a46_i4 values (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> select * from a46_i4 a, lateral (select b.f1 as x, c.z as y from a46_i4 b,
+>   lateral (select a.f1 % 7 + b.f1 % 5 as z offset 0) c where b.f1 > 0) s
+>   where s.x = a.f1 order by 1, 2, 3
+f1:int4 | x:int4 | y:int4
+123456 | 123456 | 5
+2147483647 | 2147483647 | 3
+-- SELECT 2
+
+> select * from a46_i4 a left join lateral (select b.f1 as x, c.z as y from a46_i4 b,
+>   lateral (select a.f1 % 3 - b.f1 % 3 as z offset 0) c where b.f1 >= 0) s
+>   on s.x <> a.f1 order by 1, 2, 3
+f1:int4 | x:int4 | y:int4
+-2147483647 | 0 | -1
+-2147483647 | 123456 | -1
+-2147483647 | 2147483647 | -2
+-123456 | 0 | 0
+-123456 | 123456 | 0
+-123456 | 2147483647 | -1
+0 | 123456 | 0
+0 | 2147483647 | -1
+123456 | 0 | 0
+123456 | 2147483647 | -1
+2147483647 | 0 | 1
+2147483647 | 123456 | 1
+-- SELECT 12
+
+> select * from a46_i8 t1
+>   left join
+>     (select coalesce(t2.q1 + x, 0) from a46_i8 t2,
+>        lateral (select t3.q1 as x from a46_i8 t3,
+>                   lateral (select t2.q1, t3.q1 offset 0) s))
+>   on true order by 1, 2, 3
+q1:int8 | q2:int8 | coalesce:int8
+123 | 456 | 246
+123 | 456 | 246
+123 | 456 | 246
+123 | 456 | 246
+123 | 456 | 4567890123456912
+123 | 456 | 4567890123456912
+123 | 456 | 4567890123456912
+123 | 456 | 4567890123456912
+123 | 456 | 4567890123456912
+123 | 456 | 4567890123456912
+123 | 456 | 4567890123456912
+123 | 456 | 4567890123456912
+123 | 456 | 4567890123456912
+123 | 456 | 4567890123456912
+123 | 456 | 4567890123456912
+123 | 456 | 4567890123456912
+123 | 456 | 9135780246913578
+123 | 456 | 9135780246913578
+123 | 456 | 9135780246913578
+123 | 456 | 9135780246913578
+123 | 456 | 9135780246913578
+123 | 456 | 9135780246913578
+123 | 456 | 9135780246913578
+123 | 456 | 9135780246913578
+123 | 456 | 9135780246913578
+123 | 4567890123456789 | 246
+123 | 4567890123456789 | 246
+123 | 4567890123456789 | 246
+123 | 4567890123456789 | 246
+123 | 4567890123456789 | 4567890123456912
+123 | 4567890123456789 | 4567890123456912
+123 | 4567890123456789 | 4567890123456912
+123 | 4567890123456789 | 4567890123456912
+123 | 4567890123456789 | 4567890123456912
+123 | 4567890123456789 | 4567890123456912
+123 | 4567890123456789 | 4567890123456912
+123 | 4567890123456789 | 4567890123456912
+123 | 4567890123456789 | 4567890123456912
+123 | 4567890123456789 | 4567890123456912
+123 | 4567890123456789 | 4567890123456912
+123 | 4567890123456789 | 4567890123456912
+123 | 4567890123456789 | 9135780246913578
+123 | 4567890123456789 | 9135780246913578
+123 | 4567890123456789 | 9135780246913578
+123 | 4567890123456789 | 9135780246913578
+123 | 4567890123456789 | 9135780246913578
+123 | 4567890123456789 | 9135780246913578
+123 | 4567890123456789 | 9135780246913578
+123 | 4567890123456789 | 9135780246913578
+123 | 4567890123456789 | 9135780246913578
+4567890123456789 | -4567890123456789 | 246
+4567890123456789 | -4567890123456789 | 246
+4567890123456789 | -4567890123456789 | 246
+4567890123456789 | -4567890123456789 | 246
+4567890123456789 | -4567890123456789 | 4567890123456912
+4567890123456789 | -4567890123456789 | 4567890123456912
+4567890123456789 | -4567890123456789 | 4567890123456912
+4567890123456789 | -4567890123456789 | 4567890123456912
+4567890123456789 | -4567890123456789 | 4567890123456912
+4567890123456789 | -4567890123456789 | 4567890123456912
+4567890123456789 | -4567890123456789 | 4567890123456912
+4567890123456789 | -4567890123456789 | 4567890123456912
+4567890123456789 | -4567890123456789 | 4567890123456912
+4567890123456789 | -4567890123456789 | 4567890123456912
+4567890123456789 | -4567890123456789 | 4567890123456912
+4567890123456789 | -4567890123456789 | 4567890123456912
+4567890123456789 | -4567890123456789 | 9135780246913578
+4567890123456789 | -4567890123456789 | 9135780246913578
+4567890123456789 | -4567890123456789 | 9135780246913578
+4567890123456789 | -4567890123456789 | 9135780246913578
+4567890123456789 | -4567890123456789 | 9135780246913578
+4567890123456789 | -4567890123456789 | 9135780246913578
+4567890123456789 | -4567890123456789 | 9135780246913578
+4567890123456789 | -4567890123456789 | 9135780246913578
+4567890123456789 | -4567890123456789 | 9135780246913578
+4567890123456789 | 123 | 246
+4567890123456789 | 123 | 246
+4567890123456789 | 123 | 246
+4567890123456789 | 123 | 246
+4567890123456789 | 123 | 4567890123456912
+4567890123456789 | 123 | 4567890123456912
+4567890123456789 | 123 | 4567890123456912
+4567890123456789 | 123 | 4567890123456912
+4567890123456789 | 123 | 4567890123456912
+4567890123456789 | 123 | 4567890123456912
+4567890123456789 | 123 | 4567890123456912
+4567890123456789 | 123 | 4567890123456912
+4567890123456789 | 123 | 4567890123456912
+4567890123456789 | 123 | 4567890123456912
+4567890123456789 | 123 | 4567890123456912
+4567890123456789 | 123 | 4567890123456912
+4567890123456789 | 123 | 9135780246913578
+4567890123456789 | 123 | 9135780246913578
+4567890123456789 | 123 | 9135780246913578
+4567890123456789 | 123 | 9135780246913578
+4567890123456789 | 123 | 9135780246913578
+4567890123456789 | 123 | 9135780246913578
+4567890123456789 | 123 | 9135780246913578
+4567890123456789 | 123 | 9135780246913578
+4567890123456789 | 123 | 9135780246913578
+4567890123456789 | 4567890123456789 | 246
+4567890123456789 | 4567890123456789 | 246
+4567890123456789 | 4567890123456789 | 246
+4567890123456789 | 4567890123456789 | 246
+4567890123456789 | 4567890123456789 | 4567890123456912
+4567890123456789 | 4567890123456789 | 4567890123456912
+4567890123456789 | 4567890123456789 | 4567890123456912
+4567890123456789 | 4567890123456789 | 4567890123456912
+4567890123456789 | 4567890123456789 | 4567890123456912
+4567890123456789 | 4567890123456789 | 4567890123456912
+4567890123456789 | 4567890123456789 | 4567890123456912
+4567890123456789 | 4567890123456789 | 4567890123456912
+4567890123456789 | 4567890123456789 | 4567890123456912
+4567890123456789 | 4567890123456789 | 4567890123456912
+4567890123456789 | 4567890123456789 | 4567890123456912
+4567890123456789 | 4567890123456789 | 4567890123456912
+4567890123456789 | 4567890123456789 | 9135780246913578
+4567890123456789 | 4567890123456789 | 9135780246913578
+4567890123456789 | 4567890123456789 | 9135780246913578
+4567890123456789 | 4567890123456789 | 9135780246913578
+4567890123456789 | 4567890123456789 | 9135780246913578
+4567890123456789 | 4567890123456789 | 9135780246913578
+4567890123456789 | 4567890123456789 | 9135780246913578
+4567890123456789 | 4567890123456789 | 9135780246913578
+4567890123456789 | 4567890123456789 | 9135780246913578
+-- SELECT 125
+
+> create table a46_t1 (a int, b int) with (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> create table a46_t2 (x int, y int) with (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> create table a46_t3 (p int, q int) with (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> insert into a46_t1 select g, g from generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> insert into a46_t2 select g, g from generate_series(1, 100) g
+-- INSERT 0 100
+
+> insert into a46_t3 select g, g from generate_series(1, 10) g
+-- INSERT 0 10
+
+> analyze a46_t1, a46_t2, a46_t3
+-- ANALYZE
+
+> explain (costs off) select * from a46_t1 t1, a46_t2 t2, a46_t3 t3 where t2.x = t1.a and t3.p = t1.a
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (t1.a = t2.x)
+  ->  Seq Scan on a46_t1 t1
+  ->  Hash
+        ->  Hash Join
+              Hash Cond: (t2.x = t3.p)
+              ->  Seq Scan on a46_t2 t2
+              ->  Hash
+                    ->  Seq Scan on a46_t3 t3
+-- EXPLAIN
+
+> explain (costs off) select * from a46_t1 t1, a46_t2 t2, a46_t3 t3 where t3.p = t1.a and t2.x = t1.a
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (t1.a = t3.p)
+  ->  Seq Scan on a46_t1 t1
+  ->  Hash
+        ->  Hash Join
+              Hash Cond: (t2.x = t3.p)
+              ->  Seq Scan on a46_t2 t2
+              ->  Hash
+                    ->  Seq Scan on a46_t3 t3
+-- EXPLAIN
+
+> explain (costs off) select * from a46_t1 t1 join a46_t2 t2 on t2.x = t1.a join a46_t3 t3 on t3.p = t1.a
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (t1.a = t2.x)
+  ->  Seq Scan on a46_t1 t1
+  ->  Hash
+        ->  Hash Join
+              Hash Cond: (t2.x = t3.p)
+              ->  Seq Scan on a46_t2 t2
+              ->  Hash
+                    ->  Seq Scan on a46_t3 t3
+-- EXPLAIN
+
+> explain (costs off) select * from a46_t3 t3, a46_t2 t2, a46_t1 t1 where t2.x = t1.a and t3.p = t1.a
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (t1.a = t2.x)
+  ->  Seq Scan on a46_t1 t1
+  ->  Hash
+        ->  Hash Join
+              Hash Cond: (t2.x = t3.p)
+              ->  Seq Scan on a46_t2 t2
+              ->  Hash
+                    ->  Seq Scan on a46_t3 t3
+-- EXPLAIN
+
+> explain select * from a46_t1 t1, a46_t3 t3 where t3.p = t1.a and t1.a in (select x from a46_t2 t2)
+QUERY PLAN:text
+Hash Right Semi Join  (cost=20.20..22.68 rows=10 width=16)
+  Hash Cond: (t2.x = t3.p)
+  ->  Seq Scan on a46_t2 t2  (cost=0.00..2.00 rows=100 width=4)
+  ->  Hash  (cost=20.08..20.08 rows=10 width=16)
+        ->  Hash Join  (cost=1.23..20.08 rows=10 width=16)
+              Hash Cond: (t1.a = t3.p)
+              ->  Seq Scan on a46_t1 t1  (cost=0.00..15.00 rows=1000 width=8)
+              ->  Hash  (cost=1.10..1.10 rows=10 width=8)
+                    ->  Seq Scan on a46_t3 t3  (cost=0.00..1.10 rows=10 width=8)
+-- EXPLAIN
+
+> explain select t3.q from a46_t1 t1, a46_t3 t3 where t3.p = t1.a and t1.a in (select x from a46_t2 t2 where y < 50)
+QUERY PLAN:text
+Hash Join  (cost=4.08..22.42 rows=5 width=4)
+  Hash Cond: (t1.a = t3.p)
+  ->  Hash Semi Join  (cost=2.85..21.01 rows=48 width=8)
+        Hash Cond: (t1.a = t2.x)
+        ->  Seq Scan on a46_t1 t1  (cost=0.00..15.00 rows=1000 width=4)
+        ->  Hash  (cost=2.25..2.25 rows=48 width=4)
+              ->  Seq Scan on a46_t2 t2  (cost=0.00..2.25 rows=48 width=4)
+                    Filter: (y < 50)
+  ->  Hash  (cost=1.10..1.10 rows=10 width=8)
+        ->  Seq Scan on a46_t3 t3  (cost=0.00..1.10 rows=10 width=8)
+-- EXPLAIN
+
+> explain select t1.b from a46_t1 t1, a46_t3 t3 where t3.p = t1.a and exists (select 1 from a46_t2 t2 where t2.x = t3.p and t2.y = t1.b)
+QUERY PLAN:text
+Hash Right Semi Join  (cost=20.23..22.98 rows=1 width=4)
+  Hash Cond: ((t2.x = t3.p) AND (t2.y = t1.b))
+  ->  Seq Scan on a46_t2 t2  (cost=0.00..2.00 rows=100 width=8)
+  ->  Hash  (cost=20.08..20.08 rows=10 width=12)
+        ->  Hash Join  (cost=1.23..20.08 rows=10 width=12)
+              Hash Cond: (t1.a = t3.p)
+              ->  Seq Scan on a46_t1 t1  (cost=0.00..15.00 rows=1000 width=8)
+              ->  Hash  (cost=1.10..1.10 rows=10 width=4)
+                    ->  Seq Scan on a46_t3 t3  (cost=0.00..1.10 rows=10 width=4)
+-- EXPLAIN
+
+> set enable_hashjoin = off
+-- SET
+
+> explain select t3.q from a46_t1 t1, a46_t3 t3 where t3.p = t1.a and t1.a in (select x from a46_t2 t2 where y < 50)
+QUERY PLAN:text
+Merge Join  (cost=69.69..69.77 rows=5 width=4)
+  Merge Cond: (t1.a = t3.p)
+  ->  Merge Semi Join  (cost=68.42..69.64 rows=48 width=8)
+        Merge Cond: (t1.a = t2.x)
+        ->  Sort  (cost=64.83..67.33 rows=1000 width=4)
+              Sort Key: t1.a
+              ->  Seq Scan on a46_t1 t1  (cost=0.00..15.00 rows=1000 width=4)
+        ->  Sort  (cost=3.59..3.71 rows=48 width=4)
+              Sort Key: t2.x
+              ->  Seq Scan on a46_t2 t2  (cost=0.00..2.25 rows=48 width=4)
+                    Filter: (y < 50)
+  ->  Sort  (cost=1.27..1.29 rows=10 width=8)
+        Sort Key: t3.p
+        ->  Seq Scan on a46_t3 t3  (cost=0.00..1.10 rows=10 width=8)
+-- EXPLAIN
+
+> set enable_mergejoin = off
+-- SET
+
+> explain select * from a46_t1 t1, a46_t3 t3 where t3.p = t1.a and t1.a in (select x from a46_t2 t2)
+QUERY PLAN:text
+Nested Loop Semi Join  (cost=0.00..183.38 rows=10 width=16)
+  Join Filter: (t3.p = t2.x)
+  ->  Nested Loop  (cost=0.00..166.12 rows=10 width=16)
+        Join Filter: (t1.a = t3.p)
+        ->  Seq Scan on a46_t1 t1  (cost=0.00..15.00 rows=1000 width=8)
+        ->  Materialize  (cost=0.00..1.15 rows=10 width=8)
+              ->  Seq Scan on a46_t3 t3  (cost=0.00..1.10 rows=10 width=8)
+  ->  Materialize  (cost=0.00..2.50 rows=100 width=4)
+        ->  Seq Scan on a46_t2 t2  (cost=0.00..2.00 rows=100 width=4)
+-- EXPLAIN
+
+> explain (costs off) select 1 from a46_t1 t1 where exists (select 1 from a46_t2 t2, a46_t3 t3 where t2.x = t1.a and t3.p = t2.x)
+QUERY PLAN:text
+Nested Loop Semi Join
+  Join Filter: (t1.a = t2.x)
+  ->  Seq Scan on a46_t1 t1
+  ->  Materialize
+        ->  Nested Loop
+              Join Filter: (t2.x = t3.p)
+              ->  Seq Scan on a46_t2 t2
+              ->  Materialize
+                    ->  Seq Scan on a46_t3 t3
+-- EXPLAIN
+
+> explain (costs off) select 1 from a46_t1 t1 where exists (select 1 from a46_t2 t2, a46_t3 t3 where t2.x = t1.a and t3.q = t2.y)
+QUERY PLAN:text
+Nested Loop Semi Join
+  Join Filter: (t1.a = t2.x)
+  ->  Seq Scan on a46_t1 t1
+  ->  Materialize
+        ->  Nested Loop
+              Join Filter: (t2.y = t3.q)
+              ->  Seq Scan on a46_t2 t2
+              ->  Materialize
+                    ->  Seq Scan on a46_t3 t3
+-- EXPLAIN
+
+> explain (costs off) select 1 from a46_t1 t1, a46_t2 t2 where t2.x = t1.a
+QUERY PLAN:text
+Nested Loop
+  Join Filter: (t1.a = t2.x)
+  ->  Seq Scan on a46_t1 t1
+  ->  Materialize
+        ->  Seq Scan on a46_t2 t2
+-- EXPLAIN
+
+> reset enable_hashjoin
+-- RESET
+
+> reset enable_mergejoin
+-- RESET
+
+> select count(*) from a46_t1 t1, a46_t3 t3 where t3.p = t1.a and t1.a in (select x from a46_t2 t2 where y < 50)
+count:int8
+10
+-- SELECT 1
+
+> set enable_mergejoin = off
+-- SET
+
+> set enable_nestloop = off
+-- SET
+
+> explain select * from a46_t3 t1, a46_t2 t2 where t1.p = t2.x + 0
+QUERY PLAN:text
+Hash Join  (cost=1.23..3.83 rows=10 width=16)
+  Hash Cond: ((t2.x + 0) = t1.p)
+  ->  Seq Scan on a46_t2 t2  (cost=0.00..2.00 rows=100 width=8)
+  ->  Hash  (cost=1.10..1.10 rows=10 width=8)
+        ->  Seq Scan on a46_t3 t1  (cost=0.00..1.10 rows=10 width=8)
+-- EXPLAIN
+
+> explain select * from a46_t3 t1, a46_t2 t2 where t1.p = (t2.x + t2.y) / 2
+QUERY PLAN:text
+Hash Join  (cost=1.23..3.95 rows=10 width=16)
+  Hash Cond: (((t2.x + t2.y) / 2) = t1.p)
+  ->  Seq Scan on a46_t2 t2  (cost=0.00..2.00 rows=100 width=8)
+  ->  Hash  (cost=1.10..1.10 rows=10 width=8)
+        ->  Seq Scan on a46_t3 t1  (cost=0.00..1.10 rows=10 width=8)
+-- EXPLAIN
+
+> reset enable_mergejoin
+-- RESET
+
+> reset enable_nestloop
+-- RESET
+
+> create table a46_jt1 (a int, b int) with (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> create table a46_jt2 (x int, y int, z int) with (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> insert into a46_jt1 select g, g from generate_series(1, 10) g
+-- INSERT 0 10
+
+> insert into a46_jt2 select g, g, g from generate_series(1, 10) g
+-- INSERT 0 10
+
+> analyze a46_jt1, a46_jt2
+-- ANALYZE
+
+> set enable_hashjoin = off
+-- SET
+
+> explain (verbose, costs off) select a46_jt1.a, s.x from a46_jt1, (select * from a46_jt2 offset 0) s where a46_jt1.a = s.x for update
+QUERY PLAN:text
+LockRows
+  Output: a46_jt1.a, s.x, a46_jt1.ctid, s.*
+  ->  Merge Join
+        Output: a46_jt1.a, s.x, a46_jt1.ctid, s.*
+        Merge Cond: (a46_jt1.a = s.x)
+        ->  Sort
+              Output: a46_jt1.a, a46_jt1.ctid
+              Sort Key: a46_jt1.a
+              ->  Seq Scan on public.a46_jt1
+                    Output: a46_jt1.a, a46_jt1.ctid
+        ->  Sort
+              Output: s.x, s.*
+              Sort Key: s.x
+              ->  Subquery Scan on s
+                    Output: s.x, s.*
+                    ->  LockRows
+                          Output: a46_jt2.x, a46_jt2.y, a46_jt2.z, a46_jt2.ctid
+                          ->  Seq Scan on public.a46_jt2
+                                Output: a46_jt2.x, a46_jt2.y, a46_jt2.z, a46_jt2.ctid
+-- EXPLAIN
+
+> set enable_mergejoin = off
+-- SET
+
+> explain (verbose, costs off) select a46_jt1.a, s.x from a46_jt1, (select * from a46_jt2 offset 0) s where a46_jt1.a = s.x for update
+QUERY PLAN:text
+LockRows
+  Output: a46_jt1.a, s.x, a46_jt1.ctid, s.*
+  ->  Nested Loop
+        Output: a46_jt1.a, s.x, a46_jt1.ctid, s.*
+        Join Filter: (a46_jt1.a = s.x)
+        ->  Seq Scan on public.a46_jt1
+              Output: a46_jt1.a, a46_jt1.ctid
+        ->  Materialize
+              Output: s.x, s.*
+              ->  Subquery Scan on s
+                    Output: s.x, s.*
+                    ->  LockRows
+                          Output: a46_jt2.x, a46_jt2.y, a46_jt2.z, a46_jt2.ctid
+                          ->  Seq Scan on public.a46_jt2
+                                Output: a46_jt2.x, a46_jt2.y, a46_jt2.z, a46_jt2.ctid
+-- EXPLAIN
+
+> reset enable_hashjoin
+-- RESET
+
+> reset enable_mergejoin
+-- RESET
+
+> create table a46_ca (x text) with (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> create table a46_cb (x text) with (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> insert into a46_ca select 'a' || g from generate_series(1, 100) g
+-- INSERT 0 100
+
+> insert into a46_cb select 'a' || g from generate_series(1, 100) g
+-- INSERT 0 100
+
+> analyze a46_ca, a46_cb
+-- ANALYZE
+
+> explain (costs off) select * from a46_ca a, a46_cb b where a.x = b.x and a.x = 'a1' collate "C"
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (b.x = a.x)
+  ->  Seq Scan on a46_cb b
+  ->  Hash
+        ->  Seq Scan on a46_ca a
+              Filter: (x = 'a1'::text COLLATE "C")
+-- EXPLAIN
+
+> explain (costs off) select * from a46_ca a, a46_cb b where a.x = b.x and a.x = 'a1'
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on a46_ca a
+        Filter: (x = 'a1'::text)
+  ->  Seq Scan on a46_cb b
+        Filter: (x = 'a1'::text)
+-- EXPLAIN
+
+> explain (costs off) select * from a46_ca a, a46_cb b where a.x = b.x collate "C" and a.x = 'a1'
+QUERY PLAN:text
+Hash Join
+  Hash Cond: ((b.x)::text = (a.x)::text)
+  ->  Seq Scan on a46_cb b
+  ->  Hash
+        ->  Seq Scan on a46_ca a
+              Filter: (x = 'a1'::text)
+-- EXPLAIN
+
+> explain (costs off) select * from a46_ca a, a46_cb b where a.x = b.x collate "POSIX" and b.x = 'a1' collate "C"
+QUERY PLAN:text
+Hash Join
+  Hash Cond: ((a.x)::text = (b.x)::text)
+  ->  Seq Scan on a46_ca a
+  ->  Hash
+        ->  Seq Scan on a46_cb b
+              Filter: (x = 'a1'::text COLLATE "C")
+-- EXPLAIN
+
+> select * from a46_ca a, a46_cb b where a.x = b.x and a.x = 'a1' collate "C"
+x:text | x:text
+a1 | a1
+-- SELECT 1
+
+> select * from a46_ca a, a46_cb b where a.x = b.x collate "C" and a.x = 'a1'
+x:text | x:text
+a1 | a1
+-- SELECT 1
+

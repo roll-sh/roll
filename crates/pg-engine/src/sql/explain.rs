@@ -2915,7 +2915,7 @@ fn whole_row_outputs(n: &mut ExNode, added: &mut Vec<String>) {
 /// `rels`: those `whole_row_outputs` gave a whole row. (Not under a data-modifying node,
 /// whose actions read columns EXPLAIN doesn't show.)
 fn drop_whole_only_columns(top: &mut ExNode, rels: Vec<String>) {
-    if rels.is_empty() || top.operation.is_some() || top.node_type == "ModifyTable" {
+    if top.operation.is_some() || top.node_type == "ModifyTable" {
         return;
     }
     // Every reading of a column but passing it up as it is.
@@ -2937,20 +2937,49 @@ fn drop_whole_only_columns(top: &mut ExNode, rels: Vec<String>) {
             }
         }
     }
-    fn columns(n: &ExNode, r: &str, out: &mut Vec<String>) {
-        if n.is_scan() && node_alias(n).as_deref() == Some(r) {
+    // (A subquery's columns are passed up by the nodes over its Subquery Scan, not only
+    // returned by it.)
+    fn columns(n: &ExNode, r: &str, sub: bool, out: &mut Vec<String>) {
+        if sub || n.is_scan() && node_alias(n).as_deref() == Some(r) {
             let prefix = format!("{r}.");
-            out.extend(n.output.iter().filter(|o| o.starts_with(&prefix) && !o.ends_with(".*")).cloned());
+            for o in &n.output {
+                if o.starts_with(&prefix) && !o.ends_with(".*") && !out.contains(o) {
+                    out.push(o.clone());
+                }
+            }
         }
         for c in &n.children {
             if matches!(c.relationship, Some("Outer" | "Inner")) {
-                columns(c, r, out);
+                columns(c, r, sub, out);
             }
         }
     }
-    for r in rels {
+    // A whole-row-marked subquery (ROW_MARK_COPY: its Subquery Scan returns `s.*`) passes
+    // up only what is read too: the Sort or Materialize over it lists `s.x, s.*`.
+    fn marked(n: &ExNode, out: &mut Vec<String>) {
+        if n.node_type == "Subquery Scan"
+            && let Some(a) = node_alias(n)
+            && n.output.iter().any(|o| *o == format!("{a}.*"))
+            && !out.contains(&a)
+        {
+            out.push(a);
+        }
+        for c in &n.children {
+            if matches!(c.relationship, Some("Outer" | "Inner")) {
+                marked(c, out);
+            }
+        }
+    }
+    let mut subs = Vec::new();
+    marked(top, &mut subs);
+    let rels: Vec<(String, bool)> = rels
+        .into_iter()
+        .map(|r| (r, false))
+        .chain(subs.into_iter().map(|r| (r, true)))
+        .collect();
+    for (r, sub) in rels {
         let mut cols = Vec::new();
-        columns(top, &r, &mut cols);
+        columns(top, &r, sub, &mut cols);
         for c in cols {
             if !reads(top, true, &c) {
                 drop(top, &c);
@@ -6075,12 +6104,17 @@ impl Builder<'_, '_> {
                         .collect();
                     n.details.push(Detail::Text("Function Call", t.join(", ")));
                 }
-                // cost_functionscan: the calls once, then a tuple per row.
+                // cost_functionscan: the calls once, then a tuple per row. (The calls'
+                // evaluation, their arguments' included, cost_qual_eval_node over
+                // rte->functions: a LATERAL call's `t.x::integer % 10` too.)
                 n.rows = calls
                     .iter()
                     .map(|c| costs::function_rows(c.func.name, &c.args, c.func.srf.is_some()))
                     .fold(1.0, f64::max);
-                n.startup_cost = costs::CPU_OPERATOR_COST * calls.len() as f64;
+                n.startup_cost = calls
+                    .iter()
+                    .map(|c| costs::CPU_OPERATOR_COST + c.args.iter().map(costs::qual_cost).sum::<f64>())
+                    .sum();
                 n.total_cost = n.startup_cost + n.rows * costs::CPU_TUPLE_COST;
                 n.width = calls.iter().map(|c| type_width(&c.ty)).sum();
                 // (Only the columns used above: its reltarget.)
@@ -12342,7 +12376,13 @@ impl Builder<'_, '_> {
                     .map(|e| self.show(e, &names, Cx::Upper))
                     .collect();
                 // (Estimated over the subquery's outputs, examine_variable looking into
-                // it; cost_subqueryscan's per-tuple qual cost.)
+                // it; cost_subqueryscan's per-tuple qual cost. A LATERAL value of this level
+                // is another relation's Var there, `level_vars_hidden`.)
+                let est_quals: Vec<Expr> = {
+                    let (od, depth) = (&self.outer_depth, self.depth);
+                    let level = |d: usize| d >= 1 && od.get(d - 1) == Some(&depth);
+                    quals.iter().map(|e| costs::level_vars_hidden(e, &level)).collect()
+                };
                 let (sel, qc) = {
                     let cat = self.ctx.catalog();
                     let cols = c.node.cols.clone();
@@ -12357,7 +12397,7 @@ impl Builder<'_, '_> {
                         user: None,
                         same_rel: true,
                     };
-                    (est.clauses(&quals), quals.iter().map(costs::qual_cost).sum::<f64>())
+                    (est.clauses(&est_quals), quals.iter().map(costs::qual_cost).sum::<f64>())
                 };
                 if subscan {
                     // (Its scan computes it: the quals go on it.)
@@ -14875,9 +14915,24 @@ impl Builder<'_, '_> {
                 Expr::Col(i, _) => cs.get(*i).cloned(),
                 _ => None,
             };
+            // (An expression of one table's columns without statistics of its own:
+            // get_variable_numdistinct takes the table's tuples when fewer than the default,
+            // as the join search's `join_var` does.)
+            let expr_distinct = || -> Option<f64> {
+                let vars: Vec<costs::VarRef> = e.columns().iter().map(|&k| cs.get(k).and_then(|c| c.var.clone())).collect::<Option<_>>()?;
+                let first = vars.first()?;
+                vars.iter()
+                    .all(|v| v.table.oid == first.table.oid)
+                    .then_some(first.tuples)
+                    .filter(|t| *t > 0.0 && *t < costs::DEFAULT_NUM_DISTINCT)
+                    .map(costs::clamp_rows)
+            };
             joins::JoinVar {
                 var: c.as_ref().and_then(|c| c.var.clone()),
-                distinct: c.as_ref().and_then(|c| c.distinct),
+                distinct: match &c {
+                    Some(c) => c.distinct,
+                    None => expr_distinct(),
+                },
                 rel_rows: c
                     .as_ref()
                     .and_then(|c| c.var.as_ref())
@@ -14949,9 +15004,15 @@ impl Builder<'_, '_> {
             JoinMethod::Merge => "Merge Join",
             JoinMethod::NestLoop => "Nested Loop",
         });
-        n.rows = meta
-            .rows
-            .unwrap_or_else(|| joins::join_rows(jt, lrows, rrows, jsel, 1.0));
+        let moved = (lateral && matches!(jt, Jt::Inner | Jt::Left))
+            .then(|| lateral_moved(right, params, &lcols, self.ctx))
+            .flatten();
+        n.rows = meta.rows.unwrap_or_else(|| match moved {
+            // (The join relation's size from the LATERAL item's own rows and the join
+            // clauses its parameterized path checks: set_joinrel_size_estimates.)
+            Some((rel_rows, sel)) => joins::join_rows(jt, lrows, rel_rows, jsel * sel, 1.0),
+            None => joins::join_rows(jt, lrows, rrows, jsel, 1.0),
+        });
         let planned = meta.method.is_some();
         n.cols = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
             lcols.clone()
@@ -14969,7 +15030,8 @@ impl Builder<'_, '_> {
             + 6 * (rowmarks_under(left, &self.rowmarks) + rowmarks_under(right, &self.rowmarks))
                 as u32
             + copy_widths_under(left, &self.copy_marks)
-            + copy_widths_under(right, &self.copy_marks);
+            + copy_widths_under(right, &self.copy_marks)
+            + if matches!(kind, JoinKind::Semi) { meta.semi_carried } else { 0 };
         // The quals' evaluation costs.
         let key_cost: f64 = keys
             .iter()
@@ -17856,11 +17918,11 @@ pub(crate) fn subplan_costs(exprs: &[Expr], ctx: &ExecCtx) -> (f64, f64) {
             let hashed = !correlated && s.kind == K::Any && s.ops.iter().all(|o| o.name == "=");
             let ops = s.ops.len() as f64 * costs::CPU_OPERATOR_COST;
             if hashed {
-                let est = estimate(&s.plan, ctx);
+                let est = estimate_subquery(&s.plan, ctx);
                 startup += costs::CPU_OPERATOR_COST.mul_add(est.rows, est.total);
                 per += ops;
             } else if correlated {
-                let est = estimate(&s.plan, ctx);
+                let est = estimate_subquery(&s.plan, ctx);
                 let run = est.total - est.startup;
                 per += ops
                     + match s.kind {
@@ -18781,8 +18843,22 @@ fn level_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> ExNode {
 }
 
 pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
+    estimate_in(plan, ctx, false)
+}
+
+/// `estimate` of a sub-select's plan (a level of its own): every `Outer(d, ..)` in it is a
+/// value of an enclosing level, so a sub-select of it reading only those is an InitPlan its
+/// top node pays for once (SS_charge_for_initplans), not a SubPlan run per row.
+pub fn estimate_subquery(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
+    estimate_in(plan, ctx, true)
+}
+
+fn estimate_in(plan: &Arc<Plan>, ctx: &ExecCtx, sublevel: bool) -> PlanEstimate {
     let o = estimate_options();
     let mut b = estimate_builder(plan, ctx, &o);
+    if sublevel {
+        b.outer_depth = vec![usize::MAX; 16];
+    }
     let n = b.level(plan);
     let width_of = super::binder::plan_width(plan);
     let cols = if n.cols.len() == width_of {
@@ -18811,6 +18887,86 @@ pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
         disabled: parallel::disabled_nodes(&n),
         cols,
     }
+}
+
+/// A LATERAL join's right side with the join clauses its parameterized path checks
+/// moved into it (a Filter whose every clause reads the join's values, `Outer(1, k)`):
+/// the item's own rows (rel->rows) and those clauses' selectivity where the join relation
+/// is sized (set_joinrel_size_estimates). A subquery's Subquery Scan estimated them as
+/// restrictions over two relations' Vars (cost_subqueryscan, `costs::level_vars_hidden`),
+/// the RestrictInfos' cached norm_selec the join takes too; another item's parameterized
+/// path took them with the left side a constant, caching nothing: their join selectivity.
+fn lateral_moved(right: &Plan, params: &[Expr], lcols: &[ColInfo], ctx: &ExecCtx) -> Option<(f64, f64)> {
+    let Plan::Filter { input, pred } = right else {
+        return None;
+    };
+    let mut parts = Vec::new();
+    conjuncts(pred, &mut parts);
+    let reads = |e: &Expr| {
+        let mut f = false;
+        e.walk(&mut |x| f |= matches!(x, Expr::Outer(1, ..)));
+        f
+    };
+    if parts.is_empty() || !parts.iter().all(reads) {
+        return None;
+    }
+    let inner = estimate(input, ctx);
+    let cat = ctx.catalog();
+    let subquery = matches!(&**input, Plan::Barrier { .. });
+    let nl = lcols.len();
+    let mut cols: Vec<Option<costs::VarRef>> = if subquery { Vec::new() } else { lcols.iter().map(|c| c.var.clone()).collect() };
+    cols.extend(inner.cols.iter().map(|c| c.1.clone()));
+    let vars = |i: usize| cols.get(i).cloned().flatten();
+    let est = costs::Est {
+        cat: &cat,
+        fmt: ctx.fmt(),
+        vars: &vars,
+        exprs: &[],
+        endpoint: None,
+        distinct: None,
+        user: None,
+        same_rel: subquery,
+    };
+    let mut sel = 1.0;
+    for p in &parts {
+        if subquery {
+            sel *= est.clause(&costs::level_vars_hidden(p, &|d| d == 1));
+            continue;
+        }
+        // (Over the join's row: the values as the left side's expressions.)
+        let joined = p
+            .clone()
+            .transform(&mut |x| {
+                Ok(match x {
+                    Expr::Outer(1, k, t) => params.get(k).cloned().unwrap_or(Expr::Outer(1, k, t)),
+                    Expr::Col(c, t) => Expr::Col(c + nl, t),
+                    x => x,
+                })
+            })
+            .expect("a moved clause over the join's row");
+        let jv = |e: &Expr| -> Option<super::joins::JoinVar> {
+            let Expr::Col(i, _) = strip_relabel(strip_widening(e)) else { return None };
+            let (var, distinct) = if *i < nl {
+                (lcols[*i].var.clone(), lcols[*i].distinct)
+            } else {
+                let c = inner.cols.get(*i - nl)?;
+                (c.1.clone(), c.2)
+            };
+            Some(super::joins::JoinVar {
+                rel_rows: var.as_ref().map_or(0.0, |v| v.rows),
+                var,
+                distinct,
+            })
+        };
+        sel *= match &joined {
+            Expr::Call(d, a, _) if d.name == "=" && a.len() == 2 => match (jv(&a[0]), jv(&a[1])) {
+                (Some(x), Some(y)) => super::joins::eqjoinsel_inner(&cat, ctx.fmt(), &x, &y),
+                _ => est.clause(&joined),
+            },
+            e => est.clause(e),
+        };
+    }
+    Some((inner.rows, sel))
 }
 
 /// One of a FROM subquery's final paths, as the join search weighs it.

@@ -532,6 +532,9 @@ pub struct Binder<'b, 'a> {
     /// count and the offset): each arm is planned for the rows it reads
     /// (set_subquery_pathlist passes the tuple_fraction down).
     pub(crate) arm_limit: Option<(usize, f64, f64)>,
+    /// The FROM lists being bound, their lengths (deconstruct_recurse's from_collapse_limit
+    /// test for a subquery pulled up into one).
+    pub(crate) from_lens: Vec<usize>,
     /// Binding a set operation's tree: how many of its leaf queries are bound so far
     /// (their range table entries are `*SELECT* n`).
     pub(crate) setop_leaves: Option<usize>,
@@ -685,6 +688,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             no_params: false,
             unplanned: false,
             arm_limit: None,
+            from_lens: Vec::new(),
             setop_leaves: None,
             setop_coerced: false,
             defer_level: None,

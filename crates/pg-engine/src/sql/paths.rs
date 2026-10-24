@@ -3087,16 +3087,19 @@ impl Planner<'_, '_> {
                     return;
                 }
                 use crate::sql::expr::SubqueryKind as K;
-                let correlated = !s.params.is_empty();
+                // (Correlated: its parameters read the scanned row. One reading only values
+                // of enclosing query levels is an InitPlan of this level (SS_process_sublinks:
+                // no Var of it), its Param free to read, charged once where it is attached.)
+                let correlated = s.params.iter().any(|p| !p.columns().is_empty());
                 let hashed =
                     !correlated && s.kind == K::Any && s.ops.iter().all(|o| o.name == "=");
                 let ops = s.ops.len() as f64 * CPU_OPERATOR_COST;
                 if hashed {
-                    let est = crate::sql::explain::estimate(&s.plan, self.ctx);
+                    let est = crate::sql::explain::estimate_subquery(&s.plan, self.ctx);
                     startup += CPU_OPERATOR_COST.mul_add(est.rows, est.total);
                     per_tuple += ops;
                 } else if correlated {
-                    let est = crate::sql::explain::estimate(&s.plan, self.ctx);
+                    let est = crate::sql::explain::estimate_subquery(&s.plan, self.ctx);
                     let run = est.total - est.startup;
                     per_tuple += ops
                         + match s.kind {

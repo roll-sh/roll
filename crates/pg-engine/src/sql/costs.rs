@@ -76,6 +76,23 @@ pub fn clamp_rows(r: f64) -> f64 {
     }
 }
 
+/// A LATERAL subquery's Subquery Scan checks the join clauses of its parameterized path,
+/// and cost_subqueryscan estimates them with clauselist_selectivity(varRelid 0, no
+/// SpecialJoinInfo): restriction estimators over Vars of two relations of the level, not
+/// a Var against a parameter (eqsel's get_restriction_variable fails: DEFAULT_EQ_SEL).
+/// `e` with the values `level` says are that level's (`Outer(d, ..)`) as columns without
+/// statistics, so `Est` takes them so.
+pub fn level_vars_hidden(e: &Expr, level: &dyn Fn(usize) -> bool) -> Expr {
+    e.clone()
+        .transform(&mut |x| {
+            Ok(match x {
+                Expr::Outer(d, k, t) if level(d) => Expr::Col(usize::MAX / 4 + k, t),
+                x => x,
+            })
+        })
+        .expect("hiding a level's values")
+}
+
 /// get_typavgwidth: a type's typical width.
 pub fn type_width(ty: &DataType) -> u32 {
     let len = crate::catalog::relsize::typlen(ty);
@@ -416,8 +433,18 @@ fn cmp_as(a: &Value, b: &Value, ty: &DataType) -> Ordering {
     if let (DataType::Bpchar(_), Value::Text(x), Value::Text(y)) = (ty, a, b) {
         return x.trim_end_matches(' ').cmp(y.trim_end_matches(' '));
     }
+    // (A date against a timestamp: the cross-type operators compare the date as the
+    // timestamp of its midnight, date2timestamp.)
+    match (a, b) {
+        (Value::Date(d), Value::Timestamp(t) | Value::Timestamptz(t)) => return (*d as i64 * USECS_PER_DAY).cmp(t),
+        (Value::Timestamp(t) | Value::Timestamptz(t), Value::Date(d)) => return t.cmp(&(*d as i64 * USECS_PER_DAY)),
+        _ => {}
+    }
     cmp(a, b)
 }
+
+/// Microseconds in a day: a date on the timestamps' scale.
+const USECS_PER_DAY: i64 = 86_400_000_000;
 
 fn cmp(a: &Value, b: &Value) -> Ordering {
     crate::exec::agg::cmp_rows(std::slice::from_ref(a), std::slice::from_ref(b))
@@ -1741,7 +1768,9 @@ fn scalars(v: &Value, lo: &Value, hi: &Value, fmt: &FormatCtx) -> Option<(f64, f
             Value::Numeric(_) => crate::types::text::format_value(x, &DataType::NUMERIC, fmt)
                 .parse()
                 .ok()?,
-            Value::Date(d) => *d as f64,
+            // (convert_timevalue_to_scalar: a date as its midnight's timestamp, so a date
+            // column's histogram and a timestamp constant share one scale.)
+            Value::Date(d) => *d as f64 * USECS_PER_DAY as f64,
             Value::Timestamp(t) | Value::Timestamptz(t) | Value::Time(t) => *t as f64,
             _ => return None,
         })
@@ -1820,6 +1849,8 @@ pub fn qual_cost(e: &Expr) -> f64 {
     let mut n = 0.0;
     e.walk(&mut |x| match x {
         Expr::Call(..) => n += 1.0,
+        // (GREATEST / LEAST: a MinMaxExpr, cost_qual_eval_walker's one operator.)
+        Expr::MinMax(..) => n += 1.0,
         // (A row comparison checks every pair, once: its `=`s aren't calls of their own.)
         Expr::RowCompare(rc) => n -= rc.eqs.len() as f64,
         // A user-defined function called (not inlined): its procost.
