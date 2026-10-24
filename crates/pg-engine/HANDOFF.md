@@ -339,14 +339,14 @@ them all with the "Fixed in round N" sections describing what was already tried.
    partition_prune 2 units; round 14's agent 5 and round 16's agent 12 sections in STATUS.md have
    what changed and why the rest is open; round 16's agent 17 section has join relations
    parameterized by LATERAL references and why 442, partition_join 74/86/88/92 and
-   partition_prune 265/410 stay open; join 123/410/502/503 done in round 16, agent 22: a FROM
+   partition_prune 410 stays open (265 done in round 16, agent 27: SubPlan copies per place); join 123/410/502/503 done in round 16, agent 22: a FROM
    subquery's sorted paths, class clauses' first making, ParamPathInfo rows; join
    499/543/612/632/654/655/819/888 done in round 16, agent 23: self-join elimination order,
    SubPlan classes, semi join unique-ification, join target list order, with why 560/620/715
    stay open): cost-driven choices (join 424/450/560/715, partition_join 74),
    partitionwise LATERAL joins left (partition_join 48/207 done in round 16, agent 19; 204:
    a PlaceHolderVar), IN over a partitioned subquery as a semi join (partition_join 86/88/92: the
-   subquery is planned before the WHERE's sublinks are pulled up), partition_prune 265 / 410.
+   subquery is planned before the WHERE's sublinks are pulled up), partition_prune 410.
 3. **subselect** (3 units; rounds 13–14 fixed the row comparisons with sub-selects, most of
    PostgreSQL 18's IN / VALUES pull-up, sub-select copies, per-member EXISTS alternatives,
    reltarget orders, strict-NULL folding, early unique-ified semi joins, IN over a

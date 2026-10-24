@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51107 (**99.92%**) |
-| units differing | 43 |
+| units matching | 51108 (**99.92%**) |
+| units differing | 42 |
 | files fully matching | 226 |
 | engine output == expected/*.out (pg_regress "ok") | 187 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 43 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 42 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 43 units
-join (25), partition_join (15), partition_prune (2), returning (1)
+### EXPLAIN (group C1) — 42 units
+join (25), partition_join (15), partition_prune (1), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -106,6 +106,119 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 27 (SubPlan copies per place, AlternativeSubPlan choices per copy, numbering and naming order)
+
+Subset runs of the planner-heavy files (create_index, create_misc, create_view, select, union,
+subselect, join, aggregates, inherit, insert_conflict, limit, returning, updatable_views,
+merge, with, rules, rowsecurity, select_views, select_distinct, equivclass, partition_join,
+partition_prune, partition_aggregate, select_parallel, incremental_sort, memoize, join_hash,
+explain, stats_ext, groupingsets, window, tsrf, rangefuncs, sqljson_jsontable, collate and
+test_setup), unit by unit against a baseline run of the same subset on 773f83c (13383 ->
+13384 of 13441), then again after rebasing onto e7e37e6 and deee52e against their own
+baselines (13393 -> 13394, 13398 -> 13399 of 13442): 1 unit fixed, none broken, no other
+agent's units moved. Crate tests and clippy on each.
+
+| file | fixed units |
+|---|---|
+| partition_prune | 265 |
+
+What changed:
+
+- **A pulled-up subquery's sub-select output is copied into each place reading it**
+  (pullup_replace_vars; make_subplan for each copy). A join group's subquery over one table
+  or over a join (`lift.rs`, `flatten_join_subquery`) now moves an output holding a sub-select
+  up like any other when no outer join of the group nulls it (as written: else it stays a
+  PlaceHolderVar, one SubPlan), and `copy_moved_subselects` gives every place after the first
+  (the group's target list, then the join tree's quals in preprocess_qual_conditions' order) a
+  copy: an id of its own and plan nodes of its own, its own sub-selects copies too
+  (`sublinkcopy::make_copy`, `paths::make_subquery_copy`). A WHERE clause pushed through a
+  FROM subquery's projection reads a copy of its own (`optimize::output_copy`; `projectable`
+  takes sub-select outputs outside PlaceHolderVar semantics, nothing volatile in them). EXPLAIN's
+  split of a sub-select a projection reads twice uses the same deep copies (its InitPlans were
+  shared). Each copy runs where it is read: `EXPLAIN ANALYZE` shows the loops of each.
+- A sub-select in a join clause is no volatile function to a parameterized path
+  (contain_volatile_functions looks at a SubPlan's arguments: `param_paths`, `param_cands`
+  use `expr_volatile_deep`): `id > (EXISTS(...))::int` is an index condition of the inner
+  side, as with a column.
+- **AlternativeSubPlan per copy** (setrefs.c fix_alternative_subplan): each place picks plain
+  or hashed by its NUM_EXEC: a join's clauses (Join Filter, Hash / Merge Cond) for twice the
+  join's rows, an index scan's shown Index Cond (indexqualorig) for twice its rows, an
+  index-only scan's (indexqual) for one run, a Bitmap Heap Scan's Recheck Cond for twice its
+  rows, a Bitmap Index Scan's (indexqualorig) for twice its rows.
+- **Where a SubPlan shows** (ExplainSubPlans prints each plan_id once, under the first node
+  whose planstate initialized it): a nested loop parameter holding a sub-select (the inner
+  clause's copy, which the engine passes in as the parameter's value) is shown and registered
+  at each place reading it (`inline_sub_params`), not where the parameter is named; an
+  index-only scan's index condition and a Bitmap Index Scan's are labeled but not attached
+  without ANALYZE (`Builder::detach`, `unattached`: ExecInitIndexOnlyScan stops before the
+  runtime keys under EXPLAIN_ONLY), while the index-only scan's recheckqual registers its own
+  choice, attached; an inheritance Append with run-time pruning registers its exec pruning
+  steps' values (the partition key's clauses over the nested loop's values, fixed for one
+  run, register_partpruneinfo), attached to the Append, which ExecInitAppend initializes
+  before its members. A scan's and a join's target-list SubPlans come before their quals'
+  (ExecInit* assigns the projection first).
+- **Numbering: the target list first** (`Subquery::tlist`, set by the binder for the select
+  list, ORDER BY, DISTINCT ON, window clauses, an UPDATE's SET, a one-row INSERT's values,
+  RETURNING; `renumbering`): a level's target-list sub-selects (each with the sub-selects in
+  it and its hashed alternative) are numbered before its other own ones (quals, HAVING, ...),
+  as subquery_planner preprocesses the target list first. Not a MERGE's own level (its
+  actions are preprocessed after the quals); GROUPING() argument copies count as the target
+  list's.
+- **Naming in number order**: setrefs flattens the SubPlans' range tables after the main
+  query's, in plan_id order, and EXPLAIN names only the relations of plans it shows. Once a
+  build knows the numbers, the sub-selects' relations are named in that order
+  (`assign_refnames_skip`'s `ranks`, `Builder::sub_ranks`): a nested one before the one it is
+  in, an unshown plain alternative not at all. A hashed alternative shown beside its plain
+  one is a range table entry of its own (`fresh_hashed`): `tinner_2` under `tinner_1`.
+
+Golden: `tests/sql/a27_subplan_copies.sql`.
+
+For agent 30 (join 362 / 363, PlaceHolderVars with sub-selects), how a pulled-up output gets
+its own copy:
+
+- In a join group, `lift` (`paths/joinpath/lift.rs`) decides per output of a pulled-up
+  subquery whether it moves up (`up`): one holding a sub-select moves when no outer join of
+  the group nulls it as written (`nulled == 0 && movable_fromless`), else it stays computed
+  in the subquery's projection (a PlaceHolderVar: one SubPlan, read by column). `note_moved`
+  records the moved outputs' sub-select ids, and the map (`Lifted::map`) puts the output's
+  expression in every place reading it (`subst`), at first all with the same id.
+- `copy_moved_subselects` (called from `lift_group`) then walks the places in
+  subquery_planner's order, the group's target list (the map) first, then the join tree's
+  quals (a join's inputs before its own clauses), and every occurrence of a recorded id after
+  the first becomes a copy: `sublinkcopy::make_copy` gives it a fresh id and deep-copies its
+  plan, its own sub-selects included (planner MIN / MAX InitPlans keep planner ids), so each
+  copy is its own SubPlan / InitPlan in EXPLAIN and its own cache entry in the executor. The
+  copy's `Subquery::tlist` / `qual` say which clause it is in, for the numbering.
+- Elsewhere (`binder::optimize::output_copy` for a qual pushed into a FROM subquery,
+  `explain::split_shared_subqueries` for a projection reading one twice) the same
+  `paths::make_subquery_copy` makes the copy. For a PlaceHolderVar whose expression holds a
+  sub-select, Postgres plans a copy per place too (preprocess_expression processes the
+  PlaceHolderVar's contents in each clause: 362's unused `InitPlan 2`); calling
+  `make_subquery_copy` on each place's PlaceHolderVar expression besides the one evaluated
+  gives that, numbered in place (target list first). 362 / 363 are unchanged by this batch.
+
+Left, and why (none fails a unit of the subset):
+
+- EXPLAIN ANALYZE of a pulled-up EXISTS read as an index condition: Postgres evaluates the
+  index condition's plain SubPlan in each member's scan and in the Append's pruning
+  (`loops=15` for 5 outer rows over 2 partitions), the engine once per outer row as the nested
+  loop's parameter (`loops=5`); and the hashed alternative EXPLAIN picks is planned for the
+  display only, so ANALYZE shows it `never executed` (the executor runs the plain plan).
+- Copies are made where the engine substitutes the output (the join group's lifting, a
+  qual pushed into a FROM subquery). A projection reading the same sub-select output twice
+  over a single relation still computes it once in the executor (EXPLAIN splits the copies
+  for display only), and an ORDER BY over an output a join clause also reads sees one value
+  (Postgres's two copies are different equivalence-class members: `Sort Key: ((SubPlan 2)),
+  t2.a`, the engine drops `t2.a`).
+- An index condition's other operand is costed nothing (index_other_operands_eval_cost adds
+  its evaluation, a SubPlan's or `x + 1`'s, to the index scan's startup), and a Bitmap Heap
+  Scan's recheck of a parameterized clause isn't charged per row: Postgres prefers an index
+  scan over a bitmap for `id > touter.f1 + 1` (startup 0.16), the engine the bitmap.
+- A FROM subquery's plain output nothing above reads stays in its scan's target list when the
+  subquery also has a sub-select output (`Output: (SubPlan 1), t1.a`), before this batch too.
+- A multi-key hashed EXISTS's test expression shows `(a = (hashed SubPlan n).col1 AND b = ...)`
+  for Postgres's `((a = ...) AND (b = ...))`.
 
 ## Round 16, agent 25 (column-selecting subqueries pulled up, WHERE over pulled-up subqueries, LATERAL join restrictions, constant classes, `name = text` merge keys)
 
@@ -3490,7 +3603,7 @@ produces no units on Linux (skipped by the file itself).
 | with | 307 | 307 | 100% | yes | yes |  |
 | xml | 281 | 281 | 100% | yes | yes |  |
 | partition_join | 614 | 599 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (15) |
-| partition_prune | 771 | 769 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
+| partition_prune | 771 | 770 | 100% | yes | no | wrong result `SELECT: row count differs` (1) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |
 | indexing | 645 | 645 | 100% | yes | yes |  |
