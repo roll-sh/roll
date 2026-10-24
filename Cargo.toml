@@ -140,6 +140,7 @@ toml = "1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
+http-body = "1"
 comrak = { version = "0.56", default-features = false }
 ammonia = "4"
 

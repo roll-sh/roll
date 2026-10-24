@@ -128,7 +128,7 @@ pub struct Job {
     pub progress: Option<Value>,
 }
 
-const JOB_COLS: &str = "id, repo_id, change_id, kind, mode, \"full\", command, state, attempts, error, review_id, requested_by, created_at, updated_at, stage, progress";
+pub(crate) const JOB_COLS: &str = "id, repo_id, change_id, kind, mode, \"full\", command, state, attempts, error, review_id, requested_by, created_at, updated_at, stage, progress";
 
 /// The stage a job shows: a running job's own, otherwise what its state says.
 fn stage_of(state: &str, stored: Option<String>) -> String {
@@ -140,7 +140,7 @@ fn stage_of(state: &str, stored: Option<String>) -> String {
     }
 }
 
-fn job_row(r: &Row<'_>) -> code_sql::Result<Job> {
+pub(crate) fn job_row(r: &Row<'_>) -> code_sql::Result<Job> {
     Ok(Job {
         id: r.get(0)?,
         repo_id: r.get(1)?,

@@ -17,6 +17,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use code_control::db::now;
 use code_control::model::{Change, ChangeState, Preview, PreviewPostgres, PreviewRedis, PreviewState, RepoRow};
+use code_control::cluster::RepoOwnership;
 use code_control::{Code, PreviewBackend};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -107,21 +108,64 @@ impl Previews {
         })
     }
 
-    /// Connect to the control plane (which holds this backend) and start the idle reaper.
+    /// Connect to the control plane (which holds this backend) and start the idle reaper. In a
+    /// cluster, previews follow their repo: a node that takes a repo over marks its previews
+    /// asleep (their containers were on the previous owner; the next visit starts them here),
+    /// and a node that loses one stops their containers.
     pub fn attach(self: &Arc<Self>, code: &Arc<Code>) {
         let _ = self.code.set(Arc::downgrade(code));
+        let clustered = code.cluster().is_some();
+        let mut ownership = code.subscribe_ownership();
         let this = Arc::downgrade(self);
         tokio::spawn(async move {
             docker::remove_leftovers("preview").await;
-            if let Some(p) = this.upgrade() {
+            if !clustered && let Some(p) = this.upgrade() {
                 p.reconcile();
             }
+            let mut reap = tokio::time::interval(Duration::from_secs(15));
+            reap.tick().await;
             loop {
-                tokio::time::sleep(Duration::from_secs(15)).await;
-                let Some(p) = this.upgrade() else { return };
-                p.reap().await;
+                tokio::select! {
+                    _ = reap.tick() => {
+                        let Some(p) = this.upgrade() else { return };
+                        p.reap().await;
+                    }
+                    Some(o) = ownership.recv() => {
+                        let Some(p) = this.upgrade() else { return };
+                        match o {
+                            RepoOwnership::Acquired(repo) => p.reconcile_repo(&repo),
+                            RepoOwnership::Lost(repo) => p.stop_repo(&repo).await,
+                        }
+                    }
+                }
             }
         });
+    }
+
+    /// The previews of a repo just taken over: none of their containers runs here.
+    fn reconcile_repo(&self, repo_id: &str) {
+        let Ok(code) = self.code() else { return };
+        let Ok(changes) = code.db.changes(repo_id, None, usize::MAX) else { return };
+        for c in changes {
+            if c.preview.as_ref().is_some_and(|p| matches!(p.state, PreviewState::Creating | PreviewState::Running))
+                && !self.live.lock().get(&c.id).is_some_and(|l| matches!(*l.phase.borrow(), Phase::Running { .. } | Phase::Starting))
+            {
+                self.persist(&c.id, |p| p.state = PreviewState::Sleeping);
+            }
+        }
+    }
+
+    /// A repo moved to another node: stop its previews' containers here.
+    async fn stop_repo(&self, repo_id: &str) {
+        let Ok(code) = self.code() else { return };
+        let live: Vec<(String, Arc<Live>)> = self.live.lock().iter().map(|(k, l)| (k.clone(), l.clone())).collect();
+        for (id, l) in live {
+            if code.change_or_404(&id).is_ok_and(|c| c.repo_id == repo_id) {
+                info!(change = %id, "the repo moved to another node; stopping its preview here");
+                self.stop(&l).await;
+                self.live.lock().remove(&id);
+            }
+        }
     }
 
     fn code(&self) -> anyhow::Result<Arc<Code>> {
@@ -522,12 +566,23 @@ fn page(status: StatusCode, title: &str, detail: &str, refresh: bool) -> Respons
 }
 
 /// Middleware for the API listener: requests for a preview host go to the preview, everything
-/// else passes through.
+/// else passes through. In a cluster a preview runs on its repo's owner, so the request is
+/// forwarded there (plain HTTP: a WebSocket upgrade only works on the owner itself).
 pub async fn route(State(p): State<Arc<Previews>>, req: Request, next: Next) -> Response {
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().host().map(str::to_string));
-    match host.and_then(|h| p.change_for_host(&h)) {
-        Some(change) => p.proxy(&change, req).await,
-        None => next.run(req).await,
+    let Some(change) = host.and_then(|h| p.change_for_host(&h)) else { return next.run(req).await };
+    let cluster = p.code().ok().and_then(|c| c.cluster().cloned().zip(c.change_or_404(&change).ok().map(|c| c.repo_id)));
+    match cluster {
+        Some((cluster, repo_id)) => {
+            let p2 = p.clone();
+            cluster.dispatch(&repo_id, req, move |req, guard| async move {
+                let resp = p2.proxy(&change, req).await;
+                drop(guard);
+                resp
+            })
+            .await
+        }
+        None => p.proxy(&change, req).await,
     }
 }
 

@@ -27,7 +27,24 @@ GET /v1/code → {storage, git_url /* e.g. "https://roll.sh" or "http://127.0.0.
 
 GET /v1/code/names/{owner}/{repo} → same shape, for a repo name within an owner
 GET /v1/code/names/{name} → {name, available: bool, reason: null | "taken" | "reserved" | "invalid", message: string | null}
+
+GET /v1/code/health → 200 | 503 {status: "ok" | "unavailable", database: bool /* Postgres or SQLite answered within 5 s */,
+                cluster: null /* one node */ | {node, healthy: bool /* a member whose leases are within their local
+                deadline */, draining: bool, nodes: number /* live nodes it sees */, repos: number /* it owns */}}
+                No caller needed: for load balancers. 503 (with Retry-After: 1) when the database doesn't answer, or in
+                a cluster when the node can't trust its leases or is draining (shutting down).
 ```
+
+**In a cluster** (docs/code/cluster.md) any node answers every route. Requests for a repo run on
+the repo's owner node, forwarded there by whichever node received them; this is invisible to
+clients except for the following:
+- A repo that is moving between nodes (a handoff, or a dead node's lease that hasn't expired yet)
+  makes the receiving node wait and try again for about a lease's length; past that the request
+  answers `503 {error}` with `Retry-After` and `x-roll-code-unavailable`. Nothing ran: retry it.
+- An event stream ends when its repo starts moving to another node: reconnect (the dashboard and
+  `roll code watch` do).
+- `x-roll-code-*` request headers belong to the cluster: a request carrying one that isn't signed
+  by a node of the cluster answers 401.
 
 ## Owners
 

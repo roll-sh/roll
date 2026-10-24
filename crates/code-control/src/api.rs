@@ -151,11 +151,30 @@ pub fn router(code: Arc<Code>) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY))
         .layer(cors())
         .with_state(code.clone());
-    let git = code_git::router(GitAdapter::new(code.clone()), code_git::ServerConfig::default());
-    let all = api.merge(git);
-    // MCP tools call the rest of the API on the caller's behalf.
-    let mcp = crate::mcp::routes(code, all.clone()).layer(axum::extract::DefaultBodyLimit::max(MAX_BODY));
-    all.merge(mcp)
+    let git_config = code_git::ServerConfig { memory_budget: Some(code.git_budget.clone()), ..code_git::ServerConfig::default() };
+    let git = code_git::router(GitAdapter::new(code.clone()), git_config);
+    let mut all = api.merge(git);
+    // In a cluster every repo-scoped request runs on the repo's owner (crate::cluster).
+    if code.cluster().is_some() {
+        all = all.layer(axum::middleware::from_fn_with_state(code.clone(), crate::cluster::route));
+    }
+    // MCP tools call the rest of the API on the caller's behalf (so they're routed the same way).
+    let mcp = crate::mcp::routes(code.clone(), all.clone()).layer(axum::extract::DefaultBodyLimit::max(MAX_BODY));
+    let health = Router::new().route("/v1/code/health", get(health)).layer(cors()).with_state(code.clone());
+    let mut out = all.merge(mcp).merge(health);
+    if let Some(cluster) = code.cluster() {
+        out = out
+            .merge(crate::cluster::internal_routes(code.clone(), cluster.clone()))
+            .merge(cluster.router())
+            // Requests from other nodes are verified (and their client address kept).
+            .layer(axum::middleware::from_fn_with_state(cluster.clone(), code_cluster::accept_forwarded));
+    }
+    out
+}
+
+/// `GET /v1/code/health`: 200 while this node can serve (for load balancers), else 503.
+async fn health(State(code): S) -> Response {
+    code.health().await
 }
 
 // ── info, names, owners ──
@@ -770,7 +789,11 @@ async fn audit(State(code): S, caller: Caller, Path((owner, repo)): Path<(String
 
 async fn events(State(code): S, caller: Caller, parts: Parts, Path((owner, repo)): Path<(String, String)>) -> Result<Response> {
     let r = code.readable(&caller, &owner, &repo)?;
-    let peer = parts.extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0);
+    // A stream forwarded by another node counts against the client that node saw (verified).
+    let peer = match parts.extensions.get::<code_cluster::Forwarded>() {
+        Some(f) => f.client.as_deref().and_then(|c| c.parse::<std::net::IpAddr>().ok()).map(|ip| std::net::SocketAddr::new(ip, 0)),
+        None => parts.extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0),
+    };
     let key = crate::streams::key(&caller, token(&parts).as_deref(), &parts.headers, peer, code.config.trust_forwarded_for);
     let permit = match code.stream_permit(key) {
         Ok(p) => p,

@@ -25,6 +25,7 @@ thing but not do it, 404 one who can't see it (docs/code/http-api.md).
 | Route | Statuses | Tests |
 | --- | --- | --- |
 | `GET /v1/code` | 200 | `api.rs::land_merge_and_conflict`, `contract.rs::auth_matrix`, `contract.rs::open_mode_makes_everyone_admin`, `routes.rs::bad_tokens_are_401_on_every_route` |
+| `GET /v1/code/health` | 200, 503 | `routes.rs::statuses_of_every_route`, `routes.rs::bad_tokens_are_401_on_every_route`, `cluster.rs::health_follows_each_node`, `cluster.rs::draining_moves_every_repo_off_a_node_before_it_leaves` |
 | `GET /v1/code/names/{name}` | 200 | `api.rs::names_and_owners`, `routes.rs::bad_tokens_are_401_on_every_route` |
 | `GET /v1/code/names/{owner}/{repo}` | 200, 401, 404 | `api.rs::repos_rename_and_visibility`, `contract.rs::auth_matrix`, `routes.rs::every_repo_route_follows_the_auth_matrix`, `routes.rs::bad_tokens_are_401_on_every_route` |
 | `GET /v1/code/owners` | 200, 401 | `contract.rs::auth_matrix`, `contract.rs::open_mode_makes_everyone_admin`, `routes.rs::every_repo_route_follows_the_auth_matrix`, `routes.rs::bad_tokens_are_401_on_every_route` |
@@ -749,6 +750,26 @@ Parsing (`code-github/tests`) and the effect in roll against a mock GitHub
 | streamed pack parsing (any chunk boundaries, truncation, corruption, trailing data) and metering (what's held is charged, a refusing meter stops the read) | `code-git/tests/pack.rs::streamed_packs_read_like_whole_ones`, `code-git/tests/pack.rs::reading_charges_what_it_holds_and_stops_when_refused` |
 | local object storage opened durable fsyncs blobs and reads back the same; S3 unchanged | `pg-storage/src/objects.rs::durable_local_store_fsyncs_and_works_the_same`, `pg-storage/src/objects.rs::s3_is_durable_either_way` |
 | branch push opens a change, repush revises it, delete closes it, a push after landing opens a new one; merge commits fast-forward; other ref namespaces refused | `git.rs::git_clone_push_land_and_conflict`, `git_more.rs::tags_branches_and_merge_commits` |
+
+## Cluster (`code-control/tests/cluster.rs`)
+
+Three nodes in one process, each a `Code` with its own server, sharing one database pair (two
+fresh Postgres schemas with `ROLL_CODE_TEST_DATABASE`, else one SQLite pair) and one object
+directory, with `ClusterConfig::for_tests` timings (docs/code/cluster.md).
+
+| Behaviour | Tests |
+| --- | --- |
+| which routes are repo-scoped (repos, git, changes, threads, work items) and which are global | `code-control/src/cluster.rs::repo_scoped_paths_are_classified` |
+| every repo request through every node runs on the repo's owner: API reads and landings, changes, threads and work items by id, git push and clone through other nodes, an event stream through a non-owner (with an event emitted on a third node, forwarded to the owner), MCP tool calls | `cluster.rs::every_request_for_a_repo_runs_on_its_owner` |
+| 64 concurrent landings over every node: each lands exactly once | `cluster.rs::concurrent_landings_through_every_node_land_exactly_once` |
+| a killed owner (port closed, connections dropped, no `leave`): another node takes the repo after the lease expires (not before), landings through the others keep going, every acknowledged one is on main once | `cluster.rs::a_dead_owners_repo_moves_and_keeps_every_acknowledged_landing` |
+| the merge queue: a dead owner's in-flight batch is recovered, tested again and landed by the new owner | `cluster.rs::the_merge_queue_continues_a_dead_owners_batch` |
+| roll's reviewer: a review running on a dead owner is queued again and run by the new owner (2 attempts) | `cluster.rs::a_running_review_runs_again_after_its_owner_dies` |
+| a joining node gets its share of the repos (each moves to its preferred node) while landings and reads through every node never fail | `cluster.rs::a_joining_node_takes_repos_over_without_failing_requests` |
+| draining (SIGTERM) moves every repo off the node before it leaves, the health check fails meanwhile, and requests through the others never fail | `cluster.rs::draining_moves_every_repo_off_a_node_before_it_leaves` |
+| a rename keeps the repo on its owner; the old name answers 301 and git follows it, through any node | `cluster.rs::renaming_a_repo_keeps_its_owner` |
+| an event stream ends as soon as its repo starts moving, without holding the move up | `cluster.rs::an_event_stream_ends_when_its_repo_moves` |
+| health: 200 with the node's id while it holds its leases, 503 while it can't reach the database, 200 again after | `cluster.rs::health_follows_each_node` |
 
 ## code-store
 

@@ -6,6 +6,7 @@ pub mod ai;
 pub mod api;
 pub mod broken;
 pub mod checkout;
+pub mod cluster;
 pub mod db;
 pub mod ext;
 pub mod git;
@@ -78,6 +79,67 @@ pub struct Config {
     pub search_index_wait_ms: u64,
     /// How long a deep review waits for it before going on without repository context.
     pub review_index_wait_ms: u64,
+    /// Both databases on one Postgres (schemas `code_store` and `code_control`); `None` keeps
+    /// them in SQLite under `home` (one node).
+    pub database: Option<DatabaseConfig>,
+    /// Run as one node of a cluster (docs/code/cluster.md). Needs `database` and S3.
+    pub cluster: Option<code_cluster::ClusterConfig>,
+    /// Tests only: a cluster whose nodes share one process may use SQLite and a local object
+    /// directory.
+    #[doc(hidden)]
+    pub cluster_single_host: bool,
+    /// Memory every git request together may hold: one budget for the whole node.
+    pub git_memory_budget_bytes: u64,
+    /// Most one git request may hold (`None`: three quarters of the budget).
+    pub git_max_request_memory_bytes: Option<u64>,
+    /// How long a git request waits for memory before it fails as busy.
+    pub git_memory_wait: std::time::Duration,
+}
+
+/// roll code's Postgres: both databases in one, as two schemas.
+#[derive(Clone)]
+pub struct DatabaseConfig {
+    /// `postgres://user:pass@host:5432/db?sslmode=require`.
+    pub url: String,
+    /// Connections each database's pool opens at most.
+    pub connections: usize,
+    /// More CA certificates (PEM) to trust besides the system's.
+    pub ca: Option<PathBuf>,
+    /// code-store's schema (`code_store`).
+    pub store_schema: String,
+    /// code-control's schema (`code_control`); the cluster's tables live there too.
+    pub control_schema: String,
+}
+
+impl DatabaseConfig {
+    pub fn new(url: impl Into<String>) -> DatabaseConfig {
+        DatabaseConfig { url: url.into(), connections: 16, ca: None, store_schema: "code_store".into(), control_schema: "code_control".into() }
+    }
+
+    pub(crate) fn options(&self, connections: usize) -> code_sql::PgOptions {
+        code_sql::PgOptions { max_connections: connections.max(1), ca: self.ca.clone(), ..code_sql::PgOptions::default() }
+    }
+}
+
+impl std::fmt::Debug for DatabaseConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The URL may carry a password.
+        let url = match url::Url::parse(&self.url) {
+            Ok(mut u) if u.password().is_some() => {
+                let _ = u.set_password(Some("redacted"));
+                u.to_string()
+            }
+            Ok(u) => u.to_string(),
+            Err(_) => "<unparsable>".into(),
+        };
+        f.debug_struct("DatabaseConfig")
+            .field("url", &url)
+            .field("connections", &self.connections)
+            .field("ca", &self.ca)
+            .field("store_schema", &self.store_schema)
+            .field("control_schema", &self.control_schema)
+            .finish()
+    }
 }
 
 impl Config {
@@ -99,6 +161,12 @@ impl Config {
             trust_forwarded_for: false,
             search_index_wait_ms: 10_000,
             review_index_wait_ms: 60_000,
+            database: None,
+            cluster: None,
+            cluster_single_host: false,
+            git_memory_budget_bytes: 1 << 30,
+            git_max_request_memory_bytes: None,
+            git_memory_wait: std::time::Duration::from_secs(30),
         }
     }
 }
@@ -281,6 +349,10 @@ impl<K: Hash + Eq, V: Clone> Cache<K, V> {
         }
         m.insert(k, v);
     }
+    /// Keep only the entries whose key passes `f`.
+    pub(crate) fn retain(&self, f: impl Fn(&K) -> bool) {
+        self.map.lock().retain(|k, _| f(k));
+    }
 }
 
 /// A repo's landing settings and the default-branch head they were read at.
@@ -328,24 +400,80 @@ pub struct Code {
     /// The cluster this node is part of (docs/code/cluster.md); unset on a single node, which
     /// owns every repo.
     pub(crate) cluster: std::sync::OnceLock<Arc<code_cluster::Cluster>>,
+    /// What this node does for the repos it owns, started and stopped as ownership moves.
+    pub(crate) duties: cluster::Duties,
+    /// One memory budget for every git request this node serves.
+    pub git_budget: code_git::MemoryBudget,
+}
+
+/// The databases a [`Code`] runs on: code-store's, code-control's, and the cluster's tables
+/// (code-control's database unless given).
+pub struct Databases {
+    pub store: code_sql::Db,
+    pub control: code_sql::Db,
+    pub cluster: Option<code_sql::Db>,
 }
 
 impl Code {
-    /// Open roll code in `config.home`: code-store's code.db and control.db, both SQLite. (With
-    /// `ROLL_CODE_TEST_DATABASE` set, tests put control.db in Postgres: see
-    /// [`code_sql::Db::open_or_test`].)
+    /// Open roll code: on `config.database` (Postgres, the two schemas) when set, else code-store's
+    /// code.db and control.db, both SQLite, in `config.home`. (With `ROLL_CODE_TEST_DATABASE`
+    /// set, tests put the SQLite ones in Postgres: see [`code_sql::Db::open_or_test`].) With
+    /// `config.cluster`, joins the cluster (blocks on the database; needs a Tokio runtime).
     pub fn open(config: Config, objects: pg_storage::Objects) -> anyhow::Result<Arc<Code>> {
-        let control = sqlite_or_test_db(&config.home.join("code"))?;
-        Code::open_with_db(config, objects, control)
+        match &config.database {
+            Some(d) => {
+                let store = code_sql::Db::connect(&d.url, &d.store_schema, d.options(d.connections))?;
+                let control = code_sql::Db::connect(&d.url, &d.control_schema, d.options(d.connections))?;
+                // Leases get a small pool of their own, so renewals never queue behind requests.
+                let cluster = match &config.cluster {
+                    Some(_) => Some(code_sql::Db::connect(&d.url, &d.control_schema, d.options(4))?),
+                    None => None,
+                };
+                Code::open_on(config, objects, Databases { store, control, cluster })
+            }
+            None => {
+                let control = sqlite_or_test_db(&config.home.join("code"))?;
+                let store = Store::open(&config.home, objects.clone())?;
+                Code::open_with_store(config, objects, store, control, None)
+            }
+        }
     }
 
     /// [`Code::open`] with control.db in `control`, e.g. a configured Postgres that every node of
     /// a cluster shares.
     pub fn open_with_db(config: Config, objects: pg_storage::Objects, control: code_sql::Db) -> anyhow::Result<Arc<Code>> {
-        let store = Store::open(&config.home, objects)?;
+        let store = Store::open(&config.home, objects.clone())?;
+        Code::open_with_store(config, objects, store, control, None)
+    }
+
+    /// [`Code::open`] on databases that are already open (every node of a test cluster shares
+    /// one pair).
+    pub fn open_on(config: Config, objects: pg_storage::Objects, dbs: Databases) -> anyhow::Result<Arc<Code>> {
+        let store = Store::open_db(dbs.store, objects.clone())?;
+        Code::open_with_store(config, objects, store, dbs.control, dbs.cluster)
+    }
+
+    fn open_with_store(
+        config: Config,
+        objects: pg_storage::Objects,
+        store: Arc<Store>,
+        control: code_sql::Db,
+        cluster_db: Option<code_sql::Db>,
+    ) -> anyhow::Result<Arc<Code>> {
+        if config.cluster.is_some() {
+            cluster::check_config(&config, &objects, &control)?;
+        }
+        let cluster_db = cluster_db.unwrap_or_else(|| control.clone());
         let db = db::Db::open(control)?;
         let (events, _) = broadcast::channel(4096);
         let ai = ai::Ai::new(&config);
+        let git_budget = code_git::ServerConfig {
+            memory_budget_bytes: config.git_memory_budget_bytes,
+            max_request_memory_bytes: config.git_max_request_memory_bytes,
+            memory_wait: config.git_memory_wait,
+            ..code_git::ServerConfig::default()
+        }
+        .budget();
         let code = Arc::new_cyclic(|me| Code {
             config,
             store,
@@ -373,8 +501,13 @@ impl Code {
             streams: Default::default(),
             me: me.clone(),
             cluster: std::sync::OnceLock::new(),
+            duties: cluster::Duties::default(),
+            git_budget,
         });
         code.clean_worktrees();
+        if let Some(cfg) = code.config.cluster.clone() {
+            cluster::join(&code, cluster_db, cfg)?;
+        }
         Ok(code)
     }
 
@@ -407,10 +540,21 @@ impl Code {
         self.events.subscribe()
     }
 
-    /// Send an event to the repo's feed (`/events`).
+    /// Send an event to the repo's feed (`/events`). In a cluster the feed lives on the repo's
+    /// owner: a node that doesn't own the repo passes the event on to it.
     pub fn emit(&self, repo_id: &str, kind: &'static str, data: Value) {
         self.webhook_event(repo_id, kind, &data);
-        let _ = self.events.send(model::Event { repo_id: repo_id.into(), kind, data });
+        let ev = model::Event { repo_id: repo_id.into(), kind, data };
+        if self.owns_repo(repo_id) {
+            let _ = self.events.send(ev);
+        } else {
+            self.forward_event(ev);
+        }
+    }
+
+    /// An event that came from another node (the repo is ours): to this node's feed only.
+    pub(crate) fn emit_local(&self, ev: model::Event) {
+        let _ = self.events.send(ev);
     }
 
     pub(crate) fn main_status_lock(&self, repo_id: &str) -> Arc<tokio::sync::Mutex<()>> {

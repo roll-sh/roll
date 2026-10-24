@@ -329,6 +329,7 @@ async fn bad_tokens_are_401_on_every_route() {
         assert_eq!((s, v["auth"]["caller"]["kind"].as_str()), (OK, Some("invalid")));
         assert_eq!(call(a, "GET", "/v1/code/names/neworg", None, Some(token)).await, OK);
         assert_eq!(call(a, "GET", "/v1/code/github", None, Some(token)).await, OK);
+        assert_eq!(call(a, "GET", "/v1/code/health", None, Some(token)).await, OK);
         assert_eq!(call(a, "GET", "/v1/code/github/setup", None, Some(token)).await, StatusCode::FOUND);
         assert_eq!(call(a, "POST", "/v1/code/github/webhook", Some(&json!({})), Some(token)).await, NOT_FOUND, "no App configured");
     }
@@ -454,6 +455,10 @@ async fn statuses_of_every_route() {
     }
     let r = a.send(Request::get("/v1/code/repos/acme/y/refs").body(Body::empty()).unwrap()).await;
     assert_eq!(r.headers()["location"], "/v1/code/repos/acme/z");
+
+    // The health check of a single node: the database answers, there's no cluster.
+    let (s, v) = a.req("GET", "/v1/code/health", None, None).await;
+    assert_eq!((s, v["status"].as_str(), v["database"].as_bool(), v["cluster"].is_null()), (OK, Some("ok"), Some(true), true), "{v}");
 }
 
 /// `POST /v1/code/github/webhook` with the App configured: 401 for a bad signature, 400 for a

@@ -27,7 +27,9 @@ futures.workspace = true
 getrandom.workspace = true
 hex.workspace = true
 hmac.workspace = true
+http-body.workspace = true
 parking_lot.workspace = true
+percent-encoding.workspace = true
 pg-storage.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 serde.workspace = true
@@ -43,6 +45,8 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { workspace = true, features = ["service", "tokio"] }
 rand = "0.8"
 rsa = { version = "0.9", features = ["pem"] }
 tempfile.workspace = true

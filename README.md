@@ -25,6 +25,7 @@ crates/
   code-github/      GitHub App: auth, webhooks, REST client, event mapping, mirror scheduling
   code-control/     roll code control plane: owners, repos, changes, work items, git adapter, HTTP API
   code-preview/     roll code checks and previews: roll.toml, containers, branched Postgres/Redis, host routing
+  code-cluster/     roll code on many nodes: membership, repo leases with self-fencing, placement, handoff, forwarding
   rolld/            Daemon: proxy + API + reconciler + Redis + Kafka listener (+ roll tasks on /v1/tasks, roll code on /v1/code and /git)
   roll-cli/         `roll` CLI
 deploy/aws/         roll tasks on AWS: Dockerfile + CloudFormation
@@ -585,6 +586,17 @@ How it works:
   - Checks run in containers.
   - A preview branches the linked Postgres project and Redis database, then serves the change
     at `chg-<id>.preview.localhost`. It scales to zero when idle.
+- **Many nodes.**
+  - One node keeps everything in SQLite. `--code-database postgres://…` moves both databases to
+    Postgres, and `--code-cluster-secret` makes the node one of a cluster of identical
+    `rolld --code-only` nodes sharing that database and S3 behind any load balancer.
+  - Each repo has one owner node (a lease); every node forwards a repo's requests to it.
+    Killed nodes' repos move after their leases expire, joining nodes take their share, and
+    SIGTERM drains a node first. `GET /v1/code/health` is the load balancer's check.
+  - Flags: `--code-only`, `--code-database`, `--code-db-connections`, `--code-db-ca`,
+    `--code-cluster-secret`, `--code-advertise-url`, `--code-node-id`, `--code-drain-timeout`,
+    and the git memory budget (`--code-git-memory-budget`, `--code-git-max-request-memory`,
+    `--code-git-memory-wait-secs`). See [docs/code/cluster.md](docs/code/cluster.md).
 
 More in [docs/code](docs/code/README.md): [architecture](docs/code/architecture.md) and the
 [HTTP API](docs/code/http-api.md).

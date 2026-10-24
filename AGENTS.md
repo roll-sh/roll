@@ -120,6 +120,13 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     after `write` returns. Never ignore a failed statement inside a write (it ends a Postgres
     transaction): use `ON CONFLICT`, or check first.
   - `crates/code-preview` runs `roll.toml` checks and previews in containers.
+  - `crates/code-cluster` is membership, repo leases and forwarding; `code-control/src/cluster.rs`
+    wires it in (docs/code/cluster.md). In a cluster every request naming a repo, change, thread
+    or work item runs on the repo's owner: put new such routes under a routed prefix
+    (`cluster::classify`). A repo's background work runs only on its owner: check
+    `Code::owns_repo` before side effects, run long work under `Code::while_owner`, and resume it
+    from `Code::resume_repo` (or `Code::subscribe_ownership`), never by scanning every repo at
+    startup. On a single node all of this is a no-op.
   - Landing must stay O(change). Never read the full tree, scan history, or do repo-wide work
     inside the lander. CI never sits in front of it.
   - git is derived. Imports must round-trip byte-exactly, so commit ids match and the GitHub
@@ -231,6 +238,8 @@ The product should feel alive: dots react to the cursor and the marks "think". E
       helpers in `src/test/`)
     - HTTP statuses and the auth matrix for every route: `code-control/tests/routes.rs`
     - event stream limits: `code-control/tests/streams.rs`
+    - the cluster (several nodes in one process: routing, takeover, joining, draining):
+      `code-control/tests/cluster.rs`
     - two nodes racing on one control database: `code-control/tests/concurrency.rs`
 - **Local state:**
   - `.roll/` holds SQLite and branch data. Never commit it.

@@ -35,20 +35,38 @@ impl Code {
         loop {
             let free = slots.available_permits();
             if free > 0 {
-                match self.db.due_ai_jobs(free) {
+                // In a cluster, each repo's jobs run on its owner.
+                match self.due_ai_jobs_here(free) {
                     Ok(jobs) => {
                         for j in jobs {
+                            let guard = match self.cluster() {
+                                Some(c) => match c.guard(&j.repo_id) {
+                                    Some(g) => Some(g),
+                                    None => continue,
+                                },
+                                None => None,
+                            };
                             match self.db.claim_ai_job(&j.id) {
                                 Ok(true) => {}
                                 _ => continue,
                             }
                             let Ok(permit) = slots.clone().acquire_owned().await else { return };
                             let me = self.clone();
-                            tokio::spawn(async move {
-                                me.run_job(j).await;
+                            let repo_id = j.repo_id.clone();
+                            let task = tokio::spawn(async move {
+                                match &guard {
+                                    // Stopped (and left `running`, for the repo's next owner to
+                                    // run again) if the repo moves away mid-review.
+                                    Some(g) => {
+                                        me.while_owner_guarded(&j.repo_id.clone(), g, me.run_job(j)).await;
+                                    }
+                                    None => me.run_job(j).await,
+                                }
+                                drop(guard);
                                 drop(permit);
                                 me.ai.wake.notify_one();
                             });
+                            self.track(&repo_id, task.abort_handle());
                         }
                     }
                     Err(e) => tracing::warn!(error = %e, "listing reviewer jobs"),

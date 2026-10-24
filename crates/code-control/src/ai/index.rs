@@ -57,6 +57,10 @@ impl Code {
             tokio::time::sleep(Duration::from_millis(250)).await;
             let dirty: Vec<String> = std::mem::take(&mut *self.ai.index_dirty.lock()).into_iter().collect();
             for id in dirty {
+                // A repo that moved away is indexed by its new owner.
+                if !self.owns_repo(&id) {
+                    continue;
+                }
                 let Ok(r) = self.repo_by_id(&id) else { continue };
                 // Only repos that were indexed before follow along; others build on first use.
                 let built = self.ai.index.as_ref().and_then(|i| i.repo(&r.id).ok()).and_then(|x| x.head().ok().flatten()).is_some();

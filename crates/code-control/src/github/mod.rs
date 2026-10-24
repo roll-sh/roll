@@ -17,6 +17,7 @@ mod reviews;
 mod sync;
 
 pub use sync::webhook;
+pub(crate) use sync::handle_for_repo;
 
 use crate::model::RepoRow;
 use crate::{Code, Error, Result};
@@ -118,18 +119,40 @@ pub fn enable(code: &Arc<Code>, config: AppConfig, opts: Options) -> anyhow::Res
     });
     code.github.set(hub).map_err(|_| anyhow::anyhow!("GitHub is already enabled"))?;
     notify::start(code.clone());
-    // Pick up where a restart left off.
+    // Pick up where a restart left off (in a cluster: the repos this node owns; the others
+    // start on whichever node takes them).
     for r in linked_repos(code)? {
-        let Some(link) = link_of(&r) else { continue };
-        if !link.connected {
-            continue;
-        }
-        match r.import.as_ref().and_then(|i| i.get("state")).and_then(Value::as_str) {
-            Some("done") => mirror::start(code, &r.id),
-            _ => sync::start_import(code, &r.id),
+        if code.owns_repo(&r.id) {
+            resume(code, &r);
         }
     }
     Ok(())
+}
+
+/// Start what a connected repo needs on its owner: its import if unfinished, else its mirror;
+/// a disconnected repo's mirror stops. Idempotent.
+pub(crate) fn resume(code: &Arc<Code>, r: &RepoRow) {
+    if code.github_hub().is_none() {
+        return;
+    }
+    let Some(link) = link_of(r) else { return };
+    if !link.connected {
+        forget(code, &r.id);
+        return;
+    }
+    match r.import.as_ref().and_then(|i| i.get("state")).and_then(Value::as_str) {
+        Some("done") => mirror::start(code, &r.id),
+        _ => sync::start_import(code, &r.id),
+    }
+}
+
+/// The repo moved to another node: its mirror and import stop here (their tasks are aborted by
+/// the caller).
+pub(crate) fn stop(code: &Code, repo_id: &str) {
+    if let Some(h) = code.github_hub() {
+        h.mirrors.lock().remove(repo_id);
+        h.imports.lock().remove(repo_id);
+    }
 }
 
 /// [`enable`] from `ROLL_GITHUB_*` (see `code_github::AppConfig::from_env`). `Ok(false)` when
@@ -264,8 +287,12 @@ pub(crate) async fn prepare(code: &Code, s: &Spec) -> Result<Prepared> {
     })
 }
 
-/// Start importing a freshly connected repo.
+/// Start importing a freshly connected repo (on its owner).
 pub(crate) fn connected(code: &Arc<Code>, repo_id: &str) {
+    if code.cluster().is_some() && !code.owns_repo(repo_id) {
+        code.kick_owner(repo_id);
+        return;
+    }
     sync::start_import(code, repo_id);
 }
 

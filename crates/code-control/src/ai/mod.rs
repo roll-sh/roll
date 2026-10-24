@@ -781,7 +781,10 @@ impl Code {
         if self.ai.started.swap(true, Ordering::SeqCst) {
             return;
         }
-        match self.db.requeue_running_ai_jobs() {
+        // In a cluster other nodes' jobs are running: each repo's jobs start over when a node
+        // takes the repo over (`cluster::Code::acquired`).
+        let requeued = if self.cluster().is_some() { Ok(0) } else { self.db.requeue_running_ai_jobs() };
+        match requeued {
             Ok(n) if n > 0 => tracing::info!(jobs = n, "restarting reviews that were running"),
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "requeueing reviews"),

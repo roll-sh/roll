@@ -39,7 +39,7 @@ the ideas of Piper and Mononoke/Bonsai, and adapts it to a multi-tenant serverle
         │ derivation    │   │ HTTP srv+cli  │    │ client, event mapping│
         └───┬──────┬────┘   └───────────────┘    └──────────────────────┘
             │      │
-     SQLite meta   pg_storage::Objects (S3 or local dir): blobs
+     SQLite or Postgres meta   pg_storage::Objects (S3 or local dir): blobs
 ```
 
 Previews and checks run as containers through the same driver that runs Postgres computes.
@@ -253,8 +253,9 @@ interleaved:
 Every landing was committed durably before it was acknowledged. At load 35–60 every
 configuration fell to 380–570 merges/s.
 
-Multi-node: the ref CAS keeps correctness, and a lease per `(repo, ref)` picks the node
-that runs the lander.
+Several nodes: the ref CAS keeps correctness, and each repo's lease (docs/code/cluster.md)
+picks the one node that runs its landers, so batching still works; every repo request is
+forwarded to that node.
 
 ### Gating: post-merge or the merge queue
 
@@ -597,6 +598,11 @@ All requests on a node share one memory budget (`code_git::MemoryBudget`). These
 | `max_request_memory_bytes` | ¾ of the budget | the most one request may hold |
 | `memory_wait` | 30 s | how long a request waits for memory before it's busy |
 | `memory_budget` | none | a shared `MemoryBudget` to use instead of the fields above |
+
+roll code builds one budget per node from its config (`Config::git_memory_budget_bytes`,
+`git_max_request_memory_bytes`, `git_memory_wait`; rolld's `--code-git-memory-budget`,
+`--code-git-max-request-memory` in MiB and `--code-git-memory-wait-secs`) and keeps it on `Code`
+(`Code::git_budget`), so every router built for the node charges the same one.
 
 Each request takes a lease and charges it, as it goes, for what it actually holds:
 

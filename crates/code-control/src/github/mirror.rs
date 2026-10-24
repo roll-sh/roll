@@ -17,9 +17,12 @@ pub(crate) enum Cmd {
     Observed(Option<String>),
 }
 
-/// Start the repo's mirror if it isn't running.
+/// Start the repo's mirror if it isn't running (on the repo's owner only).
 pub(crate) fn start(code: &Arc<Code>, repo_id: &str) {
     let Some(hub) = code.github_hub().cloned() else { return };
+    if !code.owns_repo(repo_id) {
+        return;
+    }
     let rx = {
         let mut mirrors = hub.mirrors.lock();
         if mirrors.get(repo_id).is_some_and(|tx| !tx.is_closed()) {
@@ -29,10 +32,11 @@ pub(crate) fn start(code: &Arc<Code>, repo_id: &str) {
         mirrors.insert(repo_id.to_string(), tx);
         rx
     };
-    let (code, repo_id) = (code.clone(), repo_id.to_string());
-    tokio::spawn(async move {
-        run(code, hub, repo_id, rx).await;
+    let (code2, repo_id2) = (code.clone(), repo_id.to_string());
+    let task = tokio::spawn(async move {
+        run(code2, hub, repo_id2, rx).await;
     });
+    code.track(repo_id, task.abort_handle());
 }
 
 pub(crate) fn observed(code: &Code, repo_id: &str, sha: Option<String>) {
@@ -75,6 +79,10 @@ async fn run(code: Arc<Code>, hub: Arc<Hub>, repo_id: String, mut rx: mpsc::Unbo
     }
     let mut status = Status::default();
     loop {
+        // The repo moved to another node: its mirror runs there now.
+        if !code.owns_repo(&repo_id) {
+            return;
+        }
         let now_i = Instant::now();
         let wait = match m.poll(now_i) {
             MirrorAction::Idle | MirrorAction::Blocked(_) => None,
@@ -129,10 +137,12 @@ async fn run(code: Arc<Code>, hub: Arc<Hub>, repo_id: String, mut rx: mpsc::Unbo
                 }
                 None => break,
             },
-            _ = tokio::time::sleep(wait.unwrap_or(Duration::from_secs(3600))) => {}
+            _ = tokio::time::sleep(wait.unwrap_or(Duration::from_secs(3600)).min(Duration::from_secs(if code.cluster().is_some() { 1 } else { 3600 }))) => {}
         }
     }
-    status.write(&code, &repo_id, &m, true);
+    if code.owns_repo(&repo_id) {
+        status.write(&code, &repo_id, &m, true);
+    }
 }
 
 /// Push `to` over `from` (GitHub's expected value) with every object GitHub doesn't have.

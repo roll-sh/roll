@@ -1586,17 +1586,21 @@ fn print_queue(q: &Value) {
 }
 
 async fn watch(c: &Client<'_>, json_out: bool, spec: &Spec) -> anyhow::Result<()> {
-    let mut res = c
-        .request(Method::GET, &format!("{}/events", spec.path()))
-        .header("accept", "text/event-stream")
-        .send()
-        .await
-        .with_context(|| format!("can't reach {} (is rolld running?)", c.api.base))?;
-    if !res.status().is_success() {
-        let status = res.status();
-        let v = serde_json::from_str(&res.text().await?).unwrap_or(Value::Null);
-        bail!("{}", err(status, &v));
-    }
+    let connect = || async {
+        let res = c
+            .request(Method::GET, &format!("{}/events", spec.path()))
+            .header("accept", "text/event-stream")
+            .send()
+            .await
+            .with_context(|| format!("can't reach {} (is rolld running?)", c.api.base))?;
+        if !res.status().is_success() {
+            let status = res.status();
+            let v = serde_json::from_str(&res.text().await?).unwrap_or(Value::Null);
+            bail!("{}", err(status, &v));
+        }
+        anyhow::Ok(res)
+    };
+    let mut res = connect().await?;
     let on = color();
     if !json_out {
         eprintln!("watching {} — keep the code rolling (ctrl-c to stop)", spec.full());
@@ -1609,7 +1613,28 @@ async fn watch(c: &Client<'_>, json_out: bool, spec: &Spec) -> anyhow::Result<()
     loop {
         tokio::select! {
             chunk = res.chunk() => {
-                let Some(chunk) = chunk? else { bail!("the event stream ended") };
+                let chunk = match chunk {
+                    Ok(Some(chunk)) => chunk,
+                    // The stream ended: the server restarted, or (in a cluster) the repo moved to
+                    // another node. Follow it again, giving up after about a minute.
+                    Ok(None) | Err(_) => {
+                        let mut wait = std::time::Duration::from_millis(200);
+                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                        loop {
+                            tokio::time::sleep(wait).await;
+                            match connect().await {
+                                Ok(r) => {
+                                    res = r;
+                                    sse = Sse::default();
+                                    break;
+                                }
+                                Err(e) if std::time::Instant::now() >= deadline => return Err(e.context("the event stream ended")),
+                                Err(_) => wait = (wait * 2).min(std::time::Duration::from_secs(5)),
+                            }
+                        }
+                        continue;
+                    }
+                };
                 for ev in sse.feed(&String::from_utf8_lossy(&chunk)) {
                     let data: Value = serde_json::from_str(&ev.data).unwrap_or(Value::String(ev.data.clone()));
                     if json_out {

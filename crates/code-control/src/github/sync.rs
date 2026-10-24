@@ -40,23 +40,32 @@ async fn credentials(hub: &Hub, link: &Link) -> Result<(String, Credentials)> {
 
 pub(crate) fn start_import(code: &Arc<Code>, repo_id: &str) {
     let Some(hub) = code.github_hub().cloned() else { return };
+    // In a cluster the repo's owner imports it (taking the repo over starts it there).
+    if !code.owns_repo(repo_id) {
+        return;
+    }
     if !hub.imports.lock().insert(repo_id.to_string()) {
         return;
     }
-    let (code, repo_id) = (code.clone(), repo_id.to_string());
-    tokio::spawn(async move {
-        set_import(&code, &repo_id, "importing", 0, None, None);
-        let result = import(&code, &hub, &repo_id).await;
-        hub.imports.lock().remove(&repo_id);
-        match result {
-            Ok(()) => mirror::start(&code, &repo_id),
-            Err(e) => {
-                tracing::warn!(repo = %repo_id, error = %e, "GitHub import failed");
-                let commits = code.db.repo_by_id(&repo_id).ok().flatten().and_then(|r| r.import).and_then(|i| i["commits"].as_u64()).unwrap_or(0);
-                set_import(&code, &repo_id, "error", commits as usize, None, Some(&e.to_string()));
+    let task = tokio::spawn({
+        let (code, repo_id) = (code.clone(), repo_id.to_string());
+        async move {
+            set_import(&code, &repo_id, "importing", 0, None, None);
+            let result = code.while_owner(&repo_id, import(&code, &hub, &repo_id)).await;
+            hub.imports.lock().remove(&repo_id);
+            match result {
+                // The repo moved to another node, which imports it again.
+                None => {}
+                Some(Ok(())) => mirror::start(&code, &repo_id),
+                Some(Err(e)) => {
+                    tracing::warn!(repo = %repo_id, error = %e, "GitHub import failed");
+                    let commits = code.db.repo_by_id(&repo_id).ok().flatten().and_then(|r| r.import).and_then(|i| i["commits"].as_u64()).unwrap_or(0);
+                    set_import(&code, &repo_id, "error", commits as usize, None, Some(&e.to_string()));
+                }
             }
         }
     });
+    code.track(repo_id, task.abort_handle());
 }
 
 async fn import(code: &Arc<Code>, hub: &Hub, repo_id: &str) -> Result<()> {
@@ -535,7 +544,7 @@ pub async fn webhook(code: Arc<Code>, headers: HeaderMap, body: Bytes) -> Result
     let task = tokio::spawn({
         let code = code.clone();
         async move {
-            let r = handle(&code, &hub, event).await;
+            let r = handle(&code, &hub, &event_name, &body, event).await;
             if let Err(e) = &r {
                 tracing::warn!(event = %event_name, error = %e, "GitHub webhook failed");
                 // Let a redelivery try again.
@@ -574,7 +583,10 @@ fn set_connected(code: &Arc<Code>, filter: impl Fn(&Link) -> bool, connected: bo
             l.mirror.state = if connected { "pending".into() } else { "paused".into() };
             l.mirror.error = (!connected).then(|| why.to_string());
         })?;
-        if connected {
+        if code.cluster().is_some() && !code.owns_repo(&r.id) {
+            // The repo's owner starts or stops its mirror.
+            code.kick_owner(&r.id);
+        } else if connected {
             mirror::start(code, &r.id);
         } else {
             super::forget(code, &r.id);
@@ -583,15 +595,46 @@ fn set_connected(code: &Arc<Code>, filter: impl Fn(&Link) -> bool, connected: bo
     Ok(())
 }
 
-async fn handle(code: &Arc<Code>, hub: &Hub, event: Event) -> Result<()> {
-    match event {
-        Event::Ping { .. } | Event::Ignored { .. } => Ok(()),
-        Event::IssueComment(e) => {
-            for (r, link) in repos_for(code, &e.repository.full_name)? {
-                super::commands::pr_comment(code, hub, &r, &link, &e).await?;
-            }
-            Ok(())
+/// The GitHub repository a per-repo event is about (`None`: an event about the App).
+fn repo_of(event: &Event) -> Option<&str> {
+    Some(match event {
+        Event::Ping { .. } | Event::Ignored { .. } | Event::Installation { .. } | Event::InstallationRepositories { .. } => return None,
+        Event::IssueComment(e) => &e.repository.full_name,
+        Event::Push(p) => &p.repository.full_name,
+        Event::PullRequest(e) => &e.repository.full_name,
+        Event::PullRequestReview(e) => &e.repository.full_name,
+        Event::PullRequestReviewComment(e) => &e.repository.full_name,
+        Event::PullRequestReviewThread(e) => &e.repository.full_name,
+        Event::Issues(e) => &e.repository.full_name,
+    })
+}
+
+/// A delivery, verified and de-duplicated by whichever node received it. Each connected repo's
+/// part runs on that repo's owner: here, or sent there with the original payload.
+async fn handle(code: &Arc<Code>, hub: &Hub, event_name: &str, body: &Bytes, event: Event) -> Result<()> {
+    let Some(full_name) = repo_of(&event) else { return handle_app(code, event) };
+    for (r, link) in repos_for(code, full_name)? {
+        if code.cluster().is_none() || code.owns_repo(&r.id) {
+            handle_repo(code, hub, &r, &link, &event).await?;
+        } else {
+            code.github_on_owner(&r.id, event_name, body.clone()).await?;
         }
+    }
+    Ok(())
+}
+
+/// One repo's part of a delivery, on the repo's owner (what a non-owner sends it).
+pub(crate) async fn handle_for_repo(code: &Arc<Code>, repo_id: &str, event_name: &str, body: &[u8]) -> Result<()> {
+    let Some(hub) = code.github_hub().cloned() else { return Err(Error::NotFound("GitHub App".into())) };
+    let event = Event::parse(event_name, body).map_err(|e| Error::Invalid(e.to_string()))?;
+    let Some(full_name) = repo_of(&event) else { return Ok(()) };
+    let Some((r, link)) = repos_for(code, full_name)?.into_iter().find(|(r, _)| r.id == repo_id) else { return Ok(()) };
+    handle_repo(code, &hub, &r, &link, &event).await
+}
+
+/// Events about the App itself: installations and the repositories it can reach.
+fn handle_app(code: &Arc<Code>, event: Event) -> Result<()> {
+    match event {
         Event::Installation { action, installation, .. } => {
             let id = installation.id;
             match action {
@@ -612,47 +655,24 @@ async fn handle(code: &Arc<Code>, hub: &Hub, event: Event) -> Result<()> {
             }
             Ok(())
         }
-        Event::Push(p) => {
-            let draft = mapping::push_draft(&p);
-            for (r, link) in repos_for(code, &p.repository.full_name)? {
-                handle_push(code, hub, &r, &link, &draft).await?;
-            }
-            Ok(())
-        }
-        Event::PullRequest(e) => {
-            let draft = mapping::pull_request_draft(&e.pull_request);
-            for (r, link) in repos_for(code, &e.repository.full_name)? {
-                upsert_pr(code, hub, &r, &link, &draft).await?;
-            }
-            Ok(())
-        }
-        Event::PullRequestReview(e) => {
-            for (r, _) in repos_for(code, &e.repository.full_name)? {
-                super::reviews::review_event(code, hub, &r, &e).await?;
-            }
-            Ok(())
-        }
-        Event::PullRequestReviewComment(e) => {
-            for (r, _) in repos_for(code, &e.repository.full_name)? {
-                super::reviews::comment_event(code, hub, &r, &e).await?;
-            }
-            Ok(())
-        }
-        Event::PullRequestReviewThread(e) => {
-            for (r, _) in repos_for(code, &e.repository.full_name)? {
-                super::reviews::thread_event(code, hub, &r, &e).await?;
-            }
-            Ok(())
-        }
+        _ => Ok(()),
+    }
+}
+
+async fn handle_repo(code: &Arc<Code>, hub: &Hub, r: &RepoRow, link: &Link, event: &Event) -> Result<()> {
+    match event {
+        Event::IssueComment(e) => super::commands::pr_comment(code, hub, r, link, e).await,
+        Event::Push(p) => handle_push(code, hub, r, link, &mapping::push_draft(p)).await,
+        Event::PullRequest(e) => upsert_pr(code, hub, r, link, &mapping::pull_request_draft(&e.pull_request)).await,
+        Event::PullRequestReview(e) => super::reviews::review_event(code, hub, r, e).await,
+        Event::PullRequestReviewComment(e) => super::reviews::comment_event(code, hub, r, e).await,
+        Event::PullRequestReviewThread(e) => super::reviews::thread_event(code, hub, r, e).await,
         Event::Issues(e) => {
             if e.issue.is_pull_request() {
                 return Ok(());
             }
-            let draft = mapping::issue_draft(&e.issue);
-            for (r, _) in repos_for(code, &e.repository.full_name)? {
-                upsert_issue(code, &r, &draft)?;
-            }
-            Ok(())
+            upsert_issue(code, r, &mapping::issue_draft(&e.issue))
         }
+        Event::Ping { .. } | Event::Ignored { .. } | Event::Installation { .. } | Event::InstallationRepositories { .. } => Ok(()),
     }
 }

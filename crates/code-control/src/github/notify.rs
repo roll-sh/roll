@@ -25,6 +25,10 @@ pub(crate) fn start(code: Arc<Code>) {
                 Err(broadcast::error::RecvError::Closed) => return,
             };
             let Some(hub) = code.github_hub().cloned() else { return };
+            // The repo's owner tells GitHub (its marks make each notification happen once).
+            if !code.owns_repo(&ev.repo_id) {
+                continue;
+            }
             if let Err(e) = handle(&code, &hub, ev.kind, &ev.data).await {
                 tracing::warn!(kind = ev.kind, error = %e, "notifying GitHub");
             }

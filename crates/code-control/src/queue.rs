@@ -66,6 +66,8 @@ pub struct Worker {
     /// Something changed under the batch in flight (a member dequeued, revised or closed).
     dirty: AtomicBool,
     view: Mutex<Option<BatchView>>,
+    /// The task running it (aborted when the repo moves to another node).
+    task: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 #[derive(Default)]
@@ -392,13 +394,30 @@ impl Code {
     /// counts as landed if its tip made it onto the default branch.
     pub fn start_queues(&self) -> anyhow::Result<()> {
         self.queues.ready.store(true, Ordering::SeqCst);
-        for repo_id in self.db.queued_repos()? {
-            if let Err(e) = self.recover_queue(&repo_id) {
+        let repos = match self.cluster() {
+            // In a cluster, the repos this node owns; the rest start on their owners, and a repo
+            // taken over later starts when it's taken.
+            Some(c) => c.owned().into_iter().map(|(k, _)| k).filter(|k| !k.starts_with("singleton:")).collect(),
+            None => self.db.queued_repos()?,
+        };
+        for repo_id in repos {
+            if self.cluster().is_none()
+                && let Err(e) = self.recover_queue(&repo_id)
+            {
                 warn!(repo = %repo_id, error = %e, "recovering a merge queue");
             }
             self.kick(&repo_id);
         }
         Ok(())
+    }
+
+    /// Stop a repo's queue worker now (the repo moved to another node, which recovers its batch).
+    pub(crate) fn stop_queue(&self, repo_id: &str) {
+        if let Some(w) = self.queues.workers.lock().remove(repo_id)
+            && let Some(t) = w.task.lock().take()
+        {
+            t.abort();
+        }
     }
 
     fn recover_queue(&self, repo_id: &str) -> Result<()> {
@@ -432,9 +451,14 @@ impl Code {
         Ok(())
     }
 
-    /// Wake (or start) a repo's queue worker.
+    /// Wake (or start) a repo's queue worker. In a cluster only the repo's owner runs it: another
+    /// node wakes the owner instead.
     pub(crate) fn kick(&self, repo_id: &str) {
         if !self.queues.ready.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.cluster().is_some() && !self.owns_repo(repo_id) {
+            self.kick_owner(repo_id);
             return;
         }
         let Some(code) = self.me.upgrade() else { return };
@@ -446,13 +470,37 @@ impl Code {
         let w = Arc::new(Worker::default());
         workers.insert(repo_id.to_string(), w.clone());
         let repo_id = repo_id.to_string();
-        tokio::spawn(async move { code.work(repo_id, w).await });
+        let task = tokio::spawn({
+            let w = w.clone();
+            async move { code.work(repo_id, w).await }
+        });
+        *w.task.lock() = Some(task.abort_handle());
     }
 
     async fn work(self: Arc<Self>, repo_id: String, w: Arc<Worker>) {
+        let clustered = self.cluster().is_some();
+        // A node that just took the repo over picks up the batch the previous owner left.
+        if clustered && let Err(e) = self.recover_queue(&repo_id) {
+            warn!(repo = %repo_id, error = %e, "recovering a merge queue");
+        }
         let mut failures = 0u32;
         loop {
-            let progressed = match self.step(&repo_id, &w).await {
+            // In a cluster a batch runs only while this node owns the repo; a handoff waits for it.
+            let step = match self.cluster() {
+                Some(c) => match c.guard(&repo_id) {
+                    Some(g) => self.while_owner_guarded(&repo_id, &g, self.step(&repo_id, &w)).await,
+                    None => None,
+                },
+                None => Some(self.step(&repo_id, &w).await),
+            };
+            let Some(step) = step else {
+                let mut workers = self.queues.workers.lock();
+                if workers.get(&repo_id).is_some_and(|x| Arc::ptr_eq(x, &w)) {
+                    workers.remove(&repo_id);
+                }
+                return;
+            };
+            let progressed = match step {
                 Ok(p) => {
                     failures = 0;
                     p

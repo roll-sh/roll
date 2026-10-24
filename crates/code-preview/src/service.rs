@@ -16,6 +16,7 @@ use futures::future::join_all;
 use code_control::Code;
 use code_control::broken::Source;
 use code_control::Runner;
+use code_control::cluster::RepoOwnership;
 use code_control::model::{Change, ChangeState, Check, CheckStatus, RepoRow};
 use code_store::{ChangesetId, Landed};
 use parking_lot::Mutex;
@@ -52,32 +53,67 @@ impl Service {
         self.code.config.home.join("code").join("checks")
     }
 
-    /// Follow changes and landings until the control plane goes away.
+    /// Follow changes and landings until the control plane goes away. In a cluster, only for
+    /// the repos this node owns: a repo taken over resumes its checks here.
     pub fn start(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let this = self.clone();
         // Subscribe before anything else, so nothing that happens while we clean up is missed.
         let mut changes = this.code.subscribe();
         let mut landed = this.code.store.subscribe_all();
+        let mut ownership = this.code.subscribe_ownership();
+        let clustered = this.code.cluster().is_some();
         let dir = self.work_dir();
         tokio::spawn(async move {
             let _ = tokio::fs::remove_dir_all(&dir).await;
             docker::remove_leftovers("check").await;
-            this.recover();
+            if !clustered {
+                this.recover();
+            }
             loop {
                 tokio::select! {
                     ev = changes.recv() => match ev {
-                        Ok(ev) if ev.kind == "change" => this.on_change(&ev.data),
+                        Ok(ev) if ev.kind == "change" && this.code.owns_repo(&ev.repo_id) => this.on_change(&ev.data),
                         Ok(_) | Err(RecvError::Lagged(_)) => {}
                         Err(RecvError::Closed) => return,
                     },
                     ev = landed.recv() => match ev {
-                        Ok(l) => this.on_landed(l),
+                        Ok(l) if this.code.owns_repo(&l.repo) => this.on_landed(l),
+                        Ok(_) => {}
                         Err(RecvError::Lagged(n)) => warn!(missed = n, "post-merge checks fell behind on landings"),
                         Err(RecvError::Closed) => return,
                     },
+                    Some(o) = ownership.recv() => {
+                        if let RepoOwnership::Acquired(repo) = o {
+                            this.resume_repo(&repo);
+                        }
+                    }
                 }
             }
         })
+    }
+
+    /// A repo this node just took over: checks that were queued or running on the node that had
+    /// it run again here, and so do the default branch's if its head wasn't checked green.
+    pub fn resume_repo(self: &Arc<Self>, repo_id: &str) {
+        let open = match self.code.db.changes(repo_id, Some(ChangeState::Open), 10_000) {
+            Ok(open) => open,
+            Err(e) => return warn!(repo = %repo_id, error = %e, "listing open changes to resume their checks"),
+        };
+        for c in open {
+            let interrupted =
+                c.checks.iter().any(|k| k.source == "runner" && matches!(k.status, CheckStatus::Queued | CheckStatus::Running));
+            if interrupted && let Ok(data) = serde_json::to_value(&c) {
+                info!(change = %c.id, "resuming checks interrupted by a move to this node");
+                self.started.lock().remove(&c.id);
+                self.on_change(&data);
+            }
+        }
+        let Ok(r) = self.code.repo_by_id(repo_id) else { return };
+        let Ok(Some(head)) = self.code.head(&r) else { return };
+        let last_green = self.code.db.repo_queue(repo_id).ok().and_then(|q| q.last_green);
+        if last_green.as_deref() != Some(code_control::cs_id(&head).as_str()) {
+            self.run_main(r, head);
+        }
     }
 
     /// After a restart: checks that were queued or running died with the old process (their
@@ -148,6 +184,10 @@ impl Service {
 
     fn report(&self, id: &str, head: &str, k: &Check) {
         let Some(c) = self.current(id, head) else { return };
+        // The repo moved to another node, which runs the check again.
+        if !self.code.owns_repo(&c.repo_id) {
+            return;
+        }
         let body = json!({ "name": k.name, "status": k.status.as_str(), "source": "runner", "url": k.url, "summary": k.summary, "head": head });
         match self.code.report_check(&c, &body) {
             // The change moved on while the check ran: its result is for an old head.
@@ -215,18 +255,23 @@ impl Service {
         if l.ref_name.strip_prefix("refs/heads/").unwrap_or(&l.ref_name) != r.default_branch {
             return;
         }
+        self.run_main(r, l.changeset);
+    }
+
+    /// Post-merge checks on `cs`, coalesced with a run already going.
+    fn run_main(self: &Arc<Self>, r: RepoRow, cs: ChangesetId) {
         {
             let mut main = self.main.lock();
             let run = main.entry(r.id.clone()).or_default();
             if run.running {
-                run.pending = Some(l.changeset);
+                run.pending = Some(cs);
                 return;
             }
             run.running = true;
         }
         let this = self.clone();
         tokio::spawn(async move {
-            let mut cs = l.changeset;
+            let mut cs = cs;
             loop {
                 if let Err(e) = this.check_main(&r.id, cs).await {
                     warn!(repo = %r.full_name(), error = %format!("{e:#}"), "post-merge checks");
@@ -288,6 +333,10 @@ impl Service {
     /// CI statuses (`status:<context>`) are handled by code-control, not here.
     async fn after_main(&self, r: &RepoRow, cs: &ChangesetId, results: &[Check]) -> anyhow::Result<()> {
         let id = code_control::cs_id(cs);
+        // The repo moved to another node, which checks its head again.
+        if !self.code.owns_repo(&r.id) {
+            return Ok(());
+        }
         let open = self.code.open_broken_main(r, Source::Runner)?;
         let failed: Vec<&Check> = results.iter().filter(|k| k.status == CheckStatus::Failure).collect();
         if failed.is_empty() {
