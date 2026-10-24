@@ -61,17 +61,32 @@ use std::time::{Duration, Instant};
 
 /// The database both sides run in: `gxg_regression`, or `PGREGRESS_DB` (lets several runs share the
 /// reference container).
+/// (`contrib_regression` for the contrib modules' suites, as pg_regress names it there.)
 fn db_name() -> &'static str {
     static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    NAME.get_or_init(|| std::env::var("PGREGRESS_DB").unwrap_or_else(|_| "gxg_regression".into()))
+    NAME.get_or_init(|| {
+        std::env::var("PGREGRESS_DB").unwrap_or_else(|_| {
+            if contrib_mode() { "contrib_regression" } else { "gxg_regression" }.into()
+        })
+    })
+}
+
+/// Set once by `pg_contrib` before anything runs.
+static CONTRIB: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn contrib_mode() -> bool {
+    CONTRIB.load(std::sync::atomic::Ordering::Relaxed)
 }
 const GIT_TAG: &str = "REL_18_6";
 const HUNKS_PER_FILE: usize = 12;
 
+#[derive(Clone)]
 struct Config {
     root: PathBuf,
     src: PathBuf,
     out: PathBuf,
+    /// psql's working directory (a contrib module's directory: its scripts read `data/...`).
+    cwd: PathBuf,
     container: String,
     port: u16,
     timeout: u64,
@@ -88,6 +103,7 @@ impl Config {
         let src = root.join("src-repo/src/test/regress");
         Config {
             out: root.join("out"),
+            cwd: root.join("build"),
             src,
             root,
             container: std::env::var("PGREGRESS_CONTAINER")
@@ -146,6 +162,346 @@ fn pg_regress() {
         pct(matched, units),
         cfg.report_dir.join("REPORT.md").display()
     );
+}
+
+/// The contrib modules whose own regression tests `pg_contrib` runs by default.
+const CONTRIB_MODULES: &[&str] = &[
+    "pgcrypto",
+    "uuid-ossp",
+    "citext",
+    "hstore",
+    "pg_trgm",
+    "btree_gin",
+    "btree_gist",
+    "pg_stat_statements",
+    "unaccent",
+    "fuzzystrmatch",
+    "ltree",
+    "intarray",
+    "tablefunc",
+    "cube",
+    "earthdistance",
+    "isn",
+    "seg",
+    "lo",
+    "amcheck",
+    "pageinspect",
+    "pg_buffercache",
+    "postgres_fdw",
+    "dblink",
+];
+
+/// The contrib modules' own regression tests (`contrib/<module>/sql` and `expected` at
+/// REL_18_6), run like `make installcheck` runs them: each module in a fresh
+/// `contrib_regression` database (template0, pg_regress's settings), its `REGRESS_OPTS`
+/// `--load-extension`s created first, then its `REGRESS` files in order, psql in the module's
+/// directory (scripts read `data/...`). Compared unit by unit with the reference as
+/// `pg_regress` is; the summary goes to `tests/contrib/REPORT.md` (or `PGREGRESS_REPORT_DIR`),
+/// each module's report and hunks to `<PGREGRESS_DIR>/contrib-report/<module>/`.
+///
+///     PGCONTRIB_ONLY=pgcrypto,citext PGREGRESS_DIR=... cargo test -p pg-engine \
+///       --test pg_regress pg_contrib -- --ignored --nocapture
+///
+/// - `PGCONTRIB_ONLY=a,b`: these modules (default: `CONTRIB_MODULES`). `PGREGRESS_ONLY=x,y`:
+///   only these files of them. `PGREGRESS_REPORT_ONLY=1`: rebuild the reports.
+/// - The reference must run with the modules' `--temp-config` settings (pg_stat_statements:
+///   `shared_preload_libraries = 'pg_stat_statements'`, `max_prepared_transactions = 5`), so
+///   use a container of the pinned image started with them (`PGREGRESS_CONTAINER`) rather
+///   than the shared `roll-engine-ref`; the module directories must be at the same absolute
+///   path in it (a bind mount of `PGREGRESS_DIR`, or they are copied in).
+#[test]
+#[ignore = "runs contrib modules' regression tests against a reference container; slow"]
+fn pg_contrib() {
+    CONTRIB.store(true, std::sync::atomic::Ordering::Relaxed);
+    let base = Config::from_env();
+    let modules: Vec<String> = std::env::var("PGCONTRIB_ONLY")
+        .ok()
+        .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
+        .unwrap_or_else(|| CONTRIB_MODULES.iter().map(|m| m.to_string()).collect());
+    if !base.report_only {
+        ensure_contrib(&base, &modules);
+    }
+    let module_cfg = |m: &str| {
+        let mut cfg = base.clone();
+        cfg.src = base.root.join("src-repo/contrib").join(m);
+        cfg.cwd = cfg.src.clone();
+        cfg.out = base.root.join("contrib-out").join(m);
+        cfg.report_dir = base.root.join("contrib-report").join(m);
+        cfg
+    };
+    let schedules: Vec<(String, Vec<String>, Vec<String>)> = modules
+        .iter()
+        .map(|m| {
+            let (mut tests, load) = contrib_schedule(&module_cfg(m).src.join("Makefile"));
+            if let Some(only) = &base.only {
+                tests.retain(|t| only.contains(t));
+            }
+            (m.clone(), tests, load)
+        })
+        .collect();
+    if !base.report_only {
+        let data = base.root.join("enginedata");
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(base.root.join("contrib-out")).unwrap();
+        let log = base.root.join("contrib-out/engine.log");
+        let _ = std::fs::remove_file(&log);
+        let bin = base.root.join("roll-engine.bin");
+        let src = std::env::var("PGREGRESS_ENGINE_BIN")
+            .unwrap_or_else(|_| env!("CARGO_BIN_EXE_roll-engine").to_string());
+        std::fs::copy(&src, &bin).expect("copy roll-engine");
+        let mut engine = EngineProc::start(&bin, &data, &log, base.port, &base.root);
+        let eng = Target::Engine(base.port);
+        let before = globals(&base);
+        assert!(!before.is_empty(), "cannot reach the reference container {}", base.container);
+        for (m, tests, load) in &schedules {
+            let cfg = module_cfg(m);
+            for d in ["ref", "engine", "prepared", "meta"] {
+                let p = cfg.out.join(d);
+                let _ = std::fs::remove_dir_all(&p);
+                std::fs::create_dir_all(&p).unwrap();
+            }
+            let setup = setup_db_sql();
+            let mut ext = String::new();
+            for e in load {
+                let _ = writeln!(ext, "CREATE EXTENSION IF NOT EXISTS \"{e}\";");
+            }
+            for target in [Target::Reference, Target::Engine(base.port)] {
+                let out = psql_cmd(&cfg, &target, "postgres", &setup);
+                let out2 = if ext.is_empty() { String::new() } else { psql_cmd(&cfg, &target, db_name(), &ext) };
+                if out.contains("ERROR") || out2.contains("ERROR") {
+                    eprintln!("{m}: database setup reported:\n{out}{out2}");
+                }
+            }
+            eprintln!("== {m}: {}", tests.join(" "));
+            for t in tests {
+                run_test(&cfg, &mut engine, &log, t, &before);
+            }
+        }
+        let _ = psql_cmd(&base, &eng, "postgres", &format!("DROP DATABASE IF EXISTS \"{}\";", db_name()));
+        engine.stop();
+        cleanup_reference(&base, &before);
+    }
+    let mut summary = Vec::new();
+    for (m, tests, _) in &schedules {
+        let cfg = module_cfg(m);
+        let results: Vec<FileResult> = tests
+            .iter()
+            .scan(BTreeSet::new(), |failed, t| Some(analyze(&cfg, t, failed)))
+            .flatten()
+            .collect();
+        std::fs::create_dir_all(&cfg.report_dir).unwrap();
+        write_report(&cfg, &results);
+        summary.push((m.clone(), results));
+    }
+    let report_dir = std::env::var("PGREGRESS_REPORT_DIR").map_or_else(
+        |_| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/contrib"),
+        PathBuf::from,
+    );
+    write_contrib_report(&report_dir, &base, &summary);
+    let units: usize = summary.iter().flat_map(|s| &s.1).map(|r| r.units).sum();
+    let matched: usize = summary.iter().flat_map(|s| &s.1).map(|r| r.matched).sum();
+    eprintln!(
+        "pg_contrib: {matched}/{units} units match ({:.1}%), report in {}",
+        pct(matched, units),
+        report_dir.join("REPORT.md").display()
+    );
+}
+
+/// The contrib sources (sparse, next to the main suite's), and each module's directory at the
+/// same absolute path in the reference container.
+fn ensure_contrib(cfg: &Config, modules: &[String]) {
+    let repo = cfg.root.join("src-repo");
+    if !repo.join("contrib").exists() {
+        std::fs::create_dir_all(&cfg.root).unwrap();
+        let ok = if repo.exists() {
+            sh(Command::new("git").current_dir(&repo).args(["sparse-checkout", "add", "contrib"]))
+        } else {
+            sh(Command::new("git").args([
+                "clone",
+                "-q",
+                "--depth",
+                "1",
+                "--filter=blob:none",
+                "--sparse",
+                "--branch",
+                GIT_TAG,
+                "https://github.com/postgres/postgres.git",
+                repo.to_str().unwrap(),
+            ])) && sh(Command::new("git").current_dir(&repo).args(["sparse-checkout", "set", "contrib"]))
+        };
+        assert!(ok, "could not fetch the contrib modules");
+    }
+    // psql's working directory for the setup statements.
+    let build = cfg.builddir();
+    std::fs::create_dir_all(&build).unwrap();
+    let _ = sh(Command::new("docker").args([
+        "exec", "-u", "root", &cfg.container, "mkdir", "-p", build.to_str().unwrap(),
+    ]));
+    for m in modules {
+        let dir = repo.join("contrib").join(m);
+        let d = dir.to_str().unwrap();
+        let there = sh(Command::new("docker").args(["exec", &cfg.container, "test", "-f", &format!("{d}/Makefile")]));
+        if !there {
+            assert!(sh(Command::new("docker").args([
+                "exec", "-u", "root", &cfg.container, "mkdir", "-p", d,
+            ])));
+            assert!(sh(Command::new("docker").args([
+                "cp",
+                &format!("{d}/."),
+                &format!("{}:{d}", cfg.container),
+            ])));
+        }
+    }
+}
+
+/// A module's `REGRESS` files and `--load-extension`s, from its Makefile: `NAME = ...` /
+/// `+=` assignments (with `\` continuations), `$(NAME)` references and `$(if c, a, b)` (the
+/// configured branch: the reference is built with zlib, as pgcrypto's tests need).
+fn contrib_schedule(makefile: &Path) -> (Vec<String>, Vec<String>) {
+    let text = std::fs::read_to_string(makefile).unwrap_or_default().replace("\\\n", " ");
+    let mut vars: HashMap<String, String> = HashMap::new();
+    let mut depth = 0;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with("ifdef") || t.starts_with("ifeq") || t.starts_with("ifneq") || t.starts_with("ifndef") {
+            depth += 1;
+            continue;
+        }
+        if t.starts_with("endif") {
+            depth -= 1;
+            continue;
+        }
+        if depth > 0 || t.starts_with('#') {
+            continue;
+        }
+        let (name, val, append) = if let Some((n, v)) = t.split_once("+=") {
+            (n, v, true)
+        } else if let Some((n, v)) = t.split_once('=') {
+            (n.trim_end_matches([':', '?']), v, false)
+        } else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() || name.contains(char::is_whitespace) {
+            continue;
+        }
+        let e = vars.entry(name.to_string()).or_default();
+        if !append {
+            e.clear();
+        }
+        e.push(' ');
+        e.push_str(val.trim());
+    }
+    fn expand(s: &str, vars: &HashMap<String, String>, depth: usize) -> String {
+        let mut out = String::new();
+        let mut rest = s;
+        while let Some(i) = rest.find("$(") {
+            out.push_str(&rest[..i]);
+            let body = &rest[i + 2..];
+            let mut level = 1;
+            let mut end = body.len();
+            for (k, c) in body.char_indices() {
+                match c {
+                    '(' => level += 1,
+                    ')' => {
+                        level -= 1;
+                        if level == 0 {
+                            end = k;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let inner = &body[..end];
+            rest = body.get(end + 1..).unwrap_or("");
+            if depth > 20 {
+                continue;
+            }
+            if let Some(args) = inner.strip_prefix("if ") {
+                // Top-level commas split the condition and the branches.
+                let mut parts = Vec::new();
+                let (mut lv, mut st) = (0, 0);
+                for (k, c) in args.char_indices() {
+                    match c {
+                        '(' => lv += 1,
+                        ')' => lv -= 1,
+                        ',' if lv == 0 => {
+                            parts.push(&args[st..k]);
+                            st = k + 1;
+                        }
+                        _ => {}
+                    }
+                }
+                parts.push(&args[st..]);
+                out.push_str(&expand(parts.get(1).copied().unwrap_or(""), vars, depth + 1));
+            } else if let Some(v) = vars.get(inner.trim()) {
+                out.push_str(&expand(v, vars, depth + 1));
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+    let words = |n: &str| -> Vec<String> {
+        vars.get(n)
+            .map(|v| expand(v, &vars, 0))
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    };
+    let load = words("REGRESS_OPTS")
+        .iter()
+        .filter_map(|w| w.strip_prefix("--load-extension=").map(str::to_string))
+        .collect();
+    (words("REGRESS"), load)
+}
+
+/// `tests/contrib/REPORT.md`: per module and file, units matching, and each file's first
+/// differing units.
+fn write_contrib_report(dir: &Path, base: &Config, summary: &[(String, Vec<FileResult>)]) {
+    let mut s = String::new();
+    let _ = writeln!(s, "# contrib modules' regression tests: engine parity report\n");
+    let _ = writeln!(
+        s,
+        "Generated by `pg_contrib` in `tests/pg_regress.rs` (its doc comment has how to run it). Sources: `contrib/<module>/sql` at `{GIT_TAG}`; reference: PostgreSQL 18.6. A unit matches when its psql output is byte-identical to the reference's. Per-module reports and hunks: `{}/contrib-report/<module>/`.\n",
+        base.root.display()
+    );
+    let units: usize = summary.iter().flat_map(|s| &s.1).map(|r| r.units).sum();
+    let matched: usize = summary.iter().flat_map(|s| &s.1).map(|r| r.matched).sum();
+    let _ = writeln!(s, "**Total: {matched}/{units} units ({:.1}%).**\n", pct(matched, units));
+    let _ = writeln!(s, "| module | files | full files | units | matching | % | ref == expected |");
+    let _ = writeln!(s, "|---|---|---|---|---|---|---|");
+    for (m, rs) in summary {
+        let u: usize = rs.iter().map(|r| r.units).sum();
+        let k: usize = rs.iter().map(|r| r.matched).sum();
+        let _ = writeln!(
+            s,
+            "| {m} | {} | {} | {u} | {k} | {:.1}% | {}/{} |",
+            rs.len(),
+            rs.iter().filter(|r| r.units == r.matched).count(),
+            pct(k, u),
+            rs.iter().filter(|r| r.ref_expected == Some(true)).count(),
+            rs.iter().filter(|r| r.ref_expected.is_some()).count(),
+        );
+    }
+    for (m, rs) in summary {
+        let _ = writeln!(s, "\n## {m}\n");
+        let _ = writeln!(s, "| file | units | matching | first differing units |");
+        let _ = writeln!(s, "|---|---|---|---|");
+        for r in rs {
+            let first: Vec<String> = r
+                .gaps
+                .iter()
+                .take(4)
+                .map(|g| format!("{} `{}` ({})", g.unit, md_escape(&first_line(&g.stmt)), short_class(g.class)))
+                .collect();
+            let _ = writeln!(s, "| {} | {} | {} | {} |", r.name, r.units, r.matched, first.join("<br>"));
+        }
+    }
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("REPORT.md"), s).unwrap();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -709,6 +1065,9 @@ fn copy_to_client(
 /// `regression` is the database's name in a few statements (GRANT ... ON DATABASE regression,
 /// psql's `\d host.regression.x` patterns); the database here is `gxg_regression`.
 fn rename_db(line: &str) -> String {
+    if contrib_mode() {
+        return line.to_string();
+    }
     if !(line.starts_with('\\') || line.to_ascii_lowercase().contains("database regression")) {
         return line.to_string();
     }
@@ -872,7 +1231,7 @@ fn psql(
             ),
         },
     };
-    let build = cfg.builddir().to_str().unwrap().to_string();
+    let build = cfg.cwd.to_str().unwrap().to_string();
     let mut envs = vec![
         format!("PGHOST={host}"),
         format!("PGPORT={port}"),
@@ -1221,10 +1580,19 @@ fn run_all(cfg: &Config, schedule: &[String]) {
     eprintln!("{}", psql_cmd(cfg, &eng, "postgres", &setup));
 
     for test in schedule {
+        run_test(cfg, &mut engine, &log, test, &before);
+    }
+    engine.stop();
+    cleanup_reference(cfg, &before);
+}
+
+/// Runs one file of the suite on both sides and saves the outputs under `cfg.out`.
+fn run_test(cfg: &Config, engine: &mut EngineProc, log: &Path, test: &str, before: &BTreeSet<String>) {
+    {
         let path = cfg.src.join("sql").join(format!("{test}.sql"));
         let Ok(src) = std::fs::read_to_string(&path) else {
             eprintln!("{test}: no sql file");
-            continue;
+            return;
         };
         let p = prepare(&src, &regress_env(cfg));
         std::fs::write(cfg.out.join("prepared").join(format!("{test}.sql")), &p.text).unwrap();
@@ -1239,16 +1607,16 @@ fn run_all(cfg: &Config, schedule: &[String]) {
         let t0 = Instant::now();
         let (ref_out, ref_st) = psql(cfg, &Target::Reference, db_name(), &app, p.text.as_bytes(), cfg.timeout);
         let ref_secs = t0.elapsed().as_secs_f64();
-        let ref_out = shared_tablespace(test, &before, ref_out);
+        let ref_out = shared_tablespace(test, before, ref_out);
         std::fs::write(cfg.out.join("ref").join(format!("{test}.out")), &ref_out).unwrap();
 
-        let log_start = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+        let log_start = std::fs::metadata(log).map(|m| m.len()).unwrap_or(0);
         let t0 = Instant::now();
         let (eng_out, eng_st, resumes, restarted) =
-            run_engine_file(cfg, &mut engine, &app, &p.text, &ref_out);
+            run_engine_file(cfg, engine, &app, &p.text, &ref_out);
         let eng_secs = t0.elapsed().as_secs_f64();
         std::fs::write(cfg.out.join("engine").join(format!("{test}.out")), &eng_out).unwrap();
-        let log_text = std::fs::read(&log).unwrap_or_default();
+        let log_text = std::fs::read(log).unwrap_or_default();
         let new_log = String::from_utf8_lossy(&log_text[(log_start as usize).min(log_text.len())..]);
         let panics: Vec<&str> = new_log
             .lines()
@@ -1275,8 +1643,6 @@ fn run_all(cfg: &Config, schedule: &[String]) {
             }
         );
     }
-    engine.stop();
-    cleanup_reference(cfg, &before);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1456,7 +1822,7 @@ fn analyze(cfg: &Config, test: &str, failed: &mut BTreeSet<String>) -> Option<Fi
         s.lines()
             .filter(|l| !l.starts_with("-- @@@ "))
             .map(|l| rewrites.get(l).map(String::as_str).unwrap_or(l))
-            .map(|l| l.replace(db_name(), "regression"))
+            .map(|l| if contrib_mode() { l.to_string() } else { l.replace(db_name(), "regression") })
             .collect::<Vec<_>>()
             .join("\n")
     };

@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod catalog;
 pub mod engine;
+pub mod ext;
 pub mod error;
 pub mod exec;
 pub mod largeobj;
