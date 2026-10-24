@@ -529,8 +529,12 @@ impl PgConn {
     fn note(&self, e: tokio_postgres::Error) -> Error {
         match e.code().map(|c| c.code()) {
             Some("40001" | "40P01") => self.conflict.set(true),
-            // A cached plan went stale after a schema change, or a statement vanished.
-            Some("0A000" | "26000") => self.statements.borrow_mut().clear(),
+            // A cached plan went stale after a schema change (another node migrating), or a
+            // statement vanished: forget them all and re-run the transaction.
+            Some("0A000" | "26000") => {
+                self.statements.borrow_mut().clear();
+                self.conflict.set(true);
+            }
             _ => {}
         }
         if e.is_closed() || self.client.is_closed() {
