@@ -355,7 +355,7 @@ fn mark_tracked(db: u64, t: u32) {
 
 /// Whether values read from table `t` (of the running statement's database) may be
 /// compressed or out-of-line datums.
-fn tracked(t: u32) -> bool {
+pub(crate) fn tracked(t: u32) -> bool {
     let generation = TRACKED_GEN.load(std::sync::atomic::Ordering::Acquire);
     if generation == 0 {
         return false;
@@ -2602,6 +2602,12 @@ pub fn row_roots(t: &Table, keys: &[Vec<u8>], ctx: &ExecCtx) -> Option<Vec<Optio
     let rf = ctx.sess.db.relfiles.lock();
     let h = rf.heaps.get(&t.oid)?;
     Some(keys.iter().map(|k| h.locate(k, &v).map(|tid| h.hot_root(tid))).collect())
+}
+
+/// Whether the table's heap is modelled page by page (`row_tids` places its rows),
+/// deciding it on first use.
+pub fn heap_modelled(t: &Table, ctx: &ExecCtx) -> bool {
+    matches!(heap_blocks(t, ctx), Ok(Some(_))) && ctx.sess.db.relfiles.lock().heaps.contains_key(&t.oid)
 }
 
 /// The table's current size in pages (None: not modelled).

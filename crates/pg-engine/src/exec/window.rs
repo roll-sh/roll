@@ -171,6 +171,8 @@ fn run_windows(
     });
     let mut order: Vec<usize> = (0..n).collect();
     let mut sorted: Vec<String> = presorted.to_vec();
+    // (No window's results yet: rows that are the same are the same in every way.)
+    let mut first = true;
     for wi in sequence {
         let call0 = &calls[wins[wi].1[0]];
         let part_exprs: Vec<&crate::sql::expr::Expr> = call0
@@ -246,6 +248,18 @@ fn run_windows(
                 if let Some(e) = err.or(cs.err) {
                     return Err(e);
                 }
+            } else if let Some(p) = first
+                .then(|| {
+                    let keys: Vec<SortKey> = need.iter().map(|k| k.key.clone()).collect();
+                    // (Partition keys under a nondeterministic collation compare by it.)
+                    if need.iter().any(|k| k.coll.is_some()) {
+                        return None;
+                    }
+                    super::fastsort::order(n, &keys, |i, k| &vals[order[i]][k], |i| &rows[order[i]], None)
+                })
+                .flatten()
+            {
+                order = p.into_iter().map(|j| order[j]).collect();
             } else {
                 order = super::pgsort::tuplesort(order, None, &mut cf);
             }
@@ -264,12 +278,16 @@ fn run_windows(
             .map(|&i| part_exprs.iter().map(|e| eval(e, &rows[i], ctx)).collect())
             .collect::<Result<_>>()?;
         let pkeys: Vec<&NeedKey> = need.iter().take(npart).collect();
+        // (Each partition key's comparison, found once rather than per row.)
+        let pk: Vec<Option<&NeedKey>> = part_exprs
+            .iter()
+            .map(|e| {
+                let r = key_repr(e, false, false);
+                pkeys.iter().find(|k| k.repr == r).copied()
+            })
+            .collect();
         let same_part = |a: &[Value], b: &[Value]| -> Result<bool> {
-            for (i, e) in part_exprs.iter().enumerate() {
-                let k = pkeys
-                    .iter()
-                    .find(|k| k.repr == key_repr(e, false, false))
-                    .copied();
+            for (i, k) in pk.iter().enumerate() {
                 let o = match k {
                     Some(k) => cmp_need(&a[i], &b[i], k, ctx)?,
                     None => a[i].cmp_total(&b[i]),
@@ -301,6 +319,7 @@ fn run_windows(
                 results[i][ci] = v;
             }
         }
+        first = false;
     }
     Ok(order)
 }

@@ -9,6 +9,7 @@ use crate::sql::plan::{AggCall, SortKey, UserAgg};
 use crate::types::array::ArrayValue;
 use crate::types::json::{Jsonb, write_json_string};
 use crate::types::numeric::Numeric;
+use super::partial::Partial;
 use crate::types::text::format_value;
 use crate::types::value::Interval;
 use crate::types::{DataType as T, Value};
@@ -41,6 +42,15 @@ pub trait Accum {
     /// Aggregate combines into its own before making the result (a user-defined
     /// aggregate's combine function).
     fn split(&mut self) {}
+    /// An empty partial state (`exec::partial`) when this aggregate is exact however its
+    /// rows are split (None: it isn't split).
+    fn partial(&self) -> Option<Partial> {
+        None
+    }
+    /// Rows aggregated apart (a `partial` state) added, after the rows before them.
+    fn merge(&mut self, _p: Partial) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub type MakeAccum = fn(&AggInit) -> Result<Box<dyn Accum>>;
@@ -204,6 +214,15 @@ impl Accum for Count {
         self.0 += 1;
         Ok(())
     }
+    fn partial(&self) -> Option<Partial> {
+        Some(Partial::Count(0))
+    }
+    fn merge(&mut self, p: Partial) -> Result<()> {
+        if let Partial::Count(n) = p {
+            self.0 += n;
+        }
+        Ok(())
+    }
     fn result(&self, _: &ExecCtx) -> Result<Value> {
         Ok(Value::Int8(self.0))
     }
@@ -225,6 +244,16 @@ impl Accum for SumInt {
     fn result(&self, _: &ExecCtx) -> Result<Value> {
         Ok(self.0.map(Value::Int8).unwrap_or(Value::Null))
     }
+    // (int2 / int4 values: no sum of fewer than 2^32 of them leaves the i64, in any order.)
+    fn partial(&self) -> Option<Partial> {
+        Some(Partial::SumInt(None))
+    }
+    fn merge(&mut self, p: Partial) -> Result<()> {
+        if let Partial::SumInt(Some(v)) = p {
+            self.0 = Some(self.0.unwrap_or(0).saturating_add(v));
+        }
+        Ok(())
+    }
 }
 
 fn to_num(v: &Value) -> Numeric {
@@ -236,33 +265,47 @@ fn to_num(v: &Value) -> Numeric {
     }
 }
 
-/// sum(int8 / numeric) → numeric, also the base of avg.
+/// sum(int8 / numeric) → numeric, also the base of avg (`partial::SumNum`: exact, in an
+/// i128 while the values fit).
 struct SumNum {
-    sum: Option<Numeric>,
-    n: i64,
+    st: super::partial::SumNum,
     avg: bool,
 }
+
+impl SumNum {
+    fn new(avg: bool) -> SumNum {
+        SumNum {
+            st: Default::default(),
+            avg,
+        }
+    }
+}
+
 impl Accum for SumNum {
     fn add(&mut self, a: &[Value], _: &ExecCtx) -> Result<()> {
-        let v = to_num(&a[0]);
-        self.sum = Some(match self.sum.take() {
-            None => v,
-            Some(s) => s.add(&v),
-        });
-        self.n += 1;
+        self.st.add(&a[0]);
         Ok(())
     }
     fn result(&self, _: &ExecCtx) -> Result<Value> {
-        let Some(s) = &self.sum else {
+        let Some(s) = &self.st.total() else {
             return Ok(Value::Null);
         };
         if self.avg {
             if s.is_nan() {
                 return Ok(Value::numeric(Numeric::NaN));
             }
-            return Ok(Value::numeric(s.div(&Numeric::from_i64(self.n))?));
+            return Ok(Value::numeric(s.div(&Numeric::from_i64(self.st.n))?));
         }
         Ok(Value::numeric(s.clone()))
+    }
+    fn partial(&self) -> Option<Partial> {
+        Some(Partial::SumNum(Default::default()))
+    }
+    fn merge(&mut self, p: Partial) -> Result<()> {
+        if let Partial::SumNum(o) = p {
+            self.st.merge(o);
+        }
+        Ok(())
     }
 }
 
@@ -331,6 +374,18 @@ struct FloatAgg {
 impl Accum for FloatAgg {
     fn add(&mut self, a: &[Value], _: &ExecCtx) -> Result<()> {
         self.st.push(a[0].as_f64().unwrap_or(0.0))
+    }
+    // (The values come in their serial order and are pushed in it: the same float sums.)
+    fn partial(&self) -> Option<Partial> {
+        Some(Partial::Floats(Vec::new()))
+    }
+    fn merge(&mut self, p: Partial) -> Result<()> {
+        if let Partial::Floats(xs) = p {
+            for x in xs {
+                self.st.push(x)?;
+            }
+        }
+        Ok(())
     }
     fn result(&self, _: &ExecCtx) -> Result<Value> {
         let FloatStats { n, sx, sxx } = self.st;
@@ -414,6 +469,16 @@ impl Accum for AvgInt {
     fn add(&mut self, a: &[Value], _: &ExecCtx) -> Result<()> {
         self.sum += a[0].as_i64().unwrap_or(0) as i128;
         self.n += 1;
+        Ok(())
+    }
+    fn partial(&self) -> Option<Partial> {
+        Some(Partial::AvgInt(0, 0))
+    }
+    fn merge(&mut self, p: Partial) -> Result<()> {
+        if let Partial::AvgInt(s, n) = p {
+            self.sum += s;
+            self.n += n;
+        }
         Ok(())
     }
     fn result(&self, _: &ExecCtx) -> Result<Value> {
@@ -542,6 +607,28 @@ impl Accum for MinMax {
     }
     fn result(&self, _: &ExecCtx) -> Result<Value> {
         Ok(self.best.clone().unwrap_or(Value::Null))
+    }
+    // (By the type's own order only. A part's best is its rows' best under the same rule,
+    // so the parts' bests taken in order give the serial best, ties kept as they would be.)
+    fn partial(&self) -> Option<Partial> {
+        self.lt.is_none().then(|| {
+            Partial::Best(super::partial::Best {
+                best: None,
+                max: self.max,
+                bpchar: matches!(self.ty, T::Bpchar(_)),
+                keep_old: matches!(self.ty, T::Bpchar(_) | T::Tid),
+            })
+        })
+    }
+    fn merge(&mut self, p: Partial) -> Result<()> {
+        if let Partial::Best(mut b) = p
+            && let Some(v) = b.best.take()
+        {
+            b.best = self.best.take();
+            b.add(&v);
+            self.best = b.best;
+        }
+        Ok(())
     }
 }
 
@@ -1194,18 +1281,10 @@ fn register(b: &mut Builder) {
         b.norm("sum", vec![t], Int8, |_| Ok(Box::new(SumInt(None))));
     }
     b.norm("sum", vec![Int8], Numeric(-1), |_| {
-        Ok(Box::new(SumNum {
-            sum: None,
-            n: 0,
-            avg: false,
-        }))
+        Ok(Box::new(SumNum::new(false)))
     });
     b.norm("sum", vec![Numeric(-1)], Numeric(-1), |_| {
-        Ok(Box::new(SumNum {
-            sum: None,
-            n: 0,
-            avg: false,
-        }))
+        Ok(Box::new(SumNum::new(false)))
     });
     b.norm("sum", vec![Float4], Float4, |_| Ok(Box::new(SumF4(None))));
     b.norm("sum", vec![Float8], Float8, |_| {
@@ -1228,11 +1307,7 @@ fn register(b: &mut Builder) {
         });
     }
     b.norm("avg", vec![Numeric(-1)], Numeric(-1), |_| {
-        Ok(Box::new(SumNum {
-            sum: None,
-            n: 0,
-            avg: true,
-        }))
+        Ok(Box::new(SumNum::new(true)))
     });
     for t in [Float4, Float8] {
         b.norm("avg", vec![t], Float8, |_| {
@@ -2179,6 +2254,23 @@ pub fn feed(call: &AggCall, st: &mut AggState, row: &[Value], ctx: &ExecCtx) -> 
     {
         return Ok(());
     }
+    // (One argument straight to the transition: no vector per row; a column not even
+    // copied.)
+    if call.args.len() == 1 && st.presorted.is_none() && st.buffered.is_none() {
+        if let crate::sql::expr::Expr::Col(i, _) = &call.args[0]
+            && let Some(v) = row.get(*i)
+        {
+            if call.def.skip_nulls && v.is_null() {
+                return Ok(());
+            }
+            return st.acc.add(std::slice::from_ref(v), ctx);
+        }
+        let v = eval(&call.args[0], row, ctx)?;
+        if call.def.skip_nulls && v.is_null() {
+            return Ok(());
+        }
+        return st.acc.add(std::slice::from_ref(&v), ctx);
+    }
     let args = eval_all(&call.args, row, ctx)?;
     if call.def.skip_nulls && args.iter().any(Value::is_null) {
         return Ok(());
@@ -2317,8 +2409,20 @@ pub fn finish(call: &AggCall, mut st: AggState, ctx: &ExecCtx) -> Result<Value> 
                 let mut c = super::pgsort::Cmp::new(&mut f);
                 super::pgsort::pg_qsort(&mut buf, &mut c);
             }
+            // (The values seen, hashed when equality is `cmp_rows`'s, which the values'
+            // hash agrees with.)
+            let hashable = colls.iter().all(Option::is_none);
+            let mut seen_set: super::fasthash::HashSet<Vec<Value>> = Default::default();
             let mut seen: Vec<Vec<Value>> = Vec::new();
             for (args, _) in buf {
+                if hashable {
+                    if seen_set.contains(&args) {
+                        continue;
+                    }
+                    st.acc.add(&args, ctx)?;
+                    seen_set.insert(args);
+                    continue;
+                }
                 if seen.iter().any(|s| cmp(s, &args) == Ordering::Equal) {
                     continue;
                 }
@@ -2458,6 +2562,44 @@ impl AggNode {
         Ok(hashed.order(est, self.groups.len() + self.aggs.len(), ctx))
     }
 
+    /// The input's rows aggregated in parts by a parallel scan (`partial`), when the input
+    /// is one that can and every key and aggregate can be: kernels for the keys and
+    /// arguments, exact aggregates without DISTINCT, ORDER BY, FILTER or direct arguments.
+    fn partial_run(&self, input: &mut BoxNode, ctx: &ExecCtx) -> Result<Option<super::parscan::PartialRun>> {
+        use super::kernel::compile;
+        if ctx.instrumented() || self.split(ctx) {
+            return Ok(None);
+        }
+        let Some(keys) = self.groups.iter().map(compile).collect::<Option<Vec<_>>>() else {
+            return Ok(None);
+        };
+        let mut aggs = Vec::with_capacity(self.aggs.len());
+        for a in &self.aggs {
+            if a.user.is_some()
+                || a.distinct
+                || !a.order_by.is_empty()
+                || a.filter.is_some()
+                || !a.direct.is_empty()
+                || a.def.kind.is_ordered()
+                || a.args.len() > 1
+            {
+                return Ok(None);
+            }
+            let Some(empty) = new_state(a, Vec::new())?.acc.partial() else {
+                return Ok(None);
+            };
+            let arg = match a.args.first() {
+                Some(e) => match compile(e) {
+                    Some(k) => Some(k),
+                    None => return Ok(None),
+                },
+                None => None,
+            };
+            aggs.push((arg, a.def.skip_nulls, empty));
+        }
+        input.partials(Arc::new(super::partial::Spec { keys, aggs }), ctx)
+    }
+
     /// A new group's aggregate states; direct arguments see the group's key.
     fn states(&self, key: &[Value], ctx: &ExecCtx) -> Result<Vec<AggState>> {
         let split = self.split(ctx);
@@ -2561,31 +2703,96 @@ impl AggNode {
                 let rows = super::nodes::sort_rows(rows, &keys, ctx)?;
                 input = Box::new(super::nodes::VecNode::new(rows));
             }
-            while let Some(row) = input.next(ctx)? {
-                ctx.check()?;
-                let key = eval_all(&self.groups, &row, ctx)?;
-                let hkey = group_key(&key, &colls);
-                let gi = match index.get(&hkey) {
-                    Some(i) => *i,
-                    None => {
-                        let mut states = self.states(&key, ctx)?;
-                        if let Some(p) = presorted_agg {
-                            states[p].buffered = None;
-                            states[p].presorted = Some(None);
+            // (Each group's hash for the hash table's order, computed at its first row: equal
+            // keys hash alike.)
+            let mut ghash: Vec<u32> = Vec::new();
+            let nondet = colls.iter().any(Option::is_some);
+            // A parallel scan below aggregating its rows in parts (`partial`).
+            let mut run = match presorted_agg.is_none() && !nondet {
+                true => self.partial_run(&mut input, ctx)?,
+                false => None,
+            };
+            // A group's first row (key `$key`, its hash key `$hkey`): its index.
+            macro_rules! new_group {
+                ($key:expr, $hkey:expr) => {{
+                    let key: Vec<Value> = $key;
+                    let hkey: Vec<Value> = $hkey;
+                    if !self.groups.is_empty() {
+                        ghash.push(if red.iter().any(|r| *r) {
+                            let hk: Vec<Value> =
+                                hkey.iter().zip(&red).filter(|(_, r)| !**r).map(|(v, _)| v.clone()).collect();
+                            hashed.hash(&hk)
+                        } else {
+                            hashed.hash(&hkey)
+                        });
+                    }
+                    let mut states = self.states(&key, ctx)?;
+                    if let Some(p) = presorted_agg {
+                        states[p].buffered = None;
+                        states[p].presorted = Some(None);
+                    }
+                    groups.push((key, states));
+                    index.insert(hkey, groups.len() - 1);
+                    groups.len() - 1
+                }};
+            }
+            // (The key is made in one vector, copied only for a new group.)
+            let mut key: Vec<Value> = Vec::with_capacity(self.groups.len());
+            loop {
+                let row = match &mut run {
+                    Some(r) => match r.next(ctx)? {
+                        None => break,
+                        Some(super::parscan::PartialItem::Row(row)) => row,
+                        Some(super::parscan::PartialItem::Part(p)) => {
+                            // Its groups in their order of appearance (the serial order:
+                            // the part's rows come before the later ones), each row's
+                            // lookup, then its states added.
+                            let mut map = Vec::with_capacity(p.groups.len());
+                            let mut parts = Vec::with_capacity(p.groups.len());
+                            for (k, st) in p.groups {
+                                let gi = match index.get(&k) {
+                                    Some(i) => *i,
+                                    None => new_group!(k.clone(), k),
+                                };
+                                map.push(gi);
+                                parts.push(st);
+                            }
+                            if !self.groups.is_empty() {
+                                for &l in &p.seq {
+                                    let g = map[l as usize];
+                                    hashed.lookup(ghash[g], g);
+                                }
+                            }
+                            for (gi, st) in map.into_iter().zip(parts) {
+                                for (s, x) in groups[gi].1.iter_mut().zip(st) {
+                                    s.acc.merge(x)?;
+                                }
+                            }
+                            continue;
                         }
-                        groups.push((key, states));
-                        index.insert(hkey.clone(), groups.len() - 1);
-                        groups.len() - 1
+                    },
+                    None => match input.next(ctx)? {
+                        Some(row) => row,
+                        None => break,
+                    },
+                };
+                ctx.check()?;
+                key.clear();
+                for g in &self.groups {
+                    key.push(eval(g, &row, ctx)?);
+                }
+                let hkey = if nondet { Some(group_key(&key, &colls)) } else { None };
+                let found = index.get(hkey.as_ref().unwrap_or(&key)).copied();
+                let gi = match found {
+                    Some(i) => i,
+                    None => {
+                        let key = key.clone();
+                        let hkey = hkey.unwrap_or_else(|| key.clone());
+                        new_group!(key, hkey)
                     }
                 };
                 if !self.groups.is_empty() {
-                    if red.iter().any(|r| *r) {
-                        let hk: Vec<Value> =
-                            hkey.iter().zip(&red).filter(|(_, r)| !**r).map(|(v, _)| v.clone()).collect();
-                        hashed.row(&hk, gi);
-                    } else {
-                        hashed.row(&hkey, gi);
-                    }
+                    hashed.lookup(ghash[gi], gi);
                 }
                 let states = &mut groups[gi].1;
                 for ((a, st), sh) in self.aggs.iter().zip(states.iter_mut()).zip(&share) {

@@ -3,7 +3,12 @@
 pub mod agg;
 pub mod dml;
 pub mod fasthash;
+pub mod fastsort;
 pub mod merge;
+pub mod kernel;
+pub mod need;
+pub mod parscan;
+pub mod partial;
 pub mod nodes;
 pub mod scan;
 pub mod pghash;
@@ -59,6 +64,16 @@ pub trait Node {
 
     /// Rows of the children for this (parent) DML node's transition tables.
     fn add_captured(&mut self, _rows: Vec<trigger::AfterRow>) {}
+
+    /// This node's rows aggregated as `spec` says off the executor's thread (`partial`),
+    /// when it can (a parallel scan that hasn't started): then its rows come from the run.
+    fn partials(
+        &mut self,
+        _spec: Arc<partial::Spec>,
+        _ctx: &ExecCtx,
+    ) -> Result<Option<parscan::PartialRun>> {
+        Ok(None)
+    }
 }
 
 pub type BoxNode = Box<dyn Node>;
@@ -118,6 +133,10 @@ pub struct ExecCtx<'a> {
     stable_snap: RefCell<Option<Rc<crate::txn::Snap>>>,
     /// Set while a LIMIT opens its input: the bound a sort right below it gets.
     pub sort_bound: Cell<Option<usize>>,
+    /// Set right before opening a plan node (`nodes::open_need`), taken as it opens: the
+    /// columns of its rows anything above reads (None: all). A scan leaves the others
+    /// undecoded (NULL).
+    pub need: Cell<Option<Rc<[bool]>>>,
     /// Planner estimates the executor sizes hash tables by, per plan node.
     pub estimates: RefCell<HashMap<usize, f64>>,
     /// Correlated EXISTS subqueries run as hashed lookups (by subquery id; None: not
@@ -413,6 +432,7 @@ impl<'a> ExecCtx<'a> {
             snap: RefCell::new(None),
             stable_snap: RefCell::new(None),
             sort_bound: Cell::new(None),
+            need: Cell::new(None),
             estimates: RefCell::default(),
             exists_hash: RefCell::default(),
             scalar_hash: RefCell::default(),
@@ -483,6 +503,7 @@ impl<'a> ExecCtx<'a> {
             snap: RefCell::new(None),
             stable_snap: RefCell::new(self.stable_snap.borrow().clone()),
             sort_bound: Cell::new(None),
+            need: Cell::new(None),
             estimates: RefCell::default(),
             exists_hash: RefCell::default(),
             scalar_hash: RefCell::default(),

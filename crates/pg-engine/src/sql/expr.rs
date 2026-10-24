@@ -943,7 +943,13 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
         Expr::Param(i, _) => ctx.param(*i),
         Expr::Call(def, args, ty) if def.spread => eval_spread(def, args, ty, row, ctx),
         Expr::Call(def, args, ty) => {
-            let mut vals = Vec::with_capacity(args.len());
+            // (Up to four arguments on the stack: no allocation per call.)
+            let mut buf: [Value; 4] = [Value::Null, Value::Null, Value::Null, Value::Null];
+            let mut heap = Vec::new();
+            let n = args.len();
+            if n > buf.len() {
+                heap.reserve(n);
+            }
             for (i, a) in args.iter().enumerate() {
                 let mut v = eval(a, row, ctx)?;
                 if def.strict && v.is_null() {
@@ -954,8 +960,13 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
                 if matches!(v, Value::Ext(..)) && def.args.get(i).is_some_and(crate::ext::types::wants_builtin) {
                     v = crate::ext::types::to_builtin(v);
                 }
-                vals.push(v);
+                if n > buf.len() {
+                    heap.push(v);
+                } else {
+                    buf[i] = v;
+                }
             }
+            let vals: &[Value] = if n > buf.len() { &heap } else { &buf[..n] };
             // Range bounds compare under the collation the call carries.
             let _g = def
                 .coll
@@ -968,7 +979,7 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
                 })
                 .map(|c| crate::types::range::under(Some(c.clone())));
             let v = (def.imp)(
-                &vals,
+                vals,
                 &FnCtx {
                     exec: ctx,
                     ret: ty,

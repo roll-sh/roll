@@ -940,62 +940,75 @@ fn format(a: &[Value], c: &FnCtx) -> Result<Value> {
 
 // ── LIKE ──
 
-/// Match `s` against a LIKE pattern with `escape` (None = no escape character).
-pub fn like_match(st: &str, pat: &str, escape: Option<char>, ci: bool) -> Result<bool> {
-    // ILIKE lowers both sides with lower() first.
-    let (st, pat) = if ci {
-        (
-            st.chars().map(simple_lower).collect(),
-            pat.chars().map(simple_lower).collect(),
-        )
-    } else {
-        (st.to_string(), pat.to_string())
-    };
-    // Compile into tokens.
-    enum Tok {
-        Lit(char),
-        One,
-        Any,
+/// A LIKE pattern compiled into tokens.
+#[derive(Clone, Copy, PartialEq)]
+enum LikeTok {
+    Lit(char),
+    One,
+    Any,
+}
+
+thread_local! {
+    /// The last pattern compiled (a pure function of the pattern and the escape): a LIKE
+    /// over a table's rows compiles its constant pattern once.
+    static LIKE_LAST: std::cell::RefCell<Option<(String, Option<char>, std::rc::Rc<[LikeTok]>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn like_tokens(pat: &str, escape: Option<char>) -> Result<std::rc::Rc<[LikeTok]>> {
+    if let Some(t) = LIKE_LAST.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|(p, e, _)| p == pat && *e == escape)
+            .map(|(_, _, t)| t.clone())
+    }) {
+        return Ok(t);
     }
     let mut toks = Vec::new();
     let mut it = pat.chars();
     while let Some(c) = it.next() {
         if Some(c) == escape {
             match it.next() {
-                Some(n) => toks.push(Tok::Lit(n)),
+                Some(n) => toks.push(LikeTok::Lit(n)),
                 None => bail!(
                     INVALID_ESCAPE_SEQUENCE,
                     "LIKE pattern must not end with escape character"
                 ),
             }
         } else if c == '%' {
-            if !matches!(toks.last(), Some(Tok::Any)) {
-                toks.push(Tok::Any);
+            if !matches!(toks.last(), Some(LikeTok::Any)) {
+                toks.push(LikeTok::Any);
             }
         } else if c == '_' {
-            toks.push(Tok::One);
+            toks.push(LikeTok::One);
         } else {
-            toks.push(Tok::Lit(c));
+            toks.push(LikeTok::Lit(c));
         }
     }
-    let chars: Vec<char> = st.chars().collect();
-    // Iterative wildcard matching with backtracking on the last '%'.
+    let toks: std::rc::Rc<[LikeTok]> = toks.into();
+    LIKE_LAST.with(|c| *c.borrow_mut() = Some((pat.to_string(), escape, toks.clone())));
+    Ok(toks)
+}
+
+/// Iterative wildcard matching with backtracking on the last '%', over the string's
+/// characters (`at(i)`, `n` of them).
+fn like_tokens_match(toks: &[LikeTok], n: usize, at: impl Fn(usize) -> char) -> bool {
     let (mut si, mut ti) = (0usize, 0usize);
     let mut star: Option<(usize, usize)> = None;
-    while si < chars.len() {
+    while si < n {
         if ti < toks.len() {
             match toks[ti] {
-                Tok::Lit(c) if c == chars[si] => {
+                LikeTok::Lit(c) if c == at(si) => {
                     si += 1;
                     ti += 1;
                     continue;
                 }
-                Tok::One => {
+                LikeTok::One => {
                     si += 1;
                     ti += 1;
                     continue;
                 }
-                Tok::Any => {
+                LikeTok::Any => {
                     star = Some((ti, si));
                     ti += 1;
                     continue;
@@ -1009,13 +1022,31 @@ pub fn like_match(st: &str, pat: &str, escape: Option<char>, ci: bool) -> Result
                 si = s0 + 1;
                 star = Some((t, s0 + 1));
             }
-            None => return Ok(false),
+            None => return false,
         }
     }
-    while ti < toks.len() && matches!(toks[ti], Tok::Any) {
+    while ti < toks.len() && matches!(toks[ti], LikeTok::Any) {
         ti += 1;
     }
-    Ok(ti == toks.len())
+    ti == toks.len()
+}
+
+/// Match `s` against a LIKE pattern with `escape` (None = no escape character).
+pub fn like_match(st: &str, pat: &str, escape: Option<char>, ci: bool) -> Result<bool> {
+    // ILIKE lowers both sides with lower() first.
+    if ci {
+        let st: String = st.chars().map(simple_lower).collect();
+        let pat: String = pat.chars().map(simple_lower).collect();
+        return like_match(&st, &pat, escape, false);
+    }
+    let toks = like_tokens(pat, escape)?;
+    // (An ASCII string's characters are its bytes.)
+    if st.is_ascii() {
+        let b = st.as_bytes();
+        return Ok(like_tokens_match(&toks, b.len(), |i| b[i] as char));
+    }
+    let chars: Vec<char> = st.chars().collect();
+    Ok(like_tokens_match(&toks, chars.len(), |i| chars[i]))
 }
 
 fn escape_char(a: &[Value]) -> Result<Option<char>> {
@@ -2659,4 +2690,22 @@ pub fn register(r: &mut Registry) {
     }
     r.binop("^@", Text, Text, Bool, starts_with);
     let _ = Ret::Poly;
+}
+
+// ── pure implementations ──
+
+// (Two arguments: the default escape, as `escape_char` gives it.)
+fn p_like(x: &Value, y: &Value, _: &crate::types::DataType) -> Result<Value> {
+    Ok(Value::Bool(like_match(s(x), s(y), Some('\\'), false)?))
+}
+fn p_not_like(x: &Value, y: &Value, _: &crate::types::DataType) -> Result<Value> {
+    Ok(Value::Bool(!like_match(s(x), s(y), Some('\\'), false)?))
+}
+
+/// `ops::pure` for LIKE (without a collation of the call's own: a nondeterministic one
+/// matches otherwise).
+pub(super) fn pure(imp: super::FnImpl) -> Option<super::ops::PureFn> {
+    let table: [(super::FnImpl, super::ops::PureFn); 3] =
+        [(like, p_like), (bp_like, p_like), (not_like, p_not_like)];
+    table.iter().find(|(f, _)| std::ptr::fn_addr_eq(*f, imp)).map(|(_, p)| *p)
 }

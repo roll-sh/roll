@@ -69,6 +69,16 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   and TPC-H (5–20x: a row-at-a-time executor over decoded `Value` rows, no parallel query),
   bulk loads and DDL. In-process (how roll embeds it) OLTP is 2–27x PostgreSQL's over the wire.
   TPC-H SF1 takes 2.4x less disk. BENCH.md's "Where it is still slower" is the to-do list.
+- **Analytic performance** (round 18, agent 42): projection pushdown into scans and row
+  decoding, parallel sequential scans of big tables (worker threads decoding and filtering by
+  compiled kernels, rows taken in key order), partial aggregation in the workers for exact
+  aggregates, i128 numeric fast paths and accumulators, byte-keyed sorts with a tie check,
+  fewer per-row allocations (`exec/need.rs`, `parscan.rs`, `kernel.rs`, `partial.rs`,
+  `fastsort.rs`). TPC-H SF1 3.2x faster in all (from 0.06x PostgreSQL's speed to 0.18x; q01,
+  q06, q18 7x, to 0.55–0.6x), the 2M-row analytic set 1.7–8x; numbers, method and what is
+  still slower (index-scan fetches, joins and aggregates over joins on one thread) in
+  BENCH.md's round 18 section.
+  The regression suite, goldens and difftest are unchanged unit for unit.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
@@ -332,8 +342,13 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
   - `func::range::user_constructors` (process-wide): by the whole range type and its
     constructors' oids. `func::pubsub::RESETS` (subscription statistics' reset times): by the
     cluster (its `OidGen`, held by a `Weak`) and the subscription. `types::collation::get`: by the whole definition. `regex::compile`: by
-    pattern, flags and strategy. Interners (`func::intern`), the built-in registries and the
+    pattern, flags and strategy. `string::LIKE_LAST` (the last LIKE pattern compiled, per
+    thread): by pattern and escape. Interners (`func::intern`), the built-in registries and the
     `include_str!` tables are pure.
+  - `exec::parscan` (round 18, agent 42): a parallel scan's worker threads run only kernels
+    (`exec::kernel`, pure functions of a row) and row decoding, never `eval` or anything of a
+    session; the process-wide `ACTIVE` counts running workers against max_parallel_workers,
+    `STARTED` counts scans (for tests). A worker's rows reach the statement in key order.
   - Subquery / CTE ids (`Binder::fresh_id`) are unique in the process: `ExecCtx`'s
     `subq_cache`, `exists_hash`, `scalar_hash`, `ctes`, `work` are keyed by them, and a SQL
     function's statements (bound by binders of their own) run in their caller's context.

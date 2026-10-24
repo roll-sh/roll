@@ -10,6 +10,7 @@ use crate::storage::row::decode_row;
 use crate::txn::TxnScan;
 use crate::txn::locks::{LockMode, WaitPolicy};
 use crate::types::Value;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// Stored rows start with a header byte (never a value tag) followed by the writing
@@ -37,6 +38,11 @@ fn split_header_tid(bytes: &[u8]) -> Result<(u64, Option<(u32, u16)>, &[u8])> {
         None
     };
     Ok((xid, tid, &bytes[pos..]))
+}
+
+/// A stored row's encoded values (after its header).
+pub(crate) fn row_data(bytes: &[u8]) -> Result<&[u8]> {
+    split_header(bytes).map(|(_, d)| d)
 }
 
 /// Split a stored row into its xmin and the encoded values.
@@ -287,7 +293,40 @@ fn ranges(
     Ok(vec![(start, end)])
 }
 
-pub fn open_scan(s: &ScanPlan, ctx: &ExecCtx) -> Result<BoxNode> {
+/// The columns of its rows scan `s` decodes: what is needed above it (`need`), and what
+/// its own conditions read. None: all of them.
+fn scan_need(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Option<Rc<[bool]>> {
+    let need = need?;
+    let plain_access = match (&s.access, &s.index) {
+        (Access::Seq | Access::Unplanned, None) => true,
+        (Access::Index { .. } | Access::Bitmap(..), Some((ix, b))) => ix.method == "btree" && b.order.is_empty(),
+        (Access::Bitmap(..), None) => true,
+        _ => false,
+    };
+    if !plain_access
+        || s.mark.is_some()
+        || s.current_of.is_some()
+        || s.sample.is_some()
+        || ctx.instrumented()
+        || super::sizing::tracked(s.table.oid)
+    {
+        return None;
+    }
+    let mut out = need[..need.len().min(s.table.columns.len())].to_vec();
+    if let Some(f) = &s.filter
+        && !super::need::mark(f, &mut out)
+    {
+        return None;
+    }
+    // (Only columns that aren't all needed are worth a mask.)
+    if out.len() >= s.table.columns.len() && out.iter().all(|b| *b) {
+        return None;
+    }
+    Some(Rc::from(out))
+}
+
+pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNode> {
+    let need = scan_need(s, need, ctx);
     let epq = ctx.epq.borrow().clone();
     if let Some(test) = epq.as_ref().and_then(|m| m.get(&(s as *const ScanPlan as usize))) {
         return epq_scan(s, test.as_ref(), ctx);
@@ -355,6 +394,7 @@ pub fn open_scan(s: &ScanPlan, ctx: &ExecCtx) -> Result<BoxNode> {
             sample: None,
             only: None,
             key: s as *const ScanPlan as usize,
+            need: if matches!(s.access, Access::Bitmap(..)) && s.index.is_none() { need } else { None },
             plan,
             ranges: Vec::new(),
             cur_range: 0,
@@ -365,6 +405,9 @@ pub fn open_scan(s: &ScanPlan, ctx: &ExecCtx) -> Result<BoxNode> {
             ios: false,
             tid_order: false,
             sorted: None,
+            streamed: false,
+            par: None,
+            par_tried: false,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -397,6 +440,7 @@ pub fn open_scan(s: &ScanPlan, ctx: &ExecCtx) -> Result<BoxNode> {
             sample: None,
             only: None,
             key: s as *const ScanPlan as usize,
+            need: if matches!(s.access, Access::Bitmap(..)) && s.index.is_none() { need } else { None },
             plan,
             ranges: Vec::new(),
             cur_range: 0,
@@ -407,6 +451,9 @@ pub fn open_scan(s: &ScanPlan, ctx: &ExecCtx) -> Result<BoxNode> {
             ios: false,
             tid_order: false,
             sorted: None,
+            streamed: false,
+            par: None,
+            par_tried: false,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -430,7 +477,7 @@ pub fn open_scan(s: &ScanPlan, ctx: &ExecCtx) -> Result<BoxNode> {
         let mut fwd = s.clone();
         fwd.reverse = false;
         fwd.limit = None;
-        let inner = open_scan_as(&fwd, s as *const ScanPlan as usize, ranges, ctx)?;
+        let inner = open_scan_as(&fwd, s as *const ScanPlan as usize, ranges, None, ctx)?;
         // A GiST circle or polygon distance is lossy (rechecked on the heap row), which an
         // index-only scan can't do.
         let lossy_ios = matches!(s.access, Access::Index { only: true, .. })
@@ -454,7 +501,7 @@ pub fn open_scan(s: &ScanPlan, ctx: &ExecCtx) -> Result<BoxNode> {
         let mut fwd = s.clone();
         fwd.reverse = false;
         fwd.limit = None;
-        let inner = open_scan_as(&fwd, s as *const ScanPlan as usize, ranges, ctx)?;
+        let inner = open_scan_as(&fwd, s as *const ScanPlan as usize, ranges, need, ctx)?;
         return Ok(Box::new(Backward {
             inner: Some(inner),
             rows: Vec::new(),
@@ -464,7 +511,7 @@ pub fn open_scan(s: &ScanPlan, ctx: &ExecCtx) -> Result<BoxNode> {
             fetches: None,
         }));
     }
-    open_scan_as(s, s as *const ScanPlan as usize, ranges, ctx)
+    open_scan_as(s, s as *const ScanPlan as usize, ranges, need, ctx)
 }
 
 /// A scan over `ranges`, counted (EXPLAIN ANALYZE) as the scan `key`.
@@ -472,6 +519,7 @@ fn open_scan_as(
     s: &ScanPlan,
     key: usize,
     ranges: Vec<(Vec<u8>, Vec<u8>)>,
+    need: Option<Rc<[bool]>>,
     ctx: &ExecCtx,
 ) -> Result<BoxNode> {
     let secondary = s.current_of.is_none() && s.index.as_ref().is_some_and(|(ix, _)| reads_entries(ix));
@@ -537,6 +585,7 @@ fn open_scan_as(
         sample,
         only,
         key,
+        need,
         plan: s.clone(),
         ranges,
         cur_range: 0,
@@ -547,6 +596,9 @@ fn open_scan_as(
         ios,
         tid_order,
         sorted: None,
+        streamed: false,
+        par: None,
+        par_tried: false,
         run: Default::default(),
         pending: None,
         blocks: Default::default(),
@@ -923,6 +975,8 @@ enum StatTarget {
 struct ScanNode {
     /// The plan's address (EXPLAIN ANALYZE counts filtered rows by it).
     key: usize,
+    /// The table columns decoded (`scan_need`; None: all).
+    need: Option<Rc<[bool]>>,
     stat: StatTarget,
     plan: ScanPlan,
     ranges: Vec<(Vec<u8>, Vec<u8>)>,
@@ -942,6 +996,11 @@ struct ScanNode {
     tid_order: bool,
     /// A sequential scan's rows, read and put in heap order.
     sorted: Option<std::vec::IntoIter<(Vec<u8>, bytes::Bytes)>>,
+    /// A sequential scan of a table whose heap isn't modelled: rows in storage order.
+    streamed: bool,
+    /// Such a scan read by worker threads (`parscan`), once decided (`par_tried`).
+    par: Option<super::parscan::ParScan>,
+    par_tried: bool,
     /// An index scan's run of rows with equal keys, in heap order.
     run: std::collections::VecDeque<(Vec<u8>, bytes::Bytes)>,
     /// The index entry that ended the last run (it starts the next).
@@ -1082,8 +1141,18 @@ impl ScanNode {
             return self.next_stored(ctx);
         }
         if !self.secondary {
-            if self.sorted.is_none() {
+            if self.sorted.is_none() && !self.streamed {
                 self.nblocks = super::sizing::modelled_blocks(self.plan.table.oid, ctx);
+                // A table whose heap isn't modelled (too big) has no heap order to put its
+                // rows in: they come as stored, read as they're asked for.
+                if !super::sizing::heap_modelled(&self.plan.table, ctx) {
+                    self.streamed = true;
+                }
+            }
+            if self.streamed {
+                return self.next_stored(ctx);
+            }
+            if self.sorted.is_none() {
                 let mut rows = Vec::new();
                 while let Some(r) = self.next_stored(ctx)? {
                     ctx.check()?;
@@ -1253,13 +1322,38 @@ impl ScanNode {
 impl ScanNode {
     /// A stored row as this scan emits it: columns, then the key and system columns if asked.
     fn full_row(&self, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Row> {
-        scan_row(&self.plan, key, bytes, ctx)
+        match &self.need {
+            Some(need) => scan_row_need(&self.plan, key, bytes, need, ctx),
+            None => scan_row(&self.plan, key, bytes, ctx),
+        }
     }
+}
+
+/// `scan_row` decoding only the table columns `need` marks (the others NULL).
+fn scan_row_need(plan: &ScanPlan, key: &[u8], bytes: &[u8], need: &[bool], ctx: &ExecCtx) -> Result<Row> {
+    let t = &plan.table;
+    let (_, data) = split_header(bytes)?;
+    let mut row = crate::storage::row::decode_row_need(data, need)?;
+    if row.len() < t.columns.len() {
+        for (i, c) in t.columns.iter().enumerate().skip(row.len()) {
+            row.push(match need.get(i) {
+                Some(true) => c.missing.clone().unwrap_or(Value::Null),
+                _ => Value::Null,
+            });
+        }
+    }
+    row.truncate(t.columns.len());
+    scan_row_rest(plan, key, bytes, row, ctx)
 }
 
 /// A stored row as scan `plan` emits it: columns, then the key and system columns if asked.
 fn scan_row(plan: &ScanPlan, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Row> {
-    let mut row = decode_table_row_at(&plan.table, Some(key), bytes)?;
+    let row = decode_table_row_at(&plan.table, Some(key), bytes)?;
+    scan_row_rest(plan, key, bytes, row, ctx)
+}
+
+/// The key and system columns after a scanned row's columns, if the scan asks for them.
+fn scan_row_rest(plan: &ScanPlan, key: &[u8], bytes: &[u8], mut row: Row, ctx: &ExecCtx) -> Result<Row> {
     if plan.with_key {
         row.push(Value::Bytea(Arc::from(key)));
     }
@@ -1359,10 +1453,143 @@ fn epq_scan(s: &ScanPlan, test: Option<&(Vec<u8>, bytes::Bytes)>, ctx: &ExecCtx)
     Ok(Box::new(super::nodes::VecNode::new(if ok { vec![row] } else { Vec::new() })))
 }
 
+/// Worker threads for a parallel scan: max_parallel_workers_per_gather's, plus one in
+/// place of the leader (this thread takes the rows), 0: none; and the pool they come
+/// from (max_parallel_workers, shared by the process's scans).
+fn parallel_workers(ctx: &ExecCtx) -> (usize, usize) {
+    let s = ctx.sess.settings.borrow();
+    let num = |n: &str, d: usize| s.get_str(n).and_then(|v| v.parse::<usize>().ok()).unwrap_or(d);
+    let pool = num("max_parallel_workers", 8);
+    let n = num("max_parallel_workers_per_gather", 2).min(pool);
+    (if n == 0 { 0 } else { (n + 1).min(8) }, pool.max(n + 1))
+}
+
+impl ScanNode {
+    /// A sequential scan of a big table (its heap not modelled: rows in storage order)
+    /// read by worker threads, when nothing it does needs this thread per row.
+    fn start_parallel(
+        &mut self,
+        spec: Option<Arc<super::partial::Spec>>,
+        ctx: &ExecCtx,
+    ) -> Result<Option<super::parscan::ParScan>> {
+        use super::parscan::{Decode, ParScan, split_keys};
+        let p = &self.plan;
+        if !self.tid_order
+            || self.secondary
+            || self.keys.is_some()
+            || self.only.is_some()
+            || self.sample.is_some()
+            || p.index.is_some()
+            || !matches!(p.access, Access::Seq | Access::Unplanned)
+            || p.mark.is_some()
+            || p.sys
+            || p.limit.is_some()
+            || self.ranges.len() != 1
+            || ctx.instrumented()
+            || super::sizing::tracked(p.table.oid)
+        {
+            return Ok(None);
+        }
+        // (An aggregating scan's rows would all go to the serial path when its filter has no
+        // kernel: not worth it.)
+        if spec.is_some() && p.filter.as_ref().is_some_and(|f| super::kernel::compile(f).is_none()) {
+            return Ok(None);
+        }
+        let (workers, pool) = parallel_workers(ctx);
+        let Some(snap) = ctx.snapshot() else {
+            return Ok(None);
+        };
+        if workers == 0 {
+            return Ok(None);
+        }
+        // (Decided as `next_raw` decides it.)
+        self.nblocks = super::sizing::modelled_blocks(p.table.oid, ctx);
+        if super::sizing::heap_modelled(&p.table, ctx) {
+            return Ok(None);
+        }
+        self.streamed = true;
+        let (start, end) = self.ranges[0].clone();
+        let txn = ctx.txn.borrow();
+        let lo = txn.scan_snap(&start, &end, &snap).next().transpose()?.map(|(k, _)| k);
+        let hi = txn.scan_rev(&start, &end, Some(&*snap)).next().transpose()?.map(|(k, _)| k);
+        let (Some(lo), Some(hi)) = (lo, hi) else {
+            return Ok(None);
+        };
+        let cuts = split_keys(&lo, &hi, ParScan::chunks(workers));
+        if cuts.is_empty() {
+            return Ok(None);
+        }
+        let mut bounds = vec![start];
+        bounds.extend(cuts);
+        bounds.push(end);
+        let scans = bounds.windows(2).map(|w| txn.scan_snap(&w[0], &w[1], &snap)).collect();
+        drop(txn);
+        let d = Decode {
+            need: self.need.as_deref().map(Arc::from),
+            missing: p.table.columns.iter().map(|c| c.missing.clone()).collect(),
+            with_key: p.with_key,
+            filter: p.filter.as_ref().and_then(super::kernel::compile),
+            filtered: p.filter.is_some(),
+            spec,
+        };
+
+        Ok(ParScan::start(scans, workers, pool, d))
+    }
+}
+
 impl Node for ScanNode {
+    fn partials(
+        &mut self,
+        spec: Arc<super::partial::Spec>,
+        ctx: &ExecCtx,
+    ) -> Result<Option<super::parscan::PartialRun>> {
+        if self.par_tried || self.emitted > 0 || self.sorted.is_some() || self.streamed {
+            return Ok(None);
+        }
+        let Some(par) = self.start_parallel(Some(spec), ctx)? else {
+            return Ok(None);
+        };
+        self.par_tried = true;
+        let stat = match self.stat {
+            StatTarget::Seq(t) => Some(t),
+            _ => None,
+        };
+        Ok(Some(super::parscan::PartialRun::new(par, stat, self.plan.filter.clone(), self.key)))
+    }
+
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         if self.plan.limit.is_some_and(|l| self.emitted >= l) {
             return Ok(None);
+        }
+        if !self.par_tried {
+            self.par_tried = true;
+            if self.sorted.is_none() && !self.streamed {
+                self.par = self.start_parallel(None, ctx)?;
+            }
+        }
+        if let Some(par) = &mut self.par {
+            loop {
+                ctx.check()?;
+                let Some((row, done, skipped)) = par.next_row()? else {
+                    if let StatTarget::Seq(t) = self.stat {
+                        super::pgstat::count_returned(ctx, t, par.trailing() as i64);
+                    }
+                    return Ok(None);
+                };
+                // (Rows the workers' filter dropped were read all the same.)
+                if let StatTarget::Seq(t) = self.stat {
+                    super::pgstat::count_returned(ctx, t, skipped as i64 + 1);
+                }
+                if !done
+                    && let Some(f) = &self.plan.filter
+                    && !eval_bool(f, &row, ctx)?
+                {
+                    ctx.filtered(self.key);
+                    continue;
+                }
+                self.emitted += 1;
+                return Ok(Some(row));
+            }
         }
         loop {
             ctx.check()?;

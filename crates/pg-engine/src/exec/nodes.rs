@@ -14,15 +14,26 @@ use std::sync::Arc;
 
 /// Start running `plan`.
 pub fn open(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
+    // (Taken first: a mask is for this node alone, whatever happens next.)
+    let need = ctx.need.take();
     crate::stack::check()?;
-    let node = open_node(plan, ctx)?;
+    let node = open_node(plan, need.as_deref(), ctx)?;
     Ok(match &*ctx.instr.borrow() {
         Some(i) => super::InstrNode::wrap(node, Arc::as_ptr(plan) as usize, i.clone()),
         None => node,
     })
 }
 
-fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
+/// Open `plan`, whose rows' columns outside `need` nothing reads (None: all are read).
+pub fn open_need(plan: &Arc<Plan>, need: Option<Vec<bool>>, ctx: &ExecCtx) -> Result<BoxNode> {
+    if !ctx.instrumented() {
+        ctx.need.set(need.map(Rc::from));
+    }
+    open(plan, ctx)
+}
+
+fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNode> {
+    use super::need as nd;
     Ok(match &**plan {
         Plan::One => Box::new(VecNode::new(vec![Vec::new()])),
         Plan::Empty { .. } => Box::new(VecNode::new(Vec::new())),
@@ -30,7 +41,7 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
             rows: rows.clone(),
             i: 0,
         }),
-        Plan::Scan(s) => super::scan::open_scan(s, ctx)?,
+        Plan::Scan(s) => super::scan::open_scan(s, need, ctx)?,
         Plan::SysScan { table, filter, path, .. } => {
             if let Some(rows) = sys_rescan(*table, filter.as_ref(), path.as_deref(), ctx)? {
                 return Ok(Box::new(VecNode::new(rows)));
@@ -138,11 +149,11 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
             })
         }
         Plan::Filter { input, pred } => Box::new(FilterNode {
-            input: open(input, ctx)?,
+            input: open_need(input, nd::add(need.map(<[bool]>::to_vec), [pred]), ctx)?,
             pred: pred.clone(),
         }),
         Plan::Project { input, exprs } => Box::new(ProjectNode {
-            input: open(input, ctx)?,
+            input: open_need(input, nd::of(exprs), ctx)?,
             exprs: exprs.clone(),
         }),
         Plan::ProjectSet { input, exprs, srfs } => Box::new(ProjectSetNode {
@@ -157,11 +168,36 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
             sets,
             aggs,
         } => Box::new(
-            super::agg::AggNode::new(open(input, ctx)?, groups.clone(), sets.clone(), aggs.clone())
+            super::agg::AggNode::new(
+                {
+                    let need = (|| {
+                        let mut ex: Vec<&Expr> = groups.iter().collect();
+                        for a in aggs {
+                            ex.extend(nd::agg_exprs(a)?);
+                        }
+                        nd::of(ex)
+                    })();
+                    open_need(input, need, ctx)?
+                },
+                groups.clone(),
+                sets.clone(),
+                aggs.clone(),
+            )
                 .planned(plan.clone()),
         ),
         Plan::Window { input, calls } => {
-            let node = super::window::WindowNode::new(open(input, ctx)?, calls.clone());
+            // (Its rows are the input's, then the calls' results.)
+            let need = (|| {
+                let mut ex: Vec<&Expr> = Vec::new();
+                for c in calls {
+                    ex.extend(c.args.iter().chain(&c.partition_by).chain(nd::keys(&c.order_by)));
+                    if let crate::sql::plan::WinFunc::Agg(a) = &c.func {
+                        ex.extend(nd::agg_exprs(a)?);
+                    }
+                }
+                nd::add(need.map(<[bool]>::to_vec), ex)
+            })();
+            let node = super::window::WindowNode::new(open_need(input, need, ctx)?, calls.clone());
             Box::new(match &**input {
                 Plan::Sort { keys, .. } => node.presorted(keys),
                 _ => node,
@@ -172,7 +208,7 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
             Box::new(SortNode {
                 presorted: super::pghash::presorted_keys(plan, ctx).min(keys.len()),
                 key: Arc::as_ptr(plan) as usize,
-                input: Some(open(input, ctx)?),
+                input: Some(open_need(input, nd::add(need.map(<[bool]>::to_vec), nd::keys(keys)), ctx)?),
                 keys: keys.clone(),
                 out: Vec::new().into_iter(),
                 bound,
@@ -187,7 +223,11 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
             input: {
                 // ExecSetTupleBound: a sort right below needs only LIMIT + OFFSET rows.
                 ctx.sort_bound.set(tuple_bound(input, limit, offset, with_ties, ctx));
-                let n = open(input, ctx);
+                let need = match with_ties {
+                    Some(k) => nd::add(need.map(<[bool]>::to_vec), nd::keys(k)),
+                    None => need.map(<[bool]>::to_vec),
+                };
+                let n = open_need(input, need, ctx);
                 ctx.sort_bound.set(None);
                 n?
             },
@@ -276,7 +316,7 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
             {
                 Box::new(HashJoinNode::new(
                     *kind,
-                    open(left, ctx)?,
+                    open_need(left, nd::join_left(need, *nleft, lk, cond.as_ref()), ctx)?,
                     right.clone(),
                     lk.clone(),
                     rk.clone(),
@@ -301,9 +341,11 @@ fn open_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
                     pending: None,
                 })
             } else {
+                let memo_keys = meta.memoize.as_ref().map(|m| &m.keys[..]).unwrap_or(&[]);
+                let lneed = nd::join_left(need, *nleft, params.iter().chain(memo_keys), cond.as_ref());
                 let mut nl = NestLoopNode::new(
                     *kind,
-                    open(left, ctx)?,
+                    open_need(left, lneed, ctx)?,
                     right.clone(),
                     cond.clone(),
                     params.clone(),
@@ -1067,6 +1109,37 @@ pub fn sort_rows_bounded(
     bound: Option<usize>,
     ctx: &ExecCtx,
 ) -> Result<Vec<Row>> {
+    // Keys that are the rows' own columns: the rows compared in place (the same
+    // comparisons, so the same order), without a key vector per row.
+    let cols: Option<Vec<usize>> = keys
+        .iter()
+        .map(|k| match k.expr {
+            Expr::Col(i, _) => Some(i),
+            _ => None,
+        })
+        .collect();
+    if let Some(cols) = cols
+        && rows.iter().all(|r| cols.iter().all(|&c| c < r.len()))
+    {
+        let mut f = |a: &Row, b: &Row| -> Result<Ordering> {
+            for (k, &c) in keys.iter().zip(&cols) {
+                match compare_values(&a[c], &b[c], k, ctx)? {
+                    Ordering::Equal => {}
+                    o => return Ok(o),
+                }
+            }
+            Ok(Ordering::Equal)
+        };
+        if let Some(order) = super::fastsort::order(rows.len(), keys, |i, k| &rows[i][cols[k]], |i| &rows[i], bound) {
+            return Ok(super::fastsort::permute(rows, &order));
+        }
+        let mut cmp = super::pgsort::Cmp::new(&mut f);
+        let sorted = super::pgsort::tuplesort(rows, bound, &mut cmp);
+        if let Some(e) = cmp.err {
+            return Err(e);
+        }
+        return Ok(sorted);
+    }
     let mut keyed: Vec<(Vec<Value>, Row)> = Vec::with_capacity(rows.len());
     for r in rows {
         let k = keys
@@ -1074,6 +1147,10 @@ pub fn sort_rows_bounded(
             .map(|k| eval(&k.expr, &r, ctx))
             .collect::<Result<Vec<_>>>()?;
         keyed.push((k, r));
+    }
+    if let Some(order) = super::fastsort::order(keyed.len(), keys, |i, k| &keyed[i].0[k], |i| &keyed[i].1, bound) {
+        let rows: Vec<Row> = keyed.into_iter().map(|(_, r)| r).collect();
+        return Ok(super::fastsort::permute(rows, &order));
     }
     let mut f = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row)| -> Result<Ordering> {
         for (i, k) in keys.iter().enumerate() {
@@ -1459,17 +1536,20 @@ fn hashed_distinct_keyed(
     let mut index: HashMap<Row, usize> = HashMap::default();
     let mut firsts: Vec<Row> = Vec::new();
     let mut order = super::pghash::GroupOrder::new(types, ctx);
+    // (Each group's hash taken at its first row: equal keys hash alike.)
+    let mut hashes: Vec<u32> = Vec::new();
     for (k, r) in rows {
         ctx.check()?;
         let g = match index.get(&k) {
             Some(g) => *g,
             None => {
                 firsts.push(r);
-                index.insert(k.clone(), firsts.len() - 1);
+                hashes.push(order.hash(&k));
+                index.insert(k, firsts.len() - 1);
                 firsts.len() - 1
             }
         };
-        order.row(&k, g);
+        order.lookup(hashes[g], g);
     }
     let width = firsts.first().map_or(1, Vec::len);
     let est = super::pghash::estimated_rows(plan, ctx);
@@ -2290,8 +2370,11 @@ impl Node for NestLoopNode {
 /// (pghash::JoinTable), each row's place in its chain, and the rows by key.
 struct HashBuilt {
     rows: Vec<Row>,
-    /// Rows by key, in their chain's order (the most recently inserted first).
-    map: HashMap<Vec<Value>, Vec<usize>>,
+    /// Rows by key, in their chain's order (the most recently inserted first; a merge
+    /// join's: in their order).
+    map: HashMap<Vec<Value>, Rc<[usize]>>,
+    /// No rows (a probe matching nothing).
+    none: Rc<[usize]>,
     table: super::pghash::JoinTable,
 }
 
@@ -2341,18 +2424,23 @@ fn value_type(v: &Value) -> crate::types::DataType {
 fn int_keys(k: Vec<Value>, keys: &[Expr]) -> Vec<Value> {
     k.into_iter()
         .zip(keys.iter().map(Some).chain(std::iter::repeat(None)))
-        .map(|(v, e)| match v {
-            Value::Int2(x) => Value::Int8(x as i64),
-            Value::Int4(x) => Value::Int8(x as i64),
-            Value::Text(s)
-                if e.is_some_and(|e| matches!(e.ty(), crate::types::DataType::Bpchar(_)))
-                    && s.ends_with(' ') =>
-            {
-                Value::text(s.trim_end_matches(' '))
-            }
-            v => v,
-        })
+        .map(|(v, e)| int_key(v, e))
         .collect()
+}
+
+/// `int_keys` of one key's value (`e`: its expression, when known).
+fn int_key(v: Value, e: Option<&Expr>) -> Value {
+    match v {
+        Value::Int2(x) => Value::Int8(x as i64),
+        Value::Int4(x) => Value::Int8(x as i64),
+        Value::Text(s)
+            if e.is_some_and(|e| matches!(e.ty(), crate::types::DataType::Bpchar(_)))
+                && s.ends_with(' ') =>
+        {
+            Value::text(s.trim_end_matches(' '))
+        }
+        v => v,
+    }
 }
 
 fn build_hash(
@@ -2360,6 +2448,7 @@ fn build_hash(
     keys: &[Expr],
     nbuckets: Option<u32>,
     keep_nulls: bool,
+    merge: bool,
     ctx: &ExecCtx,
 ) -> Result<HashBuilt> {
     let types = key_types(keys);
@@ -2395,10 +2484,18 @@ fn build_hash(
     for (k, i) in by_key {
         map.entry(k).or_default().push(i);
     }
-    for v in map.values_mut() {
-        v.sort_by_key(|&i| pos[i]);
-    }
-    Ok(HashBuilt { rows, map, table })
+    let map = map
+        .into_iter()
+        .map(|(k, mut v)| {
+            if merge {
+                v.sort_unstable();
+            } else {
+                v.sort_by_key(|&i| pos[i]);
+            }
+            (k, Rc::from(v))
+        })
+        .collect();
+    Ok(HashBuilt { rows, map, table, none: Rc::from(Vec::new()) })
 }
 
 /// Hash join on equality keys; the right side is the build side. A merge join runs this
@@ -2414,7 +2511,7 @@ struct HashJoinNode {
     nright: usize,
     table: Option<HashBuilt>,
     matched: Vec<bool>,
-    cur: Option<(Row, Vec<usize>, usize, bool)>,
+    cur: Option<(Row, Rc<[usize]>, usize, bool)>,
     unmatched_right: Option<std::vec::IntoIter<usize>>,
     nbuckets: Option<u32>,
     merge: bool,
@@ -2424,6 +2521,8 @@ struct HashJoinNode {
     merged: std::vec::IntoIter<Row>,
     /// A merge join's first outer row, read before the inner side runs.
     first: Option<Row>,
+    /// The probe key's vector, reused.
+    kbuf: Vec<Value>,
 }
 
 impl HashJoinNode {
@@ -2457,6 +2556,7 @@ impl HashJoinNode {
             merge_dirs: meta.merge_dirs.clone(),
             merged: Vec::new().into_iter(),
             first: None,
+            kbuf: Vec::new(),
         }
     }
 
@@ -2506,13 +2606,8 @@ impl HashJoinNode {
             }
         }
         let keep = matches!(self.kind, JoinKind::Right | JoinKind::Full);
-        let mut built = build_hash(rows, &self.rkeys, self.nbuckets, keep, ctx)?;
-        if self.merge {
-            // A merge join meets equal inner rows in their (sorted) order.
-            for v in built.map.values_mut() {
-                v.sort_unstable();
-            }
-        }
+        // (A merge join meets equal inner rows in their (sorted) order.)
+        let built = build_hash(rows, &self.rkeys, self.nbuckets, keep, self.merge, ctx)?;
         self.matched = vec![false; built.rows.len()];
         self.table = Some(built);
         Ok(())
@@ -2674,18 +2769,19 @@ impl Node for HashJoinNode {
                 match next {
                     Some(l) => {
                         ctx.check()?;
-                        let k = int_keys(eval_all(&self.lkeys, &l, ctx)?, &self.lkeys);
+                        // (The probe's key in one vector for all rows.)
+                        let mut k = std::mem::take(&mut self.kbuf);
+                        k.clear();
+                        for e in &self.lkeys {
+                            k.push(int_key(eval(e, &l, ctx)?, Some(e)));
+                        }
+                        let t = self.table.as_ref().unwrap();
                         let cands = if k.iter().any(Value::is_null) {
-                            Vec::new()
+                            t.none.clone()
                         } else {
-                            self.table
-                                .as_ref()
-                                .unwrap()
-                                .map
-                                .get(&k)
-                                .cloned()
-                                .unwrap_or_default()
+                            t.map.get(&k).unwrap_or(&t.none).clone()
                         };
+                        self.kbuf = k;
                         self.cur = Some((l, cands, 0, false));
                     }
                     None => {
@@ -2766,7 +2862,7 @@ struct RightSemiNode {
 impl RightSemiNode {
     fn run(&self, ctx: &ExecCtx) -> Result<Vec<Row>> {
         let rows = collect(&self.left, ctx, None)?;
-        let built = build_hash(rows, &self.lkeys, self.nbuckets, self.anti, ctx)?;
+        let built = build_hash(rows, &self.lkeys, self.nbuckets, self.anti, false, ctx)?;
         let rows = &built.rows;
         let mut emitted = vec![false; rows.len()];
         let mut out = Vec::new();
@@ -2780,7 +2876,7 @@ impl RightSemiNode {
             let Some(cands) = built.map.get(&k) else {
                 continue;
             };
-            for &j in cands {
+            for &j in cands.iter() {
                 if emitted[j] {
                     continue;
                 }

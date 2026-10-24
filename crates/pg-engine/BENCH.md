@@ -332,11 +332,181 @@ the runs between steps were on a busy machine, so read them as ratios, not absol
     per execution of a prepared range query did so each time); the last 64 parsed slots are
     kept (by settings generation, type and texts; plain scalar types only).
 
+## Round 18 (agent 42): analytic queries
+
+The executor's side of "Where it is still slower" item 1. Measured on the same machine with
+the same harness and settings as above, but on cores 20–23 (both servers) and 24–27 (the
+client), with the machine busier than in round 17 (load 25–40): PostgreSQL's own times are
+up to 1.7x round 17's, so compare within these tables, not with the ones above. **pg** is
+PostgreSQL 18.6 (container `a42-pg`, 2 workers per Gather); **before** the engine at this
+round's start (`ca0c077`); **after** this round's engine; times are medians of 3 (seconds),
+the best of two runs; **spread** is how far the two runs' medians differ.
+
+### Analytic
+
+| query | rows | pg | before | after | after / pg | after / before | spread |
+|---|---|---|---|---|---|---|---|
+| filtered scan | 200k | 0.025 | 0.225 | 0.109 | 0.23x | 2.1x | 48% |
+| full sort, float | 200k | 0.099 | 0.386 | 0.182 | 0.54x | 2.1x | 28% |
+| full sort, text | 200k | 0.112 | 0.584 | 0.204 | 0.55x | 2.9x | 4% |
+| top-100 | 200k | 0.032 | 0.178 | 0.098 | 0.33x | 1.8x | 0% |
+| hash aggregate (1000 groups) | 200k | 0.039 | 0.465 | 0.166 | 0.23x | 2.8x | 24% |
+| count(DISTINCT) | 200k | 0.068 | 0.915 | 0.243 | 0.28x | 3.8x | 8% |
+| hash join + aggregate | 200k | 0.120 | 0.581 | 0.436 | 0.28x | 1.3x | 4% |
+| window functions | 200k | 0.227 | 0.876 | 0.450 | 0.51x | 1.9x | 5% |
+| index range (49k rows) | 200k | 0.008 | 0.161 | 0.115 | 0.07x | 1.4x | 4% |
+| numeric sum / avg | 200k | 0.026 | 0.205 | 0.095 | 0.27x | 2.2x | 3% |
+| filtered scan | 2M | 0.134 | 2.030 | 0.254 | 0.53x | 8.0x | 48% |
+| full sort, float | 2M | 1.122 | 5.783 | 1.953 | 0.57x | 3.0x | 40% |
+| full sort, text | 2M | 1.011 | 7.777 | 2.546 | 0.40x | 3.1x | 72% |
+| top-100 | 2M | 0.105 | 1.625 | 0.650 | 0.16x | 2.5x | 7% |
+| hash aggregate (1000 groups) | 2M | 0.186 | 2.823 | 0.605 | 0.31x | 4.7x | 36% |
+| count(DISTINCT) | 2M | 0.530 | 7.971 | 3.110 | 0.17x | 2.6x | 43% |
+| hash join + aggregate | 2M | 0.406 | 3.751 | 2.241 | 0.18x | 1.7x | 97% |
+| window functions | 2M | 1.857 | 11.76 | 5.005 | 0.37x | 2.3x | 60% |
+| index range (49k rows) | 2M | 0.011 | 0.203 | 0.078 | 0.14x | 2.6x | 64% |
+| numeric sum / avg | 2M | 0.095 | 1.968 | 0.290 | 0.33x | 6.8x | 7% |
+
+### TPC-H SF1
+
+| query | pg | before | after | after / pg | after / before | spread |
+|---|---|---|---|---|---|---|
+| q01 | 1.948 | 23.55 | 3.298 | 0.59x | 7.1x | 16% |
+| q02 | 0.258 | 3.693 | 1.327 | 0.19x | 2.8x | 12% |
+| q03 | 0.563 | 19.22 | 8.457 | 0.07x | 2.3x | 11% |
+| q04 | 0.171 | 12.27 | 4.043 | 0.04x | 3.0x | 13% |
+| q05 | 0.500 | 3.993 | 3.107 | 0.16x | 1.3x | 23% |
+| q06 | 0.547 | 6.870 | 0.963 | 0.57x | 7.1x | 52% |
+| q07 | 0.508 | 11.22 | 5.258 | 0.10x | 2.1x | 34% |
+| q08 | 0.289 | 3.349 | 1.277 | 0.23x | 2.6x | 70% |
+| q09 | 1.775 | 24.05 | 10.87 | 0.16x | 2.2x | 46% |
+| q10 | 0.834 | 12.24 | 5.910 | 0.14x | 2.1x | 47% |
+| q11 | 0.139 | 0.637 | 0.366 | 0.38x | 1.7x | 3% |
+| q12 | 0.692 | 20.21 | 7.659 | 0.09x | 2.6x | 6% |
+| q13 | 0.860 | 11.64 | 5.612 | 0.15x | 2.1x | 3% |
+| q14 | 0.249 | 15.35 | 1.494 | 0.17x | 10.3x | 0% |
+| q15 | 0.427 | 9.206 | 0.971 | 0.44x | 9.5x | 1% |
+| q16 | 0.352 | 4.519 | 2.643 | 0.13x | 1.7x | 7% |
+| q17 | 0.899 | 17.68 | 3.662 | 0.25x | 4.8x | 5% |
+| q18 | 2.862 | 34.29 | 5.219 | 0.55x | 6.6x | 4% |
+| q19 | 0.082 | 1.624 | 0.463 | 0.18x | 3.5x | 1% |
+| q20 | 0.138 | 5.501 | 3.060 | 0.05x | 1.8x | 5% |
+| q21 | 0.763 | 24.25 | 6.453 | 0.12x | 3.8x | 21% |
+| q22 | 0.157 | 3.884 | 1.417 | 0.11x | 2.7x | 20% |
+| all 22 | 15.01 | 269.3 | 83.5 | 0.18x | 3.2x | |
+
+Every result hash agrees with PostgreSQL's (as before: the two float sums PostgreSQL adds in
+its workers' order differ from its parallel plan; they equal `max_parallel_workers_per_gather =
+0`'s digit for digit, checked with psql, as the window query's float running sum does).
+
+### What changed
+
+1. **Projection pushdown** (`exec/need.rs`, `nodes::open_need`, `scan::scan_need`,
+   `storage::row::decode_row_need` / `skip_value`): a node opened by a parent passes down the
+   columns anything above reads (`ExecCtx::need`, taken as the child opens): filters and sorts
+   add their expressions' columns to what is asked of them, projections, aggregates and
+   window calls ask for exactly what they evaluate, joins for the left side's needed columns
+   with their keys, parameters and condition. A table scan decodes those columns and skips the
+   others (NULL in the row); its own filter's columns are always decoded. Conservative where
+   it can't see: no mask through LockRows, DML, CTEs, set operations, sub-selects' parameters
+   are columns like any other, nothing under EXPLAIN ANALYZE (whose sizes read whole rows),
+   none for a table whose compressed values are tracked (`sizing::note_read`), none for the
+   build side of hash joins (its rows' sizes model PostgreSQL's bucket chunks) or for scans
+   with row marks, samples or ordered index paths. Lineitem's 16 columns → q01's 7.
+2. **Big tables read as they're asked for** (`ScanNode::streamed`, `sizing::heap_modelled`):
+   a table past the heap model's limit has no heap order to put rows in; its sequential scan
+   no longer collects every (key, row) before the first row.
+3. **Parallel sequential scans** (`exec/parscan.rs`): such a scan (a statement snapshot, no
+   row marks, sample or system columns, not under EXPLAIN ANALYZE, max_parallel_workers_per_gather
+   > 0) is cut into 64 chunks per worker by its key range; max_parallel_workers_per_gather + 1
+   threads (from a process-wide pool of max_parallel_workers) read, decode and filter chunks
+   while the executor's thread takes their rows in key order, so the rows and their order are
+   the serial scan's. pg_stat's tuples read count each row as the serial scan does, filtered
+   ones included, when the executor takes it.
+4. **Kernels** (`exec/kernel.rs`, `ops::pure`, `string::pure`): the filters, group keys and
+   aggregate arguments the workers evaluate, compiled from `Expr`: columns, constants, AND /
+   OR / NOT, NULL tests, searched CASE, IN lists, `op ANY (array)` and binary built-ins that read
+   only their arguments (comparisons without a collation of their own, bpchar and date /
+   timestamp comparisons, integer, float and numeric + − ×, LIKE / NOT LIKE), each the same
+   code the executor's implementation calls. A kernel never fails: where `eval` would raise
+   an error (or meets a value it leaves to `eval`: an extension type's, a record, a
+   timestamptz compared with a date), the row goes to the executor's thread unfiltered and
+   `eval` runs the original expression there, so the first error is the serial scan's, at the
+   same row.
+5. **Partial aggregation** (`exec/partial.rs`, `AggNode::partial_run`): a plain GROUP BY right
+   over such a scan, whose keys and arguments are kernels and whose aggregates split exactly
+   (count, sum / avg of numeric and integers, min / max by the type's order, and float
+   aggregates whose values the workers collect in order and the executor's thread sums in
+   the serial order), runs as PostgreSQL's Partial / Finalize Aggregate: the workers
+   aggregate their chunks into parts, the executor's thread merges the parts in key order,
+   numbering groups in their order of first appearance and looking each row up in the hash
+   table model (`pghash::GroupOrder`, which takes each group's hash once now), so groups come
+   out in the serial order. A row a kernel can't do comes as a row, in its place, for the
+   serial path.
+6. **Numeric** (`types/numeric.rs`, `ops`, `agg`): add, sub, mul, cmp, `checked` and hashing of
+   values fitting an i64 in i128 arithmetic without allocating (the general BigInt path
+   otherwise; `small_fast_paths_match_bigint` checks they agree); operands borrowed rather
+   than cloned; sum / avg(numeric, int8) accumulate in an i128 at the largest scale seen,
+   spilling to the exact BigInt sum past it; stored numerics up to 8 bytes decode straight
+   from an i64.
+7. **Fast sorts** (`exec/fastsort.rs`): sort keys whose values encode as bytes ordering like
+   `compare_values` (no USING operator; integers, floats, dates, times, booleans, text by its
+   bytes) are sorted by those bytes with Rust's sort, also for bounded (LIMIT) sorts, window
+   sorts and the presort of DISTINCT aggregates; the result is PostgreSQL's quicksort's when no
+   two rows with equal keys differ, which is checked after sorting (then the rows go through
+   `pgsort` from their original order). Keys that are plain columns aren't copied per row.
+8. **Per-row costs**: calls evaluate up to four arguments on the stack; aggregates with one
+   argument feed it without a vector (a column without a copy); the hash aggregate makes its
+   key in one reused vector and hashes each group once for the order model, DISTINCT too;
+   hash join probes reuse their key vector and share candidate lists (`Rc`) instead of
+   cloning them; LIKE compiles its pattern once per pattern and matches ASCII strings by
+   bytes; window partitions no longer format each key's text per row; DISTINCT aggregates
+   deduplicate with a hash set.
+
+### Where analytic work is still slower
+
+- **Index scans over many rows** (q03, q04, q09, q10, q12, q20, q21: most of their time).
+  Nested loops over inner index scans and merge joins over index scans fetch each row with a
+  point read through every LSM source; agent 43's storage work (batched index fetches). And
+  for SF1's big tables the engine's index cost estimates (round 17 item 7) give some plans
+  PostgreSQL doesn't choose (q12: a merge join over orders' primary key where PostgreSQL
+  hashes a parallel scan): EXPLAIN differs there.
+- **Joins and aggregates above them run on one thread**: only a scan, its filter and an
+  aggregate right over it are parallel. Hash join probes (hash_join, q05, q07, q08) and
+  aggregates over joins run on the executor's thread, a row (`Vec<Value>`) at a time, with a
+  clone of both sides' values per joined row. The next steps: probe a shared, read-only build
+  table from the scan workers (PostgreSQL's Parallel Hash Join) and aggregate the joined rows
+  in parts as in 5; and single-integer join keys in a map of their own.
+- **Sorts with ties between different rows** fall back to the PostgreSQL-order quicksort over
+  `Value`s, and sorts of numeric keys always do (no byte encoding yet).
+- **Window functions** sort and run on one thread; `count(DISTINCT)` sorts all rows first.
+- **Numeric values** still allocate (an `Arc` and a BigInt per value): decode, arithmetic and
+  aggregation of numeric columns are most of what q01's workers do.
+
+### Verification (round 18)
+
+- `cargo test -p pg-engine` (all of it, including the new `tests/parallel_scan.rs`: every
+  kind of filter, aggregate and error over a 420,000-row table, serial against parallel, row
+  for row with the same statistics; `exec::fastsort` encodings against `compare_values`;
+  numeric fast paths against the BigInt arithmetic; partial row decoding), and `cargo clippy
+  -p pg-engine --all-targets` with no new warnings.
+- The regression suite in full, with its own reference container, at this round's start and
+  end: **51,134 / 51,150 both, identical per file and per differing unit**.
+- `difftest smoke`: the same counts as `smoke_known.txt`'s run; and 150 seeds × 120
+  statements with planner-setting variants (`DIFFTEST_PLAN=0.5`) at the start and the end:
+  the same 1,144 mismatch records, statement for statement.
+- Every benchmark query's result hash, as above; and 19 queries whose row order shows (no
+  ORDER BY: hash aggregates, joins, scans, DISTINCT; sorts with ties; bounded sorts) over the
+  2M-row and TPC-H tables, row for row against the round's starting engine. (One of them
+  showed an old difference from PostgreSQL, not this round's: `GROUP BY k % 50` over the 2M
+  rows comes out in another hash order than PostgreSQL's, from both engines.)
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:
 
-1. **Analytic queries and TPC-H (5–20x slower).** The executor pulls one `Row` (a
+1. **Analytic queries and TPC-H (5–20x slower in round 17; 1.7–10x since round 18, which
+   did the first steps below: see its section).** The executor pulls one `Row` (a
    `Vec<Value>`, a heap allocation per text value) at a time through boxed nodes, evaluates
    expressions by walking `Expr` trees, aggregates `numeric` as `BigInt`s, and runs every plan
    on one thread (PostgreSQL ran two parallel workers on the same four cores). A scan

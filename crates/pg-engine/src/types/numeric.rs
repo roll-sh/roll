@@ -43,6 +43,19 @@ fn pow10(n: u32) -> BigInt {
     BigInt::from(10u32).pow(n)
 }
 
+/// 10^n as an i128 (n <= 38).
+fn pow10_i128(n: u32) -> Option<i128> {
+    10i128.checked_pow(n)
+}
+
+/// Two small values (each fitting an i64) at their common scale, as i128s: the fast path
+/// of add / sub / cmp, exactly what `aligned` computes, without allocating.
+fn aligned_small(a: &BigInt, sa: u32, b: &BigInt, sb: u32) -> Option<(i128, i128, u32)> {
+    let (x, y) = (a.to_i64()? as i128, b.to_i64()? as i128);
+    let s = sa.max(sb);
+    Some((x.checked_mul(pow10_i128(s - sa)?)?, y.checked_mul(pow10_i128(s - sb)?)?, s))
+}
+
 /// Divide rounding half away from zero.
 fn div_round(n: &BigInt, d: &BigInt) -> BigInt {
     let (q, r) = (n / d, n % d);
@@ -302,6 +315,11 @@ impl Numeric {
             (PosInf, _) | (_, PosInf) => PosInf,
             (NegInf, _) | (_, NegInf) => NegInf,
             (Finite { int: a, scale: sa }, Finite { int: b, scale: sb }) => {
+                if let Some((x, y, s)) = aligned_small(a, *sa, b, *sb)
+                    && let Some(r) = x.checked_add(y)
+                {
+                    return Finite { int: BigInt::from(r), scale: s };
+                }
                 let (a, b, s) = Self::aligned(a, *sa, b, *sb);
                 Finite {
                     int: a + b,
@@ -312,6 +330,12 @@ impl Numeric {
     }
 
     pub fn sub(&self, other: &Numeric) -> Numeric {
+        if let (Numeric::Finite { int: a, scale: sa }, Numeric::Finite { int: b, scale: sb }) = (self, other)
+            && let Some((x, y, s)) = aligned_small(a, *sa, b, *sb)
+            && let Some(r) = x.checked_sub(y)
+        {
+            return Numeric::Finite { int: BigInt::from(r), scale: s };
+        }
         self.add(&other.neg())
     }
 
@@ -321,6 +345,11 @@ impl Numeric {
             (NaN, _) | (_, NaN) => NaN,
             (Finite { int: a, scale: sa }, Finite { int: b, scale: sb }) => {
                 let scale = sa + sb;
+                if scale as i64 <= DSCALE_MAX
+                    && let (Some(x), Some(y)) = (a.to_i64(), b.to_i64())
+                {
+                    return Finite { int: BigInt::from(x as i128 * y as i128), scale };
+                }
                 let n = Finite { int: a * b, scale };
                 if scale as i64 > DSCALE_MAX {
                     n.with_scale(DSCALE_MAX as u32)
@@ -666,7 +695,8 @@ impl Numeric {
             if *scale as i64 > DSCALE_MAX {
                 bail!(NUMERIC_VALUE_OUT_OF_RANGE, "value overflows numeric format");
             }
-            if !int.is_zero() {
+            // (Below 2^63 at a scale up to DSCALE_MAX the weight is within -4097..=4.)
+            if !int.is_zero() && int.to_i64().is_none() {
                 let w = Var::from_parts(int.clone(), *scale as i64).weight();
                 if !(WEIGHT_MIN..=WEIGHT_MAX).contains(&w) {
                     bail!(NUMERIC_VALUE_OUT_OF_RANGE, "value overflows numeric format");
@@ -1656,6 +1686,9 @@ impl Ord for Numeric {
         };
         match (self, other) {
             (Finite { int: a, scale: sa }, Finite { int: b, scale: sb }) => {
+                if let Some((x, y, _)) = aligned_small(a, *sa, b, *sb) {
+                    return x.cmp(&y);
+                }
                 let (a, b, _) = Self::aligned(a, *sa, b, *sb);
                 a.cmp(&b)
             }
@@ -1666,12 +1699,37 @@ impl Ord for Numeric {
 
 impl Hash for Numeric {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        match self.normalize() {
-            Numeric::Finite { int, scale } => {
-                0u8.hash(state);
-                int.hash(state);
-                scale.hash(state);
+        // (A value fitting an i64 normalised without allocating; either way, a normalised
+        // value fitting an i64 hashes as one, so equal values hash alike.)
+        if let Numeric::Finite { int, scale } = self
+            && let Some(mut v) = int.to_i64()
+        {
+            let mut scale = *scale;
+            while scale > 0 && v != 0 && v % 10 == 0 {
+                v /= 10;
+                scale -= 1;
             }
+            if v == 0 {
+                scale = 0;
+            }
+            0u8.hash(state);
+            v.hash(state);
+            scale.hash(state);
+            return;
+        }
+        match self.normalize() {
+            Numeric::Finite { int, scale } => match int.to_i64() {
+                Some(v) => {
+                    0u8.hash(state);
+                    v.hash(state);
+                    scale.hash(state);
+                }
+                None => {
+                    5u8.hash(state);
+                    int.hash(state);
+                    scale.hash(state);
+                }
+            },
             Numeric::NaN => 1u8.hash(state),
             Numeric::PosInf => 2u8.hash(state),
             Numeric::NegInf => 3u8.hash(state),
@@ -1760,5 +1818,54 @@ mod tests {
             "0.333333333333333"
         );
         assert_eq!(Numeric::from_f64(1e20).to_string(), "100000000000000000000");
+    }
+
+    /// The i64 fast paths of add / sub / mul / cmp / checked give what the BigInt
+    /// arithmetic gives (computed here as the general path does), and equal values hash
+    /// alike however they're written.
+    #[test]
+    fn small_fast_paths_match_bigint() {
+        use std::hash::BuildHasher;
+        let vals: Vec<(i64, u32)> = [0i64, 1, -1, 7, -12, 100, 999_999, -1_000_000, i64::MAX, i64::MIN, i64::MAX / 3]
+            .iter()
+            .flat_map(|&v| [0u32, 1, 2, 5, 18].map(|s| (v, s)))
+            .collect();
+        let big = |v: i64, s: u32| Numeric::Finite { int: BigInt::from(v), scale: s };
+        let slow = |a: (i64, u32), b: (i64, u32), op: char| -> Numeric {
+            let (x, y) = (BigInt::from(a.0), BigInt::from(b.0));
+            let (x, y, s) = Numeric::aligned(&x, a.1, &y, b.1);
+            match op {
+                '+' => Numeric::Finite { int: x + y, scale: s },
+                '-' => Numeric::Finite { int: x - y, scale: s },
+                _ => unreachable!(),
+            }
+        };
+        let st = std::collections::hash_map::RandomState::new();
+        let h = |n: &Numeric| st.hash_one(n);
+        for &a in &vals {
+            for &b in &vals {
+                let (na, nb) = (big(a.0, a.1), big(b.0, b.1));
+                for op in ['+', '-'] {
+                    let got = if op == '+' { na.add(&nb) } else { na.sub(&nb) };
+                    let want = slow(a, b, op);
+                    assert_eq!(format!("{got:?}"), format!("{want:?}"), "{a:?} {op} {b:?}");
+                }
+                let got = na.mul(&nb);
+                let want = Numeric::Finite { int: BigInt::from(a.0) * BigInt::from(b.0), scale: a.1 + b.1 };
+                assert_eq!(format!("{got:?}"), format!("{want:?}"), "{a:?} * {b:?}");
+                let (x, y, _) = Numeric::aligned(&BigInt::from(a.0), a.1, &BigInt::from(b.0), b.1);
+                assert_eq!(na.cmp(&nb), x.cmp(&y), "{a:?} cmp {b:?}");
+                if na == nb {
+                    assert_eq!(h(&na), h(&nb), "{a:?} hash {b:?}");
+                }
+            }
+        }
+        // A value past the i64 equal to a small one (trailing zeros) hashes as it does.
+        let a = big(15, 1);
+        let b = Numeric::Finite { int: BigInt::from(15) * BigInt::from(10).pow(30), scale: 31 };
+        assert_eq!(a, b);
+        assert_eq!(h(&a), h(&b));
+        assert!(big(i64::MAX, 0).checked().is_ok());
+        assert!(Numeric::Finite { int: BigInt::from(10).pow(200000), scale: 0 }.checked().is_err());
     }
 }

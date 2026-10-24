@@ -633,8 +633,18 @@ impl GroupOrder {
 
     /// A row of group `group` (numbered by first appearance) with key values `key`.
     pub fn row(&mut self, key: &[Value], group: usize) {
-        let h = tuple_hash(key, &self.types, Some(&self.cat));
+        let h = self.hash(key);
         self.lookups.push((h, group));
+    }
+
+    /// The hash the table keeps key values `key` under.
+    pub fn hash(&self, key: &[Value]) -> u32 {
+        tuple_hash(key, &self.types, Some(&self.cat))
+    }
+
+    /// A row of group `group` whose key hashes to `hash`.
+    pub fn lookup(&mut self, hash: u32, group: usize) {
+        self.lookups.push((hash, group));
     }
 
     /// The groups in the hash table's iteration order, the table sized for `ngroups`.

@@ -355,7 +355,17 @@ pub fn decode_value(b: &[u8], pos: &mut usize) -> Result<Value> {
         tag::FLOAT8 => Value::Float8(le!(f64, 8)),
         tag::NUMERIC => {
             let scale = get_varint(b, pos)? as u32;
-            let int = BigInt::from_signed_bytes_le(take_bytes(b, pos)?);
+            let bytes = take_bytes(b, pos)?;
+            // (Up to 8 bytes: sign-extended to an i64, the common case, without the
+            // general conversion.)
+            let int = if !bytes.is_empty() && bytes.len() <= 8 {
+                let fill = if bytes[bytes.len() - 1] & 0x80 != 0 { 0xFF } else { 0 };
+                let mut w = [fill; 8];
+                w[..bytes.len()].copy_from_slice(bytes);
+                BigInt::from(i64::from_le_bytes(w))
+            } else {
+                BigInt::from_signed_bytes_le(bytes)
+            };
             Value::numeric(Numeric::from_parts(int, scale))
         }
         tag::NUM_NAN => Value::numeric(Numeric::NaN),
@@ -484,6 +494,59 @@ pub fn decode_row(b: &[u8]) -> Result<Vec<Value>> {
     Ok(row)
 }
 
+/// Step over one encoded value without building it.
+pub fn skip_value(b: &[u8], pos: &mut usize) -> Result<()> {
+    let t = *b.get(*pos).ok_or_else(|| internal("truncated row"))?;
+    let fixed = match t {
+        tag::NULL | tag::FALSE | tag::TRUE | tag::NUM_NAN | tag::NUM_PINF | tag::NUM_NINF => 0,
+        tag::CHAR => 1,
+        tag::INT2 => 2,
+        tag::INT4 | tag::FLOAT4 | tag::DATE | tag::OID => 4,
+        tag::TID => 6,
+        tag::MACADDR => 6,
+        tag::INT8 | tag::FLOAT8 | tag::TIME | tag::TIMESTAMP | tag::TIMESTAMPTZ | tag::MONEY
+        | tag::LSN | tag::XID8 | tag::MACADDR8 => 8,
+        tag::TIMETZ => 12,
+        tag::INTERVAL | tag::UUID => 16,
+        tag::TEXT | tag::JSON | tag::JSONB | tag::BYTEA | tag::SNAPSHOT | tag::TSVECTOR
+        | tag::TSQUERY => {
+            *pos += 1;
+            take_bytes(b, pos)?;
+            return Ok(());
+        }
+        tag::NUMERIC => {
+            *pos += 1;
+            get_varint(b, pos)?;
+            take_bytes(b, pos)?;
+            return Ok(());
+        }
+        // (The rest: decoded and dropped.)
+        _ => {
+            decode_value(b, pos)?;
+            return Ok(());
+        }
+    };
+    take(b, pos, 1 + fixed)?;
+    Ok(())
+}
+
+/// `decode_row` building only the values `need` marks (the others NULL; a value past the
+/// mask's end isn't needed).
+pub fn decode_row_need(b: &[u8], need: &[bool]) -> Result<Vec<Value>> {
+    let mut pos = 0;
+    let n = get_varint(b, &mut pos)? as usize;
+    let mut row = Vec::with_capacity(n);
+    for i in 0..n {
+        if need.get(i).copied().unwrap_or(false) {
+            row.push(decode_value(b, &mut pos)?);
+        } else {
+            skip_value(b, &mut pos)?;
+            row.push(Value::Null);
+        }
+    }
+    Ok(row)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,12 +567,44 @@ mod tests {
             ))),
             Value::Jsonb(Arc::new(parse_jsonb(r#"{"a": [1, 2]}"#).unwrap())),
             Value::Uuid(0x1234),
+            Value::Char(b'x'),
+            Value::Date(5),
+            Value::Timetz(1, -2),
+            Value::Tid(3, 4),
+            Value::bytea(vec![1u8, 2, 3]),
+            Value::Int8(-9),
         ];
         let enc = encode_row(&row);
         let dec = decode_row(&enc).unwrap();
         assert_eq!(dec, row);
+        // Any subset decoded, the rest skipped.
+        for m in 0u32..(1 << row.len()) {
+            let need: Vec<bool> = (0..row.len()).map(|i| m & (1 << i) != 0).collect();
+            let part = decode_row_need(&enc, &need).unwrap();
+            for (i, v) in part.iter().enumerate() {
+                if need[i] {
+                    assert_eq!(*v, row[i]);
+                } else {
+                    assert!(v.is_null());
+                }
+            }
+        }
         if let Value::Numeric(n) = &dec[4] {
             assert_eq!(n.to_string(), "-123.4500");
+        }
+    }
+
+    #[test]
+    fn numerics_roundtrip() {
+        for s in [
+            "0", "1", "-1", "127", "128", "-128", "-129", "255", "256", "-32768", "0.01",
+            "-0.01", "9223372036854775807", "-9223372036854775808", "9223372036854775808",
+            "-9223372036854775809", "1180591620717411303424.5", "-12345678901234567890123.25",
+        ] {
+            let v = Value::numeric(s.parse().unwrap());
+            let dec = decode_row(&encode_row(std::slice::from_ref(&v))).unwrap();
+            assert_eq!(dec[0], v, "{s}");
+            assert_eq!(format!("{:?}", dec[0]), format!("{v:?}"), "{s}");
         }
     }
 }

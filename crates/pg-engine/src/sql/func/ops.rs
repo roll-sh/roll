@@ -329,13 +329,13 @@ fn i(a: &Value) -> i128 {
 }
 
 fn int_add(a: &[Value], c: &FnCtx) -> Result<Value> {
-    int_result(i(&a[0]) + i(&a[1]), c.ret)
+    p_int_add(&a[0], &a[1], c.ret)
 }
 fn int_sub(a: &[Value], c: &FnCtx) -> Result<Value> {
-    int_result(i(&a[0]) - i(&a[1]), c.ret)
+    p_int_sub(&a[0], &a[1], c.ret)
 }
 fn int_mul(a: &[Value], c: &FnCtx) -> Result<Value> {
-    int_result(i(&a[0]) * i(&a[1]), c.ret)
+    p_int_mul(&a[0], &a[1], c.ret)
 }
 fn int_div(a: &[Value], c: &FnCtx) -> Result<Value> {
     let d = i(&a[1]);
@@ -434,21 +434,13 @@ fn float_result(v: f64, ty: &T, inputs_finite: bool, zero_ok: bool) -> Result<Va
 }
 
 fn fl_add(a: &[Value], c: &FnCtx) -> Result<Value> {
-    let (x, y) = (f(&a[0]), f(&a[1]));
-    float_result(x + y, c.ret, x.is_finite() && y.is_finite(), true)
+    p_fl_add(&a[0], &a[1], c.ret)
 }
 fn fl_sub(a: &[Value], c: &FnCtx) -> Result<Value> {
-    let (x, y) = (f(&a[0]), f(&a[1]));
-    float_result(x - y, c.ret, x.is_finite() && y.is_finite(), true)
+    p_fl_sub(&a[0], &a[1], c.ret)
 }
 fn fl_mul(a: &[Value], c: &FnCtx) -> Result<Value> {
-    let (x, y) = (f(&a[0]), f(&a[1]));
-    float_result(
-        x * y,
-        c.ret,
-        x.is_finite() && y.is_finite(),
-        x == 0.0 || y == 0.0,
-    )
+    p_fl_mul(&a[0], &a[1], c.ret)
 }
 fn fl_div(a: &[Value], c: &FnCtx) -> Result<Value> {
     let (x, y) = (f(&a[0]), f(&a[1]));
@@ -485,14 +477,22 @@ fn n(a: &Value) -> Numeric {
     }
 }
 
-fn num_add(a: &[Value], _: &FnCtx) -> Result<Value> {
-    Ok(Value::numeric(n(&a[0]).add(&n(&a[1])).checked()?))
+/// `n` without copying a numeric argument.
+fn nr(a: &Value) -> std::borrow::Cow<'_, Numeric> {
+    match a {
+        Value::Numeric(x) => std::borrow::Cow::Borrowed(&**x),
+        v => std::borrow::Cow::Owned(n(v)),
+    }
 }
-fn num_sub(a: &[Value], _: &FnCtx) -> Result<Value> {
-    Ok(Value::numeric(n(&a[0]).sub(&n(&a[1])).checked()?))
+
+fn num_add(a: &[Value], c: &FnCtx) -> Result<Value> {
+    p_num_add(&a[0], &a[1], c.ret)
 }
-fn num_mul(a: &[Value], _: &FnCtx) -> Result<Value> {
-    Ok(Value::numeric(n(&a[0]).mul(&n(&a[1])).checked()?))
+fn num_sub(a: &[Value], c: &FnCtx) -> Result<Value> {
+    p_num_sub(&a[0], &a[1], c.ret)
+}
+fn num_mul(a: &[Value], c: &FnCtx) -> Result<Value> {
+    p_num_mul(&a[0], &a[1], c.ret)
 }
 fn num_div(a: &[Value], _: &FnCtx) -> Result<Value> {
     Ok(Value::numeric(n(&a[0]).div(&n(&a[1]))?.checked()?))
@@ -1321,4 +1321,151 @@ dt_cmp! {
     dt_le => |o| o != Ordering::Greater,
     dt_gt => |o| o == Ordering::Greater,
     dt_ge => |o| o != Ordering::Less,
+}
+
+// ── pure implementations ──
+
+/// A binary operator's implementation that reads nothing of its call but its arguments and its
+/// result type: callable off the executor's thread (`exec::kernel`). Only for calls without
+/// a collation of their own (the comparisons then compare as `cmp_in` does without one).
+pub type PureFn = fn(&Value, &Value, &T) -> Result<Value>;
+
+fn p_eq(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(cmp(x, y) == Ordering::Equal))
+}
+fn p_ne(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(cmp(x, y) != Ordering::Equal))
+}
+fn p_lt(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(cmp(x, y) == Ordering::Less))
+}
+fn p_le(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(cmp(x, y) != Ordering::Greater))
+}
+fn p_gt(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(cmp(x, y) == Ordering::Greater))
+}
+fn p_ge(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(cmp(x, y) != Ordering::Less))
+}
+fn p_bpcmp(x: &Value, y: &Value) -> Ordering {
+    bp(x).as_bytes().cmp(bp(y).as_bytes())
+}
+fn p_bp_eq(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(p_bpcmp(x, y) == Ordering::Equal))
+}
+fn p_bp_ne(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(p_bpcmp(x, y) != Ordering::Equal))
+}
+fn p_bp_lt(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(p_bpcmp(x, y) == Ordering::Less))
+}
+fn p_bp_le(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(p_bpcmp(x, y) != Ordering::Greater))
+}
+fn p_bp_gt(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(p_bpcmp(x, y) == Ordering::Greater))
+}
+fn p_bp_ge(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(p_bpcmp(x, y) != Ordering::Less))
+}
+fn p_int_add(x: &Value, y: &Value, r: &T) -> Result<Value> {
+    int_result(i(x) + i(y), r)
+}
+fn p_int_sub(x: &Value, y: &Value, r: &T) -> Result<Value> {
+    int_result(i(x) - i(y), r)
+}
+fn p_int_mul(x: &Value, y: &Value, r: &T) -> Result<Value> {
+    int_result(i(x) * i(y), r)
+}
+fn p_fl_add(x: &Value, y: &Value, r: &T) -> Result<Value> {
+    let (x, y) = (f(x), f(y));
+    float_result(x + y, r, x.is_finite() && y.is_finite(), true)
+}
+fn p_fl_sub(x: &Value, y: &Value, r: &T) -> Result<Value> {
+    let (x, y) = (f(x), f(y));
+    float_result(x - y, r, x.is_finite() && y.is_finite(), true)
+}
+fn p_fl_mul(x: &Value, y: &Value, r: &T) -> Result<Value> {
+    let (x, y) = (f(x), f(y));
+    float_result(x * y, r, x.is_finite() && y.is_finite(), x == 0.0 || y == 0.0)
+}
+fn p_num_add(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::numeric(nr(x).add(&nr(y)).checked()?))
+}
+fn p_num_sub(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::numeric(nr(x).sub(&nr(y)).checked()?))
+}
+fn p_num_mul(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::numeric(nr(x).mul(&nr(y)).checked()?))
+}
+
+/// `as_instant` of a date or a timestamp (a timestamptz needs the session's zone: left to
+/// the executor's thread).
+fn p_instant(v: &Value) -> Result<i64> {
+    match v {
+        Value::Date(d) => Ok(date_to_ts(*d).unwrap_or(datetime::TS_POS_INF)),
+        Value::Timestamp(t) => Ok(*t),
+        Value::Timestamptz(_) => Err(crate::error::internal("timestamptz compared off the session")),
+        _ => Ok(0),
+    }
+}
+fn p_dtcmp(x: &Value, y: &Value) -> Result<Ordering> {
+    Ok(p_instant(x)?.cmp(&p_instant(y)?))
+}
+fn p_dt_eq(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(p_dtcmp(x, y)? == Ordering::Equal))
+}
+fn p_dt_ne(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(p_dtcmp(x, y)? != Ordering::Equal))
+}
+fn p_dt_lt(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(p_dtcmp(x, y)? == Ordering::Less))
+}
+fn p_dt_le(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(p_dtcmp(x, y)? != Ordering::Greater))
+}
+fn p_dt_gt(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(p_dtcmp(x, y)? == Ordering::Greater))
+}
+fn p_dt_ge(x: &Value, y: &Value, _: &T) -> Result<Value> {
+    Ok(Value::Bool(p_dtcmp(x, y)? != Ordering::Less))
+}
+
+/// The pure implementation of built-in `imp`, when it has one.
+pub fn pure(imp: super::FnImpl) -> Option<PureFn> {
+    let table: [(super::FnImpl, PureFn); 27] = [
+        (dt_eq, p_dt_eq),
+        (dt_ne, p_dt_ne),
+        (dt_lt, p_dt_lt),
+        (dt_le, p_dt_le),
+        (dt_gt, p_dt_gt),
+        (dt_ge, p_dt_ge),
+        (op_eq, p_eq),
+        (op_ne, p_ne),
+        (op_lt, p_lt),
+        (op_le, p_le),
+        (op_gt, p_gt),
+        (op_ge, p_ge),
+        (bp_eq, p_bp_eq),
+        (bp_ne, p_bp_ne),
+        (bp_lt, p_bp_lt),
+        (bp_le, p_bp_le),
+        (bp_gt, p_bp_gt),
+        (bp_ge, p_bp_ge),
+        (int_add, p_int_add),
+        (int_sub, p_int_sub),
+        (int_mul, p_int_mul),
+        (fl_add, p_fl_add),
+        (fl_sub, p_fl_sub),
+        (fl_mul, p_fl_mul),
+        (num_add, p_num_add),
+        (num_sub, p_num_sub),
+        (num_mul, p_num_mul),
+    ];
+    table
+        .iter()
+        .find(|(f, _)| std::ptr::fn_addr_eq(*f, imp))
+        .map(|(_, p)| *p)
+        .or_else(|| super::string::pure(imp))
 }
