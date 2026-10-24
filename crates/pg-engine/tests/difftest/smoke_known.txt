@@ -58,7 +58,6 @@ eval_error s23 #67
 eval_error s24 #32
 eval_error s24 #53
 missing_error s25 #34
-wrong_error s25 #39
 eval_error s25 #42
 eval_error s25 #65
 engine_error s25 #72
