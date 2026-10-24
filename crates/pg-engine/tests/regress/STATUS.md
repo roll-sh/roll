@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51123 (**99.95%**) |
-| units differing | 27 |
+| units matching | 51125 (**99.95%**) |
+| units differing | 25 |
 | files fully matching | 227 |
 | engine output == expected/*.out (pg_regress "ok") | 188 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 27 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 25 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 27 units
-join (18), partition_join (8), partition_prune (1)
+### EXPLAIN (group C1) — 25 units
+join (18), partition_join (6), partition_prune (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -881,6 +881,36 @@ select_distinct_on, create_function_sql: unchanged):
 
 Golden: `tests/sql/a26_collapse_sje_neq.sql`.
 
+Third batch (the same subset against the base it is on, 7d29166: 13152 -> 13154, none lost; on e958e87 partition_join 234 and 553 the only changes, the other files differing only by roles of a concurrent run on the shared reference; on fafa1cd and 9d18ee9: 13153 -> 13155; the 33 other files with
+joins unchanged):
+
+| file | fixed units |
+|---|---|
+| partition_join | 234, 553 |
+
+- **Partitionwise joins of some of a group's items** (`partitionwise.rs` `pw_subset`):
+  Postgres's search gives every join relation of partitioned items its partitionwise paths
+  (try_partitionwise_join in populate_joinrel_with_paths), so `t1 ⋈ t3` joins partition by
+  partition under a hash join with an item partitioned otherwise (partition_join 234). An
+  inner group whose items can't all be joined partitionwise is planned again with each subset
+  of partitioned items joined first (planned as a group of its own, partitionwise) as one
+  item; the cheapest such plan replaces the plain one when it costs fuzzily less. (Groups
+  with outer joins inside aren't tried: partition_join 138 stays open.)
+- **The topmost relation's items made partitionwise for it**: the topmost scan/join relation
+  keeps only partitionwise paths when it has any (apply_scanjoin_target_to_paths), and an
+  item that is a join of partitioned tables has partitionwise paths whatever its cheapest
+  is; when the group can't be joined partitionwise because such an item was planned plainly
+  (cheaper on its own), it is planned again with its items' joins forced partitionwise
+  (partition_join 553: the FULL JOIN of `t1 ⟕ t2` and t3 over merged list bounds).
+- **Self-join elimination over PlaceHolderVars** ("PHVs should not impose any constraints on
+  removing self-joins"): a group computing PlaceHolderVars eliminates self joins too, their
+  columns, scopes and the removed relation's PlaceHolderVar quals going to the kept one; it
+  keeps two items so they are still computed. join 674 / 681 now differ only by the kept
+  scan's target list (Postgres keeps the removed relation's reltarget: `Output: t3.id`, and an
+  Index Scan where `tr.y` is still needed), agent 23's 620.
+
+Golden: `tests/sql/a26_pw_items.sql`.
+
 Looked at and left (why):
 
 - join 674 / 681: Postgres removes the self join although one side is a pulled-up subquery
@@ -900,16 +930,15 @@ Looked at and left (why):
   shape as partition_join 204 (agent 25's).
 - partition_join 98: a merge clause between two expressions (`t1::text = t2::text`), sorted
   on each side: expression members of equivalence classes (agent 21's area).
-- partition_join 138 / 234: Postgres builds partitionwise paths for every join relation of the
-  search (try_partitionwise_join in populate_joinrel_with_paths), so `t1 ⋈ t3` joins
-  partitionwise below a join that can't; the engine tries it for a whole join group only.
+- partition_join 138: Postgres builds partitionwise paths for every join relation of the
+  search (try_partitionwise_join in populate_joinrel_with_paths), so `t2 ⋈ t3` joins
+  partitionwise below the LEFT JOIN with the empty subquery; the third batch's `pw_subset`
+  takes inner groups only.
 - partition_join 210: an EXISTS over a join with a LATERAL item (`int4_tbl, LATERAL (... LIMIT
   2)`) isn't pulled up (`sublink::sub_join` takes joins without parameters), so the DELETE's
   partitions aren't pruned by the pushed-down `c IS NULL`.
 - partition_join 300: the child joins' orders tie exactly on cost (5.30, 7.18); Postgres keeps
   the path it made first.
-- partition_join 553: a three-way join with a FULL JOIN over merged list bounds isn't joined
-  partitionwise (the engine joins its LEFT JOIN alone first).
 
 ## Round 16, agent 24 (row marks: several locking clauses, preprocess_rowmarks' order, whole-row mark widths)
 
@@ -4202,7 +4231,7 @@ produces no units on Linux (skipped by the file itself).
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 307 | 100% | yes | yes |  |
 | xml | 281 | 281 | 100% | yes | yes |  |
-| partition_join | 614 | 606 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (8) |
+| partition_join | 614 | 608 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (6) |
 | partition_prune | 771 | 770 | 100% | yes | no | wrong result `SELECT: row count differs` (1) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |
