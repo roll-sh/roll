@@ -1,0 +1,3 @@
+<stdin>:1:Invalid syntax at line 1, char 8
+<stdin>:1:  SELECT & FROM x;
+<stdin>:1:         ^

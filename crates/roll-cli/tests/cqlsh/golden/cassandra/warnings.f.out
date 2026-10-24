@@ -1,0 +1,51 @@
+
+ count
+-------
+     2
+
+(1 rows)
+
+Warnings :
+Aggregation query used without partition key
+
+
+ system.max(c)
+---------------
+             1
+
+(1 rows)
+
+Warnings :
+Aggregation query used without partition key
+
+
+ [json]
+----------------------------
+ {"k": 1, "c": 1, "v": "a"}
+
+(1 rows)
+
+ k | c | v
+---+---+-----------
+ 5 | 1 | it's json
+
+(1 rows)
+
+ key
+-------
+ local
+
+(1 rows)
+
+ k | c | v
+---+---+-----
+ 1 | 1 |   a
+ 1 | 2 | ttl
+
+(2 rows)
+
+ k | c | v
+---+---+---
+
+
+(0 rows)

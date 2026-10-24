@@ -1,0 +1,26 @@
+
+CAPTURE [cqlsh only]
+
+Begins capturing command output and appending it to a specified file.
+Output will not be shown at the console while it is captured.
+
+Usage:
+
+  CAPTURE '<file>';
+  CAPTURE OFF;
+  CAPTURE;
+
+That is, the path to the file to be appended to must be given inside a
+string literal. The path is interpreted relative to the current working
+directory. The tilde shorthand notation ('~/mydir') is supported for
+referring to $HOME.
+
+Only query result output is captured. Errors and output from cqlsh-only
+commands will still be shown in the cqlsh session.
+
+To stop capturing output and show it in the cqlsh session again, use
+CAPTURE OFF.
+
+To inspect the current capture configuration, use CAPTURE with no
+arguments.
+

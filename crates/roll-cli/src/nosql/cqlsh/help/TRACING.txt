@@ -1,0 +1,17 @@
+
+TRACING [cqlsh]
+
+  Enables or disables request tracing.
+
+TRACING ON
+
+  Enables tracing for all further requests.
+
+TRACING OFF
+
+  Disables tracing.
+
+TRACING
+
+  TRACING with no arguments shows the current tracing status.
+

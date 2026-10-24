@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "next typegen && tsc --noEmit",
-    "test": "rm -rf .test-build && tsc -p tsconfig.test.json && node --test --test-reporter=spec .test-build/test/*.test.js"
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./test/register.mjs --test \"test/*.test.ts\""
   },
   "dependencies": {
     "@roll/brand": "workspace:*",

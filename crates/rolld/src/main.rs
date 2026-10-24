@@ -15,11 +15,12 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// `mi_option_purge_delay` (libmimalloc-sys doesn't export the constant).
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
+mod nosql;
 mod queues;
 mod storage_events;
 
-/// roll daemon: serverless Postgres, serverless Redis, S3-compatible storage, Kafka-compatible streams, tasks and RabbitMQ-compatible queues on
-/// your machine (or an EC2 host).
+/// roll daemon: serverless Postgres, serverless Redis, S3-compatible storage, Kafka-compatible streams, tasks,
+/// RabbitMQ-compatible queues and ScyllaDB/Cassandra-compatible nosql on your machine (or an EC2 host).
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -209,6 +210,8 @@ struct Args {
     no_storage: bool,
     #[command(flatten)]
     queues: queues::QueuesArgs,
+    #[command(flatten)]
+    nosql: nosql::NosqlArgs,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -217,9 +220,16 @@ fn main() -> anyhow::Result<()> {
     // that are parked. Measured: no throughput cost; idle footprint after 256 MB of writes 36–56 MB
     // → 24–31 MB (and ~90 MB → ~60 MB with 600 partitions).
     unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0) };
+    nosql_storage::memory::set_allocator_release(|| unsafe { libmimalloc_sys::mi_collect(true) });
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .on_thread_park(|| unsafe { libmimalloc_sys::mi_collect(false) })
+        // Memory a thread frees that another (blocking-pool) thread allocated stays with that
+        // thread's heap until it allocates in the same size class again or exits. Blocking
+        // threads (file reads, block decoding, flushes) mostly don't: with tokio's 10 s
+        // keep-alive a compaction left ~3x its working set pinned, and an unload's memory came
+        // back only 10 s later. Idle ones exit after 50 ms instead (measured: no slower).
+        .thread_keep_alive(std::time::Duration::from_millis(50))
         .build()?
         .block_on(run())
 }
@@ -228,13 +238,32 @@ async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,redis_server=info,redis_control=info,stream_broker=info,tasks=info,mq_core=info,mq_amqp=info,mq_cluster=info,mq_mgmt=info,mq_http=info,mq_mqtt=info,mq_stomp=info,mq_shovel=info,s3_store=info,s3_server=info,s3_control=info".into()),
+                .unwrap_or_else(|_| "info,pg_proxy=info,pg_control=info,pg_storage=info,redis_server=info,redis_control=info,stream_broker=info,tasks=info,mq_core=info,mq_amqp=info,mq_cluster=info,mq_mgmt=info,mq_http=info,mq_mqtt=info,mq_stomp=info,mq_shovel=info,nosql_server=info,nosql_control=info,nosql_storage=info,s3_store=info,s3_server=info,s3_control=info".into()),
         )
         .init();
     let args = Args::parse();
     let home = std::path::absolute(&args.home)?;
     let home_abs = home.clone();
     let storage_opts = StorageOpts::from(&args);
+
+    // Object storage shared by the products (S3, or a directory under --home).
+    let mut storage = Config::local(home.clone()).storage;
+    if let Some(bucket) = &args.s3_bucket {
+        storage = StorageConfig::S3 { bucket: bucket.clone(), region: args.s3_region.clone(), endpoint: args.s3_endpoint.clone(), prefix: args.s3_prefix.clone() };
+    }
+    if args.nosql.nosql_only {
+        anyhow::ensure!(!args.nosql.nosql_disabled, "--nosql-only with --no-nosql leaves nothing to run");
+        let n = nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage).await?;
+        let listener = tokio::net::TcpListener::bind(args.api).await?;
+        info!(addr = %args.api, "nosql control API listening");
+        tokio::select! {
+            r = axum::serve(listener, n.router()) => r?,
+            r = n.serve() => r?,
+            _ = shutdown_signal() => info!("shutting down"),
+        }
+        n.shutdown().await?;
+        return Ok(());
+    }
 
     let queues = if args.queues.disabled { None } else { Some(queues::Queues::start(&home, args.queues.clone(), &args.public_host).await?) };
     if args.queues_only {
@@ -269,23 +298,14 @@ async fn run() -> anyhow::Result<()> {
     stream_config.local_disk_bytes = args.stream_disk_mb << 20;
     stream_config.evict_on_unload = !args.stream_keep_local;
 
-    let mut config = Config::local(home);
+    let mut config = Config::local(home.clone());
     config.public_host = args.public_host.clone();
     config.public_port = args.proxy.port();
     config.mem_mb_per_cu = args.mem_per_cu;
     config.evict_after_s = args.evict_after;
     config.internal_url = args.internal_url.unwrap_or_else(|| format!("http://host.docker.internal:{}", args.api.port()));
-    if let Some(bucket) = args.s3_bucket {
-        config.storage = StorageConfig::S3 {
-            bucket,
-            region: args.s3_region,
-            endpoint: args.s3_endpoint,
-            prefix: args.s3_prefix,
-        };
-    }
+    config.storage = storage.clone();
     stream_config.storage = config.storage.clone();
-
-    let storage = config.storage.clone();
     let control = Control::new(config).await?;
     info!(storage = %control.objects.description, "durable storage");
     reconciler::recover(&control).await?;
@@ -296,7 +316,7 @@ async fn run() -> anyhow::Result<()> {
     );
     // Serverless Redis: same object storage, its own node.
     let mut rcfg = redis_control::RedisConfig::local(std::path::absolute(&args.home)?.join("redis"));
-    rcfg.node_name = args.node;
+    rcfg.node_name = args.node.clone();
     rcfg.public_host = args.public_host.clone();
     rcfg.resp_port = args.redis.port();
     rcfg.http_port = args.redis_http.port();
@@ -318,6 +338,8 @@ async fn run() -> anyhow::Result<()> {
         let (st, l) = start_storage(&storage_opts, &home_abs, &storage).await?;
         (Some(st), Some(l))
     };
+    // roll nosql: same object storage, its own node.
+    let nosql = if args.nosql.nosql_disabled { None } else { Some(nosql::Nosql::start(&home, args.nosql.clone(), &args.public_host, &args.node, &storage).await?) };
 
     let broker = stream_broker::Broker::new(stream_config).await?;
     if let Some(name) = &broker.config.default_stream
@@ -355,6 +377,15 @@ async fn run() -> anyhow::Result<()> {
             _ => std::future::pending().await,
         }
     };
+    if let Some(n) = &nosql {
+        router = router.merge(n.router());
+    }
+    let nosql_serve = async {
+        match &nosql {
+            Some(n) => n.serve().await,
+            None => std::future::pending().await,
+        }
+    };
     let queues_serve = async {
         match &queues {
             Some(q) => q.serve().await,
@@ -369,6 +400,7 @@ async fn run() -> anyhow::Result<()> {
         r = redis_server::http::serve_http(redis_http, redis_dir) => r?,
         r = queues_serve => r?,
         r = storage_serve => r?,
+        r = nosql_serve => r?,
         r = stream_broker::server::serve_on(broker.clone(), kafka) => r?,
         _ = reconciler::run(control.clone()) => {}
         _ = broker.clone().run() => {}
@@ -378,6 +410,9 @@ async fn run() -> anyhow::Result<()> {
             redis.shipper.flush().await?;
             redis.shipper.write_manifests(true).await?;
         }
+    }
+    if let Some(n) = &nosql {
+        n.shutdown().await?;
     }
     if let Some(q) = &queues {
         q.shutdown().await;

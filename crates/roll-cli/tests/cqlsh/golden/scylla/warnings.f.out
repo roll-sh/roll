@@ -1,0 +1,53 @@
+
+Warnings :
+Using Replication Factor replication_factor=1 lower than the minimum_replication_factor_warn_threshold=3 is not recommended.
+
+
+ count
+-------
+     2
+
+(1 rows)
+
+ system.max(c)
+---------------
+             1
+
+(1 rows)
+
+ [json]
+----------------------------
+ {"k": 1, "c": 1, "v": "a"}
+
+(1 rows)
+
+ k | c | v
+---+---+-----------
+ 5 | 1 | it's json
+
+(1 rows)
+
+ key
+-------
+ local
+
+(1 rows)
+
+ k | c | v
+---+---+---
+ 1 | 1 | a
+
+(1 rows)
+
+ k | c | v
+---+---+-----
+ 1 | 1 |   a
+ 1 | 2 | ttl
+
+(2 rows)
+
+ k | c | v
+---+---+---
+
+
+(0 rows)

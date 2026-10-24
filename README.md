@@ -6,7 +6,7 @@ Serverless infrastructure for everything.
 
 ```
 apps/
-  dashboard/        Next.js 16 app — brand playground (/), dashboard (/dashboard, /dashboard/databases, /dashboard/streams, /dashboard/tasks, /dashboard/storage)
+  dashboard/        Next.js 16 app — brand playground (/), dashboard (/dashboard, /dashboard/databases, /dashboard/streams, /dashboard/tasks, /dashboard/storage, /dashboard/nosql)
 packages/
   brand/            @roll/brand — logo geometry, animation engine, React components, SVG assets
   tasks/            @roll/tasks — TypeScript SDK: client, pull consumer, signature verification, workflows
@@ -17,6 +17,15 @@ crates/
   redis-engine/     Redis data structures and commands (pure, synchronous, one engine per shard)
   redis-server/     Redis network layer: RESP + TLS, REST API, tenants, durability on S3, replicas
   redis-control/    Redis control plane: databases, branches, restore, replicas, metering, HTTP API
+  nosql-types/      CQL data types: values, ordering, serialisation, literals, JSON, Murmur3 tokens
+  nosql-proto/      CQL native protocol v3/v4/v5 (both directions) and an async client
+  nosql-cql/        CQL lexer and parser for Cassandra 5 and ScyllaDB, with the references' syntax errors
+  nosql-storage/    LSM storage on object storage: memtables, SSTables, compaction, commit log, branches, PITR
+  nosql-engine/     CQL engine: schema, queries, LWT, indexes, views, CDC, auth, UDFs (Lua 5.4), DESCRIBE, dialects
+  nosql-lua/        Vendored Lua 5.4 for ScyllaDB Lua UDFs (symbols prefixed so it links next to redis-lua)
+  nosql-alternator/ ScyllaDB Alternator: the DynamoDB API on top of the engine
+  nosql-server/     NoSQL data plane: CQL (+TLS, SNI, shard-aware), Alternator, ScyllaDB REST, tenants, scale to zero
+  nosql-control/    NoSQL control plane: databases, branches, restore, imports, masking, metering, HTTP API
   stream-log/       Kafka-format partition log: segments, group commit, idempotence, transactions
   stream-broker/    Kafka-compatible broker: wire protocol, coordinators, tiering, compaction, HTTP API
   tasks/            roll tasks: messages, queues, schedules, workflows (SQLite, its own S3 log store, or DynamoDB)
@@ -24,7 +33,7 @@ crates/
   s3-store/         roll storage metadata: SQLite + durable log on S3, branching, refcounts, trash, GC, blob backend
   s3-server/        S3-compatible HTTP API: routing, auth, handlers, streaming to and from S3
   s3-control/       roll storage control plane: buckets, branches, keys, browsing, usage and pricing (/v1/storage)
-  rolld/            Daemon: proxy + API + reconciler + Redis + Kafka listener + S3 API (+ roll tasks on /v1/tasks)
+  rolld/            Daemon: proxy + API + reconciler + Redis + NoSQL + Kafka listener + S3 API (+ roll tasks on /v1/tasks)
   roll-cli/         `roll` CLI
 deploy/aws/         roll tasks on AWS: Dockerfile + CloudFormation
 ```
@@ -251,6 +260,64 @@ It also runs a differential compatibility suite. That suite sends the same scrip
 The script skips itself when nothing relevant changed. Pass `--force` to run anyway, or `--unit` to skip
 Docker. CI is in `.github/workflows/redis.yml`. To run the durability tests against S3, set
 `ROLL_E2E_S3_BUCKET` and `ROLL_E2E_S3_ENDPOINT` (plus AWS credentials).
+
+## NoSQL
+
+A ScyllaDB- and Cassandra-compatible wide-column database, written in Rust. Each database has a
+dialect, `scylla` (ScyllaDB 2026.3.3) or `cassandra` (Cassandra 5.0.9), and behaves like that server
+for every client: drivers, cqlsh, ScyllaDB's `nodetool` over its REST API, and the AWS SDKs through
+Alternator. Data lives in object storage, a database nobody uses costs only its S3 bytes, and a
+branch of any size is ready instantly. The main use is a copy of a production cluster per pull
+request, developer or CI run (`docs/nosql/preview-environments.md`).
+
+```sh
+cargo run -p rolld                                   # CQL on :59042, Alternator on :58000, REST on :59100
+cargo run -p roll-cli -- nosql create app --dialect scylla --datacenter us-east-1
+cargo run -p roll-cli -- nosql cqlsh app             # built-in cqlsh, same output as the real one
+cargo run -p roll-cli -- nosql import app --from cql://reader:pw@prod:9042 --keyspaces shop
+cargo run -p roll-cli -- nosql branch app --name pr-482 --expires 72h
+cargo run -p roll-cli -- nosql diff pr-482           # schema change against the parent, as CQL
+cargo run -p roll-cli -- nosql connect pr-482        # Java, Python, Go, Rust and Node snippets
+```
+
+How it works (details in `docs/nosql/`):
+
+- **The cluster a client sees.** A database presents one healthy node in a single datacenter, with
+  the datacenter, rack and cluster names you choose, so drivers configured for production work
+  unchanged. Every consistency level is satisfied, schema agreement is immediate, and ScyllaDB's
+  shard-aware, LWT and tablet extensions are advertised as ScyllaDB does.
+- **Many tenants per node.** Connections pick a database by TLS server name (`<db>.<domain>`) or by
+  the login `role@<db>`. A database loads on first use and unloads after its idle timeout.
+- **Storage.** An LSM tree per table, with our own SSTable format built for range reads from S3, a
+  memory and disk block cache, and every compaction strategy of both products (visible effects such
+  as tombstone purging match). Each node ships one commit-log segment for all its tenants every
+  ~100 ms; `durability: sync` acknowledges a write only once it is in S3.
+- **Branches and point in time.** Branches reference their parent's SSTables, so creating one
+  writes a single manifest. Reset keeps a branch's endpoint and credentials, restore runs in place,
+  and branches can expire, be read-only, hold only the schema, or carry a masking policy that
+  anonymises production data for every role.
+- **Getting data in.** A live import from any Cassandra or ScyllaDB cluster over CQL keeps write
+  times and TTLs, and can refresh on a schedule.
+- **Metering.** Storage, requests and connection time, with a cost estimate next to Amazon
+  Keyspaces, DynamoDB, Astra and ScyllaDB Cloud.
+
+### Tests
+
+`pnpm test:nosql` (or `scripts/test-nosql.sh`) runs clippy and every crate's tests. It then starts
+`scylladb/scylla:2026.3.3` and `cassandra:5.0.9` (or reuses running ones given in
+`ROLL_NOSQL_REF_*`) for the tests that compare roll with them:
+
+- the differential scripts, which send the same CQL to roll and the reference and compare raw
+  results;
+- the Rust driver;
+- cqlsh output;
+- imports.
+
+`--conformance` adds ScyllaDB's own `test/cqlpy` and `test/alternator` suites, run against roll.
+`scripts/nosql-conformance.sh` downloads them at test time; they are never committed. Every test
+the reference passes must pass on roll, apart from the lists in
+`crates/nosql-server/tests/conformance/roll-known-failures-*.txt`, which may only shrink. Current
+numbers are in `docs/nosql/plan.md`. CI is in `.github/workflows/nosql.yml`.
 
 ## Streams
 

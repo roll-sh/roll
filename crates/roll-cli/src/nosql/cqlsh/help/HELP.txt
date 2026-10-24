@@ -1,0 +1,7 @@
+
+HELP [cqlsh only]
+
+Gives information about cqlsh commands. To see available topics,
+enter "HELP" without any arguments. To see help on a topic,
+use "HELP <topic>".
+

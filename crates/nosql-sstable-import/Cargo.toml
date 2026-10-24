@@ -1,0 +1,25 @@
+[package]
+name = "nosql-sstable-import"
+description = "roll nosql: reading Cassandra and ScyllaDB SSTable backups (nodetool snapshots, ScyllaDB Manager, Medusa) into roll SSTables"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+crc32fast.workspace = true
+flate2.workspace = true
+lz4_flex.workspace = true
+nosql-storage.workspace = true
+pg-storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+snap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

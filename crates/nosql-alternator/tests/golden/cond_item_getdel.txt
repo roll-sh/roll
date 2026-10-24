@@ -1,0 +1,217 @@
+# Setup: hash-only S table and hash+range S/S table with a few items
+> CreateTable {"TableName":"alt_cond_gd_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_cond_gd_s","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> CreateTable {"TableName":"alt_cond_gd_ss","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_cond_gd_ss","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> PutItem {"TableName":"alt_cond_gd_s","Item":{"p":{"S":"k1"},"a":{"N":"1"},"s":{"S":"x"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_gd_s","Item":{"p":{"S":"big4k"},"s":{"S":"$repeat(y,4000)"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_gd_s","Item":{"p":{"S":"big5k"},"s":{"S":"$repeat(y,5000)"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_gd_s","Item":{"p":{"S":"big9k"},"s":{"S":"$repeat(y,9000)"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_gd_ss","Item":{"p":{"S":"a"},"c":{"S":"b"},"x":{"N":"1"}}}
+< 200 {}
+# GetItem: ConsistentRead valid and invalid values
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"k1"},"a":{"N":"1"},"s":{"S":"x"}}}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ConsistentRead":false}
+< 200 {"Item":{"p":{"S":"k1"},"a":{"N":"1"},"s":{"S":"x"}}}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ConsistentRead":"true"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConsistentRead flag must be a boolean"}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ConsistentRead":1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConsistentRead flag must be a boolean"}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ConsistentRead":null}
+< 200 {"Item":{"p":{"S":"k1"},"a":{"N":"1"},"s":{"S":"x"}}}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ConsistentRead":[]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConsistentRead flag must be a boolean"}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ConsistentRead":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConsistentRead flag must be a boolean"}
+# GetItem: ReturnConsumedCapacity values; read units depend on ConsistentRead and item size (4KB units), missing item
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnConsumedCapacity":"TOTAL"}
+< 200 {"Item":{"p":{"S":"k1"},"a":{"N":"1"},"s":{"S":"x"}},"ConsumedCapacity":{"CapacityUnits":0.5}}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnConsumedCapacity":"TOTAL","ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"k1"},"a":{"N":"1"},"s":{"S":"x"}},"ConsumedCapacity":{"CapacityUnits":1.0}}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"nope"}},"ReturnConsumedCapacity":"TOTAL"}
+< 200 {"ConsumedCapacity":{"CapacityUnits":0.5}}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"nope"}},"ReturnConsumedCapacity":"TOTAL","ConsistentRead":true}
+< 200 {"ConsumedCapacity":{"CapacityUnits":1.0}}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"big4k"}},"ReturnConsumedCapacity":"TOTAL","ProjectionExpression":"p"}
+< 200 {"Item":{"p":{"S":"big4k"}},"ConsumedCapacity":{"CapacityUnits":0.5}}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"big4k"}},"ReturnConsumedCapacity":"TOTAL","ConsistentRead":true,"ProjectionExpression":"p"}
+< 200 {"Item":{"p":{"S":"big4k"}},"ConsumedCapacity":{"CapacityUnits":1.0}}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"big5k"}},"ReturnConsumedCapacity":"TOTAL","ProjectionExpression":"p"}
+< 200 {"Item":{"p":{"S":"big5k"}},"ConsumedCapacity":{"CapacityUnits":1.0}}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"big5k"}},"ReturnConsumedCapacity":"TOTAL","ConsistentRead":true,"ProjectionExpression":"p"}
+< 200 {"Item":{"p":{"S":"big5k"}},"ConsumedCapacity":{"CapacityUnits":2.0}}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"big9k"}},"ReturnConsumedCapacity":"TOTAL","ProjectionExpression":"p"}
+< 200 {"Item":{"p":{"S":"big9k"}},"ConsumedCapacity":{"CapacityUnits":1.5}}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"big9k"}},"ReturnConsumedCapacity":"TOTAL","ConsistentRead":true,"ProjectionExpression":"p"}
+< 200 {"Item":{"p":{"S":"big9k"}},"ConsumedCapacity":{"CapacityUnits":3.0}}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnConsumedCapacity":"INDEXES"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"INDEXES consumed capacity is not supported"}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnConsumedCapacity":"NONE"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown consumed capacity NONE"}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnConsumedCapacity":"BAD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown consumed capacity BAD"}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnConsumedCapacity":3}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Non-string ReturnConsumedCapacity field in request"}
+# GetItem: parameters that do not belong to GetItem
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Item":{"p":{"S":"k1"},"a":{"N":"1"},"s":{"S":"x"}}}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnValues":"DOG"}
+< 200 {"Item":{"p":{"S":"k1"},"a":{"N":"1"},"s":{"S":"x"}}}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"2"}}}
+< 200 {"Item":{"p":{"S":"k1"},"a":{"N":"1"},"s":{"S":"x"}}}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"Bogus":true}
+< 200 {"Item":{"p":{"S":"k1"},"a":{"N":"1"},"s":{"S":"x"}}}
+# GetItem: Key problems
+# (GetItem without Key gives a backtrace message: not captured)
+> GetItem {"TableName":"alt_cond_gd_s","Key":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"q":{"S":"k1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"},"a":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> GetItem {"TableName":"alt_cond_gd_ss","Key":{"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column c not found"}
+> GetItem {"TableName":"alt_cond_gd_ss","Key":{"c":{"S":"b"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> GetItem {"TableName":"alt_cond_gd_ss","Key":{"p":{"S":"a"},"c":{"S":"b"}}}
+< 200 {"Item":{"p":{"S":"a"},"c":{"S":"b"},"x":{"N":"1"}}}
+> GetItem {"TableName":"alt_cond_gd_ss","Key":{"p":{"S":"a"},"c":{"S":"b"},"x":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+> GetItem {"TableName":"alt_cond_gd_ss","Key":{"p":{"S":"a"},"c":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column c, got type \"N\""}
+> GetItem {"TableName":"alt_cond_gd_ss","Key":{"p":{"S":"a"},"c":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: c"}
+> GetItem {"TableName":"alt_cond_gd_ss","Key":{"p":{"S":"a"},"x":{"S":"b"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column c not found"}
+# GetItem: missing table and bad table name; which error wins with a bad key/consistent read
+> GetItem {"TableName":"alt_cond_gd_missing","Key":{"p":{"S":"k1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_cond_gd_missing not found"}
+> GetItem {"TableName":"alt_cond_gd_missing","Key":{"p":{"S":"k1"}},"ConsistentRead":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_cond_gd_missing not found"}
+> GetItem {"TableName":"alt_cond_gd_missing","Key":{"p":{"S":"k1"}},"ReturnConsumedCapacity":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_cond_gd_missing not found"}
+> GetItem {"TableName":"a!","Key":{"p":{"S":"k1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"TableName must be at least 3 characters long and at most 192 characters long"}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"N":"1"}},"ConsistentRead":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConsistentRead flag must be a boolean"}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"N":"1"}},"ReturnConsumedCapacity":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"N":"1"}},"ProjectionExpression":"a,"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ConsistentRead":"x","ProjectionExpression":"a,"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConsistentRead flag must be a boolean"}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ConsistentRead":"x","ReturnConsumedCapacity":"x"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConsistentRead flag must be a boolean"}
+# DeleteItem: success shape, ReturnValues NONE/ALL_OLD on existing and missing items
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}}}
+< 200 {}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}}}
+< 200 {}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}}}
+< 200 {}
+> PutItem {"TableName":"alt_cond_gd_s","Item":{"p":{"S":"k1"},"a":{"N":"1"},"s":{"S":"x"}}}
+< 200 {}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnValues":"NONE"}
+< 200 {}
+> PutItem {"TableName":"alt_cond_gd_s","Item":{"p":{"S":"k1"},"a":{"N":"1"},"s":{"S":"x"}}}
+< 200 {}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"k1"},"a":{"N":"1"},"s":{"S":"x"}}}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnValues":"ALL_OLD"}
+< 200 {}
+> DeleteItem {"TableName":"alt_cond_gd_ss","Key":{"p":{"S":"a"},"c":{"S":"b"}},"ReturnValues":"ALL_OLD"}
+< 200 {"Attributes":{"p":{"S":"a"},"c":{"S":"b"},"x":{"N":"1"}}}
+# DeleteItem: invalid ReturnValues (delete must not happen)
+> PutItem {"TableName":"alt_cond_gd_s","Item":{"p":{"S":"k1"},"a":{"N":"1"}}}
+< 200 {}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnValues":"UPDATED_OLD"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"DeleteItem supports only NONE or ALL_OLD for ReturnValues"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnValues":"ALL_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"DeleteItem supports only NONE or ALL_OLD for ReturnValues"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"DeleteItem supports only NONE or ALL_OLD for ReturnValues"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnValues":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: DOG"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnValues":"all_old"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: all_old"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnValues":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: "}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnValues":false}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Expected string value for ReturnValues, got: false"}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}}}
+< 200 {"Item":{"p":{"S":"k1"},"a":{"N":"1"}}}
+# DeleteItem: ReturnConsumedCapacity (existing, missing, large item with ALL_OLD) and ReturnItemCollectionMetrics
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnConsumedCapacity":"TOTAL"}
+< 200 {"ConsumedCapacity":{"CapacityUnits":1.0}}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnConsumedCapacity":"TOTAL"}
+< 200 {"ConsumedCapacity":{"CapacityUnits":1.0}}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"big5k"}},"ReturnConsumedCapacity":"TOTAL","ReturnValues":"ALL_OLD","ConditionExpression":"attribute_exists(p)"}
+< 200 {"ConsumedCapacity":{"CapacityUnits":5.0},"Attributes":{"p":{"S":"big5k"},"s":{"S":"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"}}}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"big4k"}},"ReturnConsumedCapacity":"TOTAL"}
+< 200 {"ConsumedCapacity":{"CapacityUnits":1.0}}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnConsumedCapacity":"INDEXES"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"INDEXES consumed capacity is not supported"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnConsumedCapacity":"NONE"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown consumed capacity NONE"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnItemCollectionMetrics":"SIZE"}
+< 200 {}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnItemCollectionMetrics":"DOG"}
+< 200 {}
+# DeleteItem: Key problems
+> DeleteItem {"TableName":"alt_cond_gd_s"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"JSON parameter Key not found"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column p not found"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"},"a":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"B":"AQ=="}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"B\""}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":""}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The AttributeValue for a key attribute cannot contain an empty string value. Key: p"}
+> DeleteItem {"TableName":"alt_cond_gd_ss","Key":{"p":{"S":"a"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Key column c not found"}
+> DeleteItem {"TableName":"alt_cond_gd_ss","Key":{"p":{"S":"a"},"c":{"S":"b"},"d":{"S":"x"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Given key attribute not in schema"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"$repeat(a,2049)"}}}
+< 200 {}
+> GetItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"$repeat(a,2049)"}}}
+< 200 {}
+> DeleteItem {"TableName":"alt_cond_gd_ss","Key":{"p":{"S":"a"},"c":{"S":"$repeat(a,1025)"}}}
+< 200 {}
+# DeleteItem: missing table, and error priority vs bad key / ReturnValues / condition
+> DeleteItem {"TableName":"alt_cond_gd_missing","Key":{"p":{"S":"k1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_cond_gd_missing not found"}
+> DeleteItem {"TableName":"alt_cond_gd_missing","Key":{"p":{"S":"k1"}},"ReturnValues":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_cond_gd_missing not found"}
+> DeleteItem {"TableName":"alt_cond_gd_missing","Key":{"p":{"S":"k1"}},"ConditionExpression":"(("}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ResourceNotFoundException","message":"Requested resource not found: Table: alt_cond_gd_missing not found"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"N":"1"}},"ReturnValues":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: DOG"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"N":"1"}},"ConditionExpression":"(("}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Type mismatch: expected type S for key column p, got type \"N\""}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnValues":"DOG","ConditionExpression":"(("}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unrecognized value for ReturnValues: DOG"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ReturnValues":"UPDATED_NEW","ReturnConsumedCapacity":"DOG"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unknown consumed capacity DOG"}
+# DeleteItem: ExpressionAttribute* without ConditionExpression; empty ConditionExpression
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues cannot be used without ConditionExpression"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ExpressionAttributeNames":{"#n":"a"}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeNames cannot be used without ConditionExpression"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ConditionExpression":""}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ConditionExpression must not be empty"}
+> DeleteItem {"TableName":"alt_cond_gd_s","Key":{"p":{"S":"k1"}},"ConditionalOperator":"OR"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter cannot be specified for missing or empty Expression"}
+> DeleteTable {"TableName":"alt_cond_gd_s"}
+< 200 {"TableDescription":{"TableName":"alt_cond_gd_s","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_cond_gd_s:scylla:table/alt_cond_gd_s","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}
+> DeleteTable {"TableName":"alt_cond_gd_ss"}
+< 200 {"TableDescription":{"TableName":"alt_cond_gd_ss","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_cond_gd_ss:scylla:table/alt_cond_gd_ss","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

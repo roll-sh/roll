@@ -10,20 +10,46 @@ publish.workspace = true
 name = "roll"
 path = "src/main.rs"
 
+[features]
+# `tests/cqlsh_roll.rs`: the golden corpus against an in-process roll server.
+roll-server-tests = ["dep:nosql-engine", "dep:nosql-server", "dep:nosql-storage"]
+
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
 clap.workspace = true
+nosql-engine = { workspace = true, optional = true }
+nosql-proto = { workspace = true, features = ["client"] }
+nosql-server = { workspace = true, optional = true }
+nosql-storage = { workspace = true, optional = true }
+nosql-types.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
+rustls-pemfile.workspace = true
+rustyline.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tokio-util = { workspace = true, features = ["io"] }
+unicode-width.workspace = true
 urlencoding.workspace = true
 
 [dev-dependencies]
 aws-sdk-s3.workspace = true
 axum.workspace = true
+# `tests/nosql_api.rs`: the real control API in process.
+nosql-control.workspace = true
+nosql-server.workspace = true
+nosql-storage.workspace = true
+regex.workspace = true
 s3-control.workspace = true
 s3-server.workspace = true
 s3-store.workspace = true
+tempfile.workspace = true
+
+[[test]]
+name = "cqlsh_roll"
+required-features = ["roll-server-tests"]

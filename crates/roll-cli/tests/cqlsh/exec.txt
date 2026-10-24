@@ -1,0 +1,42 @@
+DROP KEYSPACE IF EXISTS cli_g_exec; CREATE KEYSPACE cli_g_exec WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1}; CREATE TABLE cli_g_exec.t (k int PRIMARY KEY, v text); CREATE TYPE cli_g_exec.pt (x int, y text); CREATE INDEX t_v ON cli_g_exec.t (v); INSERT INTO cli_g_exec.t (k, v) VALUES (1, 'one'); SELECT * FROM cli_g_exec.t
+----
+SELECT * FROM cli_g_exec.t WHERE k = 1;
+----
+SELECT k, v FROM cli_g_exec.t WHERE k = 2
+----
+SELEC 1
+----
+SELECT & FROM x
+----
+SELECT 'unterminated
+----
+USE cli_g_exec; SELECT * FROM t; EXPAND ON; SELECT * FROM t
+----
+CONSISTENCY ALL; SELECT * FROM cli_g_exec.t
+----
+DESC TABLE cli_g_exec.t
+----
+DESC KEYSPACE cli_g_exec
+----
+DESC TYPE cli_g_exec.nope
+----
+DESC cli_g_exec.nope
+----
+USE cli_g_exec; DESC TABLE t
+----
+SHOW VERSION
+----
+HELP
+----
+SELECT * FROM cli_g_exec.t;
+SELECT v FROM cli_g_exec.t WHERE k = 1;
+----
+BEGIN BATCH INSERT INTO cli_g_exec.t (k, v) VALUES (2, 'two'); APPLY BATCH; SELECT * FROM cli_g_exec.t WHERE k = 2
+----
+USE cli_g_exec; DESC TABLES; DESC TYPES; DESC TABLE t; DESC TYPE nope; DESC nope; DESC t; DESC KEYSPACE; DESC CLUSTER
+----
+DESC KEYSPACE cli_g_exec; DESC TABLE cli_g_exec.nope; DESC INDEX cli_g_exec.nope; DESC MATERIALIZED VIEW cli_g_exec.nope; DESC cli_g_exec.nope; DESC KEYSPACE nope; DESC KEYSPACE; DESC nope; DESC TYPE nope
+----
+USE cli_g_exec; CREATE TABLE w (p int, c text, s int static, v int, l list<int>, PRIMARY KEY (p, c)) WITH CLUSTERING ORDER BY (c DESC) AND comment = 'it''s' AND gc_grace_seconds = 3600; CREATE MATERIALIZED VIEW mv AS SELECT p, c, v FROM w WHERE p IS NOT NULL AND c IS NOT NULL AND v IS NOT NULL PRIMARY KEY (v, p, c); CREATE TABLE "Comp" (a int, b int, "C" text, d text, PRIMARY KEY ((a, b), "C")); CREATE INDEX ON "Comp" (d); DESC TABLE w; DESC MATERIALIZED VIEW mv; DESC TABLE "Comp"; DESC KEYSPACE cli_g_exec
+----
+DROP KEYSPACE IF EXISTS cli_g_exec

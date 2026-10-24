@@ -1,0 +1,19 @@
+
+CONSISTENCY [cqlsh only]
+
+   Overrides default consistency level (default level is ONE).
+
+CONSISTENCY <level>
+
+   Sets consistency level for future requests.
+
+   Valid consistency levels:
+
+   ANY, ONE, TWO, THREE, QUORUM, ALL, LOCAL_ONE, LOCAL_QUORUM, EACH_QUORUM, SERIAL and LOCAL_SERIAL.
+
+   SERIAL and LOCAL_SERIAL may be used only for SELECTs; will be rejected with updates.
+
+CONSISTENCY
+
+   CONSISTENCY with no arguments shows the current consistency level.
+
