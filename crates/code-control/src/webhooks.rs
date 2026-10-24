@@ -21,7 +21,7 @@ use crate::review::apps::check_url;
 use crate::{Caller, Code, Error, Result, cs_id, new_id};
 use code_store::ChangesetId;
 use parking_lot::Mutex;
-use rusqlite::{OptionalExtension, Row, params};
+use code_sql::{OptionalExtension, Row, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -87,7 +87,7 @@ pub struct HookRow {
 
 const HOOK_COLS: &str = "id, repo_id, url, events, secret, active, created_by, created_at, updated_at, since_seq";
 
-fn hook_row(r: &Row) -> rusqlite::Result<HookRow> {
+fn hook_row(r: &Row<'_>) -> code_sql::Result<HookRow> {
     Ok(HookRow {
         id: r.get(0)?,
         repo_id: r.get(1)?,
@@ -115,21 +115,19 @@ pub struct Status {
 
 impl Db {
     pub fn webhooks(&self, repo_id: &str) -> Result<Vec<HookRow>> {
-        let db = self.lock();
-        let mut st = db.prepare(&format!("SELECT {HOOK_COLS} FROM repo_webhooks WHERE repo_id = ? ORDER BY created_at, id"))?;
-        Ok(st.query_map([repo_id], hook_row)?.collect::<Result<_, _>>()?)
+        Ok(self.sql().query(&format!("SELECT {HOOK_COLS} FROM repo_webhooks WHERE repo_id = ? ORDER BY created_at, id"), [repo_id], hook_row)?)
     }
 
     pub fn webhook(&self, id: &str) -> Result<Option<HookRow>> {
-        Ok(self.lock().query_row(&format!("SELECT {HOOK_COLS} FROM repo_webhooks WHERE id = ?"), [id], hook_row).optional()?)
+        Ok(self.sql().query_row(&format!("SELECT {HOOK_COLS} FROM repo_webhooks WHERE id = ?"), [id], hook_row).optional()?)
     }
 
     pub fn any_webhooks(&self) -> Result<bool> {
-        Ok(self.lock().query_row("SELECT EXISTS (SELECT 1 FROM repo_webhooks)", [], |r| r.get::<_, i64>(0))? != 0)
+        Ok(self.sql().query_row("SELECT EXISTS (SELECT 1 FROM repo_webhooks)", (), |r| r.get::<_, i64>(0))? != 0)
     }
 
     fn save_webhook(&self, h: &HookRow) -> Result<()> {
-        self.lock().execute(
+        self.sql().execute(
             "INSERT INTO repo_webhooks (id, repo_id, url, events, secret, active, created_by, created_at, updated_at, since_seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (id) DO UPDATE SET url = excluded.url, events = excluded.events, secret = excluded.secret, \
              active = excluded.active, updated_at = excluded.updated_at",
@@ -139,14 +137,15 @@ impl Db {
     }
 
     fn delete_webhook(&self, id: &str) -> Result<()> {
-        let db = self.lock();
-        db.execute("DELETE FROM repo_webhooks WHERE id = ?", [id])?;
-        db.execute("DELETE FROM review_deliveries WHERE app_id = ?", [id])?;
-        Ok(())
+        Ok(self.write(|c| {
+            c.execute("DELETE FROM repo_webhooks WHERE id = ?", [id])?;
+            c.execute("DELETE FROM review_deliveries WHERE app_id = ?", [id])?;
+            Ok(())
+        })?)
     }
 
     fn upsert_status(&self, repo_id: &str, cs: &str, s: &Status) -> Result<()> {
-        self.lock().execute(
+        self.sql().execute(
             "INSERT INTO commit_statuses (repo_id, changeset, context, state, target_url, description, creator, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (repo_id, changeset, context) DO UPDATE SET state = excluded.state, \
              target_url = excluded.target_url, description = excluded.description, creator = excluded.creator, updated_at = excluded.updated_at",
@@ -156,13 +155,11 @@ impl Db {
     }
 
     pub fn statuses(&self, repo_id: &str, cs: &str) -> Result<Vec<Status>> {
-        let db = self.lock();
-        let mut st = db.prepare(
+        Ok(self.sql().query(
             "SELECT context, state, target_url, description, creator, created_at, updated_at FROM commit_statuses \
              WHERE repo_id = ? AND changeset = ? ORDER BY context",
-        )?;
-        Ok(st
-            .query_map(params![repo_id, cs], |r| {
+            params![repo_id, cs],
+            |r| {
                 Ok(Status {
                     context: r.get(0)?,
                     state: r.get(1)?,
@@ -172,36 +169,41 @@ impl Db {
                     created_at: r.get(5)?,
                     updated_at: r.get(6)?,
                 })
-            })?
-            .collect::<Result<_, _>>()?)
+            },
+        )?)
     }
 
     /// Open (or queued) changes whose head is `head`.
     fn changes_at_head(&self, repo_id: &str, head: &str) -> Result<Vec<String>> {
-        let db = self.lock();
-        let mut st = db.prepare("SELECT id FROM changes WHERE repo_id = ? AND head = ? AND state IN ('open', 'queued', 'conflict') ORDER BY number")?;
-        Ok(st.query_map(params![repo_id, head], |r| r.get(0))?.collect::<Result<_, _>>()?)
+        Ok(self.sql().query(
+            "SELECT id FROM changes WHERE repo_id = ? AND head = ? AND state IN ('open', 'queued', 'conflict') ORDER BY number",
+            params![repo_id, head],
+            |r| r.get(0),
+        )?)
     }
 
     /// How far into the store's land log webhooks have queued deliveries.
     fn land_cursor(&self) -> Result<Option<i64>> {
-        Ok(self.lock().query_row("SELECT seq FROM webhook_land_cursor WHERE id = 1", [], |r| r.get(0)).optional()?)
+        Ok(self.sql().query_row("SELECT seq FROM webhook_land_cursor WHERE id = 1", (), |r| r.get(0)).optional()?)
     }
 
     fn set_land_cursor(&self, seq: i64) -> Result<()> {
-        self.lock().execute(
-            "INSERT INTO webhook_land_cursor (id, seq) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET seq = max(seq, excluded.seq)",
+        self.sql().execute(
+            // Only ever forward (two forwarders may race); `max(a, b)` isn't portable.
+            "INSERT INTO webhook_land_cursor (id, seq) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET \
+             seq = CASE WHEN excluded.seq > webhook_land_cursor.seq THEN excluded.seq ELSE webhook_land_cursor.seq END",
             [seq],
         )?;
         Ok(())
     }
 
     fn delete_repo_hooks(&self, repo_id: &str) -> Result<()> {
-        let db = self.lock();
-        db.execute("DELETE FROM review_deliveries WHERE app_id IN (SELECT id FROM repo_webhooks WHERE repo_id = ?)", [repo_id])?;
-        db.execute("DELETE FROM repo_webhooks WHERE repo_id = ?", [repo_id])?;
-        db.execute("DELETE FROM commit_statuses WHERE repo_id = ?", [repo_id])?;
-        Ok(())
+        Ok(self.write(|c| {
+            c.execute("DELETE FROM review_deliveries WHERE app_id IN (SELECT id FROM repo_webhooks WHERE repo_id = ?)", [repo_id])?;
+            c.execute("DELETE FROM repo_webhooks WHERE repo_id = ?", [repo_id])?;
+            c.execute("DELETE FROM commit_statuses WHERE repo_id = ?", [repo_id])?;
+            Ok(())
+        })?)
     }
 }
 

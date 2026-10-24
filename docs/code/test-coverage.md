@@ -780,6 +780,20 @@ Parsing (`code-github/tests`) and the effect in roll against a mock GitHub
 | HTTP and WebSocket proxying, unknown and closed previews, idle reaper, reconcile after restart | `code-preview/src/preview.rs::proxies_http_and_websockets_and_reconciles_after_restart` |
 | real Docker: success, failure, timeout, broken config, no leftovers; preview through the host router; post-merge; cleanup on land | `code-preview/tests/docker.rs` (all) |
 
+## control.db on SQLite and Postgres (`code-control/tests/concurrency.rs`, `code-sql/tests/backends.rs`)
+
+Every code-control test runs on SQLite, and on Postgres with `ROLL_CODE_TEST_DATABASE` set
+(control.db in a fresh schema; a restart in a test reopens the same one).
+
+| Behaviour | Tests |
+| --- | --- |
+| two nodes on one control database (the same SQLite file, or the same Postgres schema through their own connections): change and work item numbers created at once from both are each used exactly once | `concurrency.rs::numbers_are_unique_across_nodes` |
+| agents claiming at once through both nodes' APIs: each work item goes to exactly one claimant | `concurrency.rs::each_work_item_has_exactly_one_claimant` |
+| merge queue entries made at once on both nodes get distinct positions; a change enqueued on both at once has one entry | `concurrency.rs::queue_positions_are_unique_across_nodes` |
+| tokens made at once on both nodes all work on both; a revoked one stops working on the other node at once | `concurrency.rs::tokens_work_and_revoke_across_nodes` |
+| text with a NUL character is a 400 on Postgres (which can't store it), leaving nothing half-written; SQLite keeps it | `api.rs::nul_in_text_is_a_400_on_postgres` |
+| one SQL dialect on both backends: types, byte-order text, upserts, serializable re-run writes, rollbacks, migrations, columns named like types | `code-sql/tests/backends.rs::writes_are_serializable_and_retried`, `code-sql/tests/backends.rs::failures_roll_back_and_are_never_reported_as_success`, `code-sql/tests/backends.rs::schema_migrations_and_columns`, `code-sql/tests/backends.rs::columns_named_like_types` |
+
 ## Security regressions
 
 | Defect fixed | Test |
@@ -816,6 +830,7 @@ Defects found by the phase-3 coverage audit, each with the test that failed befo
 | MCP `comment` hid "not found" behind "needs a thread"; `create_change` refused work items by number | `mcp.rs::tool_argument_errors`, `mcp.rs::tools_map_onto_their_routes` |
 | `roll code` exited 2 (rebase and retry) for usage errors and for landing a landed or closed change | `roll-cli/tests/code.rs::repo_land_and_usage_edges`, `roll-cli/tests/code.rs::change_and_work_edges` |
 | the MCP snippet lost its auth header placeholder before a token was created | `connect-agent.test.tsx` (dashboard) |
+| a thread resolved on GitHub could be resolved back there when a notification read the thread between "GitHub has it resolved" and the resolution itself (now one write, read in one statement) | `github.rs::reviews_both_ways` |
 
 ## Dashboard (`apps/dashboard`, vitest)
 

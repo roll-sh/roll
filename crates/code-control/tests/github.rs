@@ -301,6 +301,14 @@ where
     panic!("timed out waiting for {what}");
 }
 
+/// The import brought its PRs in: there are changes, and each has its PR number (a PR's change
+/// is created first and linked to its PR right after, so the list can show it in between).
+async fn imported(a: &App) -> bool {
+    let changes = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await;
+    let changes = changes.as_array().unwrap();
+    !changes.is_empty() && changes.iter().all(|c| !c["github_pr"].is_null())
+}
+
 fn issue_json(n: u64, title: &str, state: &str, labels: &[&str]) -> Value {
     json!({
         "number": n, "title": title, "body": format!("body of {n}"), "state": state,
@@ -396,7 +404,7 @@ async fn connect_import_webhooks_and_mirror() {
 
     // Open issues became work items, open PRs changes.
     until("issue import", || async { !a.ok("GET", "/v1/code/repos/acme/app/work", None).await.as_array().unwrap().is_empty() }).await;
-    until("PR import", || async { !a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().is_empty() }).await;
+    until("PR import", || async { imported(&a).await }).await;
     let work = a.ok("GET", "/v1/code/repos/acme/app/work", None).await;
     assert_eq!(work.as_array().unwrap().len(), 1, "closed issues aren't imported: {work}");
     assert_eq!(work[0]["source"], "github#1");
@@ -586,7 +594,7 @@ async fn issue_pr_and_installation_lifecycles() {
     a.ok("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "app", "source": { "github": { "installation_id": INSTALLATION, "owner": "acme", "repo": "app" } } })))
         .await;
     until("import", || async { a.ok("GET", "/v1/code/repos/acme/app", None).await["import"]["state"] == "done" }).await;
-    until("PR import", || async { !a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().is_empty() }).await;
+    until("PR import", || async { imported(&a).await }).await;
     let repo = repo_json(&g.mock);
     let inst = json!({ "id": INSTALLATION });
     let item = |a: &App| {
@@ -737,7 +745,7 @@ async fn reviews_both_ways() {
     enable(&a, &g, fast_mirror());
     a.ok("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" }))).await;
     a.ok("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "app", "source": { "github": { "installation_id": INSTALLATION, "owner": "acme", "repo": "app" } } }))).await;
-    until("PR import", || async { !a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().is_empty() }).await;
+    until("PR import", || async { imported(&a).await }).await;
     let c3 = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().iter().find(|c| c["github_pr"] == 3).unwrap().clone();
     let id = c3["id"].as_str().unwrap().to_string();
     let repo = repo_json(&g.mock);
@@ -954,7 +962,7 @@ async fn roll_reviewer_posts_to_the_pull_request() {
     enable(&a, &g, fast_mirror());
     a.ok("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" }))).await;
     a.ok("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "app", "source": { "github": { "installation_id": INSTALLATION, "owner": "acme", "repo": "app" } } }))).await;
-    until("PR import", || async { !a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().is_empty() }).await;
+    until("PR import", || async { imported(&a).await }).await;
     let c3 = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().iter().find(|c| c["github_pr"] == 3).unwrap().clone();
     let id = c3["id"].as_str().unwrap().to_string();
     a.ok("PATCH", "/v1/code/repos/acme/app/reviewer", Some(json!({ "enabled": true, "mode": "standard" }))).await;
@@ -988,7 +996,7 @@ async fn roll_commands_from_github_comments() {
     enable(&a, &g, fast_mirror());
     a.ok("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" }))).await;
     a.ok("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "app", "source": { "github": { "installation_id": INSTALLATION, "owner": "acme", "repo": "app" } } }))).await;
-    until("PR import", || async { !a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().is_empty() }).await;
+    until("PR import", || async { imported(&a).await }).await;
     let c3 = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().iter().find(|c| c["github_pr"] == 3).unwrap().clone();
     let id = c3["id"].as_str().unwrap().to_string();
     let repo = repo_json(&g.mock);
@@ -1056,7 +1064,7 @@ async fn review_events_every_action_against_the_rules() {
     enable(&a, &g, fast_mirror());
     a.ok("POST", "/v1/code/owners", Some(json!({ "name": "acme", "kind": "org" }))).await;
     a.ok("POST", "/v1/code/repos", Some(json!({ "owner": "acme", "name": "app", "source": { "github": { "installation_id": INSTALLATION, "owner": "acme", "repo": "app" } } }))).await;
-    until("PR import", || async { !a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().is_empty() }).await;
+    until("PR import", || async { imported(&a).await }).await;
     let c3 = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().iter().find(|c| c["github_pr"] == 3).unwrap().clone();
     let id = c3["id"].as_str().unwrap().to_string();
     let (repo, inst, pr) = (repo_json(&g.mock), json!({ "id": INSTALLATION }), pr_json(&g.mock, 3, "feature", &feature_sha, &main_sha));
@@ -1227,7 +1235,7 @@ fn head_git(a: &App, repo_id: &str, c: &Value) -> String {
 }
 
 fn mark(a: &App, key: &str) -> Option<String> {
-    a.code.db.lock().query_row("SELECT value FROM github_marks WHERE key = ?", [key], |r| r.get(0)).ok()
+    a.code.db.sql().query_row("SELECT value FROM github_marks WHERE key = ?", [key], |r| r.get(0)).ok()
 }
 
 /// Push webhooks beyond the default branch's fast-forward and merge: a pushed branch opens its
@@ -1245,7 +1253,7 @@ async fn push_webhooks_for_branches_tags_and_echoes() {
     let a = app(None);
     enable(&a, &g, quiet_mirror());
     let repo_id = connect(&a).await;
-    until("PR import", || async { !a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().is_empty() }).await;
+    until("PR import", || async { imported(&a).await }).await;
     let c3 = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await[0]["id"].as_str().unwrap().to_string();
     let push = |r: &str, before: &str, after: &str, sender: &str| {
         json!({
@@ -1371,7 +1379,7 @@ async fn pull_request_issue_and_installation_actions() {
     enable(&a, &g, quiet_mirror());
     let a = &a;
     connect(a).await;
-    until("PR import", || async { !a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().is_empty() }).await;
+    until("PR import", || async { imported(a).await }).await;
     let c3 = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await[0]["id"].as_str().unwrap().to_string();
     let repo = repo_json(&g.mock);
     let inst = json!({ "id": INSTALLATION });
@@ -1543,7 +1551,7 @@ async fn outbound_notifications_once_each() {
     enable(&a, &g, fast_mirror());
     let a = &a;
     connect(a).await;
-    until("PR import", || async { !a.ok("GET", "/v1/code/repos/acme/app/changes", None).await.as_array().unwrap().is_empty() }).await;
+    until("PR import", || async { imported(a).await }).await;
     let c3 = a.ok("GET", "/v1/code/repos/acme/app/changes", None).await[0]["id"].as_str().unwrap().to_string();
     let check = |change: &str, body: Value| {
         let change = change.to_string();
@@ -1601,7 +1609,7 @@ async fn outbound_notifications_once_each() {
     // A later notification (a check run) shows the update's event was handled.
     let n = g.mock.check_runs.load(Ordering::SeqCst);
     let c7 = a.ok("POST", "/v1/code/repos/acme/app/changes", Some(json!({ "title": "x", "message": "x", "files": { "x.txt": { "content": "x\n" } } }))).await;
-    a.code.db.lock().execute("UPDATE changes SET github_pr = 77 WHERE id = ?", [c7["id"].as_str().unwrap()]).unwrap();
+    a.code.db.sql().execute("UPDATE changes SET github_pr = 77 WHERE id = ?", [c7["id"].as_str().unwrap()]).unwrap();
     check(c7["id"].as_str().unwrap(), json!({ "name": "later", "status": "running" })).await;
     until("the later check run", || async { g.mock.check_runs.load(Ordering::SeqCst) > n }).await;
     let calls = g.mock.calls.lock().clone();

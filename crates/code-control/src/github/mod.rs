@@ -22,7 +22,7 @@ use crate::model::RepoRow;
 use crate::{Code, Error, Result};
 use code_github::{AppConfig, ClientOptions, GitHub, MirrorConfig};
 use parking_lot::Mutex;
-use rusqlite::{OptionalExtension, params};
+use code_sql::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -106,7 +106,7 @@ impl Code {
 
 /// Turn the GitHub App on: webhooks, connecting repos, mirrors and notifications.
 pub fn enable(code: &Arc<Code>, config: AppConfig, opts: Options) -> anyhow::Result<()> {
-    code.db.lock().execute_batch(SCHEMA)?;
+    code.db.sql().ensure_schema(SCHEMA)?;
     let client = GitHub::with_options(config.clone(), opts.client.clone())?;
     let hub = Arc::new(Hub {
         client,
@@ -152,20 +152,20 @@ pub(crate) fn linked_repos(code: &Code) -> Result<Vec<RepoRow>> {
     Ok(code.db.repos(None)?.into_iter().filter(|r| r.source == "github" && r.github.is_some()).collect())
 }
 
-/// Read-modify-write a repo's link under the db lock, so the mirror's status updates and
-/// webhook updates don't overwrite each other.
-pub(crate) fn update_link(code: &Code, repo_id: &str, f: impl FnOnce(&mut Link)) -> Result<Option<Link>> {
-    let db = code.db.lock();
-    let raw: Option<Option<String>> =
-        db.query_row("SELECT github FROM repos WHERE id = ?", [repo_id], |r| r.get(0)).optional()?;
-    let Some(mut link) = raw.flatten().and_then(|s| serde_json::from_str::<Link>(&s).ok()) else { return Ok(None) };
-    let before = serde_json::to_value(&link).unwrap_or_default();
-    f(&mut link);
-    let after = serde_json::to_value(&link).unwrap_or_default();
-    if before != after {
-        db.execute("UPDATE repos SET github = ? WHERE id = ?", params![after.to_string(), repo_id])?;
-    }
-    Ok(Some(link))
+/// Read-modify-write a repo's link in one database write, so the mirror's status updates and
+/// webhook updates (from any node) don't overwrite each other. `f` may run more than once.
+pub(crate) fn update_link(code: &Code, repo_id: &str, mut f: impl FnMut(&mut Link)) -> Result<Option<Link>> {
+    Ok(code.db.write(|db| {
+        let raw: Option<Option<String>> = db.query_row("SELECT github FROM repos WHERE id = ?", [repo_id], |r| r.get(0)).optional()?;
+        let Some(mut link) = raw.flatten().and_then(|s| serde_json::from_str::<Link>(&s).ok()) else { return Ok(None) };
+        let before = serde_json::to_value(&link).unwrap_or_default();
+        f(&mut link);
+        let after = serde_json::to_value(&link).unwrap_or_default();
+        if before != after {
+            db.execute("UPDATE repos SET github = ? WHERE id = ?", params![after.to_string(), repo_id])?;
+        }
+        Ok(Some(link))
+    })?)
 }
 
 pub(crate) fn set_import(code: &Code, repo_id: &str, state: &str, commits: usize, total: Option<usize>, error: Option<&str>) {
@@ -178,11 +178,16 @@ pub(crate) fn set_import(code: &Code, repo_id: &str, state: &str, commits: usize
 // ── marks: idempotency for notifications, deliveries and check-run ids ──
 
 pub(crate) fn mark(code: &Code, key: &str) -> Result<Option<String>> {
-    Ok(code.db.lock().query_row("SELECT value FROM github_marks WHERE key = ?", [key], |r| r.get(0)).optional()?)
+    Ok(code.db.sql().query_row("SELECT value FROM github_marks WHERE key = ?", [key], |r| r.get(0)).optional()?)
 }
 
 pub(crate) fn set_mark(code: &Code, key: &str, value: &str) -> Result<()> {
-    code.db.lock().execute(
+    Ok(code.db.write(|c| set_mark_in(c, key, value))?)
+}
+
+/// [`set_mark`] inside a write (with whatever else must change with it).
+pub(crate) fn set_mark_in(c: &code_sql::Conn<'_>, key: &str, value: &str) -> code_sql::Result<()> {
+    c.execute(
         "INSERT INTO github_marks (key, value, at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value, at = excluded.at",
         params![key, value, crate::db::now()],
     )?;
@@ -190,7 +195,7 @@ pub(crate) fn set_mark(code: &Code, key: &str, value: &str) -> Result<()> {
 }
 
 pub(crate) fn clear_mark(code: &Code, key: &str) -> Result<()> {
-    code.db.lock().execute("DELETE FROM github_marks WHERE key = ?", [key])?;
+    code.db.sql().execute("DELETE FROM github_marks WHERE key = ?", [key])?;
     Ok(())
 }
 

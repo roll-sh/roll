@@ -8,13 +8,13 @@
 //!   to it (as the App) and keyed the same way. roll's own webhooks are recognised by the App's
 //!   bot login and ignored, so nothing echoes.
 
-use super::{Hub, Link, clear_mark, link_of, mark, set_mark};
+use super::{Hub, Link, clear_mark, link_of, mark, set_mark, set_mark_in};
 use crate::model::{Change, RepoRow};
 use crate::review::{Origin, Reviewer, ReviewerKind, Thread, Verdict};
 use crate::{Code, Error, Result, cs_id, new_id};
 use code_github::model::{CreateReview, DraftReviewComment, ReviewComment, User};
 use code_github::webhook::{CommentAction, PullRequestReviewCommentEvent, PullRequestReviewEvent, PullRequestReviewThreadEvent, ReviewAction, ThreadAction};
-use rusqlite::{OptionalExtension, params};
+use code_sql::{OptionalExtension, params};
 use serde_json::Value;
 
 const SOURCE: &str = "github";
@@ -54,7 +54,7 @@ fn revision_of(code: &Code, r: &RepoRow, c: &Change, commit: Option<&str>) -> Re
     }
     let rev: Option<i64> = code
         .db
-        .lock()
+        .sql()
         .query_row("SELECT revision FROM change_revisions WHERE change_id = ? AND head = ? ORDER BY revision DESC LIMIT 1", params![c.id, id], |r| r.get(0))
         .optional()?;
     Ok((rev.map(|r| r as u64).unwrap_or(0), Some(id)))
@@ -118,7 +118,7 @@ pub(crate) async fn review_event(code: &Code, hub: &Hub, r: &RepoRow, e: &PullRe
                 url: e.review.html_url.as_deref(),
             })?;
             // Inline comments that arrived before their review get linked to it.
-            code.db.lock().execute(
+            code.db.sql().execute(
                 "UPDATE review_threads SET review_id = (SELECT id FROM reviews WHERE repo_id = ?1 AND source = 'github' AND external_id = ?2) \
                  WHERE repo_id = ?1 AND review_id = ?3",
                 params![r.id, ext, format!("github:{ext}")],
@@ -228,12 +228,16 @@ pub(crate) async fn thread_event(code: &Code, hub: &Hub, r: &RepoRow, e: &PullRe
     let by = e.sender.as_ref().map(|s| format!("@{}", s.login)).unwrap_or_else(|| "github".into());
     let resolved = e.action == ThreadAction::Resolved;
     // Remember the thread's node id (for resolving it from roll later) and that GitHub already
-    // has this state, so it isn't sent back.
-    if let Some(node) = &e.thread.node_id {
-        set_mark(code, &format!("gh-thread-node:{}", th.id), node)?;
-    }
-    set_mark(code, &format!("gh-resolved:{}", th.id), if resolved { "1" } else { "0" })?;
-    code.db.set_thread_resolved(&th.id, resolved.then_some(by.as_str()))?;
+    // has this state, so it isn't sent back. One write with the state itself: a notification
+    // reading in between would otherwise see them disagree and send the old state back.
+    let node = e.thread.node_id.as_deref();
+    code.db.write(|c| {
+        if let Some(node) = node {
+            set_mark_in(c, &format!("gh-thread-node:{}", th.id), node)?;
+        }
+        set_mark_in(c, &format!("gh-resolved:{}", th.id), if resolved { "1" } else { "0" })?;
+        crate::db::Db::thread_resolved_in(c, &th.id, resolved.then_some(by.as_str()))
+    })?;
     emit_thread(code, r, &th.id)?;
     if let Ok(c) = code.change_or_404(&th.change) {
         code.emit_change(&c);
@@ -396,11 +400,25 @@ async fn sync_resolution(code: &Code, hub: &Hub, l: &Link, pr: u64, thread: &str
     let Some(th) = code.db.thread(thread)? else { return Ok(()) };
     let Some(root) = th.external_id.as_deref().and_then(|e| e.parse::<u64>().ok()) else { return Ok(()) };
     let key = format!("gh-resolved:{}", th.id);
-    let want = if th.resolved { "1" } else { "0" };
-    match mark(code, &key)?.as_deref() {
+    // The thread's state and the state GitHub has, read together (one statement): read apart, a
+    // resolution from GitHub landing in between would look like one to send back.
+    let Some((resolved, have)) = code
+        .db
+        .sql()
+        .query_row(
+            "SELECT resolved_at IS NOT NULL, (SELECT value FROM github_marks WHERE key = ?) FROM review_threads WHERE id = ?",
+            params![key, th.id],
+            |r| Ok((r.get::<_, bool>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?
+    else {
+        return Ok(());
+    };
+    let want = if resolved { "1" } else { "0" };
+    match have.as_deref() {
         Some(have) if have == want => return Ok(()),
         // Never resolved anywhere: GitHub's threads start open.
-        None if !th.resolved => return Ok(()),
+        None if !resolved => return Ok(()),
         _ => {}
     }
     let node_key = format!("gh-thread-node:{}", th.id);
@@ -414,6 +432,6 @@ async fn sync_resolution(code: &Code, hub: &Hub, l: &Link, pr: u64, thread: &str
             None => return Ok(()),
         },
     };
-    let now = hub.client.set_review_thread_resolved(l.installation_id, &node, th.resolved).await.map_err(gh)?;
+    let now = hub.client.set_review_thread_resolved(l.installation_id, &node, resolved).await.map_err(gh)?;
     set_mark(code, &key, if now { "1" } else { "0" })
 }

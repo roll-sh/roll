@@ -431,3 +431,26 @@ async fn events_stream_landings_and_changes() {
     assert_eq!(v["files"], 1);
     assert!(v["changeset"].as_str().unwrap().starts_with("cs_"));
 }
+
+/// Postgres text can't hold NUL characters (SQLite's can): there, text with one is the caller's
+/// mistake, a 400 that leaves nothing half-written; SQLite keeps it, as it always did.
+#[tokio::test]
+async fn nul_in_text_is_a_400_on_postgres() {
+    let a = app(None);
+    a.repo("acme", "app").await;
+    let postgres = a.code.db.sql().pg_schema().is_some();
+    let (s, v) = a.req("POST", "/v1/code/repos/acme/app/work", Some(json!({ "title": "a\u{0}b", "body": "x" })), None).await;
+    let (s2, list) = a.req("GET", "/v1/code/repos/acme/app/work?label=a%00b", None, None).await;
+    if postgres {
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("NUL"), "{v}");
+        assert_eq!(s2, StatusCode::BAD_REQUEST, "{list}");
+    } else {
+        assert_eq!(s, StatusCode::CREATED, "{v}");
+        assert_eq!(v["title"], "a\u{0}b");
+        assert_eq!((s2, list), (StatusCode::OK, json!([])));
+    }
+    // Nothing was half-written: the next item gets the next number.
+    let w = a.ok("POST", "/v1/code/repos/acme/app/work", Some(json!({ "title": "fine" }))).await;
+    assert_eq!(w["number"], if postgres { 1 } else { 2 });
+}

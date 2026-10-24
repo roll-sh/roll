@@ -37,6 +37,8 @@ const MAX_ATTEMPTS: i64 = 8;
 /// Longest wait between attempts.
 const MAX_BACKOFF_MS: u64 = 6 * 3600 * 1000;
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a node holds a delivery it's sending (well past [`TIMEOUT`]).
+const CLAIM_MS: i64 = 60_000;
 const MAX_APPS_PER_OWNER: usize = 50;
 
 /// The delivery worker's state.
@@ -456,6 +458,12 @@ impl Code {
         let due = self.db.due_deliveries(code_store::now_ms(), 50)?;
         let mut sends = Vec::new();
         for d in due {
+            // Claim it first (a compare-and-swap on `next_at`): with several nodes sending, each
+            // delivery is attempted by one of them. The claim lasts past the request's timeout;
+            // if this node dies mid-send, the delivery is due again after it.
+            if !self.db.claim_delivery(&d.id, d.next_at, code_store::now_ms() + CLAIM_MS)? {
+                continue;
+            }
             sends.push(self.send_delivery(&client, d));
         }
         futures::future::join_all(sends).await;

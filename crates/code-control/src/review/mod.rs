@@ -1020,28 +1020,27 @@ impl Code {
     }
 
     pub fn review_requests_view(&self, c: &Change) -> Result<Vec<Value>> {
-        let db = self.db.lock();
-        let mut st = db.prepare(
+        Ok(self.db.sql().query(
             "SELECT reviewer_kind, reviewer_name, reviewer_app, head, required, requested_at, done_at FROM review_requests \
              WHERE change_id = ? ORDER BY rowid",
-        )?;
-        let rows = st.query_map([&c.id], |row| {
-            let reviewer = Reviewer {
-                kind: ReviewerKind::parse(&row.get::<_, String>(0)?),
-                name: row.get(1)?,
-                app: Some(row.get::<_, String>(2)?).filter(|a| !a.is_empty()),
-            };
-            let head: String = row.get(3)?;
-            Ok(json!({
-                "reviewer": reviewer,
-                "head": head,
-                "current": head == c.head,
-                "required": row.get::<_, i64>(4)? != 0,
-                "requested_at": row.get::<_, i64>(5)?,
-                "done_at": row.get::<_, Option<i64>>(6)?,
-            }))
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
+            [&c.id],
+            |row| {
+                let reviewer = Reviewer {
+                    kind: ReviewerKind::parse(&row.get::<_, String>(0)?),
+                    name: row.get(1)?,
+                    app: Some(row.get::<_, String>(2)?).filter(|a| !a.is_empty()),
+                };
+                let head: String = row.get(3)?;
+                Ok(json!({
+                    "reviewer": reviewer,
+                    "head": head,
+                    "current": head == c.head,
+                    "required": row.get::<_, i64>(4)? != 0,
+                    "requested_at": row.get::<_, i64>(5)?,
+                    "done_at": row.get::<_, Option<i64>>(6)?,
+                }))
+            },
+        )?)
     }
 
     /// A change was opened or got a new revision: tell review apps, and ask the required ones

@@ -132,6 +132,10 @@ pub enum Error {
     /// The repo's code index is still being built (its first time): a 503 to retry.
     #[error("the code index for this repository is still being built; try again shortly")]
     Indexing,
+    /// The database can't answer right now (no free connection, or the connection was lost
+    /// while saving): a 503 to retry.
+    #[error("{0}")]
+    Unavailable(String),
     #[error(transparent)]
     Internal(anyhow::Error),
 }
@@ -146,15 +150,34 @@ impl From<anyhow::Error> for Error {
         if let Some(n) = e.downcast_ref::<code_store::NotFound>() {
             return Error::NotFound(n.0.clone());
         }
+        if let Some(mapped) = e.chain().find_map(|c| c.downcast_ref::<code_sql::Error>()).and_then(db_error) {
+            return mapped;
+        }
         Error::Internal(e)
     }
 }
 
-impl From<rusqlite::Error> for Error {
-    fn from(e: rusqlite::Error) -> Self {
-        Error::Internal(e.into())
+impl From<code_sql::Error> for Error {
+    fn from(e: code_sql::Error) -> Self {
+        db_error(&e).unwrap_or_else(|| Error::Internal(e.into()))
     }
 }
+
+/// What a database error means for the caller, when it isn't a plain 500.
+fn db_error(e: &code_sql::Error) -> Option<Error> {
+    match e {
+        code_sql::Error::CommitUnknown(_) => Some(Error::Unavailable(
+            "lost the database connection while saving; it may or may not have been saved, so check before retrying".into(),
+        )),
+        code_sql::Error::PoolTimeout(_) => Some(Error::Unavailable("the database is busy; try again shortly".into())),
+        // Postgres text can't hold NUL characters (SQLite's can): that's the caller's input.
+        e if e.to_string().contains(NUL_TEXT) => Some(Error::Invalid("text can't contain NUL (\\u0000) characters".into())),
+        _ => None,
+    }
+}
+
+/// What code-sql says when a text parameter holds a NUL character (Postgres).
+const NUL_TEXT: &str = "text can't contain NUL characters";
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
@@ -186,6 +209,12 @@ impl IntoResponse for Error {
             Error::Indexing => {
                 let mut r = (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": self.to_string(), "indexing": true }))).into_response();
                 r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("10"));
+                return r;
+            }
+            Error::Unavailable(_) => {
+                tracing::warn!(error = %self, "code request: database unavailable");
+                let mut r = (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": self.to_string() }))).into_response();
+                r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
                 return r;
             }
             Error::Internal(e) => {
@@ -299,9 +328,19 @@ pub struct Code {
 }
 
 impl Code {
+    /// Open roll code in `config.home`: code-store's code.db and control.db, both SQLite. (With
+    /// `ROLL_CODE_TEST_DATABASE` set, tests put control.db in Postgres: see
+    /// [`code_sql::Db::open_or_test`].)
     pub fn open(config: Config, objects: pg_storage::Objects) -> anyhow::Result<Arc<Code>> {
+        let control = sqlite_or_test_db(&config.home.join("code"))?;
+        Code::open_with_db(config, objects, control)
+    }
+
+    /// [`Code::open`] with control.db in `control`, e.g. a configured Postgres that every node of
+    /// a cluster shares.
+    pub fn open_with_db(config: Config, objects: pg_storage::Objects, control: code_sql::Db) -> anyhow::Result<Arc<Code>> {
         let store = Store::open(&config.home, objects)?;
-        let db = db::Db::open(&config.home.join("code").join("control.db"))?;
+        let db = db::Db::open(control)?;
         let (events, _) = broadcast::channel(4096);
         let ai = ai::Ai::new(&config);
         let code = Arc::new_cyclic(|me| Code {
@@ -380,6 +419,27 @@ impl Code {
         }
         Err(Error::Unauthorized)
     }
+}
+
+/// control.db in `dir` (SQLite) — or, in tests with `ROLL_CODE_TEST_DATABASE` set, a fresh
+/// Postgres schema ([`code_sql::Db::open_or_test`]). The schema's name is kept in `dir`, so
+/// opening the same state directory again (a restart) finds the same database.
+fn sqlite_or_test_db(dir: &std::path::Path) -> anyhow::Result<code_sql::Db> {
+    let target = code_sql::Target::Sqlite(dir.join("control.db"));
+    let url = std::env::var(code_sql::TEST_DATABASE_ENV).unwrap_or_default();
+    if url.is_empty() {
+        return Ok(code_sql::Db::open(&target)?);
+    }
+    let marker = dir.join("control.pg-schema");
+    if let Ok(schema) = std::fs::read_to_string(&marker) {
+        return Ok(code_sql::Db::connect(&url, schema.trim(), code_sql::PgOptions { max_connections: 8, ..Default::default() })?);
+    }
+    let db = code_sql::Db::open_or_test(&target, "control")?;
+    if let Some(schema) = db.pg_schema() {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(&marker, schema)?;
+    }
+    Ok(db)
 }
 
 pub(crate) fn hash_token(token: &str) -> String {

@@ -1,10 +1,11 @@
 //! Reviews, threads, comments, review settings and requests, review apps and their deliveries
-//! in control.db. Rows keep their insertion order through SQLite's rowid.
+//! in control.db. Rows keep their insertion order through `rowid` (SQLite's, or the identity
+//! column code-sql gives every such table on Postgres).
 
 use super::{Comment, Review, Reviewer, ReviewerKind, Thread, Verdict};
 use crate::db::{Db, now};
 use anyhow::Result;
-use rusqlite::{OptionalExtension, Row, params};
+use code_sql::{OptionalExtension, Row, params};
 
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS reviews (
@@ -131,7 +132,7 @@ fn reviewer(kind: String, name: String, app: Option<String>) -> Reviewer {
 const REVIEW_COLS: &str = "id, change_id, revision, head, reviewer_kind, reviewer_name, reviewer_app, verdict, body, source, url, \
                            dismissed_at, dismissed_by, dismiss_reason, created_at, updated_at, external_id, rowid, ai";
 
-fn review_row(r: &Row) -> rusqlite::Result<Review> {
+fn review_row(r: &Row<'_>) -> code_sql::Result<Review> {
     Ok(Review {
         id: r.get(0)?,
         change: r.get(1)?,
@@ -158,7 +159,7 @@ fn review_row(r: &Row) -> rusqlite::Result<Review> {
 const THREAD_COLS: &str = "id, change_id, review_id, path, side, original_line, original_start_line, original_revision, line, \
                            start_line, revision, at, outdated, resolved_at, resolved_by, source, created_at, updated_at, external_id";
 
-fn thread_row(r: &Row) -> rusqlite::Result<Thread> {
+fn thread_row(r: &Row<'_>) -> code_sql::Result<Thread> {
     Ok(Thread {
         id: r.get(0)?,
         change: r.get(1)?,
@@ -186,7 +187,7 @@ fn thread_row(r: &Row) -> rusqlite::Result<Thread> {
 
 const COMMENT_COLS: &str = "id, thread_id, author_kind, author_name, author_app, body, source, created_at, updated_at, external_id";
 
-fn comment_row(r: &Row) -> rusqlite::Result<Comment> {
+fn comment_row(r: &Row<'_>) -> code_sql::Result<Comment> {
     let body: String = r.get(5)?;
     let author = reviewer(r.get(2)?, r.get(3)?, r.get(4)?);
     let finding = (author.kind == super::ReviewerKind::Roll)
@@ -257,7 +258,7 @@ pub struct AppRow {
 
 const APP_COLS: &str = "id, owner_id, name, webhook_url, events, repos, required, active, secret, created_at, updated_at";
 
-fn app_row(r: &Row) -> rusqlite::Result<AppRow> {
+fn app_row(r: &Row<'_>) -> code_sql::Result<AppRow> {
     Ok(AppRow {
         id: r.get(0)?,
         owner_id: r.get(1)?,
@@ -291,7 +292,7 @@ pub struct DeliveryRow {
 
 const DELIVERY_COLS: &str = "id, app_id, event, payload, state, attempts, next_at, last_status, last_error, created_at, delivered_at, last_response";
 
-fn delivery_row(r: &Row) -> rusqlite::Result<DeliveryRow> {
+fn delivery_row(r: &Row<'_>) -> code_sql::Result<DeliveryRow> {
     Ok(DeliveryRow {
         id: r.get(0)?,
         app_id: r.get(1)?,
@@ -313,7 +314,7 @@ impl Db {
 
     pub fn insert_review(&self, n: &NewReview) -> Result<()> {
         let t = now();
-        self.lock().execute(
+        self.sql().execute(
             "INSERT INTO reviews (id, change_id, repo_id, revision, head, reviewer_kind, reviewer_name, reviewer_app, verdict, body, \
              source, external_id, url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
@@ -338,13 +339,13 @@ impl Db {
     }
 
     pub fn review(&self, id: &str) -> Result<Option<Review>> {
-        Ok(self.lock().query_row(&format!("SELECT {REVIEW_COLS} FROM reviews WHERE id = ?"), [id], review_row).optional()?)
+        Ok(self.sql().query_row(&format!("SELECT {REVIEW_COLS} FROM reviews WHERE id = ?"), [id], review_row).optional()?)
     }
 
     /// A review by its id at `source` (posted there by roll, or made there).
     pub fn review_by_external(&self, repo_id: &str, source: &str, external_id: &str) -> Result<Option<Review>> {
         Ok(self
-            .lock()
+            .sql()
             .query_row(
                 &format!("SELECT {REVIEW_COLS} FROM reviews WHERE repo_id = ? AND (source = ? OR source = 'roll') AND external_id = ?"),
                 params![repo_id, source, external_id],
@@ -354,24 +355,23 @@ impl Db {
     }
 
     pub fn reviews(&self, change_id: &str) -> Result<Vec<Review>> {
-        let db = self.lock();
-        let mut st = db.prepare(&format!("SELECT {REVIEW_COLS} FROM reviews WHERE change_id = ? ORDER BY rowid"))?;
-        Ok(st.query_map([change_id], review_row)?.collect::<Result<_, _>>()?)
+        Ok(self.sql().query(&format!("SELECT {REVIEW_COLS} FROM reviews WHERE change_id = ? ORDER BY rowid"), [change_id], review_row)?)
     }
 
     pub fn update_review(&self, id: &str, verdict: Option<Verdict>, body: Option<&str>) -> Result<()> {
-        let db = self.lock();
-        if let Some(v) = verdict {
-            db.execute("UPDATE reviews SET verdict = ?, updated_at = ? WHERE id = ?", params![v.as_str(), now(), id])?;
-        }
-        if let Some(b) = body {
-            db.execute("UPDATE reviews SET body = ?, updated_at = ? WHERE id = ?", params![b, now(), id])?;
-        }
-        Ok(())
+        self.write(|c| {
+            if let Some(v) = verdict {
+                c.execute("UPDATE reviews SET verdict = ?, updated_at = ? WHERE id = ?", params![v.as_str(), now(), id])?;
+            }
+            if let Some(b) = body {
+                c.execute("UPDATE reviews SET body = ?, updated_at = ? WHERE id = ?", params![b, now(), id])?;
+            }
+            Ok(())
+        })
     }
 
     pub fn set_review_external(&self, id: &str, external_id: &str, url: Option<&str>) -> Result<()> {
-        self.lock().execute(
+        self.sql().execute(
             "UPDATE reviews SET external_id = ?, url = COALESCE(?, url), updated_at = ? WHERE id = ?",
             params![external_id, url, now(), id],
         )?;
@@ -379,7 +379,7 @@ impl Db {
     }
 
     pub fn dismiss_review(&self, id: &str, by: &str, reason: &str) -> Result<bool> {
-        let n = self.lock().execute(
+        let n = self.sql().execute(
             "UPDATE reviews SET dismissed_at = ?, dismissed_by = ?, dismiss_reason = ?, updated_at = ? WHERE id = ? AND dismissed_at IS NULL",
             params![now(), by, reason, now(), id],
         )?;
@@ -390,7 +390,7 @@ impl Db {
 
     pub fn insert_thread(&self, n: &NewThread) -> Result<()> {
         let t = now();
-        self.lock().execute(
+        self.sql().execute(
             "INSERT INTO review_threads (id, change_id, repo_id, review_id, path, side, original_line, original_start_line, \
              original_revision, line, start_line, revision, at, source, external_id, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -429,31 +429,34 @@ impl Db {
         external_id: Option<&str>,
     ) -> Result<()> {
         let t = now();
-        let db = self.lock();
-        db.execute(
-            "INSERT INTO review_comments (id, thread_id, repo_id, author_kind, author_name, author_app, body, source, external_id, \
-             created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![id, thread_id, repo_id, author.kind.as_str(), author.name, author.app, body, source, external_id, t, t],
-        )?;
-        db.execute("UPDATE review_threads SET updated_at = ? WHERE id = ?", params![t, thread_id])?;
-        Ok(())
+        self.write(|c| {
+            c.execute(
+                "INSERT INTO review_comments (id, thread_id, repo_id, author_kind, author_name, author_app, body, source, external_id, \
+                 created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, thread_id, repo_id, author.kind.as_str(), author.name, author.app, body, source, external_id, t, t],
+            )?;
+            c.execute("UPDATE review_threads SET updated_at = ? WHERE id = ?", params![t, thread_id])?;
+            Ok(())
+        })
     }
 
     fn with_comments(&self, mut t: Thread) -> Result<Thread> {
-        let db = self.lock();
-        let mut st = db.prepare(&format!("SELECT {COMMENT_COLS} FROM review_comments WHERE thread_id = ? AND deleted = 0 ORDER BY rowid"))?;
-        t.comments = st.query_map([&t.id], comment_row)?.collect::<Result<_, _>>()?;
+        t.comments = self.sql().query(
+            &format!("SELECT {COMMENT_COLS} FROM review_comments WHERE thread_id = ? AND deleted = 0 ORDER BY rowid"),
+            [&t.id],
+            comment_row,
+        )?;
         Ok(t)
     }
 
     pub fn thread(&self, id: &str) -> Result<Option<Thread>> {
-        let t = self.lock().query_row(&format!("SELECT {THREAD_COLS} FROM review_threads WHERE id = ?"), [id], thread_row).optional()?;
+        let t = self.sql().query_row(&format!("SELECT {THREAD_COLS} FROM review_threads WHERE id = ?"), [id], thread_row).optional()?;
         t.map(|t| self.with_comments(t)).transpose()
     }
 
     pub fn thread_by_external(&self, repo_id: &str, source: &str, external_id: &str) -> Result<Option<Thread>> {
         let t = self
-            .lock()
+            .sql()
             .query_row(
                 &format!("SELECT {THREAD_COLS} FROM review_threads WHERE repo_id = ? AND (source = ? OR source = 'roll') AND external_id = ?"),
                 params![repo_id, source, external_id],
@@ -464,16 +467,12 @@ impl Db {
     }
 
     pub fn threads(&self, change_id: &str) -> Result<Vec<Thread>> {
-        let rows: Vec<Thread> = {
-            let db = self.lock();
-            let mut st = db.prepare(&format!("SELECT {THREAD_COLS} FROM review_threads WHERE change_id = ? ORDER BY rowid"))?;
-            st.query_map([change_id], thread_row)?.collect::<Result<_, _>>()?
-        };
+        let rows = self.sql().query(&format!("SELECT {THREAD_COLS} FROM review_threads WHERE change_id = ? ORDER BY rowid"), [change_id], thread_row)?;
         rows.into_iter().map(|t| self.with_comments(t)).collect()
     }
 
     pub fn count_unresolved(&self, change_id: &str) -> Result<u64> {
-        Ok(self.lock().query_row(
+        Ok(self.sql().query_row(
             "SELECT COUNT(*) FROM review_threads WHERE change_id = ? AND resolved_at IS NULL",
             [change_id],
             |r| r.get::<_, i64>(0),
@@ -481,16 +480,18 @@ impl Db {
     }
 
     pub fn set_thread_resolved(&self, id: &str, by: Option<&str>) -> Result<()> {
+        self.write(|c| Self::thread_resolved_in(c, id, by))
+    }
+
+    /// [`Db::set_thread_resolved`] inside a write (with whatever else must change with it).
+    pub(crate) fn thread_resolved_in(c: &code_sql::Conn<'_>, id: &str, by: Option<&str>) -> code_sql::Result<()> {
         let t = now();
         match by {
-            Some(by) => self.lock().execute(
+            Some(by) => c.execute(
                 "UPDATE review_threads SET resolved_at = COALESCE(resolved_at, ?), resolved_by = COALESCE(resolved_by, ?), updated_at = ? WHERE id = ?",
                 params![t, by, t, id],
             )?,
-            None => self.lock().execute(
-                "UPDATE review_threads SET resolved_at = NULL, resolved_by = NULL, updated_at = ? WHERE id = ?",
-                params![t, id],
-            )?,
+            None => c.execute("UPDATE review_threads SET resolved_at = NULL, resolved_by = NULL, updated_at = ? WHERE id = ?", params![t, id])?,
         };
         Ok(())
     }
@@ -499,18 +500,18 @@ impl Db {
     pub fn move_thread(&self, id: &str, lines: Option<(u64, u64)>, revision: u64, at: &str) -> Result<()> {
         let t = now();
         match lines {
-            Some((start, end)) => self.lock().execute(
+            Some((start, end)) => self.sql().execute(
                 "UPDATE review_threads SET start_line = ?, line = ?, revision = ?, at = ?, updated_at = ? WHERE id = ?",
                 params![start as i64, end as i64, revision as i64, at, t, id],
             )?,
-            None => self.lock().execute("UPDATE review_threads SET outdated = 1, updated_at = ? WHERE id = ?", params![t, id])?,
+            None => self.sql().execute("UPDATE review_threads SET outdated = 1, updated_at = ? WHERE id = ?", params![t, id])?,
         };
         Ok(())
     }
 
     pub fn comment_by_external(&self, repo_id: &str, source: &str, external_id: &str) -> Result<Option<Comment>> {
         Ok(self
-            .lock()
+            .sql()
             .query_row(
                 &format!("SELECT {COMMENT_COLS} FROM review_comments WHERE repo_id = ? AND (source = ? OR source = 'roll') AND external_id = ?"),
                 params![repo_id, source, external_id],
@@ -520,37 +521,37 @@ impl Db {
     }
 
     pub fn comment_thread(&self, comment_id: &str) -> Result<Option<String>> {
-        Ok(self.lock().query_row("SELECT thread_id FROM review_comments WHERE id = ?", [comment_id], |r| r.get(0)).optional()?)
+        Ok(self.sql().query_row("SELECT thread_id FROM review_comments WHERE id = ?", [comment_id], |r| r.get(0)).optional()?)
     }
 
     pub fn set_comment_external(&self, id: &str, external_id: &str) -> Result<()> {
-        self.lock().execute("UPDATE review_comments SET external_id = ? WHERE id = ?", params![external_id, id])?;
+        self.sql().execute("UPDATE review_comments SET external_id = ? WHERE id = ?", params![external_id, id])?;
         Ok(())
     }
 
     pub fn set_thread_external(&self, id: &str, external_id: &str) -> Result<()> {
-        self.lock().execute("UPDATE review_threads SET external_id = ? WHERE id = ?", params![external_id, id])?;
+        self.sql().execute("UPDATE review_threads SET external_id = ? WHERE id = ?", params![external_id, id])?;
         Ok(())
     }
 
     pub fn edit_comment(&self, id: &str, body: &str) -> Result<()> {
-        self.lock().execute("UPDATE review_comments SET body = ?, updated_at = ? WHERE id = ?", params![body, now(), id])?;
+        self.sql().execute("UPDATE review_comments SET body = ?, updated_at = ? WHERE id = ?", params![body, now(), id])?;
         Ok(())
     }
 
     pub fn delete_comment(&self, id: &str) -> Result<()> {
-        self.lock().execute("UPDATE review_comments SET deleted = 1, updated_at = ? WHERE id = ?", params![now(), id])?;
+        self.sql().execute("UPDATE review_comments SET deleted = 1, updated_at = ? WHERE id = ?", params![now(), id])?;
         Ok(())
     }
 
     // ── settings ──
 
     pub fn review_rules(&self, repo_id: &str) -> Result<Option<String>> {
-        Ok(self.lock().query_row("SELECT rules FROM review_settings WHERE repo_id = ?", [repo_id], |r| r.get(0)).optional()?)
+        Ok(self.sql().query_row("SELECT rules FROM review_settings WHERE repo_id = ?", [repo_id], |r| r.get(0)).optional()?)
     }
 
     pub fn set_review_rules(&self, repo_id: &str, rules: &str) -> Result<()> {
-        self.lock().execute(
+        self.sql().execute(
             "INSERT INTO review_settings (repo_id, rules, updated_at) VALUES (?, ?, ?) \
              ON CONFLICT (repo_id) DO UPDATE SET rules = excluded.rules, updated_at = excluded.updated_at",
             params![repo_id, rules, now()],
@@ -561,9 +562,10 @@ impl Db {
     // ── requests ──
 
     pub fn request_review(&self, change_id: &str, r: &Reviewer, head: &str, required: bool) -> Result<()> {
-        self.lock().execute(
+        self.sql().execute(
             "INSERT INTO review_requests (change_id, reviewer_kind, reviewer_name, reviewer_app, head, required, requested_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO UPDATE SET required = MAX(required, excluded.required), \
+             VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (change_id, reviewer_kind, reviewer_name, reviewer_app, head) DO UPDATE SET \
+             required = CASE WHEN excluded.required > review_requests.required THEN excluded.required ELSE review_requests.required END, \
              done_at = NULL, requested_at = excluded.requested_at",
             params![change_id, r.kind.as_str(), r.name, r.app.clone().unwrap_or_default(), head, required, now()],
         )?;
@@ -572,8 +574,8 @@ impl Db {
 
     /// A reviewer gave (or no longer owes) a review of `head` (every head when `None`).
     pub fn finish_review_requests(&self, change_id: &str, r: &Reviewer, head: Option<&str>) -> Result<()> {
-        let db = self.lock();
         let t = now();
+        let db = self.sql();
         match head {
             Some(h) => db.execute(
                 "UPDATE review_requests SET done_at = ? WHERE change_id = ? AND reviewer_kind = ? AND lower(reviewer_name) = lower(?) \
@@ -592,20 +594,19 @@ impl Db {
     /// Required reviews still owed for `head` (a deleted or disabled review app owes nothing:
     /// it can't review, and nobody else can clear its request).
     pub fn pending_reviews(&self, change_id: &str, head: &str) -> Result<Vec<Reviewer>> {
-        let db = self.lock();
-        let mut st = db.prepare(
+        Ok(self.sql().query(
             "SELECT reviewer_kind, reviewer_name, reviewer_app FROM review_requests \
              WHERE change_id = ? AND head = ? AND required = 1 AND done_at IS NULL \
              AND (reviewer_app = '' OR reviewer_app IN (SELECT id FROM review_apps WHERE active = 1)) ORDER BY rowid",
-        )?;
-        let rows = st.query_map(params![change_id, head], |r| Ok(reviewer(r.get(0)?, r.get(1)?, r.get(2)?)))?;
-        Ok(rows.collect::<Result<_, _>>()?)
+            params![change_id, head],
+            |r| Ok(reviewer(r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
     }
 
     // ── review apps ──
 
     pub fn insert_app(&self, a: &AppRow, token_hash: &str) -> Result<bool> {
-        let n = self.lock().execute(
+        let n = self.sql().execute(
             "INSERT OR IGNORE INTO review_apps (id, owner_id, name, name_lower, webhook_url, events, repos, required, active, secret, \
              token_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
@@ -627,27 +628,35 @@ impl Db {
         Ok(n == 1)
     }
 
+    /// Save an app's settings; `false` when another app of its owner has the new name (or the
+    /// app is gone).
     pub fn update_app(&self, a: &AppRow) -> Result<bool> {
-        let n = self.lock().execute(
-            "UPDATE OR IGNORE review_apps SET name = ?, name_lower = ?, webhook_url = ?, events = ?, repos = ?, required = ?, active = ?, \
-             updated_at = ? WHERE id = ?",
-            params![
-                a.name,
-                a.name.to_ascii_lowercase(),
-                a.webhook_url,
-                serde_json::to_string(&a.events)?,
-                serde_json::to_string(&a.repos)?,
-                a.required,
-                a.active,
-                now(),
-                a.id
-            ],
-        )?;
-        Ok(n == 1)
+        let (name_lower, events, repos) = (a.name.to_ascii_lowercase(), serde_json::to_string(&a.events)?, serde_json::to_string(&a.repos)?);
+        self.write(|c| {
+            // Checked first rather than ignored: a failed statement ends a Postgres transaction.
+            let taken = c
+                .query_row(
+                    "SELECT 1 FROM review_apps o WHERE o.name_lower = ? AND o.id <> ? \
+                     AND o.owner_id = (SELECT owner_id FROM review_apps WHERE id = ?)",
+                    params![name_lower, a.id, a.id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if taken {
+                return Ok(false);
+            }
+            let n = c.execute(
+                "UPDATE review_apps SET name = ?, name_lower = ?, webhook_url = ?, events = ?, repos = ?, required = ?, active = ?, \
+                 updated_at = ? WHERE id = ?",
+                params![a.name, name_lower, a.webhook_url, events, repos, a.required, a.active, now(), a.id],
+            )?;
+            Ok(n == 1)
+        })
     }
 
     pub fn rotate_app(&self, id: &str, secret: &str, token_hash: &str) -> Result<()> {
-        self.lock().execute(
+        self.sql().execute(
             "UPDATE review_apps SET secret = ?, token_hash = ?, updated_at = ? WHERE id = ?",
             params![secret, token_hash, now(), id],
         )?;
@@ -655,38 +664,32 @@ impl Db {
     }
 
     pub fn delete_app(&self, id: &str) -> Result<()> {
-        let db = self.lock();
-        db.execute("DELETE FROM review_apps WHERE id = ?", [id])?;
-        db.execute("DELETE FROM review_deliveries WHERE app_id = ?", [id])?;
-        Ok(())
+        self.write(|c| {
+            c.execute("DELETE FROM review_apps WHERE id = ?", [id])?;
+            c.execute("DELETE FROM review_deliveries WHERE app_id = ?", [id])?;
+            Ok(())
+        })
     }
 
     pub fn app(&self, id: &str) -> Result<Option<AppRow>> {
-        Ok(self.lock().query_row(&format!("SELECT {APP_COLS} FROM review_apps WHERE id = ?"), [id], app_row).optional()?)
+        Ok(self.sql().query_row(&format!("SELECT {APP_COLS} FROM review_apps WHERE id = ?"), [id], app_row).optional()?)
     }
 
     pub fn app_by_token(&self, token_hash: &str) -> Result<Option<AppRow>> {
-        Ok(self.lock().query_row(&format!("SELECT {APP_COLS} FROM review_apps WHERE token_hash = ?"), [token_hash], app_row).optional()?)
+        Ok(self.sql().query_row(&format!("SELECT {APP_COLS} FROM review_apps WHERE token_hash = ?"), [token_hash], app_row).optional()?)
     }
 
     pub fn apps(&self, owner_id: Option<&str>) -> Result<Vec<AppRow>> {
-        let db = self.lock();
-        match owner_id {
-            Some(o) => {
-                let mut st = db.prepare(&format!("SELECT {APP_COLS} FROM review_apps WHERE owner_id = ? ORDER BY name_lower"))?;
-                Ok(st.query_map([o], app_row)?.collect::<Result<_, _>>()?)
-            }
-            None => {
-                let mut st = db.prepare(&format!("SELECT {APP_COLS} FROM review_apps ORDER BY name_lower"))?;
-                Ok(st.query_map([], app_row)?.collect::<Result<_, _>>()?)
-            }
-        }
+        Ok(match owner_id {
+            Some(o) => self.sql().query(&format!("SELECT {APP_COLS} FROM review_apps WHERE owner_id = ? ORDER BY name_lower"), [o], app_row)?,
+            None => self.sql().query(&format!("SELECT {APP_COLS} FROM review_apps ORDER BY name_lower"), (), app_row)?,
+        })
     }
 
     // ── deliveries ──
 
     pub fn insert_delivery(&self, id: &str, app_id: &str, event: &str, payload: &str) -> Result<()> {
-        self.lock().execute(
+        self.sql().execute(
             "INSERT INTO review_deliveries (id, app_id, event, payload, state, next_at, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
             params![id, app_id, event, payload, code_store::now_ms(), now()],
         )?;
@@ -694,27 +697,38 @@ impl Db {
     }
 
     pub fn delivery(&self, id: &str) -> Result<Option<DeliveryRow>> {
-        Ok(self.lock().query_row(&format!("SELECT {DELIVERY_COLS} FROM review_deliveries WHERE id = ?"), [id], delivery_row).optional()?)
+        Ok(self.sql().query_row(&format!("SELECT {DELIVERY_COLS} FROM review_deliveries WHERE id = ?"), [id], delivery_row).optional()?)
     }
 
     pub fn deliveries(&self, app_id: &str, limit: usize) -> Result<Vec<DeliveryRow>> {
-        let db = self.lock();
-        let mut st = db.prepare(&format!("SELECT {DELIVERY_COLS} FROM review_deliveries WHERE app_id = ? ORDER BY rowid DESC LIMIT ?"))?;
-        Ok(st.query_map(params![app_id, limit as i64], delivery_row)?.collect::<Result<_, _>>()?)
+        Ok(self.sql().query(
+            &format!("SELECT {DELIVERY_COLS} FROM review_deliveries WHERE app_id = ? ORDER BY rowid DESC LIMIT ?"),
+            params![app_id, crate::db::limit(limit)],
+            delivery_row,
+        )?)
     }
 
     /// Pending deliveries due by `now_ms`, oldest first.
     pub fn due_deliveries(&self, now_ms: i64, limit: usize) -> Result<Vec<DeliveryRow>> {
-        let db = self.lock();
-        let mut st = db.prepare(&format!(
-            "SELECT {DELIVERY_COLS} FROM review_deliveries WHERE state = 'pending' AND next_at <= ? ORDER BY next_at, rowid LIMIT ?"
-        ))?;
-        Ok(st.query_map(params![now_ms, limit as i64], delivery_row)?.collect::<Result<_, _>>()?)
+        Ok(self.sql().query(
+            &format!("SELECT {DELIVERY_COLS} FROM review_deliveries WHERE state = 'pending' AND next_at <= ? ORDER BY next_at, rowid LIMIT ?"),
+            params![now_ms, crate::db::limit(limit)],
+            delivery_row,
+        )?)
     }
 
     /// When the next pending delivery is due.
     pub fn next_delivery_at(&self) -> Result<Option<i64>> {
-        Ok(self.lock().query_row("SELECT MIN(next_at) FROM review_deliveries WHERE state = 'pending'", [], |r| r.get(0))?)
+        Ok(self.sql().query_row("SELECT MIN(next_at) FROM review_deliveries WHERE state = 'pending'", (), |r| r.get(0))?)
+    }
+
+    /// Take a due delivery to send it, until `until_ms`; `false` if another sender (another
+    /// node) took it first, or it changed since it was read as `next_at`.
+    pub fn claim_delivery(&self, id: &str, next_at: i64, until_ms: i64) -> Result<bool> {
+        Ok(self.sql().execute(
+            "UPDATE review_deliveries SET next_at = ? WHERE id = ? AND state = 'pending' AND next_at = ?",
+            params![until_ms, id, next_at],
+        )? == 1)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -729,7 +743,7 @@ impl Db {
         response: Option<&str>,
     ) -> Result<()> {
         let delivered = (state == "delivered").then(now);
-        self.lock().execute(
+        self.sql().execute(
             "UPDATE review_deliveries SET state = ?, attempts = ?, next_at = ?, last_status = ?, last_error = ?, \
              delivered_at = COALESCE(?, delivered_at), last_response = ? WHERE id = ?",
             params![state, attempts, next_at, status, error, delivered, response, id],
@@ -738,7 +752,7 @@ impl Db {
     }
 
     pub fn redeliver(&self, id: &str) -> Result<()> {
-        self.lock().execute(
+        self.sql().execute(
             "UPDATE review_deliveries SET state = 'pending', next_at = ? WHERE id = ?",
             params![code_store::now_ms(), id],
         )?;

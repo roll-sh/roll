@@ -1212,7 +1212,7 @@ async fn blockers_that_appear_while_waiting_eject_at_the_gate() {
         cs.push(id(&c));
     }
     let gone_entry = a.ok("GET", &format!("/v1/code/changes/{}", cs[0]), None).await["queue"]["id"].clone();
-    a.code.db.lock().execute("DELETE FROM changes WHERE id = ?", [&cs[0]]).unwrap();
+    a.code.db.sql().execute("DELETE FROM changes WHERE id = ?", [&cs[0]]).unwrap();
     a.ok("POST", &format!("/v1/code/changes/{}/checks", cs[1]), Some(json!({ "name": "ci", "status": "failure" }))).await;
     a.code.db.update_change_meta(&cs[2], None, None, Some(true)).unwrap();
     a.code.db.set_change_state(&cs[3], code_control::model::ChangeState::Closed, None, None).unwrap();

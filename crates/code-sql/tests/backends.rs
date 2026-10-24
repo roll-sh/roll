@@ -68,6 +68,19 @@ fn values_round_trip_with_sqlite_types() {
     }
 }
 
+/// Columns named like types (`text`) or after a Postgres reserved word (`"full"`, quoted) work
+/// on both, with their declared types.
+#[test]
+fn columns_named_like_types() {
+    for f in each("names") {
+        let db = &f.db;
+        db.ensure_schema("CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY, text TEXT NOT NULL, \"full\" INTEGER NOT NULL DEFAULT 0)").unwrap();
+        db.execute("INSERT INTO notes (id, text, \"full\") VALUES (?, ?, ?)", params!["a", "hello", 1i64 << 40]).unwrap();
+        let (text, full): (String, i64) = db.query_row("SELECT text, \"full\" FROM notes WHERE id = 'a'", (), |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((text.as_str(), full), ("hello", 1 << 40));
+    }
+}
+
 #[test]
 fn text_sorts_bytewise_like_sqlite() {
     for f in each("collation") {
