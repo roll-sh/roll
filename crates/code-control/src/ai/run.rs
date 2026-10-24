@@ -213,10 +213,6 @@ impl Code {
         // with the author's human cap read again then, so it never costs more than it reserved.
         let mut reservation = None;
         if chosen.key == KeySource::Hosted {
-            let spent_now = || {
-                let (spent, free_used, _) = self.db.usage_month(&r.owner_id, &month, &c.author)?;
-                Ok((spent, free_used))
-            };
             let author_std = self.db.usage_month(&r.owner_id, &month, &c.author)?.2;
             let sent = files.len() as u32;
             let estimate = |mode: Mode| {
@@ -228,7 +224,7 @@ impl Code {
                     )
                 }
             };
-            match self.ai.reserve(&r.owner_id, billing.monthly_cap_usd, spent_now, estimate(choice.mode))? {
+            match self.reserve(&r.owner_id, &month, billing.monthly_cap_usd, estimate(choice.mode))? {
                 Some(g) => reservation = Some(g),
                 None => {
                     let cap = billing.monthly_cap_usd.unwrap_or_default();
@@ -243,14 +239,15 @@ impl Code {
                                 choice.reasons.push(format!("the monthly cap (${cap:.2}) is reached: standard only"));
                             }
                             // Standard reviews go on past the cap; still held, so the others see them.
-                            reservation = self.ai.reserve(&r.owner_id, None, spent_now, estimate(Mode::Standard))?;
+                            reservation = self.reserve(&r.owner_id, &month, None, estimate(Mode::Standard))?;
                         }
                         _ => return self.capped(&r, &c, cap).await,
                     }
                 }
             }
         }
-        let reservation = reservation;
+        // Held until the review is metered (released with it) or this job ends without being metered.
+        let mut reservation = reservation;
 
         // The prompt.
         let default_head = self.head(&r)?;
@@ -436,7 +433,7 @@ impl Code {
             "details": engine::ai_summary(&result),
         });
         self.db.set_review_ai(&review.id, &ai)?;
-        self.db.insert_usage(&UsageRow {
+        let usage = UsageRow {
             id: new_id("use"),
             owner_id: r.owner_id.clone(),
             repo_id: r.id.clone(),
@@ -465,7 +462,8 @@ impl Code {
             public,
             month,
             created_at: crate::db::now(),
-        })?;
+        };
+        self.meter(&usage, reservation.as_mut())?;
         if let Ok(Some(v)) = self.db.review(&review.id) {
             self.emit(&r.id, "review", serde_json::to_value(&v).unwrap_or_default());
         }
@@ -656,11 +654,7 @@ impl Code {
         if chosen.key == KeySource::Hosted {
             let billing = self.db.billing(&r.owner_id)?;
             let estimate = |_| pricing::price(&self.config.review.rates, &price_input(Kind::Chat, Mode::Standard, KeySource::Hosted, 0, public, human), &Month::default());
-            let spent_now = || {
-                let (spent, free_used, _) = self.db.usage_month(&r.owner_id, &month, &c.author)?;
-                Ok((spent, free_used))
-            };
-            match self.ai.reserve(&r.owner_id, billing.monthly_cap_usd, spent_now, estimate)? {
+            match self.reserve(&r.owner_id, &month, billing.monthly_cap_usd, estimate)? {
                 Some(g) => reservation = Some(g),
                 None => {
                     let cap = billing.monthly_cap_usd.unwrap_or_default();
@@ -674,7 +668,8 @@ impl Code {
                 }
             }
         }
-        let _reservation = reservation;
+        // Held until the reply is metered (released with it) or this job ends without being metered.
+        let mut reservation = reservation;
         // The thread's code, its conversation and the question.
         let head = self.store.resolve_or_404(&r.id, &c.head)?;
         let at = self.store.resolve(&r.id, &th.at)?.unwrap_or(head);
@@ -721,7 +716,7 @@ impl Code {
         // Meter the reply.
         let price = pricing::price(&self.config.review.rates, &price_input(Kind::Chat, Mode::Standard, chosen.key, 0, public, human), &Month::default());
         let cost = pricing::provider_cost(&model, &usage, &self.config.review.model_rates);
-        self.db.insert_usage(&UsageRow {
+        let metered = UsageRow {
             id: new_id("use"),
             owner_id: r.owner_id.clone(),
             repo_id: r.id.clone(),
@@ -750,7 +745,8 @@ impl Code {
             public,
             month,
             created_at: crate::db::now(),
-        })?;
+        };
+        self.meter(&metered, reservation.as_mut())?;
         Ok(())
     }
 }

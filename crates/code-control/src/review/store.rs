@@ -125,6 +125,10 @@ CREATE INDEX IF NOT EXISTS review_deliveries_due ON review_deliveries (state, ne
 CREATE INDEX IF NOT EXISTS review_deliveries_app ON review_deliveries (app_id);
 "#;
 
+/// A new pending delivery: `(id, app_id, event, payload, next_at ms, created_at s)`.
+pub(crate) const INSERT_DELIVERY: &str =
+    "INSERT INTO review_deliveries (id, app_id, event, payload, state, next_at, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)";
+
 fn reviewer(kind: String, name: String, app: Option<String>) -> Reviewer {
     Reviewer { kind: ReviewerKind::parse(&kind), name, app: app.filter(|a| !a.is_empty()) }
 }
@@ -689,10 +693,7 @@ impl Db {
     // ── deliveries ──
 
     pub fn insert_delivery(&self, id: &str, app_id: &str, event: &str, payload: &str) -> Result<()> {
-        self.sql().execute(
-            "INSERT INTO review_deliveries (id, app_id, event, payload, state, next_at, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
-            params![id, app_id, event, payload, code_store::now_ms(), now()],
-        )?;
+        self.sql().execute(INSERT_DELIVERY, params![id, app_id, event, payload, code_store::now_ms(), now()])?;
         Ok(())
     }
 
@@ -722,8 +723,10 @@ impl Db {
         Ok(self.sql().query_row("SELECT MIN(next_at) FROM review_deliveries WHERE state = 'pending'", (), |r| r.get(0))?)
     }
 
-    /// Take a due delivery to send it, until `until_ms`; `false` if another sender (another
-    /// node) took it first, or it changed since it was read as `next_at`.
+    /// Take a due delivery to send it, until `until_ms` (the database's clock); `false` if
+    /// another sender (another node) took it first, or it changed since it was read as
+    /// `next_at`. While claimed it's pending with `next_at = until_ms`, so it's due again (for
+    /// any node) if the claimer never finishes it.
     pub fn claim_delivery(&self, id: &str, next_at: i64, until_ms: i64) -> Result<bool> {
         Ok(self.sql().execute(
             "UPDATE review_deliveries SET next_at = ? WHERE id = ? AND state = 'pending' AND next_at = ?",
@@ -731,24 +734,35 @@ impl Db {
         )? == 1)
     }
 
+    /// Give a claim back unsent: due again at `next_at`. `false` if the claim was gone.
+    pub fn unclaim_delivery(&self, id: &str, claimed_until: i64, next_at: i64) -> Result<bool> {
+        Ok(self.sql().execute(
+            "UPDATE review_deliveries SET next_at = ? WHERE id = ? AND state = 'pending' AND next_at = ?",
+            params![next_at, id, claimed_until],
+        )? == 1)
+    }
+
+    /// Record an attempt of a delivery claimed until `claimed_until`. `false` (nothing written)
+    /// if the claim isn't held any more: it lapsed and another sender took it, or it was
+    /// redelivered or deleted meanwhile.
     #[allow(clippy::too_many_arguments)]
     pub fn finish_delivery(
         &self,
         id: &str,
+        claimed_until: i64,
         state: &str,
         attempts: i64,
         next_at: i64,
         status: Option<i64>,
         error: Option<&str>,
         response: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let delivered = (state == "delivered").then(now);
-        self.sql().execute(
+        Ok(self.sql().execute(
             "UPDATE review_deliveries SET state = ?, attempts = ?, next_at = ?, last_status = ?, last_error = ?, \
-             delivered_at = COALESCE(?, delivered_at), last_response = ? WHERE id = ?",
-            params![state, attempts, next_at, status, error, delivered, response, id],
-        )?;
-        Ok(())
+             delivered_at = COALESCE(?, delivered_at), last_response = ? WHERE id = ? AND state = 'pending' AND next_at = ?",
+            params![state, attempts, next_at, status, error, delivered, response, id, claimed_until],
+        )? == 1)
     }
 
     pub fn redeliver(&self, id: &str) -> Result<()> {

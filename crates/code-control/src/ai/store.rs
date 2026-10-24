@@ -3,7 +3,7 @@
 
 use crate::db::{Db, now};
 use anyhow::Result;
-use code_sql::{OptionalExtension, Row, params};
+use code_sql::{Conn, OptionalExtension, Row, params};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -102,6 +102,25 @@ CREATE TABLE IF NOT EXISTS ai_paused (
     change_id TEXT PRIMARY KEY,
     paused_by TEXT NOT NULL,
     paused_at INTEGER NOT NULL
+);
+-- Hosted spend (and free public reviews) held by jobs still running, on any node: inserted in
+-- the transaction that checks the cap, deleted in the one that meters the job (or when it ends
+-- without being metered). A running job renews its row; a dead node's rows lapse at expires_at.
+CREATE TABLE IF NOT EXISTS ai_reservations (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    month TEXT NOT NULL,
+    usd REAL NOT NULL,
+    free INTEGER NOT NULL,
+    -- Unix milliseconds on the database's clock.
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ai_reservations_owner ON ai_reservations (owner_id, month);
+-- One row per owner that reservations lock while they check the cap (they take turns).
+CREATE TABLE IF NOT EXISTS ai_owner_locks (
+    owner_id TEXT PRIMARY KEY,
+    n INTEGER NOT NULL
 );
 "#;
 
@@ -410,7 +429,97 @@ impl Db {
     // ── usage ──
 
     pub fn insert_usage(&self, u: &UsageRow) -> Result<()> {
-        self.sql().execute(
+        self.meter(u, None)
+    }
+
+    /// Record a metered job and release its reservation, in one transaction: a crash can
+    /// neither count the job twice (metered and still held) nor lose the record.
+    pub(crate) fn meter(&self, u: &UsageRow, reservation: Option<&str>) -> Result<()> {
+        self.write(|c| {
+            insert_usage_on(c, u)?;
+            if let Some(id) = reservation {
+                c.execute("DELETE FROM ai_reservations WHERE id = ?", [id])?;
+            }
+            Ok(())
+        })
+    }
+
+    // ── reservations ──
+
+    /// Reserve a job's price for an owner if the month's metered spend, plus what running jobs
+    /// on every node hold, plus the price stays within `cap` (`None`: no cap). `price` prices
+    /// the job given the free public reviews used, counting the ones running jobs claimed, so
+    /// two jobs can't both take the last free one. `now_ms` is the database's clock; the
+    /// reservation lapses `ttl_ms` later unless renewed. `None` when the cap refuses it.
+    ///
+    /// Reservations for one owner take turns on the owner's `ai_owner_locks` row (read
+    /// committed, so a busy owner's jobs wait in line instead of failing serialization over and
+    /// over), and read metered spend and holds in one statement, so one snapshot: a job metered
+    /// meanwhile (usage written and its hold deleted in one transaction) is counted exactly once.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn reserve_ai(
+        &self,
+        id: &str,
+        owner_id: &str,
+        month: &str,
+        cap: Option<f64>,
+        now_ms: i64,
+        ttl_ms: i64,
+        price: &dyn Fn(u32) -> code_review::pricing::Price,
+    ) -> Result<Option<code_review::pricing::Price>> {
+        Ok(self.sql().write_with(code_sql::Isolation::ReadCommitted, |c| -> code_sql::Result<_> {
+            c.execute(
+                "INSERT INTO ai_owner_locks (owner_id, n) VALUES (?, 1) ON CONFLICT (owner_id) DO UPDATE SET n = excluded.n",
+                [owner_id],
+            )?;
+            // Lapsed holds (a node died while its jobs ran) are gone for good.
+            c.execute("DELETE FROM ai_reservations WHERE owner_id = ? AND expires_at <= ?", params![owner_id, now_ms])?;
+            let (spent, free_used, held_usd, held_free): (f64, i64, f64, i64) = c.query_row(
+                "SELECT (SELECT COALESCE(SUM(price_usd), 0) FROM ai_usage WHERE owner_id = ?1 AND month = ?2), \
+                        (SELECT COUNT(*) FROM ai_usage WHERE owner_id = ?1 AND month = ?2 AND free = 1), \
+                        (SELECT COALESCE(SUM(usd), 0) FROM ai_reservations WHERE owner_id = ?1 AND month = ?2), \
+                        (SELECT COUNT(*) FROM ai_reservations WHERE owner_id = ?1 AND month = ?2 AND free = 1)",
+                params![owner_id, month],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            let p = price((free_used as u32).saturating_add(held_free as u32));
+            if let Some(cap) = cap
+                && spent + held_usd + p.charged_usd > cap + 1e-9
+            {
+                return Ok(None);
+            }
+            c.execute(
+                "INSERT INTO ai_reservations (id, owner_id, month, usd, free, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![id, owner_id, month, p.charged_usd, p.free as i64, now_ms + ttl_ms, now()],
+            )?;
+            Ok(Some(p))
+        })?)
+    }
+
+    /// Spend and free public reviews held right now by running jobs for an owner, on every
+    /// node (lapsed holds don't count). `now_ms` is the database's clock.
+    pub fn reserved(&self, owner_id: &str, now_ms: i64) -> Result<(f64, u32)> {
+        let c = self.sql();
+        let usd: f64 = c.query_row("SELECT COALESCE(SUM(usd), 0) FROM ai_reservations WHERE owner_id = ? AND expires_at > ?", params![owner_id, now_ms], |r| r.get(0))?;
+        let free: i64 =
+            c.query_row("SELECT COUNT(*) FROM ai_reservations WHERE owner_id = ? AND expires_at > ? AND free = 1", params![owner_id, now_ms], |r| r.get(0))?;
+        Ok((usd, free as u32))
+    }
+}
+
+/// Keep a running job's reservation until `expires_at`; `false` if it's gone.
+pub(crate) fn renew_reservation(sql: &code_sql::Db, id: &str, expires_at: i64) -> code_sql::Result<bool> {
+    Ok(sql.execute("UPDATE ai_reservations SET expires_at = ? WHERE id = ?", params![expires_at, id])? == 1)
+}
+
+pub(crate) fn release_reservation(sql: &code_sql::Db, id: &str) -> code_sql::Result<()> {
+    sql.execute("DELETE FROM ai_reservations WHERE id = ?", [id])?;
+    Ok(())
+}
+
+fn insert_usage_on(c: &Conn<'_>, u: &UsageRow) -> code_sql::Result<()> {
+    {
+        c.execute(
             &format!("INSERT INTO ai_usage ({USAGE_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
             params![
                 u.id,
@@ -443,9 +552,25 @@ impl Db {
                 u.created_at
             ],
         )?;
-        Ok(())
     }
+    Ok(())
+}
 
+/// The month so far on `c`: charged total, free public reviews used, and this author's hosted
+/// standard charges.
+fn usage_month_on(c: &Conn<'_>, owner_id: &str, month: &str, author: &str) -> code_sql::Result<(f64, u32, f64)> {
+    let total: f64 = c.query_row("SELECT COALESCE(SUM(price_usd), 0) FROM ai_usage WHERE owner_id = ? AND month = ?", params![owner_id, month], |r| r.get(0))?;
+    let free: i64 = c.query_row("SELECT COUNT(*) FROM ai_usage WHERE owner_id = ? AND month = ? AND free = 1", params![owner_id, month], |r| r.get(0))?;
+    let author_std: f64 = c.query_row(
+        "SELECT COALESCE(SUM(price_usd), 0) FROM ai_usage WHERE owner_id = ? AND month = ? AND author = ? AND human_author = 1 \
+         AND kind = 'review' AND mode = 'standard' AND key_source = 'hosted'",
+        params![owner_id, month, author],
+        |r| r.get(0),
+    )?;
+    Ok((total, free as u32, author_std))
+}
+
+impl Db {
     pub fn usage_rows(&self, owner_id: &str, month: &str) -> Result<Vec<UsageRow>> {
         Ok(self.sql().query(
             &format!("SELECT {USAGE_COLS} FROM ai_usage WHERE owner_id = ? AND month = ? ORDER BY created_at DESC, rowid DESC"),
@@ -457,16 +582,7 @@ impl Db {
     /// The month so far: charged total, free public reviews used, and this author's hosted
     /// standard charges.
     pub fn usage_month(&self, owner_id: &str, month: &str, author: &str) -> Result<(f64, u32, f64)> {
-        let c = self.sql();
-        let total: f64 = c.query_row("SELECT COALESCE(SUM(price_usd), 0) FROM ai_usage WHERE owner_id = ? AND month = ?", params![owner_id, month], |r| r.get(0))?;
-        let free: i64 = c.query_row("SELECT COUNT(*) FROM ai_usage WHERE owner_id = ? AND month = ? AND free = 1", params![owner_id, month], |r| r.get(0))?;
-        let author_std: f64 = c.query_row(
-            "SELECT COALESCE(SUM(price_usd), 0) FROM ai_usage WHERE owner_id = ? AND month = ? AND author = ? AND human_author = 1 \
-             AND kind = 'review' AND mode = 'standard' AND key_source = 'hosted'",
-            params![owner_id, month, author],
-            |r| r.get(0),
-        )?;
-        Ok((total, free as u32, author_std))
+        Ok(self.sql().read(|c| usage_month_on(c, owner_id, month, author))?)
     }
 
     // ── learnings ──

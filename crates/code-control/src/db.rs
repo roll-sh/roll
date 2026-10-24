@@ -390,7 +390,7 @@ impl Db {
     /// Open control.db in `sql`: create what's missing and bring old databases up to date.
     /// Every node of a cluster may do this at once.
     pub fn open(sql: code_sql::Db) -> Result<Db> {
-        for schema in [SCHEMA, crate::review::store::SCHEMA, crate::ai::store::SCHEMA, crate::webhooks::SCHEMA, crate::broken::SCHEMA] {
+        for schema in [SCHEMA, crate::review::store::SCHEMA, crate::ai::store::SCHEMA, crate::webhooks::SCHEMA, crate::broken::SCHEMA, crate::mcp::SCHEMA] {
             sql.ensure_schema(schema)?;
         }
         for (table, column, decl) in COLUMNS {

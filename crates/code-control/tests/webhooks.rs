@@ -906,3 +906,385 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
         assert_eq!(keys(&g.body["repo"]), ["default_branch", "full_name", "id", "visibility"]);
     }
 }
+
+// ── many nodes on one database (docs/code/cluster.md, "Work that isn't per repo") ──
+
+/// Another node on `a`'s databases (control.db and the store), with connections of its own.
+fn node(a: &App) -> App {
+    let code = common::open_in(a.dir.path(), |c| c.review_app_retry_ms = 20);
+    App { router: code_control::api::router(code.clone()), code, dir: tempfile::tempdir().unwrap() }
+}
+
+/// A receiver that counts attempts per delivery id: it fails each delivery's first attempt
+/// (`fail_first`) and holds each first attempt `slow_first` long before answering.
+#[derive(Clone)]
+struct Counter {
+    url: String,
+    attempts: Arc<Mutex<HashMap<String, u32>>>,
+    /// Bodies of the attempts it answered 200.
+    ok: Arc<Mutex<Vec<Value>>>,
+}
+
+async fn counter(fail_first: bool, slow_first: Option<Duration>) -> Counter {
+    let attempts: Arc<Mutex<HashMap<String, u32>>> = Arc::default();
+    let ok: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let (at, okc) = (attempts.clone(), ok.clone());
+    let app = axum::Router::new().fallback(move |headers: HeaderMap, body: Bytes| {
+        let (attempts, ok) = (at.clone(), okc.clone());
+        async move {
+            let d = headers.get("x-roll-delivery").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+            let n = {
+                let mut a = attempts.lock();
+                let n = a.entry(d).or_insert(0);
+                *n += 1;
+                *n
+            };
+            if n == 1
+                && let Some(s) = slow_first
+            {
+                tokio::time::sleep(s).await;
+            }
+            if n == 1 && fail_first {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+            ok.lock().push(serde_json::from_slice(&body).unwrap_or(Value::Null));
+            StatusCode::OK.into_response()
+        }
+    });
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/hook", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    Counter { url, attempts, ok }
+}
+
+impl Counter {
+    fn answered(&self, event: &str) -> Vec<Value> {
+        self.ok.lock().iter().filter(|b| b["event"] == event).cloned().collect()
+    }
+    async fn wait(&self, event: &str, n: usize, secs: u64) {
+        for _ in 0..secs * 100 {
+            if self.answered(event).len() >= n {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{} of {n} {event} deliveries", self.answered(event).len());
+    }
+}
+
+/// A webhook on `P` made through `a`; its id.
+async fn hook(a: &App, url: &str, events: Value) -> String {
+    let created = a.ok("POST", &format!("{P}/webhooks"), Some(json!({ "url": url, "events": events }))).await;
+    created["webhook"]["id"].as_str().unwrap().to_string()
+}
+
+/// Every landed changeset delivered exactly once.
+fn each_once(got: &[Value], want: &[String]) {
+    let mut seen: Vec<String> = got.iter().map(|b| b["data"]["changeset"].as_str().unwrap().to_string()).collect();
+    seen.sort();
+    let mut want = want.to_vec();
+    want.sort();
+    assert_eq!(seen.len(), want.len(), "each landing once");
+    assert_eq!(seen, want, "every landing, each once");
+}
+
+/// Land `n` more changesets on main in one advance; their ids.
+async fn land_burst(a: &App, repo_id: &str, n: usize) -> Vec<String> {
+    let head = a.code.store.get_ref(repo_id, "refs/heads/main").unwrap().unwrap();
+    let tip = chain(a, repo_id, head, n).await;
+    let landed = a.code.store.advance(repo_id, "main", Some(head), tip).await.unwrap();
+    assert_eq!(landed.len(), n);
+    landed.iter().map(|l| code_control::cs_id(&l.changeset)).collect()
+}
+
+/// Run a node's forwarder once, off the runtime's threads (it blocks on the database).
+async fn forward(a: &App) -> code_control::Result<code_control::webhooks::Forwarded> {
+    let code = a.code.clone();
+    tokio::task::spawn_blocking(move || code.forward_landings()).await.unwrap()
+}
+
+/// Two nodes forwarding the same land log at once (their background forwarders, plus four
+/// more rounds racing in a loop) while landings keep arriving: each landing is queued and
+/// delivered exactly once per webhook. Each page's deliveries go in with the cursor's
+/// compare-and-swap, so the loser of a race queues nothing and re-reads from the new cursor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn two_forwarders_deliver_each_landing_once() {
+    let a = setup().await;
+    let b = node(&a);
+    let rx = counter(false, None).await;
+    let id = hook(&b, &rx.url, json!(["landed"])).await;
+    rx.wait("ping", 1, 10).await;
+    a.code.start_webhooks();
+    b.code.start_webhooks();
+    let repo_id = a.ok("GET", P, None).await["id"].as_str().unwrap().to_string();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut racers = Vec::new();
+    for code in [a.code.clone(), b.code.clone(), a.code.clone(), b.code.clone()] {
+        let stop = stop.clone();
+        racers.push(tokio::task::spawn_blocking(move || {
+            let mut rounds = 0;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                code.forward_landings().unwrap();
+                rounds += 1;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            rounds
+        }));
+    }
+    let mut want = Vec::new();
+    for _ in 0..6 {
+        want.extend(land_burst(&a, &repo_id, 200).await);
+    }
+    // Every landing forwarded, then stop the racers.
+    let head = a.code.store.land_log_head().unwrap();
+    for _ in 0..1000 {
+        if a.code.db.land_cursor().unwrap() == Some(head) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(b.code.db.land_cursor().unwrap(), Some(head), "the cursor reached the head");
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    for r in racers {
+        assert!(r.await.unwrap() > 0);
+    }
+    rx.wait("landed", want.len(), 60).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    each_once(&rx.answered("landed"), &want);
+    let queued = a.code.db.deliveries(&id, 100_000).unwrap();
+    assert_eq!(queued.iter().filter(|d| d.event == "landed").count(), want.len(), "queued once each");
+    assert!(queued.iter().all(|d| d.state == "delivered" && d.attempts == 1), "and sent once each");
+}
+
+/// A forwarder that fails after queueing a page's deliveries (as a crash would) leaves nothing
+/// of the page behind and the cursor where it was; the pages before it stay forwarded, and the
+/// next round forwards the rest: nothing is dropped and nothing is queued twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forwarder_failing_mid_page_neither_drops_nor_duplicates() {
+    let a = setup().await;
+    let rx = counter(false, None).await;
+    let id = hook(&a, &rx.url, json!(["landed"])).await;
+    rx.wait("ping", 1, 10).await;
+    let repo_id = a.ok("GET", P, None).await["id"].as_str().unwrap().to_string();
+    let landed = |a: &App| a.code.db.deliveries(&id, 100_000).unwrap().into_iter().filter(|d| d.event == "landed").count();
+    // A full page that goes through.
+    let mut want = land_burst(&a, &repo_id, 500).await;
+    rx.wait("landed", 500, 60).await;
+    let page1 = a.code.db.land_cursor().unwrap().unwrap();
+    // Then every round fails after queueing.
+    a.code.fail_land_forwarding(u32::MAX);
+    let more = land_burst(&a, &repo_id, 200).await;
+    for _ in 0..3 {
+        assert!(forward(&a).await.is_err(), "the injected failure");
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(a.code.db.land_cursor().unwrap(), Some(page1), "the cursor didn't move");
+    assert_eq!(landed(&a), 500, "nothing of the failed page was kept");
+    assert_eq!(rx.answered("landed").len(), 500);
+    // One more failure, then it works.
+    a.code.fail_land_forwarding(1);
+    let head = a.code.store.land_log_head().unwrap();
+    for _ in 0..100 {
+        let _ = forward(&a).await;
+        if a.code.db.land_cursor().unwrap() == Some(head) {
+            break;
+        }
+    }
+    assert_eq!(a.code.db.land_cursor().unwrap(), Some(head));
+    want.extend(more);
+    rx.wait("landed", want.len(), 60).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(landed(&a), want.len(), "queued once each");
+    each_once(&rx.answered("landed"), &want);
+}
+
+/// Which webhooks an event goes to is read from the database, not a node's memory: a webhook
+/// made through one node gets the events emitted on another at once, a change to it applies at
+/// once, and one deleted through one node stops deliveries from every node.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn webhooks_made_on_one_node_apply_to_events_on_another() {
+    let a = setup().await;
+    let b = node(&a);
+    let rx = counter(false, None).await;
+    let change = |n: usize| json!({ "title": format!("t{n}"), "message": "t", "base": "main", "files": { format!("c{n}.txt"): { "content": "c\n" } } });
+    // `a` emits (and looks for webhooks) before any exists.
+    a.ok("POST", &format!("{P}/changes"), Some(change(0))).await;
+    let id = hook(&b, &rx.url, json!(["change", "landed"])).await;
+    rx.wait("ping", 1, 10).await;
+    // An event on a: delivered to b's webhook.
+    let c = a.ok("POST", &format!("{P}/changes"), Some(change(1))).await;
+    for _ in 0..1000 {
+        if rx.answered("change").iter().any(|v| v["data"]["id"] == c["id"]) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(rx.answered("change").iter().any(|v| v["data"]["id"] == c["id"]), "{:?}", rx.answered("change"));
+    // A landing through a: once.
+    let cs = land_file(&a, "landed through a", "l.txt", "1\n").await;
+    rx.wait("landed", 1, 10).await;
+    // Changed through b: a stops sending `change` at once.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    b.ok("PATCH", &format!("{P}/webhooks/{id}"), Some(json!({ "events": ["landed"] }))).await;
+    let changes = rx.answered("change").len();
+    a.ok("POST", &format!("{P}/changes"), Some(change(2))).await;
+    // Deleted through b: nothing more from a.
+    let (s, _) = b.req("DELETE", &format!("{P}/webhooks/{id}"), None, None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    a.ok("POST", &format!("{P}/changes"), Some(change(3))).await;
+    land_file(&a, "after the delete", "l.txt", "2\n").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(rx.answered("change").len(), changes, "no change events after the update, nor after the delete");
+    let landed = rx.answered("landed");
+    assert_eq!(landed.len(), 1, "one landing, delivered once, none after the delete");
+    assert_eq!(landed[0]["data"]["changeset"], cs.as_str());
+    // A node taking a repo over can drop what it knew about its webhooks (nothing is kept).
+    b.code.forget_repo_webhooks(a.ok("GET", P, None).await["id"].as_str().unwrap());
+}
+
+/// Two delivery workers (one per node) over one delivery queue: each delivery is sent by one
+/// of them at a time, so with every first attempt failing, the receiver gets each delivery
+/// exactly twice (the failure and the retry), whichever node sends it, and the log says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_delivery_workers_send_each_delivery_once_including_retries() {
+    let a = setup().await;
+    let b = node(&a);
+    let rx = counter(true, None).await;
+    let id = hook(&a, &rx.url, json!(["change"])).await;
+    for n in 0..20 {
+        let node = if n % 2 == 0 { &a } else { &b };
+        node.ok("POST", &format!("{P}/changes"), Some(json!({ "title": format!("t{n}"), "message": "t", "base": "main", "files": { format!("c{n}.txt"): { "content": "c\n" } } }))).await;
+    }
+    let mut ds = Vec::new();
+    for _ in 0..1000 {
+        ds = a.code.db.deliveries(&id, 1000).unwrap();
+        if ds.len() >= 21 && ds.iter().all(|d| d.state == "delivered") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(ds.len() >= 21 && ds.iter().all(|d| d.state == "delivered"), "{:?}", ds.iter().map(|d| (&d.state, d.attempts)).collect::<Vec<_>>());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let ds = a.code.db.deliveries(&id, 1000).unwrap();
+    assert!(ds.iter().all(|d| d.state == "delivered"));
+    let attempts = rx.attempts.lock().clone();
+    for d in &ds {
+        assert_eq!(d.attempts, 2, "{} {}", d.id, d.event);
+        assert_eq!(attempts.get(&d.id), Some(&2), "{} was sent exactly twice (a failure, then the retry)", d.id);
+    }
+    assert_eq!(attempts.len(), ds.len());
+}
+
+/// A delivery claimed by a node that died before sending it is due again once the claim
+/// lapses, and another node sends it then (once).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claim_held_by_a_dead_node_is_retried_after_it_lapses() {
+    let a = setup().await;
+    let b = node(&a);
+    let rx = counter(false, None).await;
+    let id = hook(&a, &rx.url, json!(["change"])).await;
+    rx.wait("ping", 1, 10).await;
+    // The dead node's delivery: queued, then claimed for 400 ms, and never sent.
+    let sql = a.code.db.sql();
+    let far = i64::MAX / 2;
+    sql.execute(
+        "INSERT INTO review_deliveries (id, app_id, event, payload, state, next_at, created_at) VALUES ('dl_dead', ?, 'ping', ?, 'pending', ?, 0)",
+        code_sql::params![id.as_str(), json!({ "event": "ping", "delivery": "dl_dead" }).to_string(), far],
+    )
+    .unwrap();
+    let claimed = std::time::Instant::now();
+    let now = sql.now_ms().unwrap();
+    assert!(a.code.db.claim_delivery("dl_dead", far, now + 400).unwrap());
+    // b's worker, woken by a ping of its own, sends it when the claim lapses, not before.
+    b.ok("POST", &format!("{P}/webhooks/{id}/ping"), None).await;
+    rx.wait("ping", 2, 10).await;
+    assert!(!rx.attempts.lock().contains_key("dl_dead"), "not while it's claimed");
+    for _ in 0..500 {
+        if rx.attempts.lock().contains_key("dl_dead") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(claimed.elapsed() >= Duration::from_millis(390), "{:?}", claimed.elapsed());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(rx.attempts.lock().get("dl_dead"), Some(&1), "sent once");
+    let d = a.code.db.delivery("dl_dead").unwrap().unwrap();
+    assert_eq!((d.state.as_str(), d.attempts), ("delivered", 1));
+}
+
+/// A receiver slower than the claim can't get a delivery from two senders at once: the
+/// request's total timeout is well inside the claim, so the slow attempt ends (and is recorded
+/// as a failed attempt) before anyone else may send; the retry is the only other send, and
+/// every send the receiver saw is an attempt in the log.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_receiver_never_gets_an_unrecorded_second_send() {
+    let a = setup().await;
+    let b = node(&a);
+    for n in [&a, &b] {
+        n.code.set_delivery_timing(Duration::from_millis(300), Duration::from_millis(1_500));
+    }
+    // Each first attempt takes 3 s, twice the claim.
+    let rx = counter(false, Some(Duration::from_secs(3))).await;
+    let id = hook(&a, &rx.url, json!(["change"])).await;
+    b.ok("POST", &format!("{P}/webhooks/{id}/ping"), None).await;
+    for _ in 0..500 {
+        let ds = a.code.db.deliveries(&id, 10).unwrap();
+        if ds.len() == 2 && ds.iter().all(|d| d.state == "delivered") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Past the slow attempts and their claims: no more sends.
+    tokio::time::sleep(Duration::from_millis(3_500)).await;
+    let attempts = rx.attempts.lock().clone();
+    let ds = a.code.db.deliveries(&id, 10).unwrap();
+    assert_eq!(ds.len(), 2);
+    for d in &ds {
+        assert_eq!((d.state.as_str(), d.attempts), ("delivered", 2), "{}: the timed-out attempt, then the retry", d.id);
+        assert_eq!(attempts.get(&d.id), Some(&2), "{}: the receiver saw exactly the recorded attempts", d.id);
+    }
+}
+
+/// Webhooks created through two nodes at the moment the forwarder starts for the first time
+/// (no cursor yet, on either side of the race): every creation succeeds, and each webhook gets
+/// the next landing exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn webhooks_created_while_the_forwarder_starts() {
+    let a = setup().await;
+    let b = node(&a);
+    let rx = counter(false, None).await;
+    let r = a.code.find_repo("acme", "api").unwrap();
+    let repo_id = r.id.clone();
+    let mut hooks = Vec::new();
+    for _ in 0..5 {
+        a.code.db.sql().execute("DELETE FROM webhook_land_cursor", ()).unwrap();
+        let mut tasks = Vec::new();
+        for i in 0..4 {
+            let (code, url, r) = (if i % 2 == 0 { a.code.clone() } else { b.code.clone() }, rx.url.clone(), r.clone());
+            tasks.push(tokio::task::spawn_blocking(move || code.create_webhook(&code_control::Caller::Admin, &r, &json!({ "url": url, "events": ["landed"] }))));
+        }
+        let forwarders: Vec<_> = [a.code.clone(), b.code.clone()].into_iter().map(|c| tokio::task::spawn_blocking(move || c.forward_landings())).collect();
+        for t in tasks {
+            let v = t.await.unwrap().expect("created");
+            hooks.push(v["webhook"]["id"].as_str().unwrap().to_string());
+        }
+        for f in forwarders {
+            f.await.unwrap().unwrap();
+        }
+    }
+    let cs = land_burst(&a, &repo_id, 1).await;
+    for _ in 0..1000 {
+        if rx.answered("landed").len() >= hooks.len() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let got = rx.answered("landed");
+    assert_eq!(got.len(), hooks.len(), "one landing, once per webhook");
+    let mut per: Vec<String> = got.iter().map(|g| g["webhook"].as_str().unwrap().to_string()).collect();
+    per.sort();
+    hooks.sort();
+    assert_eq!(per, hooks);
+    assert!(got.iter().all(|g| g["data"]["changeset"] == cs[0].as_str()));
+}

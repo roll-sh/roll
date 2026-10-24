@@ -90,7 +90,10 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
   - with an unknown or ended session: 404
   - from a different token than the one that started the session: 404
 
-  `DELETE /v1/code/mcp` ends a session.
+  `DELETE /v1/code/mcp` ends a session. Sessions are kept in control.db, so a session started
+  through one node of a cluster works through any other (no sticky load balancing needed) and
+  survives restarts. A session unused for 7 days ends (404: initialize again), and past 10,000
+  sessions the least recently used go.
 - **Messages:**
   - Notifications and responses get `202 Accepted`.
   - JSON-RPC batches are accepted, and the reply has one answer per request.

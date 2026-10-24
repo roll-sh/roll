@@ -371,7 +371,10 @@ mode, and is metered to its owner each month.
   review is estimated on every file it sends and metered on the files it read, so it never costs
   more than it reserved. A public repo's free reviews are reserved the same way: a running review
   holds the free one it counts on, and is metered as free exactly when it got one. Reservations
-  live in the daemon's memory, so this holds for one node.
+  are rows in control.db (`ai_reservations`), checked and taken in one transaction, so this holds
+  across every node of a cluster; metering a job and releasing its reservation are one
+  transaction. A running job renews its reservation, and a dead node's reservations lapse after
+  `reservation_ttl_ms` (5 minutes) instead of holding the cap forever (docs/code/cluster.md).
 - **Who counts as a person** for the human cap: the change's author, unless the author is one of
   these:
   - an `agent:…` or `…[bot]` name

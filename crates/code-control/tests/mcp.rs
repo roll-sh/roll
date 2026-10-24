@@ -1031,3 +1031,69 @@ async fn tools_follow_the_whole_auth_matrix() {
     c.initialize("2025-06-18").await;
     assert_eq!(c.tool("create_work", json!({ "repo": "acme/x", "title": "t" })).await["title"], "t");
 }
+
+/// Sessions live in control.db, so behind a load balancer without stickiness a session started
+/// through one node works through every other (same database, own connections), ends for all of
+/// them when it ends on one, survives a restart, and lapses when idle. `last_seen` is written
+/// only when it's a few seconds old.
+#[tokio::test]
+async fn sessions_work_through_any_node() {
+    let a = app(None);
+    let node = |a: &App| {
+        let code = common::open_in(a.dir.path(), |_| {});
+        App { router: code_control::api::router(code.clone()), code, dir: tempfile::tempdir().unwrap() }
+    };
+    let b = node(&a);
+    let mut c = Client::new(&a, None);
+    assert_eq!(c.initialize("2025-06-18").await["result"]["protocolVersion"], "2025-06-18");
+    let sid = c.session.clone().unwrap();
+    // The same session through the other node: tools, a tool call, the negotiated version.
+    let mut cb = Client { a: &b, token: None, session: Some(sid.clone()), next: 100, headers: Vec::new() };
+    assert_eq!(cb.rpc("tools/list", json!({})).await["result"]["tools"].as_array().unwrap().len(), TOOLS.len());
+    a.repo("acme", "api").await;
+    let listed = cb.tool("list_changes", json!({ "repo": "acme/api" })).await;
+    assert!(listed.to_string().contains("[]"), "{listed}");
+    let (s, _, _) = cb.post(json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }), &[("mcp-protocol-version", "2025-06-18")]).await;
+    assert_eq!(s, StatusCode::OK);
+    // A different token is a different caller, on either node.
+    let mut foreign = Client { a: &b, token: Some("rlc_someone_else".into()), session: Some(sid.clone()), next: 1, headers: Vec::new() };
+    let (s, _, _) = foreign.post(json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }), &[]).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    foreign.a = &a;
+    let (s, _, _) = foreign.post(json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }), &[]).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    // A restarted node still knows it.
+    let r = node(&a);
+    let mut cr = Client { a: &r, token: None, session: Some(sid.clone()), next: 200, headers: Vec::new() };
+    assert_eq!(cr.rpc("ping", json!({})).await["result"], json!({}));
+
+    // `last_seen` moves when it's old, and isn't rewritten on every request.
+    let sql = a.code.db.sql();
+    let seen = || sql.query_row("SELECT last_seen FROM mcp_sessions WHERE id = ?", [sid.as_str()], |r| r.get::<_, i64>(0)).unwrap();
+    let now = code_control::db::now();
+    sql.execute("UPDATE mcp_sessions SET last_seen = ? WHERE id = ?", code_sql::params![now - 60, sid.as_str()]).unwrap();
+    cb.rpc("ping", json!({})).await;
+    assert!(seen() >= now, "touched: {} < {now}", seen());
+    sql.execute("UPDATE mcp_sessions SET last_seen = ? WHERE id = ?", code_sql::params![now - 1, sid.as_str()]).unwrap();
+    c.rpc("ping", json!({})).await;
+    assert_eq!(seen(), now - 1, "used a second ago: not written again");
+
+    // Ended through b: gone on a too.
+    let del = |sid: &str| Request::builder().method("DELETE").uri(MCP).header("mcp-session-id", sid).body(Body::empty()).unwrap();
+    assert_eq!(b.send(del(&sid)).await.status(), StatusCode::NO_CONTENT);
+    let (s, _, _) = c.post(json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" }), &[]).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "ended on the other node");
+    assert_eq!(a.send(del(&sid)).await.status(), StatusCode::NOT_FOUND);
+
+    // A session idle past its lifetime is over, on every node.
+    let mut d = Client::new(&b, None);
+    d.initialize("2025-11-25").await;
+    let idle = d.session.clone().unwrap();
+    sql.execute("UPDATE mcp_sessions SET last_seen = ? WHERE id = ?", code_sql::params![now - code_control::mcp::SESSION_IDLE_S - 1, idle.as_str()]).unwrap();
+    let mut da = Client { a: &a, token: None, session: Some(idle), next: 1, headers: Vec::new() };
+    let (s, _, _) = da.post(json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }), &[]).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "idle too long");
+    da.session = None;
+    da.initialize("2025-11-25").await;
+    assert_eq!(da.rpc("ping", json!({})).await["result"], json!({}), "a new one works");
+}

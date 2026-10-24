@@ -9,7 +9,9 @@
 //!
 //! - `initialize` negotiates the protocol version and starts a session (`Mcp-Session-Id`). Every
 //!   later request needs the session id (400 without one, 404 for an unknown or ended one) and
-//!   the same token the session started with.
+//!   the same token the session started with. Sessions live in control.db (`mcp_sessions`), so
+//!   one started through any node of a cluster works through every other, and survives restarts;
+//!   one idle for [`SESSION_IDLE_S`] ends.
 //! - Tool failures (a 4xx from the API) are tool results with `isError: true`; protocol problems
 //!   are JSON-RPC errors. A land that conflicts or is blocked is a normal result
 //!   (`status: "conflict" | "blocked"`): it's an outcome agents act on, not a failure.
@@ -25,17 +27,37 @@ use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 use axum::routing::post;
 use axum::{Json, Router};
-use parking_lot::Mutex;
+use code_sql::{OptionalExtension, params};
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tower::ServiceExt;
 
 /// Protocol versions this server speaks, newest first.
 pub const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const SESSION_HEADER: &str = "mcp-session-id";
 const VERSION_HEADER: &str = "mcp-protocol-version";
+/// Sessions kept at most (the least recently used go first).
 const MAX_SESSIONS: usize = 10_000;
+/// A session unused this long (seconds) is over.
+pub const SESSION_IDLE_S: i64 = 7 * 24 * 3600;
+/// A session's `last_seen` is written at most this often (seconds): most requests only read it.
+const SESSION_TOUCH_S: i64 = 5;
+/// How often a node prunes idle and excess sessions (seconds).
+const SESSION_PRUNE_S: i64 = 60;
+
+pub const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS mcp_sessions (
+    id TEXT PRIMARY KEY,
+    version TEXT NOT NULL,
+    -- sha256 of the token the session started with ('' for none).
+    token_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    -- Unix seconds, written at most every SESSION_TOUCH_S.
+    last_seen INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS mcp_sessions_seen ON mcp_sessions (last_seen);
+"#;
 /// Lines `read_file` returns without a range.
 const READ_LINES: usize = 2_000;
 const MAX_RESPONSE: usize = 64 << 20;
@@ -53,12 +75,67 @@ struct Session {
 struct Mcp {
     code: Arc<Code>,
     api: Router,
-    sessions: Arc<Mutex<HashMap<String, Session>>>,
+    /// When this node last pruned sessions (Unix seconds).
+    pruned: Arc<AtomicI64>,
+}
+
+/// Sessions in control.db: every node sees the same ones.
+impl Mcp {
+    fn session(&self, id: &str) -> crate::Result<Option<Session>> {
+        let now = crate::db::now();
+        let s = self
+            .code
+            .db
+            .sql()
+            .query_row("SELECT version, token_hash, last_seen FROM mcp_sessions WHERE id = ?", [id], |r| {
+                Ok(Session { version: r.get(0)?, token: r.get(1)?, last_seen: r.get(2)? })
+            })
+            .optional()?;
+        Ok(s.filter(|s| s.last_seen > now - SESSION_IDLE_S))
+    }
+
+    /// The session was used now: written only when the stored time is a few seconds old.
+    fn touch(&self, id: &str, s: &Session) -> crate::Result<()> {
+        let now = crate::db::now();
+        if now - s.last_seen >= SESSION_TOUCH_S {
+            self.code.db.sql().execute("UPDATE mcp_sessions SET last_seen = ? WHERE id = ? AND last_seen < ?", params![now, id, now])?;
+        }
+        Ok(())
+    }
+
+    fn start_session(&self, id: &str, version: &str, token: &str) -> crate::Result<()> {
+        let now = crate::db::now();
+        self.code.db.sql().execute(
+            "INSERT INTO mcp_sessions (id, version, token_hash, created_at, last_seen) VALUES (?, ?, ?, ?, ?)",
+            params![id, version, token, now, now],
+        )?;
+        let last = self.pruned.load(Ordering::Relaxed);
+        if now - last >= SESSION_PRUNE_S && self.pruned.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+            self.prune(now)?;
+        }
+        Ok(())
+    }
+
+    /// Forget idle sessions, and the least recently used past [`MAX_SESSIONS`].
+    fn prune(&self, now: i64) -> crate::Result<()> {
+        let sql = self.code.db.sql();
+        sql.execute("DELETE FROM mcp_sessions WHERE last_seen <= ?", [now - SESSION_IDLE_S])?;
+        sql.execute(
+            "DELETE FROM mcp_sessions WHERE last_seen < (SELECT last_seen FROM mcp_sessions ORDER BY last_seen DESC LIMIT 1 OFFSET ?)",
+            [MAX_SESSIONS as i64],
+        )?;
+        Ok(())
+    }
+
+    fn end_session(&self, id: &str) -> crate::Result<()> {
+        self.code.db.sql().execute("DELETE FROM mcp_sessions WHERE id = ?", [id])?;
+        Ok(())
+    }
 }
 
 /// The MCP route. `api` is the rest of the API, which tools call into.
 pub fn routes(code: Arc<Code>, api: Router) -> Router {
-    let state = Mcp { code, api, sessions: Arc::new(Mutex::new(HashMap::new())) };
+    let state = Mcp { code, api, pruned: Arc::new(AtomicI64::new(0)) };
     Router::new()
         .route("/v1/code/mcp", post(handle).get(no_stream).delete(end_session))
         .with_state(state)
@@ -106,13 +183,13 @@ async fn no_stream() -> Response {
 
 async fn end_session(State(m): State<Mcp>, headers: HeaderMap) -> Response {
     let Some(id) = header_str(&headers, SESSION_HEADER) else { return http_error(StatusCode::BAD_REQUEST, "Mcp-Session-Id is required") };
-    let mut s = m.sessions.lock();
-    match s.get(id) {
-        Some(sess) if sess.token == token_key(&headers) => {
-            s.remove(id);
-            StatusCode::NO_CONTENT.into_response()
-        }
-        _ => http_error(StatusCode::NOT_FOUND, "unknown session"),
+    match m.session(id) {
+        Ok(Some(sess)) if sess.token == token_key(&headers) => match m.end_session(id) {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(e) => e.into_response(),
+        },
+        Ok(_) => http_error(StatusCode::NOT_FOUND, "unknown session"),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -144,11 +221,16 @@ async fn handle(State(m): State<Mcp>, ext: axum::http::Extensions, headers: Head
         };
         // A revoked (or otherwise invalid) token ends its session at once.
         if bearer(&headers).is_some() && matches!(m.code.caller(bearer(&headers).as_deref()), Err(crate::Error::Unauthorized)) {
-            m.sessions.lock().remove(id);
+            if let Err(e) = m.end_session(id) {
+                return e.into_response();
+            }
             return http_error(StatusCode::UNAUTHORIZED, "the token isn't valid (revoked?)");
         }
-        let mut sessions = m.sessions.lock();
-        let Some(s) = sessions.get_mut(id).filter(|s| s.token == token_key(&headers)) else {
+        let s = match m.session(id) {
+            Ok(s) => s,
+            Err(e) => return e.into_response(),
+        };
+        let Some(s) = s.filter(|s| s.token == token_key(&headers)) else {
             return http_error(StatusCode::NOT_FOUND, "unknown or ended session: initialize again");
         };
         if let Some(v) = header_str(&headers, VERSION_HEADER)
@@ -157,7 +239,9 @@ async fn handle(State(m): State<Mcp>, ext: axum::http::Extensions, headers: Head
         {
             return http_error(StatusCode::BAD_REQUEST, &format!("unsupported MCP-Protocol-Version {v}"));
         }
-        s.last_seen = crate::db::now();
+        if let Err(e) = m.touch(id, &s) {
+            return e.into_response();
+        }
     }
     // `Accept: text/event-stream` without `application/json`: the answer comes as server-sent
     // events (one `message` event per response, keep-alive comments while a long tool call
@@ -229,11 +313,13 @@ async fn process(m: &Mcp, headers: &HeaderMap, messages: Vec<Value>) -> (Vec<Val
         };
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         let resp = match method {
-            "initialize" => {
-                let (result, sid) = initialize(m, headers, &params);
-                new_session = Some(sid);
-                rpc_result(id, result)
-            }
+            "initialize" => match initialize(m, headers, &params) {
+                Ok((result, sid)) => {
+                    new_session = Some(sid);
+                    rpc_result(id, result)
+                }
+                Err(e) => rpc_error(id, -32603, format!("couldn't start a session: {e}")),
+            },
             "ping" => rpc_result(id, json!({})),
             "tools/list" => rpc_result(id, json!({ "tools": tools() })),
             "tools/call" => {
@@ -256,20 +342,11 @@ async fn process(m: &Mcp, headers: &HeaderMap, messages: Vec<Value>) -> (Vec<Val
     (responses, new_session)
 }
 
-fn initialize(m: &Mcp, headers: &HeaderMap, params: &Value) -> (Value, String) {
+fn initialize(m: &Mcp, headers: &HeaderMap, params: &Value) -> crate::Result<(Value, String)> {
     let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
     let version = if PROTOCOL_VERSIONS.contains(&asked) { asked } else { PROTOCOL_VERSIONS[0] };
     let sid = crate::new_id("mcp");
-    {
-        let mut s = m.sessions.lock();
-        if s.len() >= MAX_SESSIONS {
-            // Forget the least recently used.
-            if let Some(oldest) = s.iter().min_by_key(|(_, v)| v.last_seen).map(|(k, _)| k.clone()) {
-                s.remove(&oldest);
-            }
-        }
-        s.insert(sid.clone(), Session { version: version.to_string(), token: token_key(headers), last_seen: crate::db::now() });
-    }
+    m.start_session(&sid, version, &token_key(headers))?;
     let result = json!({
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
@@ -281,7 +358,7 @@ queued (merge queue), blocked (review or checks rules; the blockers say what's m
 changed underneath you: re-read them, revise, land again). Changes are \"chg_…\" or \"owner/repo#N\"; work items \
 \"wi_…\" or \"owner/repo#N\".",
     });
-    (result, sid)
+    Ok((result, sid))
 }
 
 // ── tools ──
