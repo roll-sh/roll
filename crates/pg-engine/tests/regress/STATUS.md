@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51112 (**99.92%**) |
-| units differing | 38 |
+| units matching | 51116 (**99.93%**) |
+| units differing | 34 |
 | files fully matching | 226 |
 | engine output == expected/*.out (pg_regress "ok") | 187 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 38 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 34 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 38 units
-join (24), partition_join (12), partition_prune (1), returning (1)
+### EXPLAIN (group C1) — 34 units
+join (23), partition_join (9), partition_prune (1), returning (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -441,6 +441,96 @@ Still open, and why:
   merge / hash condition relabeled (`(tc.i)::text = nk.s`; Postgres `tc.i = nk.s`: the
   column has the class's collation already); EXPLAIN's `name_text_relabel` doesn't see column
   collations.
+
+## Round 16, agent 26 (partial partitionwise grouping by add_path, filters over joins, parallel-safe nested loop parameters, ANY over outer values)
+
+The units no other agent owned (join 662–808, partition_join 52–608). Measured in subset runs
+of 33 planner-heavy files (test_setup, create_misc, create_index, create_view, select, union,
+subselect, join, aggregates, inherit, partition_join, partition_prune, partition_aggregate,
+equivclass, memoize, with, rowsecurity, updatable_views, select_distinct, groupingsets,
+incremental_sort, merge, returning, rules, insert_conflict, join_hash, select_parallel,
+rangefuncs, tsrf, limit, window, stats_ext, sqljson_jsontable), unit by unit against a run of
+the branch head it is on (f517f1c: 13121 -> 13125; rebased onto e7e37e6: 13132 -> 13135, the
+one loss test_setup 7, the shared reference's `regress_tblspace` from a concurrent run; onto
+deee52e: 13137 -> 13141; onto 01368ea: 13138 -> 13142; onto a8de4bd: 13141 -> 13145; onto 35d7dbb: 13142 -> 13146): 4 units fixed, none lost; no other agent's units moved. Crate tests
+and clippy on each.
+
+| file | fixed units |
+|---|---|
+| join | 781 |
+| partition_join | 52, 588, 608 |
+
+What changed:
+
+- **A filter merged into a join** (a WHERE over a full join's merged column) costs its quals on
+  the tuples the join's other quals are checked on, final_cost_mergejoin's mergejointuples
+  (hashjoin's hashjointuples, nestloop's outer x inner rows), not on the rows the join puts
+  out (`ExNode::qual_tuples`): the Merge Full Join under `WHERE a BETWEEN 490 AND 510` costs
+  12.74, not 13.35.
+- **Partitionwise grouping competes as add_path has it** (`pwagg.rs`): the serial grouping's
+  paths, then the partitionwise one, through compare_path_costs_fuzzily and the pathkeys; one
+  fuzzily as cheap that starts sooner removes them, and the cheapest of the paths left wins
+  (partition_join 52: the partial grouping over a full join, 31.77..32.63, beats the serial
+  Group's 32.17..32.43). A Group finalizing partial groups has no per-group tuple cost
+  (cost_group), and the partitions' groupings are named as the serial grouping's sort keys,
+  a key computed below them wrapped (`(COALESCE(prt1.a, p2.a))`).
+- **Nested loop parameters are no parallel hazard** (`parallel::plan_hazard`): an inner side's
+  `Outer` references bound by the join's parameters are PARAM_EXECs set in the process running
+  the join (max_parallel_hazard restricts only those set outside the plan), so
+  debug_parallel_query's single-copy Gather goes over parameterized nested loops and Memoize
+  (partition_join 608).
+- **convert_ANY_sublink_to_join over a sub-select reading only queries further up** (join
+  781): a sub-select that isn't simple (OFFSET 0) and reads none of the query's own rows, only
+  an outer query's values (here a LATERAL subquery's reference to the VALUES list), joins as a
+  subquery of its own, ANY_subquery, those values in place (`sublink::params_in_place`); the
+  Subquery Scan goes as trivial, as in Postgres: a Nested Loop Semi Join over a Materialize of
+  the index scan parameterized by `"*VALUES*".column2`.
+- **A qual over a PlaceHolderVar is its relation's restriction** (pull_varnos counts its
+  ph_eval_at): a pulled-up subquery's constant output an outer join nulled as written, the join
+  then reduced by the WHERE, shows `Filter: (1 = 1)` on the scan, not a gating Result's
+  One-Time Filter (no unit by itself: join 674 / 681 then differ by self-join elimination only).
+- **Sort keys over a partitionwise join's Append** name a sub-partitioned child's members by
+  their topmost parent (ruleutils descends to each Append's first child, and a Var whose
+  topmost inheritance parent is among the Appends' apprelids prints as that parent's:
+  get_variable's appendparents), `Sort Key: t1.a` where the child join shows `t1_2.a`
+  (partition_join 588).
+
+Golden: `tests/sql/a26_pw_parallel_sublinks.sql`.
+
+Looked at and left (why):
+
+- join 662 / 663: `join_collapse_limit` is never read (`joinpath.rs` `COLLAPSE_LIMIT` is a
+  fixed 8); at 1 Postgres keeps the explicit JOINs' tree, `(k1 ⋈ k2) ⋈ j2` once SJE removed
+  j1 (with the limit at 8 the engine's plan is Postgres's). Needs explicit JOINs told apart
+  from FROM lists (deconstruct_recurse: join_collapse_limit for JoinExprs, from_collapse_limit
+  for FromExprs) and the unflattened side planned as a group of its own.
+- join 674 / 681: Postgres removes the self join although one side is a pulled-up subquery
+  computing a PlaceHolderVar ("PHVs should not impose any constraints"); the engine's pair
+  test takes plain scans only (its leaf is the PlaceHolderVar projection over the scan).
+  675 / 676 (the kept scan's target list after SJE: its own Vars, then the PlaceHolderVars
+  add_placeholders_to_base_rels adds later) are agent 23's self-join target lists (620).
+- join 691: the rule action's range table order (the old relation `sj` before the target
+  `sj_1`, so the class clause is `sj.a = sj_1.a`): agent 24's returning 105.
+- join 765: a whole-row Var passed up as one value (`Output: i.f1, i.*` under the nested
+  loop that reads `i.*` as a parameter), HANDOFF's known gap.
+- join 776: the LATERAL subquery with an outer join inside isn't flattened into the query's
+  join tree, so `t1.f1 = 1` gates a Result inside it where Postgres makes it t1's filter.
+- join 783: a LATERAL nested loop's rows are the outer rows times the inner path's, not the
+  join relation's size (agent 14's note); here it decides the join order.
+- join 808: the PlaceHolderVar `least(t1.a, t2.a, t3.a)` of a LATERAL join subquery, the same
+  shape as partition_join 204 (agent 25's).
+- partition_join 98: a merge clause between two expressions (`t1::text = t2::text`), sorted
+  on each side: expression members of equivalence classes (agent 21's area).
+- partition_join 138 / 234: Postgres builds partitionwise paths for every join relation of the
+  search (try_partitionwise_join in populate_joinrel_with_paths), so `t1 ⋈ t3` joins
+  partitionwise below a join that can't; the engine tries it for a whole join group only.
+- partition_join 210: an EXISTS over a join with a LATERAL item (`int4_tbl, LATERAL (... LIMIT
+  2)`) isn't pulled up (`sublink::sub_join` takes joins without parameters), so the DELETE's
+  partitions aren't pruned by the pushed-down `c IS NULL`.
+- partition_join 300: the child joins' orders tie exactly on cost (5.30, 7.18); Postgres keeps
+  the path it made first.
+- partition_join 553: a three-way join with a FULL JOIN over merged list bounds isn't joined
+  partitionwise (the engine joins its LEFT JOIN alone first).
 
 ## Round 16, agent 24 (row marks: several locking clauses, preprocess_rowmarks' order, whole-row mark widths)
 
@@ -3623,7 +3713,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 901 | 97% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (24) |
+| join | 925 | 902 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (23) |
 | aggregates | 556 | 556 | 100% | yes | no |  |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
@@ -3733,7 +3823,7 @@ produces no units on Linux (skipped by the file itself).
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 307 | 100% | yes | yes |  |
 | xml | 281 | 281 | 100% | yes | yes |  |
-| partition_join | 614 | 602 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (12) |
+| partition_join | 614 | 605 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (9) |
 | partition_prune | 771 | 770 | 100% | yes | no | wrong result `SELECT: row count differs` (1) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |
