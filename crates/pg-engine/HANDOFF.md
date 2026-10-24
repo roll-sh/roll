@@ -100,10 +100,11 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   against `tests/difftest/smoke_known.txt`. Score, what it found and fixed, and what is open:
   `tests/difftest/STATUS.md`. Round 17 ran about 50,000 statements; its wrong-results fixes:
   grouping sets nulling constants they shouldn't, max / min ties, bpchar keys (merge joins,
-  grouping, set operations), self-join elimination over outer join clauses. Open wrong
-  results: a pseudoconstant qual of an inner join under an outer join gating the outer join
-  (`c LEFT JOIN (a JOIN b ON (SELECT false)) ON ...` loses c's rows), and the empty grouping
-  set over no input rows (constants equal to keys).
+  grouping, set operations), self-join elimination over outer join clauses. Round 18
+  (agent 45): a pseudoconstant or volatile qual of an inner join under an outer join no
+  longer gates the outer join (`c LEFT JOIN (a JOIN b ON (SELECT false)) ON ...`), and a
+  grouping-set query's constants equal to a constant key are pass-through values (NULL in
+  the empty set's row over no input).
 - **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
   PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified
   (`pg_dump_tap`, through stand-ins for its Perl test modules in `tests/pg_dump/perl`), round

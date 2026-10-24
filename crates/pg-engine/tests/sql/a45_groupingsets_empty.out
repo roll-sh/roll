@@ -1,0 +1,171 @@
+> CREATE TABLE t (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO t VALUES (1, 10), (2, 20)
+-- INSERT 0 2
+
+> CREATE TABLE e (a int, b int)
+-- CREATE TABLE
+
+> SELECT 1 AS c0, 1 AS c2 FROM t WHERE false GROUP BY ROLLUP (t.b, 1)
+c0:int4 | c2:int4
+NULL | NULL
+-- SELECT 1
+
+> SELECT 1 AS c0, 1 AS c2 FROM t GROUP BY ROLLUP (t.b, 1) ORDER BY 1, 2
+c0:int4 | c2:int4
+1 | 1
+1 | 1
+NULL | 1
+NULL | 1
+NULL | 1
+-- SELECT 5
+
+> SELECT 1 AS c0, 1 AS c2, 2 AS c3 FROM e GROUP BY ROLLUP (e.b, 1)
+c0:int4 | c2:int4 | c3:int4
+NULL | NULL | 2
+-- SELECT 1
+
+> SELECT 1 AS c2, b FROM e GROUP BY ROLLUP (b, 1)
+c2:int4 | b:int4
+NULL | NULL
+-- SELECT 1
+
+> SELECT 1 AS c0, 1 AS c2 FROM t WHERE false GROUP BY CUBE (t.b, 1)
+c0:int4 | c2:int4
+NULL | NULL
+-- SELECT 1
+
+> SELECT 1, 1 FROM t WHERE false GROUP BY GROUPING SETS ((1), ())
+?column?:int4 | ?column?:int4
+NULL | NULL
+-- SELECT 1
+
+> SELECT 1 AS c0, 1+1 AS c2, 2 FROM t WHERE false GROUP BY GROUPING SETS ((1+1), ())
+c0:int4 | c2:int4 | ?column?:int4
+1 | NULL | 2
+-- SELECT 1
+
+> SELECT 1 AS c0, 1 AS c2 FROM e GROUP BY GROUPING SETS ((1), ())
+c0:int4 | c2:int4
+NULL | NULL
+-- SELECT 1
+
+> SELECT 1 AS c0, 1 AS c2 FROM e GROUP BY GROUPING SETS ((1))
+c0:int4 | c2:int4
+-- SELECT 0
+
+> SELECT 1 AS c0, 1 AS c2 FROM e GROUP BY GROUPING SETS (())
+c0:int4 | c2:int4
+1 | 1
+-- SELECT 1
+
+> SELECT 1 AS c0, 'a' AS c2, 'a'::text AS c3 FROM e GROUP BY ROLLUP(1, 2)
+c0:int4 | c2:text | c3:text
+NULL | NULL | NULL
+-- SELECT 1
+
+> SELECT 1 AS c0, (SELECT 1) AS c2 FROM e GROUP BY GROUPING SETS ((1), ())
+c0:int4 | c2:int4
+NULL | 1
+-- SELECT 1
+
+> SELECT 1 AS c0, 1 AS c2, count(*) FROM e GROUP BY GROUPING SETS ((1), ())
+c0:int4 | c2:int4 | count:int8
+NULL | NULL | 0
+-- SELECT 1
+
+> SELECT 1 AS c0, 1 AS c2, sum(1) FROM e GROUP BY GROUPING SETS ((1), ()) ORDER BY 2
+c0:int4 | c2:int4 | sum:int8
+NULL | NULL | NULL
+-- SELECT 1
+
+> SELECT 1 AS c0, 1 AS c2 FROM e GROUP BY GROUPING SETS ((1), (), ())
+c0:int4 | c2:int4
+NULL | NULL
+NULL | NULL
+-- SELECT 2
+
+> SELECT 1 AS c0, 1 AS c2, now() IS NULL FROM e GROUP BY GROUPING SETS ((1), ())
+c0:int4 | c2:int4 | ?column?:bool
+NULL | NULL | f
+-- SELECT 1
+
+> SELECT 1 AS c0, count(*) FROM e GROUP BY GROUPING SETS ((e.b), 1, ()) HAVING 1 IS DISTINCT FROM NULL
+c0:int4 | count:int8
+-- SELECT 0
+
+> SELECT 1 AS c0, count(*) FROM t GROUP BY GROUPING SETS ((t.b), 1, ()) HAVING 1 IS DISTINCT FROM NULL ORDER BY 1, 2
+c0:int4 | count:int8
+1 | 2
+NULL | 1
+NULL | 1
+NULL | 2
+-- SELECT 4
+
+> SELECT 1 AS c0, 1 AS c1, count(*) FROM t GROUP BY GROUPING SETS ((b), 1) ORDER BY 2 DESC, 1
+c0:int4 | c1:int4 | count:int8
+1 | 1 | 2
+NULL | 1 | 1
+NULL | 1 | 1
+-- SELECT 3
+
+> SELECT 1 AS c0, 1 AS c1, GROUPING(b), GROUPING(1) FROM t GROUP BY GROUPING SETS ((b), 1, ()) ORDER BY 3, 4, 1
+c0:int4 | c1:int4 | grouping:int4 | grouping:int4
+NULL | 1 | 0 | 1
+NULL | 1 | 0 | 1
+1 | 1 | 1 | 0
+NULL | 1 | 1 | 1
+-- SELECT 4
+
+> SELECT 1 AS c0, 1 AS c1, GROUPING(b, 1) FROM e GROUP BY GROUPING SETS ((b), 1, ())
+c0:int4 | c1:int4 | grouping:int4
+NULL | NULL | 3
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT 1 AS c0, 1 AS c2 FROM t GROUP BY ROLLUP (t.b, 1)
+QUERY PLAN:text
+MixedAggregate
+  Output: (1), (1), b
+  Hash Key: t.b, 1
+  Hash Key: t.b
+  Group Key: ()
+  ->  Seq Scan on public.t
+        Output: 1, b, 1
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT 1 AS c0, count(*) FROM t GROUP BY GROUPING SETS ((t.b), 1) HAVING 1 IS DISTINCT FROM NULL
+QUERY PLAN:text
+HashAggregate
+  Output: (1), count(*), b
+  Hash Key: t.b
+  Hash Key: 1
+  Filter: ((1) IS NOT NULL)
+  ->  Seq Scan on public.t
+        Output: 1, b, 1
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT 1 AS c0, 1 AS c2, sum(1) FROM e GROUP BY GROUPING SETS ((1), ()) ORDER BY 2
+QUERY PLAN:text
+Sort
+  Output: (1), (1), (sum(1))
+  Sort Key: (1)
+  ->  MixedAggregate
+        Output: (1), (1), sum(1)
+        Hash Key: 1
+        Group Key: ()
+        ->  Seq Scan on public.e
+              Output: 1, 1
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT 1 AS c0, 'a' AS c2, 'a'::text AS c3 FROM e GROUP BY ROLLUP(1, 2)
+QUERY PLAN:text
+MixedAggregate
+  Output: (1), ('a'::text), ('a'::text)
+  Hash Key: 1, 'a'::text
+  Hash Key: 1
+  Group Key: ()
+  ->  Seq Scan on public.e
+        Output: 1, 'a'::text, 'a'::text
+-- EXPLAIN
+

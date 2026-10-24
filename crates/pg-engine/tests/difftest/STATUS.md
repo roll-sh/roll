@@ -166,20 +166,38 @@ Batch 5 (`a35_full_join_dummy`):
   first (restriction_is_constant_false), so `INSERT ... SELECT count(*) FROM (a FULL JOIN b ON
   <not mergeable>) WHERE NOT NULL` inserts its one row.
 
+Round 18, agent 45, batch 1 (`a45_oj_pseudoconst`, `a45_groupingsets_empty`):
+
+- **Wrong rows**: a clause of an inner join reading no column of the level (an uncorrelated
+  sub-select, an InitPlan's output, a volatile call) on the nullable side of an outer join
+  gated the whole outer join: `SELECT * FROM c LEFT JOIN (a a1 JOIN a a2 ON (SELECT false))
+  ON a1.x = c.z` returned no rows (also `ON random() > 2`, `NOT EXISTS (...)`, RIGHT JOINs,
+  nested and multi-way joins). It was the join search, not the binder: `outerjoins.rs`
+  `gather_group` took every sub-select for volatile and gave the clause no items (the top of
+  the group). Now as distribute_qual_to_rels: such a clause holds at its join's items
+  (qualscope) unless it is pseudoconstant and in the top join domain (not under a LEFT /
+  anti join's nullable side), where it gates the whole plan. EXPLAIN gates an inner join on
+  an InitPlan's output with a Result (`create_gating_plan`) instead of a Join Filter.
+- **Wrong rows**: with grouping sets, an expression equal to a grouping key written as a
+  constant (`1 AS c2` with `ROLLUP (t.b, 1)` naming `1 AS c0`), other than the item the key
+  names, is no grouping column: PostgreSQL computes it below the Agg and reads it from the
+  group's representative row, so it is never nulled, but it is NULL in the empty grouping
+  set's row over no input rows. The binder makes each such occurrence a pass-through key
+  (a key in no grouping set, `select.rs` `PassThrough`), which the executor takes from the
+  group's first row (`agg.rs` `set_key`) and GROUPING() skips; EXPLAIN shows them as `(1)`
+  and as extra input columns. A constant `ORDER BY` item names its select-list entry
+  (`ORDER BY 2` sorts by c2's value, not the key's).
+
 ## Open
 
-- **Wrong rows**: a pseudoconstant qual (an uncorrelated sub-select, an InitPlan) or a
-  volatile one without columns, of an inner join on the nullable side of an outer join,
-  gates the whole outer join instead of the inner join:
-  `SELECT * FROM c LEFT JOIN (a a1 JOIN a a2 ON (SELECT false)) ON a1.x = c.z` returns no
-  rows (PostgreSQL: c's rows null-extended); also `ON random() > 2`, `NOT EXISTS (SELECT 1
-  FROM t)`, a RIGHT JOIN with the inner join on its left. EXPLAIN shows the One-Time Filter
-  above the outer join. It happens while binding the join tree (`join_collapse_limit = 1`
-  doesn't avoid it, `OFFSET 0` around the inner join does), not in the join search.
-- **Wrong rows (executor artifact)**: with no input rows (an empty table, `WHERE false`), the
-  empty grouping set's row has a select-list constant equal to a grouping key NULL in
-  PostgreSQL (`SELECT 1 AS c0, 1 AS c2 FROM t WHERE false GROUP BY ROLLUP (t.b, 1)`: `NULL |
-  NULL`; with input rows `c2` stays 1, as the engine has it). Seeds 134, 163, 205.
+- **Wrong rows (bind-time folding)**: the grouping-key matching above compares folded
+  expressions, PostgreSQL's (`substitute_grouped_columns`) the expressions as written:
+  `1+0`, `1::int8`, `COALESCE(1, 5)`, `(1+1)*3` and `HAVING 1 = 1` over a key `1` / `1+1`
+  differ in the no-input empty set's row (PostgreSQL: `(1) + 0` is NULL, `COALESCE((1), 5)`
+  is 5, the HAVING drops the row).
+- EXPLAIN only: a single-table FROM subquery on the nullable side whose WHERE is a
+  sub-select (`c LEFT JOIN (SELECT x FROM a WHERE (SELECT false)) s ON ...`): PostgreSQL
+  checks it as the outer join's Join Filter, the engine gates the scan with a Result.
 - **Wrong rows (row order)**: DISTINCT ON keeping another of two equal values
   (`'24:00:00'` / `'1 day'`) whose input order comes from a different join order (seed 176).
 - wrong_state cases of the round 2 sweep not reduced yet (seeds 116, 179, 211, 216): DML

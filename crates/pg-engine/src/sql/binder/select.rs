@@ -2206,23 +2206,33 @@ impl Binder<'_, '_> {
             // variable-free key's place, which grouping sets null.
             let mut group_targets = std::mem::take(&mut st.group_targets);
             group_targets.resize(ng, None);
+            let mut group_literal = std::mem::take(&mut st.group_literal);
+            group_literal.resize(ng, false);
+            // (With grouping sets: the constant keys' other occurrences in the select list
+            // and HAVING, values passed through from the group's rows.)
+            let pass = PassThrough {
+                literal: &group_literal,
+                found: Default::default(),
+            };
+            let pass_on = sets.is_some() && !self.deparse;
+            let tx_pass = |e: Expr, outer_keys: bool| {
+                post_agg_with(e, &groups, ng, mask_col, &scope, outer_keys, pass_on.then_some(&pass))
+                    .map_err(|err| ungrouped_pos(err, s))
+            };
             tgt_exprs = tgt_exprs
                 .into_iter()
                 .enumerate()
                 .map(|(i, e)| {
                     match group_targets.iter().position(|t| *t == Some(i)) {
                         Some(k) if k < ng && groups[k].same_as(&e) => Ok(Expr::Col(k, e.ty())),
-                        _ => tx(e),
+                        _ => tx_pass(e, true),
                     }
                 })
                 .collect::<Result<_>>()?;
             if let Some(h) = having.take() {
                 // (A key of outer references only is a Param to HAVING, which moves to WHERE:
                 // not nulled there, unlike in the select list.)
-                having = Some(
-                    post_agg(h, &groups, ng, mask_col, &scope, false)
-                        .map_err(|err| ungrouped_pos(err, s))?,
-                );
+                having = Some(tx_pass(h, false)?);
             }
             // A sort key that is a constant names the select-list item equal to it (by
             // position or findTargetlistEntrySQL99), a grouped key then.
@@ -2235,7 +2245,36 @@ impl Binder<'_, '_> {
                 },
                 _ => tx(e),
             };
-            order_exprs = order_exprs.into_iter().map(tx_key).collect::<Result<_>>()?;
+            // (With pass-through values, a constant sort key is the item it names, which
+            // may be one: `ORDER BY 2` over `1 AS c0, 1 AS c1` sorts by c1's value.)
+            let order_entries: Vec<Option<usize>> = if pass_on {
+                s.sort_clause
+                    .iter()
+                    .map(|sb| match inner(sb) {
+                        Some(NodeEnum::SortBy(sb)) => sb.node.as_deref(),
+                        _ => None,
+                    })
+                    .zip(&order_exprs)
+                    .map(|(n, e)| {
+                        if let Some(NodeEnum::AConst(c)) = n.and_then(inner)
+                            && let Some(pb::a_const::Val::Ival(i)) = &c.val
+                        {
+                            return usize::try_from(i.ival - 1).ok();
+                        }
+                        targets.iter().position(|t| t.expr.same_as(e))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            order_exprs = order_exprs
+                .into_iter()
+                .enumerate()
+                .map(|(i, e)| match (&e, order_entries.get(i).copied().flatten()) {
+                    (Expr::Const(..), Some(t)) if t < tgt_exprs.len() => Ok(tgt_exprs[t].clone()),
+                    _ => tx_key(e),
+                })
+                .collect::<Result<_>>()?;
             on_exprs = on_exprs.into_iter().map(tx_key).collect::<Result<_>>()?;
             for w in &mut windows {
                 w.args = std::mem::take(&mut w.args)
@@ -2295,6 +2334,45 @@ impl Binder<'_, '_> {
                     }
                     ungrouped_pos(e, s)
                 })?;
+            }
+            // The pass-through values: columns after the keys (in no grouping set), the
+            // aggregates' and the GROUPING() mask's after them.
+            let found = pass.found.into_inner();
+            if !found.is_empty() {
+                let np = found.len();
+                let renumber = |e: Expr| -> Expr {
+                    e.transform(&mut |x| {
+                        Ok(match x {
+                            Expr::Col(c, t) if c >= PASS_BASE => Expr::Col(ng + (c - PASS_BASE), t),
+                            Expr::Col(c, t) if c >= ng => Expr::Col(c + np, t),
+                            x => x,
+                        })
+                    })
+                    .expect("renumbering grouped columns")
+                };
+                tgt_exprs = tgt_exprs.into_iter().map(renumber).collect();
+                having = having.map(renumber);
+                order_exprs = order_exprs.into_iter().map(renumber).collect();
+                on_exprs = on_exprs.into_iter().map(renumber).collect();
+                for w in &mut windows {
+                    w.args = std::mem::take(&mut w.args).into_iter().map(renumber).collect();
+                    w.partition_by = std::mem::take(&mut w.partition_by).into_iter().map(renumber).collect();
+                    for k in &mut w.order_by {
+                        k.expr = renumber(k.expr.clone());
+                    }
+                    if let crate::sql::plan::WinFunc::Agg(a) = &mut w.func {
+                        a.args = w.args.clone();
+                        a.filter = a.filter.take().map(renumber);
+                    }
+                    w.frame = tx_frame(std::mem::take(&mut w.frame), &|e| Ok(renumber(e)))?;
+                }
+                for sr in &mut srfs {
+                    sr.args = std::mem::take(&mut sr.args).into_iter().map(renumber).collect();
+                }
+                for a in &mut st.aggs {
+                    a.direct = std::mem::take(&mut a.direct).into_iter().map(renumber).collect();
+                }
+                groups.extend(found);
             }
             // HAVING without GROUP BY or aggregates is degenerate grouping: one group whatever
             // the input, which isn't read at all (is_degenerate_grouping).
@@ -3272,8 +3350,15 @@ impl Binder<'_, '_> {
                 _ => false,
             });
         }
+        // (Written as a constant: the select-list item it names, else the item itself.)
+        let written = match tgt.and_then(|t| targets.get(t)).and_then(inner) {
+            Some(NodeEnum::ResTarget(rt)) => rt.val.as_deref(),
+            _ => Some(g),
+        };
+        let literal = written.is_some_and(literal_node);
         let st = &mut self.level().st;
         st.group_targets.resize(groups.len(), None);
+        st.group_literal.resize(groups.len(), false);
         // An item named by alias or position is its own key; an expression is that of an
         // equal key.
         let found = match tgt {
@@ -3295,6 +3380,7 @@ impl Binder<'_, '_> {
             None => {
                 groups.push(e);
                 st.group_targets.push(tgt);
+                st.group_literal.push(literal);
                 groups.len() - 1
             }
         };
@@ -7101,6 +7187,29 @@ fn hashable(ty: &DataType) -> bool {
 }
 
 /// Rewrite an expression from FROM-row terms to the aggregation output row.
+/// A constant as written: a literal, perhaps cast (its bound form is what was written, not
+/// a folded expression).
+fn literal_node(n: &Node) -> bool {
+    match inner(n) {
+        Some(NodeEnum::AConst(_)) => true,
+        Some(NodeEnum::TypeCast(c)) => c.arg.as_deref().is_some_and(literal_node),
+        _ => false,
+    }
+}
+
+/// The grouping-set queries' pass-through values (`post_agg`): an expression equal to a
+/// grouping key written as a constant, other than the select-list item the key names, is no
+/// grouping column but a value of the group's input rows (Postgres computes it below the
+/// Agg and reads it from the group's representative row: NULL in the empty grouping set's
+/// row over no input rows). Each occurrence is a value of its own, a column past the keys.
+struct PassThrough<'a> {
+    literal: &'a [bool],
+    found: std::cell::RefCell<Vec<Expr>>,
+}
+
+/// Where `post_agg` numbers a pass-through value before the columns are known.
+const PASS_BASE: usize = 1 << 40;
+
 fn post_agg(
     e: Expr,
     groups: &[Expr],
@@ -7109,6 +7218,19 @@ fn post_agg(
     scope: &Scope,
     outer_keys: bool,
 ) -> Result<Expr> {
+    post_agg_with(e, groups, ng, mask_col, scope, outer_keys, None)
+}
+
+/// `post_agg`, with the pass-through values of a grouping-set query collected in `pass`.
+fn post_agg_with(
+    e: Expr,
+    groups: &[Expr],
+    ng: usize,
+    mask_col: Option<usize>,
+    scope: &Scope,
+    outer_keys: bool,
+    pass: Option<&PassThrough>,
+) -> Result<Expr> {
     // (Constants are always acceptable: never a grouped column, so never nulled by a
     // grouping set either. Nor is anything equal to a key without the level's columns,
     // volatile functions or (`outer_keys`: in the select list) outer references: as the
@@ -7116,6 +7238,17 @@ fn post_agg(
     let keyed = |g: &Expr| {
         !g.columns().is_empty() || g.is_volatile() || (outer_keys && g.has_outer_refs())
     };
+    // (A constant key's other occurrences: values of the group's rows.)
+    if let Some(pt) = pass
+        && let Some(k) = groups
+            .iter()
+            .position(|g| !keyed(g) && !g.has_outer_refs() && g.same_as(&e))
+        && pt.literal.get(k) == Some(&true)
+    {
+        let mut f = pt.found.borrow_mut();
+        f.push(e.clone());
+        return Ok(Expr::Col(PASS_BASE + f.len() - 1, e.ty()));
+    }
     if !matches!(e, Expr::Const(..))
         && let Some(k) = groups.iter().position(|g| keyed(g) && g.same_query_as(&e))
     {
@@ -7157,7 +7290,7 @@ fn post_agg(
         // A sub-select's outer references to ungrouped columns (check_ungrouped_columns at
         // sublevels_up > 0): its own message. Its IN / ANY left operands are this level's.
         Expr::Subquery(mut sq) => {
-            let tx = |c: Expr| post_agg(c, groups, ng, mask_col, scope, outer_keys);
+            let tx = |c: Expr| post_agg_with(c, groups, ng, mask_col, scope, outer_keys, pass);
             sq.left = std::mem::take(&mut sq.left).into_iter().map(tx).collect::<Result<_>>()?;
             sq.params = std::mem::take(&mut sq.params)
                 .into_iter()
@@ -7175,7 +7308,7 @@ fn post_agg(
                 .collect::<Result<_>>()?;
             Ok(Expr::Subquery(sq))
         }
-        e => e.map_children(&mut |c| post_agg(c, groups, ng, mask_col, scope, outer_keys)),
+        e => e.map_children(&mut |c| post_agg_with(c, groups, ng, mask_col, scope, outer_keys, pass)),
     }
 }
 

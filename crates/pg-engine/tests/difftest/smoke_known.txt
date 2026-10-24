@@ -44,7 +44,6 @@ engine_error s16 #49
 eval_error s17 #9
 eval_error s17 #16
 eval_error s17 #36
-wrong_rows s18 #35
 eval_error s18 #80
 wrong_error s19 #9
 eval_error s19 #20

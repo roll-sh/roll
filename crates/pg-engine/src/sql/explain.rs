@@ -12653,13 +12653,20 @@ impl Builder<'_, '_> {
             let mut out: Vec<String> = Vec::new();
             // (A relabelled column shows bare at the target list's top: an entry of its own.)
             let mut seen: Vec<String> = Vec::new();
-            // (In the order of the level's target list: make_group_input_target.)
-            let order: Vec<usize> = my_key
+            // (In the order of the level's target list: make_group_input_target. A
+            // grouping-set query's pass-through values, keys in no set, after the keys, each
+            // an entry of its own.)
+            let pass: Vec<bool> = (0..groups.len())
+                .map(|i| sets.is_some_and(|ss| !ss.iter().any(|s| s.contains(&i))))
+                .collect();
+            let nkeys = pass.iter().filter(|p| !**p).count();
+            let mut order: Vec<usize> = my_key
                 .and_then(|k| self.gtl.order.get(&k))
-                .filter(|o| o.len() == groups.len())
-                .cloned()
-                .unwrap_or_else(|| (0..groups.len()).collect());
-            for (g, n, &r) in order.iter().map(|&i| (&groups[i], &gnames[i], &relabeled[i])) {
+                .filter(|o| o.len() == nkeys || o.len() == groups.len())
+                .map(|o| o.iter().copied().filter(|&i| !pass.get(i).copied().unwrap_or(true)).collect())
+                .unwrap_or_else(|| (0..groups.len()).filter(|&i| !pass[i]).collect());
+            order.extend((0..groups.len()).filter(|&i| pass[i]));
+            for (g, n, &r, &own) in order.iter().map(|&i| (&groups[i], &gnames[i], &relabeled[i], &pass[i])) {
                 if r && let Expr::Collate(x, ..) = g && let Expr::Col(j, _) = &**x {
                     if let Some(n) = c.exported.get(*j) {
                         out.push(self.pick(n, Cx::Output));
@@ -12672,7 +12679,7 @@ impl Builder<'_, '_> {
                     _ => n,
                 };
                 let t = self.pick(n, Cx::Output);
-                if !seen.contains(&t) {
+                if own || !seen.contains(&t) {
                     seen.push(t.clone());
                     out.push(t);
                 }
@@ -15500,9 +15507,11 @@ impl Builder<'_, '_> {
         // (create_gating_plan): a Result with a One-Time Filter above.
         let mut gating = Vec::new();
         for p in &others {
+            // (An InitPlan's output is no volatile function: contain_volatile_functions
+            // doesn't look into a SubPlan.)
             if kind == JoinKind::Inner
                 && p.columns().is_empty()
-                && !p.is_volatile()
+                && crate::sql::binder::optimize::pseudo_constant(p)
                 && !matches!(p, Expr::Const(..))
             {
                 gating.push(p.clone());

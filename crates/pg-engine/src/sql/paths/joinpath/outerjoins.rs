@@ -29,6 +29,8 @@ struct RawJoin {
     r: u32,
     conds: Vec<Expr>,
     inner: u32,
+    /// The items below it (its clauses' syntactic scope, qualscope).
+    scope: u32,
     /// Columns of ON conditions the binder already pushed into the nullable side.
     pushed: Vec<usize>,
     /// Columns the join's row carries for clauses an equivalence class with a constant
@@ -259,6 +261,7 @@ fn walk(
             r: jr,
             conds,
             inner,
+            scope: l | r,
             pushed: meta.pushed.iter().map(|&c| map(c)).collect(),
             kept: meta.kept.iter().map(|&c| map(c)).collect(),
             swapped,
@@ -286,6 +289,7 @@ fn walk(
             r: 0,
             conds: conds.into_iter().map(|e| subst_frame(e.shift_cols(off as isize), frame)).collect(),
             inner: 0,
+            scope: m,
             pushed: Vec::new(),
             kept: Vec::new(),
             swapped: Vec::new(),
@@ -402,15 +406,23 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
     let mut clauses = Vec::new();
     let mut meta = Vec::new();
     let mut semi_swapped: Vec<usize> = Vec::new();
-    for j in &joins {
+    for (ji, j) in joins.iter().enumerate() {
         let below = sjs.len();
         if j.kind == JoinKind::Inner {
+            // (Inside an outer join's nullable side: a join domain of its own, not the
+            // top one.)
+            let nested = joins[ji + 1..]
+                .iter()
+                .any(|o| matches!(o.kind, JoinKind::Left | JoinKind::Anti) && j.scope != 0 && j.scope & !o.r == 0);
             for e in &j.conds {
-                // (A pseudoconstant ON clause (no column of this level: an outer query's
-                // value) holds at its join, as its syntactic scope: inside an outer join's
-                // nullable side it gates only that side, not the whole group.)
+                // distribute_qual_to_rels: a clause of no column of this level (an outer
+                // query's value, an InitPlan's output, a volatile call) holds where it was
+                // written (qualscope), unless it is a pseudoconstant one in the top join
+                // domain: that one gates the whole plan (an empty set of items here). So
+                // inside an outer join's nullable side it gates only that side.
                 let it = items(e);
-                let it = if it == 0 && !e.is_volatile() { j.l | j.r } else { it };
+                let pseudo = crate::sql::binder::optimize::pseudo_constant(e);
+                let it = if it == 0 && (nested || !pseudo) { j.scope } else { it };
                 let (req, nullable) = delay(it, &sjs[..below]);
                 clauses.push((e.clone(), false));
                 meta.push((None, req, nullable));

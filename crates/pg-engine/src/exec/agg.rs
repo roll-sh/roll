@@ -2844,11 +2844,18 @@ impl AggNode {
         }
     }
 
-    /// A grouping set's key for a row: its columns, NULL for the others.
+    /// A key in no grouping set: a value passed through from the group's rows (the
+    /// binder's pass-through values), not a grouping column.
+    fn pass_through(&self, i: usize) -> bool {
+        self.sets.as_ref().is_some_and(|ss| !ss.iter().any(|s| s.contains(&i)))
+    }
+
+    /// A grouping set's key for a row: its columns, NULL for the others (the pass-through
+    /// values: the row's, the group's first row's as the group starts with it).
     fn set_key(&self, set: &[usize], full: &[Value]) -> Vec<Value> {
         (0..self.groups.len())
             .map(|i| {
-                if set.contains(&i) {
+                if set.contains(&i) || self.pass_through(i) {
                     full[i].clone()
                 } else {
                     Value::Null
@@ -2860,7 +2867,7 @@ impl AggNode {
     /// GROUPING() bitmask: bit set for columns NOT in the set (most significant first).
     fn set_mask(&self, set: &[usize]) -> i64 {
         let mut mask: i64 = 0;
-        for i in 0..self.groups.len() {
+        for i in (0..self.groups.len()).filter(|&i| !self.pass_through(i)) {
             mask = (mask << 1) | if set.contains(&i) { 0 } else { 1 };
         }
         mask

@@ -343,6 +343,9 @@ pub(crate) struct SelectState {
     /// Per GROUP BY expression: the select-list item it names (by alias or position),
     /// whose own grouping key it is (two items of equal value stay two keys).
     pub group_targets: Vec<Option<usize>>,
+    /// Per GROUP BY expression: written as a constant (a literal, perhaps cast), so its
+    /// bound form is the expression as written.
+    pub group_literal: Vec<bool>,
     pub grouping_sets: bool,
     /// The FROM clause reads the recursive CTE's work table (a recursive term).
     pub self_ref: bool,
