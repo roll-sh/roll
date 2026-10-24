@@ -731,7 +731,7 @@ impl Inner {
         // heartbeat or sweep doesn't push it back.
         let renew_if_due = |next_renew: &mut Duration| {
             let now = clock::now();
-            if now < *next_renew {
+            if now < *next_renew || self.paused() {
                 return;
             }
             *next_renew = match self.renew() {
@@ -744,12 +744,14 @@ impl Inner {
             };
         };
         while !self.flags.stop.load(Ordering::SeqCst) && !self.flags.superseded.load(Ordering::SeqCst) {
-            if self.faults.freeze.load(Ordering::SeqCst) {
+            if self.paused() {
                 std::thread::park_timeout(Duration::from_millis(10));
                 continue;
             }
+            // Each step checks `paused` again: a stopped (or, in tests, frozen) node must not
+            // finish the rest of a round after a slow statement.
             renew_if_due(&mut next_renew);
-            if clock::now() >= next_hb {
+            if clock::now() >= next_hb && !self.paused() {
                 let now = clock::now();
                 match self.heartbeat().and_then(|_| self.refresh_nodes()) {
                     Ok(()) => {}
@@ -759,21 +761,24 @@ impl Inner {
                 next_hb = (now + c.heartbeat).max(clock::now() + c.heartbeat / 4);
                 renew_if_due(&mut next_renew);
             }
-            if clock::now() >= next_sweep {
+            if clock::now() >= next_sweep && !self.paused() {
                 if let Err(e) = self.sweep(&mut cursor) {
                     tracing::warn!(node = %self.me(), error = %e, "sweeping expired leases failed");
                 }
                 next_sweep = clock::now() + c.sweep_every;
                 renew_if_due(&mut next_renew);
             }
-            if clock::now() >= next_rebalance {
+            if clock::now() >= next_rebalance && !self.paused() {
                 self.rebalance();
                 next_rebalance = clock::now() + c.rebalance_every;
             }
-            if clock::now() >= next_cleanup {
+            if clock::now() >= next_cleanup && !self.paused() {
                 self.delete_dead_nodes();
                 next_cleanup = clock::now() + c.node_ttl * 12;
                 renew_if_due(&mut next_renew);
+            }
+            if self.paused() {
+                continue;
             }
             let handing_off = self.progress_handoffs();
             let now = clock::now();
@@ -786,6 +791,10 @@ impl Inner {
                 std::thread::park_timeout(next - now);
             }
         }
+    }
+
+    fn paused(&self) -> bool {
+        self.flags.stop.load(Ordering::SeqCst) || self.flags.superseded.load(Ordering::SeqCst) || self.faults.freeze.load(Ordering::SeqCst)
     }
 
     fn watchdog_loop(self: Arc<Self>) {

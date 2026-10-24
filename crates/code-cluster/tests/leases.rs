@@ -80,8 +80,11 @@ fn epoch_rises_on_every_change_of_holder_even_back_and_forth() {
     }
 }
 
+/// When `node`'s lease ran out: its last state before another node held the key.
 fn last_expiry_of(seen: &[(i64, Option<Lease>)], node: &str) -> i64 {
-    seen.iter().filter_map(|(_, l)| l.as_ref().filter(|l| l.node == node)).map(|l| l.expires_at).max().unwrap()
+    let states: Vec<&Lease> = seen.iter().filter_map(|(_, l)| l.as_ref()).collect();
+    let takeover = states.iter().position(|l| l.node != node).unwrap_or(states.len());
+    states[..takeover].iter().rev().find(|l| l.node == node).map(|l| l.expires_at).unwrap()
 }
 
 fn first_seen_holder(seen: &[(i64, Option<Lease>)], node: &str) -> Option<Lease> {
