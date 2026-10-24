@@ -18,6 +18,7 @@ use crate::merge::Outcome;
 use crate::model::Changeset;
 use crate::path::RepoPath;
 use crate::tree::{Overlay, TreeConflict, TreeError};
+use crate::db::Steps;
 use crate::{ChangesetRow, Meta, RefRow, Store, invalid, now_ms};
 use bytes::Bytes;
 use code_sql::{Backend, Isolation, OptionalExtension, ValueRef, params};
@@ -181,6 +182,10 @@ struct Batch {
     blobs: HashMap<Oid, bytes::Bytes>,
     paths: HashMap<RepoPath, u64>,
     fast_forwarded: HashSet<ChangesetId>,
+    /// Path index entries read for the batch's requests up front, in a few queries rather than
+    /// one per file (`None`: not in the index). Valid for the batch's start: anything else that
+    /// writes the index moves the ref, and the batch is rebuilt.
+    index: HashMap<RepoPath, Option<u64>>,
 }
 
 impl Batch {
@@ -198,6 +203,7 @@ impl Batch {
             blobs: HashMap::new(),
             paths: HashMap::new(),
             fast_forwarded: HashSet::new(),
+            index: HashMap::new(),
         }
     }
 
@@ -440,6 +446,28 @@ impl Store {
         Ok(RefState { head: Some(Head { meta, commit, tree }), floor, version })
     }
 
+    /// Path index entries of many paths, a chunk per query.
+    fn path_gens(&self, repo: &str, name: &str, paths: &[&RepoPath]) -> anyhow::Result<HashMap<RepoPath, Option<u64>>> {
+        const CHUNK: usize = 64;
+        let sql = format!(
+            "SELECT path, generation FROM path_index WHERE repo = ? AND ref = ? AND path IN ({})",
+            vec!["?"; CHUNK].join(", ")
+        );
+        let mut out: HashMap<RepoPath, Option<u64>> = paths.iter().map(|p| ((*p).clone(), None)).collect();
+        for chunk in paths.chunks(CHUNK) {
+            // One statement shape for every chunk: a short one repeats its last path.
+            let mut values = vec![ValueRef::Text(repo), ValueRef::Text(name)];
+            values.extend((0..CHUNK).map(|i| ValueRef::Text(chunk[i.min(chunk.len() - 1)].as_str())));
+            let rows = self.db.query(&sql, values.as_slice(), |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            for (path, g) in rows {
+                if let Ok(path) = RepoPath::new(path) {
+                    out.insert(path, Some(g as u64));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn path_gen(&self, repo: &str, name: &str, path: &RepoPath) -> anyhow::Result<Option<u64>> {
         Ok(self
             .db
@@ -556,6 +584,13 @@ impl Lander {
                     return;
                 }
             };
+            if let Err(e) = self.prefetch_index(&mut batch, &requests) {
+                let msg = format!("{e:#}");
+                for (_, reply) in requests {
+                    let _ = reply.send(Err(LandError::Other(anyhow::anyhow!("{msg}"))));
+                }
+                return;
+            }
             let mut results = Vec::with_capacity(requests.len());
             for (cs, _) in &requests {
                 results.push(self.land(&mut batch, *cs).await);
@@ -618,6 +653,31 @@ impl Lander {
             Ok(if current == expect { Written::Committed { exact: true } } else { Written::Moved })
         })
         .await?
+    }
+
+    /// Read the path index entries of the files the requests change, for `land`.
+    fn prefetch_index(&self, batch: &mut Batch, requests: &[(ChangesetId, LandReply)]) -> anyhow::Result<()> {
+        /// Paths read up front at most; any others are read as they're needed.
+        const MAX: usize = 4096;
+        let Some(head) = batch.head.as_ref().map(|h| h.meta.id) else { return Ok(()) };
+        let mut metas = Vec::with_capacity(requests.len());
+        for (cs, _) in requests {
+            // Missing changesets fail in `land`, with the right error. Changes on the head
+            // fast-forward without reading the index.
+            if let Some(m) = self.store.meta(&self.repo, cs)?
+                && m.cs.parents.first() != Some(&head)
+            {
+                metas.push(m);
+            }
+        }
+        let mut paths: Vec<&RepoPath> = metas.iter().flat_map(|m| m.cs.files.keys()).collect();
+        paths.sort();
+        paths.dedup();
+        paths.truncate(MAX);
+        if !paths.is_empty() {
+            batch.index = self.store.path_gens(&self.repo, &self.name, &paths)?;
+        }
+        Ok(())
     }
 
     fn lookup<'a>(&'a self, batch: &'a Batch, scratch: &'a [Arc<Meta>]) -> impl Fn(&ChangesetId) -> anyhow::Result<Arc<Meta>> + 'a {
@@ -693,7 +753,10 @@ impl Lander {
                     let g = match batch.paths.get(path) {
                         Some(g) => Some(*g),
                         None if batch.clear_index => None,
-                        None => store.path_gen(&self.repo, &self.name, path)?,
+                        None => match batch.index.get(path) {
+                            Some(g) => *g,
+                            None => store.path_gen(&self.repo, &self.name, path)?,
+                        },
                     };
                     g.is_some_and(|g| g > orig_parent.generation)
                 } else {
@@ -1082,25 +1145,16 @@ fn write_ref_blocking(store: &Store, w: &RefWrite) -> anyhow::Result<Written> {
 /// The write's transaction. `Ok(false)`: the compare-and-swap failed, nothing was written.
 fn apply(store: &Store, w: &RefWrite, xid: &RefCell<Option<String>>, abort: bool) -> code_sql::Result<bool> {
     let pg = store.db.backend() == Backend::Postgres;
+    let now = now_ms();
+    let prune = !w.log.is_empty() && random() % 1024 < w.log.len() as u64;
+    let steps = steps(w, store.land_log_lock, now, prune);
     store.db.write_with(Isolation::ReadCommitted, |c| {
         // The ref row first: on Postgres its lock is then held to the commit, so a lander
         // elsewhere that moves the ref waits for this transaction rather than racing it.
         let Some(id) = cas_ref(c, w, pg)? else { return Ok(false) };
         *xid.borrow_mut() = id;
-        if w.new.is_none() || w.clear_index {
-            c.execute("DELETE FROM path_index WHERE repo = ? AND ref = ?", params![w.repo, w.name])?;
-        }
-        if w.new.is_some() {
-            Store::insert_changesets_tx(c, &w.repo, &w.changesets)?;
-            Store::insert_trees_tx(c, &w.repo, w.trees.iter().map(|(o, d)| (o, d)))?;
-            Store::insert_blobs_tx(c, &w.repo, &w.blobs)?;
-            Store::insert_git_tx(c, &w.repo, &w.git)?;
-            write_index(c, w)?;
-        }
-        if !w.log.is_empty() {
-            count_landed(c, &w.repo, w.log.len() as i64)?;
-            log_landed(c, store.land_log_lock, &w.repo, &w.log)?;
-        }
+        // Everything else in one round trip on Postgres.
+        steps.run(c)?;
         if abort {
             return Err(code_sql::Error::Other("injected fault: rolling back".into()));
         }
@@ -1236,46 +1290,63 @@ fn cas_ref(c: &code_sql::Conn<'_>, w: &RefWrite, pg: bool) -> code_sql::Result<O
     }
 }
 
-fn write_index(c: &code_sql::Conn<'_>, w: &RefWrite) -> code_sql::Result<()> {
-    c.execute_many(
-        "INSERT INTO path_index (repo, ref, path, generation) VALUES (?, ?, ?, ?)
-         ON CONFLICT (repo, ref, path) DO UPDATE SET generation =
-             CASE WHEN excluded.generation > path_index.generation THEN excluded.generation ELSE path_index.generation END",
-        w.paths.iter().map(|(p, g)| [ValueRef::Text(&w.repo), ValueRef::Text(&w.name), ValueRef::Text(p.as_str()), ValueRef::Int(*g)]),
-    )?;
-    Ok(())
-}
-
-fn count_landed(c: &code_sql::Conn<'_>, repo: &str, landed: i64) -> code_sql::Result<()> {
-    c.execute(
-        "INSERT INTO land_stats (repo, minute, count) VALUES (?, ?, ?)
-         ON CONFLICT (repo, minute) DO UPDATE SET count = land_stats.count + excluded.count",
-        params![repo, now_ms() / 60_000, landed],
-    )?;
-    Ok(())
-}
-
 /// How long the land log keeps a landing.
 pub const LAND_LOG_RETENTION_MS: i64 = 7 * 86_400_000;
 
-/// Append to the land log. Readers page through it by sequence number and must never skip
-/// one, so sequence numbers have to become visible in order. With one SQLite writer they do.
-/// On Postgres concurrent transactions take numbers in one order and may commit in another, so
-/// appends take a transaction-scoped lock first: whoever gets a later number commits later.
-/// It's held only for the append and the commit (the last statements of the transaction).
-fn log_landed(c: &code_sql::Conn<'_>, lock: Option<i64>, repo: &str, log: &[(i64, String)]) -> code_sql::Result<()> {
-    let Some(((last_at, last), rest)) = log.split_last() else { return Ok(()) };
-    if let Some(key) = lock {
-        c.execute("SELECT pg_advisory_xact_lock(?)", [key])?;
+/// The statements of a ref write after its compare-and-swap, in order.
+///
+/// The land log comes last. Readers page through it by sequence number and must never skip one,
+/// so numbers have to become visible in order. With one SQLite writer they do. On Postgres,
+/// concurrent transactions take numbers in one order and may commit in another, so appends take
+/// a transaction-scoped lock (`lock`) first: whoever takes a later number commits later. It's
+/// held only for the append and the commit. `prune` drops entries past the retention too.
+fn steps<'a>(w: &'a RefWrite, lock: Option<i64>, now: i64, prune: bool) -> Steps<'a> {
+    use ValueRef::{Int, Text};
+    let (repo, name) = (Text(&w.repo), Text(&w.name));
+    let mut steps = Steps::default();
+    if w.expect.is_none() && w.new.is_none() {
+        return steps;
     }
-    const INSERT: &str = "INSERT INTO land_log (repo, at_ms, record) VALUES (?, ?, ?)";
-    c.execute_many(INSERT, rest.iter().map(|(at, rec)| [ValueRef::Text(repo), ValueRef::Int(*at), ValueRef::Text(rec)]))?;
-    let seq: i64 = c.query_row(&format!("{INSERT} RETURNING seq"), params![repo, last_at, last], |r| r.get(0))?;
-    // Prune now and then (roughly every 1024 landings), so the log stays a window.
-    if seq % 1024 < log.len() as i64 {
-        c.execute("DELETE FROM land_log WHERE at_ms < ?", [now_ms() - LAND_LOG_RETENTION_MS])?;
+    if w.new.is_none() || w.clear_index {
+        steps.push("DELETE FROM path_index WHERE repo = ? AND ref = ?", vec![repo, name]);
     }
-    Ok(())
+    if w.new.is_some() {
+        steps.changesets(&w.repo, &w.changesets);
+        steps.trees(&w.repo, w.trees.iter().map(|(o, d)| (o, d)));
+        steps.blobs(&w.repo, &w.blobs);
+        steps.git(&w.repo, &w.git);
+        // Paths are unique within a write, as `DO UPDATE` needs.
+        steps.insert(
+            "INSERT INTO path_index (repo, ref, path, generation)",
+            " ON CONFLICT (repo, ref, path) DO UPDATE SET generation =
+                 CASE WHEN excluded.generation > path_index.generation THEN excluded.generation ELSE path_index.generation END",
+            w.paths.iter().map(|(p, g)| vec![repo, name, Text(p.as_str()), Int(*g)]).collect(),
+        );
+    }
+    if !w.log.is_empty() {
+        steps.push(
+            "INSERT INTO land_stats (repo, minute, count) VALUES (?, ?, ?)
+             ON CONFLICT (repo, minute) DO UPDATE SET count = land_stats.count + excluded.count",
+            vec![repo, Int(now / 60_000), Int(w.log.len() as i64)],
+        );
+        if let Some(key) = lock {
+            steps.push("SELECT pg_advisory_xact_lock(?)", vec![Int(key)]);
+        }
+        // The rows of one statement take sequence numbers in order.
+        steps.insert("INSERT INTO land_log (repo, at_ms, record)", "", w.log.iter().map(|(at, rec)| vec![repo, Int(*at), Text(rec)]).collect());
+        if prune {
+            steps.push("DELETE FROM land_log WHERE at_ms < ?", vec![Int(now - LAND_LOG_RETENTION_MS)]);
+        }
+    }
+    steps
+}
+
+/// A random number (land log pruning picks roughly one landing in 1024 to prune at).
+fn random() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+    h.finish()
 }
 
 #[cfg(test)]

@@ -4,6 +4,13 @@
 //! Written once in SQLite's dialect; `code_sql` translates it for Postgres (BIGINT, BYTEA,
 //! `TEXT COLLATE "C"`, an identity column for `land_log.seq`).
 
+use crate::ChangesetRow;
+use crate::ids::{ChangesetId, Oid};
+use bytes::Bytes;
+use code_sql::Conn;
+use code_sql::ValueRef::{self, Blob, Int, Text};
+use std::collections::HashMap;
+
 pub const TABLES: &[&str] =
     &["changesets", "cs_git", "git_commits", "trees", "git_raw", "blobs", "refs", "path_index", "land_stats", "land_log", "repos"];
 
@@ -102,3 +109,86 @@ pub const SCHEMA: &str = "
 pub const READERS: usize = 8;
 /// The SQLite writer's page cache, in KiB.
 pub const CACHE_KIB: i64 = 64 << 10;
+
+/// Rows most statements insert at once.
+const ROWS_PER_INSERT: usize = 64;
+
+/// The statements of one write, built before it (a write may run more than once) and sent in
+/// one round trip on Postgres ([`code_sql::Conn::execute_pipeline`]). Inserts put several rows
+/// in each statement: on Postgres a statement costs far more than a row, even pipelined.
+#[derive(Default)]
+pub(crate) struct Steps<'a>(Vec<(String, Vec<Vec<ValueRef<'a>>>)>);
+
+impl<'a> Steps<'a> {
+    /// One statement.
+    pub fn push(&mut self, sql: &str, params: Vec<ValueRef<'a>>) {
+        self.0.push((sql.to_string(), vec![params]));
+    }
+
+    /// `head VALUES (…), (…) … tail` for `rows`, in chunks of 64, then 32, 16, … 1, so only a
+    /// few statement shapes exist (each is prepared once per connection). Rows must not
+    /// conflict with each other under `ON CONFLICT … DO UPDATE`.
+    pub fn insert(&mut self, head: &str, tail: &str, rows: Vec<Vec<ValueRef<'a>>>) {
+        let Some(cols) = rows.first().map(Vec::len) else { return };
+        let group = format!("({})", vec!["?"; cols].join(", "));
+        let mut rest = &rows[..];
+        while !rest.is_empty() {
+            let k = if rest.len() >= ROWS_PER_INSERT { ROWS_PER_INSERT } else { 1 << rest.len().ilog2() };
+            let (chunk, r) = rest.split_at(k);
+            let sql = format!("{head} VALUES {}{tail}", vec![group.as_str(); k].join(", "));
+            match self.0.last_mut() {
+                // The same shape again (a run of full chunks): one more parameter list.
+                Some((last, lists)) if *last == sql => lists.push(chunk.concat()),
+                _ => self.0.push((sql, vec![chunk.concat()])),
+            }
+            rest = r;
+        }
+    }
+
+    pub fn changesets(&mut self, repo: &'a str, rows: &'a [ChangesetRow]) {
+        self.insert(
+            "INSERT OR IGNORE INTO changesets (repo, id, generation, depth, skip, data, created_at)",
+            "",
+            rows.iter()
+                .map(|m| {
+                    let skip = m.skip.as_ref().map_or(ValueRef::Null, |s| Blob(&s.0));
+                    vec![Text(repo), Blob(&m.id.0), Int(m.generation as i64), Int(m.depth as i64), skip, Blob(&m.data), Int(m.created_at)]
+                })
+                .collect(),
+        );
+    }
+
+    pub fn trees(&mut self, repo: &'a str, trees: impl IntoIterator<Item = (&'a Oid, &'a Bytes)>) {
+        self.insert("INSERT OR IGNORE INTO trees (repo, oid, data)", "", trees.into_iter().map(|(o, d)| vec![Text(repo), Blob(&o.0), Blob(d)]).collect());
+    }
+
+    /// Which blobs the repo has (uploaded before the write).
+    pub fn blobs(&mut self, repo: &'a str, blobs: &'a HashMap<Oid, Bytes>) {
+        self.insert(
+            "INSERT OR IGNORE INTO blobs (repo, oid, size)",
+            "",
+            blobs.iter().map(|(o, d)| vec![Text(repo), Blob(&o.0), Int(d.len() as i64)]).collect(),
+        );
+    }
+
+    /// Derived git data, both directions: `(changeset, commit, tree, commit bytes)`.
+    pub fn git(&mut self, repo: &'a str, rows: &'a [(ChangesetId, Oid, Oid, Bytes)]) {
+        self.insert(
+            "INSERT OR IGNORE INTO cs_git (repo, cs, commit_oid, tree_oid)",
+            "",
+            rows.iter().map(|(cs, commit, tree, _)| vec![Text(repo), Blob(&cs.0), Blob(&commit.0), Blob(&tree.0)]).collect(),
+        );
+        self.insert(
+            "INSERT OR IGNORE INTO git_commits (repo, oid, cs, data)",
+            "",
+            rows.iter().map(|(cs, commit, _, data)| vec![Text(repo), Blob(&commit.0), Blob(&cs.0), Blob(data)]).collect(),
+        );
+    }
+
+    /// Run them, in order (inside a write).
+    pub fn run(&self, c: &Conn<'_>) -> code_sql::Result<()> {
+        let steps: Vec<(&str, Vec<Vec<ValueRef<'_>>>)> = self.0.iter().map(|(sql, lists)| (sql.as_str(), lists.clone())).collect();
+        c.execute_pipeline(&steps)?;
+        Ok(())
+    }
+}

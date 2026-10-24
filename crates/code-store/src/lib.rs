@@ -36,7 +36,7 @@ pub use path::RepoPath;
 pub use read::{ChangesetInfo, DirEntry, EntryKind, FileContent, FileDiff, FileStatus, LogQuery, RefInfo, RepoStats};
 
 use bytes::Bytes;
-use code_sql::{Db, OptionalExtension, Target, ValueRef, params};
+use code_sql::{Db, OptionalExtension, Target, params};
 use parking_lot::Mutex;
 use pg_storage::Objects;
 use std::collections::{BTreeMap, HashMap};
@@ -257,7 +257,7 @@ impl Store {
         Ok(())
     }
 
-    /// Upload blobs whose rows are written by the caller's transaction ([`Self::insert_blobs_tx`]).
+    /// Upload blobs whose rows are written by the caller's transaction (`db::Steps::blobs`).
     pub(crate) async fn upload_blobs(&self, repo: &str, blobs: &HashMap<Oid, Bytes>) -> anyhow::Result<()> {
         use futures::StreamExt;
         let jobs: Vec<_> = blobs
@@ -277,14 +277,6 @@ impl Store {
                 self.blob_cache.insert((repo.into(), *oid), data.clone(), data.len() + 64);
             }
         }
-        Ok(())
-    }
-
-    pub(crate) fn insert_blobs_tx(c: &code_sql::Conn<'_>, repo: &str, blobs: &HashMap<Oid, Bytes>) -> code_sql::Result<()> {
-        c.execute_many(
-            "INSERT OR IGNORE INTO blobs (repo, oid, size) VALUES (?, ?, ?)",
-            blobs.iter().map(|(oid, data)| [ValueRef::Text(repo), ValueRef::Blob(&oid.0), ValueRef::Int(data.len() as i64)]),
-        )?;
         Ok(())
     }
 
@@ -396,50 +388,6 @@ impl Store {
         Ok(Some(cur))
     }
 
-    /// Insert changesets (new ones; existing ids are left alone).
-    pub(crate) fn insert_changesets_tx(c: &code_sql::Conn<'_>, repo: &str, rows: &[ChangesetRow]) -> code_sql::Result<()> {
-        c.execute_many(
-            "INSERT OR IGNORE INTO changesets (repo, id, generation, depth, skip, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            rows.iter().map(|m| {
-                [
-                    ValueRef::Text(repo),
-                    ValueRef::Blob(&m.id.0),
-                    ValueRef::Int(m.generation as i64),
-                    ValueRef::Int(m.depth as i64),
-                    m.skip.as_ref().map_or(ValueRef::Null, |s| ValueRef::Blob(&s.0)),
-                    ValueRef::Blob(&m.data),
-                    ValueRef::Int(m.created_at),
-                ]
-            }),
-        )?;
-        Ok(())
-    }
-
-    /// Insert derived git data: `(changeset, commit, tree, commit bytes)`.
-    pub(crate) fn insert_git_tx(c: &code_sql::Conn<'_>, repo: &str, rows: &[(ChangesetId, Oid, Oid, Bytes)]) -> code_sql::Result<()> {
-        c.execute_many(
-            "INSERT OR IGNORE INTO cs_git (repo, cs, commit_oid, tree_oid) VALUES (?, ?, ?, ?)",
-            rows.iter().map(|(cs, commit, tree, _)| [ValueRef::Text(repo), ValueRef::Blob(&cs.0), ValueRef::Blob(&commit.0), ValueRef::Blob(&tree.0)]),
-        )?;
-        c.execute_many(
-            "INSERT OR IGNORE INTO git_commits (repo, oid, cs, data) VALUES (?, ?, ?, ?)",
-            rows.iter().map(|(cs, commit, _, data)| [ValueRef::Text(repo), ValueRef::Blob(&commit.0), ValueRef::Blob(&cs.0), ValueRef::Blob(data)]),
-        )?;
-        Ok(())
-    }
-
-    pub(crate) fn insert_trees_tx<'a>(
-        c: &code_sql::Conn<'_>,
-        repo: &str,
-        trees: impl IntoIterator<Item = (&'a Oid, &'a Bytes)>,
-    ) -> code_sql::Result<()> {
-        c.execute_many(
-            "INSERT OR IGNORE INTO trees (repo, oid, data) VALUES (?, ?, ?)",
-            trees.into_iter().map(|(oid, data)| [ValueRef::Text(repo), ValueRef::Blob(&oid.0), ValueRef::Blob(data)]),
-        )?;
-        Ok(())
-    }
-
     /// Create a changeset from file edits on `base`. Content is uploaded, the edits are
     /// validated against the base tree (deletes must exist, no file/directory clashes) and the
     /// git commit is derived. Edits that change nothing are dropped.
@@ -525,7 +473,9 @@ impl Store {
         let id = cs.id();
         if self.meta(repo, &id)?.is_some() {
             if !blobs.is_empty() {
-                self.db.write(|c| Self::insert_blobs_tx(c, repo, blobs))?;
+                let mut steps = db::Steps::default();
+                steps.blobs(repo, blobs);
+                self.db.write(|c| steps.run(c))?;
             }
             return Ok(id);
         }
@@ -534,12 +484,12 @@ impl Store {
         let (commit, tree, data) = self.derive_commit(repo, &meta, &mut overlay, &|p| self.derive_git(repo, p))?;
         let row = [ChangesetRow::new(&meta)];
         let git = [(id, commit, tree, data)];
-        self.db.write(|c| {
-            Self::insert_changesets_tx(c, repo, &row)?;
-            Self::insert_blobs_tx(c, repo, blobs)?;
-            Self::insert_trees_tx(c, repo, overlay.trees.iter())?;
-            Self::insert_git_tx(c, repo, &git)
-        })?;
+        let mut steps = db::Steps::default();
+        steps.changesets(repo, &row);
+        steps.blobs(repo, blobs);
+        steps.trees(repo, overlay.trees.iter());
+        steps.git(repo, &git);
+        self.db.write(|c| steps.run(c))?;
         let size = row[0].data.len() + 128;
         self.meta_cache.insert((repo.into(), id), Arc::new(meta), size);
         self.git_cache.insert((repo.into(), id), (commit, tree), 128);
@@ -606,10 +556,10 @@ impl Store {
                 self.git_of(repo, p)?.ok_or_else(|| anyhow::anyhow!("parent {} not derived", p.short()))
             })?;
             let git = [(id, commit, tree, data)];
-            self.db.write(|c| {
-                Self::insert_trees_tx(c, repo, overlay.trees.iter())?;
-                Self::insert_git_tx(c, repo, &git)
-            })?;
+            let mut steps = db::Steps::default();
+            steps.trees(repo, overlay.trees.iter());
+            steps.git(repo, &git);
+            self.db.write(|c| steps.run(c))?;
         }
         self.git_of(repo, cs)?.ok_or_else(|| anyhow::anyhow!("derivation failed"))
     }

@@ -69,14 +69,15 @@ impl Store {
         for (_, data) in &trees {
             git::parse_tree(data)?;
         }
-        self.db.write(|c| {
-            Self::insert_trees_tx(c, repo, trees.iter().map(|(o, d)| (o, d)))?;
-            c.execute_many(
-                "INSERT OR IGNORE INTO git_raw (repo, oid, kind, data) VALUES (?, ?, ?, ?)",
-                tags.iter().map(|(oid, data)| [ValueRef::Text(repo), ValueRef::Blob(&oid.0), ValueRef::Int(Kind::Tag.db_code()), ValueRef::Blob(data)]),
-            )?;
-            Ok::<_, code_sql::Error>(())
-        })?;
+        let mut steps = crate::db::Steps::default();
+        steps.trees(repo, trees.iter().map(|(o, d)| (o, d)));
+        steps.insert(
+            "INSERT OR IGNORE INTO git_raw (repo, oid, kind, data)",
+            "",
+            tags.iter().map(|(oid, data)| vec![ValueRef::Text(repo), ValueRef::Blob(&oid.0), ValueRef::Int(Kind::Tag.db_code()), ValueRef::Blob(data)]).collect(),
+        );
+        self.db.write(|c| steps.run(c))?;
+        drop(steps);
         drop(trees);
 
         // Commits, parents first.
@@ -174,10 +175,10 @@ impl Store {
         }
         let changesets: Vec<crate::ChangesetRow> = rows.iter().map(|(meta, ..)| crate::ChangesetRow::new(meta)).collect();
         let git: Vec<(ChangesetId, Oid, Oid, Bytes)> = rows.iter().map(|(meta, oid, tree, raw)| (meta.id, *oid, *tree, raw.clone())).collect();
-        self.db.write(|c| {
-            Self::insert_changesets_tx(c, repo, &changesets)?;
-            Self::insert_git_tx(c, repo, &git)
-        })?;
+        let mut steps = crate::db::Steps::default();
+        steps.changesets(repo, &changesets);
+        steps.git(repo, &git);
+        self.db.write(|c| steps.run(c))?;
         rows.clear();
         Ok(())
     }
