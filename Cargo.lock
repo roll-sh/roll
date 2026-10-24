@@ -1400,6 +1400,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "code-sql"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "parking_lot",
+ "rusqlite",
+ "rustls-native-certs",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
+ "tokio-rustls 0.26.6",
+ "tracing",
+]
+
+[[package]]
 name = "code-store"
 version = "0.1.0"
 dependencies = [
