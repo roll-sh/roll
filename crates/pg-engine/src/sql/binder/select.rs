@@ -5814,6 +5814,18 @@ impl Binder<'_, '_> {
             } else {
                 (rp, rscope)
             };
+            // (So are its JOIN USING merged columns over a FROM subquery's computed output:
+            // their own values, PlaceHolderVars when they need one.)
+            let (lp, lscope) = if matches!(kind, JoinKind::Right | JoinKind::Full) {
+                materialize_using(lp, lscope)
+            } else {
+                (lp, lscope)
+            };
+            let (rp, rscope) = if matches!(kind, JoinKind::Left | JoinKind::Full) {
+                materialize_using(rp, rscope)
+            } else {
+                (rp, rscope)
+            };
             let nleft = width(&lp);
             let nright = width(&rp);
             let rscope = rscope.shifted(nleft);
@@ -7511,6 +7523,78 @@ fn nulls_with_row(e: &Expr) -> bool {
 /// A FROM item's virtual generated columns that wouldn't go NULL with a null-extended row
 /// (constants, COALESCE, CASE, …): computed in a projection over its plan, in their own
 /// slots, and read from there.
+/// An outer join's nullable side's JOIN USING merged columns (flatten_join_alias_vars'
+/// expansions of the join's alias Vars) that read a FROM subquery's computed output: their
+/// values computed in a projection right over the side's join, which the outer join above
+/// nulls. Once the subquery is pulled up the expansion reads its output as the join below
+/// has it (no outer join above nulls it there), and the alias value is a PlaceHolderVar of
+/// its own when it isn't a standard alias expression any more (add_nullingrels_if_needed):
+/// `'123'::bigint` of `(select 123 as x ...) left join (...) using (x)`, evaluated at that
+/// join, not the subquery's `123` at its scan with the cast above.
+fn materialize_using(mut plan: Plan, mut scope: Scope) -> (Plan, Scope) {
+    // (Whether column `k` of `p`'s row is a subquery's computed output.)
+    fn computed(p: &Plan, k: usize) -> bool {
+        match p {
+            Plan::Join { left, right, nleft, kind, .. } if !matches!(kind, JoinKind::Semi | JoinKind::Anti) => {
+                if k < *nleft {
+                    computed(left, k)
+                } else {
+                    computed(right, k - nleft)
+                }
+            }
+            Plan::Filter { input, .. } => computed(input, k),
+            Plan::Project { input, exprs } => match exprs.get(k) {
+                Some(Expr::Col(j, _)) => computed(input, *j),
+                Some(_) => true,
+                None => false,
+            },
+            _ => false,
+        }
+    }
+    if !matches!(plan, Plan::Join { .. }) {
+        return (plan, scope);
+    }
+    let mut found: Vec<Expr> = Vec::new();
+    for rel in scope.rels.iter().filter(|r| r.anonymous || r.join_rte) {
+        for c in &rel.cols {
+            if !matches!(c.expr, Expr::Col(..))
+                && c.expr.columns().iter().any(|&k| computed(&plan, k))
+                && !found.iter().any(|f| f.same_as(&c.expr))
+            {
+                found.push(c.expr.clone());
+            }
+        }
+    }
+    if found.is_empty() {
+        return (plan, scope);
+    }
+    let w = width(&plan);
+    let types = crate::sql::paths::analyzejoins::col_types(&plan);
+    let mut exprs: Vec<Expr> = (0..w)
+        .map(|k| Expr::Col(k, types.get(k).cloned().unwrap_or(DataType::Unknown)))
+        .collect();
+    exprs.extend(found.iter().cloned());
+    // (Every column with that value reads it there: the join alias's own too.)
+    for rel in &mut scope.rels {
+        for c in &mut rel.cols {
+            if let Some(i) = found.iter().position(|f| f.same_as(&c.expr)) {
+                let ty = c.expr.ty();
+                c.expr = Expr::Col(w + i, ty);
+            }
+        }
+    }
+    if let Plan::Join { meta, .. } = &mut plan {
+        meta.alias_cols = found.len();
+    }
+    (
+        Plan::Project {
+            input: Arc::new(plan),
+            exprs,
+        },
+        scope,
+    )
+}
+
 fn materialize_virtuals(plan: Plan, mut scope: Scope) -> (Plan, Scope) {
     let w = width(&plan);
     let mut exprs: Option<Vec<Expr>> = None;

@@ -1762,6 +1762,13 @@ pub fn qual_cost(e: &Expr) -> f64 {
         Expr::Cast(_, from, to, _) if io_cast(from, to) => n += 2.0,
         Expr::Cast(_, from, to, _) if !binary_coercible(from, to) => n += 1.0,
         Expr::InList(_, list, _) => n += list.len() as f64,
+        // (A domain with constraints checked: cost_qual_eval_walker's one operator. One
+        // without any is a RelabelType after eval_const_expressions.)
+        Expr::CoerceToDomain(_, d)
+            if d.tag || d.array || d.not_null || !d.checks.is_empty() || d.base.is_some() =>
+        {
+            n += 1.0
+        }
         Expr::ArrayOp { right, .. } => {
             let len = match strip(right) {
                 Expr::Array(items, _) => items.len(),

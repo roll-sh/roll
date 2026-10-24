@@ -212,6 +212,17 @@ fn subquery_leaf(p: &Plan) -> Option<(&ScanPlan, &Vec<Expr>)> {
     Some((sp, exprs))
 }
 
+/// is_standard_join_alias_expression: a column (or a PlaceHolderVar's), under implicit
+/// coercions and COALESCE.
+fn standard_alias(e: &Expr) -> bool {
+    match e {
+        Expr::Col(..) => true,
+        Expr::Cast(x, ..) | Expr::Relabel(x, _) => standard_alias(x),
+        Expr::Coalesce(args, _) => args.iter().all(standard_alias),
+        _ => false,
+    }
+}
+
 /// A FROM subquery (or view) over a join, or a filter over its outputs (a WHERE clause
 /// pushed down to it): its join tree is part of the group (pull_up_simple_subquery), its
 /// outputs evaluated where they're read. One an outer join above nulls that wouldn't go
@@ -257,15 +268,32 @@ fn flatten_join_subquery(p: &Plan, nulled: u32, anulled: u32, cx: &mut Cx) -> Op
     // PlaceHolderVar, evaluated at the lowest join of the relations it reads (or of all
     // the subquery's, reading none).
     let _ = anulled;
-    let needs_phv =
-        |e: &Expr| !matches!(e, Expr::Col(..)) && nulled != 0 && (e.columns().is_empty() || nonstrict(e));
+    // (The last `alias_cols` outputs are JOIN USING merged columns (the binder's
+    // `materialize_using`): add_nullingrels_if_needed wraps one that isn't a standard join
+    // alias expression, columns under implicit coercions and COALESCE.)
+    let alias_from = {
+        let j = match &**input {
+            Plan::Filter { input, .. } => &**input,
+            j => j,
+        };
+        match j {
+            Plan::Join { meta, .. } => exprs.len().saturating_sub(meta.alias_cols),
+            _ => exprs.len(),
+        }
+    };
+    let needs_phv_at = |i: usize, e: &Expr| {
+        if i >= alias_from {
+            return nulled != 0 && !standard_alias(e);
+        }
+        !matches!(e, Expr::Col(..)) && nulled != 0 && (e.columns().is_empty() || nonstrict(e))
+    };
     if !join_subquery(input)
         || virtual_proj(proj).is_some()
         || reads_outer(input)
         || !exprs
             .iter()
             .all(|e| matches!(e, Expr::Col(..)) || (movable(e) || nulled == 0 && movable_fromless(e)) && outer_refs(e).is_empty())
-        || exprs.iter().any(|e| needs_phv(e) && e.has_outer_refs())
+        || exprs.iter().enumerate().any(|(i, e)| needs_phv_at(i, e) && e.has_outer_refs())
     {
         return None;
     }
@@ -292,10 +320,11 @@ fn flatten_join_subquery(p: &Plan, nulled: u32, anulled: u32, cx: &mut Cx) -> Op
     let map: Vec<Expr> = exprs
         .iter()
         .zip(&direct)
-        .map(|(e, d)| {
+        .enumerate()
+        .map(|(i, (e, d))| {
             // (Judged on the output as its own pulled-up subqueries left it: a column
             // of one that became its constant needs one too.)
-            if needs_phv(d) {
+            if needs_phv_at(i, d) {
                 phvs.push(d.clone());
                 Expr::Col(w2 + phvs.len() - 1, e.ty())
             } else {
@@ -845,7 +874,8 @@ fn lift(
             // (An equivalence class with a value the lifting put in: `l = r` over an inner
             // join whose side has `r = k` gives the other side `l = k`, the join clause
             // implied by the two, the class's clauses each member's.)
-            let (l2, r2, hash2, meta2) = if *kind == JoinKind::Inner && wk == JoinKind::Inner && params2.is_empty() {
+            // (reduce_outer_joins comes first: an outer join it made inner is one too.)
+            let (l2, r2, hash2, meta2) = if *kind == JoinKind::Inner && params2.is_empty() {
                 ec_lifted_constants(l2, r2, hash2, meta2)
             } else {
                 (l2, r2, hash2, meta2)
@@ -1879,8 +1909,43 @@ pub(super) fn lift_group(p: &Plan) -> Option<Lifted> {
 fn lifted_constants(p: &Plan) -> Vec<(usize, Expr)> {
     let pred = match p {
         Plan::Filter { input, pred } if matches!(&**input, Plan::Scan(_)) => Some(pred),
+        // (A side that is an inner join (one join domain, reduce_outer_joins having made it
+        // inner): its items' `x = k`, as its columns, the class being one across it.)
+        Plan::Join {
+            kind: JoinKind::Inner,
+            left,
+            right,
+            nleft,
+            params,
+            cond,
+            ..
+        } if params.is_empty() => {
+            let mut out = lifted_constants(left);
+            out.extend(lifted_constants(right).into_iter().map(|(i, k)| (i + nleft, k)));
+            // (And its own clauses equating a column with the value: a key the lifting
+            // made `x = k`.)
+            out.extend(const_clauses(cond.as_ref()));
+            return out;
+        }
+        // (A projection over one computing PlaceHolderVars: its columns passed through.)
+        Plan::Project { input, exprs } if crate::sql::plan::phv_projection(p).is_some() => {
+            let below = lifted_constants(input);
+            return exprs
+                .iter()
+                .enumerate()
+                .filter_map(|(o, e)| match e {
+                    Expr::Col(j, _) => below.iter().find(|(c, _)| c == j).map(|(_, k)| (o, k.clone())),
+                    _ => None,
+                })
+                .collect();
+        }
         _ => None,
     };
+    const_clauses(pred)
+}
+
+/// The `col = k` clauses of `pred` (k a pseudo-constant of no column, not a plain constant).
+fn const_clauses(pred: Option<&Expr>) -> Vec<(usize, Expr)> {
     let mut out = Vec::new();
     let Some(pred) = pred else { return out };
     let mut parts = Vec::new();
@@ -1918,6 +1983,11 @@ fn ec_lifted_constants(
     if lc.is_empty() && rc.is_empty() {
         return (l, r, Some((lk, rk)), meta);
     }
+    let scan_side = |p: &Plan| match p {
+        Plan::Scan(_) => true,
+        Plan::Filter { input, .. } => matches!(&**input, Plan::Scan(_)),
+        _ => false,
+    };
     let eq_of = |a: &Expr, k: &Expr| -> Option<Expr> {
         let res = crate::sql::func::resolve_binop("=", &a.ty(), &k.ty()).ok()?;
         Some(Expr::Call(res.def, vec![a.clone(), k.clone()], DataType::Bool))
@@ -1925,19 +1995,35 @@ fn ec_lifted_constants(
     let (mut lpush, mut rpush) = (Vec::new(), Vec::new());
     let (mut lk2, mut rk2) = (Vec::new(), Vec::new());
     let (mut hs, mut kf) = (Vec::new(), Vec::new());
+    let nl = crate::sql::binder::plan_width(&l);
     for (i, (a, b)) in lk.iter().zip(&rk).enumerate() {
         let k = match (a, b) {
             (Expr::Col(x, _), Expr::Col(y, _)) => rc
                 .iter()
                 .find(|(c, _)| c == y)
-                .or_else(|| lc.iter().find(|(c, _)| c == x))
-                .map(|(_, k)| k.clone()),
+                .map(|(_, k)| (k.clone(), true))
+                .or_else(|| lc.iter().find(|(c, _)| c == x).map(|(_, k)| (k.clone(), false))),
             _ => None,
         };
-        match k.and_then(|k| Some((eq_of(a, &k)?, eq_of(b, &k)?))) {
-            Some((le, re)) => {
-                lpush.push(le);
-                rpush.push(re);
+        match k.and_then(|(k, from_r)| Some((eq_of(a, &k)?, eq_of(b, &k)?, from_r))) {
+            Some((le, re, from_r)) => {
+                // (A join side holding the constant has its `member = value` in its item's
+                // scan already.)
+                if from_r || scan_side(&l) {
+                    lpush.push(le);
+                }
+                if !from_r || scan_side(&r) {
+                    rpush.push(re);
+                }
+                // (The clause the class absorbed still has its columns carried up to the
+                // join: distribute_qual_to_rels' add_vars_to_targetlist.)
+                if let (Expr::Col(x, _), Expr::Col(y, _)) = (a, b) {
+                    for c in [*x, nl + *y] {
+                        if !meta.kept.contains(&c) {
+                            meta.kept.push(c);
+                        }
+                    }
+                }
             }
             None => {
                 lk2.push(a.clone());
@@ -1947,11 +2033,14 @@ fn ec_lifted_constants(
             }
         }
     }
-    if lpush.is_empty() {
+    if lk2.len() == lk.len() {
         return (l, r, Some((lk, rk)), meta);
     }
     // (A side's own `value = member` is the class's `member = value` now.)
     let regen = |p: Plan, push: Vec<Expr>| -> Plan {
+        if push.is_empty() {
+            return p;
+        }
         let (input, pred) = match p {
             Plan::Filter { input, pred } => (input, Some(pred)),
             p => (Arc::new(p), None),

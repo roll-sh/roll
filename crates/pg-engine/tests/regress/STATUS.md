@@ -35,8 +35,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51121 (**99.94%**) |
-| units differing | 29 |
+| units matching | 51122 (**99.95%**) |
+| units differing | 28 |
 | files fully matching | 227 |
 | engine output == expected/*.out (pg_regress "ok") | 188 files |
 | engine crashes / panics | none |
@@ -45,7 +45,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 29 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 28 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -53,8 +53,8 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 29 units
-join (19), partition_join (9), partition_prune (1)
+### EXPLAIN (group C1) — 28 units
+join (18), partition_join (9), partition_prune (1)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -106,6 +106,111 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 30 (JOIN USING aliases as PlaceHolderVars, PlaceHolderVar nested loop parameters, constant classes through reduced outer joins)
+
+Measured in subset runs of the planner-heavy files (test_setup, create_index, create_misc,
+create_view, select, union, subselect, join, aggregates, inherit, insert_conflict, limit,
+returning, updatable_views, merge, with, rules, rowsecurity, select_views, select_distinct,
+equivclass, partition_join, partition_prune, partition_aggregate, select_parallel,
+incremental_sort, memoize, join_hash, explain, stats_ext, groupingsets, window, tsrf,
+rangefuncs, sqljson_jsontable, collate; 13441 units), unit by unit against a run of the base
+35d7dbb (13403 -> 13404), and again rebased onto ad16655 (13411 -> 13412) and 4ae4438
+(13412 -> 13413): 1 unit fixed, none broken (rowsecurity's role drops differed once from a concurrent run's database, as alone
+they match). Crate tests and clippy on this state.
+
+| file | fixed units |
+|---|---|
+| join | 426 |
+
+What changed:
+
+- **JOIN USING merged columns over a pulled-up subquery's computed output** (join 426;
+  flatten_join_alias_vars' add_nullingrels_if_needed). The binder bound a merged column as an
+  expression of the joined columns at every place reading it, so `(select *, 123 as x ...) ss1
+  left join ss2 using (x)` read above `i0 left join (...)` was ss1's PlaceHolderVar `123` (the
+  outer join nulls ss1) with the cast above it. Now an outer join's nullable side whose merged
+  columns read a FROM subquery's computed output computes them in a projection right over the
+  side's join (`binder::select::materialize_using`, `JoinMeta::alias_cols`); the lift pulls
+  that projection up as a subquery over a join, but judges those outputs by
+  is_standard_join_alias_expression (columns under implicit coercions and COALESCE need no
+  PlaceHolderVar) rather than pullup_replace_vars_callback's rules. Inside, the subquery's
+  output is read where the USING join reads it (no outer join nulls it there): `'123'::bigint`
+  is one PlaceHolderVar evaluated at `i1 ⟕ i2` (variable-free: the join's relations), its
+  constant folded (a numeric coercion of a constant, `int48(123)`), and `123` isn't computed at
+  `i1`'s scan any more. USING joins whose merged columns read plain columns are bound as
+  before (no projection), so ordinary USING joins don't become subquery leaves.
+- **No have_dangerous_phv** (Postgres 18 removed it): a nested loop whose inner side reads a
+  PlaceHolderVar as a parameter while the outer side has some of its ph_eval_at is allowed;
+  the outer plan computes the PlaceHolderVar in its target list for the parameter only
+  (create_nestloop_plan's change_plan_targetlist, identify_current_nestloop_params: ph_eval_at
+  within the outer side plus its own parameterization, overlapping the outer side), and the
+  join's row drops it again (`Search::build_path_node`). A parameterized item's outer side
+  (the one-row join passing its values) gets the projection over the item itself, which
+  EXPLAIN shows as its Subquery Scan with the physical target list (`Output: ss0.x,
+  (64)::...`). Only a PlaceHolderVar neither the outer side nor its parameters give is
+  refused. outer_params passes in the values such a PlaceHolderVar reads from outside.
+- **have_relevant_joinclause by required_relids overlap** (joininfo.c): in a group with outer
+  joins or LATERAL items, a clause makes `a` and `b` worth joining when its required items
+  overlap both, not only when they are exactly within the pair, so a clause that needs a third
+  item (a PlaceHolderVar's ph_eval_at) still leads the search to join its first two
+  (join 345's `ss0 ⋈ t1` under `t3`).
+- **An equivalence class's new_members clause** (generate_join_implied_equalities_normal):
+  at the join where an equality's PlaceHolderVar operand first has its ph_eval_at split
+  between the two sides, the clause is checked again (`Join Filter: (t1.tenthous =
+  ((64)::...)::integer)`) even when a parameterized path below enforces an instance of it
+  (that one carries parent_ec, this one doesn't). PlaceHolderVars aren't class members in the
+  engine, so an inner join's equality of one with a column stands for the class's clause.
+  Such a PlaceHolderVar also widens its class's ec_relids for the columns kept in the join
+  rows (generate_base_implied_equalities_no_const: `t2.ten` carried to the top).
+- **Constant classes through reduced outer joins and nested inner joins** (lift's
+  `ec_lifted_constants`): a lifted constant a nested inner join (or its clause, a key the
+  lifting made `x = k`, or a PlaceHolderVar projection) equates a column with reaches across
+  an outer join reduce_outer_joins made inner (`i8.q1 = ((64)::...)::integer`); the absorbed
+  join key's columns stay carried up to where they meet (`JoinMeta::kept`, now gathered per
+  join of a group with outer joins: distribute_qual_to_rels' add_vars_to_targetlist).
+- A domain with constraints costs one operator in a qual (cost_qual_eval_walker's
+  CoerceToDomain), and an operator's PlaceHolderVar operand of such a value is relabeled to
+  the base type, shown `(((64)::...))::integer` when a nested loop passes it.
+
+Goldens: `tests/sql/a30_phv_placement.sql`.
+
+Still open, and why:
+
+- join 345: the plan now has Postgres's shape (t3 at the top, everything else parameterized by
+  it, the PlaceHolderVar computed in ss0's Subquery Scan for t1's index scan, the top Join
+  Filter). Left: `t1`'s columns in its reltarget's order (`t1.tenthous, t1.unique1`: the
+  ON clause's Var before the WHERE's, deconstruct_jointree's order of add_vars_to_targetlist);
+  the engine's join outputs keep column order for columns the level's target list doesn't
+  read, and its gathered clauses aren't in the jointree's order (the binder pushes the WHERE
+  into the top join's condition, hash keys after), so there's no order to take it from.
+- join 360: needs the UNION ALL's FROM-less arm (`select 0`) as an appendrel member a
+  parameterized path can take (the arm a Result gated on the join's parameter, `One-Time
+  Filter: ((1) = 0)`); `Planner::members` takes table scans only, so the Append has no
+  parameterized path and the search hashes it. The PlaceHolderVar part (`COALESCE(t.i, (1))`
+  in a Result over the Append, for the LATERAL `kl`) is what this batch's nested loop
+  parameters give once that path exists.
+- join 332, partition_join 41 / 204: PostgreSQL pulls a LATERAL subquery over a join up
+  (is_simple_subquery allows lateral references in its select list, and in its quals inside
+  the lowest outer join), its outputs reading LATERAL values PlaceHolderVars with ph_lateral,
+  whose evaluation join's base relations take ph_lateral as lateral_relids
+  (create_lateral_join_info: every path of `t2`, `t3` parameterized by `t1`). The engine
+  keeps such a subquery a LATERAL leaf (`flatten_join_subquery` refuses outputs with outer
+  references), and its Search has lateral dependencies only for leaves reading values
+  themselves (`Leaf::lateral`); base relations with only indirect lateral dependencies (no
+  paths but parameterized ones, though they read nothing) aren't modelled. 332's WHERE then
+  becomes `i42.f1 = PHV(i41.f1)`, a join clause of `{i81, i42}` by the PlaceHolderVar's
+  ph_eval_at, which today the binder pushes into `i42`'s scan.
+- join 362 / 363: agent 27's per-place copies are in; what's left is where the
+  PlaceHolderVars are evaluated (the same LATERAL-subquery lift), and then the unused
+  `InitPlan 2` is the PlaceHolderVar's own copy (`make_subquery_copy` on each place's
+  expression besides the one evaluated).
+- Seen while probing: a FROM subquery planned apart whose output is a domain value
+  (`(select (f1+1)::cardinal_number as d ... offset 0) s`) compared with a base-typed column
+  shows no relabeling (`(((...))::cardinal_number))::integer` in Postgres); a top-level
+  PlaceHolderVar's columns are ranked by the level's target list in EXPLAIN's join outputs
+  (`tlist_layout`), where Postgres adds a PlaceHolderVar's Vars only at its evaluation level
+  (`i2.q2, i2.q1` for `COALESCE(..., i2.q2)` over a FULL JOIN USING).
 
 ## Round 16, agent 29 (rule actions over a view: range table order, NEW in the action's SET; whole-row Vars of subqueries)
 
@@ -3822,7 +3927,7 @@ produces no units on Linux (skipped by the file itself).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 906 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (19) |
+| join | 925 | 907 | 98% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (18) |
 | aggregates | 556 | 556 | 100% | yes | no |  |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |

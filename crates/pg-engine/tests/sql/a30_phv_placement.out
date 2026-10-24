@@ -1,0 +1,228 @@
+> create table a30_i4 (f1 int)
+-- CREATE TABLE
+
+> create table a30_i8 (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> create table a30_tk (unique1 int, ten int, fivethous int, tenthous int)
+-- CREATE TABLE
+
+> insert into a30_i4 values (0), (123), (-123456), (64), (7)
+-- INSERT 0 5
+
+> create table a30_i0 (f1 int)
+-- CREATE TABLE
+
+> insert into a30_i0 values (0), (64), (999), (3), (null)
+-- INSERT 0 5
+
+> insert into a30_i8 values (123, 456), (123, 4567890123456789), (4567890123456789, 123),
+>   (64, 123), (4567890123456789, -4567890123456789)
+-- INSERT 0 5
+
+> insert into a30_tk select g, g % 10, g % 5000, g from generate_series(0, 9999) g
+-- INSERT 0 10000
+
+> create index a30_tk_tenthous on a30_tk (tenthous)
+-- CREATE INDEX
+
+> analyze a30_i4
+-- ANALYZE
+
+> analyze a30_i0
+-- ANALYZE
+
+> analyze a30_i8
+-- ANALYZE
+
+> analyze a30_tk
+-- ANALYZE
+
+> explain (verbose, costs off)
+> select * from
+> a30_i4 i0 left join
+> ( (select *, 123 as x from a30_i4 i1) ss1
+>   left join
+>   (select *, q2 as x from a30_i8 i2) ss2
+>   using (x)
+> ) ss0
+> on (i0.f1 = ss0.f1)
+> order by i0.f1, x
+QUERY PLAN:text
+Sort
+  Output: i0.f1, ('123'::bigint), i1.f1, i2.q1, i2.q2
+  Sort Key: i0.f1, ('123'::bigint)
+  ->  Hash Right Join
+        Output: i0.f1, ('123'::bigint), i1.f1, i2.q1, i2.q2
+        Hash Cond: (i1.f1 = i0.f1)
+        ->  Nested Loop Left Join
+              Output: i1.f1, i2.q1, i2.q2, '123'::bigint
+              ->  Seq Scan on public.a30_i4 i1
+                    Output: i1.f1
+              ->  Materialize
+                    Output: i2.q1, i2.q2
+                    ->  Seq Scan on public.a30_i8 i2
+                          Output: i2.q1, i2.q2
+                          Filter: (123 = i2.q2)
+        ->  Hash
+              Output: i0.f1
+              ->  Seq Scan on public.a30_i4 i0
+                    Output: i0.f1
+-- EXPLAIN
+
+> select * from
+> a30_i0 i0 left join
+> ( (select *, 123 as x from a30_i4 i1) ss1
+>   left join
+>   (select *, q2 as x from a30_i8 i2) ss2
+>   using (x)
+> ) ss0
+> on (i0.f1 = ss0.f1)
+> order by i0.f1, x
+f1:int4 | x:int8 | f1:int4 | q1:int8 | q2:int8
+0 | 123 | 0 | 4567890123456789 | 123
+0 | 123 | 0 | 64 | 123
+3 | NULL | NULL | NULL | NULL
+64 | 123 | 64 | 64 | 123
+64 | 123 | 64 | 4567890123456789 | 123
+999 | NULL | NULL | NULL | NULL
+NULL | NULL | NULL | NULL | NULL
+-- SELECT 7
+
+> select * from
+> a30_i0 i0 left join
+> ( (select *, f1 + 1 as x from a30_i4 i1) ss1
+>   full join
+>   (select *, q2 as x from a30_i8 i2) ss2
+>   using (x)
+> ) ss0
+> on (i0.f1 = ss0.f1)
+> order by 1, 2, 3, 4, 5
+f1:int4 | x:int8 | f1:int4 | q1:int8 | q2:int8
+0 | 1 | 0 | NULL | NULL
+3 | NULL | NULL | NULL | NULL
+64 | 65 | 64 | NULL | NULL
+999 | NULL | NULL | NULL | NULL
+NULL | NULL | NULL | NULL | NULL
+-- SELECT 5
+
+> select * from
+> a30_i0 i0 left join
+> ( (select *, 7 as x from a30_i4 i1) ss1
+>   right join
+>   (select *, 7::int8 as x from a30_i8 i2) ss2
+>   using (x)
+> ) ss0
+> on (i0.f1 = ss0.f1 + 4)
+> order by 1, 2, 3, 4, 5
+f1:int4 | x:int8 | f1:int4 | q1:int8 | q2:int8
+0 | NULL | NULL | NULL | NULL
+3 | NULL | NULL | NULL | NULL
+64 | NULL | NULL | NULL | NULL
+999 | NULL | NULL | NULL | NULL
+NULL | NULL | NULL | NULL | NULL
+-- SELECT 5
+
+> select * from
+> a30_i8 i0 right join
+> ( (select *, 123 as x from a30_i4 i1) ss1
+>   left join
+>   (select *, q1 as x from a30_i8 i2) ss2
+>   using (x)
+> ) ss0
+> on (i0.q2 = ss0.x)
+> order by 1, 2, 3, 4, 5
+q1:int8 | q2:int8 | x:int8 | f1:int4 | q1:int8 | q2:int8
+64 | 123 | 123 | -123456 | 123 | 4567890123456789
+64 | 123 | 123 | -123456 | 123 | 456
+64 | 123 | 123 | 0 | 123 | 456
+64 | 123 | 123 | 0 | 123 | 4567890123456789
+64 | 123 | 123 | 7 | 123 | 4567890123456789
+64 | 123 | 123 | 7 | 123 | 456
+64 | 123 | 123 | 64 | 123 | 456
+64 | 123 | 123 | 64 | 123 | 4567890123456789
+64 | 123 | 123 | 123 | 123 | 4567890123456789
+64 | 123 | 123 | 123 | 123 | 456
+4567890123456789 | 123 | 123 | -123456 | 123 | 4567890123456789
+4567890123456789 | 123 | 123 | -123456 | 123 | 456
+4567890123456789 | 123 | 123 | 0 | 123 | 4567890123456789
+4567890123456789 | 123 | 123 | 0 | 123 | 456
+4567890123456789 | 123 | 123 | 7 | 123 | 456
+4567890123456789 | 123 | 123 | 7 | 123 | 4567890123456789
+4567890123456789 | 123 | 123 | 64 | 123 | 456
+4567890123456789 | 123 | 123 | 64 | 123 | 4567890123456789
+4567890123456789 | 123 | 123 | 123 | 123 | 456
+4567890123456789 | 123 | 123 | 123 | 123 | 4567890123456789
+-- SELECT 20
+
+> select * from a30_i8 i8 left join (a30_i4 i4 join
+>   (select 64::information_schema.cardinal_number as d1 from a30_tk t3 where t3.fivethous < 2) ss
+>   on i4.f1 = ss.d1) on i8.q1 = i4.f1 where i4.f1 > 0
+q1:int8 | q2:int8 | f1:int4 | d1:int4
+64 | 123 | 64 | 64
+64 | 123 | 64 | 64
+64 | 123 | 64 | 64
+64 | 123 | 64 | 64
+-- SELECT 4
+
+> select * from a30_i8 i8 left join (a30_i4 i4 join
+>   (select 64::information_schema.cardinal_number as d1 from a30_tk t3 where t3.fivethous < 2) ss
+>   on i4.f1 = ss.d1) on i8.q1 = i4.f1
+> order by 1, 2, 3, 4
+q1:int8 | q2:int8 | f1:int4 | d1:int4
+64 | 123 | 64 | 64
+64 | 123 | 64 | 64
+64 | 123 | 64 | 64
+64 | 123 | 64 | 64
+123 | 456 | NULL | NULL
+123 | 4567890123456789 | NULL | NULL
+4567890123456789 | -4567890123456789 | NULL | NULL
+4567890123456789 | 123 | NULL | NULL
+-- SELECT 8
+
+> select ss1.d1, i8.q2 from
+>   a30_tk as t1
+>   inner join a30_tk as t2 on t1.tenthous = t2.tenthous
+>   inner join
+>     a30_i8 as i8
+>     left join a30_i4 as i4
+>       inner join (select 64::information_schema.cardinal_number as d1
+>                   from a30_tk t3,
+>                        lateral (select abs(t3.unique1) + random()) ss0(x)
+>                   where t3.fivethous < 2) as ss1
+>       on i4.f1 = ss1.d1
+>     on i8.q1 = i4.f1
+>   on t1.tenthous = ss1.d1
+> where t1.unique1 <= i4.f1
+> order by 1, 2
+d1:int4 | q2:int8
+64 | 123
+64 | 123
+64 | 123
+64 | 123
+-- SELECT 4
+
+> select ss1.d1, i8.q2, i4.f1 from
+>   a30_i8 as i8
+>   left join a30_i4 as i4
+>     inner join (select 64::information_schema.cardinal_number as d1
+>                 from a30_tk t3,
+>                      lateral (select abs(t3.unique1) + random()) ss0(x)
+>                 where t3.fivethous < 2) as ss1
+>     on i4.f1 = ss1.d1
+>   on i8.q1 = i4.f1
+> order by 1, 2, 3
+d1:int4 | q2:int8 | f1:int4
+64 | 123 | 64
+64 | 123 | 64
+64 | 123 | 64
+64 | 123 | 64
+NULL | -4567890123456789 | NULL
+NULL | 123 | NULL
+NULL | 456 | NULL
+NULL | 4567890123456789 | NULL
+-- SELECT 8
+
+> drop table a30_i0, a30_i4, a30_i8, a30_tk
+-- DROP TABLE
+

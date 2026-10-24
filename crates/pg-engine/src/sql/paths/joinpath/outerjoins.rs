@@ -31,6 +31,9 @@ struct RawJoin {
     inner: u32,
     /// Columns of ON conditions the binder already pushed into the nullable side.
     pushed: Vec<usize>,
+    /// Columns the join's row carries for clauses an equivalence class with a constant
+    /// absorbed (`JoinMeta::kept`): still needed up to where they meet.
+    kept: Vec<usize>,
 }
 
 /// What `gather_group` makes of a join tree.
@@ -48,6 +51,8 @@ pub(super) struct Group {
     /// column of the group's row, its expression (over that row) and the items under the
     /// projection (its syntactic scope), innermost first.
     pub phvs: Vec<(usize, Expr, u32, u32)>,
+    /// Per join of the tree with `JoinMeta::kept` columns: those (group) columns.
+    pub kept: Vec<Vec<usize>>,
 }
 
 fn rebuild_eq(a: Expr, b: Expr, bad: bool) -> Option<Expr> {
@@ -188,6 +193,7 @@ fn walk(
             conds,
             inner,
             pushed: meta.pushed.iter().map(|&c| map(c)).collect(),
+            kept: meta.kept.iter().map(|&c| map(c)).collect(),
         });
         return (l | r, inner);
     }
@@ -213,6 +219,7 @@ fn walk(
             conds: conds.into_iter().map(|e| e.shift_cols(off as isize)).collect(),
             inner: 0,
             pushed: Vec::new(),
+            kept: Vec::new(),
         });
         return (m, inner);
     }
@@ -415,6 +422,7 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
         sjs,
         laterals,
         phvs,
+        kept: joins.iter().filter(|j| !j.kept.is_empty()).map(|j| j.kept.clone()).collect(),
     })
 }
 
@@ -583,11 +591,11 @@ impl Search<'_, '_, '_> {
         false
     }
 
-    /// have_relevant_joinclause: a clause needs exactly items of both.
+    /// have_relevant_joinclause: a clause of `a`'s joininfo whose required_relids overlap
+    /// `b` (it may need more items before it can be checked: a PlaceHolderVar's ph_eval_at,
+    /// a parameterized path's clause).
     pub(super) fn relevant_clause(&self, a: u32, b: u32) -> bool {
-        self.clauses.iter().any(|c| {
-            c.req != 0 && c.req & !(a | b) == 0 && c.req & a != 0 && c.req & b != 0
-        }) || self.const_ec_relevant(a, b)
+        self.clauses.iter().any(|c| c.req & a != 0 && c.req & b != 0) || self.const_ec_relevant(a, b)
     }
 
     /// The clauses to check at the join of `a` and `b`: those needing items of both and

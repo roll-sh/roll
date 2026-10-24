@@ -17,9 +17,9 @@ compared statement by statement.
 
 As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
 
-- **Regression suite: 51,121 of 51,150 statements match (99.94%).** 29 differ. The full
+- **Regression suite: 51,122 of 51,150 statements match (99.95%).** 28 differ. The full
   classified list, per file and per unit, is in `tests/regress/STATUS.md`.
-  - All 29 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
+  - All 28 are `EXPLAIN` plan text. Query results already match (sqljson_jsontable's join
     order since round 16, agent 17: join relations parameterized by LATERAL references).
   - None differs by design any more (aggregates `balk` matches since round 16, agent 14: a
     Finalize Aggregate runs the user-defined combine functions).
@@ -331,11 +331,15 @@ them all with the "Fixed in round N" sections describing what was already tried.
    lowest relation of their ph_eval_at (`lift.rs` `flatten_join_subquery`, `plan::phv_projection`,
    `joinpath.rs` `Phv` / `with_phvs`), so 328/343/388 match. Left: remove_useless_result_rtes
    moving PlaceHolderVars of RESULT relations onto their join partner (347, 366: done), one computed
-   in a LATERAL subquery scan (345) or over a parameterized appendrel (360), PlaceHolderVars
-   with sub-selects (362/363), a dummy Result showing a view's expressions (368), a
-   partitionwise join with a LATERAL PlaceHolderVar (partition_join 41). (744, a hash join
-   parameterized by a LATERAL inner side: done in round 16, agent 17.)
-2. **Remaining join / partition_join / partition_prune plan shapes** (join 19, partition_join 9,
+   in a LATERAL subquery scan (345: the plan's shape since round 16, agent 30, PlaceHolderVar
+   nested loop parameters computed by the outer side; left a reltarget's column order) or over
+   a parameterized appendrel (360: a FROM-less UNION ALL arm as an appendrel member),
+   PlaceHolderVars with sub-selects (362/363), a dummy Result showing a view's expressions
+   (368), a LATERAL subquery over a join pulled up with PlaceHolderVars carrying ph_lateral
+   (join 332, partition_join 41 / 204; STATUS.md round 16, agent 30). (744, a hash join
+   parameterized by a LATERAL inner side: done in round 16, agent 17; 426, a JOIN USING alias
+   as a PlaceHolderVar at its join: round 16, agent 30.)
+2. **Remaining join / partition_join / partition_prune plan shapes** (join 18, partition_join 9,
    partition_prune 1 unit; round 14's agent 5 and round 16's agent 12 sections in STATUS.md have
    what changed and why the rest is open; round 16's agent 17 section has join relations
    parameterized by LATERAL references and why partition_prune 410 stays open (265 and 442 done in

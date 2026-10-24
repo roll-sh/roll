@@ -1709,6 +1709,19 @@ fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
         // SubPlan's member scan returns nothing.)
         let member_map_unread = matches!(p, Plan::Project { exprs, .. }
             if exprs.iter().all(|e| matches!(e, Expr::Col(..))) && needed.iter().all(|n| !n));
+        // (A FROM subquery's scan returning all its columns, then a nested loop's
+        // PlaceHolderVar parameters: its physical target list, which
+        // change_plan_targetlist extends.)
+        if let Plan::Project { input, exprs } = p
+            && matches!(&**input, Plan::Barrier { secure: false, alias, .. } if !alias.is_empty())
+        {
+            let w = super::binder::plan_width(input);
+            if exprs.len() > w && exprs[..w].iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i)) {
+                for n in needed.iter_mut().take(w) {
+                    *n = true;
+                }
+            }
+        }
         if let Plan::Project { input, exprs } = p
             && !member_map_unread
             && let Plan::Scan(sc) = &**input
@@ -2145,8 +2158,13 @@ fn shown_subqueries(root: &Plan, needed: &HashMap<usize, Vec<bool>>) -> HashMap<
                 let w = super::binder::plan_width(input);
                 let identity = exprs.len() == w
                     && exprs.iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i));
+                // (All its columns, then values computed over them: its physical target
+                // list with a nested loop's PlaceHolderVar parameters added
+                // (create_nestloop_plan's change_plan_targetlist).)
+                let extended = exprs.len() > w
+                    && exprs[..w].iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i));
                 if !identity {
-                    out.insert(addr(input), true);
+                    out.insert(addr(input), !extended);
                 }
                 go(input, false, needed, out);
             }

@@ -283,6 +283,11 @@ pub struct JoinMeta {
     /// The planner (`paths::Planner::id`) that planned this join as a lifted group's
     /// tree (`paths::joinpath::lift`): not lifted again when its walk comes to it (0: none).
     pub lifted_by: u64,
+    /// The projection right above this join computes, past the join's columns, this many
+    /// JOIN USING merged columns of joins in it that an outer join above nulls (the binder's
+    /// `materialize_using`): flatten_join_alias_vars' expansions, PlaceHolderVars when not
+    /// a standard alias expression once subqueries are pulled up (add_nullingrels_if_needed).
+    pub alias_cols: usize,
     /// The order the join relation's target list has the join's columns in (indices into
     /// its row, the left input's then the right's; empty: that order): each relation's
     /// columns together, the relations as the first pair make_join_rel built the join

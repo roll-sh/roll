@@ -1024,8 +1024,12 @@ impl Deparser<'_, '_> {
             Expr::Relabel(inner, to) => {
                 // Outside deparsing only a folded CASE keeps its type this way (and a
                 // domain's checked value read as its base type, which shows).
+                // (So does a nested loop's parameter carrying such a value, a PlaceHolderVar
+                // the outer side computes: `(((64)::d))::integer`.)
                 if (!showimplicit || self.subplans.is_some())
-                    && !(self.subplans.is_some() && matches!(&**inner, Expr::CoerceToDomain(_, d) if !d.tag))
+                    && !(self.subplans.is_some()
+                        && matches!(&**inner, Expr::CoerceToDomain(_, d) if !d.tag)
+                        || self.subplans.is_some() && matches!(&**inner, Expr::Outer(1, ..)))
                 {
                     return self.paren(inner, false, Parent::Cast);
                 }

@@ -473,6 +473,10 @@ struct Search<'s, 'c, 'a> {
     /// equate with it (`a.x = 0 AND b.y = 0`: one class, no join clause), those items
     /// (have_relevant_eclass_joinclause counts them as joinable: the join is likely small).
     const_ecs: Vec<u32>,
+    /// Columns of join clauses a class with a constant absorbed (the lifted tree's
+    /// `JoinMeta::kept`): distribute_qual_to_rels still marks them needed where the
+    /// clause's relations meet (add_vars_to_targetlist over its relids).
+    kept_at: Vec<Vec<usize>>,
     /// The equivalence classes' expression members (`XMember`); as members they are
     /// numbered after the group's columns (`ec.len() + k`).
     xm: Vec<XMember>,
@@ -580,6 +584,14 @@ fn key_col(e: &Expr) -> Option<usize> {
         Expr::Collate(x, ..) => key_col(x),
         _ => None,
     }
+}
+
+/// A built-in numeric type (its coercions to one another are immutable functions).
+fn numeric_type(t: &DataType) -> bool {
+    matches!(
+        t,
+        DataType::Int2 | DataType::Int4 | DataType::Int8 | DataType::Float4 | DataType::Float8 | DataType::Numeric(_)
+    )
 }
 
 fn mergeable(t: &DataType) -> bool {
@@ -2084,7 +2096,14 @@ impl Search<'_, '_, '_> {
                 let Expr::Call(def, args, ty) = &self.clauses[*ci].expr else {
                     continue;
                 };
-                let param = Expr::Outer(1, k, other.ty());
+                // (A PlaceHolderVar relabeled to the operator's type: the relabeling stays
+                // in the scan's clause, the parameter is the PlaceHolderVar's value.)
+                let (param, other) = match other {
+                    Expr::Relabel(x, t) if key_col(x).is_some_and(|g| self.phv(g).is_some()) => {
+                        (Expr::Relabel(Box::new(Expr::Outer(1, k, x.ty())), t.clone()), &**x)
+                    }
+                    o => (Expr::Outer(1, k, o.ty()), o),
+                };
                 let mine_first = args[0].clone().shift_cols(-(leaf.off as isize)).same_as(col)
                     || key_col(&args[0]).is_some_and(|g| matches!(col, Expr::Col(c, _) if g == leaf.off + c));
                 let colx = col.clone();
@@ -4497,23 +4516,43 @@ impl Search<'_, '_, '_> {
         {
             return;
         }
-        // have_dangerous_phv: a PlaceHolderVar the inner side reads as a parameter whose
-        // relations the outer side has some of (and so can't supply).
+        // (Postgres 18 has no have_dangerous_phv: a PlaceHolderVar the inner side reads as a
+        // parameter whose relations the outer side has some of is added to the outer plan's
+        // target list, computed over the outer side and the values its own parameterization
+        // brings (create_nestloop_plan, identify_current_nestloop_params). One needing
+        // relations neither gives isn't planned here.)
         if param_join
-            && self
-                .phvs
-                .iter()
-                .any(|p| p.eval_at & !ip.req == 0 && p.eval_at & op.set != 0)
+            && self.phvs.iter().any(|p| {
+                p.eval_at & !ip.req == 0 && p.eval_at & op.set != 0 && p.eval_at & !(op.set | op.req) != 0
+            })
         {
             return;
         }
         let mut enforced: Vec<usize> = enforced_of(ip.memoized());
         enforced.extend(enforced_of(op));
+        // (An equivalence class's clause with a member this join first makes whole, one
+        // reading both sides (a PlaceHolderVar evaluated over relations of each): its
+        // instance here is generate_join_implied_equalities' new_members clause, not marked
+        // redundant (no parent_ec), so not the one a parameterized path below enforces.)
+        // (PlaceHolderVars aren't class members here: an inner join's equality of one with
+        // a column is taken as the class's clause it would be.)
+        let split = |c: usize| {
+            let cl = &self.clauses[c];
+            !cl.on
+                && cl.sj.is_none()
+                && cl.eq.as_ref().is_some_and(|(a, b, la, lb)| {
+                    [(a, *la), (b, *lb)].iter().any(|(e, m)| {
+                        m & op.set != 0
+                            && m & ip.set != 0
+                            && key_col(e).is_some_and(|g| self.phv(g).is_some())
+                    })
+                })
+        };
         let mut quals: Vec<usize> = ex
             .restrict
             .iter()
             .copied()
-            .filter(|c| !enforced.contains(c))
+            .filter(|&c| !enforced.contains(&c) || split(c))
             .collect();
         if param_join {
             self.param_clauses(ex.set, req_all, op, ip, star, &enforced, &mut quals);
@@ -5271,8 +5310,10 @@ impl Search<'_, '_, '_> {
                 | JNode::Append { params, .. }
                 | JNode::Opaque { params, .. } => {
                     // (Their columns from outside: a parameter may mix them with ones
-                    // inside.)
+                    // inside. A PlaceHolderVar evaluated partly inside, partly outside, is
+                    // computed inside, the values it reads from outside passed in.)
                     for e in params {
+                        let e = &s.inline_phvs_by(e, &|ph| ph.eval_at & set == 0 || ph.eval_at & !set == 0);
                         e.walk(&mut |x| {
                             if let Expr::Col(g, _) = x
                                 && s.leaf_of.get(*g).is_some() && s.leaves_of(x) & set == 0
@@ -5702,7 +5743,77 @@ impl Search<'_, '_, '_> {
                 } else {
                     (outer_sort, inner_sort)
                 };
-                let (mut lp, ll) = self.build(lnode);
+                let (mut lp, mut ll) = self.build(lnode);
+                // (create_nestloop_plan: a PlaceHolderVar the inner side reads as a parameter
+                // that the outer row doesn't carry, evaluable over the outer side and the values
+                // of its own parameterization (identify_current_nestloop_params: ph_eval_at
+                // within them, overlapping the outer side), is added to the outer plan's
+                // target list for the parameter only.)
+                let mut phv_params: Vec<usize> = Vec::new();
+                if *method == JoinMethod::NestLoop && !swapped && !self.phvs.is_empty() {
+                    let ips: Vec<Expr> = match &inner.memoized().node {
+                        JNode::Scan { params, .. } | JNode::Append { params, .. } | JNode::Opaque { params, .. } => {
+                            params.clone()
+                        }
+                        JNode::Join { .. } if inner.req != 0 => self.outer_params(inner.memoized()),
+                        _ => Vec::new(),
+                    };
+                    let avail = outer.set | outer.req;
+                    for e in &ips {
+                        for g in e.columns() {
+                            if let Some(ph) = self.phv(g)
+                                && !ll.contains(&g)
+                                && !phv_params.contains(&g)
+                                && ph.eval_at & !avail == 0
+                                && ph.eval_at & outer.set != 0
+                            {
+                                phv_params.push(g);
+                            }
+                        }
+                    }
+                    if !phv_params.is_empty() {
+                        let mut exprs: Vec<Expr> =
+                            ll.iter().enumerate().map(|(i, &g)| Expr::Col(i, self.col_type(g))).collect();
+                        let mut local = true;
+                        for &g in &phv_params {
+                            let ph = self.phv(g).unwrap();
+                            let e = self.inline_phvs(&ph.expr, &ll);
+                            local &= e.columns().iter().all(|c| ll.contains(c));
+                            exprs.push(self.param_ref(&e, &ll));
+                        }
+                        // (The outer side a parameterized item passed its values by a one-row
+                        // join: the target list is the item's own, its scan's (a Subquery
+                        // Scan's), when the PlaceHolderVars read nothing from outside.)
+                        lp = match lp {
+                            Plan::Join {
+                                kind: JoinKind::Inner,
+                                left,
+                                right,
+                                cond: None,
+                                hash: None,
+                                params,
+                                nleft: 0,
+                                nright: _,
+                                meta,
+                            } if local && matches!(&*left, Plan::One) => Plan::Join {
+                                kind: JoinKind::Inner,
+                                left,
+                                nright: exprs.len(),
+                                right: Arc::new(Plan::Project { input: right, exprs }),
+                                cond: None,
+                                hash: None,
+                                params,
+                                nleft: 0,
+                                meta,
+                            },
+                            lp => Plan::Project {
+                                input: Arc::new(lp),
+                                exprs,
+                            },
+                        };
+                        ll.extend(phv_params.iter().copied());
+                    }
+                }
                 // A parameterized join inside: the values from outside it it reads come in
                 // as this nested loop's parameters.
                 let join_params: Option<Vec<Expr>> = (*method == JoinMethod::NestLoop
@@ -5930,13 +6041,35 @@ impl Search<'_, '_, '_> {
                 // So do an equivalence class's columns from a side that hasn't all its
                 // FROM items yet: they are needed up to the join of them all (its
                 // ec_relids).
-                if self.clauses.iter().any(|c| c.derived) {
+                // (A PlaceHolderVar an inner join's equality equates with a class's column is
+                // a member of that class to Postgres: the class's ec_relids take its
+                // ph_eval_at, and every member's columns are needed up to them,
+                // generate_base_implied_equalities_no_const.)
+                let phv_eqs: Vec<(usize, u32)> = if self.phvs.is_empty() {
+                    Vec::new()
+                } else {
+                    self.clauses
+                        .iter()
+                        .filter(|c| !c.on && c.sj.is_none())
+                        .filter_map(|c| {
+                            let (a, b, _, _) = c.eq.as_ref()?;
+                            let (x, y) = (key_col(a)?, key_col(b)?);
+                            match (self.phv(x), self.phv(y)) {
+                                (None, Some(p)) if x < self.ec.len() => Some((self.ec[x], p.eval_at)),
+                                (Some(p), None) if y < self.ec.len() => Some((self.ec[y], p.eval_at)),
+                                _ => None,
+                            }
+                        })
+                        .collect()
+                };
+                if self.clauses.iter().any(|c| c.derived) || !phv_eqs.is_empty() {
                     let members = self.ec_members();
                     let ec_leaves = |e: usize| {
                         members
                             .iter()
                             .filter(|&&g| self.m_ec(g) == e)
                             .fold(0u32, |m, &g| m | (1u32 << self.m_leaf(g)))
+                            | phv_eqs.iter().filter(|(c, _)| *c == e).fold(0u32, |m, (_, at)| m | at)
                     };
                     for &g in &members {
                         for side in [outer.set, inner.set] {
@@ -5950,6 +6083,18 @@ impl Search<'_, '_, '_> {
                                         kept.push(i);
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+                for cols in &self.kept_at {
+                    let at = cols.iter().fold(0u32, |m, &g| m | self.leaves_of(&Expr::Col(g, DataType::Unknown)));
+                    if at & !p.set == 0 && at & outer.set != 0 && at & inner.set != 0 {
+                        for &g in cols {
+                            if let Some(i) = pos(&both, g)
+                                && !kept.contains(&i)
+                            {
+                                kept.push(i);
                             }
                         }
                     }
@@ -6050,6 +6195,7 @@ impl Search<'_, '_, '_> {
                         presorted: false,
                         phv_join: false,
                         lifted_by: 0,
+                        alias_cols: 0,
                         tlist: self.tlist_order(p.set, &both),
                         explicit: false,
                     }),
@@ -6071,6 +6217,21 @@ impl Search<'_, '_, '_> {
                         pred: if f.len() == 1 { f.pop().unwrap() } else { Expr::And(f) },
                     }
                 };
+                // (The PlaceHolderVars added to the outer side for the parameters only go no
+                // further: the join's target list doesn't have them.)
+                if !phv_params.is_empty() {
+                    let nl0 = nleft - phv_params.len();
+                    let keep: Vec<usize> = (0..layout.len()).filter(|&i| i < nl0 || i >= nleft).collect();
+                    let exprs = keep.iter().map(|&i| Expr::Col(i, self.col_type(layout[i]))).collect();
+                    let layout = keep.iter().map(|&i| layout[i]).collect();
+                    return (
+                        Plan::Project {
+                            input: Arc::new(plan),
+                            exprs,
+                        },
+                        layout,
+                    );
+                }
                 (plan, layout)
             }
         }
@@ -6915,6 +7076,17 @@ impl Planner<'_, '_> {
                                 Err(_) => call,
                             }
                         }
+                        // (A numeric coercion of a constant: its immutable cast function,
+                        // `'123'::bigint` of `int48(123)`.)
+                        Expr::Cast(x, from, to, b)
+                            if matches!(&*x, Expr::Const(..)) && numeric_type(&from) && numeric_type(&to) =>
+                        {
+                            let cast = Expr::Cast(x, from, to.clone(), b);
+                            match crate::sql::expr::eval(&cast, &[], self.ctx) {
+                                Ok(v) => Expr::Const(v, to),
+                                Err(_) => cast,
+                            }
+                        }
                         x => x,
                     })
                 })
@@ -7116,6 +7288,7 @@ impl Planner<'_, '_> {
         let extra = self.absorbed.take();
         let mut laterals: Vec<(usize, Vec<Expr>)> = Vec::new();
         let mut group_phvs: Vec<(usize, Expr, u32, u32)> = Vec::new();
+        let mut group_kept: Vec<Vec<usize>> = Vec::new();
         let (mut sjs, mut clause_meta, general) = match outerjoins::gather_group(p, &extra) {
             // (Or LATERAL items among more than two inner-joined ones: the join order
             // the references allow.)
@@ -7128,6 +7301,7 @@ impl Planner<'_, '_> {
                 raw_clauses = g.clauses;
                 laterals = g.laterals;
                 group_phvs = g.phvs;
+                group_kept = g.kept;
                 kind = JoinKind::Inner;
                 (g.sjs, g.meta, true)
             }
@@ -7457,9 +7631,41 @@ impl Planner<'_, '_> {
             ppi: Default::default(),
             const_ecs: Vec::new(),
             xm: Vec::new(),
+            kept_at: group_kept,
         };
         s.needed.resize(gw, false);
         for (ci, (e, on)) in raw_clauses.into_iter().enumerate() {
+            // (An operator's operand that is a PlaceHolderVar of a value coerced to a domain
+            // with constraints: the operator takes the base type, a RelabelType over it
+            // (make_op's coercion of a domain argument), `((x)::d)::integer`, as add_filter
+            // has it for a scan's quals.)
+            let e = if s.phvs.is_empty() {
+                e
+            } else {
+                e.transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Call(d, args, ty)
+                            if !d.name.is_empty() && !d.name.chars().any(|c| c.is_alphanumeric() || c == '_') =>
+                        {
+                            let args = args
+                                .into_iter()
+                                .map(|a| match a {
+                                    Expr::Col(g, t)
+                                        if s.phv(g).is_some_and(|p| matches!(&p.expr, Expr::CoerceToDomain(_, dc)
+                                            if !dc.tag && !dc.array && (dc.not_null || !dc.checks.is_empty() || dc.base.is_some()))) =>
+                                    {
+                                        Expr::Relabel(Box::new(Expr::Col(g, t.clone())), t)
+                                    }
+                                    a => a,
+                                })
+                                .collect();
+                            Expr::Call(d, args, ty)
+                        }
+                        x => x,
+                    })
+                })
+                .unwrap()
+            };
             let leaves_mask = s.leaves_of(&e);
             let eq = match &e {
                 // (Under a nondeterministic collation equal strings needn't hash or sort
