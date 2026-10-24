@@ -36,8 +36,9 @@ const MAX_FF_WALK: usize = 10_000;
 /// A lander with nothing to do for this long stops (every branch an agent ever pushed would
 /// otherwise keep a task). The next request starts a fresh one, which reloads the ref.
 const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
-/// Times a batch (or a ref update) is rebuilt after another lander moved the ref first.
-const MAX_MOVED_RETRIES: usize = 5;
+/// Times a batch (or a ref update) is rebuilt after another lander moved the ref first. Two
+/// landers on one ref only happen while a lease changes hands; they take turns (`moved_pause`).
+const MAX_MOVED_RETRIES: usize = 30;
 /// Times the lander asks whether a commit whose reply was lost happened (about 30 s in all).
 const RESOLVE_ATTEMPTS: u32 = 40;
 
@@ -313,6 +314,7 @@ impl Store {
     pub async fn land(self: &Arc<Self>, repo: &str, ref_name: &str, cs: ChangesetId) -> Result<Landed, LandError> {
         self.check_repo(repo)?;
         let name = crate::full_ref(ref_name);
+        check_ref_name(&name)?;
         let (reply, rx) = oneshot::channel();
         self.lander(repo, &name).send(Cmd::Land { cs, reply }).await.map_err(|_| anyhow::anyhow!("lander stopped"))?;
         rx.await.map_err(|_| anyhow::anyhow!("lander stopped"))?
@@ -342,6 +344,7 @@ impl Store {
     pub async fn advance(self: &Arc<Self>, repo: &str, ref_name: &str, expect: Option<ChangesetId>, new: ChangesetId) -> anyhow::Result<Vec<Landed>> {
         self.check_repo(repo)?;
         let name = crate::full_ref(ref_name);
+        check_ref_name(&name)?;
         self.meta_or_404(repo, &new)?;
         let (reply, rx) = oneshot::channel();
         self.lander(repo, &name).send(Cmd::Advance { expect, new, reply }).await.map_err(|_| anyhow::anyhow!("lander stopped"))?;
@@ -366,6 +369,7 @@ impl Store {
         if !name.starts_with("refs/") || name.len() > 256 || name.contains("..") || name.ends_with('/') {
             return Err(invalid(format!("invalid ref name {name}")));
         }
+        check_ref_name(&name)?;
         if let Some((cs, _)) = &new {
             self.meta_or_404(repo, cs)?;
         }
@@ -556,7 +560,7 @@ impl Lander {
             for (cs, _) in &requests {
                 results.push(self.land(&mut batch, *cs).await);
             }
-            let written = if batch.changes() { self.commit(&batch, &results).await } else { self.sync().await };
+            let written = if batch.changes() { self.commit(&batch, &results).await } else { self.unchanged(&batch.start).await };
             match written {
                 Ok(Written::Committed { exact }) => {
                     if batch.changes() {
@@ -585,6 +589,7 @@ impl Lander {
                     moved += 1;
                     self.state = None;
                     tracing::debug!(repo = %self.repo, r#ref = %self.name, attempt = moved, "the ref moved underneath the lander; rebuilding the batch");
+                    moved_pause(moved).await;
                 }
                 Ok(Written::Moved) => {
                     self.state = None;
@@ -601,12 +606,18 @@ impl Lander {
         }
     }
 
-    /// A batch that changes nothing still answers only about durable state: the head it read
-    /// may have come from a commit whose sync hasn't finished (SQLite; a no-op on Postgres).
-    async fn sync(&self) -> anyhow::Result<Written> {
-        let store = self.store.clone();
-        tokio::task::spawn_blocking(move || store.db.sync()).await??;
-        Ok(Written::Committed { exact: true })
+    /// A batch that changes nothing (every request already landed, or failed) commits nothing,
+    /// but still answers only about current, durable state: the ref must still be what the batch
+    /// was built on (else it's `Moved`, and rebuilt), and the commit that put it there must be
+    /// synced (it may be another writer's whose sync hasn't finished; a no-op on Postgres).
+    async fn unchanged(&self, start: &RefState) -> anyhow::Result<Written> {
+        let (store, repo, name, expect) = (self.store.clone(), self.repo.clone(), self.name.clone(), start.expect());
+        tokio::task::spawn_blocking(move || {
+            let current = store.ref_row(&repo, &name)?.map(|(cs, _, version, floor)| (cs, version, floor));
+            store.db.sync()?;
+            Ok(if current == expect { Written::Committed { exact: true } } else { Written::Moved })
+        })
+        .await?
     }
 
     fn lookup<'a>(&'a self, batch: &'a Batch, scratch: &'a [Arc<Meta>]) -> impl Fn(&ChangesetId) -> anyhow::Result<Arc<Meta>> + 'a {
@@ -866,7 +877,8 @@ impl Lander {
         let store = self.store.clone();
         let repo = self.repo.clone();
         let repo = repo.as_str();
-        for _ in 0..=MAX_MOVED_RETRIES {
+        for attempt in 0..=MAX_MOVED_RETRIES {
+            moved_pause(attempt).await;
             let start = store.load_head(repo, &self.name)?;
             let current = start.head.as_ref().map(|h| h.meta.id);
             if current != expect {
@@ -946,7 +958,8 @@ impl Lander {
         let store = self.store.clone();
         let repo = self.repo.clone();
         let repo = repo.as_str();
-        for _ in 0..=MAX_MOVED_RETRIES {
+        for attempt in 0..=MAX_MOVED_RETRIES {
+            moved_pause(attempt).await;
             let start = store.load_head(repo, &self.name)?;
             let current = start.head.as_ref().map(|h| h.meta.id);
             match (expect, current) {
@@ -996,6 +1009,26 @@ impl Lander {
         }
         Err(anyhow::anyhow!("{} kept moving concurrently; retry", self.name))
     }
+}
+
+/// A short random pause before rebuilding on a ref that another lander keeps moving. The lander
+/// that just committed is already building its next batch, so without one the other would lose
+/// every race; with it they take turns.
+async fn moved_pause(attempt: usize) {
+    if attempt < 2 {
+        return;
+    }
+    let max_us = 250u64 << attempt.min(7);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos() as u64).unwrap_or(0);
+    tokio::time::sleep(std::time::Duration::from_micros(nanos % max_us)).await;
+}
+
+/// Ref names are stored as text, which can't hold NUL on Postgres: refuse them everywhere.
+fn check_ref_name(name: &str) -> anyhow::Result<()> {
+    if name.contains('\0') {
+        return Err(invalid("ref names can't contain NUL"));
+    }
+    Ok(())
 }
 
 /// Answer a batch that wasn't committed: what would have landed fails with `e`; requests that
