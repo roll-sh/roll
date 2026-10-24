@@ -1872,9 +1872,10 @@ impl<'b, 'a> Binder<'b, 'a> {
         column: &str,
     ) -> Result<Expr> {
         let col = column.to_string();
+        // (format_type_be: without typmods.)
         let shown = |b: &Self, t: &DataType, d: Option<u32>| match d {
             Some(d) => b.cat.format_type(t, Some(d), &b.ctx.search_path),
-            None => t.display(),
+            None => t.without_typmod().display(),
         };
         let to_shown = shown(self, to, to_domain);
         let from_domain = self.declared_domain(&e);

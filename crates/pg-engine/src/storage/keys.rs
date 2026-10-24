@@ -27,6 +27,7 @@ const MULTIRANGE: u8 = 0xB1;
 const GEO: u8 = 0xB2;
 const TSVECTOR: u8 = 0xB3;
 const TSQUERY: u8 = 0xB4;
+const EXT: u8 = 0xB5;
 
 pub fn put_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_be_bytes());
@@ -271,6 +272,12 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value, desc: bool) {
         Value::TsVector(v) => {
             out.push(TSVECTOR);
             crate::types::tsearch::tsvector_key(v, out);
+        }
+        // An extension's native type: its own order-preserving key.
+        Value::Ext(k, b) => {
+            out.push(EXT);
+            out.extend_from_slice(&k.to_be_bytes());
+            crate::ext::types::key(*k, b, out);
         }
         Value::TsQuery(q) => {
             out.push(TSQUERY);

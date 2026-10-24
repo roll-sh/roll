@@ -38,12 +38,13 @@ pub fn library(probin: &str) -> &str {
 /// Whether the engine has native code for library `lib` (so a symbol it lacks is an error,
 /// as `dlsym` failing is).
 pub fn has_library(lib: &str) -> bool {
-    matches!(lib, "pgcrypto" | "uuid-ossp")
+    matches!(lib, "citext" | "pgcrypto" | "uuid-ossp")
 }
 
 /// The implementation of `symbol` in the library `probin` names.
 pub fn lookup(probin: &str, symbol: &str) -> Option<Native> {
     match library(probin) {
+        "citext" => super::citext::symbol(symbol),
         "pgcrypto" => super::pgcrypto::symbol(symbol),
         "uuid-ossp" => super::uuid_ossp::symbol(symbol),
         _ => None,

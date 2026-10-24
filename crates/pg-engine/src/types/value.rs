@@ -125,6 +125,10 @@ pub enum Value {
     Geo(Arc<super::geo::Geo>),
     TsVector(Arc<super::tsearch::TsVector>),
     TsQuery(Arc<super::tsearch::TsQuery>),
+    /// A value of an extension's type the engine implements natively (`crate::ext::types`):
+    /// its kind and its own bytes; ordered, compared and hashed as the type's default
+    /// operator classes do.
+    Ext(u16, Arc<[u8]>),
 }
 
 impl Value {
@@ -241,6 +245,8 @@ impl Value {
             (Macaddr8(a), Macaddr8(b)) => a.cmp(b),
             (TsVector(a), TsVector(b)) => super::tsearch::tsvector_cmp(a, b),
             (TsQuery(a), TsQuery(b)) => super::tsearch::tsquery_cmp(a, b),
+            (Ext(k, a), Ext(l, b)) if k == l => crate::ext::types::cmp(*k, a, b),
+            (Ext(k, _), Ext(l, _)) => k.cmp(l),
             (Money(a), Money(b)) => a.cmp(b),
             (PgLsn(a), PgLsn(b)) | (Xid8(a), Xid8(b)) => a.cmp(b),
             (Snapshot(a), Snapshot(b)) => a.cmp(b),
@@ -301,6 +307,7 @@ impl Value {
             TsQuery(_) => 29,
             Xid8(_) => 30,
             Snapshot(_) => 31,
+            Ext(..) => 32,
         }
     }
 
@@ -396,6 +403,10 @@ impl Hash for Value {
             Macaddr8(m) => m.hash(state),
             TsVector(v) => v.hash(state),
             TsQuery(q) => q.hash(state),
+            Ext(k, b) => {
+                k.hash(state);
+                crate::ext::types::canon(*k, b).hash(state)
+            }
             Money(m) => m.hash(state),
             PgLsn(l) | Xid8(l) => l.hash(state),
             Snapshot(s) => s.hash(state),

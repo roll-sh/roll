@@ -51,6 +51,8 @@ mod tag {
     pub const TSQUERY: u8 = 38;
     pub const XID8: u8 = 39;
     pub const SNAPSHOT: u8 = 40;
+    /// An extension's native type: kind (u16) and its bytes.
+    pub const EXT: u8 = 41;
 }
 
 fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
@@ -211,6 +213,11 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
             let mut b = Vec::new();
             crate::types::tsearch::tsvector_send(v, &mut b);
             put_bytes(out, &b);
+        }
+        Value::Ext(k, b) => {
+            out.push(tag::EXT);
+            out.extend_from_slice(&k.to_le_bytes());
+            put_bytes(out, b);
         }
         Value::TsQuery(q) => {
             out.push(tag::TSQUERY);
@@ -411,6 +418,10 @@ pub fn decode_value(b: &[u8], pos: &mut usize) -> Result<Value> {
         tag::INET => {
             let a = take_bytes(b, pos)?.to_vec();
             Value::Inet(a.into(), take(b, pos, 1)?[0])
+        }
+        tag::EXT => {
+            let k = u16::from_le_bytes(take(b, pos, 2)?.try_into().unwrap());
+            Value::Ext(k, take_bytes(b, pos)?.to_vec().into())
         }
         tag::MACADDR => Value::Macaddr(take(b, pos, 6)?.try_into().unwrap()),
         tag::MACADDR8 => Value::Macaddr8(take(b, pos, 8)?.try_into().unwrap()),

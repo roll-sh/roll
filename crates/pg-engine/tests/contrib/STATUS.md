@@ -14,6 +14,15 @@ last run's per-file table.
   pg_available_extension_versions all follow from that.
 - `LANGUAGE C` functions are native Rust code found by library and symbol
   (`src/ext/native.rs`, one module per extension under `src/ext/`).
+- Types an extension's script creates that the engine implements natively are
+  `Value::Ext(kind, bytes)` (`src/ext/types.rs`, kinds stored with values): their default
+  operator classes' order and equality are the value's, so sorting, grouping, hashing and
+  btree index keys follow them (citext's index keys are its lowercased bytes). A
+  binary-coercible cast to or from the built-in type it is stored as (citext and text)
+  converts the value; an internal-language function over it (`AS 'texticlike'`) gets the
+  built-in value.
+- User operators win IN lists and `= ANY` as `oper` picks them (`user_op_def`), and a C
+  operator function shows as its operator, so the planner matches it to btree indexes.
 - Only the extensions with files in `src/ext/files/` are available. The older stand-ins
   (`session::ddl::EXTENSIONS`: CREATE EXTENSION accepted, nothing installed) remain for the
   ones not ported yet.
@@ -36,11 +45,17 @@ Baseline (before any extension was ported; CREATE EXTENSION was a stand-in): 2,7
 units (35.6%). The reference matches `expected/` for every module except postgres_fdw and
 dblink (they connect to a loopback server).
 
+Done since: uuid-ossp, citext and pgcrypto at 100% (citext's run also fixed engine-wide:
+index elements' and COLLATE clauses' collations resolved through the search path, an index
+build's GUC changes discarded at its end as DefineIndex's nest level does, explicit text to
+`bit(n)` casts truncating, assignment errors naming types without typmods, VALUES errors at a
+cast's argument, `textlen`).
+
 | module | units | matching | status |
 |---|---|---|---|
 | uuid-ossp | 23 | 23 | done |
-| pgcrypto | 369 | 36 | in progress |
-| citext | 544 | 32 | in progress |
+| pgcrypto | 369 | 369 | done |
+| citext | 544 | 544 | done |
 | hstore | 309 | 21 | not started |
 | pg_trgm | 261 | 140 | not started (stand-in) |
 | btree_gin | 297 | 245 | not started (stand-in) |

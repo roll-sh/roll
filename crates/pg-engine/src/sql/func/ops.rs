@@ -127,6 +127,8 @@ fn image_of(v: &Value) -> Option<Image> {
         Value::Float8(f) => Image::Word(f.to_bits()),
         Value::Text(t) | Value::Json(t) => Image::Bytes(t.as_bytes().to_vec()),
         Value::Bytea(b) => Image::Bytes(b.to_vec()),
+        // An extension type's own bytes (citext's, as written).
+        Value::Ext(_, b) => Image::Bytes(b.to_vec()),
         Value::Uuid(u) => Image::Bytes(u.to_be_bytes().to_vec()),
         // (A numeric's image carries its display scale: 1.0 and 1.00 differ.)
         Value::Numeric(n) => Image::Bytes(n.to_string().into_bytes()),

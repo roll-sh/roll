@@ -884,7 +884,7 @@ impl Ddl<'_, '_> {
         }
         if let Some(cc) = &cd.coll_clause {
             let cn = names(&cc.collname);
-            if !crate::types::collation::exists(&self.cat, &cn) {
+            if crate::types::collation::resolve(&self.cat, self.search_path(), &cn).is_none() {
                 return Err(with_pos(
                     Error::new(
                         code::UNDEFINED_OBJECT,
@@ -2096,7 +2096,7 @@ impl Ddl<'_, '_> {
                     c.row_types = crate::sql::expr::named_row_types(&bound);
                     t.constraints.push(c);
                 }
-                Pending::Exclusion(x) => self.exclusion_constraint(&mut t, *x, existing)?,
+                Pending::Exclusion(x) => self.in_index_build(|d| d.exclusion_constraint(&mut t, *x, existing))?,
                 Pending::Index {
                     primary,
                     name,
@@ -5717,7 +5717,7 @@ impl Ddl<'_, '_> {
         let collation = match &cd.coll_clause {
             Some(cc) => {
                 let cn = names(&cc.collname);
-                if !crate::types::collation::exists(&self.cat, &cn) {
+                if crate::types::collation::resolve(&self.cat, self.search_path(), &cn).is_none() {
                     return Err(with_pos(
                         Error::new(
                             code::UNDEFINED_OBJECT,

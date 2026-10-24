@@ -277,7 +277,7 @@ impl Binder<'_, '_> {
                         c.location,
                     ));
                 }
-                if !crate::types::collation::exists(&self.cat, &coll) {
+                if crate::types::collation::resolve(&self.cat, &self.ctx.search_path, &coll).is_none() {
                     return Err(with_pos(
                         Error::new(
                             code::UNDEFINED_OBJECT,
@@ -1926,6 +1926,22 @@ impl Binder<'_, '_> {
 
     /// A user-defined operator (CREATE OPERATOR) for these operands, when one matches better
     /// than any built-in: a call of its function, shown as the operator.
+    /// The user-defined operator `op` that operands of types `lt` and `rt` resolve to (ahead
+    /// of the built-ins, as `oper` chooses): its call target and argument types.
+    fn user_op_def(&mut self, op: &str, lt: &DataType, rt: &DataType, loc: i32) -> Result<Option<(Arc<FuncDef>, Vec<DataType>)>> {
+        if self.cat.operators.is_empty() {
+            return Ok(None);
+        }
+        let probe = |t: &DataType| Expr::Const(Value::Null, t.clone());
+        Ok(match self.user_operator(None, op, Some(probe(lt)), probe(rt), loc)? {
+            Some(Expr::Call(def, args, _)) if args.len() == 2 => {
+                let types = args.iter().map(Expr::ty).collect();
+                Some((def, types))
+            }
+            _ => None,
+        })
+    }
+
     fn user_operator(
         &mut self,
         schema: Option<&str>,
@@ -2127,9 +2143,15 @@ impl Binder<'_, '_> {
                     ret,
                 )));
             }
-            // An internal-language function runs the built-in, shown as the operator.
-            if f.language == "internal" {
-                return Ok(Some(match self.internal_call(&f, args, loc)? {
+            // An internal-language function runs the built-in, a C one its native code, shown
+            // as the operator.
+            if f.language == "internal" || (f.language == "c" && Self::native_def(&f).is_some() && !f.returns_set) {
+                let call = if f.language == "c" {
+                    self.native_call(&f, args, loc)?
+                } else {
+                    self.internal_call(&f, args, loc)?
+                };
+                return Ok(Some(match call {
                     Expr::Call(d, a, t) => Expr::Call(
                         Arc::new(FuncDef {
                             name: display,
@@ -2573,6 +2595,35 @@ impl Binder<'_, '_> {
         if self.deparse {
             return self.in_list_parsed(l, items, not, loc);
         }
+        // Values of a type whose `=` is a user-defined operator (an extension's type):
+        // constants of the common type probed as one array, others compared one by one.
+        if !self.cat.operators.is_empty() {
+            let mut types = vec![l.ty()];
+            types.extend(items.iter().map(|e| e.ty()));
+            if let Ok(ty) = super::unify_types(&types, "IN")
+                && self.user_op_def("=", &ty, &ty, loc)?.is_some()
+            {
+                let consts = items.len() > 1 && items.iter().all(|i| matches!(i, Expr::Const(..)));
+                if consts {
+                    let mut vals = Vec::with_capacity(items.len());
+                    for it in items {
+                        match self.coerce_implicit(it, &ty)? {
+                            Expr::Const(v, _) => vals.push(v),
+                            _ => return Err(crate::error::internal("IN constant")),
+                        }
+                    }
+                    let arr = Value::Array(Arc::new(crate::types::array::ArrayValue::from_vec(ty.clone(), vals)));
+                    let right = Expr::Const(arr, DataType::array_of(ty));
+                    return self.array_op(if not { "<>" } else { "=" }, l, right, not, loc);
+                }
+                let op = if not { "<>" } else { "=" };
+                let parts = items
+                    .into_iter()
+                    .map(|it| self.binop(op, l.clone(), it, loc))
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(if not { Expr::And(parts) } else { Expr::Or(parts) });
+            }
+        }
         // Prefer one common type for all values.
         let mut all = vec![l.clone()];
         all.extend(items.iter().cloned());
@@ -2745,9 +2796,13 @@ impl Binder<'_, '_> {
             DataType::OidVector => self.coerce_implicit(r, &DataType::array_of(DataType::Oid))?,
             // An untyped literal takes the array type of the operator's right input.
             DataType::Unknown => {
+                let user = self.user_op_def(op, &l.ty(), &DataType::Unknown, loc)?;
                 let res =
-                    resolve_binop(op, &l.ty(), &DataType::Unknown).map_err(|e| with_pos(e, loc))?;
-                let elem = res.arg_types[1].clone();
+                    resolve_binop(op, &l.ty(), &DataType::Unknown).map_err(|e| with_pos(e, loc));
+                let elem = match (user, res) {
+                    (Some((_, types)), _) => types[1].clone(),
+                    (None, res) => res?.arg_types[1].clone(),
+                };
                 let elem = if elem.is_polymorphic() || matches!(elem, DataType::Unknown) {
                     if matches!(l.ty(), DataType::Unknown) {
                         DataType::Text
@@ -2770,6 +2825,24 @@ impl Binder<'_, '_> {
             }
         };
         let elem = r.ty().elem().cloned().unwrap_or(DataType::Text);
+        // A user-defined operator (an extension's type's `=`).
+        if let Some((def, types)) = self.user_op_def(op, &l.ty(), &elem, loc)? {
+            if !matches!(def.ret, func::Ret::Fixed(DataType::Bool)) {
+                return Err(with_pos(
+                    Error::new(code::WRONG_OBJECT_TYPE, "op ANY/ALL (array) requires operator to yield boolean"),
+                    loc,
+                ));
+            }
+            let l = self.coerce_implicit(l, &types[0])?;
+            let r = self.coerce_implicit(r, &DataType::array_of(types[1].clone()))?;
+            let op = self.collated(def, &[&l, &r]);
+            return Ok(Expr::ArrayOp {
+                left: Box::new(l),
+                right: Box::new(r),
+                op,
+                all,
+            });
+        }
         let res = resolve_binop(op, &l.ty(), &elem).map_err(|e| with_pos(e, loc))?;
         if !matches!(res.ret, DataType::Bool) {
             return Err(with_pos(
@@ -7281,11 +7354,13 @@ impl Binder<'_, '_> {
             } else {
                 ret
             };
+            // (OUT columns: one record of them per row.)
+            let ncols = fdef.out_cols.len().max(1);
             let i = self.push_srf(SrfCall {
                 func: def,
                 args: coerced,
                 ty: ty.clone(),
-                ncols: 1,
+                ncols,
                 body: None,
             });
             return Ok(Expr::Srf(i, ty));
@@ -7301,7 +7376,8 @@ impl Binder<'_, '_> {
         coerced: Vec<Expr>,
         loc: i32,
     ) -> Result<Expr> {
-        let def = crate::catalog::system::builtin_by_prosrc(&fdef.body).and_then(|b| {
+        let builtin = crate::catalog::system::builtin_by_prosrc(&fdef.body);
+        let mut def = builtin.and_then(|b| {
             func::registry()
                 .funcs
                 .values()
@@ -7309,6 +7385,27 @@ impl Binder<'_, '_> {
                 .find(|d| d.oid == b && d.srf.is_none())
                 .cloned()
         });
+        // A built-in the engine runs under another oid (or as a cast): found by its pg_proc
+        // name and argument types (`rtrim1` is rtrim(text), `booltext` text(boolean)).
+        if def.is_none()
+            && let Some(sig) = builtin.and_then(|b| crate::catalog::system::builtin_proc_sigs().iter().find(|s| s.oid == b))
+        {
+            let args: Option<Vec<DataType>> = sig.args.iter().map(|a| DataType::from_oid(*a)).collect();
+            if let Some(args) = args {
+                if let Ok(r) = func::resolve_function(sig.name, &args) {
+                    def = Some(r.def);
+                } else if sig.name == "text" && sig.ret == crate::types::oid::TEXT && args.len() == 1 {
+                    // text(x): the cast to text.
+                    fn to_text(a: &[Value], c: &func::FnCtx) -> Result<Value> {
+                        crate::types::cast::cast_value(a[0].clone(), &c.arg_type(0), &DataType::Text, c.exec.fmt(), true)
+                    }
+                    let mut d = (*func::display_def(fdef)).clone();
+                    d.name = "text";
+                    d.imp = to_text;
+                    def = Some(Arc::new(d));
+                }
+            }
+        }
         let Some(def) = def else {
             return Err(with_pos(
                 crate::error::unsupported(format!(
@@ -7319,7 +7416,17 @@ impl Binder<'_, '_> {
             ));
         };
         let mut d = (*def).clone();
-        d.args = fdef.args.iter().map(|a| a.1.clone()).collect();
+        // (A parameter of an extension's native type keeps the built-in's own type: the call
+        // passes the built-in value, `crate::ext::types::wants_builtin`.)
+        d.args = fdef
+            .args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| match (&a.1, def.args.get(i)) {
+                (DataType::Base(b), Some(own)) if b.ext != 0 => own.clone(),
+                _ => a.1.clone(),
+            })
+            .collect();
         d.ret = func::Ret::Fixed(fdef.ret.clone());
         d.variadic = false;
         d.spread = false;

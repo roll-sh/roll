@@ -2416,6 +2416,7 @@ pub fn register(r: &mut Registry) {
         r.func(name, vec![Bpchar(-1)], Int4, bp_length);
     }
     r.func("length", vec![Bytea], Int4, bytea_length);
+    r.func("textlen", vec![Text], Int4, length);
     r.func("octet_length", vec![Text], Int4, octet_length);
     r.func("octet_length", vec![Bytea], Int4, octet_length);
     r.func("octet_length", vec![Bpchar(-1)], Int4, octet_length);

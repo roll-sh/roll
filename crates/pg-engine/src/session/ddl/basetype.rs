@@ -82,6 +82,7 @@ impl Ddl<'_, '_> {
                 preferred: false,
                 collatable: false,
                 pseudo: false,
+                ext: 0,
             }),
             owner: self.me(),
             input: 2398,
@@ -478,8 +479,13 @@ impl Ddl<'_, '_> {
             None => 0,
         };
         let repr = self.base_repr(input_oid);
+        // A type an extension's script makes that the engine implements natively.
+        let ext = super::extension::creating_extension()
+            .and_then(|e| self.cat.extensions.iter().find(|x| x.0 == e))
+            .map_or(0, |e| crate::ext::types::kind_for(&e.1, &name));
         let array_oid = self.cat.alloc_oid();
         let ty = Arc::new(BaseType {
+            ext,
             oid: typoid,
             name: Arc::from(name.as_str()),
             schema,

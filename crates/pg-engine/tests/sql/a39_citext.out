@@ -1,0 +1,198 @@
+> CREATE EXTENSION citext
+-- CREATE EXTENSION
+
+> SELECT '101'::citext::bit
+bit:bit
+1
+-- SELECT 1
+
+> SELECT '101'::text::bit
+bit:bit
+1
+-- SELECT 1
+
+> SELECT '101'::citext::bit(3)
+bit:bit
+101
+-- SELECT 1
+
+> CREATE TABLE a39_ct (c citext PRIMARY KEY)
+-- CREATE TABLE
+
+> INSERT INTO a39_ct VALUES ('abc'), ('Def'), ('ABD')
+-- INSERT 0 3
+
+> INSERT INTO a39_ct VALUES ('ABC')
+ERROR 23505: duplicate key value violates unique constraint "a39_ct_pkey"
+DETAIL: Key (c)=(ABC) already exists.
+OBJECTS: schema=public table=a39_ct constraint=a39_ct_pkey
+
+> SELECT * FROM a39_ct ORDER BY c
+c:user
+abc
+ABD
+Def
+-- SELECT 3
+
+> SELECT DISTINCT lower(c::text) FROM a39_ct ORDER BY 1
+lower:text
+abc
+abd
+def
+-- SELECT 3
+
+> SELECT c, count(*) FROM (SELECT c FROM a39_ct UNION ALL SELECT 'DEF'::citext) s GROUP BY c ORDER BY c
+c:user | count:int8
+abc | 1
+ABD | 1
+Def | 2
+-- SELECT 3
+
+> SELECT * FROM a39_ct WHERE c = 'DEF'
+c:user
+Def
+-- SELECT 1
+
+> SELECT * FROM a39_ct WHERE c IN ('ABC', 'abd')
+c:user
+ABD
+abc
+-- SELECT 2
+
+> SELECT min(c), max(c) FROM a39_ct
+min:user | max:user
+abc | Def
+-- SELECT 1
+
+> SELECT c::text, c || 'x', upper(c), length(c) FROM a39_ct ORDER BY c DESC
+c:text | ?column?:text | upper:text | length:int4
+abc | abcx | ABC | 3
+Def | Defx | DEF | 3
+ABD | ABDx | ABD | 3
+-- SELECT 3
+
+> SELECT 'a'::citext < 'B'::citext, 'a'::citext = 'A', citext_cmp('a', 'B')
+?column?:bool | ?column?:bool | citext_cmp:int4
+t | t | -1
+-- SELECT 1
+
+> SELECT c FROM a39_ct WHERE c LIKE 'a%'
+c:user
+ABD
+abc
+-- SELECT 2
+
+> SELECT c FROM a39_ct WHERE c ~ '^d'
+c:user
+Def
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a39_ct WHERE c = 'DEF'
+QUERY PLAN:text
+Index Only Scan using a39_ct_pkey on a39_ct
+  Index Cond: (c = 'DEF'::citext)
+-- EXPLAIN
+
+> SELECT a.c, b.c FROM a39_ct a JOIN a39_ct b ON a.c = upper(b.c::text)::citext ORDER BY 1
+c:user | c:user
+abc | abc
+ABD | ABD
+Def | Def
+-- SELECT 3
+
+> SET enable_hashjoin = off
+-- SET
+
+> SELECT a.c, b.c FROM a39_ct a JOIN a39_ct b ON a.c = upper(b.c::text)::citext ORDER BY 1
+c:user | c:user
+abc | abc
+ABD | ABD
+Def | Def
+-- SELECT 3
+
+> SELECT array_agg(c ORDER BY c) FROM a39_ct
+array_agg:user
+{abc,ABD,Def}
+-- SELECT 1
+
+> SELECT ARRAY['b', 'A']::citext[]
+array:user
+{b,A}
+-- SELECT 1
+
+> SELECT row('X'::citext, 1)
+row:record
+(X,1)
+-- SELECT 1
+
+> SELECT pg_typeof(c), c IS NULL FROM a39_ct LIMIT 1
+pg_typeof:regtype | ?column?:bool
+citext | f
+-- SELECT 1
+
+> SELECT * FROM a39_ct WHERE c IN ('ABC', 'abd')
+c:user
+ABD
+abc
+-- SELECT 2
+
+> SELECT * FROM a39_ct WHERE c = ANY (ARRAY['ABC', 'abd']::citext[])
+c:user
+ABD
+abc
+-- SELECT 2
+
+> SELECT c = 'ABC' FROM a39_ct
+?column?:bool
+f
+f
+t
+-- SELECT 3
+
+> SELECT 'ABC'::citext = ANY (ARRAY['abc']::citext[])
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT c, count(*) FROM (SELECT c FROM a39_ct UNION ALL SELECT 'DEF'::citext) s GROUP BY c ORDER BY c
+c:user | count:int8
+abc | 1
+ABD | 1
+Def | 2
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a39_ct WHERE c = 'DEF'
+QUERY PLAN:text
+Index Only Scan using a39_ct_pkey on a39_ct
+  Index Cond: (c = 'DEF'::citext)
+-- EXPLAIN
+
+> SELECT * FROM a39_ct WHERE c = 'DEF'
+c:user
+Def
+-- SELECT 1
+
+> SET enable_seqscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a39_ct WHERE c > 'B' ORDER BY c
+QUERY PLAN:text
+Sort
+  Sort Key: c
+  ->  Bitmap Heap Scan on a39_ct
+        Recheck Cond: (c > 'B'::citext)
+        ->  Bitmap Index Scan on a39_ct_pkey
+              Index Cond: (c > 'B'::citext)
+-- EXPLAIN
+
+> SELECT * FROM a39_ct WHERE c > 'B' ORDER BY c
+c:user
+Def
+-- SELECT 1
+
+> DROP TABLE a39_ct
+-- DROP TABLE
+
+> DROP EXTENSION citext
+-- DROP EXTENSION
+

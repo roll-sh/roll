@@ -944,10 +944,15 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
         Expr::Call(def, args, ty) if def.spread => eval_spread(def, args, ty, row, ctx),
         Expr::Call(def, args, ty) => {
             let mut vals = Vec::with_capacity(args.len());
-            for a in args {
-                let v = eval(a, row, ctx)?;
+            for (i, a) in args.iter().enumerate() {
+                let mut v = eval(a, row, ctx)?;
                 if def.strict && v.is_null() {
                     return Ok(Value::Null);
+                }
+                // An extension type's value passed to a built-in function over its
+                // representation (citext's `AS 'texticlike'`): the built-in's value.
+                if matches!(v, Value::Ext(..)) && def.args.get(i).is_some_and(crate::ext::types::wants_builtin) {
+                    v = crate::ext::types::to_builtin(v);
                 }
                 vals.push(v);
             }
@@ -974,6 +979,13 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
             // A void result is a non-null empty value, as in Postgres.
             if matches!(ty, DataType::Void) && v.is_null() {
                 return Ok(Value::Text(Arc::from("")));
+            }
+            // A built-in's result declared as an extension's native type (citext(bpchar) AS
+            // 'rtrim1'): that type's value.
+            if let DataType::Base(b) = ty
+                && b.ext != 0
+            {
+                return Ok(crate::ext::types::from_builtin(b.ext, v));
             }
             Ok(v)
         }

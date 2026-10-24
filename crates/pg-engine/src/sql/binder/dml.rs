@@ -3391,11 +3391,18 @@ enum Inferred {
     Elems(Vec<InferElem>, Option<Expr>),
 }
 
-/// Where a value's transformed expression is (exprLocation after analysis): a cast's is
-/// its `::`, else the expression's own.
+/// Where a value's transformed expression is (exprLocation after analysis): a row cast to a
+/// composite type is a RowExpr at the `::` (coerce_record_to_complex); any other cast's
+/// leftmost part (a coerced literal keeps the literal's location, a cast function or
+/// relabeling starts at its argument).
 fn value_location(n: &Node) -> i32 {
     match inner(n) {
-        Some(NodeEnum::TypeCast(tc)) if tc.location >= 0 => tc.location,
+        Some(NodeEnum::TypeCast(tc))
+            if tc.location >= 0
+                && matches!(tc.arg.as_deref().and_then(inner), Some(NodeEnum::RowExpr(_))) =>
+        {
+            tc.location
+        }
         _ => ast::location(n),
     }
 }

@@ -211,6 +211,13 @@ pub fn cast_context(from: &DataType, to: &DataType) -> Option<CastContext> {
 /// A binary-coercible cast (WITHOUT FUNCTION): the same bits, read as the target type's
 /// value (int4 bits as a float4, ...).
 pub fn binary_reinterpret(v: Value, to: &DataType) -> Value {
+    // An extension's native type: its own value to and from the built-in one it is stored as
+    // (citext and text).
+    match to {
+        DataType::Base(b) if b.ext != 0 => return crate::ext::types::from_builtin(b.ext, v),
+        _ if matches!(v, Value::Ext(..)) => return crate::ext::types::to_builtin(v),
+        _ => {}
+    }
     let target = match to {
         DataType::Base(b) => b.repr.clone().unwrap_or(DataType::Text),
         t => t.clone(),
@@ -343,7 +350,9 @@ pub fn cast_value(
             Value::Text(t) if from.category() == Category::String => t.to_string(),
             v => super::text::format_value(v, from, ctx),
         };
-        if to.category() == Category::String && !matches!(to, T::Base(_)) {
+        // (Into a built-in type: as text's I/O conversion to it, its typmod applied as an
+        // explicit cast's length coercion is.)
+        if !matches!(to, T::Base(_)) && (to.category() == Category::String || matches!(from, T::Base(b) if b.ext != 0)) {
             return cast_value(Value::text(text), &T::Text, to, ctx, explicit);
         }
         return parse_value_ex(&text, to, ctx, explicit);
@@ -658,6 +667,12 @@ pub fn cast_value(
             }
             parse_value_ex(s, to, ctx, explicit)?
         }
+        // CoerceViaIO into the type without its typmod, then the length coercion (an
+        // explicit cast truncates a bit string).
+        (Value::Text(s), T::Bit(_) | T::Varbit(_)) if to.typmod() > 0 => {
+            let v = parse_value_ex(s, &to.without_typmod(), ctx, explicit)?;
+            apply_typmod(v, to, explicit)?
+        }
         (Value::Text(s), _) => parse_value_ex(s, to, ctx, explicit)?,
         // A table's row as its ancestor's (or a typed table's as its type's): field by
         // name (ConvertRowtypeExpr).
@@ -879,7 +894,7 @@ pub fn common_type(types: &[DataType], context: &str) -> Result<DataType> {
 pub fn value_type(v: &Value) -> DataType {
     use DataType as T;
     match v {
-        Value::Null | Value::Text(_) => T::Text,
+        Value::Null | Value::Text(_) | Value::Ext(..) => T::Text,
         Value::Bool(_) => T::Bool,
         Value::Int2(_) => T::Int2,
         Value::Int4(_) => T::Int4,

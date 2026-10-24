@@ -242,7 +242,22 @@ pub(super) fn index_options(method: &str, opts: &[pb::Node]) -> Result<Vec<Strin
 impl Ddl<'_, '_> {
     // ── CREATE INDEX ──
 
+    /// DefineIndex runs the index's expressions at a GUC nest level of its own (its
+    /// security-restricted operation's NewGUCNestLevel): what a function they call SETs
+    /// (search_path) doesn't outlive the command.
+    pub(super) fn in_index_build<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let level = self.ctx.sess.settings.borrow_mut().push_nest();
+        let r = f(self);
+        // (AtEOXact_GUC(false, ...): every change at that level goes.)
+        self.ctx.sess.settings.borrow_mut().subxact_leave(level, false);
+        r
+    }
+
     pub(super) fn create_index(&mut self, s: &pb::IndexStmt) -> Result<String> {
+        self.in_index_build(|d| d.create_index_inner(s))
+    }
+
+    fn create_index_inner(&mut self, s: &pb::IndexStmt) -> Result<String> {
         if s.concurrent {
             super::prevent_in_block("CREATE INDEX CONCURRENTLY")?;
         }
@@ -565,10 +580,17 @@ impl Ddl<'_, '_> {
             };
             let collation = names(&e.collation).last().cloned().or(top_coll);
             if let Some(c) = &collation {
-                if crate::types::collation::def_by_name(&self.cat, c).is_none() {
+                // (A COLLATE name of the index element: through the search path.)
+                let found = if e.collation.is_empty() {
+                    crate::types::collation::def_by_name(&self.cat, c).is_some()
+                } else {
+                    crate::types::collation::resolve(&self.cat, self.search_path(), &names(&e.collation)).is_some()
+                };
+                if !found {
+                    let shown = if e.collation.is_empty() { c.clone() } else { names(&e.collation).join(".") };
                     return Err(Error::new(
                         code::UNDEFINED_OBJECT,
-                        format!("collation \"{c}\" for encoding \"UTF8\" does not exist"),
+                        format!("collation \"{shown}\" for encoding \"UTF8\" does not exist"),
                     ));
                 }
                 if system::type_collation(&key_ty) == 0 {
@@ -1496,7 +1518,14 @@ impl Ddl<'_, '_> {
         let image = |r: &[Value]| {
             let mut k = Vec::new();
             for x in r {
-                crate::storage::keys::encode_value(&mut k, x, false);
+                // (An extension type's image is its bytes, not its operator class's key:
+                // citext 'Two' replaces 'two'.)
+                match x {
+                    Value::Ext(_, b) => {
+                        crate::storage::keys::encode_value(&mut k, &Value::Bytea(b.clone()), false)
+                    }
+                    x => crate::storage::keys::encode_value(&mut k, x, false),
+                }
             }
             k
         };
@@ -2370,7 +2399,7 @@ impl Ddl<'_, '_> {
             declared.push((cd.colname.clone(), ty.clone(), tn.array_bounds.len() as i16));
             if let Some(cc) = &cd.coll_clause {
                 let cn = names(&cc.collname);
-                if !crate::types::collation::exists(&self.cat, &cn) {
+                if crate::types::collation::resolve(&self.cat, self.search_path(), &cn).is_none() {
                     return Err(with_pos(
                         crate::types::collation::no_such_collation(&cn),
                         cc.location,
@@ -2811,7 +2840,7 @@ impl Ddl<'_, '_> {
         }
         if let Some(cc) = &s.coll_clause {
             let cn = names(&cc.collname);
-            if !crate::types::collation::exists(&self.cat, &cn) {
+            if crate::types::collation::resolve(&self.cat, self.search_path(), &cn).is_none() {
                 return Err(crate::types::collation::no_such_collation(&cn));
             }
             if !base.collatable() {

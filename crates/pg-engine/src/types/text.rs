@@ -1717,6 +1717,7 @@ pub fn parse_value_ex(s: &str, ty: &DataType, ctx: &FormatCtx, explicit: bool) -
         T::Trigger => Value::text(s),
         // A made base type reads its values as its input function's built-in type does; a
         // shell's input function (shell_in) refuses them.
+        T::Base(b) if b.ext != 0 => crate::ext::types::input(b.ext, s)?,
         T::Base(b) => match &b.repr {
             Some(r) => parse_value_ex(s, r, ctx, explicit)?,
             None => bail!(
@@ -2078,6 +2079,7 @@ pub fn format_value(v: &Value, ty: &DataType, ctx: &FormatCtx) -> String {
     use DataType as T;
     match (v, ty) {
         (Value::Null, _) => String::new(),
+        (Value::Ext(k, b), _) => crate::ext::types::output(*k, b),
         // Fields of a known row type print by their types (a regclass as its name).
         (Value::Record(fields), T::Row(rt)) if fields.len() == rt.fields.len() => {
             // (A table's row with dropped columns, as a trigger's OLD / NEW: they don't print.)
@@ -2177,6 +2179,7 @@ fn reg_name(
 pub fn format_plain(v: &Value, ctx: &FormatCtx) -> String {
     match v {
         Value::Null => String::new(),
+        Value::Ext(k, b) => crate::ext::types::output(*k, b),
         Value::Bool(b) => if *b { "t" } else { "f" }.into(),
         Value::Int2(i) => i.to_string(),
         Value::Int4(i) => i.to_string(),

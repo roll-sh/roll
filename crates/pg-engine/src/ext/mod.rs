@@ -11,7 +11,9 @@
 
 mod files;
 pub mod native;
+mod citext;
 mod pgcrypto;
+pub mod types;
 mod uuid_ossp;
 
 use std::collections::HashMap;

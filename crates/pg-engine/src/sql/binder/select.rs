@@ -4967,6 +4967,10 @@ impl Binder<'_, '_> {
                 };
                 return Ok(Some((plan, cols, DataType::Unknown, false, true)));
             }
+            // A C function has no body: its native code runs as a built-in function does.
+            if fdef.language == "c" {
+                return Ok(None);
+            }
             let place = if fdef.returns_set {
                 super::expr::FnPlace::FromSet
             } else {

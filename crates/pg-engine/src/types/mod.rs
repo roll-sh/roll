@@ -327,6 +327,14 @@ pub struct BaseType {
     /// `index_am_handler`, ...), named in signatures.
     #[serde(default)]
     pub pseudo: bool,
+    /// An extension's type the engine implements natively (`crate::ext::types` kind; 0:
+    /// none): its values are `Value::Ext` of that kind.
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub ext: u16,
+}
+
+fn is_zero_u16(v: &u16) -> bool {
+    *v == 0
 }
 
 impl PartialEq for BaseType {
@@ -365,6 +373,7 @@ impl BaseType {
             preferred: false,
             collatable: false,
             pseudo: true,
+            ext: 0,
         })))
     }
 }
@@ -1000,8 +1009,9 @@ impl DataType {
             | PgMcvList
             | PgSnapshot
             | TxidSnapshot => false,
-            // A made base type has no operators unless some are made for it.
-            Base(_) => false,
+            // A made base type has no operators unless some are made for it; an extension's
+            // native type has its default operator classes' (its values' own).
+            Base(b) => b.ext != 0,
             _ => true,
         }
     }

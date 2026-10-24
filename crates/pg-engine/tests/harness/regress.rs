@@ -1415,7 +1415,7 @@ fn cleanup_reference(cfg: &Config, before: &BTreeSet<String>) {
     // drops them.
     let others = after.iter().any(|g| {
         g.strip_prefix("db:")
-            .is_some_and(|d| d != db && d != "regression_tbd" && d.starts_with("regression"))
+            .is_some_and(|d| d != db && d != "regression_tbd" && (d.starts_with("regression") || d.starts_with("contrib_regression")))
     });
     if others {
         eprintln!("cleanup: another run is using the reference; its tablespaces and roles stay");
