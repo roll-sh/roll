@@ -6,8 +6,9 @@ are listed in [architecture.md](architecture.md#http-api-v1code).
 - Timestamps are Unix seconds.
 - Ids are strings: changesets `cs_…` (full 64-hex ids are accepted too), git commits are 40-hex.
 - Errors are `{error: string}` with a matching status: 400, 401, 403, 404, 409 or 422 (and 429 for
-  too many event streams, 503 while a repo's search index is first built). A bad query string is a
-  400 too.
+  too many event streams, 503 while a repo's search index is first built, or with `Retry-After`
+  while the database can't answer). A bad query string is a 400 too, and so is text with a NUL
+  character where the database is Postgres.
 - Writes without a token answer 401 (the dashboard's sign-in prompt), with a token that may not
   do it 403; reads of what the caller can't see answer 404.
 

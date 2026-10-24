@@ -3,7 +3,7 @@
 
 use crate::db::{Db, now};
 use anyhow::Result;
-use rusqlite::{OptionalExtension, Row, params};
+use code_sql::{OptionalExtension, Row, params};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS ai_jobs (
     -- review or command
     kind TEXT NOT NULL,
     mode TEXT,
-    full INTEGER NOT NULL DEFAULT 0,
+    -- Quoted: FULL is a reserved word in Postgres.
+    "full" INTEGER NOT NULL DEFAULT 0,
     command TEXT,
     -- queued, running, done, failed or skipped
     state TEXT NOT NULL,
@@ -127,7 +128,7 @@ pub struct Job {
     pub progress: Option<Value>,
 }
 
-const JOB_COLS: &str = "id, repo_id, change_id, kind, mode, full, command, state, attempts, error, review_id, requested_by, created_at, updated_at, stage, progress";
+const JOB_COLS: &str = "id, repo_id, change_id, kind, mode, \"full\", command, state, attempts, error, review_id, requested_by, created_at, updated_at, stage, progress";
 
 /// The stage a job shows: a running job's own, otherwise what its state says.
 fn stage_of(state: &str, stored: Option<String>) -> String {
@@ -139,7 +140,7 @@ fn stage_of(state: &str, stored: Option<String>) -> String {
     }
 }
 
-fn job_row(r: &Row) -> rusqlite::Result<Job> {
+fn job_row(r: &Row<'_>) -> code_sql::Result<Job> {
     Ok(Job {
         id: r.get(0)?,
         repo_id: r.get(1)?,
@@ -174,7 +175,7 @@ pub struct Learning {
     pub created_at: i64,
 }
 
-fn learning_row(r: &Row) -> rusqlite::Result<Learning> {
+fn learning_row(r: &Row<'_>) -> code_sql::Result<Learning> {
     Ok(Learning {
         id: r.get(0)?,
         repo_id: r.get(1)?,
@@ -243,7 +244,7 @@ pub struct UsageRow {
 const USAGE_COLS: &str = "id, owner_id, repo_id, change_id, review_id, kind, mode, chosen_by, reasons, speed, provider, model, key_source, files_reviewed, \
     input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, provider_cost_usd, list_usd, price_usd, free, capped, human_author, author, public, month, created_at";
 
-fn usage_row(r: &Row) -> rusqlite::Result<UsageRow> {
+fn usage_row(r: &Row<'_>) -> code_sql::Result<UsageRow> {
     Ok(UsageRow {
         id: r.get(0)?,
         owner_id: r.get(1)?,
@@ -280,12 +281,12 @@ impl Db {
     // ── settings ──
 
     pub fn reviewer_settings(&self, repo_id: &str) -> Result<Option<Value>> {
-        let s: Option<String> = self.lock().query_row("SELECT settings FROM reviewer_settings WHERE repo_id = ?", [repo_id], |r| r.get(0)).optional()?;
+        let s: Option<String> = self.sql().query_row("SELECT settings FROM reviewer_settings WHERE repo_id = ?", [repo_id], |r| r.get(0)).optional()?;
         Ok(s.and_then(|s| serde_json::from_str(&s).ok()))
     }
 
     pub fn set_reviewer_settings(&self, repo_id: &str, v: &Value) -> Result<()> {
-        self.lock().execute(
+        self.sql().execute(
             "INSERT INTO reviewer_settings (repo_id, settings, updated_at) VALUES (?, ?, ?) \
              ON CONFLICT (repo_id) DO UPDATE SET settings = excluded.settings, updated_at = excluded.updated_at",
             params![repo_id, v.to_string(), now()],
@@ -298,8 +299,8 @@ impl Db {
     #[allow(clippy::too_many_arguments)]
     pub fn insert_ai_job(&self, id: &str, repo_id: &str, change_id: &str, kind: &str, mode: Option<&str>, full: bool, command: Option<&Value>, by: Option<&str>) -> Result<()> {
         let t = now();
-        self.lock().execute(
-            "INSERT INTO ai_jobs (id, repo_id, change_id, kind, mode, full, command, state, requested_by, created_at, updated_at) \
+        self.sql().execute(
+            "INSERT INTO ai_jobs (id, repo_id, change_id, kind, mode, \"full\", command, state, requested_by, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
             params![id, repo_id, change_id, kind, mode, full as i64, command.map(|c| c.to_string()), by, t, t],
         )?;
@@ -309,31 +310,32 @@ impl Db {
     /// A queued review of the change, if one is waiting (a new revision folds into it).
     pub fn queued_review_job(&self, change_id: &str) -> Result<Option<Job>> {
         Ok(self
-            .lock()
+            .sql()
             .query_row(&format!("SELECT {JOB_COLS} FROM ai_jobs WHERE change_id = ? AND kind = 'review' AND state = 'queued' ORDER BY rowid LIMIT 1"), [change_id], job_row)
             .optional()?)
     }
 
     pub fn ai_job(&self, id: &str) -> Result<Option<Job>> {
-        Ok(self.lock().query_row(&format!("SELECT {JOB_COLS} FROM ai_jobs WHERE id = ?"), [id], job_row).optional()?)
+        Ok(self.sql().query_row(&format!("SELECT {JOB_COLS} FROM ai_jobs WHERE id = ?"), [id], job_row).optional()?)
     }
 
     /// Up to `n` jobs that may run now (none of their change's running), oldest first.
     pub fn due_ai_jobs(&self, n: usize) -> Result<Vec<Job>> {
-        let c = self.lock();
-        let mut st = c.prepare(&format!(
-            "SELECT {JOB_COLS} FROM ai_jobs WHERE state = 'queued' AND run_at <= ? \
-             AND NOT EXISTS (SELECT 1 FROM ai_jobs o WHERE o.change_id = ai_jobs.change_id AND o.state = 'running') ORDER BY created_at, rowid LIMIT ?"
-        ))?;
         let ms = crate::db::now_ms();
-        let rows = st.query_map(params![ms, n as i64], job_row)?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        Ok(self.sql().query(
+            &format!(
+                "SELECT {JOB_COLS} FROM ai_jobs WHERE state = 'queued' AND run_at <= ? \
+                 AND NOT EXISTS (SELECT 1 FROM ai_jobs o WHERE o.change_id = ai_jobs.change_id AND o.state = 'running') ORDER BY created_at, rowid LIMIT ?"
+            ),
+            params![ms, crate::db::limit(n)],
+            job_row,
+        )?)
     }
 
     /// Take a queued job; `false` if someone else did, or another job of its change is running
     /// (one at a time per change, so a re-review sees the review before it).
     pub fn claim_ai_job(&self, id: &str) -> Result<bool> {
-        Ok(self.lock().execute(
+        Ok(self.sql().execute(
             "UPDATE ai_jobs SET state = 'running', stage = NULL, progress = NULL, attempts = attempts + 1, updated_at = ? WHERE id = ? AND state = 'queued' \
              AND NOT EXISTS (SELECT 1 FROM ai_jobs o WHERE o.change_id = ai_jobs.change_id AND o.state = 'running')",
             params![now(), id],
@@ -342,7 +344,7 @@ impl Db {
 
     /// What a running job is doing now.
     pub fn set_ai_stage(&self, id: &str, stage: &str, progress: Option<&Value>) -> Result<()> {
-        self.lock().execute(
+        self.sql().execute(
             "UPDATE ai_jobs SET stage = ?, progress = COALESCE(?, progress), updated_at = ? WHERE id = ? AND state = 'running'",
             params![stage, progress.map(|p| p.to_string()), now(), id],
         )?;
@@ -350,7 +352,7 @@ impl Db {
     }
 
     pub fn finish_ai_job(&self, id: &str, state: &str, error: Option<&str>, review_id: Option<&str>) -> Result<()> {
-        self.lock().execute(
+        self.sql().execute(
             "UPDATE ai_jobs SET state = ?, error = ?, review_id = COALESCE(?, review_id), updated_at = ? WHERE id = ?",
             params![state, error, review_id, now(), id],
         )?;
@@ -359,18 +361,18 @@ impl Db {
 
     /// Put a failed attempt back in line, not before `run_at_ms`.
     pub fn retry_ai_job(&self, id: &str, error: &str, run_at_ms: i64) -> Result<()> {
-        self.lock().execute("UPDATE ai_jobs SET state = 'queued', error = ?, run_at = ?, updated_at = ? WHERE id = ?", params![error, run_at_ms, now(), id])?;
+        self.sql().execute("UPDATE ai_jobs SET state = 'queued', error = ?, run_at = ?, updated_at = ? WHERE id = ?", params![error, run_at_ms, now(), id])?;
         Ok(())
     }
 
     /// After a restart: jobs that were running start over.
     pub fn requeue_running_ai_jobs(&self) -> Result<usize> {
-        Ok(self.lock().execute("UPDATE ai_jobs SET state = 'queued', updated_at = ? WHERE state = 'running'", [now()])?)
+        Ok(self.sql().execute("UPDATE ai_jobs SET state = 'queued', updated_at = ? WHERE state = 'running'", [now()])?)
     }
 
     /// `(queued, running)` for a repo, and its latest finished job.
     pub fn ai_job_summary(&self, repo_id: &str) -> Result<(u64, u64, Option<Job>)> {
-        let c = self.lock();
+        let c = self.sql();
         let n = |state: &str| c.query_row("SELECT COUNT(*) FROM ai_jobs WHERE repo_id = ? AND state = ?", params![repo_id, state], |r| r.get::<_, i64>(0)).map(|x| x as u64);
         let (q, r) = (n("queued")?, n("running")?);
         let last = c
@@ -384,30 +386,31 @@ impl Db {
     }
 
     pub fn change_ai_jobs(&self, change_id: &str) -> Result<Vec<Job>> {
-        let c = self.lock();
-        let mut st = c.prepare(&format!("SELECT {JOB_COLS} FROM ai_jobs WHERE change_id = ? ORDER BY rowid"))?;
-        let rows = st.query_map([change_id], job_row)?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        Ok(self.sql().query(&format!("SELECT {JOB_COLS} FROM ai_jobs WHERE change_id = ? ORDER BY rowid"), [change_id], job_row)?)
     }
 
     // ── paused ──
 
     pub fn set_ai_paused(&self, change_id: &str, by: Option<&str>) -> Result<()> {
         match by {
-            Some(b) => self.lock().execute("INSERT OR REPLACE INTO ai_paused (change_id, paused_by, paused_at) VALUES (?, ?, ?)", params![change_id, b, now()])?,
-            None => self.lock().execute("DELETE FROM ai_paused WHERE change_id = ?", [change_id])?,
+            Some(b) => self.sql().execute(
+                "INSERT INTO ai_paused (change_id, paused_by, paused_at) VALUES (?, ?, ?) \
+                 ON CONFLICT (change_id) DO UPDATE SET paused_by = excluded.paused_by, paused_at = excluded.paused_at",
+                params![change_id, b, now()],
+            )?,
+            None => self.sql().execute("DELETE FROM ai_paused WHERE change_id = ?", [change_id])?,
         };
         Ok(())
     }
 
     pub fn ai_paused(&self, change_id: &str) -> Result<bool> {
-        Ok(self.lock().query_row("SELECT COUNT(*) FROM ai_paused WHERE change_id = ?", [change_id], |r| r.get::<_, i64>(0))? > 0)
+        Ok(self.sql().query_row("SELECT COUNT(*) FROM ai_paused WHERE change_id = ?", [change_id], |r| r.get::<_, i64>(0))? > 0)
     }
 
     // ── usage ──
 
     pub fn insert_usage(&self, u: &UsageRow) -> Result<()> {
-        self.lock().execute(
+        self.sql().execute(
             &format!("INSERT INTO ai_usage ({USAGE_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
             params![
                 u.id,
@@ -444,16 +447,17 @@ impl Db {
     }
 
     pub fn usage_rows(&self, owner_id: &str, month: &str) -> Result<Vec<UsageRow>> {
-        let c = self.lock();
-        let mut st = c.prepare(&format!("SELECT {USAGE_COLS} FROM ai_usage WHERE owner_id = ? AND month = ? ORDER BY created_at DESC, rowid DESC"))?;
-        let rows = st.query_map(params![owner_id, month], usage_row)?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        Ok(self.sql().query(
+            &format!("SELECT {USAGE_COLS} FROM ai_usage WHERE owner_id = ? AND month = ? ORDER BY created_at DESC, rowid DESC"),
+            params![owner_id, month],
+            usage_row,
+        )?)
     }
 
     /// The month so far: charged total, free public reviews used, and this author's hosted
     /// standard charges.
     pub fn usage_month(&self, owner_id: &str, month: &str, author: &str) -> Result<(f64, u32, f64)> {
-        let c = self.lock();
+        let c = self.sql();
         let total: f64 = c.query_row("SELECT COALESCE(SUM(price_usd), 0) FROM ai_usage WHERE owner_id = ? AND month = ?", params![owner_id, month], |r| r.get(0))?;
         let free: i64 = c.query_row("SELECT COUNT(*) FROM ai_usage WHERE owner_id = ? AND month = ? AND free = 1", params![owner_id, month], |r| r.get(0))?;
         let author_std: f64 = c.query_row(
@@ -469,7 +473,7 @@ impl Db {
 
     #[allow(clippy::too_many_arguments)]
     pub fn insert_learning(&self, id: &str, repo_id: &str, path: Option<&str>, text: &str, source: &str, by: &str, thread: Option<&str>) -> Result<()> {
-        self.lock().execute(
+        self.sql().execute(
             "INSERT INTO ai_learnings (id, repo_id, path, text, source, created_by, thread_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             params![id, repo_id, path, text, source, by, thread, now()],
         )?;
@@ -477,25 +481,26 @@ impl Db {
     }
 
     pub fn learnings(&self, repo_id: &str) -> Result<Vec<Learning>> {
-        let c = self.lock();
-        let mut st = c.prepare("SELECT id, repo_id, path, text, source, created_by, thread_id, created_at FROM ai_learnings WHERE repo_id = ? ORDER BY id")?;
-        let rows = st.query_map([repo_id], learning_row)?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        Ok(self.sql().query(
+            "SELECT id, repo_id, path, text, source, created_by, thread_id, created_at FROM ai_learnings WHERE repo_id = ? ORDER BY id",
+            [repo_id],
+            learning_row,
+        )?)
     }
 
     pub fn delete_learning(&self, repo_id: &str, id: &str) -> Result<bool> {
-        Ok(self.lock().execute("DELETE FROM ai_learnings WHERE repo_id = ? AND id = ?", params![repo_id, id])? == 1)
+        Ok(self.sql().execute("DELETE FROM ai_learnings WHERE repo_id = ? AND id = ?", params![repo_id, id])? == 1)
     }
 
     pub fn learning_for_thread(&self, thread_id: &str) -> Result<bool> {
-        Ok(self.lock().query_row("SELECT COUNT(*) FROM ai_learnings WHERE thread_id = ?", [thread_id], |r| r.get::<_, i64>(0))? > 0)
+        Ok(self.sql().query_row("SELECT COUNT(*) FROM ai_learnings WHERE thread_id = ?", [thread_id], |r| r.get::<_, i64>(0))? > 0)
     }
 
     // ── owners' providers and billing ──
 
     pub fn owner_provider(&self, owner_id: &str) -> Result<Option<OwnerProvider>> {
         Ok(self
-            .lock()
+            .sql()
             .query_row(
                 "SELECT provider, base_url, model, secondary_model, key_sealed, key_last4, updated_at FROM owner_review_providers WHERE owner_id = ?",
                 [owner_id],
@@ -516,19 +521,21 @@ impl Db {
 
     pub fn set_owner_provider(&self, owner_id: &str, p: Option<&OwnerProvider>) -> Result<()> {
         match p {
-            Some(p) => self.lock().execute(
-                "INSERT OR REPLACE INTO owner_review_providers (owner_id, provider, base_url, model, secondary_model, key_sealed, key_last4, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            Some(p) => self.sql().execute(
+                "INSERT INTO owner_review_providers (owner_id, provider, base_url, model, secondary_model, key_sealed, key_last4, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (owner_id) DO UPDATE SET provider = excluded.provider, base_url = excluded.base_url, \
+                 model = excluded.model, secondary_model = excluded.secondary_model, key_sealed = excluded.key_sealed, \
+                 key_last4 = excluded.key_last4, updated_at = excluded.updated_at",
                 params![owner_id, p.provider, p.base_url, p.model, p.secondary_model, p.key_sealed, p.key_last4, now()],
             )?,
-            None => self.lock().execute("DELETE FROM owner_review_providers WHERE owner_id = ?", [owner_id])?,
+            None => self.sql().execute("DELETE FROM owner_review_providers WHERE owner_id = ?", [owner_id])?,
         };
         Ok(())
     }
 
     pub fn billing(&self, owner_id: &str) -> Result<Billing> {
         Ok(self
-            .lock()
+            .sql()
             .query_row("SELECT monthly_cap_usd, on_cap, updated_at FROM owner_billing WHERE owner_id = ?", [owner_id], |r| {
                 Ok(Billing { monthly_cap_usd: r.get(0)?, on_cap: r.get(1)?, updated_at: Some(r.get(2)?) })
             })
@@ -537,8 +544,9 @@ impl Db {
     }
 
     pub fn set_billing(&self, owner_id: &str, cap: Option<f64>, on_cap: &str) -> Result<()> {
-        self.lock().execute(
-            "INSERT OR REPLACE INTO owner_billing (owner_id, monthly_cap_usd, on_cap, updated_at) VALUES (?, ?, ?, ?)",
+        self.sql().execute(
+            "INSERT INTO owner_billing (owner_id, monthly_cap_usd, on_cap, updated_at) VALUES (?, ?, ?, ?) \
+             ON CONFLICT (owner_id) DO UPDATE SET monthly_cap_usd = excluded.monthly_cap_usd, on_cap = excluded.on_cap, updated_at = excluded.updated_at",
             params![owner_id, cap, on_cap, now()],
         )?;
         Ok(())
@@ -548,9 +556,9 @@ impl Db {
 
     /// The author's changes reverted, and ejected from the queue, since `since`.
     pub fn author_history(&self, repo_id: &str, author: &str, since: i64) -> Result<(u32, u32)> {
-        let c = self.lock();
+        let c = self.sql();
         let reverts: i64 = c.query_row(
-            "SELECT COUNT(*) FROM changes r WHERE r.repo_id = ?1 AND r.created_at >= ?3 AND r.title LIKE 'Revert: %' \
+            "SELECT COUNT(*) FROM changes r WHERE r.repo_id = ?1 AND r.created_at >= ?3 AND lower(r.title) LIKE 'revert: %' \
              AND EXISTS (SELECT 1 FROM changes o WHERE o.repo_id = ?1 AND o.author = ?2 AND r.title = 'Revert: ' || o.title)",
             params![repo_id, author, since],
             |r| r.get(0),
@@ -566,7 +574,7 @@ impl Db {
     // ── reviews' `ai` ──
 
     pub fn set_review_ai(&self, review_id: &str, ai: &Value) -> Result<()> {
-        self.lock().execute("UPDATE reviews SET ai = ? WHERE id = ?", params![ai.to_string(), review_id])?;
+        self.sql().execute("UPDATE reviews SET ai = ? WHERE id = ?", params![ai.to_string(), review_id])?;
         Ok(())
     }
 }

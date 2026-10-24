@@ -1227,7 +1227,7 @@ fn head_git(a: &App, repo_id: &str, c: &Value) -> String {
 }
 
 fn mark(a: &App, key: &str) -> Option<String> {
-    a.code.db.lock().query_row("SELECT value FROM github_marks WHERE key = ?", [key], |r| r.get(0)).ok()
+    a.code.db.sql().query_row("SELECT value FROM github_marks WHERE key = ?", [key], |r| r.get(0)).ok()
 }
 
 /// Push webhooks beyond the default branch's fast-forward and merge: a pushed branch opens its
@@ -1601,7 +1601,7 @@ async fn outbound_notifications_once_each() {
     // A later notification (a check run) shows the update's event was handled.
     let n = g.mock.check_runs.load(Ordering::SeqCst);
     let c7 = a.ok("POST", "/v1/code/repos/acme/app/changes", Some(json!({ "title": "x", "message": "x", "files": { "x.txt": { "content": "x\n" } } }))).await;
-    a.code.db.lock().execute("UPDATE changes SET github_pr = 77 WHERE id = ?", [c7["id"].as_str().unwrap()]).unwrap();
+    a.code.db.sql().execute("UPDATE changes SET github_pr = 77 WHERE id = ?", [c7["id"].as_str().unwrap()]).unwrap();
     check(c7["id"].as_str().unwrap(), json!({ "name": "later", "status": "running" })).await;
     until("the later check run", || async { g.mock.check_runs.load(Ordering::SeqCst) > n }).await;
     let calls = g.mock.calls.lock().clone();

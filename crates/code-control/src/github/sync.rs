@@ -11,7 +11,7 @@ use code_git::{Credentials, FetchArgs, ObjectId};
 use code_github::webhook::{InstallationAction, RepositoriesAction};
 use code_github::{ChangeDraft, DraftState, Event, PrState, PushDraft, WorkItemDraft, mapping};
 use code_store::{ChangesetId, Edit, Expect, Kind, Mode, NewChangeset, Oid, Signature};
-use rusqlite::{OptionalExtension, params};
+use code_sql::{OptionalExtension, params};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -288,7 +288,7 @@ pub(crate) fn upsert_issue(code: &Code, r: &RepoRow, d: &WorkItemDraft) -> Resul
 pub(crate) fn change_by_pr(code: &Code, repo_id: &str, pr: u64) -> Result<Option<String>> {
     Ok(code
         .db
-        .lock()
+        .sql()
         .query_row(
             "SELECT id FROM changes WHERE repo_id = ? AND github_pr = ? ORDER BY number DESC LIMIT 1",
             params![repo_id, pr as i64],
@@ -357,7 +357,7 @@ pub(crate) async fn upsert_pr(code: &Code, hub: &Hub, r: &RepoRow, link: &Link, 
         }
         (_, None) => return Ok(()),
     };
-    code.db.lock().execute(
+    code.db.sql().execute(
         "UPDATE changes SET github_pr = ?, github_url = ?, title = ?, body = ?, updated_at = ? WHERE id = ?",
         params![d.github_pr as i64, d.url, title, d.body, now(), id],
     )?;
@@ -509,7 +509,7 @@ fn blocked(code: &Code, r: &RepoRow, why: String) -> Result<()> {
     tracing::warn!(repo = %r.full_name(), "{why}");
     update_link(code, &r.id, |l| {
         l.mirror.state = "paused".into();
-        l.mirror.error = Some(why);
+        l.mirror.error = Some(why.clone());
     })?;
     Ok(())
 }
@@ -527,7 +527,7 @@ pub async fn webhook(code: Arc<Code>, headers: HeaderMap, body: Bytes) -> Result
     let event = Event::parse(&event_name, &body).map_err(|e| Error::Invalid(e.to_string()))?;
     let delivery = header("x-github-delivery").map(str::to_string);
     if let Some(d) = &delivery {
-        let fresh = code.db.lock().execute("INSERT OR IGNORE INTO github_deliveries (id, at) VALUES (?, ?)", params![d, now()])? > 0;
+        let fresh = code.db.sql().execute("INSERT OR IGNORE INTO github_deliveries (id, at) VALUES (?, ?)", params![d, now()])? > 0;
         if !fresh {
             return Ok(StatusCode::OK);
         }
@@ -540,7 +540,7 @@ pub async fn webhook(code: Arc<Code>, headers: HeaderMap, body: Bytes) -> Result
                 tracing::warn!(event = %event_name, error = %e, "GitHub webhook failed");
                 // Let a redelivery try again.
                 if let Some(d) = &delivery {
-                    let _ = code.db.lock().execute("DELETE FROM github_deliveries WHERE id = ?", [d]);
+                    let _ = code.db.sql().execute("DELETE FROM github_deliveries WHERE id = ?", [d]);
                 }
             }
             r

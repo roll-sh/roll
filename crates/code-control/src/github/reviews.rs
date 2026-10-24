@@ -14,7 +14,7 @@ use crate::review::{Origin, Reviewer, ReviewerKind, Thread, Verdict};
 use crate::{Code, Error, Result, cs_id, new_id};
 use code_github::model::{CreateReview, DraftReviewComment, ReviewComment, User};
 use code_github::webhook::{CommentAction, PullRequestReviewCommentEvent, PullRequestReviewEvent, PullRequestReviewThreadEvent, ReviewAction, ThreadAction};
-use rusqlite::{OptionalExtension, params};
+use code_sql::{OptionalExtension, params};
 use serde_json::Value;
 
 const SOURCE: &str = "github";
@@ -54,7 +54,7 @@ fn revision_of(code: &Code, r: &RepoRow, c: &Change, commit: Option<&str>) -> Re
     }
     let rev: Option<i64> = code
         .db
-        .lock()
+        .sql()
         .query_row("SELECT revision FROM change_revisions WHERE change_id = ? AND head = ? ORDER BY revision DESC LIMIT 1", params![c.id, id], |r| r.get(0))
         .optional()?;
     Ok((rev.map(|r| r as u64).unwrap_or(0), Some(id)))
@@ -118,7 +118,7 @@ pub(crate) async fn review_event(code: &Code, hub: &Hub, r: &RepoRow, e: &PullRe
                 url: e.review.html_url.as_deref(),
             })?;
             // Inline comments that arrived before their review get linked to it.
-            code.db.lock().execute(
+            code.db.sql().execute(
                 "UPDATE review_threads SET review_id = (SELECT id FROM reviews WHERE repo_id = ?1 AND source = 'github' AND external_id = ?2) \
                  WHERE repo_id = ?1 AND review_id = ?3",
                 params![r.id, ext, format!("github:{ext}")],

@@ -15,7 +15,7 @@
 use crate::db::Db;
 use crate::model::{ChangeState, RepoRow, WorkItem, WorkState};
 use crate::{Code, Result, cs_id};
-use rusqlite::{OptionalExtension, params};
+use code_sql::{OptionalExtension, params};
 use code_store::ChangesetId;
 use serde_json::json;
 use tracing::{info, warn};
@@ -34,11 +34,11 @@ CREATE TABLE IF NOT EXISTS broken_main_at (
 impl Db {
     /// The commit a status-opened `broken-main` item was opened for.
     pub(crate) fn broken_at(&self, work_id: &str) -> Result<Option<String>> {
-        Ok(self.lock().query_row("SELECT changeset FROM broken_main_at WHERE work_id = ?", [work_id], |r| r.get(0)).optional()?)
+        Ok(self.sql().query_row("SELECT changeset FROM broken_main_at WHERE work_id = ?", [work_id], |r| r.get(0)).optional()?)
     }
 
     pub(crate) fn set_broken_at(&self, work_id: &str, cs: &str) -> Result<()> {
-        self.lock().execute(
+        self.sql().execute(
             "INSERT INTO broken_main_at (work_id, changeset) VALUES (?, ?) ON CONFLICT (work_id) DO UPDATE SET changeset = excluded.changeset",
             params![work_id, cs],
         )?;

@@ -114,6 +114,11 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     scheduling.
   - `crates/code-control` is the control plane: owners, repos, changes, work items, the git
     adapter and the `/v1/code` API.
+  - control.db goes through `crates/code-sql` (SQLite on one node, Postgres in a cluster; SQL in
+    SQLite's dialect). A read-then-write (numbering, claims, queue positions) is one `db.write`
+    closure; write closures may re-run, so they only touch the database: emit, cache and notify
+    after `write` returns. Never ignore a failed statement inside a write (it ends a Postgres
+    transaction): use `ON CONFLICT`, or check first.
   - `crates/code-preview` runs `roll.toml` checks and previews in containers.
   - Landing must stay O(change). Never read the full tree, scan history, or do repo-wide work
     inside the lander. CI never sits in front of it.
@@ -226,6 +231,7 @@ The product should feel alive: dots react to the cursor and the marks "think". E
       helpers in `src/test/`)
     - HTTP statuses and the auth matrix for every route: `code-control/tests/routes.rs`
     - event stream limits: `code-control/tests/streams.rs`
+    - two nodes racing on one control database: `code-control/tests/concurrency.rs`
 - **Local state:**
   - `.roll/` holds SQLite and branch data. Never commit it.
   - Test Postgres with `docker run --rm postgres:18-alpine psql "postgres://...@host.docker.internal:55432/main?options=endpoint%3D<ep>"`, because there is no local psql.

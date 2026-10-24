@@ -618,10 +618,25 @@ async fn pricing_caps_allowances_and_byok() {
     // The key isn't readable anywhere: not in the API, not in the database file.
     let g = ok(&t.a, "GET", "/v1/code/owners/acme/review-provider", None).await;
     assert!(!g.to_string().contains("owner-key") && g["key_last4"] == "9999");
-    let db = std::fs::read(t.a.dir.path().join("code").join("control.db")).unwrap();
-    let wal = std::fs::read(t.a.dir.path().join("code").join("control.db-wal")).unwrap_or_default();
     let has = |b: &[u8]| b.windows(b"owner-key".len()).any(|w| w == b"owner-key");
-    assert!(!has(&db) && !has(&wal));
+    match t.a.code.db.sql().pg_schema() {
+        None => {
+            let db = std::fs::read(t.a.dir.path().join("code").join("control.db")).unwrap();
+            let wal = std::fs::read(t.a.dir.path().join("code").join("control.db-wal")).unwrap_or_default();
+            assert!(!has(&db) && !has(&wal));
+        }
+        // Postgres: every row of every table, as text.
+        Some(_) => {
+            let sql = t.a.code.db.sql();
+            let tables: Vec<String> =
+                sql.query("SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()", (), |r| r.get(0)).unwrap();
+            assert!(tables.len() > 10, "{tables:?}");
+            for table in tables {
+                let rows: Vec<String> = sql.query(&format!("SELECT CAST(x AS TEXT) FROM {table} x"), (), |r| r.get(0)).unwrap();
+                assert!(rows.iter().all(|r| !has(r.as_bytes())), "{table} holds the key");
+            }
+        }
+    }
     let (s, _) = call(&t.a, "GET", "/v1/code/owners/acme/review-provider", None, Some(&t.mallory)).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, _) = call(&t.a, "PUT", "/v1/code/owners/acme/review-provider", Some(json!({ "api_key": "x" })), None).await;
