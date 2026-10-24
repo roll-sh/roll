@@ -1165,6 +1165,59 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
     /// one) belong to the last join. Of an equivalence class's equalities just one joins
     /// them: its first member of `a` with its first of `b`.
     fn crossing(&self, a: u32, b: u32) -> Vec<usize> {
+        let mut out = self.crossing_all(a, b);
+        out.retain(|&ci| !self.oj_const_redundant(ci, a, b));
+        out
+    }
+
+    /// reconsider_outer_join_clauses: a left join's `x = y` where each side's relation
+    /// equates its column with the same constant in its own restrictions (the outer side's
+    /// written so, the nullable side's derived from it, `optimize::join`) is true for every
+    /// pair it is checked on while neither relation is null-extended yet: Postgres replaces
+    /// it with a constant-TRUE clause (its outer-join form, the outer side's column nulled
+    /// by a lower outer join, keeps the clause).
+    fn oj_const_redundant(&self, ci: usize, a: u32, b: u32) -> bool {
+        let c = &self.clauses[ci];
+        let left_oj = match c.sj {
+            Some(t) => self.sjs.get(t).is_some_and(|j| j.kind == JoinKind::Left),
+            None => !self.general && c.on && matches!(self.kind, JoinKind::Left | JoinKind::Right),
+        };
+        let Some((x, y, xl, yl)) = &c.eq else { return false };
+        if !left_oj || !c.ecable || xl.count_ones() != 1 || yl.count_ones() != 1 {
+            return false;
+        }
+        let constant = |e: &Expr| -> Option<Expr> {
+            let g = key_col(e)?;
+            let l = *self.leaf_of.get(g)?;
+            let (_, rel) = self.leaves[l].scan.as_ref()?;
+            let col = g - self.leaves[l].off;
+            rel.quals.iter().find_map(|q| {
+                let Expr::Call(d, args, _) = q else { return None };
+                if d.name != "=" || args.len() != 2 {
+                    return None;
+                }
+                match (&args[0], &args[1]) {
+                    (k, Expr::Const(..)) if key_col(k) == Some(col) => Some(args[1].clone()),
+                    (Expr::Const(..), k) if key_col(k) == Some(col) => Some(args[0].clone()),
+                    _ => None,
+                }
+            })
+        };
+        let (Some(kx), Some(ky)) = (constant(x), constant(y)) else { return false };
+        if !kx.same_as(&ky) || x.ty().without_typmod() != y.ty().without_typmod() {
+            return false;
+        }
+        // (Neither relation nulled by an outer join made inside its side.)
+        let side = |l: u32| if l & a != 0 { a } else { b };
+        let fresh = |l: u32| {
+            self.sjs
+                .iter()
+                .all(|t| t.syn_r & l == 0 || t.syn_l & side(l) == 0)
+        };
+        fresh(*xl) && fresh(*yl)
+    }
+
+    fn crossing_all(&self, a: u32, b: u32) -> Vec<usize> {
         if self.general {
             return self.general_restrict(a, b);
         }

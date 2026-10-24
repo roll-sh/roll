@@ -570,11 +570,12 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             let (old_hs, old_kf) = (meta.hash_swapped.clone(), meta.key_flipped.clone());
             let mut kept = meta.kept;
             let old_pushed = meta.pushed;
-            // (An inner join's inputs' own restrictions are class members too.)
-            let (lhave, rhave) = if kind == JoinKind::Inner && params.is_empty() {
-                (input_restrictions(&left), input_restrictions(&right))
-            } else {
-                (Vec::new(), Vec::new())
+            // (An inner join's inputs' own restrictions are class members too; a LATERAL
+            // right side's aren't looked into, its left side's are.)
+            let (lhave, rhave) = match kind {
+                JoinKind::Inner if params.is_empty() => (input_restrictions(&left), input_restrictions(&right)),
+                JoinKind::Inner => (input_restrictions(&left), Vec::new()),
+                _ => (Vec::new(), Vec::new()),
             };
             // (What the join was written as, and the PlaceHolderVars a projection over it
             // computes, stay with it.)
@@ -2021,6 +2022,12 @@ fn oj_class_clauses(above: Vec<Expr>, nleft: usize, all: &[Expr]) -> Vec<Expr> {
 /// before the join above is formed). For `ec_constants`, which takes only their
 /// `column = constant` equalities.
 fn input_restrictions(p: &Plan) -> Vec<Expr> {
+    restrictions(p, false)
+}
+
+/// `input_restrictions`, `lower`: the nullable sides' too (a lower join domain's).
+fn restrictions(p: &Plan, lower: bool) -> Vec<Expr> {
+    let input_restrictions = |q: &Plan| restrictions(q, lower);
     let mut out = Vec::new();
     match p {
         Plan::Scan(s) => {
@@ -2060,10 +2067,23 @@ fn input_restrictions(p: &Plan) -> Vec<Expr> {
             left,
             right,
             nleft,
+            params,
             ..
         } => {
             out.extend(input_restrictions(left));
-            out.extend(input_restrictions(right).into_iter().map(|e| e.shift_cols(*nleft as isize)));
+            if params.is_empty() {
+                out.extend(input_restrictions(right).into_iter().map(|e| e.shift_cols(*nleft as isize)));
+            }
+        }
+        // (An outer join's preserved side: its restrictions hold for every row of the join,
+        // in the same join domain; the nullable side's are a lower domain's.)
+        Plan::Join { kind: kind @ (JoinKind::Left | JoinKind::Right), left, right, nleft, params, .. } => {
+            if *kind == JoinKind::Left || lower {
+                out.extend(input_restrictions(left));
+            }
+            if (*kind == JoinKind::Right || lower) && params.is_empty() {
+                out.extend(input_restrictions(right).into_iter().map(|e| e.shift_cols(*nleft as isize)));
+            }
         }
         _ => {}
     }
@@ -3273,6 +3293,40 @@ pub fn join(
         let (lhave, rhave) = (input_restrictions(&left), input_restrictions(&right));
         broken = ec_constants(cat, &mut lpush, &mut rpush, &mut no_hash, &mut rest, nleft, (true, true), &mut kept, (&lhave, &rhave));
     }
+    // reconsider_outer_join_clause: an outer join's `outer = inner` whose outer column its
+    // side equates with a constant (in any join domain below) gives the nullable side
+    // `inner = constant`; the clause itself stays (the join search drops it where it is
+    // the constant-TRUE clause, `oj_const_redundant`).
+    if params.is_empty() && matches!(kind, JoinKind::Left | JoinKind::Right) {
+        let have: Vec<Expr> = if kind == JoinKind::Left {
+            restrictions(&left, true)
+        } else {
+            restrictions(&right, true).into_iter().map(|e| e.shift_cols(nleft as isize)).collect()
+        };
+        for p in &rest {
+            let Some((l, r)) = equi_key(p, nleft) else { continue };
+            let (ov, iv) = if kind == JoinKind::Left { (l, r) } else { (r, l) };
+            if iv.ty().without_typmod() != ov.ty().without_typmod() {
+                continue;
+            }
+            for h in &have {
+                let Some((x, k, def)) = col_const(h) else { continue };
+                if !x.same_as(&ov) {
+                    continue;
+                }
+                let d = Expr::Call(def, vec![iv.clone(), k], DataType::Bool);
+                if kind == JoinKind::Left {
+                    let d = d.shift_cols(-(nleft as isize));
+                    if !rpush.iter().any(|e| e.same_as(&d)) {
+                        rpush.push(d);
+                    }
+                } else if !lpush.iter().any(|e| e.same_as(&d)) {
+                    lpush.push(d);
+                }
+                break;
+            }
+        }
+    }
     let saved_broken = BROKEN_DUPS.with(|b| b.replace(broken));
     // (An outer join's ON conditions pushed into its nullable side: their columns.)
     let mut pushed: Vec<usize> = Vec::new();
@@ -3330,6 +3384,27 @@ pub fn join(
             kept,
             ..Default::default()
         }),
+    }
+}
+
+/// `x = k`, a column (through a relabeling) equated with a constant, nothing volatile: the
+/// column, the constant and the `=`.
+fn col_const(e: &Expr) -> Option<(Expr, Expr, Arc<crate::sql::func::FuncDef>)> {
+    let Expr::Call(d, args, _) = e else { return None };
+    if d.name != "=" || args.len() != 2 || e.is_volatile() {
+        return None;
+    }
+    let colish = |x: &Expr| match x {
+        Expr::Col(..) => true,
+        Expr::Relabel(y, _) => matches!(&**y, Expr::Col(..)),
+        _ => false,
+    };
+    match (&args[0], &args[1]) {
+        (x, k @ Expr::Const(..)) if colish(x) => Some((x.clone(), k.clone(), d.clone())),
+        (k @ Expr::Const(..), x) if colish(x) && args[0].ty().without_typmod() == args[1].ty().without_typmod() => {
+            Some((x.clone(), k.clone(), d.clone()))
+        }
+        _ => None,
     }
 }
 
