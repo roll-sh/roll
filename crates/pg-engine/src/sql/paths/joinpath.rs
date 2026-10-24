@@ -829,6 +829,31 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
             }
             return joins::eqjoinsel_inner(cat, fmt, &ja, &jb);
         }
+        // neqjoinsel: a built-in `<>` between two items' values is the negator's (`=`)
+        // eqjoinsel taken from one; for a semi / anti join, one minus the outer side's
+        // null fraction.
+        if let Expr::Call(d, args, _) = &c.expr
+            && d.name == "<>"
+            && args.len() == 2
+            && crate::sql::costs::user_operator(cat, d).is_none()
+            && args[0].ty().without_typmod() == args[1].ty().without_typmod()
+            && !crate::sql::explain::expr_volatile_deep(&c.expr)
+        {
+            let (al, bl) = (self.leaves_of(&args[0]), self.leaves_of(&args[1]));
+            if al != 0 && bl != 0 && al & bl == 0 {
+                let (ja, jb) = (self.join_var(&args[0]), self.join_var(&args[1]));
+                if let Some((inner_set, _)) = semi_inner {
+                    let o = if bl & inner_set != 0 && al & inner_set == 0 { &ja } else { &jb };
+                    let nf = o
+                        .var
+                        .as_ref()
+                        .and_then(|v| crate::sql::costs::col_stats_of(cat, v))
+                        .map_or(0.0, |s| s.nullfrac as f64);
+                    return (1.0 - nf).clamp(0.0, 1.0);
+                }
+                return (1.0 - joins::eqjoinsel_inner(cat, fmt, &ja, &jb)).clamp(0.0, 1.0);
+            }
+        }
         let vars = |i: usize| self.var_of(i).0;
         let est = Est {
             cat,
@@ -4981,7 +5006,12 @@ impl Search<'_, '_, '_> {
                 } else {
                     self.clauses.iter().any(|c| c.leaves & rs != 0 && c.leaves & !rs != 0) || self.const_ec_joins(rs)
                 };
-                let first = if level == 2 { pi + 1 } else { 0 };
+                // (make_rels_by_clause_joins starts past the rel itself at level 2;
+                // make_rels_by_clauseless_joins tries every base rel, where any order is
+                // legal or make_join_rel checks it: an outer join of two items keeps its
+                // sides' order.)
+                let any_order = self.general || self.kind == JoinKind::Inner;
+                let first = if level == 2 && (has_join || !any_order) { pi + 1 } else { 0 };
                 for &b in levels[1].iter().skip(first) {
                     let bs = self.rels[b].set;
                     if rs & bs != 0 {
@@ -6021,6 +6051,7 @@ impl Search<'_, '_, '_> {
                         phv_join: false,
                         lifted_by: 0,
                         tlist: self.tlist_order(p.set, &both),
+                        explicit: false,
                     }),
                 };
                 let layout = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
@@ -6119,6 +6150,7 @@ fn gather(
     clauses: &mut Vec<(Expr, bool)>,
     top: bool,
     phvs: &mut Vec<(usize, Expr, u32, u32)>,
+    limit: usize,
 ) {
     // A pulled-up subquery's inner join computing PlaceHolderVars (an outer join above
     // nulled it as written): its relations are the group's.
@@ -6134,7 +6166,7 @@ fn gather(
         let first = leaves.len();
         match &**input {
             Plan::Filter { input: j, pred } if matches!(&**j, Plan::Join { kind: JoinKind::Inner, params, .. } if params.is_empty()) => {
-                gather(j, off, leaves, clauses, false, phvs);
+                gather(j, off, leaves, clauses, false, phvs, limit);
                 let mut parts = Vec::new();
                 conjuncts(pred.clone(), &mut parts);
                 for e in parts {
@@ -6145,7 +6177,7 @@ fn gather(
                 leaves.push((p.clone(), off));
                 return;
             }
-            j => gather(j, off, leaves, clauses, false, phvs),
+            j => gather(j, off, leaves, clauses, false, phvs, limit),
         }
         let scope = (first..leaves.len()).fold(0u32, |m, i| m | (1u32 << i));
         for (i, e) in exprs.iter().enumerate() {
@@ -6170,9 +6202,23 @@ fn gather(
         && meta.from_call.is_none()
     {
         let inner_only = *kind == JoinKind::Inner;
-        if inner_only {
-            gather(left, off, leaves, clauses, false, phvs);
-            gather(right, off + nleft, leaves, clauses, false, phvs);
+        // deconstruct_recurse: JOIN syntax whose sides together are more items than
+        // join_collapse_limit isn't folded into one join problem; a side of several items
+        // is a problem of its own (a leaf planned as its group).
+        let sizes = (inner_only && meta.explicit && limit != usize::MAX)
+            .then(|| (joinlist_len(left, limit), joinlist_len(right, limit)))
+            .filter(|(l, r)| l + r > limit);
+        if let Some((nl, nr)) = sizes {
+            for (side, o, n) in [(left, off, nl), (right, off + nleft, nr)] {
+                if n > 1 {
+                    leaves.push(((**side).clone(), o));
+                } else {
+                    gather(side, o, leaves, clauses, false, phvs, limit);
+                }
+            }
+        } else if inner_only {
+            gather(left, off, leaves, clauses, false, phvs, limit);
+            gather(right, off + nleft, leaves, clauses, false, phvs, limit);
         } else {
             leaves.push(((**left).clone(), off));
             leaves.push(((**right).clone(), off + nleft));
@@ -6244,7 +6290,7 @@ fn gather(
             || crate::sql::plan::phv_projection(input).is_some())
         && outerjoins::absorbable(pred)
     {
-        gather(input, off, leaves, clauses, false, phvs);
+        gather(input, off, leaves, clauses, false, phvs, limit);
         let mut parts = Vec::new();
         conjuncts(pred.clone(), &mut parts);
         for e in parts {
@@ -6253,6 +6299,32 @@ fn gather(
         return;
     }
     leaves.push((p.clone(), off));
+}
+
+/// The items of `p`'s joinlist as deconstruct_recurse makes it (`gather`'s leaves): an
+/// explicit inner join's sides folded within `limit` (join_collapse_limit), else its two
+/// parts; anything else one item.
+fn joinlist_len(p: &Plan, limit: usize) -> usize {
+    match p {
+        Plan::Join {
+            kind: JoinKind::Inner,
+            left,
+            right,
+            params,
+            meta,
+            ..
+        } if params.is_empty() && meta.from_call.is_none() => {
+            let n = joinlist_len(left, limit) + joinlist_len(right, limit);
+            if meta.explicit && n > limit { 2 } else { n }
+        }
+        Plan::Filter { input, pred }
+            if matches!(&**input, Plan::Join { kind: JoinKind::Inner, params, meta, .. } if params.is_empty() && meta.from_call.is_none())
+                && outerjoins::absorbable(pred) =>
+        {
+            joinlist_len(input, limit)
+        }
+        _ => 1,
+    }
 }
 
 /// What the binder's `=` for a type depends on: the catalog and the search path. (A `Weak`
@@ -7068,7 +7140,17 @@ impl Planner<'_, '_> {
                     return None;
                 }
                 GATHER_FAILED.with(|f| f.set(false));
-                gather(p, 0, &mut raw_leaves, &mut raw_clauses, true, &mut group_phvs);
+                // (join_collapse_limit below the reorder limit: JOIN syntax keeps its tree.)
+                let limit = self
+                    .ctx
+                    .sess
+                    .settings
+                    .borrow()
+                    .get_raw("join_collapse_limit")
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .filter(|&l| l < COLLAPSE_LIMIT)
+                    .map_or(usize::MAX, |l| l.max(1));
+                gather(p, 0, &mut raw_leaves, &mut raw_clauses, true, &mut group_phvs, limit);
                 if GATHER_FAILED.with(|f| f.replace(false)) {
                     return None;
                 }

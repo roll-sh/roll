@@ -473,10 +473,20 @@ impl Planner<'_, '_> {
             _ => 0,
         };
         let mut tried = 0;
+        // (remove_self_joins_recurse runs the group again while a pass removes one: the
+        // clauses over the kept relation may pair it with a relation tried before.)
+        let mut pass_start = 0;
         loop {
             let mut by_rti: Vec<usize> = (0..leaves.len()).collect();
             by_rti.sort_by_key(|&i| (rti(&leaves[i].0), i));
-            let Some(&r) = by_rti.get(tried) else { break };
+            let Some(&r) = by_rti.get(tried) else {
+                if merges.len() > pass_start && leaves.len() >= 2 {
+                    pass_start = merges.len();
+                    tried = 0;
+                    continue;
+                }
+                break;
+            };
             let same_side = |k: usize| {
                 sides.iter().all(|(l, rr)| {
                     (l >> r & 1 == l >> k & 1) && (rr >> r & 1 == rr >> k & 1)

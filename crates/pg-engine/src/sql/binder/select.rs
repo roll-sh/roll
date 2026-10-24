@@ -6122,6 +6122,14 @@ impl Binder<'_, '_> {
             } else {
                 optimize::join(&self.cat, kind, lp, rp, cond, rparams, nleft, nright)
             };
+            // (JOIN syntax: its sides are one join problem only within join_collapse_limit.)
+            let mut plan = plan;
+            if kind == JoinKind::Inner
+                && let Plan::Join { kind: JoinKind::Inner, meta, nleft: nl, .. } = &mut plan
+                && *nl == nleft
+            {
+                meta.explicit = true;
+            }
             Ok((plan, scope, lparams))
         })();
         self.level().scope = saved;

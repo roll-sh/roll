@@ -288,6 +288,10 @@ pub struct JoinMeta {
     /// columns together, the relations as the first pair make_join_rel built the join
     /// relation from has them (build_joinrel_tlist), whichever input is outer.
     pub tlist: Vec<usize>,
+    /// An inner join written as JOIN syntax (a JoinExpr, not a FROM list's comma):
+    /// deconstruct_recurse folds its sides into one join problem only within
+    /// join_collapse_limit.
+    pub explicit: bool,
 }
 
 /// `p` with its join (if it is one) marked as computing PlaceHolderVars in the projection
