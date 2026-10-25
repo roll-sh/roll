@@ -335,15 +335,22 @@ impl Cluster {
                 }
             }
             Err(e) if e.is_connect() => Err(Failed::Connect(e.to_string())),
+            // Never written: the pooled connection closed before the request went out, so
+            // nothing ran and any request may go again.
+            Err(e) if buffered && never_sent(&e) => {
+                tracing::info!(to = %to.id, error = %chain(&e), "a forwarded request wasn't sent (its connection closed); sending it again");
+                Err(Failed::Connect(chain(&e)))
+            }
             // A pooled connection the other side closed as we reused it (or one that broke
             // before an answer came): an idempotent request whose body we kept can go again.
             Err(e) if buffered && idempotent(&parts.method) => {
-                tracing::info!(to = %to.id, error = %e, "forwarded request failed before an answer; it will be sent again");
-                Err(Failed::Connect(e.to_string()))
+                tracing::info!(to = %to.id, error = %chain(&e), "forwarded request failed before an answer; it will be sent again");
+                Err(Failed::Connect(chain(&e)))
             }
             Err(e) => {
-                tracing::warn!(to = %to.id, error = %e, "forwarded request failed");
-                Ok(plain(StatusCode::BAD_GATEWAY, format!("forwarding to node {} failed: {e}\n", to.id)))
+                let why = chain(&e);
+                tracing::warn!(to = %to.id, error = %why, "forwarded request failed");
+                Ok(plain(StatusCode::BAD_GATEWAY, format!("forwarding to node {} failed: {why}\n", to.id)))
             }
         }
     }
@@ -482,6 +489,30 @@ impl Cluster {
 
 async fn ping(State(c): State<Arc<Cluster>>) -> String {
     c.node_id().to_string()
+}
+
+/// An error and its sources, `: `-separated (reqwest's own text leaves out the cause).
+fn chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut cur = e.source();
+    while let Some(c) = cur {
+        out.push_str(": ");
+        out.push_str(&c.to_string());
+        cur = c.source();
+    }
+    out
+}
+
+/// Whether hyper gave up on a request before writing it (its pooled connection had closed).
+fn never_sent(e: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(c) = cur {
+        if c.downcast_ref::<hyper::Error>().is_some_and(hyper::Error::is_canceled) {
+            return true;
+        }
+        cur = c.source();
+    }
+    false
 }
 
 /// Methods that may be sent twice: they don't change anything (RFC 9110 safe methods; PUT and
