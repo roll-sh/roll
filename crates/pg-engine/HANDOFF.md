@@ -261,6 +261,17 @@ Prefix scratch objects, and drop scratch databases and roles afterwards.
   `~/.cache` data when you're done.
 - Stop any engine you start after each run; never kill processes, drop databases or delete
   files you didn't create.
+- **Pushing with several agents on one branch:** commit, then rebase onto the branch and push
+  (`git push origin HEAD:<branch>`), never with force. Build commits from rebases of real
+  commits; never copy files or a tree out of a snapshot worktree. ddffa59 did that, was based on
+  an older tree, and silently reverted three agents' commits (b99558d put them back). Right
+  before every push, fetch and run `git diff --stat origin/<branch> HEAD`: it must list only
+  your own changes.
+- **Re-verifying after a rebase:** if the commits you rebased onto don't touch code near yours
+  (for planner work that means `src/sql/paths*`, joins, costs, binder optimize/sublink/lift and
+  explain), crate tests and clippy are enough; re-run the regress pair only when they do.
+  Otherwise a busy branch keeps moving under a long verification and the batch never lands.
+- `/tmp` is tmpfs (RAM): keep large scratch data in `~/.cache/<agent>/`.
 
 ## Conventions
 
