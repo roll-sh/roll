@@ -277,7 +277,8 @@ engine's data directory and binary copy are per process, never the main suite's.
   binary>` is what `cargo test -p pg-engine --test pg_regress --no-run` built, copied aside;
   or run `cargo test -p pg-engine --test pg_regress -- pg_regress --exact --ignored
   --nocapture` with the same variables.) Compare the two `REPORT.md`s' per-file rows and
-  their `hunks/` directories. Remove the containers when done.
+  their `hunks/` directories. Remove the containers when done with `docker rm -fv` (the image
+  declares a data volume: a plain `rm -f` leaves the cluster behind as a dangling volume).
 - A full run outlives a tool's 2-hour background limit: start it detached (`setsid nohup ... &`)
   and poll its log. A run killed midway leaves its `PGREGRESS_DB` on the reference (drop it)
   and skips the cleanup of the roles / tablespaces it made.
