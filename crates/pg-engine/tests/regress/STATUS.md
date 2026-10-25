@@ -8,10 +8,10 @@ file sees the catalogs the files before it left, as `pg_regress` gives them. The
 them (HANDOFF.md, "Regression suite"): edit only the prose by hand. `REPORT.md` and
 `results.tsv` next to this file are that run's report.
 
-Round 18, agent 57 (measurement): full runs of `0201348` (f3fc889 plus this round's change)
-against private references measured **51147** in a debug build (`a57-ref1`, the generated
+Round 18, agent 57 (measurement): full runs of `ed6356cc` (6be2da44 plus this round's change)
+against private references measured **51148** in a debug build (`a57-ref1`, the generated
 blocks below) and in a release build (`a57-ref2`), identical per file, per unit and in every
-hunk. Against `242734d`'s 51142: newly matching join 362, 363, 783, 808 and partition_join 204,
+hunk; of `0201348` (f3fc889 plus the change) 51147 both ways (join 360 since 93f18763). Against `242734d`'s 51142: newly matching join 360, 362, 363, 783, 808 and partition_join 204,
 nothing newly differing. A debug full run of `8ef2f59` measured 51145 (only 783, 808 and 204
 new), and one of `242734d` on a private reference reproduced 51142. No regression in
 242734d..f3fc889: the lower numbers reported meanwhile (51141 at `85ec54f` and at agent 48's
@@ -50,14 +50,14 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 ## Summary
 
 <!-- generated: summary -->
-From the full run of commit `0201348` (debug build of the engine, 2026-10-25 08:25 UTC, reference `a57-ref1`; cluster-global objects it had before: none), written by the harness (HANDOFF.md, "Regression suite"); don't edit these numbers by hand.
+From the full run of commit `ed6356cc` (debug build of the engine, 2026-10-25 09:30 UTC, reference `a57-ref1`; cluster-global objects it had before: none), written by the harness (HANDOFF.md, "Regression suite"); don't edit these numbers by hand.
 
 | | |
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51147 (**99.99%**) |
-| units differing | 3 |
+| units matching | 51148 (**100.00%**) |
+| units differing | 2 |
 | files fully matching | 228 of 230 |
 | reference output == expected/*.out | 203 of 230 files |
 | engine output == expected/*.out (pg_regress "ok") | 201 files |
@@ -70,20 +70,20 @@ From the full run of commit `0201348` (debug build of the engine, 2026-10-25 08:
 <!-- generated: differing units -->
 | file | differing | units (harness class) |
 |---|---:|---|
-| join | 2 | 360, 368 (wrong EXPLAIN) |
+| join | 1 | 368 (wrong EXPLAIN) |
 | partition_prune | 1 | 410 (wrong result) |
 
 | harness class | units |
 |---|---:|
 | wrong result | 1 |
-| wrong EXPLAIN | 2 |
+| wrong EXPLAIN | 1 |
 <!-- end generated: differing units -->
 
 ## Remaining differences, classified
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 3 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 2 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -91,10 +91,11 @@ From the full run of commit `0201348` (debug build of the engine, 2026-10-25 08:
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 3 units
-join (2: 360, 368), partition_prune (1: 410)
+### EXPLAIN (group C1) — 2 units
+join (1: 368), partition_prune (1: 410)
 (join 808 and partition_join 204 match since round 16, agent 47, join 783 since round 16,
-agent 46, and join 362 / 363 since round 16, agent 52, counted by agent 57's full runs.)
+agent 46, join 362 / 363 since round 16, agent 52, and join 360 since agent 55 (93f18763),
+counted by agent 57's full runs.)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -4885,7 +4886,7 @@ file skips itself, `\quit`, so it has no units either way).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 923 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
+| join | 925 | 924 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
 | aggregates | 556 | 556 | 100% | yes | yes |  |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |

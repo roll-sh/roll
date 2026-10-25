@@ -1,11 +1,11 @@
 # schedule=full
-# commit=0201348
-# date=2026-10-25 08:25 UTC
+# commit=ed6356cc
+# date=2026-10-25 09:30 UTC
 # reference=a57-ref1
 # timeout=300
 # reference_preexisting=
 # engine_build=debug
-# files=230 units=51150 matched=51147 differing=3 files_matching=228 ref_expected=203 engine_expected=201
+# files=230 units=51150 matched=51148 differing=2 files_matching=228 ref_expected=203 engine_expected=201
 file	units	match	ref_exp	eng_exp	engine_status	panics	differing
 test_setup	79	79	no	no	ok	0	
 boolean	99	99	yes	yes	ok	0	
@@ -107,7 +107,7 @@ select_having	23	23	yes	yes	ok	0
 subselect	356	356	yes	yes	ok	0	
 union	198	198	yes	yes	ok	0	
 case	64	64	yes	yes	ok	0	
-join	925	923	yes	no	ok	0	360:wrong EXPLAIN,368:wrong EXPLAIN
+join	925	924	yes	no	ok	0	368:wrong EXPLAIN
 aggregates	556	556	yes	yes	ok	0	
 transactions	433	433	yes	yes	ok	0	
 random	48	48	yes	yes	ok	0	
