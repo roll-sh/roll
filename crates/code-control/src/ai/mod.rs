@@ -59,6 +59,9 @@ pub struct AiConfig {
     pub retry_ms: i64,
     /// Build the codebase index (deep reviews, `/search`).
     pub index: bool,
+    /// How long a running job's spend reservation lasts without being renewed (it's renewed
+    /// every third of that): how soon a dead node's holds stop counting against caps.
+    pub reservation_ttl_ms: i64,
 }
 
 impl Default for AiConfig {
@@ -73,6 +76,7 @@ impl Default for AiConfig {
             retry: RetryPolicy::default(),
             retry_ms: 30_000,
             index: true,
+            reservation_ttl_ms: 5 * 60_000,
         }
     }
 }
@@ -135,77 +139,127 @@ pub struct Ai {
     pub(crate) first_builds: tokio::sync::Semaphore,
     /// First builds running in the background: done when the value turns true.
     pub(crate) building: parking_lot::Mutex<std::collections::HashMap<String, tokio::sync::watch::Receiver<bool>>>,
-    /// Hosted spend reserved by reviews and chats still running, per owner: checked together
-    /// with the month's metered spend, so concurrent jobs can't overrun a cap.
-    pub(crate) reserved: parking_lot::Mutex<std::collections::HashMap<String, Held>>,
 }
 
-/// What running jobs hold for one owner: spend, and free public reviews they claimed.
-#[derive(Clone, Copy, Default)]
-pub(crate) struct Held {
-    usd: f64,
-    free: u32,
-}
-
-/// Spend held for a running job; released when dropped (after the job is metered).
-pub(crate) struct Reservation<'a> {
-    ai: &'a Ai,
-    owner_id: String,
-    usd: f64,
+/// Spend (and possibly one of the month's free public reviews) held for a running job in an
+/// `ai_reservations` row, which every node's cap checks count. Released when dropped, unless
+/// [`Code::meter`] already released it with the job's usage; renewed while it's held (when there
+/// is a runtime), so it lapses only when its node is gone.
+pub(crate) struct Reservation {
+    sql: code_sql::Db,
+    id: String,
+    /// What it holds.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub usd: f64,
     /// It claimed one of the month's free public reviews: it's metered as free, and nothing
     /// else can claim that one while it runs.
     pub free: bool,
+    renew: Option<tokio::task::AbortHandle>,
+    settled: bool,
 }
 
-impl Drop for Reservation<'_> {
-    fn drop(&mut self) {
-        let mut m = self.ai.reserved.lock();
-        if let Some(h) = m.get_mut(&self.owner_id) {
-            h.usd -= self.usd;
-            h.free -= u32::from(self.free);
-            if h.usd <= 1e-9 && h.free == 0 {
-                m.remove(&self.owner_id);
-            }
-        }
-    }
-}
-
-impl Ai {
-    /// Reserve a job's price for the owner if the month's metered spend plus what running jobs
-    /// hold plus the price stays within `cap` (`None`: no cap). `spent` reads the month's metered
-    /// spend and free public reviews used; `price` prices the job given the free reviews used,
-    /// counting the ones running jobs claimed, so two jobs can't both take the last free one.
-    /// The check and the reservation happen under one lock.
-    pub(crate) fn reserve(
-        &self,
+impl Reservation {
+    /// Reserve a job's price for the owner in `month` if metered spend plus what running jobs
+    /// hold (on every node) plus the price stays within `cap` (`None`: no cap); `price` prices
+    /// the job given the free public reviews used and held. `None` when the cap refuses it.
+    pub(crate) fn take(
+        db: &crate::db::Db,
         owner_id: &str,
+        month: &str,
         cap: Option<f64>,
-        spent: impl FnOnce() -> Result<(f64, u32)>,
-        price: impl FnOnce(u32) -> pricing::Price,
-    ) -> Result<Option<Reservation<'_>>> {
-        let mut m = self.reserved.lock();
-        let held = m.get(owner_id).copied().unwrap_or_default();
-        let (spent, free_used) = spent()?;
-        let p = price(free_used.saturating_add(held.free));
-        if let Some(cap) = cap
-            && spent + held.usd + p.charged_usd > cap + 1e-9
-        {
-            return Ok(None);
+        ttl_ms: i64,
+        price: impl Fn(u32) -> pricing::Price,
+    ) -> Result<Option<Reservation>> {
+        let ttl_ms = ttl_ms.max(1);
+        let sql = db.sql().clone();
+        let now = sql.now_ms()?;
+        let id = new_id("air");
+        let Some(p) = db.reserve_ai(&id, owner_id, month, cap, now, ttl_ms, &price)? else { return Ok(None) };
+        let renew = tokio::runtime::Handle::try_current().ok().map(|rt| {
+            let (sql, id) = (sql.clone(), id.clone());
+            rt.spawn(async move {
+                let every = std::time::Duration::from_millis((ttl_ms / 3).max(1) as u64);
+                loop {
+                    tokio::time::sleep(every).await;
+                    let (sql, id) = (sql.clone(), id.clone());
+                    // Off the runtime's threads: a database call blocks.
+                    let r = tokio::task::spawn_blocking(move || {
+                        let now = sql.now_ms()?;
+                        store::renew_reservation(&sql, &id, now + ttl_ms)
+                    })
+                    .await;
+                    match r {
+                        Ok(Ok(true)) => {}
+                        Ok(Ok(false)) => {
+                            tracing::warn!("a running job's spend reservation lapsed; the owner's cap may be overrun by this job");
+                            return;
+                        }
+                        Ok(Err(e)) => tracing::warn!(error = %e, "renewing a spend reservation"),
+                        Err(_) => return,
+                    }
+                }
+            })
+            .abort_handle()
+        });
+        Ok(Some(Reservation { sql, id, usd: p.charged_usd, free: p.free, renew, settled: false }))
+    }
+
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The job was metered, and its row deleted in the same transaction.
+    fn settled(&mut self) {
+        self.settled = true;
+        if let Some(r) = self.renew.take() {
+            r.abort();
         }
-        let h = m.entry(owner_id.to_string()).or_default();
-        h.usd += p.charged_usd;
-        h.free += u32::from(p.free);
-        Ok(Some(Reservation { ai: self, owner_id: owner_id.to_string(), usd: p.charged_usd, free: p.free }))
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if let Some(r) = self.renew.take() {
+            r.abort();
+        }
+        if !self.settled
+            && let Err(e) = store::release_reservation(&self.sql, &self.id)
+        {
+            // It lapses on its own.
+            tracing::warn!(error = %e, "releasing a spend reservation");
+        }
+    }
+}
+
+impl Code {
+    /// [`Reservation::take`] with the configured lifetime.
+    pub(crate) fn reserve(&self, owner_id: &str, month: &str, cap: Option<f64>, price: impl Fn(u32) -> pricing::Price) -> Result<Option<Reservation>> {
+        Reservation::take(&self.db, owner_id, month, cap, self.config.review.reservation_ttl_ms, price)
     }
 
-    /// Spend held by running jobs for this owner.
+    /// Record a metered job and release its reservation in one transaction.
+    pub(crate) fn meter(&self, usage: &store::UsageRow, reservation: Option<&mut Reservation>) -> Result<()> {
+        let id = reservation.as_deref().map(|r| r.id().to_string());
+        self.db.meter(usage, id.as_deref())?;
+        if let Some(r) = reservation {
+            r.settled();
+        }
+        Ok(())
+    }
+
+    /// Spend held by running jobs for this owner, on every node.
     pub fn reserved_usd(&self, owner_id: &str) -> f64 {
-        self.reserved.lock().get(owner_id).map(|h| h.usd).unwrap_or(0.0)
+        self.reserved(owner_id).0
     }
 
-    /// Free public reviews claimed by running jobs for this owner.
+    /// Free public reviews claimed by running jobs for this owner, on every node.
     pub fn reserved_free(&self, owner_id: &str) -> u32 {
-        self.reserved.lock().get(owner_id).map(|h| h.free).unwrap_or(0)
+        self.reserved(owner_id).1
+    }
+
+    fn reserved(&self, owner_id: &str) -> (f64, u32) {
+        let now = self.db.sql().now_ms().unwrap_or_else(|_| crate::db::now_ms());
+        self.db.reserved(owner_id, now).unwrap_or_default()
     }
 }
 
@@ -232,7 +286,6 @@ impl Ai {
             index_locks: parking_lot::Mutex::new(Default::default()),
             first_builds: tokio::sync::Semaphore::new(1),
             building: parking_lot::Mutex::new(Default::default()),
-            reserved: parking_lot::Mutex::new(Default::default()),
         }
     }
 }
@@ -849,32 +902,77 @@ mod tests {
         assert_eq!(month_of(1_792_540_800), "2026-10");
     }
 
-    /// Many jobs reserving at once never hold more than the cap, nor more free reviews than
-    /// are left, even when reading the month's spend is slow; dropping releases both.
-    #[test]
-    fn reservations_hold_the_cap_and_the_free_reviews_under_contention() {
+    /// control.db in `dir` (or its Postgres schema with `ROLL_CODE_TEST_DATABASE`); opening the
+    /// same `dir` again is another node on the same database, with connections of its own.
+    fn node(dir: &std::path::Path) -> crate::db::Db {
+        let sql = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.join("control.db")), "control").unwrap();
+        crate::db::Db::open(sql).unwrap()
+    }
+
+    /// A metered review: `price` charged, free or not.
+    fn metered(db: &crate::db::Db, owner: &str, month: &str, price: f64, free: bool) {
+        db.insert_usage(&usage(owner, month, price, free)).unwrap();
+    }
+
+    fn usage(owner: &str, month: &str, price: f64, free: bool) -> store::UsageRow {
+        store::UsageRow {
+            id: new_id("use"),
+            owner_id: owner.into(),
+            repo_id: "repo_1".into(),
+            change_id: None,
+            review_id: None,
+            kind: "review".into(),
+            mode: "standard".into(),
+            chosen_by: "settings".into(),
+            reasons: Vec::new(),
+            speed: "balanced".into(),
+            provider: "anthropic".into(),
+            model: "m".into(),
+            key_source: "hosted".into(),
+            files_reviewed: 1,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
+            provider_cost_usd: None,
+            list_usd: 0.25,
+            price_usd: price,
+            free,
+            capped: false,
+            human_author: false,
+            author: "agent:x".into(),
+            public: true,
+            month: month.into(),
+            created_at: crate::db::now(),
+        }
+    }
+
+    fn review(rates: &Rates) -> impl Fn(u32) -> pricing::Price + '_ {
         use code_review::pricing::{Month, PriceInput, price};
+        move |free_used: u32| {
+            let input = PriceInput { kind: pricing::Kind::Review, mode: Mode::Standard, key: KeySource::Hosted, files: 1, public_repo: true, human_author: false };
+            price(rates, &input, &Month { public_free_used: free_used, author_standard_charged: 0.0 })
+        }
+    }
+
+    /// 32 jobs reserving at once, spread over `nodes` (handles on one database), never hold more
+    /// than the cap, nor more free reviews than are left; dropping releases both.
+    fn contend(nodes: &[crate::db::Db]) {
         use std::sync::Barrier;
-        let mut config = crate::Config::local(std::env::temp_dir());
-        config.review.index = false;
-        let ai = Ai::new(&config);
+        const MONTH: &str = "2026-10";
         let rates = Rates { public_free_reviews: 5, ..Rates::default() };
         // 2 of the month's 5 free reviews are used and $0.25 is spent; the cap is $2.
-        let review = |free_used: u32| {
-            let input = PriceInput { kind: pricing::Kind::Review, mode: Mode::Standard, key: KeySource::Hosted, files: 1, public_repo: true, human_author: false };
-            price(&rates, &input, &Month { public_free_used: free_used, author_standard_charged: 0.0 })
-        };
-        let spent = || {
-            std::thread::sleep(std::time::Duration::from_millis(2));
-            Ok((0.25, 2))
-        };
+        metered(&nodes[0], "own_1", MONTH, 0.0, true);
+        metered(&nodes[0], "own_1", MONTH, 0.0, true);
+        metered(&nodes[0], "own_1", MONTH, 0.25, false);
         let barrier = Barrier::new(32);
         let granted: Vec<(bool, f64)> = std::thread::scope(|s| {
             let hs: Vec<_> = (0..32)
-                .map(|_| {
-                    s.spawn(|| {
+                .map(|i| {
+                    let (db, barrier, rates) = (&nodes[i % nodes.len()], &barrier, &rates);
+                    s.spawn(move || {
                         barrier.wait();
-                        let g = ai.reserve("own_1", Some(2.0), spent, review).unwrap();
+                        let g = Reservation::take(db, "own_1", MONTH, Some(2.0), 60_000, review(rates)).unwrap();
                         let out = g.as_ref().map(|g| (g.free, g.usd));
                         // Hold every reservation until all 32 have tried.
                         barrier.wait();
@@ -889,13 +987,61 @@ mod tests {
         assert_eq!(free, 3, "the 3 free reviews left, no more");
         assert_eq!(granted.len() - free, 7, "$1.75 of room at $0.25 each");
         assert!(0.25 + paid <= 2.0 + 1e-9, "spent {paid}");
-        assert_eq!(ai.reserved_usd("own_1"), 0.0, "released on drop");
-        assert_eq!(ai.reserved_free("own_1"), 0);
+        for db in nodes {
+            assert_eq!(db.reserved("own_1", i64::MIN).unwrap(), (0.0, 0), "released on drop, seen from every node");
+        }
         // No cap: everything is granted, still counting free reviews.
-        let a = ai.reserve("own_1", None, || Ok((0.0, 4)), review).unwrap().unwrap();
-        let b = ai.reserve("own_1", None, || Ok((0.0, 4)), review).unwrap().unwrap();
+        for _ in 0..4 {
+            metered(&nodes[0], "own_2", MONTH, 0.0, true);
+        }
+        let a = Reservation::take(&nodes[0], "own_2", MONTH, None, 60_000, review(&rates)).unwrap().unwrap();
+        let b = Reservation::take(nodes.last().unwrap(), "own_2", MONTH, None, 60_000, review(&rates)).unwrap().unwrap();
         assert!(a.free && !b.free, "the 5th free review is taken by a running job");
         drop((a, b));
-        assert_eq!(ai.reserved_free("own_1"), 0);
+        assert_eq!(nodes[0].reserved("own_2", i64::MIN).unwrap(), (0.0, 0));
+    }
+
+    #[test]
+    fn reservations_hold_the_cap_and_the_free_reviews_under_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        contend(&[node(dir.path())]);
+    }
+
+    /// The same race with the jobs on two nodes (two handles on one database, each with its own
+    /// connections): what one node holds counts on the other.
+    #[test]
+    fn reservations_hold_the_cap_across_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        contend(&[node(dir.path()), node(dir.path())]);
+    }
+
+    /// A node that dies while its job runs leaves a reservation nobody releases or renews: it
+    /// counts against the cap until it lapses, then not at all.
+    #[test]
+    fn reservations_of_a_dead_node_lapse() {
+        const MONTH: &str = "2026-10";
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (node(dir.path()), node(dir.path()));
+        let rates = Rates { public_free_reviews: 0, ..Rates::default() };
+        // Long enough for the checks below on a busy database; then waited out.
+        let held = Reservation::take(&a, "own_1", MONTH, Some(0.25), 3_000, review(&rates)).unwrap().unwrap();
+        assert_eq!(held.usd, 0.25);
+        // "Dies": never dropped, never renewed (no runtime here).
+        std::mem::forget(held);
+        assert!(Reservation::take(&b, "own_1", MONTH, Some(0.25), 3_000, review(&rates)).unwrap().is_none(), "held by the dead node");
+        let now = b.sql().now_ms().unwrap();
+        assert_eq!(b.reserved("own_1", now).unwrap().0, 0.25);
+        let expires: i64 = b.sql().query_row("SELECT MAX(expires_at) FROM ai_reservations WHERE owner_id = 'own_1'", (), |r| r.get(0)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis((expires - now).max(0) as u64 + 100));
+        let now = b.sql().now_ms().unwrap();
+        assert_eq!(b.reserved("own_1", now).unwrap(), (0.0, 0), "lapsed");
+        let mut g = Reservation::take(&b, "own_1", MONTH, Some(0.25), 60_000, review(&rates)).unwrap().expect("room again");
+        // Metered: the usage and the release are one transaction, so the spend counts once.
+        b.meter(&usage("own_1", MONTH, 0.25, false), Some(g.id())).unwrap();
+        g.settled();
+        drop(g);
+        assert_eq!(b.reserved("own_1", i64::MIN).unwrap(), (0.0, 0));
+        assert_eq!(a.usage_month("own_1", MONTH, "").unwrap().0, 0.25);
+        assert!(Reservation::take(&a, "own_1", MONTH, Some(0.25), 60_000, review(&rates)).unwrap().is_none(), "the cap is spent");
     }
 }

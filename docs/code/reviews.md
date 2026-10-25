@@ -178,7 +178,9 @@ A crate with no HTTP routes of its own. code-control drives it (`src/ai/`), and 
    A queued review absorbs later revisions. When the reviewer is `required`, the change owes
    roll a review (`review_pending`) until roll finishes or gives up.
 2. A runner with `ROLL_REVIEW_CONCURRENCY` slots (default 2) runs jobs. After a restart, jobs
-   that were running start over.
+   that were running start over. In a cluster each repo's jobs run on its owner node, under a
+   claim the node renews while the job runs: a job starts over when its node's claim lapses or
+   another node takes the repo over, never because some node restarted (docs/code/cluster.md).
 3. The job reviews one of two diffs:
    - the change since its merge base with the default branch
    - after an earlier roll review, only what changed since that review's head, within the
@@ -371,7 +373,10 @@ mode, and is metered to its owner each month.
   review is estimated on every file it sends and metered on the files it read, so it never costs
   more than it reserved. A public repo's free reviews are reserved the same way: a running review
   holds the free one it counts on, and is metered as free exactly when it got one. Reservations
-  live in the daemon's memory, so this holds for one node.
+  are rows in control.db (`ai_reservations`), checked and taken in one transaction, so this holds
+  across every node of a cluster; metering a job and releasing its reservation are one
+  transaction. A running job renews its reservation, and a dead node's reservations lapse after
+  `reservation_ttl_ms` (5 minutes) instead of holding the cap forever (docs/code/cluster.md).
 - **Who counts as a person** for the human cap: the change's author, unless the author is one of
   these:
   - an `agent:…` or `…[bot]` name

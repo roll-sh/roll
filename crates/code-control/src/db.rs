@@ -376,6 +376,10 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     // Databases from before AI jobs reported their stage.
     ("ai_jobs", "stage", "TEXT"),
     ("ai_jobs", "progress", "TEXT"),
+    // Which node runs a job and until when its claim holds (renewed while it runs), so a
+    // restarting node re-queues only jobs nobody is running any more.
+    ("ai_jobs", "claimed_by", "TEXT"),
+    ("ai_jobs", "lease_until", "INTEGER"),
     // Databases from before webhooks remembered where in the land log they started.
     ("repo_webhooks", "since_seq", "INTEGER NOT NULL DEFAULT 0"),
     // Databases from before deliveries kept the start of the response.
@@ -390,7 +394,7 @@ impl Db {
     /// Open control.db in `sql`: create what's missing and bring old databases up to date.
     /// Every node of a cluster may do this at once.
     pub fn open(sql: code_sql::Db) -> Result<Db> {
-        for schema in [SCHEMA, crate::review::store::SCHEMA, crate::ai::store::SCHEMA, crate::webhooks::SCHEMA, crate::broken::SCHEMA] {
+        for schema in [SCHEMA, crate::review::store::SCHEMA, crate::ai::store::SCHEMA, crate::webhooks::SCHEMA, crate::broken::SCHEMA, crate::mcp::SCHEMA] {
             sql.ensure_schema(schema)?;
         }
         for (table, column, decl) in COLUMNS {

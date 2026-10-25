@@ -160,16 +160,33 @@ async fn ok(a: &App, method: &str, path: &str, body: Option<Value>) -> Value {
     v
 }
 
+/// The reviewer's configuration against the mock at `url` (besides the admin token).
+fn base_config(c: &mut code_control::Config, url: &str) {
+    c.review.hosted = Some(Hosted { provider: "anthropic".into(), api_key: "sk-hosted".into(), base_url: Some(url.to_string()), model: None, secondary_model: None });
+    c.review.retry = fast_retry();
+    c.review.retry_ms = 50;
+    c.review.secret_key = Some(SECRET.into());
+    c.review.anthropic_url = url.to_string();
+}
+
+/// A second node on `t`'s databases (control.db and the store), with connections and a
+/// reviewer of its own, configured like the first and then by `f`.
+fn second_node(t: &T, f: impl FnOnce(&mut code_control::Config)) -> App {
+    let code = common::open_in(t.a.dir.path(), |c| {
+        c.admin_token = t.a.code.config.admin_token.clone();
+        base_config(c, &t.m.url);
+        f(c);
+    });
+    code.start_reviewer();
+    App { router: code_control::api::router(code.clone()), code, dir: tempfile::tempdir().unwrap() }
+}
+
 async fn setup_with(visibility: &str, f: impl FnOnce(&mut code_control::Config, &str)) -> T {
     let m = mock().await;
     let url = m.url.clone();
     let a = app_with(|c| {
         c.admin_token = Some(ROOT.into());
-        c.review.hosted = Some(Hosted { provider: "anthropic".into(), api_key: "sk-hosted".into(), base_url: Some(url.clone()), model: None, secondary_model: None });
-        c.review.retry = fast_retry();
-        c.review.retry_ms = 50;
-        c.review.secret_key = Some(SECRET.into());
-        c.review.anthropic_url = url.clone();
+        base_config(c, &url);
         f(c, &url);
     });
     a.code.start_reviewer();
@@ -1038,7 +1055,7 @@ async fn concurrent_reviews_and_chats_never_overrun_the_cap() {
     assert_eq!(paused, 2, "two refused while the others run");
     let u = ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await;
     assert_eq!(u["totals"]["price_usd"], 0.0, "nothing metered yet: {u}");
-    assert_eq!(t.a.code.ai.reserved_usd(&owner), 0.5, "the running two hold the cap");
+    assert_eq!(t.a.code.reserved_usd(&owner), 0.5, "the running two hold the cap");
     let mut reviewed = Vec::new();
     for id in &ids {
         let r = roll_reviews(&t, id, 1).await;
@@ -1053,7 +1070,7 @@ async fn concurrent_reviews_and_chats_never_overrun_the_cap() {
     let u = ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await;
     assert_eq!(u["totals"]["price_usd"], 0.5);
     assert_eq!(t.m.messages().iter().filter(|s| !s.user().contains("# Thread")).count(), 2, "no model call for capped reviews");
-    assert_eq!(t.a.code.ai.reserved_usd(&t.a.code.owner_or_404("acme").unwrap().id), 0.0, "reservations released");
+    assert_eq!(t.a.code.reserved_usd(&t.a.code.owner_or_404("acme").unwrap().id), 0.0, "reservations released");
 
     // Chats count too: at the cap, `@roll explain` answers without a model call.
     let th = threads(&t, &reviewed[0]).await[0].clone();
@@ -1094,12 +1111,12 @@ async fn concurrent_reviews_and_chats_never_overrun_the_cap() {
     t.m.delay_ms.store(2_000, Ordering::SeqCst);
     let c = change(&t, "c4", json!({ "src/c4.rs": { "content": "pub fn c4() {}\n" } })).await;
     for _ in 0..200 {
-        if t.a.code.ai.reserved_usd(&owner) > 0.0 {
+        if t.a.code.reserved_usd(&owner) > 0.0 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(t.a.code.ai.reserved_usd(&owner), 0.25, "the review is running");
+    assert_eq!(t.a.code.reserved_usd(&owner), 0.25, "the review is running");
     ok(&t.a, "POST", &format!("/v1/code/threads/{tid}/comments"), Some(json!({ "body": "@roll explain" }))).await;
     for _ in 0..400 {
         last = ok(&t.a, "GET", &format!("/v1/code/threads/{tid}"), None).await;
@@ -1154,7 +1171,7 @@ async fn concurrent_public_reviews_never_share_the_last_free_one() {
     assert_eq!(u["totals"]["price_usd"], 0.25, "never over the cap: {u}");
     assert_eq!(u["totals"]["free_reviews"], 1);
     let owner = t.a.code.owner_or_404("acme").unwrap().id;
-    assert_eq!((t.a.code.ai.reserved_usd(&owner), t.a.code.ai.reserved_free(&owner)), (0.0, 0));
+    assert_eq!((t.a.code.reserved_usd(&owner), t.a.code.reserved_free(&owner)), (0.0, 0));
 }
 
 #[tokio::test]
@@ -2089,4 +2106,97 @@ async fn bad_query_strings_are_json_400s() {
         assert_eq!(s, StatusCode::BAD_REQUEST, "{path}: {v}");
         assert!(v["error"].is_string(), "{path}: {v}");
     }
+}
+
+/// Wait (5 s at most) until `cond` holds.
+async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
+    for _ in 0..500 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("never: {what}");
+}
+
+/// `concurrent_reviews_and_chats_never_overrun_the_cap` with the reviews on two nodes (one at
+/// a time each): what one node's running review holds counts in the other's cap check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_reviews_on_two_nodes_never_overrun_the_cap() {
+    let t = setup(|c, _| c.review.concurrency = 1).await;
+    let b = second_node(&t, |c| c.review.concurrency = 1);
+    enable(&t, json!({ "mode": "standard" })).await;
+    ok(&t.a, "PUT", "/v1/code/owners/acme/billing", Some(json!({ "monthly_cap_usd": 0.5, "on_cap": "pause" }))).await;
+    t.m.delay_ms.store(2_000, Ordering::SeqCst);
+    let mut ids = Vec::new();
+    for n in 0..4 {
+        let c = change(&t, &format!("c{n}"), json!({ format!("src/c{n}.rs"): { "content": format!("pub fn c{n}() {{}}\n") } })).await;
+        ids.push(c["id"].as_str().unwrap().to_string());
+    }
+    let owner = t.a.code.owner_or_404("acme").unwrap().id;
+    // Two reviews hold the cap at once: each node runs one at a time, so one on each.
+    eventually("both nodes hold a review's price", || b.code.reserved_usd(&owner) == 0.5).await;
+    assert_eq!(t.a.code.reserved_usd(&owner), 0.5, "seen the same from either node");
+    let u = ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await;
+    assert_eq!(u["totals"]["price_usd"], 0.0, "nothing metered yet: {u}");
+    let mut reviewed = 0;
+    for id in &ids {
+        let r = roll_reviews(&t, id, 1).await;
+        if !r[0]["ai"].is_null() {
+            reviewed += 1;
+        } else {
+            assert!(r[0]["body"].as_str().unwrap().contains("paused for this month"), "{}", r[0]["body"]);
+        }
+    }
+    t.m.delay_ms.store(0, Ordering::SeqCst);
+    assert_eq!(reviewed, 2, "exactly two fit under the cap, across both nodes");
+    let u = ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await;
+    assert_eq!(u["totals"]["price_usd"], 0.5, "never over the cap: {u}");
+    assert_eq!(t.m.messages().len(), 2, "no model call for capped reviews");
+    eventually("reservations released", || t.a.code.reserved_usd(&owner) == 0.0 && b.code.reserved_usd(&owner) == 0.0).await;
+}
+
+/// `concurrent_public_reviews_never_share_the_last_free_one` with the reviews on two nodes: a
+/// free review one node's job claimed can't be claimed by the other's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_public_reviews_on_two_nodes_never_share_the_last_free_one() {
+    let t = setup_with("public", |c, _| {
+        c.review.concurrency = 1;
+        c.review.rates.public_free_reviews = 1;
+    })
+    .await;
+    let b = second_node(&t, |c| {
+        c.review.concurrency = 1;
+        c.review.rates.public_free_reviews = 1;
+    });
+    enable(&t, json!({ "mode": "standard" })).await;
+    ok(&t.a, "PUT", "/v1/code/owners/acme/billing", Some(json!({ "monthly_cap_usd": 0.25, "on_cap": "pause" }))).await;
+    t.m.delay_ms.store(1_500, Ordering::SeqCst);
+    let mut ids = Vec::new();
+    for n in 0..3 {
+        let c = change(&t, &format!("p{n}"), json!({ format!("src/p{n}.rs"): { "content": format!("pub fn p{n}() {{}}\n") } })).await;
+        ids.push(c["id"].as_str().unwrap().to_string());
+    }
+    let owner = t.a.code.owner_or_404("acme").unwrap().id;
+    // The free one and a paid one held at once: one job per node.
+    eventually("a free and a paid review held at once", || (t.a.code.reserved_usd(&owner), b.code.reserved_free(&owner)) == (0.25, 1)).await;
+    let mut prices = Vec::new();
+    let mut paused = 0;
+    for id in &ids {
+        let r = roll_reviews(&t, id, 1).await;
+        match r[0]["ai"]["price_usd"].as_f64() {
+            Some(p) => prices.push(p),
+            None => {
+                assert!(r[0]["body"].as_str().unwrap().contains("paused for this month"), "{}", r[0]["body"]);
+                paused += 1;
+            }
+        }
+    }
+    t.m.delay_ms.store(0, Ordering::SeqCst);
+    prices.sort_by(f64::total_cmp);
+    assert_eq!((prices, paused), (vec![0.0, 0.25], 1), "one free, one paid, one over the cap");
+    let u = ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await;
+    assert_eq!(u["totals"]["price_usd"], 0.25, "never over the cap: {u}");
+    assert_eq!(u["totals"]["free_reviews"], 1, "the free review was used once");
+    eventually("reservations released", || (b.code.reserved_usd(&owner), t.a.code.reserved_free(&owner)) == (0.0, 0)).await;
 }

@@ -220,7 +220,7 @@ impl Code {
     }
 
     /// Drop everything this node cached about a repo (it was taken over: another node may have
-    /// changed it meanwhile). webhooks.rs keeps caches of its own per repo; forget them here too.
+    /// changed it meanwhile), including whatever webhooks.rs keeps (`Code::forget_repo_webhooks`).
     pub fn forget_repo(&self, repo_id: &str) {
         self.settings_cache.lock().remove(repo_id);
         self.review_configs.lock().remove(repo_id);
@@ -232,6 +232,7 @@ impl Code {
         self.blames.retain(|k| k.0 != repo_id);
         self.baselines.retain(|k| k.0 != repo_id);
         self.review_facts.retain(|k| k.0 != repo_id);
+        self.forget_repo_webhooks(repo_id);
     }
 
     /// Run `fut` while this node owns the repo, holding a guard so a handoff waits for it (up to
@@ -295,12 +296,25 @@ impl Code {
         Ok(out)
     }
 
-    /// A repo's reviewer jobs that were running when it moved here start over.
+    /// A repo's reviewer jobs that were running when it moved here start over (unless they're
+    /// this node's own).
     fn requeue_running_ai_jobs_of(&self, repo_id: &str) -> Result<usize> {
-        Ok(self
-            .db
-            .sql()
-            .execute("UPDATE ai_jobs SET state = 'queued', updated_at = ? WHERE repo_id = ? AND state = 'running'", code_sql::params![crate::db::now(), repo_id])?)
+        Ok(self.db.requeue_ai_jobs_of(repo_id, &self.node_name())?)
+    }
+
+    /// Jobs of the repos this node owns whose claim lapsed (their node stopped renewing it).
+    pub(crate) fn requeue_lapsed_ai_jobs_here(&self) -> Result<usize> {
+        let Some(c) = self.cluster() else { return Ok(self.db.requeue_lapsed_ai_jobs(None)?) };
+        let repos: Vec<String> = c.owned().into_iter().map(|(k, _)| k).filter(|k| !k.starts_with("singleton:")).collect();
+        if repos.is_empty() {
+            return Ok(0);
+        }
+        Ok(self.db.requeue_lapsed_ai_jobs(Some(&repos))?)
+    }
+
+    /// Who this node is in claims it writes: its cluster node id, or `local` on a single node.
+    pub(crate) fn node_name(&self) -> String {
+        self.cluster().map_or_else(|| crate::ai::store::LOCAL.to_string(), |c| c.node_id().to_string())
     }
 
     // ── to the owner ──

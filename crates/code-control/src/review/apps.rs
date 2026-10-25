@@ -36,17 +36,45 @@ pub const EVENTS: [&str; 4] = ["change.opened", "change.revised", "thread.commen
 const MAX_ATTEMPTS: i64 = 8;
 /// Longest wait between attempts.
 const MAX_BACKOFF_MS: u64 = 6 * 3600 * 1000;
+/// Longest a delivery's request may take, response included (the client's total timeout).
 const TIMEOUT: Duration = Duration::from_secs(10);
-/// How long a node holds a delivery it's sending (well past [`TIMEOUT`]).
-const CLAIM_MS: i64 = 60_000;
+/// How long a node holds a delivery it's sending: well past [`TIMEOUT`]. See [`Deliveries`].
+const CLAIM: Duration = Duration::from_secs(60);
 const MAX_APPS_PER_OWNER: usize = 50;
 
 /// The delivery worker's state.
-#[derive(Default)]
+///
+/// Every node runs a worker, and each delivery is sent by one of them at a time: a worker
+/// claims a due delivery with a compare-and-swap that moves its `next_at` a claim's length
+/// ([`CLAIM`]) ahead on the database's clock. A node that dies holding a claim leaves the
+/// delivery due again when the claim lapses, and any node retries it then.
+///
+/// A slow receiver can't make two nodes send at once: the claim is much longer than the
+/// request's total timeout ([`TIMEOUT`], response included), and a request only starts while
+/// at least the timeout plus a margin of the claim is left, measured on this node's monotonic
+/// clock from before the claim was taken (a node stalled past that gives the claim back
+/// unsent). Recording an attempt is conditional on still holding the claim; if it isn't held any
+/// more (a stall longer than all of that, a redelivery or a deletion meanwhile), nothing is
+/// overwritten and the possible second send is logged.
 pub struct Deliveries {
     running: AtomicBool,
     notify: Notify,
     client: Mutex<Option<reqwest::Client>>,
+    /// [`TIMEOUT`] and [`CLAIM`] (tests shorten them).
+    timing: Mutex<(Duration, Duration)>,
+}
+
+impl Default for Deliveries {
+    fn default() -> Self {
+        Deliveries { running: AtomicBool::new(false), notify: Notify::new(), client: Mutex::new(None), timing: Mutex::new((TIMEOUT, CLAIM)) }
+    }
+}
+
+/// How long before a claim lapses a request may no longer start: its timeout, plus a margin
+/// for recording it (5 s, or half of what's left of the claim when that's shorter).
+fn send_window(timeout: Duration, claim: Duration) -> Duration {
+    let slack = claim.saturating_sub(timeout);
+    claim.saturating_sub(timeout).saturating_sub((slack / 2).min(Duration::from_secs(5)))
 }
 
 pub(crate) fn app_reviewer(a: &AppRow) -> Reviewer {
@@ -434,12 +462,21 @@ impl Code {
         });
     }
 
+    /// Tests: a shorter request timeout and claim (the claim must be longer than the timeout).
+    #[doc(hidden)]
+    pub fn set_delivery_timing(&self, timeout: Duration, claim: Duration) {
+        assert!(claim > timeout, "a delivery's claim must outlast its request");
+        *self.deliveries.timing.lock() = (timeout, claim);
+        *self.deliveries.client.lock() = None;
+    }
+
     fn delivery_client(&self) -> Result<reqwest::Client> {
+        let timeout = self.deliveries.timing.lock().0;
         let mut c = self.deliveries.client.lock();
         if let Some(c) = c.as_ref() {
             return Ok(c.clone());
         }
-        let mut b = reqwest::Client::builder().timeout(TIMEOUT).redirect(reqwest::redirect::Policy::none()).user_agent("roll-webhooks");
+        let mut b = reqwest::Client::builder().timeout(timeout).redirect(reqwest::redirect::Policy::none()).user_agent("roll-webhooks");
         if !self.private_webhooks_allowed() {
             b = b.dns_resolver(PublicOnly).no_proxy();
         }
@@ -455,26 +492,39 @@ impl Code {
     /// Send what's due; how long until the next one is.
     async fn run_deliveries(&self) -> Result<Duration> {
         let client = self.delivery_client()?;
-        let due = self.db.due_deliveries(code_store::now_ms(), 50)?;
+        let (timeout, claim) = *self.deliveries.timing.lock();
+        // Before reading the clock the claims are measured on: what's left of a claim here is
+        // never more than what the database (every other node) thinks is left.
+        let started = std::time::Instant::now();
+        let now = self.db.sql().now_ms()?;
+        let until = now + claim.as_millis() as i64;
+        let deadline = started + send_window(timeout, claim);
+        let due = self.db.due_deliveries(now, 50)?;
+        let Some(me) = self.me.upgrade() else { return Ok(Duration::from_secs(60)) };
         let mut sends = Vec::new();
         for d in due {
             // Claim it first (a compare-and-swap on `next_at`): with several nodes sending, each
-            // delivery is attempted by one of them. The claim lasts past the request's timeout;
-            // if this node dies mid-send, the delivery is due again after it.
-            if !self.db.claim_delivery(&d.id, d.next_at, code_store::now_ms() + CLAIM_MS)? {
+            // delivery is attempted by one of them (see `Deliveries`).
+            if !self.db.claim_delivery(&d.id, d.next_at, until)? {
                 continue;
             }
-            sends.push(self.send_delivery(&client, d));
+            // Each on a task of its own: one stuck on the database can't hold up another's
+            // request past its claim.
+            let (me, client) = (me.clone(), client.clone());
+            sends.push(tokio::spawn(async move { me.send_delivery(&client, d, until, deadline).await }));
         }
-        futures::future::join_all(sends).await;
+        for s in sends {
+            let _ = s.await;
+        }
         let next = self.db.next_delivery_at()?;
+        let now = self.db.sql().now_ms()?;
         Ok(match next {
-            Some(at) => Duration::from_millis((at - code_store::now_ms()).clamp(0, 60_000) as u64),
+            Some(at) => Duration::from_millis((at - now).clamp(0, 60_000) as u64),
             None => Duration::from_secs(60),
         })
     }
 
-    async fn send_delivery(&self, client: &reqwest::Client, d: DeliveryRow) {
+    async fn send_delivery(&self, client: &reqwest::Client, d: DeliveryRow, claimed_until: i64, deadline: std::time::Instant) {
         let attempts = d.attempts + 1;
         // Deliveries go to review apps (`app_…`) and repo webhooks (`wh_…`) alike.
         let target: std::result::Result<Option<(&str, bool, String, String)>, String> = if d.app_id.starts_with("wh_") {
@@ -482,6 +532,15 @@ impl Code {
         } else {
             self.db.app(&d.app_id).map(|a| a.map(|a| ("app", a.active, a.webhook_url, a.secret))).map_err(|e| e.to_string())
         };
+        if std::time::Instant::now() >= deadline {
+            // Too little of the claim is left to be sure no other node starts sending before this
+            // request is over: give it back, due now.
+            tracing::warn!(delivery = %d.id, "a delivery's claim ran short before sending; putting it back");
+            if let Err(e) = self.db.unclaim_delivery(&d.id, claimed_until, d.next_at) {
+                tracing::warn!(delivery = %d.id, error = %e, "putting a delivery back");
+            }
+            return;
+        }
         let result = match target {
             Ok(Some((_, true, url, secret))) => self.post(client, &url, &secret, &d).await,
             Ok(Some((what, false, ..))) => Err((None, format!("the {what} is disabled"), None)),
@@ -489,17 +548,23 @@ impl Code {
             Err(e) => Err((None, e, None)),
         };
         let r = match result {
-            Ok((status, body)) => self.db.finish_delivery(&d.id, "delivered", attempts, d.next_at, Some(status as i64), None, Some(&body)),
+            Ok((status, body)) => self.db.finish_delivery(&d.id, claimed_until, "delivered", attempts, d.next_at, Some(status as i64), None, Some(&body)),
             Err((status, err, body)) => {
                 let base = self.config.review_app_retry_ms.max(1);
                 let delay = base.saturating_mul(3u64.saturating_pow((attempts - 1) as u32)).min(MAX_BACKOFF_MS);
                 let state = if attempts >= MAX_ATTEMPTS { "failed" } else { "pending" };
                 let next = code_store::now_ms() + delay as i64;
-                self.db.finish_delivery(&d.id, state, attempts, next, status.map(|s| s as i64), Some(&err), body.as_deref())
+                self.db.finish_delivery(&d.id, claimed_until, state, attempts, next, status.map(|s| s as i64), Some(&err), body.as_deref())
             }
         };
-        if let Err(e) = r {
-            tracing::warn!(delivery = %d.id, error = %e, "recording a review app delivery");
+        match r {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                delivery = %d.id,
+                attempt = attempts,
+                "a delivery was attempted after its claim was lost (lapsed, redelivered or deleted): the receiver may get it more than once"
+            ),
+            Err(e) => tracing::warn!(delivery = %d.id, error = %e, "recording a review app delivery"),
         }
     }
 

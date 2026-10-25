@@ -125,7 +125,7 @@ Taking a repo over (`Ownership::Acquired`) first drops everything the node cache
 | work | taken over | given up (`Lost`) |
 | --- | --- | --- |
 | merge queue | a worker starts if entries are active; it first recovers the batch the last owner left (a batch that was landing counts as landed if its tip is on the branch; the rest is tested again) | the worker is aborted (each batch runs under the repo's guard, so a handoff waits for it first) |
-| roll's reviewer | jobs `running` on the previous owner are queued again; queued ones run here (each runs under the repo's guard) | running jobs are aborted and left `running` for the next owner |
+| roll's reviewer | jobs `running` under another node's claim are queued again; queued ones run here (each runs under the repo's guard) | running jobs are aborted and left `running` for the next owner |
 | GitHub | the import if it never finished, else the mirror | the mirror and import stop |
 | code index | an index this node built before catches up; a repo whose reviewer is on builds one in the background; others build on first use (search answers 503 until it's built, as on a fresh repo) | — (a stale local index catches up next time) |
 | checks (code-preview) | checks that were queued or running on open changes run again; the default branch's head is checked unless it's the last green one (which opens or closes `broken-main` items) | results of checks still running are dropped |
@@ -137,29 +137,71 @@ piece of this also checks `Code::owns_repo` before its side effects, and long wo
 `owns_repo` is always true and none of this changes anything.
 
 Every background loop that used to scan all repos at startup only works on the repos this node
-owns: `start_queues`, the reviewer's job runner (`requeue_running_ai_jobs` only runs on a single
-node), the indexer, GitHub mirrors and imports, code-preview's check recovery and preview
-reconciliation. Events emitted on a node that doesn't own the repo (a global route, a
+owns: `start_queues`, the reviewer's job runner, the indexer, GitHub mirrors and imports,
+code-preview's check recovery and preview reconciliation.
+
+A reviewer job is claimed by the node that runs it (`ai_jobs.claimed_by`, `lease_until` 60 s
+ahead on the database's clock, renewed every 20 s while it runs). Its node finishes or retries it
+only while it still holds the claim, and stops it if the claim was taken. A node starting up
+re-queues nothing on a cluster (a single node still re-queues every running job: they were all
+its own); instead each node re-queues, every 5 s, the jobs of the repos it owns whose claim
+lapsed (their node died or lost the database), and a node taking a repo over re-queues the
+repo's running jobs at once. So restarting one node never runs another node's review twice.
+
+Events emitted on a node that doesn't own the repo (a global route, a
 GitHub delivery) are sent to the owner's feed over the internal events route, in order per repo,
 and dropped after a few seconds if no node can take them (like an event sent while nobody
 listens; webhooks don't depend on them).
 
 ## Work that isn't per repo
 
-- **Webhook and review-app deliveries** are claimed row by row (`FOR UPDATE SKIP LOCKED` with a
-  claim that expires), so every node delivers and none twice.
+Everything below is shared through the database, so it holds with any number of nodes, and a
+node that dies mid-way leaves nothing behind that the others can't finish.
+
+- **Webhook and review-app deliveries** (`review_deliveries`) are sent by every node's delivery
+  worker. A worker claims a due delivery with a compare-and-swap on its `next_at`, which moves it
+  a claim's length (60 s) ahead on the database's clock, so each delivery is sent by one node at
+  a time. A node that dies holding a claim leaves the delivery due again when the claim lapses,
+  and any node retries it then. The claim is far longer than a request's total timeout (10 s,
+  response included), and a request only starts while at least the timeout plus a margin (5 s)
+  of the claim is left, measured on the node's monotonic clock from before the claim was taken;
+  a node stalled past that gives the claim back unsent. Recording an attempt is conditional on
+  still holding the claim. So a slow receiver can't make two nodes send at once, and if a stall
+  longer than all of that ever did, nothing is overwritten and the possible second send is
+  logged. Receivers still de-duplicate on `X-Roll-Delivery` (a timed-out attempt may have
+  arrived).
 - **Landings to webhooks** come from the durable landing log. On Postgres, concurrent
   transactions could take sequence numbers in one order and commit in another, so `code-store`
   appends under a transaction-scoped advisory lock taken just before the append (the landing's
   last statements): numbers become visible in order, and a reader paging by `seq` skips nothing
   and reads nothing twice. (Reading only rows older than `pg_snapshot_xmin` isn't enough by
   itself: a transaction still running can hold a lower number than a committed row whose
-  transaction id is older.) One node at a time runs the forwarder (a lease), and the cursor
-  moves in the same transaction as the deliveries it queues.
-- **AI spend caps** reserve their price in a `ai_reservations` row inside the same serializable
-  transaction that checks the cap, so concurrent jobs on different nodes can't overshoot it.
-  Reservations of a dead node expire.
-- **MCP sessions** live in the database, so a session works through any node.
+  transaction id is older.) One node at a time runs the forwarder
+  (`Code::singleton("land-forwarder")`, checked before every page, so a node that loses it stops
+  within a page). Each page is one transaction that checks the cursor is still where the page
+  started (a compare-and-swap), reads the webhooks of the page's repos, queues their deliveries
+  and moves the cursor past the page. A crash mid-page leaves nothing of it; a second forwarder
+  racing the first queues nothing and re-reads from the new cursor. Creating a webhook reads the
+  cursor in its own transaction and starts the webhook at the cursor or the log's head,
+  whichever is further, so a webhook gets exactly the landings after its `since_seq`. The
+  `landed` event's `change` is known to the node that landed it; the forwarder looks it up when
+  it's another node.
+- **Which webhooks an event goes to** is read from the database for each event and each page of
+  landings; nothing about webhooks is cached on a node. A webhook created, changed or deleted
+  through any node applies to events on every node at once. (`Code::forget_repo_webhooks` exists
+  for nodes taking a repo over; there's nothing to drop today.)
+- **AI spend caps** reserve a job's estimated price in an `ai_reservations` row inside the
+  transaction that checks the cap, which counts the month's metered spend plus every node's
+  reservations. Reservations for one owner take turns on the owner's `ai_owner_locks` row (read
+  committed, so a busy owner's jobs wait in line rather than failing serialization over and over)
+  and read spend and holds in one statement, one snapshot. Metering a job writes its usage and
+  deletes its reservation in one transaction, so it's never counted twice nor missed; a job that
+  ends without being metered deletes it. A running job renews its row every third of its
+  lifetime (`AiConfig::reservation_ttl_ms`, 5 minutes); a dead node's rows lapse then and stop
+  counting. Free public reviews are reserved the same way.
+- **MCP sessions** live in `mcp_sessions`, so a session started through any node works through
+  every other and survives restarts. `last_seen` is written at most every 5 s; a session idle
+  for 7 days ends, and past 10,000 sessions the least recently used go.
 - **GitHub webhooks** are verified and de-duplicated by whichever node receives them. Events
   about the App (installations) are handled there; each connected repo's part of a repository
   event runs on that repo's owner (`/internal/code/repos/{id}/github` with the original

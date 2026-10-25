@@ -215,6 +215,22 @@ impl Net {
         self.converge().await;
     }
 
+    /// Stop node `i` (it leaves the cluster) and start a new process in its place, with the
+    /// same id and its own fresh state directory.
+    async fn restart(&mut self, i: usize) {
+        let old = &self.nodes[i];
+        old.dead.store(true, Ordering::SeqCst);
+        old.accept.abort();
+        for c in old.conns.lock().drain(..) {
+            c.abort();
+        }
+        let c = old.cluster().clone();
+        tokio::task::spawn_blocking(move || c.leave()).await.unwrap();
+        let id = old.id.clone();
+        self.nodes[i] = start_node(&self.env, &id, &*self.config).await;
+        self.converge().await;
+    }
+
     /// The node that owns `repo_id` now.
     fn owner(&self, repo_id: &str) -> Option<usize> {
         let owners: Vec<usize> = (0..self.nodes.len()).filter(|i| self.nodes[*i].owns(repo_id)).collect();
@@ -359,7 +375,10 @@ async fn every_request_for_a_repo_runs_on_its_owner() {
 
     // An event stream through a node that doesn't own the repo.
     let mut stream = net.http.get(format!("{}{base}/events", net.nodes[p].url)).send().await.unwrap();
-    assert_eq!(stream.status().as_u16(), 200);
+    if stream.status().as_u16() != 200 {
+        let s = stream.status();
+        panic!("{s}: {}", stream.text().await.unwrap_or_default());
+    }
     let seen = Arc::new(Mutex::new(String::new()));
     let s2 = seen.clone();
     let reader = tokio::spawn(async move {
@@ -565,18 +584,26 @@ async fn the_merge_queue_continues_a_dead_owners_batch() {
     assert_exactly_once(&log, &["queued 0".into(), "queued 1".into(), "queued 2".into()]);
 }
 
-/// A mock Anthropic API whose first review never answers; later ones review nothing wrong.
-async fn mock_provider() -> (String, Arc<AtomicUsize>) {
+/// A mock Anthropic API whose first review doesn't answer until `release` is set (never, without
+/// one); later ones answer at once, finding nothing wrong.
+async fn mock_provider(release: Option<Arc<AtomicBool>>) -> (String, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let c2 = calls.clone();
     let app = axum::Router::new().fallback(move |uri: axum::http::Uri, _h: HeaderMap, _b: Bytes| {
-        let calls = c2.clone();
+        let (calls, release) = (c2.clone(), release.clone());
         async move {
             if uri.path().ends_with("/count_tokens") {
                 return axum::Json(json!({ "input_tokens": 500 })).into_response();
             }
             if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                std::future::pending::<()>().await;
+                match release {
+                    Some(r) => {
+                        while !r.load(Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                    }
+                    None => std::future::pending::<()>().await,
+                }
             }
             let review = json!({ "walkthrough": "Adds a file.", "files": [], "diagram": null, "findings": [], "notes": [] });
             axum::Json(json!({
@@ -594,17 +621,21 @@ async fn mock_provider() -> (String, Arc<AtomicUsize>) {
     (url, calls)
 }
 
+/// Nodes whose hosted reviewer is the mock at `url`.
+fn reviewer_config(url: String) -> Arc<dyn Fn(&mut Config) + Send + Sync> {
+    Arc::new(move |c: &mut Config| {
+        c.review.hosted = Some(code_control::ai::Hosted { provider: "anthropic".into(), api_key: "sk-hosted".into(), base_url: Some(url.clone()), model: None, secondary_model: None });
+        c.review.retry = code_review::provider::RetryPolicy { attempts: 1, base: Duration::from_millis(5), max_delay: Duration::from_millis(50), timeout: Duration::from_secs(3600) };
+        c.review.retry_ms = 50;
+    })
+}
+
 /// The owner dies in the middle of a review (the model never answers it): the node that takes
 /// the repo over runs the job again, and the change gets its review.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn a_running_review_runs_again_after_its_owner_dies() {
-    let (url, calls) = mock_provider().await;
-    let config: Arc<dyn Fn(&mut Config) + Send + Sync> = Arc::new(move |c: &mut Config| {
-        c.review.hosted = Some(code_control::ai::Hosted { provider: "anthropic".into(), api_key: "sk-hosted".into(), base_url: Some(url.clone()), model: None, secondary_model: None });
-        c.review.retry = code_review::provider::RetryPolicy { attempts: 1, base: Duration::from_millis(5), max_delay: Duration::from_millis(50), timeout: Duration::from_secs(3600) };
-        c.review.retry_ms = 50;
-    });
-    let net = net_with("review", 3, config).await;
+    let (url, calls) = mock_provider(None).await;
+    let net = net_with("review", 3, reviewer_config(url)).await;
     for n in &net.nodes {
         n.code.start_reviewer();
     }
@@ -631,6 +662,134 @@ async fn a_running_review_runs_again_after_its_owner_dies() {
     let jobs = net.ok(p, "GET", &format!("/v1/code/changes/{id}/ai-jobs"), None).await;
     assert_eq!((jobs[0]["state"].as_str(), jobs[0]["attempts"].as_u64()), (Some("done"), Some(2)), "{jobs}");
     assert_ne!(net.owner(&repo_id), Some(o));
+}
+
+/// A node restarting (its reviewer starting again) leaves the reviews running on the other
+/// nodes alone: each job runs once, on its repo's owner, and is billed once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn restarting_a_node_doesnt_run_another_nodes_review_again() {
+    let release = Arc::new(AtomicBool::new(false));
+    let (url, calls) = mock_provider(Some(release.clone())).await;
+    let mut net = net_with("restart", 2, reviewer_config(url)).await;
+    for n in &net.nodes {
+        n.code.start_reviewer();
+    }
+    let repo_id = net.repo(0, "api").await;
+    let base = "/v1/code/repos/acme/api";
+    net.ok(1, "PATCH", &format!("{base}/reviewer"), Some(json!({ "enabled": true, "mode": "standard" }))).await;
+    let o = net.owner(&repo_id).unwrap();
+    let other = 1 - o;
+    let c = net.ok(other, "POST", &format!("{base}/changes"), Some(json!({ "title": "t", "message": "t", "base": "main", "files": { "a.rs": { "content": "fn a() {}\n" } } }))).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    until("the owner asks the model", Duration::from_secs(20), || calls.load(Ordering::SeqCst) >= 1).await;
+    // The other node restarts (same id) and starts its reviewer while the review is running.
+    net.restart(other).await;
+    net.nodes[other].code.start_reviewer();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the restarted node left the running review alone");
+    let jobs = net.ok(other, "GET", &format!("/v1/code/changes/{id}/ai-jobs"), None).await;
+    assert_eq!(jobs[0]["state"], "running", "{jobs}");
+    release.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let jobs = net.ok(other, "GET", &format!("/v1/code/changes/{id}/ai-jobs"), None).await;
+        if jobs[0]["state"] == "done" {
+            assert_eq!(jobs[0]["attempts"], 1, "{jobs}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "the review never finished: {jobs}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "one model call for one review");
+    let usage = net.ok(other, "GET", "/v1/code/owners/acme/usage", None).await;
+    assert_eq!(usage["totals"]["reviews"], 1, "metered once: {usage}");
+}
+
+// ── work that isn't per repo ──
+
+/// A webhook receiver: each `landed` delivery's id and changeset.
+async fn hook_receiver() -> (String, Arc<Mutex<Vec<(String, String)>>>) {
+    let got: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+    let g = got.clone();
+    let app = axum::Router::new().fallback(move |headers: HeaderMap, body: Bytes| {
+        let got = g.clone();
+        async move {
+            let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let d = headers.get("x-roll-delivery").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+            if v["event"] == "landed" {
+                got.lock().push((d, v["data"]["changeset"].as_str().unwrap_or("").to_string()));
+            }
+            StatusCode::OK
+        }
+    });
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/hook", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    (url, got)
+}
+
+/// Landings reach webhooks through one forwarder at a time: the cluster's `land-forwarder`
+/// singleton. Kill the node running it while landings keep coming: it stops forwarding (it no
+/// longer holds the singleton), another node takes the singleton over and carries on from the
+/// cursor, and every landing is delivered exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn the_land_forwarder_moves_with_its_singleton() {
+    let (url, got) = hook_receiver().await;
+    let net = net_with("forwarder", 3, Arc::new(|c: &mut Config| c.review_app_retry_ms = 50)).await;
+    for n in &net.nodes {
+        n.code.start_webhooks();
+    }
+    net.repo(0, "api").await;
+    let (s, v) = net.req(1, "POST", "/v1/code/repos/acme/api/webhooks", Some(json!({ "url": url, "events": ["landed"] }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let mut landed = Vec::new();
+    let land = |i: usize, node: usize| {
+        let (http, base) = (net.http.clone(), net.nodes[node].url.clone());
+        async move {
+            let (s, v) = req(&http, &base, "POST", "/v1/code/repos/acme/api/land", Some(land_body(&format!("l{i}"), &format!("l{i}.txt")))).await;
+            assert_eq!(s, StatusCode::OK, "{v}");
+            v["changeset"].as_str().unwrap().to_string()
+        }
+    };
+    for i in 0..10 {
+        landed.push(land(i, i % 3).await);
+    }
+    let delivered = |want: &[String]| {
+        let g = got.lock();
+        want.iter().all(|cs| g.iter().any(|(_, c)| c == cs))
+    };
+    let wait = Duration::from_secs(20) + net.env.takeover();
+    let deadline = Instant::now() + wait;
+    while !delivered(&landed) {
+        assert!(Instant::now() < deadline, "not every landing was delivered: {:?}", got.lock());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let holder = |n: &Node| n.owns(&format!("singleton:{}", code_control::webhooks::LAND_FORWARDER));
+    let f = net.nodes.iter().position(holder).expect("a node runs the forwarder");
+    net.nodes[f].kill();
+    let survivors: Vec<usize> = (0..3).filter(|i| *i != f).collect();
+    for i in 10..20 {
+        landed.push(land(i, survivors[i % 2]).await);
+    }
+    // The dead node's forwarder doesn't hold the singleton any more: it forwards nothing.
+    let dead = net.nodes[f].code.clone();
+    let done = tokio::task::spawn_blocking(move || dead.forward_landings()).await.unwrap().unwrap();
+    assert_eq!((done.landings, done.deliveries), (0, 0));
+    let deadline = Instant::now() + wait;
+    while !delivered(&landed) {
+        assert!(Instant::now() < deadline, "landings after the forwarder died weren't all delivered: {:?}", got.lock());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(survivors.iter().any(|s| holder(&net.nodes[*s])), "a survivor runs the forwarder now");
+    // Nothing more arrives late: each landing went out in exactly one delivery.
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let g = got.lock().clone();
+    for cs in &landed {
+        let mut ids: Vec<&String> = g.iter().filter(|(_, c)| c == cs).map(|(d, _)| d).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 1, "landing {cs} went out in {} deliveries", ids.len());
+    }
 }
 
 // ── membership ──
@@ -808,7 +967,10 @@ async fn an_event_stream_ends_when_its_repo_moves() {
     let o = net.owner(&repo_id).unwrap();
     let p = (o + 1) % 3;
     let mut stream = net.http.get(format!("{}/v1/code/repos/acme/api/events", net.nodes[p].url)).send().await.unwrap();
-    assert_eq!(stream.status().as_u16(), 200);
+    if stream.status().as_u16() != 200 {
+        let s = stream.status();
+        panic!("{s}: {}", stream.text().await.unwrap_or_default());
+    }
     let ended = tokio::spawn(async move {
         loop {
             match stream.chunk().await {
