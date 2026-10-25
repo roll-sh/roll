@@ -21,6 +21,11 @@ there does not. Storage, executor, caches and data structures may differ from Po
 wherever that makes the engine faster or leaner. EXPLAIN still prints PostgreSQL's plan,
 because clients and the suite read it, but an executor node may compute its rows any way it
 likes as long as the rows, their order, errors and side effects are PostgreSQL's.
+Numbers that only mirror PostgreSQL's on-disk internals don't have to match. That covers file
+layout, pages, row versions and index entries per version, relation sizes, and EXPLAIN
+ANALYZE counts of dead versions visited. Match them only when it costs nothing. Otherwise record
+them as accepted internal differences, rather than copying PostgreSQL's storage to reproduce
+them. Application-visible behaviour always matches.
 Performance is a goal of its own: measure it (`tools/bench`, BENCH.md) against the reference
 and make the engine faster than PostgreSQL wherever possible.
 
