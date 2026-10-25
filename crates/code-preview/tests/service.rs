@@ -170,8 +170,8 @@ async fn post_merge_opens_one_broken_main_item_and_closes_it_on_green() {
 
     // Bisected to the landing that broke it, with a revert waiting for someone to land it.
     assert!(item.body.contains("Bisected to `cs_"), "{}", item.body);
-    let reverts = a.code.db.changes(&a.repo.id, None, 50).unwrap();
-    let revert = reverts.iter().find(|c| c.title == "Revert: m").expect("a revert change").clone();
+    // The revert is opened right after the item says so.
+    let revert = until("a revert change", 10, || a.code.db.changes(&a.repo.id, None, 50).unwrap().into_iter().find(|c| c.title == "Revert: m")).await;
     assert_eq!(revert.state, code_control::model::ChangeState::Open);
     assert_eq!(revert.work_item.as_deref(), Some(item.id.as_str()));
     assert_eq!(a.code.work_or_404(&item.id).unwrap().state, code_control::model::WorkState::Open, "still claimable");
