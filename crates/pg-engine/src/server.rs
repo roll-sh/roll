@@ -931,6 +931,18 @@ fn activity_state(s: &Session) -> &'static str {
     }
 }
 
+/// pg_stat_activity after a statement: the backend's state, and its application_name as
+/// the statement left it (SET application_name reports itself: pgstat_report_appname).
+fn statement_done_activity(engine: &Engine, pid: i32, s: &Session) {
+    let app = s.state.settings.borrow().show("application_name").ok();
+    engine.set_activity(pid, |a| {
+        a.state = activity_state(s).into();
+        if let Some(app) = app {
+            a.application_name = app;
+        }
+    });
+}
+
 fn message_loop(
     c: &mut Conn,
     engine: &Engine,
@@ -988,7 +1000,7 @@ fn message_loop(
                     Ok(r) => r?,
                     Err(e) => c.error(&e),
                 }
-                engine.set_activity(pid, |a| a.state = activity_state(s).into());
+                statement_done_activity(engine, pid, s);
                 // A FATAL error (the session terminating itself) ends the session.
                 if c.fatal {
                     return c.flush();
@@ -1018,7 +1030,7 @@ fn message_loop(
                 }
                 send_notices(c, s);
                 send_changed(c, s);
-                engine.set_activity(pid, |a| a.state = activity_state(s).into());
+                statement_done_activity(engine, pid, s);
                 ready_for_query(c, s)?;
                 continue;
             }
@@ -1040,7 +1052,7 @@ fn message_loop(
                 if let Err(e) = r {
                     c.error(&e);
                 }
-                engine.set_activity(pid, |a| a.state = activity_state(s).into());
+                statement_done_activity(engine, pid, s);
                 ready_for_query(c, s)?;
                 continue;
             }

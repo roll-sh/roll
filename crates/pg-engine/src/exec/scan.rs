@@ -1957,8 +1957,27 @@ pub fn tid_recheck(
         }
     }
     let Some(s) = find(plan, t) else { return Ok(None) };
-    let Access::Tid { quals, .. } = &s.access else { return Ok(None) };
     let want = Value::Tid(tid.0, tid.1);
+    // A TID range scan (TidRangeRecheck): the new version's TID within every bound.
+    if let Access::TidRange(quals) = &s.access {
+        for q in quals {
+            let Expr::Call(def, args, ty) = q else { return Ok(None) };
+            if args.len() != 2 {
+                return Ok(None);
+            }
+            let tid_arg = Expr::Const(want.clone(), crate::types::DataType::Tid);
+            let call = match (args[0].columns().is_empty(), args[1].columns().is_empty()) {
+                (false, true) => Expr::Call(def.clone(), vec![tid_arg, args[1].clone()], ty.clone()),
+                (true, false) => Expr::Call(def.clone(), vec![args[0].clone(), tid_arg], ty.clone()),
+                _ => return Ok(None),
+            };
+            if eval(&call, &[], ctx)? != Value::Bool(true) {
+                return Ok(Some(false));
+            }
+        }
+        return Ok(Some(true));
+    }
+    let Access::Tid { quals, .. } = &s.access else { return Ok(None) };
     for q in quals {
         let consts: Vec<Value> = match q {
             Expr::Call(_, args, _) if args.len() == 2 && args[1].columns().is_empty() => {

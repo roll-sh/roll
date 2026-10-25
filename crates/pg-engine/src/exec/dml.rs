@@ -570,17 +570,46 @@ pub fn insert_routed_oc(
     }
     let (target, vals) = to_leaf(l, row);
     let mut queue = Vec::new();
-    let oc = on_conflict.map(|oc| crate::sql::plan::OnConflict {
+    let r = insert_new(&l.rules, &target, vals, &[], leaf_on_conflict(l, on_conflict, ctx).as_ref(), &mut queue, ctx)?;
+    after.extend(queue.into_iter().map(|a| (leaf, a)));
+    Ok(routed(l, leaf, r))
+}
+
+/// The ON CONFLICT clause as a leaf applies it (its own arbiter indexes).
+fn leaf_on_conflict(
+    l: &PartLeaf,
+    on_conflict: Option<&crate::sql::plan::OnConflict>,
+    ctx: &ExecCtx,
+) -> Option<crate::sql::plan::OnConflict> {
+    on_conflict.map(|oc| crate::sql::plan::OnConflict {
         arbiters: leaf_arbiters(l, &oc.arbiters, ctx),
         action: ConflictAction::Nothing,
-    });
-    let r = insert_new(&l.rules, &target, vals, &[], oc.as_ref(), &mut queue, ctx)?;
-    after.extend(queue.into_iter().map(|a| (leaf, a)));
-    Ok(match r {
+    })
+}
+
+fn routed(l: &PartLeaf, leaf: usize, r: Inserted) -> Routed {
+    match r {
         Inserted::Stored(r, key) => Routed::Stored(leaf, from_leaf(l, &r), key),
         Inserted::Conflict(r, c) => Routed::Conflict(leaf, from_leaf(l, &r), c),
         Inserted::Skipped => Routed::Skipped,
-    })
+    }
+}
+
+/// An ON CONFLICT insertion into leaf `leaf` starting over from its prepared row (after
+/// its conflicting row changed while it waited).
+pub fn resume_routed(
+    routing: &PartRouting,
+    leaf: usize,
+    p: Prepared,
+    on_conflict: Option<&crate::sql::plan::OnConflict>,
+    after: &mut Vec<(usize, AfterRow)>,
+    ctx: &ExecCtx,
+) -> Result<Routed> {
+    let l = &routing.leaves[leaf];
+    let mut queue = Vec::new();
+    let r = insert_prepared(&l.rules, p, leaf_on_conflict(l, on_conflict, ctx).as_ref(), &mut queue, ctx)?;
+    after.extend(queue.into_iter().map(|a| (leaf, a)));
+    Ok(routed(l, leaf, r))
 }
 
 /// Fire the queued AFTER ROW events of routed rows, leaf by leaf in queue order.
@@ -641,32 +670,142 @@ pub struct Conflict {
     pub index: usize,
     pub existing: Vec<u8>,
     pub values: Vec<Value>,
+    /// The proposed row as the table (the leaf, when routed) takes it, to start over from.
+    pub prepared: Prepared,
 }
 
-/// Look for a row other than `own` with the same unique key. Locks the key first, so two
-/// writers of the same key serialise.
+/// How a unique check treats another transaction's in-progress index entry for the key, or
+/// its update or delete of a row with the key (what Postgres's dirty snapshot sees).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Dirty {
+    /// Wait for the writer, then look again (_bt_check_unique; CEOUC_WAIT).
+    Wait,
+    /// A potential conflict, without waiting (UNIQUE_CHECK_PARTIAL: a speculative
+    /// insertion's own entries, a deferrable constraint's).
+    Partial,
+}
+
+/// A unique check made while adding an index entry for the key: the check takes the key's
+/// lock, which stands for the entry until the transaction ends. `token`: the speculative
+/// insertion adding it, while unfinished; `row`: the row (for others' index expressions).
+pub struct Entering<'a> {
+    pub token: Option<u32>,
+    pub row: Option<&'a Arc<Vec<Value>>>,
+}
+
+/// The lock of a unique key (`locks::UNIQUE_KEY`): per key value, or the whole index under a
+/// nondeterministic collation (equal keys needn't be equal bytes).
+fn unique_lock_key(t: &Table, bix: &BoundIndex, vals: &[Value], nondet: bool) -> Vec<u8> {
+    let mut lock_key = vec![0, 0, 0, 0, 0, 0, 0, crate::txn::locks::UNIQUE_KEY];
+    if nondet {
+        lock_key.extend(index_prefix(t.oid, bix.index.id));
+    } else {
+        lock_key.extend(index_value_prefix(t, &bix.index, vals));
+    }
+    lock_key
+}
+
+/// Whether evaluating the index's key or predicate can be seen (anything but columns).
+fn index_has_exprs(bix: &BoundIndex) -> bool {
+    bix.predicate.is_some() || bix.keys.iter().any(|k| !matches!(k, crate::sql::expr::Expr::Col(..)))
+}
+
+/// Look for a row other than `own` with the same unique key, as the index's uniqueness check
+/// does over a dirty snapshot: another transaction's in-progress entry for the key (its
+/// lock on the key) or its update or delete of the row found is waited for (or, `Partial`,
+/// a conflict). `entering`: the check is for an entry being added (it takes the key's
+/// lock). `form_existing`: check_exclusion_or_unique_constraint's FormIndexDatum over each
+/// row it meets (the index expressions run on it). Some(empty key): an in-progress entry.
+#[allow(clippy::too_many_arguments)]
 fn find_conflict(
     t: &Table,
     bix: &BoundIndex,
     vals: &[Value],
     own: Option<&[u8]>,
+    entering: Option<&Entering>,
+    dirty: Dirty,
+    form_existing: bool,
     ctx: &ExecCtx,
 ) -> Result<Option<Vec<u8>>> {
     if !bix.index.nulls_not_distinct && vals.iter().any(Value::is_null) {
         return Ok(None);
     }
+    let nondet = crate::types::collation::index_nondet(&ctx.catalog(), t, &bix.index);
+    let lock_key = unique_lock_key(t, bix, vals, !nondet.is_empty());
+    let exprs = form_existing && index_has_exprs(bix);
+    let name = t.name.clone();
+    let what = || format!("unique key in \"{name}\"");
+    loop {
+        ctx.check()?;
+        let mine = match entering {
+            Some(e) => {
+                let got = ctx
+                    .txn
+                    .borrow_mut()
+                    .lock(&lock_key, LockMode::Exclusive, WaitPolicy::SkipLocked, &what)?;
+                if got {
+                    ctx.txn
+                        .borrow_mut()
+                        .hold_unique_key(&lock_key, e.token, e.row.cloned());
+                }
+                got
+            }
+            None => false,
+        };
+        if !mine {
+            let holder = ctx.txn.borrow().unique_key_holder(&lock_key);
+            if let Some(kh) = holder {
+                if exprs && let Some(r) = &kh.row {
+                    index_values(bix, r, ctx)?;
+                }
+                if dirty == Dirty::Partial {
+                    return Ok(Some(Vec::new()));
+                }
+                ctx.txn.borrow_mut().wait_for_key_holder(&kh)?;
+                continue;
+            }
+            if let Some(e) = entering {
+                // Free, but others are queued for it: wait in line.
+                ctx.txn
+                    .borrow_mut()
+                    .lock(&lock_key, LockMode::Exclusive, WaitPolicy::Block, &what)?;
+                ctx.txn
+                    .borrow_mut()
+                    .hold_unique_key(&lock_key, e.token, e.row.cloned());
+            }
+        }
+        let Some(dkey) = committed_conflict(t, bix, vals, own, &nondet, ctx)? else {
+            return Ok(None);
+        };
+        let latest = if exprs { ctx.txn.borrow().get_latest(&dkey)? } else { None };
+        if let Some((_, Some(bytes))) = latest {
+            index_values(bix, &decode_table_row(t, &bytes)?, ctx)?;
+        }
+        // Being updated or deleted by a transaction in progress: what it does decides.
+        let modifier = ctx.txn.borrow().row_modifier(&dkey);
+        if let Some(h) = modifier {
+            if dirty == Dirty::Partial {
+                return Ok(Some(dkey));
+            }
+            ctx.txn.borrow_mut().wait_for_xact(h)?;
+            continue;
+        }
+        return Ok(Some(dkey));
+    }
+}
+
+/// A committed row (or one this transaction wrote) other than `own` with the unique key.
+fn committed_conflict(
+    t: &Table,
+    bix: &BoundIndex,
+    vals: &[Value],
+    own: Option<&[u8]>,
+    nondet: &[Option<Arc<crate::types::collation::Collation>>],
+    ctx: &ExecCtx,
+) -> Result<Option<Vec<u8>>> {
     // Under a nondeterministic collation, equal keys needn't be equal bytes: look through
     // the table's rows.
-    let nondet = crate::types::collation::index_nondet(&ctx.catalog(), t, &bix.index);
     if !nondet.is_empty() {
-        let mut lock_key = vec![0, 0, 0, 0, 0, 0, 0, 4];
-        lock_key.extend(index_prefix(t.oid, bix.index.id));
-        let name = t.name.clone();
-        ctx.txn
-            .borrow_mut()
-            .lock(&lock_key, LockMode::Exclusive, WaitPolicy::Block, &|| {
-                format!("unique key in \"{name}\"")
-            })?;
         let start = index_prefix(t.oid, 0);
         let rows: Vec<(Vec<u8>, bytes::Bytes)> = ctx
             .txn
@@ -684,7 +823,7 @@ fn find_conflict(
             if crate::types::collation::keys_equal(
                 vals,
                 &other,
-                &nondet,
+                nondet,
                 bix.index.nulls_not_distinct,
             ) {
                 return Ok(Some(dkey));
@@ -692,14 +831,6 @@ fn find_conflict(
         }
         return Ok(None);
     }
-    let mut lock_key = vec![0, 0, 0, 0, 0, 0, 0, 4];
-    lock_key.extend(index_value_prefix(t, &bix.index, vals));
-    let name = t.name.clone();
-    ctx.txn
-        .borrow_mut()
-        .lock(&lock_key, LockMode::Exclusive, WaitPolicy::Block, &|| {
-            format!("unique key in \"{name}\"")
-        })?;
     if bix.index.id == 0 {
         // Primary key: the data key itself.
         let mut k = index_prefix(t.oid, 0);
@@ -914,16 +1045,22 @@ fn exclusion_violation(
 }
 
 /// What a unique or exclusion index finds for a new row's key values: a conflicting row's
-/// key (and, for exclusion constraints, its values).
+/// key (and, for exclusion constraints, its values). A unique index's check is
+/// `find_conflict`'s (`entering`, `dirty`, `form_existing` as there).
+#[allow(clippy::too_many_arguments)]
 fn index_conflict(
     t: &Table,
     bix: &BoundIndex,
     vals: &[Value],
     own: Option<&[u8]>,
+    entering: Option<&Entering>,
+    dirty: Dirty,
+    form_existing: bool,
     ctx: &ExecCtx,
 ) -> Result<Option<(Vec<u8>, Option<Vec<Value>>)>> {
     if bix.index.unique {
-        return Ok(find_conflict(t, bix, vals, own, ctx)?.map(|k| (k, None)));
+        return Ok(find_conflict(t, bix, vals, own, entering, dirty, form_existing, ctx)?
+            .map(|k| (k, None)));
     }
     Ok(exclusion_conflict(t, bix, vals, own, ctx)?.map(|o| (Vec::new(), Some(o))))
 }
@@ -964,7 +1101,7 @@ fn defer_recheck(
     let Some(con) = bix.constraint.as_ref().filter(|c| c.deferral.0) else {
         return Ok(false);
     };
-    if index_conflict(t, bix, vals, exclude, ctx)?.is_none() {
+    if index_conflict(t, bix, vals, exclude, Some(&Entering { token: None, row: None }), Dirty::Partial, false, ctx)?.is_none() {
         return Ok(true);
     }
     let deferred = ctx.txn.borrow().is_deferred(con.oid, con.deferral);
@@ -989,7 +1126,7 @@ fn recheck_row(t: &Table, bix: &BoundIndex, dkey: &[u8], ctx: &ExecCtx) -> Resul
     let Some(vals) = index_values(bix, &row, ctx)? else {
         return Ok(());
     };
-    if let Some((_, other)) = index_conflict(t, bix, &vals, Some(dkey), ctx)? {
+    if let Some((_, other)) = index_conflict(t, bix, &vals, Some(dkey), Some(&Entering { token: None, row: None }), Dirty::Wait, false, ctx)? {
         return Err(index_violation(t, bix, &vals, other.as_deref(), ctx));
     }
     Ok(())
@@ -1011,12 +1148,27 @@ pub fn put_index_entries(
     dkey: &[u8],
     ctx: &ExecCtx,
 ) -> Result<()> {
-    for bix in indexes {
+    let vals = indexes
+        .iter()
+        .map(|bix| if bix.index.id == 0 { Ok(None) } else { index_values(bix, row, ctx) })
+        .collect::<Result<Vec<_>>>()?;
+    put_index_entries_with(t, indexes, &vals, dkey, ctx)
+}
+
+/// Write a row's index entries from its index values (one per index).
+fn put_index_entries_with(
+    t: &Table,
+    indexes: &[BoundIndex],
+    vals: &[Option<Vec<Value>>],
+    dkey: &[u8],
+    ctx: &ExecCtx,
+) -> Result<()> {
+    for (bix, vals) in indexes.iter().zip(vals) {
         if bix.index.id == 0 {
             continue;
         }
-        if let Some(vals) = index_values(bix, row, ctx)? {
-            let k = index_entry_key(t, &bix.index, &vals, dkey);
+        if let Some(vals) = vals {
+            let k = index_entry_key(t, &bix.index, vals, dkey);
             let tracked = ctx.txn.borrow().serializable_tracked();
             if tracked {
                 let me = ctx.txn.borrow().id;
@@ -1224,7 +1376,10 @@ fn check_fk(
     let Some(parent) = cat.tables.get(ref_table).cloned() else {
         return Ok(());
     };
-    if !find_parent_tree(&parent, ref_columns, &vals, ctx)? {
+    // RI_FKey_check: over the transaction snapshot in REPEATABLE READ unless the referenced
+    // table is partitioned (detectNewRows).
+    let xact_snapshot = parent.partkey.is_none() && ctx.txn.borrow().isolation.txn_snapshot();
+    if !find_parent_tree(&parent, ref_columns, &vals, xact_snapshot, ctx)? {
         return Err(child_violation(t, con, &parent, &vals, ctx));
     }
     Ok(())
@@ -1604,10 +1759,11 @@ fn find_parent_tree(
     parent: &Arc<Table>,
     cols: &[usize],
     vals: &[Value],
+    xact_snapshot: bool,
     ctx: &ExecCtx,
 ) -> Result<bool> {
     for (leaf, lcols) in fk_leaves(parent, cols, ctx) {
-        if find_parent(&leaf, &lcols, vals, ctx)? {
+        if find_parent(&leaf, &lcols, vals, xact_snapshot, ctx)? {
             return Ok(true);
         }
     }
@@ -1636,8 +1792,18 @@ fn scan_tree(
     Ok(out)
 }
 
-/// Find (and share-lock) the parent row with `cols = vals`.
-fn find_parent(parent: &Table, cols: &[usize], vals: &[Value], ctx: &ExecCtx) -> Result<bool> {
+/// Find (and share-lock) the parent row with `cols = vals`, as RI_FKey_check's
+/// `SELECT 1 FROM ONLY pk WHERE ... FOR KEY SHARE` does. `xact_snapshot`: it runs over the
+/// transaction snapshot (REPEATABLE READ / SERIALIZABLE, a referenced table that isn't
+/// partitioned: ri_PerformCheck's detectNewRows is false), else over the latest committed
+/// rows.
+fn find_parent(
+    parent: &Table,
+    cols: &[usize],
+    vals: &[Value],
+    xact_snapshot: bool,
+    ctx: &ExecCtx,
+) -> Result<bool> {
     let cat = ctx.catalog();
     // Cast values to the parent's column types so keys encode identically.
     let vals: Vec<Value> = vals
@@ -1645,7 +1811,24 @@ fn find_parent(parent: &Table, cols: &[usize], vals: &[Value], ctx: &ExecCtx) ->
         .zip(cols)
         .map(|(v, c)| coerce_key(v, &parent.columns[*c].ty, ctx))
         .collect::<Result<_>>()?;
+    let nondet = ri_colls(parent, cols, ctx).is_some();
     let lookup = |dkey: &[u8]| -> Result<bool> {
+        if xact_snapshot {
+            // A row the snapshot doesn't see isn't there; one changed since is
+            // ExecLockRows's serialization failure (either way, "concurrent update").
+            if ctx.txn.borrow().get(dkey)?.is_none() {
+                return Ok(false);
+            }
+            return match super::scan::lock_row_mode(parent, dkey, RowLockMode::KeyShare, Wait::Block, ctx) {
+                Ok(Locked::Same) => Ok(true),
+                Ok(_) => Ok(false),
+                Err(e) if e.code == code::SERIALIZATION_FAILURE => Err(Error::new(
+                    code::SERIALIZATION_FAILURE,
+                    "could not serialize access due to concurrent update",
+                )),
+                Err(e) => Err(e),
+            };
+        }
         let got = ctx
             .txn
             .borrow_mut()
@@ -1655,13 +1838,35 @@ fn find_parent(parent: &Table, cols: &[usize], vals: &[Value], ctx: &ExecCtx) ->
         if !got {
             return Ok(false);
         }
-        Ok(matches!(
-            ctx.txn.borrow().get_latest(dkey)?,
-            Some((_, Some(_)))
-        ))
+        let txn = ctx.txn.borrow();
+        match txn.get_latest(dkey)? {
+            // Moved to another partition by the update it waited for: heap_lock_tuple's
+            // error (EvalPlanQual can't follow it).
+            Some((ts, None)) if txn.moved_at(dkey, ts) => Err(Error::new(
+                code::SERIALIZATION_FAILURE,
+                super::scan::MOVED_TO_PARTITION,
+            )),
+            // The newest version, rechecked against the key (EvalPlanQual).
+            Some((_, Some(bytes))) => {
+                if nondet {
+                    return Ok(true);
+                }
+                let row = decode_table_row(parent, &bytes)?;
+                let enc = |v: &Value| {
+                    let mut out = Vec::new();
+                    encode_value(&mut out, v, false);
+                    out
+                };
+                Ok(cols
+                    .iter()
+                    .zip(&vals)
+                    .all(|(c, v)| row.get(*c).is_some_and(|r| enc(r) == enc(v))))
+            }
+            _ => Ok(false),
+        }
     };
     // Keys under a nondeterministic collation match more than their bytes: scan.
-    if ri_colls(parent, cols, ctx).is_some() {
+    if nondet {
         for (dkey, _) in scan_matching(parent, cols, &vals, ctx, false)? {
             if lookup(&dkey)? {
                 return Ok(true);
@@ -1694,12 +1899,15 @@ fn find_parent(parent: &Table, cols: &[usize], vals: &[Value], ctx: &ExecCtx) ->
             && ixcols.iter().zip(cols).all(|(a, b)| *a == Some(*b))
         {
             let prefix = index_value_prefix(parent, &ix, &vals);
-            let entries: Vec<Vec<u8>> = ctx
-                .txn
-                .borrow()
-                .scan_latest(&prefix, &prefix_end(&prefix))
-                .map(|e| e.map(|(_, v)| v.to_vec()))
-                .collect::<Result<_>>()?;
+            let entries: Vec<Vec<u8>> = {
+                let txn = ctx.txn.borrow();
+                let scan = if xact_snapshot {
+                    txn.scan(&prefix, &prefix_end(&prefix))
+                } else {
+                    txn.scan_latest(&prefix, &prefix_end(&prefix))
+                };
+                scan.map(|e| e.map(|(_, v)| v.to_vec())).collect::<Result<_>>()?
+            };
             for dkey in entries {
                 if lookup(&dkey)? {
                     return Ok(true);
@@ -1895,7 +2103,7 @@ fn fk_parent_action(
     }
     if action == FkAction::NoAction
         && let Some(parent) = cat.tables.get(ref_table)
-        && find_parent_tree(parent, ref_columns, &oldvals, ctx)?
+        && find_parent_tree(parent, ref_columns, &oldvals, false, ctx)?
     {
         // Another row has the key now (ri_Check_Pk_Match).
         return Ok(());
@@ -2073,7 +2281,7 @@ fn fk_parent_action(
     // NO ACTION check (ri_restrict).
     if action == FkAction::SetDefault {
         if let Some(parent) = cat.tables.get(ref_table)
-            && find_parent_tree(parent, ref_columns, &oldvals, ctx)?
+            && find_parent_tree(parent, ref_columns, &oldvals, false, ctx)?
         {
             return Ok(());
         }
@@ -2183,6 +2391,8 @@ pub fn delete_row(
     ctx: &ExecCtx,
 ) -> Result<()> {
     ssi_change(t, indexes, dkey, old, None, ctx)?;
+    // heap_delete sets its xmax: writers of its unique keys wait for us now.
+    ctx.txn.borrow_mut().row_modified(dkey);
     super::sizing::deleted(t, indexes, dkey, ctx)?;
     super::pgstat::count_delete(ctx, t.oid);
     ctx.txn.borrow_mut().delete(dkey.to_vec())?;
@@ -2278,6 +2488,17 @@ fn hot_update(indexes: &[BoundIndex], old: &[Value], new: &[Value], ctx: &ExecCt
     Ok(true)
 }
 
+/// Whether two values are the same datum (datumIsEqual: their stored images, so `1.0` and
+/// `1.00` differ).
+fn same_image(a: Option<&Value>, b: Option<&Value>) -> bool {
+    let img = |v: Option<&Value>| {
+        let mut out = Vec::new();
+        crate::storage::row::encode_value(&mut out, v.unwrap_or(&Value::Null));
+        out
+    };
+    img(a) == img(b)
+}
+
 /// Compute generated columns, validate, and write a new version of a row (already locked).
 /// Returns the row as stored.
 pub fn update_row(
@@ -2308,17 +2529,39 @@ pub fn update_row_rls(
     check_partition(rules, &new, ctx)?;
     check_row_rls(rules, rls, &new, ctx)?;
     ssi_change(t, &rules.indexes, dkey, old, Some(&new), ctx)?;
+    // heap_update sets the old version's xmax: writers of its unique keys wait for us now.
+    ctx.txn.borrow_mut().row_modified(dkey);
     let new_key = if t.storage_pkey().is_some() {
         data_key(t, &new, None)
     } else {
         dkey.to_vec()
     };
+    // An index none of whose columns changed keeps its entry, its expressions not run again
+    // (heap_update's HOT test is by column: index expressions are immutable).
+    let changed: Vec<bool> = rules
+        .indexes
+        .iter()
+        .map(|bix| {
+            if new_key != dkey {
+                return true;
+            }
+            let mut cols = HashSet::new();
+            super::sizing::index_columns(bix, &mut cols);
+            cols.is_empty() || cols.iter().any(|&c| !same_image(old.get(c), new.get(c)))
+        })
+        .collect();
+    let mut new_vals: Vec<Option<Option<Vec<Value>>>> = vec![None; rules.indexes.len()];
+    let mut old_vals: Vec<Option<Option<Vec<Value>>>> = vec![None; rules.indexes.len()];
     // Unique and exclusion indexes whose key changed.
-    for bix in &rules.indexes {
-        if !checks_rows(bix) {
+    for (i, bix) in rules.indexes.iter().enumerate() {
+        if !checks_rows(bix) || !changed[i] {
             continue;
         }
-        let (Some(nv), ov) = (index_values(bix, &new, ctx)?, index_values(bix, old, ctx)?) else {
+        let nv = index_values(bix, &new, ctx)?;
+        new_vals[i] = Some(nv.clone());
+        let ov = index_values(bix, old, ctx)?;
+        old_vals[i] = Some(ov.clone());
+        let Some(nv) = nv else {
             continue;
         };
         check_without_overlaps(t, bix, &nv)?;
@@ -2331,7 +2574,10 @@ pub fn update_row_rls(
         if defer_recheck(t, bix, &nv, &new_key, Some(dkey), ctx)? {
             continue;
         }
-        if let Some((_, other)) = index_conflict(t, bix, &nv, Some(dkey), ctx)? {
+        let entering = Entering { token: None, row: None };
+        if let Some((_, other)) =
+            index_conflict(t, bix, &nv, Some(dkey), Some(&entering), Dirty::Wait, false, ctx)?
+        {
             ssi_change(t, &rules.indexes, dkey, old, Some(&new), ctx)?;
             // The new version went into the heap before its index entries found the
             // clash: it stays, dead, where it was put.
@@ -2347,12 +2593,18 @@ pub fn update_row_rls(
     if new_key != dkey {
         ctx.txn.borrow_mut().delete(dkey.to_vec())?;
     }
-    for bix in &rules.indexes {
-        if bix.index.id == 0 {
+    for (i, bix) in rules.indexes.iter().enumerate() {
+        if bix.index.id == 0 || !changed[i] {
             continue;
         }
-        let ov = index_values(bix, old, ctx)?;
-        let nv = index_values(bix, &new, ctx)?;
+        let ov = match old_vals[i].take() {
+            Some(v) => v,
+            None => index_values(bix, old, ctx)?,
+        };
+        let nv = match new_vals[i].take() {
+            Some(v) => v,
+            None => index_values(bix, &new, ctx)?,
+        };
         let same = new_key == dkey
             && matches!((&ov, &nv), (Some(a), Some(b)) if super::agg::cmp_rows(a, b) == std::cmp::Ordering::Equal);
         if same {
@@ -2407,23 +2659,28 @@ pub fn new_row(rules: &TableRules, target: &[usize], src: Row, ctx: &ExecCtx) ->
     Ok(row)
 }
 
-/// Insert one row given values for the `target` columns: defaults, BEFORE ROW triggers,
-/// generated columns, checks, unique keys (a collision is an error unless `on_conflict`
-/// covers it), foreign keys, the write and its index entries. AFTER ROW events are queued
-/// on `after`.
-pub fn insert_new(
+/// A row ready for its unique checks and its write (ExecInsert at its `vlock:` label):
+/// defaults, BEFORE ROW triggers, generated columns and checks done, its key chosen. An ON
+/// CONFLICT DO UPDATE whose conflicting row changed while it waited starts over from here.
+#[derive(Clone)]
+pub struct Prepared {
+    pub row: Row,
+    pub dkey: Vec<u8>,
+}
+
+/// Defaults, BEFORE ROW (or INSTEAD OF) triggers, generated columns and checks of a row
+/// offered for insertion: Err(what became of it) when a trigger took it over.
+fn prepare_insert(
     rules: &TableRules,
     target: &[usize],
     src: Row,
     rls: &[crate::sql::plan::RlsCheck],
-    on_conflict: Option<&crate::sql::plan::OnConflict>,
-    after: &mut Vec<AfterRow>,
     ctx: &ExecCtx,
-) -> Result<Inserted> {
+) -> Result<std::result::Result<Prepared, Inserted>> {
     let t = &rules.table;
     let mut row = new_row(rules, target, src, ctx)?;
     if rules.view {
-        return Ok(
+        return Ok(Err(
             match trigger::instead(&rules.triggers, t, tt::INSERT, None, Some(row), ctx)? {
                 Some(r) => {
                     check_view_options(rules, &r, ctx)?;
@@ -2431,7 +2688,7 @@ pub fn insert_new(
                 }
                 None => Inserted::Skipped,
             },
-        );
+        ));
     }
     if trigger::any(&rules.triggers, true, true, tt::INSERT, ctx) {
         let fits = |r: &Row| partition_ok(rules, r, ctx);
@@ -2442,7 +2699,7 @@ pub fn insert_new(
         };
         match trigger::before_row_in(&rules.triggers, t, tt::INSERT, None, row, &[], fits, ctx)? {
             Some(r) => row = r,
-            None => return Ok(Inserted::Skipped),
+            None => return Ok(Err(Inserted::Skipped)),
         }
     }
     for (i, g) in rules.generated.iter().enumerate() {
@@ -2462,74 +2719,242 @@ pub fn insert_new(
         None
     };
     let dkey = data_key(t, &row, rowid);
-    // SSI: heap_insert's check at the relation, then each btree entry's at its leaf page
-    // (before a unique check fails: _bt_check_unique). ON CONFLICT checks its arbiters
-    // first (ExecCheckIndexConstraints).
-    if on_conflict.is_none() {
-        ssi_insert(t, &rules.indexes, &dkey, &row, ctx)?;
+    Ok(Ok(Prepared { row, dkey }))
+}
+
+/// Insert one row given values for the `target` columns: defaults, BEFORE ROW triggers,
+/// generated columns, checks, unique keys (a collision is an error unless `on_conflict`
+/// covers it), foreign keys, the write and its index entries. AFTER ROW events are queued
+/// on `after`.
+pub fn insert_new(
+    rules: &TableRules,
+    target: &[usize],
+    src: Row,
+    rls: &[crate::sql::plan::RlsCheck],
+    on_conflict: Option<&crate::sql::plan::OnConflict>,
+    after: &mut Vec<AfterRow>,
+    ctx: &ExecCtx,
+) -> Result<Inserted> {
+    match prepare_insert(rules, target, src, rls, ctx)? {
+        Ok(p) => insert_prepared(rules, p, on_conflict, after, ctx),
+        Err(done) => Ok(done),
     }
-    // Unique and exclusion checks (primary key first), the ON CONFLICT arbiters' before
-    // the others' (the speculative insertion's pre-check).
-    let arbiter_of = |bix: &BoundIndex| {
-        on_conflict
-            .is_some_and(|oc| oc.arbiters.is_empty() || oc.arbiters.contains(&bix.index.oid))
-    };
-    let order = rules
+}
+
+/// The unique checks and the write of a prepared row. With ON CONFLICT, Postgres's
+/// speculative insertion: the arbiters are checked first (waiting for transactions writing
+/// the key), then the row goes in under a speculative token, its arbiter entries checked
+/// again without waiting; a conflict found then kills the row and starts over.
+pub fn insert_prepared(
+    rules: &TableRules,
+    p: Prepared,
+    on_conflict: Option<&crate::sql::plan::OnConflict>,
+    after: &mut Vec<AfterRow>,
+    ctx: &ExecCtx,
+) -> Result<Inserted> {
+    let t = &rules.table;
+    // Others' index expressions over our in-progress row (check_exclusion_or_unique_
+    // constraint's FormIndexDatum) need it.
+    let shared = rules
         .indexes
         .iter()
-        .enumerate()
-        .filter(|(_, b)| arbiter_of(b))
-        .chain(rules.indexes.iter().enumerate().filter(|(_, b)| !arbiter_of(b)));
-    for (n, bix) in order {
-        if !checks_rows(bix) {
-            continue;
-        }
-        let arbiter = arbiter_of(bix);
-        if arbiter && let Some(c) = bix.constraint.as_ref().filter(|c| c.deferral.0) {
-            return Err(Error::new(code::OBJECT_NOT_IN_PREREQUISITE_STATE, "ON CONFLICT does not support deferrable unique constraints/exclusion constraints as arbiters")
-                .table(ctx.catalog().schema_name(t.schema), &t.name)
-                .constraint(&c.name));
-        }
-        let Some(vals) = index_values(bix, &row, ctx)? else {
-            continue;
-        };
-        check_without_overlaps(t, bix, &vals)?;
-        if !arbiter && defer_recheck(t, bix, &vals, &dkey, None, ctx)? {
-            continue;
-        }
-        let Some((existing, other)) = index_conflict(t, bix, &vals, None, ctx)? else {
-            continue;
-        };
-        if !arbiter {
-            // _bt_check_unique checks for SSI conflicts before it reports the clash.
-            ssi_insert(t, &rules.indexes, &dkey, &row, ctx)?;
-            // The heap tuple went in before its index entries found the clash
-            // (ExecInsertIndexTuples): it stays, dead, where it was put.
-            if t.has_rowid() {
-                let _ = super::sizing::inserted(t, &rules.indexes, &dkey, &row, ctx);
+        .any(|b| checks_rows(b) && index_has_exprs(b))
+        .then(|| Arc::new(p.row.clone()));
+    let Some(oc) = on_conflict else {
+        // SSI: heap_insert's check at the relation, then each btree entry's at its leaf
+        // page (before a unique check fails: _bt_check_unique).
+        ssi_insert(t, &rules.indexes, &p.dkey, &p.row, ctx)?;
+        let vals = index_entries_checked(rules, &p, None, shared.as_ref(), ctx)?;
+        let (row, dkey) = store_inserted(rules, p, &vals, after, ctx)?;
+        return Ok(Inserted::Stored(row, dkey));
+    };
+    let arbiter_of =
+        |bix: &BoundIndex| oc.arbiters.is_empty() || oc.arbiters.contains(&bix.index.oid);
+    loop {
+        // ExecCheckIndexConstraints: the arbiters, waiting for writers of the key.
+        for (n, bix) in rules.indexes.iter().enumerate() {
+            if !checks_rows(bix) || !arbiter_of(bix) {
+                continue;
             }
-            return Err(index_violation(t, bix, &vals, other.as_deref(), ctx));
+            if let Some(c) = bix.constraint.as_ref().filter(|c| c.deferral.0) {
+                return Err(Error::new(code::OBJECT_NOT_IN_PREREQUISITE_STATE, "ON CONFLICT does not support deferrable unique constraints/exclusion constraints as arbiters")
+                    .table(ctx.catalog().schema_name(t.schema), &t.name)
+                    .constraint(&c.name));
+            }
+            let Some(vals) = index_values(bix, &p.row, ctx)? else {
+                continue;
+            };
+            check_without_overlaps(t, bix, &vals)?;
+            if let Some((existing, _)) =
+                index_conflict(t, bix, &vals, None, None, Dirty::Wait, true, ctx)?
+            {
+                return Ok(Inserted::Conflict(
+                    p.row.clone(),
+                    Conflict {
+                        index: n,
+                        existing,
+                        values: vals,
+                        prepared: p,
+                    },
+                ));
+            }
         }
-        return Ok(Inserted::Conflict(
-            row,
-            Conflict {
-                index: n,
-                existing,
-                values: vals,
+        ssi_insert(t, &rules.indexes, &p.dkey, &p.row, ctx)?;
+        let token = ctx.txn.borrow_mut().begin_speculative()?;
+        let r = index_entries_checked(rules, &p, Some((token, &arbiter_of)), shared.as_ref(), ctx);
+        let r = match r {
+            Ok(vals) => match vals.conflict {
+                // specConflict: the tuple (and its entries) went in and is killed; start
+                // over at the pre-check.
+                true => {
+                    let _ = super::sizing::inserted_with(
+                        t,
+                        &rules.indexes,
+                        &p.dkey,
+                        &p.row,
+                        Some(&vals.vals),
+                        ctx,
+                    );
+                    super::pgstat::count_insert(ctx, t.oid, 1);
+                    super::pgstat::count_delete(ctx, t.oid);
+                    for k in &vals.taken {
+                        ctx.txn.borrow_mut().unlock(k, LockMode::Exclusive);
+                    }
+                    for k in &vals.entered {
+                        if !vals.taken.contains(k) {
+                            ctx.txn.borrow_mut().hold_unique_key(k, None, shared.clone());
+                        }
+                    }
+                    None
+                }
+                false => {
+                    // The speculative insertion is complete: its entries stand for the
+                    // transaction from now on.
+                    for k in &vals.entered {
+                        ctx.txn.borrow_mut().hold_unique_key(k, None, shared.clone());
+                    }
+                    Some(store_inserted(rules, p.clone(), &vals, after, ctx))
+                }
             },
-        ));
+            Err(e) => Some(Err(e)),
+        };
+        ctx.txn.borrow_mut().end_speculative(token);
+        match r {
+            None => continue,
+            Some(r) => {
+                let (row, dkey) = r?;
+                return Ok(Inserted::Stored(row, dkey));
+            }
+        }
     }
-    if on_conflict.is_some() {
-        ssi_insert(t, &rules.indexes, &dkey, &row, ctx)?;
+}
+
+/// A row's index values, one per index, with what its unique checks did.
+struct CheckedEntries {
+    vals: Vec<Option<Vec<Value>>>,
+    /// A speculative insertion's arbiter found a (possible) conflict.
+    conflict: bool,
+    /// Unique key locks this attempt took, and every one its arbiter entries hold.
+    taken: Vec<Vec<u8>>,
+    entered: Vec<Vec<u8>>,
+}
+
+/// ExecInsertIndexTuples' part before the writes: each index's values (FormIndexDatum, in
+/// index order, once) and the unique and exclusion checks, erroring on a violation (the
+/// dead tuple left with the entries made before it). `spec`: a speculative insertion (its
+/// token, and which indexes are arbiters), whose arbiters' checks don't wait and report a
+/// conflict instead.
+#[allow(clippy::type_complexity)]
+fn index_entries_checked(
+    rules: &TableRules,
+    p: &Prepared,
+    spec: Option<(u32, &dyn Fn(&BoundIndex) -> bool)>,
+    shared: Option<&Arc<Vec<Value>>>,
+    ctx: &ExecCtx,
+) -> Result<CheckedEntries> {
+    let t = &rules.table;
+    let mut out = CheckedEntries {
+        vals: Vec::with_capacity(rules.indexes.len()),
+        conflict: false,
+        taken: Vec::new(),
+        entered: Vec::new(),
+    };
+    for bix in &rules.indexes {
+        let vals = index_values(bix, &p.row, ctx)?;
+        if let Some(v) = &vals
+            && checks_rows(bix)
+        {
+            match spec {
+                Some((token, arbiter_of)) if arbiter_of(bix) => {
+                    if bix.index.unique {
+                        let nondet = crate::types::collation::index_nondet(&ctx.catalog(), t, &bix.index);
+                        let lk = unique_lock_key(t, bix, v, !nondet.is_empty());
+                        let had = ctx.txn.borrow().holds_lock_mode(&lk, LockMode::Exclusive);
+                        let entering = Entering { token: Some(token), row: shared };
+                        let found = find_conflict(t, bix, v, None, Some(&entering), Dirty::Partial, false, ctx)?;
+                        if ctx.txn.borrow().holds_lock_mode(&lk, LockMode::Exclusive) {
+                            if !had {
+                                out.taken.push(lk.clone());
+                            }
+                            out.entered.push(lk);
+                        }
+                        out.conflict |= found.is_some();
+                    } else if exclusion_conflict(t, bix, v, None, ctx)?.is_some() {
+                        out.conflict = true;
+                    }
+                }
+                _ => {
+                    check_without_overlaps(t, bix, v)?;
+                    if !defer_recheck(t, bix, v, &p.dkey, None, ctx)? {
+                        let entering = Entering { token: None, row: shared };
+                        if let Some((_, other)) =
+                            index_conflict(t, bix, v, None, Some(&entering), Dirty::Wait, false, ctx)?
+                        {
+                            // _bt_check_unique checks for SSI conflicts before it reports
+                            // the clash.
+                            ssi_insert(t, &rules.indexes, &p.dkey, &p.row, ctx)?;
+                            // The heap tuple went in before its index entries found the
+                            // clash (ExecInsertIndexTuples): it stays, dead, where it was
+                            // put, with the entries made so far.
+                            if t.has_rowid() {
+                                let _ = super::sizing::inserted_with(
+                                    t,
+                                    &rules.indexes,
+                                    &p.dkey,
+                                    &p.row,
+                                    Some(&out.vals),
+                                    ctx,
+                                );
+                            }
+                            return Err(index_violation(t, bix, v, other.as_deref(), ctx));
+                        }
+                    }
+                }
+            }
+        }
+        out.vals.push(vals);
     }
-    let tid = super::sizing::inserted(t, &rules.indexes, &dkey, &row, ctx)?;
+    Ok(out)
+}
+
+/// Write an inserted row and its index entries; its AFTER ROW event queued.
+fn store_inserted(
+    rules: &TableRules,
+    p: Prepared,
+    vals: &CheckedEntries,
+    after: &mut Vec<AfterRow>,
+    ctx: &ExecCtx,
+) -> Result<(Row, Vec<u8>)> {
+    let t = &rules.table;
+    let Prepared { row, dkey } = p;
+    let tid = super::sizing::inserted_with(t, &rules.indexes, &dkey, &row, Some(&vals.vals), ctx)?;
     super::pgstat::count_insert(ctx, t.oid, 1);
     super::pgstat::io_insert(ctx, t.oid, 1, "normal");
     let xid = ctx.txn.borrow_mut().cur_xid();
     ctx.txn
         .borrow_mut()
         .put(dkey.clone(), encode_table_row_at(&row, xid, tid))?;
-    put_index_entries(t, &rules.indexes, &row, &dkey, ctx)?;
+    put_index_entries_with(t, &rules.indexes, &vals.vals, &dkey, ctx)?;
     if trigger::wants_after(&rules.triggers, tt::INSERT, ctx) {
         after.push(AfterRow {
             event: tt::INSERT,
@@ -2538,7 +2963,7 @@ pub fn insert_new(
             key: dkey.clone(),
         });
     }
-    Ok(Inserted::Stored(row, dkey))
+    Ok((row, dkey))
 }
 
 // ── INSERT ──
@@ -2564,6 +2989,9 @@ pub struct InsertNode {
     virtual_slot: bool,
     /// The statement's AFTER queue length when this command started (`hoist_row_events`).
     queue_mark: Option<usize>,
+    /// ON CONFLICT DO UPDATE starting a row over: (its leaf, when routed; the row as
+    /// prepared).
+    retry: Option<(Option<usize>, Prepared)>,
 }
 
 impl InsertNode {
@@ -2608,6 +3036,7 @@ impl InsertNode {
             copy_load,
             virtual_slot: false,
             queue_mark: None,
+            retry: None,
         })
     }
 
@@ -2633,27 +3062,47 @@ impl InsertNode {
     /// Insert one source row. Returns the final row (for RETURNING) with its key and the
     /// existing row ON CONFLICT updated, or None if skipped.
     fn insert(&mut self, src: Row, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
-        // ON CONFLICT DO UPDATE found its row changed while it waited for it: start over.
+        // ON CONFLICT DO UPDATE found its row changed while it waited for it: start over at
+        // the unique checks (its BEFORE ROW triggers don't fire again).
+        let mut resume = None;
         loop {
-            match self.insert_once(src.clone(), ctx) {
-                Err(e) if e.code == RETRY_INSERT => continue,
+            match self.insert_once(src.clone(), resume.take(), ctx) {
+                Err(e) if e.code == RETRY_INSERT => resume = self.retry.take(),
                 r => return r,
             }
         }
     }
 
-    fn insert_once(&mut self, src: Row, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
+    fn insert_once(
+        &mut self,
+        src: Row,
+        resume: Option<(Option<usize>, Prepared)>,
+        ctx: &ExecCtx,
+    ) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
         let rules = &self.plan.rules;
         if let Some(routing) = self.plan.route.clone() {
-            let row = new_row(rules, &self.plan.target, src, ctx)?;
-            return match insert_routed_oc(
-                &routing,
-                &rules.rls_checks,
-                row,
-                self.plan.on_conflict.as_ref(),
-                &mut self.routed_after,
-                ctx,
-            )? {
+            let r = match resume {
+                Some((Some(leaf), p)) => resume_routed(
+                    &routing,
+                    leaf,
+                    p,
+                    self.plan.on_conflict.as_ref(),
+                    &mut self.routed_after,
+                    ctx,
+                )?,
+                _ => {
+                    let row = new_row(rules, &self.plan.target, src, ctx)?;
+                    insert_routed_oc(
+                        &routing,
+                        &rules.rls_checks,
+                        row,
+                        self.plan.on_conflict.as_ref(),
+                        &mut self.routed_after,
+                        ctx,
+                    )?
+                }
+            };
+            return match r {
                 Routed::Skipped => Ok(None),
                 Routed::Stored(leaf, row, key) => {
                     self.last_table = routing.leaves[leaf].rules.table.oid;
@@ -2677,15 +3126,25 @@ impl InsertNode {
                 }
             };
         }
-        match insert_new(
-            rules,
-            &self.plan.target,
-            src,
-            &rules.rls_checks,
-            self.plan.on_conflict.as_ref(),
-            &mut self.after,
-            ctx,
-        )? {
+        let r = match resume {
+            Some((None, p)) => insert_prepared(
+                rules,
+                p,
+                self.plan.on_conflict.as_ref(),
+                &mut self.after,
+                ctx,
+            )?,
+            _ => insert_new(
+                rules,
+                &self.plan.target,
+                src,
+                &rules.rls_checks,
+                self.plan.on_conflict.as_ref(),
+                &mut self.after,
+                ctx,
+            )?,
+        };
+        match r {
             Inserted::Skipped => Ok(None),
             Inserted::Stored(row, key) => Ok(Some((row, key, None))),
             Inserted::Conflict(row, c) => Ok(self
@@ -2800,6 +3259,7 @@ impl InsertNode {
                             "could not serialize access due to concurrent delete",
                         ));
                     }
+                    self.retry = Some((leaf.map(|(_, i)| i), c.prepared.clone()));
                     return Err(Error::new(RETRY_INSERT, "retry"));
                 };
                 if Some(ts) != found {
@@ -2809,6 +3269,7 @@ impl InsertNode {
                             "could not serialize access due to concurrent update",
                         ));
                     }
+                    self.retry = Some((leaf.map(|(_, i)| i), c.prepared.clone()));
                     return Err(Error::new(RETRY_INSERT, "retry"));
                 }
                 // ExecCheckTupleVisible.

@@ -253,6 +253,7 @@ impl Database {
             lock_journal: Vec::new(),
             row_locks: Vec::new(),
             xact_locks: Vec::new(),
+            spec_token: 0,
             savepoints: Vec::new(),
             cancel,
             lock_timeout: None,
@@ -650,6 +651,8 @@ pub struct Txn {
     row_locks: Vec<(Vec<u8>, usize)>,
     /// Lock ids of the (sub)transactions here holding their transaction lock.
     xact_locks: Vec<u64>,
+    /// The last speculative insertion token handed out (`begin_speculative`).
+    spec_token: u32,
     savepoints: Vec<Savepoint>,
     pub cancel: Arc<AtomicBool>,
     pub lock_timeout: Option<Duration>,
@@ -1376,6 +1379,11 @@ impl Txn {
         self.locks_held.keys().any(|(k, _)| k == key)
     }
 
+    /// Whether this transaction holds heavyweight lock `key` in `mode`.
+    pub fn holds_lock_mode(&self, key: &[u8], mode: LockMode) -> bool {
+        self.locks_held.contains_key(&(key.to_vec(), mode))
+    }
+
     /// The backend this transaction's locks belong to.
     pub fn lock_proc(&self) -> u64 {
         locks::proc_of(self.id, self.lock_peer)
@@ -1451,6 +1459,95 @@ impl Txn {
             self.locks_held.remove(&k);
             self.db.locks.release(&k.0, self.id, k.1);
         }
+    }
+
+    /// Release one heavyweight lock this transaction took (`lock`) before it ends.
+    pub fn unlock(&mut self, key: &[u8], mode: LockMode) {
+        let k = (key.to_vec(), mode);
+        if self.locks_held.remove(&k).is_none() {
+            return;
+        }
+        if let Some(i) = self.lock_journal.iter().rposition(|j| *j == k) {
+            self.lock_journal.remove(i);
+        }
+        self.db.locks.release(key, self.id, mode);
+    }
+
+    /// Unique key lock `key` (just taken) now stands for this (sub)transaction's index
+    /// entry for `row`: others' checks of the key wait for the running (sub)transaction,
+    /// or for speculative insertion `token` while it is unfinished.
+    pub fn hold_unique_key(
+        &mut self,
+        key: &[u8],
+        token: Option<u32>,
+        row: Option<Arc<Vec<crate::types::Value>>>,
+    ) {
+        let holder = self.holder();
+        let xid = self.cur_xid();
+        if holder != self.id {
+            self.db.locks.hold_xact_lock(holder, self.id, self.lock_proc(), xid);
+            if !self.xact_locks.contains(&holder) {
+                self.xact_locks.push(holder);
+            }
+        }
+        let kh = locks::KeyHolder { holder, xid, token, row };
+        self.db.locks.set_key_holder(key, self.id, kh);
+    }
+
+    /// Wait for the writer of an in-progress index entry: its speculative insertion to
+    /// finish (SpeculativeInsertionWait) or its (sub)transaction to end (XactLockTableWait).
+    pub fn wait_for_key_holder(&mut self, kh: &locks::KeyHolder) -> Result<()> {
+        let k = match kh.token {
+            Some(token) => locks::spectoken_key(kh.xid, token),
+            None => locks::xact_key(kh.holder),
+        };
+        self.wait_for_lock(&k)
+    }
+
+    /// Wait for (sub)transaction `holder` (by its lock id) to end (XactLockTableWait).
+    pub fn wait_for_xact(&mut self, holder: u64) -> Result<()> {
+        self.wait_for_lock(&locks::xact_key(holder))
+    }
+
+    fn wait_for_lock(&mut self, k: &[u8]) -> Result<()> {
+        let proc = self.lock_proc();
+        self.db
+            .locks
+            .acquire(k, self.id, proc, LockMode::Share, &self.waits(WaitPolicy::Block), &String::new)?;
+        self.db.locks.release(k, self.id, LockMode::Share);
+        Ok(())
+    }
+
+    /// Begin a speculative insertion (SpeculativeInsertionLockAcquire): its token, whose lock
+    /// is held until `end_speculative`.
+    pub fn begin_speculative(&mut self) -> Result<u32> {
+        self.spec_token = self.spec_token.wrapping_add(1).max(1);
+        let token = self.spec_token;
+        let xid = self.xid();
+        self.lock(&locks::spectoken_key(xid, token), LockMode::Exclusive, WaitPolicy::Block, &String::new)?;
+        Ok(token)
+    }
+
+    /// SpeculativeInsertionLockRelease.
+    pub fn end_speculative(&mut self, token: u32) {
+        let xid = self.xid();
+        self.unlock(&locks::spectoken_key(xid, token), LockMode::Exclusive);
+    }
+
+    /// Row `key` (locked by this transaction) is being updated or deleted by it.
+    pub fn row_modified(&mut self, key: &[u8]) {
+        let holder = self.holder();
+        self.db.locks.mark_row_modified(key, self.id, holder);
+    }
+
+    /// The (sub)transaction (lock id) of another backend updating or deleting row `key`.
+    pub fn row_modifier(&self, key: &[u8]) -> Option<u64> {
+        self.db.locks.row_modifier(key, self.lock_proc())
+    }
+
+    /// The in-progress entry another backend holds unique key lock `key` for.
+    pub fn unique_key_holder(&self, key: &[u8]) -> Option<locks::KeyHolder> {
+        self.db.locks.key_holder(key, self.lock_proc())
     }
 
     /// Lock relation `rel` in `mode` (LockRelationOid) until the transaction ends.

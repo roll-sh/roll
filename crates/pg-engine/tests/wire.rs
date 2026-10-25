@@ -2107,3 +2107,183 @@ fn pruning_horizons_follow_snapshots() {
     });
     s.engine.shutdown();
 }
+
+/// Wait until session `pid` waits for a lock (as isolationtester does).
+async fn until_blocked(c: &Client, pid: &str) {
+    let q = format!("SELECT EXISTS (SELECT FROM pg_locks WHERE pid = {pid} AND NOT granted)");
+    for _ in 0..500 {
+        if lines(c, &q).await.unwrap() == ["t"] {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("session {pid} never waited");
+}
+
+/// What a unique check sees of other transactions' writes in progress (Postgres's dirty
+/// snapshot): an INSERT of a key whose row another transaction is deleting waits for it,
+/// and ON CONFLICT does too (it took DO NOTHING / a unique violation at once); an ON
+/// CONFLICT DO UPDATE starting over after its row changed doesn't fire BEFORE INSERT
+/// triggers again; pg_locks shows the waits on transactions.
+#[test]
+fn unique_checks_wait_for_writers_in_progress() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        let c = s.connect("postgres").await;
+        a.batch_execute(
+            "CREATE TABLE uq (k int PRIMARY KEY, d text);
+             CREATE TABLE uq_log (n int);
+             CREATE FUNCTION uq_note() RETURNS trigger LANGUAGE plpgsql AS
+               $$ BEGIN INSERT INTO uq_log VALUES (NEW.k); RETURN NEW; END $$;
+             CREATE TRIGGER uq_bi BEFORE INSERT ON uq FOR EACH ROW EXECUTE FUNCTION uq_note();
+             INSERT INTO uq VALUES (1, 'one'), (2, 'two')",
+        )
+        .await
+        .unwrap();
+        let pb = lines(&b, "SELECT pg_backend_pid()").await.unwrap().remove(0);
+        // A delete in progress: the insert waits, then the key is free.
+        a.batch_execute("BEGIN; DELETE FROM uq WHERE k = 1").await.unwrap();
+        let w = tokio::spawn(async move {
+            let r = b.batch_execute("INSERT INTO uq VALUES (1, 'again')").await;
+            (b, r)
+        });
+        until_blocked(&c, &pb).await;
+        assert_eq!(
+            lines(&c, &format!("SELECT locktype, mode FROM pg_locks WHERE pid = {pb} AND NOT granted"))
+                .await
+                .unwrap(),
+            ["transactionid|ShareLock"]
+        );
+        a.batch_execute("COMMIT").await.unwrap();
+        let (b, r) = w.await.unwrap();
+        r.unwrap();
+        assert_eq!(lines(&c, "SELECT d FROM uq WHERE k = 1").await.unwrap(), ["again"]);
+        // An update in progress: ON CONFLICT DO NOTHING waits for it, then does nothing.
+        a.batch_execute("BEGIN; UPDATE uq SET d = 'changed' WHERE k = 2").await.unwrap();
+        let w = tokio::spawn(async move {
+            let r = lines(&b, "INSERT INTO uq VALUES (2, 'no') ON CONFLICT DO NOTHING RETURNING k").await;
+            (b, r)
+        });
+        until_blocked(&c, &pb).await;
+        a.batch_execute("COMMIT").await.unwrap();
+        let (b, r) = w.await.unwrap();
+        assert!(r.unwrap().is_empty());
+        // DO UPDATE whose row changed while it waited starts over at its unique checks:
+        // the BEFORE INSERT trigger ran once.
+        a.batch_execute("TRUNCATE uq_log; BEGIN; UPDATE uq SET d = d || '+a' WHERE k = 2")
+            .await
+            .unwrap();
+        let w = tokio::spawn(async move {
+            let r = lines(
+                &b,
+                "INSERT INTO uq VALUES (2, 'b') ON CONFLICT (k) DO UPDATE SET d = uq.d || '+b' RETURNING d",
+            )
+            .await;
+            (b, r)
+        });
+        until_blocked(&c, &pb).await;
+        a.batch_execute("COMMIT").await.unwrap();
+        let (_b, r) = w.await.unwrap();
+        assert_eq!(r.unwrap(), ["changed+a+b"]);
+        assert_eq!(lines(&c, "SELECT count(*) FROM uq_log").await.unwrap(), ["1"]);
+    });
+    s.engine.shutdown();
+}
+
+/// Concurrent updates seen by MERGE, foreign key checks and TID range scans
+/// (EvalPlanQual), and pg_stat_activity's application_name after SET.
+#[test]
+fn rechecks_after_concurrent_updates() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        let c = s.connect("postgres").await;
+        a.batch_execute(
+            "CREATE TABLE mt (key int PRIMARY KEY, val text);
+             INSERT INTO mt VALUES (1, 'setup');
+             CREATE TABLE pk (a int PRIMARY KEY);
+             CREATE TABLE fk (a int REFERENCES pk);
+             CREATE TABLE rp (a int, b text) PARTITION BY RANGE (a);
+             CREATE TABLE rp1 PARTITION OF rp FOR VALUES FROM (1) TO (10);
+             CREATE TABLE rp2 PARTITION OF rp FOR VALUES FROM (10) TO (20);
+             CREATE UNIQUE INDEX ON rp1 (a);
+             INSERT INTO rp VALUES (7, 'x');
+             CREATE TABLE rfk (a int REFERENCES rp1 (a));
+             CREATE TABLE tr (id int, v int) WITH (fillfactor = 50);
+             INSERT INTO tr VALUES (1, 0)",
+        )
+        .await
+        .unwrap();
+        let pb = lines(&b, "SELECT pg_backend_pid()").await.unwrap().remove(0);
+        // MERGE: a matched row whose key a concurrent update changed goes to WHEN NOT MATCHED
+        // BY SOURCE, and its source row to WHEN NOT MATCHED.
+        a.batch_execute("BEGIN; UPDATE mt SET key = 2 WHERE key = 1").await.unwrap();
+        let w = tokio::spawn(async move {
+            let r = lines(
+                &b,
+                "MERGE INTO mt t USING (SELECT 1 AS key) s ON s.key = t.key
+                 WHEN NOT MATCHED THEN INSERT VALUES (s.key, 'new')
+                 WHEN MATCHED THEN UPDATE SET val = 'matched'
+                 WHEN NOT MATCHED BY SOURCE THEN UPDATE SET val = 'not by source'
+                 RETURNING merge_action(), t.*",
+            )
+            .await;
+            (b, r)
+        });
+        until_blocked(&c, &pb).await;
+        a.batch_execute("COMMIT").await.unwrap();
+        let (b, r) = w.await.unwrap();
+        assert_eq!(r.unwrap(), ["UPDATE|2|not by source", "INSERT|1|new"]);
+        // RI_FKey_check over the transaction snapshot in REPEATABLE READ.
+        b.batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ").await.unwrap();
+        assert!(lines(&b, "SELECT * FROM pk").await.unwrap().is_empty());
+        a.batch_execute("INSERT INTO pk VALUES (1)").await.unwrap();
+        let err = b.batch_execute("INSERT INTO fk VALUES (1)").await.unwrap_err();
+        assert_eq!(err.code().map(|c| c.code()), Some("23503"));
+        b.batch_execute("ROLLBACK; INSERT INTO fk VALUES (1)").await.unwrap();
+        // ... and a referenced row moved to another partition while the check waited.
+        a.batch_execute("BEGIN; UPDATE rp SET a = 11 WHERE a = 7").await.unwrap();
+        let w = tokio::spawn(async move {
+            let r = b.batch_execute("INSERT INTO rfk VALUES (7)").await;
+            (b, r)
+        });
+        until_blocked(&c, &pb).await;
+        a.batch_execute("COMMIT").await.unwrap();
+        let (b, r) = w.await.unwrap();
+        let err = r.unwrap_err();
+        assert_eq!(err.code().map(|c| c.code()), Some("40001"));
+        assert_eq!(
+            err.as_db_error().unwrap().message(),
+            "tuple to be locked was already moved to another partition due to concurrent update"
+        );
+        // A TID range scan's row whose new version is outside the range is skipped.
+        a.batch_execute("BEGIN; UPDATE tr SET v = v + 1 WHERE ctid BETWEEN '(0,1)' AND '(0,1)'")
+            .await
+            .unwrap();
+        let w = tokio::spawn(async move {
+            let r = lines(
+                &b,
+                "UPDATE tr SET v = v + 10 WHERE ctid BETWEEN '(0,1)' AND '(0,1)' RETURNING v",
+            )
+            .await;
+            (b, r)
+        });
+        until_blocked(&c, &pb).await;
+        a.batch_execute("COMMIT").await.unwrap();
+        let (b, r) = w.await.unwrap();
+        assert!(r.unwrap().is_empty());
+        assert_eq!(lines(&c, "SELECT v FROM tr").await.unwrap(), ["1"]);
+        // SET application_name shows in pg_stat_activity.
+        b.batch_execute("SET application_name = 'renamed'").await.unwrap();
+        assert_eq!(
+            lines(&c, &format!("SELECT application_name FROM pg_stat_activity WHERE pid = {pb}"))
+                .await
+                .unwrap(),
+            ["renamed"]
+        );
+    });
+    s.engine.shutdown();
+}

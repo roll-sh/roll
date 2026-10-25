@@ -34,6 +34,9 @@ pub struct MergeNode {
     events: Vec<u16>,
     update_cols: Vec<usize>,
     done: bool,
+    /// A joined row whose target a concurrent update made no longer match, waiting for its
+    /// WHEN NOT MATCHED [BY TARGET] action after the target's NOT MATCHED BY SOURCE one.
+    pending: Option<Row>,
 }
 
 impl MergeNode {
@@ -82,6 +85,7 @@ impl MergeNode {
             events,
             update_cols,
             done: false,
+            pending: None,
         })
     }
 
@@ -94,7 +98,7 @@ impl MergeNode {
         let n = t.columns.len();
         let off = p.target;
         let kpos = off + n;
-        let has_source = p.source_flag.is_none_or(|f| row[f] == Value::Bool(true));
+        let mut has_source = p.source_flag.is_none_or(|f| row[f] == Value::Bool(true));
         let mut has_target = !row[kpos].is_null();
         let mut locked = false;
         // A row of an inheritance child: (member, its full row).
@@ -242,18 +246,9 @@ impl MergeNode {
                     },
                     Wait::Block,
                     ctx,
-                )
-                .map_err(|e| {
-                    // (ExecMergeMatched's own words for a row moved away.)
-                    if e.message == super::scan::MOVED_TO_PARTITION {
-                        Error::new(
-                            code::SERIALIZATION_FAILURE,
-                            "tuple to be merged was already moved to another partition due to concurrent update",
-                        )
-                    } else {
-                        e
-                    }
-                })? {
+                // (A row moved to another partition fails as table_tuple_lock reports it,
+                // "tuple to be locked was already moved ...", before ExecMergeMatched could.)
+                )? {
                     Locked::Same => {
                         if member.is_some() {
                             let bytes = ctx.txn.borrow().get_latest(&dkey)?.and_then(|(_, b)| b);
@@ -281,9 +276,34 @@ impl MergeNode {
                             && let Some(c) = &p.join_cond
                             && !eval_bool(c, &row, ctx)?
                         {
-                            has_target = false;
-                            for v in &mut row[off..=kpos] {
+                            let mut source_only = row.clone();
+                            for v in &mut source_only[off..=kpos] {
                                 *v = Value::Null;
+                            }
+                            if p.actions.iter().any(|a| a.when == MergeWhen::NotMatchedBySource) {
+                                // The target row goes on to the WHEN NOT MATCHED BY SOURCE
+                                // actions, and the source row, as if it had never matched,
+                                // to WHEN NOT MATCHED [BY TARGET] after it
+                                // (mt_merge_pending_not_matched). EXPLAIN ANALYZE counts the
+                                // join's row twice when there are both kinds of actions.
+                                has_source = false;
+                                self.pending = Some(source_only);
+                                if p.actions.iter().any(|a| a.when == MergeWhen::NotMatchedByTarget) {
+                                    // (InstrUpdateTupleCount on the outer plan: the join
+                                    // node shown, under the projections over it.)
+                                    let mut node: &crate::sql::plan::Plan = &p.source;
+                                    loop {
+                                        let key = node as *const crate::sql::plan::Plan as usize;
+                                        ctx.count(key, |s| s.rows += 1);
+                                        match node {
+                                            crate::sql::plan::Plan::Project { input, .. } => node = input,
+                                            _ => break,
+                                        }
+                                    }
+                                }
+                            } else {
+                                has_target = false;
+                                row = source_only;
                             }
                         }
                         continue;
@@ -526,6 +546,12 @@ impl Node for MergeNode {
         }
         loop {
             ctx.check()?;
+            if let Some(row) = self.pending.take() {
+                if let Some(out) = self.merge_row(row, ctx)? {
+                    return Ok(Some(out));
+                }
+                continue;
+            }
             let Some(row) = self.source.next(ctx)? else {
                 self.done = true;
                 super::dml::check_statement_rechecks(ctx)?;

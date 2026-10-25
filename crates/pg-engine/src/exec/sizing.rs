@@ -1004,12 +1004,28 @@ fn entries(
     row: &[Value],
     ctx: &ExecCtx,
 ) -> Result<Vec<(u32, Arc<Key>)>> {
+    entries_with(t, indexes, row, None, ctx)
+}
+
+/// `entries`, from the row's index values when they are known (one per index; an index
+/// past their end got no entry: an insertion failed before it reached it).
+fn entries_with(
+    t: &Table,
+    indexes: &[BoundIndex],
+    row: &[Value],
+    known: Option<&[Option<Vec<Value>>]>,
+    ctx: &ExecCtx,
+) -> Result<Vec<(u32, Arc<Key>)>> {
     let mut out = Vec::new();
-    for bix in indexes {
+    for (i, bix) in indexes.iter().enumerate() {
         if btree_opts(bix).is_none() {
             continue;
         }
-        if let Some(vals) = index_values(bix, row, ctx)? {
+        let vals = match known {
+            Some(k) => k.get(i).cloned().flatten(),
+            None => index_values(bix, row, ctx)?,
+        };
+        if let Some(vals) = vals {
             out.push((bix.index.oid, index_key(t, bix, vals, row, ctx)));
         }
     }
@@ -1231,13 +1247,26 @@ pub fn inserted(
     row: &[Value],
     ctx: &ExecCtx,
 ) -> Result<Option<Tid>> {
+    inserted_with(t, indexes, key, row, None, ctx)
+}
+
+/// `inserted`, given the row's index values already computed (`vals`, one per index of
+/// `indexes`: an index expression runs once per row, as FormIndexDatum does).
+pub fn inserted_with(
+    t: &Table,
+    indexes: &[BoundIndex],
+    key: &[u8],
+    row: &[Value],
+    vals: Option<&[Option<Vec<Value>>]>,
+    ctx: &ExecCtx,
+) -> Result<Option<Tid>> {
     note_compression(t, row, Some(key), ctx);
     if !ensure(t, indexes, ctx)? {
         estimate_grows(t, row, ctx);
         return Ok(None);
     }
     let (len, exts) = layout(t, row, ctx, &HashSet::new());
-    let entries = entries(t, indexes, row, ctx)?;
+    let entries = entries_with(t, indexes, row, vals, ctx)?;
     let xid = ctx.txn.borrow_mut().cur_xid();
     let cid = ctx.txn.borrow_mut().output_cid();
     let txn = ctx.txn.borrow().id;
@@ -1292,7 +1321,7 @@ pub fn inserted(
 }
 
 /// The columns an index's entries depend on.
-fn index_columns(bix: &BoundIndex, out: &mut HashSet<usize>) {
+pub(crate) fn index_columns(bix: &BoundIndex, out: &mut HashSet<usize>) {
     let mut add = |e: &Expr| {
         e.walk(&mut |x| {
             if let Expr::Col(i, _) = x {

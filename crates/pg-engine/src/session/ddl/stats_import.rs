@@ -977,6 +977,9 @@ pub(crate) fn relation_lock_rows(ctx: &ExecCtx) -> Vec<Vec<Value>> {
             Tag::Transaction { xid, .. } if *xid != 0 => {
                 ("transactionid", n(), n(), Value::Oid(*xid as u32), n(), n(), n())
             }
+            Tag::SpecToken { xid, token } => {
+                ("spectoken", n(), n(), Value::Oid(*xid as u32), n(), Value::Oid(*token), n())
+            }
             Tag::Object { db, class, obj, sub } => (
                 "object",
                 Value::Oid(*db),

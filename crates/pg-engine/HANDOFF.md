@@ -185,8 +185,14 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   permutations at that commit): statistics reach other sessions when pgstat_report_stat would
   flush them (`exec/pgstat.rs` `report`: PGSTAT_MIN_INTERVAL / IDLE_INTERVAL,
   `pg_stat_force_next_flush`), and snapshots hold back the pruning horizon (`txn/xids.rs`
-  `horizon`; temporary tables' is their session's). What's left is classified there (DETACH
-  CONCURRENTLY, TOAST relations, catalog row locks, ...).
+  `horizon`; temporary tables' is their session's). Round 18 (agent 56) also made what
+  UPDATE / DELETE / MERGE / ON CONFLICT / foreign key checks see under concurrency match
+  (104 specs, 1,505 permutations): unique checks wait for writers in progress as a dirty
+  snapshot does (an INSERT of a key whose row is being deleted waited for nothing and failed),
+  ON CONFLICT is Postgres's speculative insertion (`exec/dml.rs` `insert_prepared`, spectoken
+  locks), MERGE's NOT MATCHED BY SOURCE recheck, RI checks over the transaction snapshot in
+  REPEATABLE READ. What's left is classified there (DETACH CONCURRENTLY, TOAST relations,
+  catalog row locks, ...).
 
 ## Repository layout
 

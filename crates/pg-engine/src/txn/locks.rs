@@ -19,6 +19,7 @@
 use crate::error::{Error, Result, code};
 use parking_lot::{Condvar, Mutex};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -172,9 +173,33 @@ pub const RELATION: u8 = 6;
 pub const TUPLE: u8 = 7;
 pub const TRANSACTION: u8 = 8;
 pub const OBJECT: u8 = 9;
+pub const SPECTOKEN: u8 = 10;
+/// A unique index key's lock (the engine's in-progress index entry, `unique_key_lock`).
+pub const UNIQUE_KEY: u8 = 4;
 
 fn prefixed(kind: u8) -> Vec<u8> {
     vec![0, 0, 0, 0, 0, 0, 0, kind]
+}
+
+/// A speculative insertion's token lock (LOCKTAG_SPECULATIVE_TOKEN): held by the inserter
+/// until its tuple is either completed or killed, waited for by others meeting the tuple.
+pub fn spectoken_key(xid: u64, token: u32) -> Vec<u8> {
+    let mut k = prefixed(SPECTOKEN);
+    k.extend_from_slice(&xid.to_be_bytes());
+    k.extend_from_slice(&token.to_be_bytes());
+    k
+}
+
+/// What a unique key's lock holder has put in the index, as another writer's check of the
+/// key finds it (Postgres's dirty snapshot seeing an in-progress index entry): the
+/// (sub)transaction to wait for, its speculative insertion's token while that is
+/// unfinished, and the row (whose index expressions the check evaluates).
+#[derive(Clone, Debug)]
+pub struct KeyHolder {
+    pub holder: u64,
+    pub xid: u64,
+    pub token: Option<u32>,
+    pub row: Option<Arc<Vec<crate::types::Value>>>,
 }
 
 /// The lock on relation `rel` of database `db` (LOCKTAG_RELATION).
@@ -220,6 +245,8 @@ pub enum Tag {
     Transaction { id: u64, xid: u64 },
     Object { db: u32, class: u32, obj: u32, sub: u16 },
     Advisory(Vec<u8>),
+    /// A speculative insertion's token.
+    SpecToken { xid: u64, token: u32 },
     /// The engine's own locks (unique keys, exclusion constraints, large objects).
     Other(Vec<u8>),
 }
@@ -251,6 +278,10 @@ pub fn tag_of(key: &[u8], xid: u64) -> Tag {
             sub: b.get(12..14).map_or(0, |s| u16::from_be_bytes(s.try_into().unwrap())),
         },
         ADVISORY => Tag::Advisory(key.to_vec()),
+        SPECTOKEN => Tag::SpecToken {
+            xid: b.get(..8).map_or(0, |s| u64::from_be_bytes(s.try_into().unwrap())),
+            token: be32(b, 8),
+        },
         _ => Tag::Other(key.to_vec()),
     }
 }
@@ -280,6 +311,9 @@ fn describe(tag: &Tag, db: u32) -> String {
             };
             format!("advisory lock [{db},{f2},{f3},{f4}]")
         }
+        Tag::SpecToken { xid, token } => {
+            format!("speculative token {token} of transaction {xid}")
+        }
         Tag::Other(_) => "a row".to_string(),
     }
 }
@@ -303,6 +337,9 @@ struct Entry {
     queue: Vec<u64>,
     /// A transaction lock's transaction id (pg_locks, deadlock reports).
     xid: u64,
+    /// A unique key lock's in-progress entry: (the top-level transaction holding it, what
+    /// it put there). Stale once that transaction holds it no longer.
+    key_holder: Option<(u64, KeyHolder)>,
 }
 
 impl Entry {
@@ -379,6 +416,8 @@ struct RowHold {
     owner: u64,
     proc: u64,
     mode: RowLockMode,
+    /// The lock is an update's or a delete's (the tuple's xmax isn't lock-only).
+    modifies: bool,
 }
 
 #[derive(Default)]
@@ -773,7 +812,7 @@ impl LockManager {
                 let holds = s.rows.entry(row.to_vec()).or_default();
                 match holds.iter_mut().find(|h| h.holder == holder) {
                     Some(h) => h.mode = h.mode.max(mode),
-                    None => holds.push(RowHold { holder, owner, proc, mode }),
+                    None => holds.push(RowHold { holder, owner, proc, mode, modifies: false }),
                 }
                 drop(s);
                 release_tuple(self, have_tuple_lock);
@@ -855,6 +894,58 @@ impl LockManager {
             }
         }
         out
+    }
+
+    /// Record what transaction `owner` (holding unique key lock `key`) put in the index.
+    pub fn set_key_holder(&self, key: &[u8], owner: u64, kh: KeyHolder) {
+        let mut s = self.state.lock();
+        if let Some(e) = s.locks.get_mut(key)
+            && e.holds.iter().any(|h| h.owner == owner)
+        {
+            e.key_holder = Some((owner, kh));
+        }
+    }
+
+    /// The in-progress entry another backend than `proc` holds unique key lock `key` for:
+    /// what it recorded, or (when it recorded nothing) its top-level transaction.
+    pub fn key_holder(&self, key: &[u8], proc: u64) -> Option<KeyHolder> {
+        let s = self.state.lock();
+        let e = s.locks.get(key)?;
+        let h = e.holds.iter().find(|h| h.proc != proc)?;
+        match &e.key_holder {
+            Some((owner, kh)) if e.holds.iter().any(|h| h.owner == *owner && h.proc != proc) => {
+                Some(kh.clone())
+            }
+            _ => Some(KeyHolder { holder: h.owner, xid: 0, token: None, row: None }),
+        }
+    }
+
+    /// Row `row`'s lock by transaction `owner` is now an update's or a delete's (the
+    /// tuple's xmax is no longer lock-only): other writers' checks of its unique keys wait
+    /// for it to end.
+    pub fn mark_row_modified(&self, row: &[u8], owner: u64, holder: u64) {
+        let mut s = self.state.lock();
+        if let Some(holds) = s.rows.get_mut(row) {
+            match holds.iter_mut().find(|h| h.owner == owner && h.holder == holder) {
+                Some(h) => h.modifies = true,
+                None => {
+                    if let Some(h) = holds.iter_mut().find(|h| h.owner == owner) {
+                        h.modifies = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The (sub)transaction of another backend than `proc` updating or deleting row `row`
+    /// (HeapTupleSatisfiesDirty's in-progress xmax), if any.
+    pub fn row_modifier(&self, row: &[u8], proc: u64) -> Option<u64> {
+        let s = self.state.lock();
+        s.rows
+            .get(row)?
+            .iter()
+            .find(|h| h.modifies && h.proc != proc)
+            .map(|h| h.holder)
     }
 
     /// The row locks on `row` other transactions than `owner` hold: (mode, pid).

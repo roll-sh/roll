@@ -16,11 +16,11 @@ run is a faithful isolationtester.
 
 ## Score
 
-| | before (round 17 start) | now |
-|---|---:|---:|
-| specs matching | 30 of 122 (24.6%) | 94 of 122 (77.0%) |
-| permutations matching | 921 of 1648 (55.9%) | 1452 of 1648 (88.1%) |
-| steps matching | 10146 of 12238 (82.9%) | 11397 of 12238 (93.1%) |
+| | before (round 17 start) | round 18 start | now |
+|---|---:|---:|---:|
+| specs matching | 30 of 122 (24.6%) | 94 of 122 (77.0%) | 104 of 122 (85.2%) |
+| permutations matching | 921 of 1648 (55.9%) | 1452 of 1648 (88.1%) | 1505 of 1648 (91.3%) |
+| steps matching | 10146 of 12238 (82.9%) | 11397 of 12238 (93.1%) | 11523 of 12238 (94.2%) |
 
 A *step* is one `step ...` line of isolationtester's output with what follows it (its rows,
 errors, notices, `<waiting ...>` and `<... completed>`); a permutation matches when all of its
@@ -35,24 +35,18 @@ it implemented over the old lock manager.
 | D2 | reindex-concurrently-toast | 60 |
 | D1 | detach-partition-concurrently-1, detach-partition-concurrently-2, detach-partition-concurrently-3, detach-partition-concurrently-4 | 51 |
 | L3 | fk-partitioned-1, fk-partitioned-2, partition-concurrent-attach | 10 |
-| E1 | eval-plan-qual, eval-plan-qual-trigger, merge-update, merge-match-recheck | 10 |
-| E2 | partition-key-update-1, partition-key-update-2, partition-key-update-3 | 10 |
 | L2 | intra-grant-inplace, intra-grant-inplace-db | 8 |
-| E4 | insert-conflict-specconflict | 5 |
 | T2 | subxid-overflow | 4 |
+| E1 | eval-plan-qual | 2 |
 | T1 | temp-schema-cleanup | 2 |
 | L6 | reindex-concurrently, multiple-cic | 2 |
 | L5 | alter-table-4 | 2 |
 | L4 | deadlock-parallel | 1 |
-| E3 | fk-snapshot | 1 |
 | L1 | drop-owned-grant | 1 |
 
 - **D1**: DETACH PARTITION ... CONCURRENTLY runs as one transaction: Postgres's two transactions (the partition marked detach-pending, a wait for every older locker of the parent, then the detach), the pending state other sessions plan around and FINALIZE after a cancel aren't there.
 - **D2**: A TOAST table isn't a relation of its own a statement can name (`ALTER TABLE pg_toast.pg_toast_N RENAME`, `REINDEX TABLE pg_toast.x`): the spec's setup fails.
-- **E1**: EvalPlanQual details: a catalog row (pg_class) updated by two transactions (the engine has no row locks on catalog rows), MERGE's rechecks of a row a concurrent MERGE / UPDATE changed (the WHEN NOT MATCHED BY SOURCE action and the join recheck), and the order notices of an EPQ recheck of a nested subquery come in.
-- **E2**: Rows moved to another partition by a concurrent UPDATE: lockers now get Postgres's 'tuple to be locked was already moved' error; INSERT ... ON CONFLICT's wait for the moving transaction's new row in the other partition differs.
-- **E3**: A REPEATABLE READ foreign key check on a partitioned referenced table uses the transaction snapshot where Postgres's RI check crosses into a fresh one (and fails).
-- **E4**: Speculative insertion (INSERT ... ON CONFLICT) races: Postgres inserts the tuple first and checks again afterwards, waiting on the other inserter's speculative token; the engine checks once, under its key lock.
+- **E1**: A catalog row (pg_class) updated by two transactions at once (`UPDATE pg_class`, `MERGE INTO pg_class`): the engine has no row locks on catalog rows, so the second fails at commit where Postgres's waits and updates the first's version. (The rest of E1, E2, E3 and E4 match since round 18, agent 56: below.)
 - (I1, stats, and I2, horizons, match since round 18, agent 56: see "Which differences are engine internals" below.)
 - **L1**: DROP OWNED's privilege changes on a role's objects: Postgres's second DROP OWNED waits on the first's catalog row (tuple) lock and then redoes its work over the committed catalog; the engine has no row locks on catalog rows, so the second commits into a merge conflict.
 - **L2**: GRANT's in-place catalog tuple lock (heap_inplace_lock) on the object's pg_class / pg_database row: a concurrent ALTER TABLE / VACUUM doesn't wait for it.
@@ -103,10 +97,10 @@ it implemented over the old lock manager.
 | fk-deadlock2 | 11/11 | 72/72 |
 | fk-partitioned-1 ✗ | 8/14 | 72/90 |
 | fk-partitioned-2 ✗ | 4/6 | 40/42 |
-| fk-snapshot ✗ | 6/7 | 57/59 |
+| fk-snapshot | 7/7 | 59/59 |
 | subxid-overflow ✗ | 0/4 | 25/31 |
-| eval-plan-qual ✗ | 53/56 | 334/342 |
-| eval-plan-qual-trigger ✗ | 37/39 | 501/503 |
+| eval-plan-qual ✗ | 54/56 | 336/342 |
+| eval-plan-qual-trigger | 39/39 | 503/503 |
 | inplace-inval | 2/2 | 9/9 |
 | intra-grant-inplace ✗ | 3/10 | 39/69 |
 | intra-grant-inplace-db ✗ | 0/1 | 5/8 |
@@ -120,11 +114,11 @@ it implemented over the old lock manager.
 | insert-conflict-do-update-2 | 2/2 | 12/12 |
 | insert-conflict-do-update-3 | 1/1 | 6/6 |
 | insert-conflict-do-update-4 | 3/3 | 21/21 |
-| insert-conflict-specconflict ✗ | 0/5 | 65/97 |
+| insert-conflict-specconflict | 5/5 | 97/97 |
 | merge-insert-update | 8/8 | 46/46 |
 | merge-delete | 19/19 | 100/100 |
-| merge-update ✗ | 14/17 | 89/94 |
-| merge-match-recheck ✗ | 22/24 | 148/150 |
+| merge-update | 17/17 | 94/94 |
+| merge-match-recheck | 24/24 | 150/150 |
 | merge-join | 4/4 | 38/38 |
 | delete-abort-savept | 7/7 | 54/54 |
 | delete-abort-savept-2 | 4/4 | 31/31 |
@@ -173,9 +167,9 @@ it implemented over the old lock manager.
 | predicate-gin | 31/31 | 189/189 |
 | partition-concurrent-attach ✗ | 1/3 | 20/24 |
 | partition-drop-index-locking | 2/2 | 20/20 |
-| partition-key-update-1 ✗ | 10/13 | 92/95 |
-| partition-key-update-2 ✗ | 1/2 | 11/17 |
-| partition-key-update-3 ✗ | 2/8 | 50/84 |
+| partition-key-update-1 | 13/13 | 95/95 |
+| partition-key-update-2 | 2/2 | 17/17 |
+| partition-key-update-3 | 8/8 | 84/84 |
 | partition-key-update-4 | 4/4 | 34/34 |
 | plpgsql-toast | 7/7 | 31/31 |
 | cluster-conflict | 2/2 | 14/14 |
@@ -223,13 +217,53 @@ it implemented over the old lock manager.
     transaction idle between statements still holds its last statement's xmin.
 - **D2** needs TOAST tables as relations of their own (the engine stores out-of-line values in
   its rows' keyspace); **T2** is the engine's stack use per PL/pgSQL subtransaction.
-- Everything else (D1, E*, L*, T1) is client-visible behaviour that can be implemented: the
-  catalog-row tuple locks of L1 / L2 / part of E1, DETACH CONCURRENTLY's two transactions, and
-  the speculative-insertion protocol are the biggest pieces.
+- Everything else (D1, E1, L*, T1) is client-visible behaviour that can be implemented: the
+  catalog-row tuple locks of L1 / L2 / the rest of E1 and DETACH CONCURRENTLY's two
+  transactions are the biggest pieces left.
 - **SSI** is implemented (`txn/ssi.rs`): no anomaly the suite checks commits, and the failures
   come where Postgres raises them. Not modelled: summarizing old serializable transactions into
   the SLRU when shared memory runs out (the engine keeps them until no snapshot needs them, the
   same conflicts), two-phase commit and parallel-worker sharing of a serializable transaction.
+
+## What round 18 changed (agent 56)
+
+What UPDATE, DELETE, MERGE, INSERT ... ON CONFLICT and foreign key checks see and change
+under concurrency (E1–E4; wire tests `unique_checks_wait_for_writers_in_progress`,
+`rechecks_after_concurrent_updates`):
+
+- **Unique checks see writes in progress as Postgres's dirty snapshot does** (`exec/dml.rs`
+  `find_conflict`). A unique key's lock (`locks::UNIQUE_KEY`) stands for an index entry in
+  progress and records its (sub)transaction, speculative token and row (`locks::KeyHolder`);
+  another writer of the key waits for that transaction (XactLockTableWait: pg_locks shows
+  `transactionid ShareLock`) or its speculative token, then looks again. A row with the key
+  being updated or deleted by a transaction in progress is waited for too (row locks record
+  whether their xmax is lock-only, `mark_row_modified`). Before, an INSERT of a key whose row
+  another transaction was deleting failed at once with a unique violation (Postgres waits and
+  the insert succeeds), and ON CONFLICT DO NOTHING did nothing at once instead of waiting
+  (partition-key-update-2/3).
+- **INSERT ... ON CONFLICT is Postgres's speculative insertion**: the arbiters' pre-check
+  (waiting; FormIndexDatum over every row it meets, so index expressions run as often as
+  Postgres's), the row inserted under a speculative token (`spectoken` in pg_locks), its arbiter
+  entries checked without waiting, and on a conflict the row killed (counted inserted and
+  deleted, left dead in the size model) and the insertion started over at the pre-check
+  (insert-conflict-specconflict). Index expressions run once per index per row (they ran two
+  or three times); an UPDATE leaves an index none of whose columns changed alone without
+  evaluating it (heap_update's HOT test).
+- An ON CONFLICT DO UPDATE whose row changed while it waited starts over at its unique
+  checks: BEFORE INSERT triggers no longer fire twice (eval-plan-qual-trigger).
+- **MERGE**: a matched row a concurrent update made no longer match goes to WHEN NOT MATCHED
+  BY SOURCE, and its source row then to WHEN NOT MATCHED (both act; EXPLAIN ANALYZE counts
+  the join's row twice); a row moved to another partition fails with "tuple to be locked was
+  already moved ..." (merge-update, merge-match-recheck).
+- **Foreign key checks** (RI_FKey_check) read over the transaction snapshot in REPEATABLE READ
+  unless the referenced table is partitioned (fk-snapshot: a referenced row committed after
+  the snapshot isn't there); in READ COMMITTED a referenced row moved to another partition by
+  the update the check waited for fails ("tuple to be locked was already moved ...") where it
+  passed as a violation, and a row whose key that update changed is no match
+  (partition-key-update-1).
+- An UPDATE / DELETE by TID range rechecks the new version's TID (eval-plan-qual).
+- pg_stat_activity shows application_name as `SET` left it (isolationtester names its
+  sessions so; specs read pg_locks joined with it).
 
 ## What this round changed (round 17, agent 34)
 
