@@ -209,7 +209,14 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   the empty set's row over no input). Constant folding errors follow eval_const_expressions:
   a constant that fails to fold stays unfolded and fails the statement only if it is still in
   the plan once planned (`sql/binder/fold.rs`), so unused subquery outputs, unreferenced CTEs
-  and short-circuited arguments no longer fail.
+  and short-circuited arguments no longer fail. Round 18 also widened the generator (seeds from
+  1000 on: date/time and time zones, numeric / float edges, regex, SQL/JSON, jsonpath, arrays,
+  ranges, prepared statements, cursors, savepoints, SEARCH / CYCLE) and ran about 75,000 more
+  statements; its other fixes: `x op ALL ('{}')` no longer reduces an outer join, a preserved
+  side's one-sided ON clause keeps its subquery column, INTERSECT / EXCEPT skip the second
+  input when the first is empty, array_remove keeps the lower bound, FULL JOIN clause kinds,
+  strict SQL functions with non-strict bodies aren't inlined, and a RefCell panic in the join
+  search. Open: tests/difftest/STATUS.md.
 - **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
   PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified
   (`pg_dump_tap`, through stand-ins for its Perl test modules in `tests/pg_dump/perl`), round

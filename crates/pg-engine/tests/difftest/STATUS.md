@@ -290,6 +290,21 @@ errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with E
 
 ## Open
 
+- **Wrong rows (planner, LATERAL pull-up; agents 33 / 41's area)**: a LATERAL subquery's WHERE
+  reading only a column of the left side's nullable relation is checked as a filter on that
+  relation's outer join below, so the null-extended rows go: the reduced case is
+  `difftest seed 1604 #73` (`(s1 LEFT JOIN unnest(...) WITH ORDINALITY s4(u, o) ON ...) LEFT JOIN
+  LATERAL (SELECT ... FROM (s6 JOIN (VALUES ...) ON 1 <= s1.c1) WHERE 1 BETWEEN 1 AND s4.o) s5
+  ON '2025-07-22' = NULL`: 6 rows, PostgreSQL 30; EXPLAIN shows `Filter: (1 <= s4.o)` on the
+  lower Nested Loop Left Join, PostgreSQL a Join Filter of the upper one). Simpler forms don't
+  show it.
+- **Wrong rows (bind-time folding, grouping sets)**: a HAVING or select-list expression with a
+  subexpression equal to a grouping key that folding merges with its surroundings (`HAVING 1
+  > (10.00 - ('2025-06-19' - '1999-11-11'::date))` with a key `('2025-06-19'::date)`, `abs(9) +
+  1` with a key `abs(9)`) isn't nulled by the sets that lack the key.
+- A stable SQL function whose body fails only at run time on some rows (seed 1472 #24's `f0`):
+  the engine fails an INSERT ... SELECT PostgreSQL completes.
+
 - **Constant folding, left**: a UNION ALL arm found empty (`... WHERE false UNION ALL ...`)
   is dropped with its outputs, which PostgreSQL still simplifies; a strict call over a pulled-up subquery's output whose expression
   fails (`NULL + s.c` with `c` = `width_bucket('NaN', ...)`: PostgreSQL substitutes first);
