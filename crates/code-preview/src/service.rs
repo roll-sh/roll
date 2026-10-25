@@ -36,6 +36,9 @@ pub struct Service {
     started: Mutex<HashMap<String, String>>,
     /// Post-merge runs per repo: whether one is going, and the newest head waiting for the next.
     main: Mutex<HashMap<String, MainRun>>,
+    /// Finished changes whose preview is being removed: one removal at a time, however many
+    /// `change` events say the change finished (a check reported late re-sends its state).
+    removing: Mutex<std::collections::HashSet<String>>,
 }
 
 #[derive(Default)]
@@ -46,7 +49,7 @@ struct MainRun {
 
 impl Service {
     pub fn new(code: Arc<Code>, runner: Arc<dyn Runner>) -> Arc<Service> {
-        Arc::new(Service { code, runner, started: Mutex::new(HashMap::new()), main: Mutex::new(HashMap::new()) })
+        Arc::new(Service { code, runner, started: Mutex::new(HashMap::new()), main: Mutex::new(HashMap::new()), removing: Mutex::default() })
     }
 
     fn work_dir(&self) -> PathBuf {
@@ -139,15 +142,19 @@ impl Service {
         match ChangeState::parse(&state) {
             Some(ChangeState::Landed | ChangeState::Closed) => {
                 self.started.lock().remove(&id);
-                if !data.get("preview").is_none_or(Value::is_null) {
-                    let code = self.code.clone();
+                if !data.get("preview").is_none_or(Value::is_null) && self.removing.lock().insert(id.clone()) {
+                    let this = self.clone();
                     tokio::spawn(async move {
+                        let code = &this.code;
+                        // Read when it runs: a removal that just finished left no preview.
                         if let Ok(c) = code.change_or_404(&id)
+                            && c.preview.is_some()
                             && let Ok(r) = code.repo_by_id(&c.repo_id)
                             && let Err(e) = code.delete_preview(&r, &c).await
                         {
                             warn!(change = %id, error = %e, "removing a finished change's preview");
                         }
+                        this.removing.lock().remove(&id);
                     });
                 }
             }
