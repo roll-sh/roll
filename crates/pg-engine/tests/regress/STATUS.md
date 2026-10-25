@@ -214,6 +214,95 @@ Index-only scans' `Heap Fetches` already come from the model and match, dead ent
 
 No code change and no golden: the unit stays as it was.
 
+## Round 16, agent 55 (FROM subqueries a LATERAL item reads pulled up as bound, a sub-select's equalities as written, partial grouping through add_partial_path)
+
+Measured unit by unit against runs of each batch's base on private references (`a55-ref1` /
+`a55-ref2`). Batch 1 (join 360): full runs, on a319ebb 51145 -> 51146 and, rebased, on
+f3fc889 51147 -> 51148 (exactly join 360; nothing lost). Batches 2 and 3: subset runs of agent
+46's 45 planner-heavy files (19764 units), identical unit for unit to their bases (on 93f1876,
+a429e852 and 0a8ec4ee): no unit of the suite depends on them. Crate tests, clippy and the
+difftest smoke pass on each pushed state. (The generated blocks are left to the next full run.)
+
+| file | fixed units |
+|---|---|
+| join | 360 |
+
+What changed:
+
+- **FROM subqueries a LATERAL item reads are pulled up as bound** (join 360; `lift.rs`
+  `Cx::unbind`, `bound_form`; `paths.rs` `bound_join_tree` / `note_bound_join_tree`). Postgres
+  pulls subqueries up before the join search, so a LATERAL item reading a subquery's outputs is
+  in one join problem with the subquery's relations. The engine planned the subquery as a
+  level first; its parameterized nested loops then came back to the level above as LATERAL
+  items and its PlaceHolderVar projection kept the level above from taking it in. Agent 41's
+  `bound_trees` (a level's tree as it was before planning) are now kept for every level whose
+  plan is projections over a join (`BoundTree::semi` says which trees have semi joins; those
+  are used as before), with the projections between the planned join and the select list as
+  `glue`; the left side of a LATERAL join is lifted with `unbind`, which takes them for its
+  FROM subqueries (and theirs). Clauses the binder pushes into a planned join after it was
+  kept (`optimize::add_filter`) go with it (`JoinMeta::bound_pushed`, mapped through the glue
+  onto the tree); one replacing a restriction inside drops the tree (`replace_restriction`).
+  360's plan: `J` outside the nested loop of the parameterized Append and `kl`, 13 rows.
+- **A Result over a parameterized Append computing a PlaceHolderVar parameter**
+  (create_nestloop_plan's change_plan_targetlist, inject_projection_plan): the Append can't
+  project, a Result does, with the Append's cost and width; and an outer side computing a
+  PlaceHolderVar parameter keeps its path's width (`JoinMeta::phv_outer_width`: 362 / 363's
+  `ss1` and `i4` `width=0`, agent 52's leftover).
+- **A Limit shows its level's constants as constants** (set_dummy_tlist_references keeps
+  Consts): `Limit Output: 1` (and the Sort / LockRows of its level under it) where the engine
+  showed `(1)`; a node above still refers to them as `(1)`.
+- **A sub-select's equalities as written** (item 3; `sublink.rs` `sublink_written`,
+  `written_order`, `anti_written`; `select.rs` records a level's WHERE equalities with outer
+  values too, `optimize::written_equalities_with`). convert_EXISTS_sublink_to_join makes the
+  sub-select's WHERE the semi join's quals: the semi join takes the level's equalities (its ON
+  clauses', then its WHERE's) from its tree as bound, over its row, so process_equivalence's
+  member order is Postgres's (`t1.a = t3.p` for `t3.p = t2.x AND t2.x = t1.a`), the join's
+  clauses come in the classes' order, and the unique-ified side's key is
+  compute_semijoin_info's semi_rhs_exprs, the written qual's operand (`Search::written_rhs`;
+  without it the member order made the engine unique-ify on `t3.p`). An anti join's quals are
+  the written ones again: the sub-select's level had made a class with the outer value, so the
+  anti join checked `t2.x = t1.a AND t3.p = t1.a` over a cartesian product of `t2` and `t3`
+  (same rows, a much worse plan); now `t1.a = t2.x` with `t2 ⋈ t3` on `t2.x = t3.p`.
+- **Partial grouping paths through add_partial_path** (item 2, TPC-H q12; `explain/parallel.rs`).
+  create_partial_grouping_paths adds the sorted partial aggregations first and the partial
+  HashAggregate after, both through add_partial_path: fuzzily (1%) as cheap as a sorted one,
+  whose order is better, the hashed one goes. The engine compared all the finalized plans
+  instead and kept the hashed one. q12 at SF0.1 gets Postgres's Partial GroupAggregate over a
+  Sort.
+
+Goldens: `tests/sql/a55_lateral_bound.sql`, `a55_sublink_written.sql`, `a55_partial_agg.sql`
+(recorded from PostgreSQL 18.6; rows of the right join's null-extended row, NULL keys in semi /
+anti joins, under a left join's ON). No wrong results were found comparing rows.
+
+Looked at and left (why):
+
+- join 355's query at the default from_collapse_limit: Postgres keeps `s` (`lateral (select
+  t2.q1, t3.q1 offset 0)`) a LATERAL item of `t2` and `t3` though its outputs go unread
+  (find_lateral_references runs before remove_unused_subquery_outputs), so it is joined above
+  `t2 ⋈ t3` under a Memoize keyed by `t2.q1, t3.q1`, its Subquery Scan kept (CP_SMALL_TLIST under
+  the Memoize). The engine nulls the unread outputs before planning and drops the parameters
+  nothing reads (`lift`, `!reads_outer(&r2)`), so `s` is an ordinary relation and the order
+  differs (this predates agent 46). Keeping the parameters as written changes how every
+  LATERAL subquery with unread outputs is planned; not done here.
+- Agent 52's leftovers: the cost of a Subquery Scan setrefs removes (the node above shows the
+  path cost without the scan's cpu_tuple_cost; join 363's `2.19` for `2.20`): the engine's
+  EXPLAIN adds its children's shown costs, so it needs the removed scan's run cost carried to
+  the parent; and a LATERAL output that is a bare PlaceHolderVar reference ranked last in a
+  join's target list. Not done.
+- TPC-H at SF0.1 (`tools/bench` against a private 18.6): of the 22 plans without costs 12 differ
+  in shape (q04 among them now flips the other way: its hashed partial aggregation is 1.03%
+  cheaper than the sorted one in Postgres and 0.97% in the engine, whose join estimate is 2962
+  rows for 3068, the storage model's statistics); q22's filter lists `c_acctbal > (InitPlan
+  1).col1` second where Postgres orders it first (an InitPlan's Param costs nothing in
+  order_qual_clauses; `optimize::qual_cost` charges a sub-select 1000).
+- `select * from (select i, k from (... union all select 0) a left join (select 1 as j, 7 as k
+  limit 1) b on i = j) ss, lateral (select k as kl limit 1)`: Postgres keeps `Subquery Scan on
+  b` (its target list `b.k, b.j` isn't the Limit's `1, 7` order) and refers to `b.k`; the
+  engine shows the Limit and `(7)`.
+- A FROM subquery's constant output used as a sort key above it (`select * from (select 1 as
+  j, x ... limit 2) s order by j, x`): Postgres keeps `(1)` as a key (a Var of the subquery
+  not pulled up), the engine drops it as a constant.
+
 ## Round 16, agent 52 (PlaceHolderVars holding sub-selects: their subqueries pulled up, PlaceHolderVar parameters by the join path's parameterization, LATERAL references' unused copies)
 
 Measured in subset runs of agent 47's 54 files (20741 units), unit by unit against a run of the
