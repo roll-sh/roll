@@ -6143,6 +6143,17 @@ impl Ddl<'_, '_> {
             &cat,
             &targets.iter().map(|t| (t.obj, t.flags)).collect::<Vec<_>>(),
         );
+        // A table's TOAST table and its index go with it (internal dependents), locked
+        // for deletion as they are found.
+        for tg in &targets {
+            if tg.obj.0 == depend::REL
+                && tg.obj.2 == 0
+                && let Some(t) = cat.index_table(tg.obj.1).filter(|t| t.toast != 0)
+            {
+                self.note_lock(t.toast, super::table::lockmode::ACCESS_EXCLUSIVE)?;
+                self.note_lock(t.toast + 1, super::table::lockmode::ACCESS_EXCLUSIVE)?;
+            }
+        }
         for t in &targets {
             self.delete_object(t.obj, &whole)?;
         }

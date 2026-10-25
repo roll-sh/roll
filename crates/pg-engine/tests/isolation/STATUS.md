@@ -18,9 +18,9 @@ run is a faithful isolationtester.
 
 | | before (round 17 start) | round 18 start | now |
 |---|---:|---:|---:|
-| specs matching | 30 of 122 (24.6%) | 94 of 122 (77.0%) | 104 of 122 (85.2%) |
-| permutations matching | 921 of 1648 (55.9%) | 1452 of 1648 (88.1%) | 1505 of 1648 (91.3%) |
-| steps matching | 10146 of 12238 (82.9%) | 11397 of 12238 (93.1%) | 11523 of 12238 (94.2%) |
+| specs matching | 30 of 122 (24.6%) | 94 of 122 (77.0%) | 105 of 122 (86.1%) |
+| permutations matching | 921 of 1648 (55.9%) | 1452 of 1648 (88.1%) | 1565 of 1648 (95.0%) |
+| steps matching | 10146 of 12238 (82.9%) | 11397 of 12238 (93.1%) | 11871 of 12238 (97.0%) |
 
 A *step* is one `step ...` line of isolationtester's output with what follows it (its rows,
 errors, notices, `<waiting ...>` and `<... completed>`); a permutation matches when all of its
@@ -32,7 +32,6 @@ it implemented over the old lock manager.
 
 | class | specs | permutations differing |
 |---|---|---:|
-| D2 | reindex-concurrently-toast | 60 |
 | D1 | detach-partition-concurrently-1, detach-partition-concurrently-2, detach-partition-concurrently-3, detach-partition-concurrently-4 | 51 |
 | L3 | fk-partitioned-1, fk-partitioned-2, partition-concurrent-attach | 10 |
 | L2 | intra-grant-inplace, intra-grant-inplace-db | 8 |
@@ -45,7 +44,19 @@ it implemented over the old lock manager.
 | L1 | drop-owned-grant | 1 |
 
 - **D1**: DETACH PARTITION ... CONCURRENTLY runs as one transaction: Postgres's two transactions (the partition marked detach-pending, a wait for every older locker of the parent, then the detach), the pending state other sessions plan around and FINALIZE after a cancel aren't there.
-- **D2**: A TOAST table isn't a relation of its own a statement can name (`ALTER TABLE pg_toast.pg_toast_N RENAME`, `REINDEX TABLE pg_toast.x`): the spec's setup fails.
+- (D2, reindex-concurrently-toast, matches since round 18, agent 56: a table's TOAST table and
+  index are relations a statement can name. `pg_toast.pg_toast_N[_index]` (or the names an
+  `ALTER TABLE / INDEX ... RENAME` under allow_system_table_mods gave them, `Table::
+  toast_relname`) resolve for regclass, ALTER ... RENAME (owner, then "permission denied:
+  \"x\" is a system catalog" without allow_system_table_mods) and REINDEX TABLE / INDEX
+  [CONCURRENTLY] (`Ddl::reindex_toast`: SHARE / ACCESS EXCLUSIVE or SHARE UPDATE EXCLUSIVE on
+  the TOAST table and index, CONCURRENTLY's waits for the TOAST table's lockers, the name
+  looked up again after the wait). Writing a value out of line, or deleting one
+  (toast_save_datum / toast_delete_datum, as the size model lays the row out), takes
+  RowExclusiveLock on the TOAST table until the transaction ends; DROP TABLE and TRUNCATE take
+  AccessExclusiveLock on the TOAST table and index; REINDEX of a table locks its TOAST table
+  and index too. Not modelled: detoasting's AccessShareLock on the TOAST table when a read
+  fetches an out-of-line value, and deletes from tables too big for the size model.)
 - **E1**: A catalog row (pg_class) updated by two transactions at once (`UPDATE pg_class`, `MERGE INTO pg_class`): the engine has no row locks on catalog rows, so the second fails at commit where Postgres's waits and updates the first's version. (The rest of E1, E2, E3 and E4 match since round 18, agent 56: below.)
 - (I1, stats, and I2, horizons, match since round 18, agent 56: see "Which differences are engine internals" below.)
 - **L1**: DROP OWNED's privilege changes on a role's objects: Postgres's second DROP OWNED waits on the first's catalog row (tuple) lock and then redoes its work over the committed catalog; the engine has no row locks on catalog rows, so the second commits into a merge conflict.
@@ -129,7 +140,7 @@ it implemented over the old lock manager.
 | lock-committed-keyupdate | 18/18 | 171/171 |
 | update-locked-tuple | 6/6 | 42/42 |
 | reindex-concurrently ✗ | 5/6 | 45/47 |
-| reindex-concurrently-toast ✗ | 0/60 | 0/348 |
+| reindex-concurrently-toast | 60/60 | 348/348 |
 | reindex-schema | 2/2 | 12/12 |
 | propagate-lock-delete | 8/8 | 80/80 |
 | tuplelock-conflict | 32/32 | 164/164 |
@@ -216,8 +227,9 @@ it implemented over the old lock manager.
     tuples it had to keep (recently dead) as the table's n_dead_tup. Not modelled: horizons
     per database (snapshots in other databases hold back this one's), and a READ COMMITTED
     transaction idle between statements still holds its last statement's xmin.
-- **D2** needs TOAST tables as relations of their own (the engine stores out-of-line values in
-  its rows' keyspace); **T2** is the engine's stack use per PL/pgSQL subtransaction.
+- **T2** is the engine's stack use per PL/pgSQL subtransaction. (D2's TOAST relations are
+  modelled since round 18: the engine still stores out-of-line values in its rows' keyspace,
+  and the TOAST table is a name, locks and its size model's chunks.)
 - Everything else (D1, E1, L*, T1) is client-visible behaviour that can be implemented: the
   catalog-row tuple locks of L1 / L2 / the rest of E1 and DETACH CONCURRENTLY's two
   transactions are the biggest pieces left.

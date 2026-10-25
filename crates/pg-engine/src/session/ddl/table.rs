@@ -461,6 +461,8 @@ impl Ddl<'_, '_> {
             rowtype,
             rowarray,
             toast: 0,
+            toast_relname: None,
+            toast_indname: None,
             rls: false,
             rls_force: false,
             of_type: 0,
@@ -3942,6 +3944,8 @@ impl Ddl<'_, '_> {
             rowtype: 0,
             rowarray: 0,
             toast: 0,
+            toast_relname: None,
+            toast_indname: None,
             rls: false,
             rls_force: false,
             of_type: 0,
@@ -6291,6 +6295,70 @@ impl Ddl<'_, '_> {
         self.follow_renames(&before, &[super::stored::Change::Column(oid, idx as i16 + 1)])
     }
 
+    /// ALTER TABLE / INDEX ... RENAME of a TOAST table or its index (`index`) of table `t`:
+    /// RangeVarCallbackForAlterRelation's checks (owner, then IsSystemClass, which only
+    /// allow_system_table_mods lets through), RenameRelation's lock.
+    fn rename_toast(
+        &mut self,
+        kind: pb::ObjectType,
+        t: &Table,
+        index: bool,
+        name: &str,
+        newname: &str,
+    ) -> Result<String> {
+        use pb::ObjectType as O;
+        let tag = format!("ALTER {}", super::object_type_word(kind));
+        self.require_owner(t.owner, if index { "index" } else { "table" }, name)?;
+        let wrong = |what: &str| {
+            Err(Error::new(code::WRONG_OBJECT_TYPE, format!("\"{name}\" is not {what}")))
+        };
+        match kind {
+            O::ObjectView => return wrong("a view"),
+            O::ObjectMatview => return wrong("a materialized view"),
+            O::ObjectSequence => return wrong("a sequence"),
+            O::ObjectForeignTable => return wrong("a foreign table"),
+            _ => {}
+        }
+        if !self.ctx.sess.settings.borrow().bool("allow_system_table_mods") {
+            return Err(Error::new(
+                code::INSUFFICIENT_PRIVILEGE,
+                format!("permission denied: \"{name}\" is a system catalog"),
+            ));
+        }
+        let oid = t.toast + index as u32;
+        self.note_lock(
+            oid,
+            if kind == O::ObjectIndex {
+                lockmode::SHARE_UPDATE_EXCLUSIVE
+            } else {
+                lockmode::ACCESS_EXCLUSIVE
+            },
+        )?;
+        let schema = self.cat.toast_schema(t);
+        let schema_name = self.cat.schema_name(schema).to_string();
+        if self.cat.name_taken(schema, newname)
+            || self.cat.find_toast(Some(&schema_name), newname, &[]).is_some()
+        {
+            return Err(Error::new(
+                code::DUPLICATE_TABLE,
+                format!("relation \"{newname}\" already exists"),
+            ));
+        }
+        let Some(cur) = self.cat.index_table(t.oid) else {
+            return Ok(tag);
+        };
+        let mut cur = (*cur).clone();
+        let given = (newname != crate::catalog::toast_name(cur.oid, index)).then(|| newname.to_string());
+        if index {
+            cur.toast_indname = given;
+        } else {
+            cur.toast_relname = given;
+        }
+        self.cat.put_storage(cur);
+        self.save()?;
+        Ok(tag)
+    }
+
     pub(super) fn rename(&mut self, s: &pb::RenameStmt) -> Result<String> {
         use pb::ObjectType as O;
         let kind = O::try_from(s.rename_type).unwrap_or(O::ObjectTable);
@@ -6307,6 +6375,11 @@ impl Ddl<'_, '_> {
             | O::ObjectForeignTable => {
                 let rv = s.relation.as_ref().unwrap();
                 let Some(rel) = self.lookup(rv)? else {
+                    if let Some((t, index)) =
+                        self.cat.find_toast(Self::rv_schema(rv), &rv.relname, self.search_path())
+                    {
+                        return self.rename_toast(kind, &t, index, &rv.relname, &newname);
+                    }
                     if s.missing_ok {
                         self.notice(format!(
                             "relation \"{}\" does not exist, skipping",
@@ -7315,6 +7388,12 @@ impl Ddl<'_, '_> {
             crate::exec::trigger::statement(b, t, true, tt::TRUNCATE, &[], self.ctx)?;
         }
         for t in &tables {
+            // ExecuteTruncateGuts gives the TOAST table new files too, under its own
+            // AccessExclusiveLock (and its index's).
+            if t.toast != 0 {
+                self.note_lock(t.toast, lockmode::ACCESS_EXCLUSIVE)?;
+                self.note_lock(t.toast + 1, lockmode::ACCESS_EXCLUSIVE)?;
+            }
             crate::exec::dml::truncate(t, self.ctx)?;
             crate::exec::pgstat::count_truncate(self.ctx, t.oid);
             if t.partkey.is_none() {
@@ -8409,6 +8488,107 @@ impl Ddl<'_, '_> {
     /// builds a copy of each index, which takes the original's place with its new oid.
     /// Partitioned tables and indexes reindex their partitions'. System catalogs' indexes get
     /// new files too (REINDEX SYSTEM, or naming one), never concurrently.
+    /// REINDEX TABLE / INDEX naming a user table's TOAST table or TOAST index (`index_stmt`:
+    /// REINDEX INDEX). None: `rv` names neither. Its locks are reindex_relation's /
+    /// ReindexRelationConcurrently's on the TOAST table and its index; a TOAST table dropped
+    /// while the lock was waited for is gone (RangeVarGetRelidExtended looks again).
+    fn reindex_toast(
+        &mut self,
+        rv: &pb::RangeVar,
+        index_stmt: bool,
+        concurrently: bool,
+        verbose: bool,
+        spc: Option<u32>,
+    ) -> Result<Option<String>> {
+        let schema = Self::rv_schema(rv);
+        let Some((t, index)) = self.cat.find_toast(schema, &rv.relname, self.search_path()) else {
+            return Ok(None);
+        };
+        if index_stmt && !index {
+            return Err(Error::new(
+                code::WRONG_OBJECT_TYPE,
+                format!("\"{}\" is not an index", rv.relname),
+            ));
+        }
+        if !index_stmt && index {
+            return Err(Error::new(
+                code::WRONG_OBJECT_TYPE,
+                format!("\"{}\" is not a table or materialized view", rv.relname),
+            ));
+        }
+        // MAINTAIN on the TOAST relation: its table's owner's (it has no ACL of its own).
+        let me = self.me();
+        if !self.cat.is_superuser(me)
+            && !self.cat.has_privs_of_role(me, t.owner, self.db_owner())
+            && !self.cat.has_privs_of_role(me, crate::catalog::acl::PG_MAINTAIN, self.db_owner())
+        {
+            return Err(Error::new(
+                code::INSUFFICIENT_PRIVILEGE,
+                format!(
+                    "permission denied for {} {}",
+                    if index { "index" } else { "table" },
+                    rv.relname
+                ),
+            ));
+        }
+        let (toast, toast_index) = (t.toast, t.toast + 1);
+        if spc.is_some() {
+            return Err(Error::new(
+                code::FEATURE_NOT_SUPPORTED,
+                format!("cannot move system relation \"{}\"", t.toast_relname(true)),
+            ));
+        }
+        let (heap_mode, index_mode) = if concurrently {
+            (lockmode::SHARE_UPDATE_EXCLUSIVE, lockmode::SHARE_UPDATE_EXCLUSIVE)
+        } else {
+            (lockmode::SHARE, lockmode::ACCESS_EXCLUSIVE)
+        };
+        let relname = t.toast_relname(false);
+        self.ctx.txn.borrow_mut().lock_relation(
+            toast,
+            crate::txn::locks::LockMode::from_number(heap_mode).expect("a lock mode"),
+            crate::txn::locks::WaitPolicy::Block,
+            &|| relname.clone(),
+        )?;
+        // (Dropped, or renamed, while the lock was waited for.)
+        self.refresh_catalog();
+        let still = self
+            .cat
+            .find_toast(schema, &rv.relname, self.search_path())
+            .is_some_and(|(t2, ix)| t2.toast == toast && ix == index);
+        if !still {
+            return Err(crate::catalog::no_such_relation(schema, &rv.relname));
+        }
+        self.note_lock(toast_index, index_mode)?;
+        let info = |d: &Self, msg: String| {
+            let mut e = crate::session::notice(msg);
+            e.severity = crate::error::Severity::Info;
+            d.ctx.notice(e);
+        };
+        let name = t.toast_relname(true);
+        if concurrently && !t.temporary {
+            // ReindexRelationConcurrently's phases: writers out (ShareLock), then every
+            // transaction using the TOAST table before the swap (AccessExclusiveLock).
+            use crate::txn::locks::LockMode as L;
+            self.ctx.txn.borrow_mut().wait_for_lockers(toast, L::Share)?;
+            self.ctx.txn.borrow_mut().wait_for_lockers(toast, L::AccessExclusive)?;
+            // (The copy built takes an oid; the engine's TOAST index keeps its own.)
+            self.cat.alloc_oid();
+            self.cat.new_filenode(toast_index);
+            if verbose {
+                let sch = self.cat.schema_name(self.cat.toast_schema(&t)).to_string();
+                info(self, format!("index \"{sch}.{name}\" was reindexed"));
+            }
+        } else {
+            self.cat.new_filenode(toast_index);
+            if verbose {
+                info(self, format!("index \"{name}\" was reindexed"));
+            }
+        }
+        self.save()?;
+        Ok(Some("REINDEX".into()))
+    }
+
     pub(super) fn reindex(&mut self, s: &pb::ReindexStmt) -> Result<String> {
         use pb::ReindexObjectType as K;
         let concurrently = def_elems(&s.params).any(|d| {
@@ -8484,7 +8664,11 @@ impl Ddl<'_, '_> {
                             format!("\"{}\" is not an index", rv.relname),
                         ));
                     }
-                    None => match system_relation(&self.cat, rv) {
+                    None => {
+                        if let Some(r) = self.reindex_toast(rv, true, concurrently, verbose, spc)? {
+                            return Ok(r);
+                        }
+                        match system_relation(&self.cat, rv) {
                         Some((oid, b'i')) => {
                             if !may_maintain_system {
                                 return Err(Error::new(
@@ -8512,7 +8696,8 @@ impl Ddl<'_, '_> {
                                 &rv.relname,
                             ));
                         }
-                    },
+                        }
+                    }
                 };
                 let Some(t) = self.cat.index_table(ix.table) else {
                     return Ok("REINDEX".into());
@@ -8584,7 +8769,11 @@ impl Ddl<'_, '_> {
                             ),
                         ));
                     }
-                    None => match system_relation(&self.cat, rv) {
+                    None => {
+                        if let Some(r) = self.reindex_toast(rv, false, concurrently, verbose, spc)? {
+                            return Ok(r);
+                        }
+                        match system_relation(&self.cat, rv) {
                         Some((oid, b'r' | b't')) => {
                             if !may_maintain_system {
                                 return Err(Error::new(
@@ -8617,7 +8806,8 @@ impl Ddl<'_, '_> {
                                 &rv.relname,
                             ));
                         }
-                    },
+                        }
+                    }
                 };
                 self.require_rel_priv(t.oid, crate::catalog::acl::MAINTAIN, false)?;
                 if t.partkey.is_some() && !concurrently {
@@ -8789,12 +8979,25 @@ impl Ddl<'_, '_> {
             for &i in &indexes {
                 self.note_lock(i, index_mode)?;
             }
+            // Its TOAST table and index (reindex_relation's recursion, or
+            // ReindexRelationConcurrently's toast indexes).
+            let toast_rel = if toast { self.cat.index_table(table).map_or(0, |t| t.toast) } else { 0 };
+            if toast_rel != 0 {
+                self.note_lock(toast_rel, heap_mode)?;
+                self.note_lock(toast_rel + 1, index_mode)?;
+            }
             // ReindexRelationConcurrently's phases: writers out (ShareLock), then every
             // transaction using the table before the swap (AccessExclusiveLock).
             if concurrently {
                 use crate::txn::locks::LockMode as L;
                 self.ctx.txn.borrow_mut().wait_for_lockers(table, L::Share)?;
+                if toast_rel != 0 {
+                    self.ctx.txn.borrow_mut().wait_for_lockers(toast_rel, L::Share)?;
+                }
                 self.ctx.txn.borrow_mut().wait_for_lockers(table, L::AccessExclusive)?;
+                if toast_rel != 0 {
+                    self.ctx.txn.borrow_mut().wait_for_lockers(toast_rel, L::AccessExclusive)?;
+                }
             }
             if let Some(spc) = spc {
                 self.reindex_move(&indexes, spc, concurrently)?;

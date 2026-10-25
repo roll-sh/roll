@@ -277,6 +277,9 @@ pub fn rel_word(cat: &crate::catalog::Catalog, oid: u32) -> (&'static str, Strin
     if let Some(s) = cat.sequences.get(&oid) {
         return ("sequence", s.name.clone());
     }
+    if let Some((t, index)) = cat.toast_owner(oid) {
+        return (if index { "index" } else { "table" }, t.toast_relname(index));
+    }
     match crate::catalog::system::SysTable::by_oid(oid) {
         Some(t) => (
             if t.is_view() { "view" } else { "table" },

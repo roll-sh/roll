@@ -2403,3 +2403,98 @@ fn notices_copy_lines_and_portal_rows_as_they_come() {
     assert_eq!(desc.as_deref(), Some(&[0, 1, 0, 0, 0, 23][..]));
     s.engine.shutdown();
 }
+
+/// A table's TOAST table as a relation of its own: writing a value out of line locks it
+/// (RowExclusiveLock until the transaction ends), REINDEX ... CONCURRENTLY of it waits for
+/// that, it can be renamed under allow_system_table_mods, and a DROP of its table holds it
+/// so a REINDEX waiting for it then finds it gone.
+#[test]
+fn toast_relations() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        let c = s.connect("postgres").await;
+        a.batch_execute(
+            "CREATE TABLE tw (id int PRIMARY KEY, data text);
+             INSERT INTO tw SELECT 1, string_agg(md5(g::text), '') FROM generate_series(1, 500) g",
+        )
+        .await
+        .unwrap();
+        let toast = lines(&a, "SELECT reltoastrelid::regclass::text FROM pg_class WHERE oid = 'tw'::regclass")
+            .await
+            .unwrap()
+            .remove(0);
+        // Renaming it is a system catalog change.
+        let err = a
+            .batch_execute(&format!("ALTER TABLE {toast} RENAME TO tw_toast"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.as_db_error().unwrap().message(),
+            format!("permission denied: \"{}\" is a system catalog", toast.trim_start_matches("pg_toast."))
+        );
+        a.batch_execute(&format!(
+            "SET allow_system_table_mods = on; ALTER TABLE {toast} RENAME TO tw_toast; RESET allow_system_table_mods"
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            lines(&a, "SELECT reltoastrelid::regclass::text FROM pg_class WHERE oid = 'tw'::regclass")
+                .await
+                .unwrap(),
+            ["pg_toast.tw_toast"]
+        );
+        // An out-of-line value written: the TOAST table is locked.
+        let pa = lines(&a, "SELECT pg_backend_pid()").await.unwrap().remove(0);
+        let pb = lines(&b, "SELECT pg_backend_pid()").await.unwrap().remove(0);
+        a.batch_execute(
+            "BEGIN; INSERT INTO tw SELECT 2, string_agg(md5(g::text), '') FROM generate_series(1, 500) g",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            lines(
+                &c,
+                &format!("SELECT mode FROM pg_locks WHERE pid = {pa} AND relation = 'pg_toast.tw_toast'::regclass")
+            )
+            .await
+            .unwrap(),
+            ["RowExclusiveLock"]
+        );
+        let w = tokio::spawn(async move {
+            let r = b.batch_execute("REINDEX TABLE CONCURRENTLY pg_toast.tw_toast").await;
+            (b, r)
+        });
+        until_waiting(&c, &pb).await;
+        a.batch_execute("COMMIT").await.unwrap();
+        let (b, r) = w.await.unwrap();
+        r.unwrap();
+        // A DROP in progress holds it: the REINDEX waits, then finds it gone.
+        a.batch_execute("BEGIN; DROP TABLE tw").await.unwrap();
+        let w = tokio::spawn(async move {
+            let r = b.batch_execute("REINDEX TABLE CONCURRENTLY pg_toast.tw_toast").await;
+            (b, r)
+        });
+        until_waiting(&c, &pb).await;
+        a.batch_execute("COMMIT").await.unwrap();
+        let (_b, r) = w.await.unwrap();
+        assert_eq!(
+            r.unwrap_err().as_db_error().unwrap().message(),
+            "relation \"pg_toast.tw_toast\" does not exist"
+        );
+    });
+    s.engine.shutdown();
+}
+
+/// Wait until session `pid` waits for a lock.
+async fn until_waiting(c: &Client, pid: &str) {
+    let q = format!("SELECT EXISTS (SELECT FROM pg_locks WHERE pid = {pid} AND NOT granted)");
+    for _ in 0..500 {
+        if lines(c, &q).await.unwrap() == ["t"] {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("session {pid} never waited");
+}

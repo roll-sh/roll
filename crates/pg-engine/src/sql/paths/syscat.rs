@@ -51,6 +51,8 @@ pub fn sys_table(t: SysTable) -> Arc<Table> {
         rowtype: 0,
         rowarray: 0,
         toast: 0,
+        toast_relname: None,
+        toast_indname: None,
         rls: false,
         rls_force: false,
         of_type: 0,

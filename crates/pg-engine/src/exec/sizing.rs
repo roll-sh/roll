@@ -1242,6 +1242,33 @@ fn index_insert(
     }
 }
 
+/// toast_save_datum / toast_delete_datum open the table's TOAST relation with
+/// RowExclusiveLock, held until the transaction ends (pg_locks shows it; REINDEX
+/// CONCURRENTLY of the TOAST table waits for it, a DROP holds it off).
+fn lock_toast(t: &Table, ctx: &ExecCtx) -> Result<()> {
+    if t.toast == 0 {
+        return Ok(());
+    }
+    let name = t.toast_relname(false);
+    ctx.txn.borrow_mut().lock_relation(
+        t.toast,
+        crate::txn::locks::LockMode::RowExclusive,
+        crate::txn::locks::WaitPolicy::Block,
+        &|| name.clone(),
+    )?;
+    Ok(())
+}
+
+/// `lock_toast` for a row written to a table too big to model: when the row's layout
+/// stores a value out of line.
+fn lock_toast_for(t: &Table, row: &[Value], ctx: &ExecCtx) -> Result<()> {
+    let big = |v: &Value| !matches!(v, Value::Null | Value::Bool(_) | Value::Int2(_) | Value::Int4(_) | Value::Int8(_) | Value::Float4(_) | Value::Float8(_) | Value::Oid(_));
+    if t.toast != 0 && row.iter().any(big) && !layout(t, row, ctx, &HashSet::new()).1.is_empty() {
+        lock_toast(t, ctx)?;
+    }
+    Ok(())
+}
+
 /// A row is about to be inserted (heap_insert and its index entries).
 pub fn inserted(
     t: &Table,
@@ -1265,10 +1292,14 @@ pub fn inserted_with(
 ) -> Result<Option<Tid>> {
     note_compression(t, row, Some(key), ctx);
     if !ensure(t, indexes, ctx)? {
+        lock_toast_for(t, row, ctx)?;
         estimate_grows(t, row, ctx);
         return Ok(None);
     }
     let (len, exts) = layout(t, row, ctx, &HashSet::new());
+    if !exts.is_empty() {
+        lock_toast(t, ctx)?;
+    }
     let entries = entries_with(t, indexes, row, vals, ctx)?;
     let xid = ctx.txn.borrow_mut().cur_xid();
     let cid = ctx.txn.borrow_mut().output_cid();
@@ -1367,6 +1398,7 @@ pub fn updated(
 ) -> Result<Option<(Tid, bool)>> {
     note_compression(t, new, Some(new_key), ctx);
     if !ensure(t, indexes, ctx)? {
+        lock_toast_for(t, new, ctx)?;
         estimate_grows(t, new, ctx);
         return Ok(None);
     }
@@ -1381,6 +1413,11 @@ pub fn updated(
         .map(|e| e.col)
         .collect();
     let (len, exts) = layout(t, new, ctx, &pinned);
+    // New values saved out of line, or old ones deleted (toast_save_datum /
+    // toast_delete_datum): the TOAST relation is opened.
+    if !exts.is_empty() || old_exts.iter().any(|e| !pinned.contains(&e.col)) {
+        lock_toast(t, ctx)?;
+    }
     // (A summarizing index, BRIN, doesn't keep an update from being HOT.)
     let mut cols = HashSet::new();
     for bix in indexes.iter().filter(|b| b.index.method != "brin") {
@@ -1484,8 +1521,15 @@ pub fn deleted(t: &Table, indexes: &[BoundIndex], key: &[u8], ctx: &ExecCtx) -> 
     if !ensure(t, indexes, ctx)? {
         return Ok(());
     }
-    let xid = ctx.txn.borrow_mut().cur_xid();
     let db = &ctx.sess.db;
+    // toast_delete: a row with out-of-line values opens the TOAST relation.
+    let external = (db.relfiles.lock().toast.get(&t.oid))
+        .and_then(|tt| tt.rows.get(key))
+        .is_some_and(|e| !e.is_empty());
+    if external {
+        lock_toast(t, ctx)?;
+    }
+    let xid = ctx.txn.borrow_mut().cur_xid();
     let xids = db.xids();
     let v = vis_for(&xids, t.oid, ctx);
     let mut rf = db.relfiles.lock();

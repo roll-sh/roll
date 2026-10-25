@@ -317,7 +317,7 @@ impl NameResolver for CatalogNames {
             (ct.schema, ct.name.clone())
         } else if let Some((t, index)) = c.toast_owner(oid) {
             // TOAST tables: bare when their schema is on the path.
-            let (ns, name) = (c.toast_schema(t), super::toast_name(t.oid, index));
+            let (ns, name) = (c.toast_schema(t), t.toast_relname(index));
             return Some(if c.effective_path(&self.search_path).contains(&ns) {
                 quote_ident(&name)
             } else {
@@ -391,20 +391,17 @@ impl NameResolver for CatalogNames {
                 return Ok(super::static_rows::oid_at(r, 0));
             }
         }
-        // TOAST tables of user tables: pg_toast_<table oid>[_index].
-        if let Some(rest) = rel.strip_prefix("pg_toast_") {
-            let (num, index) = match rest.strip_suffix("_index") {
-                Some(n) => (n, true),
-                None => (rest, false),
-            };
-            if let Some(t) = num
-                .parse()
-                .ok()
-                .and_then(|o| self.catalog.index_table(o))
-                .filter(|t| t.toast != 0 && schemas.contains(&self.catalog.toast_schema(t)))
-            {
-                return Ok(t.toast + index as u32);
+        // TOAST tables of user tables: pg_toast_<table oid>[_index], or as renamed.
+        if let Some((t, index)) = self.catalog.toasted().find_map(|t| {
+            if !schemas.contains(&self.catalog.toast_schema(t)) {
+                return None;
             }
+            [false, true]
+                .into_iter()
+                .find(|&ix| t.toast_relname(ix) == rel)
+                .map(|ix| (t, ix))
+        }) {
+            return Ok(t.toast + index as u32);
         }
         if (schema.is_none() || sch.is_some())
             && let Some(ct) = self

@@ -480,6 +480,12 @@ pub struct Table {
     /// The TOAST table's oid (its index has the next one); 0: none.
     #[serde(default)]
     pub toast: u32,
+    /// Its TOAST table's and TOAST index's names when renamed (ALTER TABLE / INDEX ...
+    /// RENAME under allow_system_table_mods); None: `pg_toast_<oid>[_index]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toast_relname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toast_indname: Option<String>,
     /// ENABLE ROW LEVEL SECURITY / FORCE ROW LEVEL SECURITY.
     #[serde(default)]
     pub rls: bool,
@@ -630,6 +636,12 @@ fn array_of(rowtype: u32, rowarray: u32) -> u32 {
 }
 
 impl Table {
+    /// The name of its TOAST table, or (`index`) of the TOAST table's index.
+    pub fn toast_relname(&self, index: bool) -> String {
+        let given = if index { &self.toast_indname } else { &self.toast_relname };
+        given.clone().unwrap_or_else(|| toast_name(self.oid, index))
+    }
+
     /// The row type's array type (0: no row type yet).
     pub fn array_type(&self) -> u32 {
         array_of(self.rowtype, self.rowarray)
@@ -849,6 +861,8 @@ impl ViewDef {
             rowtype: self.rowtype,
             rowarray: self.rowarray,
             toast: 0,
+            toast_relname: None,
+            toast_indname: None,
             rls: false,
             rls_force: false,
             of_type: 0,
@@ -3580,6 +3594,29 @@ impl Catalog {
             .values()
             .chain(self.views.values().filter_map(|v| v.storage.as_ref()))
             .filter(|t| t.toast != 0)
+    }
+
+    /// The table whose TOAST table (false) or TOAST index (true) is called `name`, in
+    /// schema `schema` or (None) on `search_path`.
+    pub fn find_toast(
+        &self,
+        schema: Option<&str>,
+        name: &str,
+        search_path: &[String],
+    ) -> Option<(Arc<Table>, bool)> {
+        let path = match schema {
+            Some(s) => vec![self.schema_by_name(s)?.oid],
+            None => self.effective_path(search_path),
+        };
+        // (Rare: only names no other relation has get here.)
+        self.toasted()
+            .filter(|t| path.contains(&self.toast_schema(t)))
+            .find_map(|t| {
+                [false, true]
+                    .into_iter()
+                    .find(|&ix| t.toast_relname(ix) == name)
+                    .map(|ix| (t.clone(), ix))
+            })
     }
 
     /// The table a TOAST table or TOAST index belongs to: (table, is the index).

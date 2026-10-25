@@ -1121,7 +1121,7 @@ fn relations_of(cat: &Catalog, only: Option<u32>) -> Vec<RelInfo> {
             }
             out.push(RelInfo {
                 oid: t.toast + index as u32,
-                name: super::toast_name(t.oid, index),
+                name: t.toast_relname(index),
                 schema: cat.toast_schema(t),
                 kind: if index { 'i' } else { 't' },
                 natts: if index { 2 } else { 3 },

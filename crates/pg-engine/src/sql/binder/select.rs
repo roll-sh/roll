@@ -4833,14 +4833,11 @@ impl Binder<'_, '_> {
         alias: Option<&str>,
         colnames: &[String],
     ) -> Result<Option<(Plan, ScopeRel)>> {
-        if !name.starts_with("pg_toast_") {
-            return Ok(None);
-        }
         let Some(t) = self
             .cat
-            .toasted()
-            .find(|t| crate::catalog::toast_name(t.oid, false) == name)
-            .cloned()
+            .find_toast(schema, name, &self.ctx.search_path)
+            .filter(|(_, index)| !index)
+            .map(|(t, _)| t)
         else {
             return Ok(None);
         };

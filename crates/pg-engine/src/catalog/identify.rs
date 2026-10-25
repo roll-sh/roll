@@ -148,7 +148,7 @@ fn relation(cat: &Catalog, oid: u32) -> Option<(&'static str, String, String)> {
         return Some((
             if index { "index" } else { "toast table" },
             s(cat.toast_schema(t)),
-            super::toast_name(t.oid, index),
+            t.toast_relname(index),
         ));
     }
     let t = SysTable::by_oid(oid)?;

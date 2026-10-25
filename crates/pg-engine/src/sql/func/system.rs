@@ -1442,7 +1442,7 @@ fn system_index_def(
     use crate::catalog::static_rows::{oid_at, rows, text_at};
     let class = rows(crate::catalog::system::SysTable::PgClass);
     let (name, ns) = match cat.toast_owner(oid) {
-        Some((t, true)) => (crate::catalog::toast_name(t.oid, true), cat.toast_schema(t)),
+        Some((t, true)) => (t.toast_relname(true), cat.toast_schema(t)),
         Some(_) => return None,
         None => {
             let r = class.iter().find(|r| oid_at(r, 0) == oid)?;

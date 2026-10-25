@@ -1,0 +1,143 @@
+> CREATE TABLE a56_tw (id int PRIMARY KEY, data text)
+-- CREATE TABLE
+
+> INSERT INTO a56_tw SELECT 1, string_agg(md5(g::text), '') FROM generate_series(1, 500) g
+-- INSERT 0 1
+
+> DO $$
+> DECLARE r record;
+> BEGIN
+>   SELECT reltoastrelid::regclass::text AS t FROM pg_class WHERE oid = 'a56_tw'::regclass INTO r;
+>   EXECUTE 'ALTER TABLE ' || r.t || ' RENAME TO a56_tw_toast';
+> EXCEPTION WHEN others THEN
+>   RAISE NOTICE 'got: % (%)', regexp_replace(sqlerrm, '[0-9]+', 'N'), sqlstate;
+> END $$
+NOTICE 00000: got: permission denied: "pg_toast_N" is a system catalog (42501)
+CONTEXT: PL/pgSQL function inline_code_block line 7 at RAISE
+-- DO
+
+> SET allow_system_table_mods = on
+-- SET
+
+> DO $$
+> DECLARE r record;
+> BEGIN
+>   SELECT reltoastrelid::regclass::text AS t FROM pg_class WHERE oid = 'a56_tw'::regclass INTO r;
+>   EXECUTE 'ALTER TABLE ' || r.t || ' RENAME TO a56_tw_toast';
+>   SELECT indexrelid::regclass::text AS i FROM pg_index
+>     WHERE indrelid = (SELECT oid FROM pg_class WHERE relname = 'a56_tw_toast') INTO r;
+>   EXECUTE 'ALTER INDEX ' || r.i || ' RENAME TO a56_tw_toast_idx';
+> END $$
+-- DO
+
+> RESET allow_system_table_mods
+-- RESET
+
+> SELECT reltoastrelid::regclass FROM pg_class WHERE oid = 'a56_tw'::regclass
+reltoastrelid:regclass
+pg_toast.a56_tw_toast
+-- SELECT 1
+
+> SELECT c.relname, c.relkind, n.nspname
+>   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+>   WHERE c.relname LIKE 'a56_tw_toast%' ORDER BY 1
+relname:name | relkind:char | nspname:name
+a56_tw_toast | t | pg_toast
+a56_tw_toast_idx | i | pg_toast
+-- SELECT 2
+
+> SELECT indexrelid::regclass, indrelid::regclass FROM pg_index
+>   WHERE indrelid = 'pg_toast.a56_tw_toast'::regclass
+indexrelid:regclass | indrelid:regclass
+pg_toast.a56_tw_toast_idx | pg_toast.a56_tw_toast
+-- SELECT 1
+
+> ALTER INDEX pg_toast.a56_tw_toast_idx RENAME TO x
+ERROR 42501: permission denied: "a56_tw_toast_idx" is a system catalog
+
+> SET allow_system_table_mods = on
+-- SET
+
+> ALTER INDEX pg_toast.a56_tw_toast_idx RENAME TO a56_tw_i2
+-- ALTER INDEX
+
+> ALTER TABLE pg_toast.a56_tw_i2 RENAME TO a56_tw_toast_idx
+-- ALTER TABLE
+
+> ALTER TABLE pg_toast.a56_tw_toast RENAME TO a56_tw_toast_idx
+ERROR 42P07: relation "a56_tw_toast_idx" already exists
+
+> ALTER VIEW pg_toast.a56_tw_toast RENAME TO x
+ERROR 42809: "a56_tw_toast" is not a view
+
+> ALTER SEQUENCE pg_toast.a56_tw_toast RENAME TO x
+ERROR 42809: "a56_tw_toast" is not a sequence
+
+> ALTER INDEX pg_toast.a56_tw_toast RENAME TO a56_tw_t2
+-- ALTER INDEX
+
+> ALTER INDEX pg_toast.a56_tw_t2 RENAME TO a56_tw_toast
+-- ALTER INDEX
+
+> RESET allow_system_table_mods
+-- RESET
+
+> REINDEX TABLE pg_toast.a56_tw_toast
+-- REINDEX
+
+> REINDEX INDEX pg_toast.a56_tw_toast_idx
+-- REINDEX
+
+> REINDEX TABLE pg_toast.a56_tw_toast_idx
+ERROR 42809: "a56_tw_toast_idx" is not a table or materialized view
+
+> REINDEX INDEX pg_toast.a56_tw_toast
+ERROR 42809: "a56_tw_toast" is not an index
+
+> REINDEX TABLE pg_toast.a56_tw_nothing
+ERROR 42P01: relation "pg_toast.a56_tw_nothing" does not exist
+
+> REINDEX TABLE CONCURRENTLY pg_toast.a56_tw_toast
+-- REINDEX
+
+> REINDEX INDEX CONCURRENTLY pg_toast.a56_tw_toast_idx
+-- REINDEX
+
+> BEGIN
+-- BEGIN
+
+> REINDEX TABLE CONCURRENTLY pg_toast.a56_tw_toast
+ERROR 25001: REINDEX CONCURRENTLY cannot run inside a transaction block
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT id, substr(data, 1, 10) FROM a56_tw
+id:int4 | substr:text
+1 | c4ca4238a0
+-- SELECT 1
+
+> CREATE ROLE regress_a56_toast
+-- CREATE ROLE
+
+> SET ROLE regress_a56_toast
+-- SET
+
+> REINDEX TABLE pg_toast.a56_tw_toast
+ERROR 42501: permission denied for schema pg_toast
+
+> REINDEX INDEX pg_toast.a56_tw_toast_idx
+ERROR 42501: permission denied for schema pg_toast
+
+> RESET ROLE
+-- RESET
+
+> DROP ROLE regress_a56_toast
+-- DROP ROLE
+
+> DROP TABLE a56_tw
+-- DROP TABLE
+
+> REINDEX TABLE pg_toast.a56_tw_toast
+ERROR 42P01: relation "pg_toast.a56_tw_toast" does not exist
+
