@@ -84,6 +84,7 @@ pub(crate) async fn review_event(code: &Code, hub: &Hub, r: &RepoRow, e: &PullRe
     let ext = e.review.id.to_string();
     let existing = code.db.review_by_external(&r.id, SOURCE, &ext)?;
     let body = e.review.body.clone().unwrap_or_default();
+    let mut promised = crate::webhooks::Promises::default();
     match (e.action, existing) {
         (ReviewAction::Dismissed, Some(v)) => {
             let by = e.sender.as_ref().map(|s| format!("@{}", s.login)).unwrap_or_else(|| "github".into());
@@ -104,7 +105,7 @@ pub(crate) async fn review_event(code: &Code, hub: &Hub, r: &RepoRow, e: &PullRe
             if reviewer.kind == ReviewerKind::User && !can_push(e.review.author_association.as_deref()) {
                 v = Verdict::Comment;
             }
-            code.db.insert_review(&crate::review::store::NewReview {
+            promised = code.db.insert_review(&crate::review::store::NewReview {
                 id: &new_id("rv"),
                 change_id: &c.id,
                 repo_id: &r.id,
@@ -129,7 +130,7 @@ pub(crate) async fn review_event(code: &Code, hub: &Hub, r: &RepoRow, e: &PullRe
         }
     }
     if let Some(v) = code.db.review_by_external(&r.id, SOURCE, &ext)? {
-        code.emit(&r.id, "review", serde_json::to_value(&v).unwrap_or_default());
+        code.emit_kept(&mut promised, &r.id, "review", serde_json::to_value(&v).unwrap_or_default());
     }
     code.emit_change(&code.change_or_404(&c.id)?);
     Ok(())

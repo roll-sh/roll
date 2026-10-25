@@ -724,7 +724,7 @@ impl Code {
             })?);
         }
         let id = new_id("rv");
-        self.db.insert_review(&store::NewReview {
+        let mut promised = self.db.insert_review(&store::NewReview {
             id: &id,
             change_id: &c.id,
             repo_id: &r.id,
@@ -743,7 +743,7 @@ impl Code {
         }
         self.db.finish_review_requests(&c.id, reviewer, Some(&c.head))?;
         let mut review = self.db.review(&id)?.ok_or_else(|| Error::NotFound(format!("review {id}")))?;
-        self.emit(&r.id, "review", serde_json::to_value(&review).unwrap_or_default());
+        self.emit_kept(&mut promised, &r.id, "review", serde_json::to_value(&review).unwrap_or_default());
         for t in &threads {
             self.emit(&r.id, "thread", serde_json::to_value(t).unwrap_or_default());
             if let Some(cm) = t.comments.first() {

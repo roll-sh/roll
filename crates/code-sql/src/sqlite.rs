@@ -18,6 +18,8 @@ pub(crate) struct Sqlite {
     writer: Mutex<Connection>,
     readers: Vec<Mutex<Connection>>,
     pub(crate) wal: WalSync,
+    /// In-process wake-ups ([`crate::Db::listen`], [`crate::Db::notify_after_commit`]).
+    listeners: Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<u64>>>,
 }
 
 impl Sqlite {
@@ -38,9 +40,25 @@ impl Sqlite {
                 Ok(Mutex::new(r))
             })
             .collect::<Result<_>>()?;
-        let db = Arc::new(Sqlite { writer: Mutex::new(conn), readers, wal: WalSync::new(path) });
+        let db = Arc::new(Sqlite { writer: Mutex::new(conn), readers, wal: WalSync::new(path), listeners: Mutex::new(Default::default()) });
         crate::durable::spawn_checkpointer(path, Arc::downgrade(&db))?;
         Ok(db)
+    }
+
+    /// A wake-up for `notify(channel)` on this handle (any clone of it, in this process).
+    pub(crate) fn listen(&self, channel: &str) -> tokio::sync::watch::Receiver<u64> {
+        self.listeners.lock().entry(channel.to_string()).or_insert_with(|| tokio::sync::watch::channel(0).0).subscribe()
+    }
+
+    pub(crate) fn notify(&self, channel: &str) {
+        let mut l = self.listeners.lock();
+        if let Some(tx) = l.get(channel) {
+            if tx.is_closed() {
+                l.remove(channel);
+            } else {
+                tx.send_modify(|n| *n += 1);
+            }
+        }
     }
 
     fn reader(&self) -> MutexGuard<'_, Connection> {

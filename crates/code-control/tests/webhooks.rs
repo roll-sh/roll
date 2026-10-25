@@ -486,7 +486,7 @@ async fn landings_while_the_daemon_was_down_are_delivered_after_a_restart() {
     let rx = receiver().await;
     let dir = tempfile::tempdir().unwrap();
     let cfg = |c: &mut code_control::Config| c.review_app_retry_ms = 20;
-    let repo_id = {
+    let (repo_id, old) = {
         let code = common::open_in(dir.path(), cfg);
         let a = App { router: code_control::api::router(code.clone()), code, dir: tempfile::tempdir().unwrap() };
         let r = a.repo("acme", "api").await;
@@ -494,8 +494,17 @@ async fn landings_while_the_daemon_was_down_are_delivered_after_a_restart() {
         rx.wait("ping", |_| true).await;
         a.ok("POST", &format!("{P}/land"), Some(json!({ "message": "before", "files": { "a.txt": { "content": "1\n" } } }))).await;
         rx.wait("landed", |g| g.body["data"]["message"] == "before").await;
-        r["id"].as_str().unwrap().to_string()
+        (r["id"].as_str().unwrap().to_string(), Arc::downgrade(&a.code))
     };
+    // The process stops: nothing of it keeps running (its background tasks hold it weakly, so
+    // its forwarder can't forward what the next process lands while it's "down").
+    for _ in 0..500 {
+        if old.upgrade().is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(old.upgrade().is_none(), "a dropped Code is kept alive by its own tasks");
     // "Down": a process that lands without delivering webhooks (they aren't started), like a
     // crash between the landing and its deliveries.
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -516,6 +525,47 @@ async fn landings_while_the_daemon_was_down_are_delivered_after_a_restart() {
     msgs.sort_by_key(|m| m.0);
     let msgs: Vec<Value> = msgs.into_iter().map(|m| m.1).collect();
     assert_eq!(msgs, vec![json!("before"), json!("burst 0"), json!("burst 1"), json!("burst 2")]);
+}
+
+/// A delivery queued by a process that stopped before sending it goes out once the next process
+/// starts its webhooks, without waiting for an event of its own to wake the delivery worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deliveries_left_queued_are_sent_after_a_restart() {
+    let rx = counter(false, None).await;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = |c: &mut code_control::Config| c.review_app_retry_ms = 20;
+    let (hook_id, old) = {
+        let code = common::open_in(dir.path(), cfg);
+        let a = App { router: code_control::api::router(code.clone()), code, dir: tempfile::tempdir().unwrap() };
+        a.repo("acme", "api").await;
+        let id = hook(&a, &rx.url, json!(["change"])).await;
+        rx.wait("ping", 1, 30).await;
+        (id, Arc::downgrade(&a.code))
+    };
+    for _ in 0..500 {
+        if old.upgrade().is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(old.upgrade().is_none(), "the old process is gone");
+    let code = common::open_in(dir.path(), cfg);
+    // What the old process queued and never sent.
+    code.db
+        .sql()
+        .execute(
+            "INSERT INTO review_deliveries (id, app_id, event, payload, state, next_at, created_at) VALUES ('dl_left', ?, 'change', ?, 'pending', 0, 0)",
+            code_sql::params![hook_id.as_str(), json!({ "event": "change", "delivery": "dl_left" }).to_string()],
+        )
+        .unwrap();
+    code.start_webhooks();
+    for _ in 0..1000 {
+        if rx.attempts.lock().contains_key("dl_left") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(rx.attempts.lock().get("dl_left"), Some(&1), "the left-over delivery was sent once");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -921,6 +971,8 @@ fn node(a: &App) -> App {
 struct Counter {
     url: String,
     attempts: Arc<Mutex<HashMap<String, u32>>>,
+    /// When each delivery's first attempt arrived.
+    first_at: Arc<Mutex<HashMap<String, std::time::Instant>>>,
     /// Bodies of the attempts it answered 200.
     ok: Arc<Mutex<Vec<Value>>>,
 }
@@ -928,11 +980,13 @@ struct Counter {
 async fn counter(fail_first: bool, slow_first: Option<Duration>) -> Counter {
     let attempts: Arc<Mutex<HashMap<String, u32>>> = Arc::default();
     let ok: Arc<Mutex<Vec<Value>>> = Arc::default();
-    let (at, okc) = (attempts.clone(), ok.clone());
+    let first_at: Arc<Mutex<HashMap<String, std::time::Instant>>> = Arc::default();
+    let (at, okc, fa) = (attempts.clone(), ok.clone(), first_at.clone());
     let app = axum::Router::new().fallback(move |headers: HeaderMap, body: Bytes| {
-        let (attempts, ok) = (at.clone(), okc.clone());
+        let (attempts, ok, first_at) = (at.clone(), okc.clone(), fa.clone());
         async move {
             let d = headers.get("x-roll-delivery").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+            first_at.lock().entry(d.clone()).or_insert_with(std::time::Instant::now);
             let n = {
                 let mut a = attempts.lock();
                 let n = a.entry(d).or_insert(0);
@@ -954,7 +1008,7 @@ async fn counter(fail_first: bool, slow_first: Option<Duration>) -> Counter {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/hook", l.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    Counter { url, attempts, ok }
+    Counter { url, attempts, first_at, ok }
 }
 
 impl Counter {
@@ -1195,17 +1249,18 @@ async fn a_claim_held_by_a_dead_node_is_retried_after_it_lapses() {
     let claimed = std::time::Instant::now();
     let now = sql.now_ms().unwrap();
     assert!(a.code.db.claim_delivery("dl_dead", far, now + 400).unwrap());
-    // b's worker, woken by a ping of its own, sends it when the claim lapses, not before.
+    // b's worker, woken by a ping of its own, sends it when the claim lapses, not before
+    // (measured when it arrives: the ping itself may take longer than the claim under load).
     b.ok("POST", &format!("{P}/webhooks/{id}/ping"), None).await;
-    rx.wait("ping", 2, 10).await;
-    assert!(!rx.attempts.lock().contains_key("dl_dead"), "not while it's claimed");
-    for _ in 0..500 {
+    rx.wait("ping", 2, 30).await;
+    for _ in 0..3000 {
         if rx.attempts.lock().contains_key("dl_dead") {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(claimed.elapsed() >= Duration::from_millis(390), "{:?}", claimed.elapsed());
+    let sent_at = *rx.first_at.lock().get("dl_dead").expect("the dead node's delivery was sent");
+    assert!(sent_at.duration_since(claimed) >= Duration::from_millis(390), "not while it's claimed: sent {:?} after the claim", sent_at.duration_since(claimed));
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(rx.attempts.lock().get("dl_dead"), Some(&1), "sent once");
     let d = a.code.db.delivery("dl_dead").unwrap().unwrap();
@@ -1287,4 +1342,80 @@ async fn webhooks_created_while_the_forwarder_starts() {
     hooks.sort();
     assert_eq!(per, hooks);
     assert!(got.iter().all(|g| g["data"]["changeset"] == cs[0].as_str()));
+}
+
+fn outbox(a: &App) -> i64 {
+    a.code.db.sql().query_row("SELECT COUNT(*) FROM webhook_outbox", (), |r| r.get::<_, i64>(0)).unwrap()
+}
+
+/// A node that dies right after a state change commits (before anything else happens for its
+/// event) loses no webhook delivery: the state change's transaction promised the event
+/// (`webhook_outbox`), and the node running the land forwarder delivers it, once, with the
+/// change or review as it is then. Covers a change opened, closed and landed, a review, checks
+/// and a commit status.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn events_promised_by_a_state_change_survive_a_crash_after_its_commit() {
+    let a = setup().await;
+    let rx = counter(false, None).await;
+    hook(&a, &rx.url, json!(["change", "review", "check"])).await;
+    rx.wait("ping", 1, 30).await;
+    let change = |n: usize| json!({ "title": format!("t{n}"), "message": "t", "base": "main", "files": { format!("c{n}.txt"): { "content": "c\n" } } });
+    // Every promised event from here on "dies" right after its commit.
+    a.code.crash_after_commit(u32::MAX);
+    let c1 = a.ok("POST", &format!("{P}/changes"), Some(change(1))).await;
+    let c2 = a.ok("POST", &format!("{P}/changes"), Some(change(2))).await;
+    let (id1, id2) = (c1["id"].as_str().unwrap().to_string(), c2["id"].as_str().unwrap().to_string());
+    a.ok("POST", &format!("/v1/code/changes/{id2}/close"), None).await;
+    let review = a.ok("POST", &format!("/v1/code/changes/{id1}/reviews"), Some(json!({ "verdict": "comment", "body": "looks fine" }))).await;
+    a.ok("POST", &format!("/v1/code/changes/{id1}/checks"), Some(json!({ "name": "ci", "status": "success" }))).await;
+    let (s, v) = a.req("POST", &format!("{P}/statuses/{}", c1["head"].as_str().unwrap()), Some(json!({ "state": "success", "context": "lint" })), None).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let landed = a.ok("POST", &format!("/v1/code/changes/{id1}/land"), None).await;
+    assert!(landed.to_string().contains("landed"), "{landed}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // c1 and c2 opened, c2 closed, the review, the ci check (and c1's change event), the
+    // status (and its check on c1, and c1's change event), c1 landed.
+    let promised = outbox(&a);
+    assert_eq!(promised, 10, "the promises are in the outbox");
+    assert_eq!(rx.answered("review").len(), 0, "the review's event died with the node");
+    let before = rx.ok.lock().len();
+    // Another node (the dead one never comes back) delivers what was promised.
+    let b = node(&a);
+    b.code.set_outbox_grace(Duration::ZERO);
+    b.code.start_webhooks();
+    for _ in 0..3000 {
+        if outbox(&a) == 0 && rx.ok.lock().len() >= before + promised as usize {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(outbox(&a), 0, "every promise kept");
+    assert_eq!(rx.ok.lock().len() - before, promised as usize, "one delivery per promise, none twice");
+    assert_eq!(rx.answered("review").iter().filter(|v| v["data"]["id"] == review["id"]).count(), 1, "the review, once");
+    let checks = rx.answered("check");
+    assert_eq!(checks.iter().filter(|v| v["data"]["change"] == id1.as_str() && v["data"]["check"]["name"] == "ci").count(), 1, "{checks:?}");
+    assert_eq!(checks.iter().filter(|v| v["data"]["change"] == id1.as_str() && v["data"]["check"]["name"] == "lint").count(), 1, "{checks:?}");
+    assert_eq!(checks.iter().filter(|v| v["data"]["status"]["context"] == "lint").count(), 1, "the commit status, once: {checks:?}");
+    // Recovered change events carry the change as it is when they're recovered.
+    let state_of = |id: &str, state: &str| rx.answered("change").into_iter().filter(|v| v["data"]["id"] == id && v["data"]["state"] == state).count();
+    assert_eq!(state_of(&id2, "closed"), 2, "c2's opening and closing, both read after the close");
+    assert!(state_of(&id1, "landed") >= 4, "c1's promised events, read after it landed");
+}
+
+/// Promises are kept by the node that made them as soon as it emits the event: nothing waits
+/// for the recovery, and nothing is left in the outbox.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn promised_events_are_delivered_at_once_and_leave_nothing_behind() {
+    let a = setup().await;
+    let rx = counter(false, None).await;
+    hook(&a, &rx.url, json!(["change"])).await;
+    rx.wait("ping", 1, 30).await;
+    let c = a.ok("POST", &format!("{P}/changes"), Some(json!({ "title": "t", "message": "t", "base": "main", "files": { "x.txt": { "content": "x\n" } } }))).await;
+    a.ok("POST", &format!("/v1/code/changes/{}/close", c["id"].as_str().unwrap()), None).await;
+    rx.wait("change", 2, 10).await;
+    assert_eq!(outbox(&a), 0);
+    let states: Vec<String> = rx.answered("change").iter().map(|v| v["data"]["state"].as_str().unwrap().to_string()).collect();
+    assert_eq!(states.len(), 2, "{states:?}");
+    assert!(states.contains(&"open".to_string()) && states.contains(&"closed".to_string()), "{states:?}");
 }

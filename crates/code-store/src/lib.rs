@@ -126,6 +126,8 @@ pub struct Store {
     pub(crate) db: Db,
     /// Postgres: the advisory lock that orders land log appends (see `lander::log_landed`).
     pub(crate) land_log_lock: Option<i64>,
+    /// The channel each landing notifies (see [`Store::listen_landings`]).
+    pub(crate) land_channel: String,
     pub(crate) objects: Objects,
     pub(crate) blob_cache: lru::Lru<(Arc<str>, Oid), Bytes>,
     pub(crate) tree_cache: lru::Lru<(Arc<str>, Oid), Arc<Vec<TreeEntry>>>,
@@ -157,9 +159,13 @@ impl Store {
     pub fn open_db(db: Db, objects: Objects) -> anyhow::Result<Arc<Store>> {
         db.ensure_schema(db::SCHEMA)?;
         let land_log_lock = db.pg_schema().map(land_log_lock_key);
+        // Postgres: NOTIFY is database-wide, so the channel names the schema. SQLite: wake-ups
+        // stay within the handle (one process).
+        let land_channel = land_log_lock.map_or_else(|| "code_landed".to_string(), |k| format!("code_landed_{:016x}", k as u64));
         Ok(Arc::new(Store {
             db,
             land_log_lock,
+            land_channel,
             objects,
             blob_cache: lru::Lru::new(64 << 20),
             tree_cache: lru::Lru::new(64 << 20),
@@ -679,6 +685,14 @@ impl Store {
     /// Landings in every repo.
     pub fn subscribe_all(&self) -> broadcast::Receiver<Landed> {
         self.all_events.subscribe()
+    }
+
+    /// A wake-up for landings on any node sharing this database: on Postgres a `NOTIFY` sent in
+    /// each landing's transaction (delivered at its commit), on SQLite a wake-up after each
+    /// commit for every store on this database handle in this process. Wake-ups are hints: read
+    /// the land log after them, and poll too.
+    pub fn listen_landings(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        self.db.listen(&self.land_channel)
     }
 
     pub(crate) fn publish(&self, ev: Landed) {

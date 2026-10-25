@@ -245,3 +245,69 @@ fn a_singleton_has_one_holder_and_moves_when_it_dies() {
     }
     assert!(runs[holder].len() == 1 && runs[ids.iter().position(|id| *id == second).unwrap()].len() == 1, "{runs:?}");
 }
+
+/// Retiring a key (its repo was deleted) waits for the guard in flight, emits `Lost` and deletes
+/// the lease row: no sweep takes it back, and it's acquired again only when it's asked for.
+#[test]
+fn a_retired_key_loses_its_lease_row_and_comes_back_only_on_demand() {
+    let env = Env::new("retire");
+    let a = env.join("a");
+    let b = env.join("b");
+    converge(&[a.clone(), b.clone()]);
+    let k = key_for(&["a", "b"], "a", "repo");
+    assert!(matches!(a.route(&k).unwrap(), Route::Local(_)));
+    let mut events = a.subscribe();
+    let _ = drain_events(&mut events);
+    let guard = a.guard(&k).unwrap();
+    assert!(a.retire(&k));
+    // The guard holds it back; no new guards meanwhile.
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(env.lease(&k).is_some() && a.guard(&k).is_none());
+    drop(guard);
+    assert!(eventually(Duration::from_secs(5), || env.lease(&k).is_none()), "the row is deleted");
+    assert_eq!(drain_events(&mut events), vec![Ownership::Lost { key: k.clone() }]);
+    // Several sweeps later nobody has it.
+    std::thread::sleep(env.config("x").sweep_every * 5);
+    assert!(env.lease(&k).is_none() && !a.owns(&k) && !b.owns(&k));
+    // A request brings it back (on its preferred node).
+    assert!(matches!(a.route(&k).unwrap(), Route::Local(_)));
+    assert_eq!(env.lease(&k).unwrap().node, "a");
+}
+
+/// An idle key is given up (row deleted) only once nothing was granted for it for the idle time
+/// and the caller's check agrees; a guard in flight or a recent one keeps it, and a key given up
+/// is taken again by the next request.
+#[test]
+fn idle_keys_are_released_and_reacquired_on_demand() {
+    let env = Env::new("idle");
+    let a = env.join("a");
+    let keys = keys_for(&["a"], "a", "repo", 3);
+    for k in &keys {
+        assert!(matches!(a.route(k).unwrap(), Route::Local(_)));
+    }
+    let idle = Duration::from_millis(400);
+    assert!(a.idle(idle).is_empty(), "just used");
+    let busy = a.guard(&keys[0]).unwrap();
+    std::thread::sleep(idle + Duration::from_millis(100));
+    // keys[0] has a guard in flight: not idle. keys[1]: the check says there's work left.
+    assert_eq!(a.idle(idle), vec![keys[1].clone(), keys[2].clone()]);
+    assert!(!a.release_if_idle(&keys[0], idle, || true));
+    let mut no_guard = false;
+    assert!(!a.release_if_idle(&keys[1], idle, || {
+        // No guard while it looks: nothing new can start.
+        no_guard = a.guard(&keys[1]).is_none();
+        false
+    }));
+    assert!(no_guard && a.guard(&keys[1]).is_some(), "no guard while it looked; kept, and usable again");
+    // The guard just granted and dropped counts as use.
+    assert!(!a.release_if_idle(&keys[1], idle, || true));
+    assert!(a.release_if_idle(&keys[2], idle, || true));
+    assert!(eventually(Duration::from_secs(5), || env.lease(&keys[2]).is_none() && !a.owns(&keys[2])), "given up");
+    assert!(env.lease(&keys[0]).is_some() && env.lease(&keys[1]).is_some());
+    drop(busy);
+    // On demand again, with a new tenure.
+    let before = env.lease(&keys[0]).unwrap().epoch;
+    assert!(matches!(a.route(&keys[2]).unwrap(), Route::Local(_)));
+    assert!(a.owns(&keys[2]) && env.lease(&keys[2]).is_some());
+    assert_eq!(env.lease(&keys[0]).unwrap().epoch, before);
+}

@@ -331,6 +331,19 @@ fn json(v: &impl serde::Serialize) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "null".into())
 }
 
+/// A `checks` row: `name, status, source, url, summary, started_at, finished_at`.
+fn check_row(r: &Row<'_>) -> code_sql::Result<Check> {
+    Ok(Check {
+        name: r.get(0)?,
+        status: CheckStatus::parse(&r.get::<_, String>(1)?).unwrap_or(CheckStatus::Queued),
+        source: r.get(2)?,
+        url: r.get(3)?,
+        summary: r.get(4)?,
+        started_at: r.get(5)?,
+        finished_at: r.get(6)?,
+    })
+}
+
 /// A row limit as a parameter. `usize::MAX` (no limit) must stay positive: SQLite reads a
 /// negative LIMIT as none, Postgres refuses it.
 pub(crate) fn limit(n: usize) -> i64 {
@@ -661,7 +674,9 @@ impl Db {
         c.query_row("UPDATE repos SET next_number = next_number + 1 WHERE id = ? RETURNING next_number - 1", [repo_id], |r| r.get(0))
     }
 
-    pub fn insert_change(&self, id: &str, repo_id: &str, n: &NewChange) -> Result<()> {
+    /// Insert a change, promising its `change` event to the repo's webhooks in the same
+    /// transaction (see [`crate::webhooks::Promises`]).
+    pub fn insert_change(&self, id: &str, repo_id: &str, n: &NewChange) -> Result<crate::webhooks::Promises> {
         self.write(|c| {
             let number = Self::next_number(c, repo_id)?;
             let t = now();
@@ -671,7 +686,9 @@ impl Db {
                 params![id, repo_id, number, n.title, n.body, n.author, n.base, n.head, n.work_item, n.branch, n.trusted, n.draft, t, t],
             )?;
             c.execute("INSERT INTO change_revisions (change_id, revision, base, head, created_at) VALUES (?, 1, ?, ?, ?)", params![id, n.base, n.head, t])?;
-            Ok(())
+            let mut p = crate::webhooks::Promises::default();
+            p.promise(c, repo_id, "change", id, None)?;
+            Ok(p)
         })
     }
 
@@ -768,6 +785,26 @@ impl Db {
         Ok(())
     }
 
+    /// [`Db::set_change_state`], promising the change's `change` event to the repo's webhooks in
+    /// the same transaction (see [`crate::webhooks::Promises`]).
+    pub fn set_change_state_promised(&self, id: &str, state: ChangeState, landed_as: Option<&str>, conflict: Option<&ConflictInfo>) -> Result<crate::webhooks::Promises> {
+        let conflict = conflict.map(json);
+        self.write(|c| {
+            let mut p = crate::webhooks::Promises::default();
+            let repo: Option<String> = c
+                .query_row(
+                    "UPDATE changes SET state = ?, landed_as = COALESCE(?, landed_as), conflict = ?, updated_at = ? WHERE id = ? RETURNING repo_id",
+                    params![state.as_str(), landed_as, conflict, now(), id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(repo) = repo {
+                p.promise(c, &repo, "change", id, None)?;
+            }
+            Ok(p)
+        })
+    }
+
     pub fn set_change_preview(&self, id: &str, preview: Option<&Preview>) -> Result<()> {
         self.sql.execute("UPDATE changes SET preview = ?, updated_at = ? WHERE id = ?", params![preview.map(json), now(), id])?;
         Ok(())
@@ -779,29 +816,21 @@ impl Db {
         Ok(self.sql.query(
             "SELECT name, status, source, url, summary, started_at, finished_at FROM checks WHERE change_id = ? ORDER BY name",
             [change_id],
-            |r| {
-                Ok(Check {
-                    name: r.get(0)?,
-                    status: CheckStatus::parse(&r.get::<_, String>(1)?).unwrap_or(CheckStatus::Queued),
-                    source: r.get(2)?,
-                    url: r.get(3)?,
-                    summary: r.get(4)?,
-                    started_at: r.get(5)?,
-                    finished_at: r.get(6)?,
-                })
-            },
+            check_row,
         )?)
     }
 
-    /// Record a check. With `head`, only while the change is still at that head (`false`
-    /// otherwise): a result for an older revision must not count for the new one.
-    pub fn upsert_check(&self, change_id: &str, head: Option<&str>, ch: &Check) -> Result<bool> {
+    /// Record a check. With `head`, only while the change is still at that head (`None`
+    /// otherwise): a result for an older revision must not count for the new one. Promises the
+    /// `check` event (with the check as recorded) and the change's `change` event to the repo's
+    /// webhooks in the same transaction.
+    pub fn upsert_check(&self, change_id: &str, head: Option<&str>, ch: &Check) -> Result<Option<crate::webhooks::Promises>> {
         self.write(|c| {
-            if let Some(head) = head {
-                let current: Option<String> = c.query_row("SELECT head FROM changes WHERE id = ?", [change_id], |r| r.get(0)).optional()?;
-                if current.as_deref() != Some(head) {
-                    return Ok(false);
-                }
+            let current: Option<(String, String)> = c.query_row("SELECT head, repo_id FROM changes WHERE id = ?", [change_id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            if let Some(head) = head
+                && current.as_ref().map(|c| c.0.as_str()) != Some(head)
+            {
+                return Ok(None);
             }
             c.execute(
                 "INSERT INTO checks (change_id, name, status, source, url, summary, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
@@ -810,7 +839,17 @@ impl Db {
                  started_at = COALESCE(checks.started_at, excluded.started_at), finished_at = excluded.finished_at",
                 params![change_id, ch.name, ch.status.as_str(), ch.source, ch.url, ch.summary, ch.started_at, ch.finished_at],
             )?;
-            Ok(true)
+            let mut p = crate::webhooks::Promises::default();
+            if let Some((_, repo)) = &current {
+                let row = c.query_row(
+                    "SELECT name, status, source, url, summary, started_at, finished_at FROM checks WHERE change_id = ? AND name = ?",
+                    params![change_id, ch.name],
+                    check_row,
+                )?;
+                p.promise(c, repo, "check", change_id, Some(&json!({ "change": change_id, "check": row })))?;
+                p.promise(c, repo, "change", change_id, None)?;
+            }
+            Ok(Some(p))
         })
     }
 

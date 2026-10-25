@@ -149,6 +149,17 @@ impl Index {
             let _ = std::fs::remove_file(self.dir.join(format!("{repo}.{ext}")));
         }
     }
+
+    /// The repos with an index on disk.
+    pub fn on_disk(&self) -> Vec<String> {
+        let Ok(rd) = std::fs::read_dir(&self.dir) else { return Vec::new() };
+        let mut v: Vec<String> = rd
+            .filter_map(|e| e.ok()?.file_name().to_str()?.strip_suffix(".db").map(str::to_string))
+            .filter(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .collect();
+        v.sort();
+        v
+    }
 }
 
 pub struct RepoIndex {

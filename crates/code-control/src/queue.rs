@@ -21,7 +21,7 @@ use crate::db::{EntryRow, now};
 use crate::model::*;
 use crate::service::short_ref;
 use crate::settings::{FILE, Settings};
-use crate::{Caller, Code, Error, Result, cs_id, new_id};
+use crate::{Caller, Code, Error, Result, cs_id, new_id, webhooks};
 use code_store::{ChangesetId, Conflict, Expect, LandError};
 use futures::future::join_all;
 use parking_lot::Mutex;
@@ -226,9 +226,9 @@ impl Code {
             return Err(Error::Blocked(blockers));
         }
         let e = self.db.enqueue(&new_id("qe"), &r.id, &c.id, lane, by)?;
-        self.db.set_change_state(&c.id, ChangeState::Queued, None, None)?;
+        let mut promised = self.db.set_change_state_promised(&c.id, ChangeState::Queued, None, None)?;
         let change = self.change_or_404(&c.id)?;
-        self.emit(&r.id, "change", serde_json::to_value(&change).unwrap_or_default());
+        self.emit_kept(&mut promised, &r.id, "change", serde_json::to_value(&change).unwrap_or_default());
         self.emit_queue(r);
         self.kick(&r.id);
         let position = self.db.position(&e)?;
@@ -781,14 +781,15 @@ impl Code {
         if !self.db.finish_entry_with(&e.id, EntryState::Ejected, Some(why), output, None)? {
             return Ok(());
         }
+        let mut promised = webhooks::Promises::default();
         if c.state == ChangeState::Queued {
-            match &conflict {
-                Some(info) => self.db.set_change_state(&c.id, ChangeState::Conflict, None, Some(info))?,
-                None => self.db.set_change_state(&c.id, ChangeState::Open, None, None)?,
-            }
+            promised = match &conflict {
+                Some(info) => self.db.set_change_state_promised(&c.id, ChangeState::Conflict, None, Some(info))?,
+                None => self.db.set_change_state_promised(&c.id, ChangeState::Open, None, None)?,
+            };
         }
         if let Ok(c) = self.change_or_404(&c.id) {
-            self.emit(&r.id, "change", serde_json::to_value(&c).unwrap_or_default());
+            self.emit_kept(&mut promised, &r.id, "change", serde_json::to_value(&c).unwrap_or_default());
         }
         Ok(())
     }

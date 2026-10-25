@@ -2,7 +2,7 @@
 
 use crate::db::{NewChange, NewWork, now};
 use crate::model::*;
-use crate::{Caller, Code, Error, Result, cs_id, hash_token, names, new_id, new_token};
+use crate::{Caller, Code, Error, Result, cs_id, hash_token, names, new_id, new_token, webhooks};
 use base64::Engine;
 use bytes::Bytes;
 use code_store::{ChangesetId, Conflict, Edit, LandError, Landed, Mode, NewChangeset, RepoPath, Signature};
@@ -389,6 +389,8 @@ impl Code {
         self.drop_worktrees(&r.id);
         self.forget_repo_hooks(&r.id)?;
         self.store.delete_repo(&r.id).await?;
+        // In a cluster: the lease goes too, once this request is done.
+        self.retire_repo(&r.id);
         Ok(())
     }
 
@@ -659,6 +661,12 @@ impl Code {
         self.emit(&c.repo_id, "change", serde_json::to_value(c).unwrap_or_default());
     }
 
+    /// [`Code::emit_change`] for a change whose state change promised the event (see
+    /// [`webhooks::Promises`]).
+    pub(crate) fn emit_change_kept(&self, promised: &mut webhooks::Promises, c: &Change) {
+        self.emit_kept(promised, &c.repo_id, "change", serde_json::to_value(c).unwrap_or_default());
+    }
+
     fn emit_work(&self, w: &WorkItem) {
         self.emit(&w.repo_id, "work", serde_json::to_value(w).unwrap_or_default());
     }
@@ -725,7 +733,7 @@ impl Code {
             Some(Value::Bool(b)) => *b,
             Some(_) => return Err(Error::Invalid("draft must be true or false".into())),
         };
-        self.db.insert_change(
+        let mut promised = self.db.insert_change(
             &id,
             &r.id,
             &NewChange {
@@ -752,7 +760,7 @@ impl Code {
             }
         }
         let c = self.change_or_404(&id)?;
-        self.emit_change(&c);
+        self.emit_change_kept(&mut promised, &c);
         self.review_change_event(r, &c, "change.opened");
         Ok(c)
     }
@@ -828,9 +836,9 @@ impl Code {
         if let Some(r) = self.db.repo_by_id(&c.repo_id)? {
             self.queued_change_moved(&r, c, false)?;
         }
-        self.db.set_change_state(&c.id, ChangeState::Closed, None, None)?;
+        let mut promised = self.db.set_change_state_promised(&c.id, ChangeState::Closed, None, None)?;
         let c = self.change_or_404(&c.id)?;
-        self.emit_change(&c);
+        self.emit_change_kept(&mut promised, &c);
         Ok(c)
     }
 
@@ -895,9 +903,9 @@ impl Code {
 
     /// The change landed as changeset `landed_as`: its work item is done.
     pub(crate) fn mark_landed_as(&self, c: &Change, landed_as: &str) -> Result<()> {
-        self.db.set_change_state(&c.id, ChangeState::Landed, Some(landed_as), None)?;
+        let mut promised = self.db.set_change_state_promised(&c.id, ChangeState::Landed, Some(landed_as), None)?;
         let c = self.change_or_404(&c.id)?;
-        self.emit_change(&c);
+        self.emit_change_kept(&mut promised, &c);
         if let Some(wid) = &c.work_item
             && let Some(mut wi) = self.db.work(wid)?
             && !matches!(wi.state, WorkState::Done | WorkState::Closed)
@@ -934,13 +942,13 @@ impl Code {
         // `head`: the changeset the check ran on. Without it the check counts for whatever the
         // change is now, which is fine for a status that doesn't outlive a revision.
         let head = s("head").map(|h| self.store.resolve(&c.repo_id, h).ok().flatten().map(|cs| cs_id(&cs)).unwrap_or_else(|| h.to_string()));
-        if !self.db.upsert_check(&c.id, head.as_deref(), &check)? {
+        let Some(mut promised) = self.db.upsert_check(&c.id, head.as_deref(), &check)? else {
             return Err(Error::Conflict(format!("change {} moved past {}; report the check for its current head", c.number, head.unwrap_or_default())));
-        }
+        };
         let check = self.db.checks(&c.id)?.into_iter().find(|k| k.name == name).unwrap_or(check);
-        self.emit(&c.repo_id, "check", json!({ "change": c.id, "check": check }));
+        self.emit_kept(&mut promised, &c.repo_id, "check", json!({ "change": c.id, "check": check }));
         let c = self.change_or_404(&c.id)?;
-        self.emit_change(&c);
+        self.emit_change_kept(&mut promised, &c);
         Ok(c)
     }
 

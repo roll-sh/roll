@@ -103,7 +103,30 @@ pub(crate) fn join(code: &Arc<Code>, db: code_sql::Db, cfg: ClusterConfig) -> an
     let _ = code.duties.events.set(tx);
     rt.spawn(follow_ownership(Arc::downgrade(code), ownership));
     rt.spawn(forward_events(Arc::downgrade(code), rx));
+    rt.spawn(release_idle_repos(Arc::downgrade(code)));
     Ok(())
+}
+
+/// Give up repos nobody has used for `Config::repo_idle_release` and that have no work waiting
+/// (their leases would otherwise be renewed forever). The next request takes them again.
+async fn release_idle_repos(code: Weak<Code>) {
+    let idle = match code.upgrade() {
+        Some(c) => c.config.repo_idle_release,
+        None => return,
+    };
+    let every = (idle / 4).clamp(Duration::from_millis(50), Duration::from_secs(60));
+    loop {
+        tokio::time::sleep(every).await;
+        let Some(code) = code.upgrade() else { return };
+        let Some(cluster) = code.cluster().cloned() else { return };
+        for key in cluster.idle(idle).into_iter().filter(|k| !k.starts_with("singleton:")) {
+            let (c, code) = (cluster.clone(), code.clone());
+            let released = tokio::task::spawn_blocking(move || c.release_if_idle(&key, idle, || !code.repo_busy(&key))).await;
+            if let Err(e) = released {
+                tracing::warn!(error = %e, "releasing an idle repo");
+            }
+        }
+    }
 }
 
 async fn follow_ownership(code: Weak<Code>, mut rx: mpsc::UnboundedReceiver<Ownership>) {
@@ -144,6 +167,59 @@ impl Code {
         }
         crate::github::stop(self, repo_id);
         self.forget_repo(repo_id);
+        // A node keeps no index of a repo it doesn't own: the next owner builds its own, and a
+        // copy left here would go stale (or outlive the repo).
+        if let Some(i) = &self.ai.index {
+            i.remove(repo_id);
+        }
+    }
+
+    /// Whether a repo has work its owner must not walk away from: merge-queue entries, reviewer
+    /// jobs, checks queued or running, previews running, promised webhook events, or a GitHub
+    /// connection (its mirror). On any doubt (an error), busy.
+    pub(crate) fn repo_busy(&self, repo_id: &str) -> bool {
+        let r = match self.db.repo_by_id(repo_id) {
+            Ok(Some(r)) => r,
+            // Deleted: nothing to keep.
+            Ok(None) => return false,
+            Err(_) => return true,
+        };
+        if crate::github::link_of(&r).is_some_and(|l| l.connected) {
+            return true;
+        }
+        let busy = self.db.sql().query_row(
+            "SELECT (EXISTS (SELECT 1 FROM queue_entries WHERE repo_id = ?1 AND state NOT IN ('ejected', 'landed'))) \
+             OR (EXISTS (SELECT 1 FROM ai_jobs WHERE repo_id = ?1 AND state IN ('queued', 'running'))) \
+             OR (EXISTS (SELECT 1 FROM checks k JOIN changes c ON c.id = k.change_id \
+                         WHERE c.repo_id = ?1 AND c.state IN ('open', 'queued', 'conflict') AND k.status IN ('queued', 'running'))) \
+             OR (EXISTS (SELECT 1 FROM changes WHERE repo_id = ?1 AND preview LIKE '%\"state\":\"running\"%')) \
+             OR (EXISTS (SELECT 1 FROM webhook_outbox WHERE repo_id = ?1))",
+            [repo_id],
+            |r| r.get::<_, bool>(0),
+        );
+        busy.unwrap_or(true)
+    }
+
+    /// A deleted repo: its owner gives the lease up for good once the request deleting it is
+    /// done (its work stops with `Lost`); the row is deleted rather than left for a sweep.
+    pub(crate) fn retire_repo(&self, repo_id: &str) {
+        if let Some(c) = self.cluster() {
+            c.retire(repo_id);
+        }
+    }
+
+    /// Indexes on disk for repos this node doesn't own: on a single node, those of repos that no
+    /// longer exist; in a cluster, all of them (a node starts owning nothing, and a node that
+    /// was killed never got to drop the ones it lost).
+    pub(crate) fn clean_indexes(&self) {
+        let Some(index) = &self.ai.index else { return };
+        for repo in index.on_disk() {
+            let stale = self.config.cluster.is_some() || matches!(self.db.repo_by_id(&repo), Ok(None));
+            if stale {
+                tracing::info!(repo = %repo, "removing a code index this node doesn't own");
+                index.remove(&repo);
+            }
+        }
     }
 
     fn tell_watchers(&self, ev: RepoOwnership) {

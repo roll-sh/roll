@@ -94,6 +94,10 @@ pub struct Config {
     pub git_max_request_memory_bytes: Option<u64>,
     /// How long a git request waits for memory before it fails as busy.
     pub git_memory_wait: std::time::Duration,
+    /// In a cluster: an owner gives up a repo it has served no request for and run no work for
+    /// this long (and that has none waiting), so leases don't pile up; the next request takes
+    /// it again.
+    pub repo_idle_release: std::time::Duration,
 }
 
 /// roll code's Postgres: both databases in one, as two schemas.
@@ -167,6 +171,7 @@ impl Config {
             git_memory_budget_bytes: 1 << 30,
             git_max_request_memory_bytes: None,
             git_memory_wait: std::time::Duration::from_secs(30),
+            repo_idle_release: std::time::Duration::from_secs(30 * 60),
         }
     }
 }
@@ -505,6 +510,7 @@ impl Code {
             git_budget,
         });
         code.clean_worktrees();
+        code.clean_indexes();
         if let Some(cfg) = code.config.cluster.clone() {
             cluster::join(&code, cluster_db, cfg)?;
         }
@@ -540,10 +546,27 @@ impl Code {
         self.events.subscribe()
     }
 
-    /// Send an event to the repo's feed (`/events`). In a cluster the feed lives on the repo's
-    /// owner: a node that doesn't own the repo passes the event on to it.
+    /// Send an event to the repo's webhooks and its feed (`/events`). The webhook deliveries are
+    /// queued (durably) before this returns. The feed is best effort: in a cluster it lives on the
+    /// repo's owner, and a node that doesn't own the repo passes the event on to it.
     pub fn emit(&self, repo_id: &str, kind: &'static str, data: Value) {
         self.webhook_event(repo_id, kind, &data);
+        self.broadcast(repo_id, kind, data);
+    }
+
+    /// [`Code::emit`] for an event whose state change promised its webhook deliveries in the
+    /// same transaction (see [`webhooks::Promises`]): they're queued from the promise, so they
+    /// can't be lost between the state change and this call.
+    pub(crate) fn emit_kept(&self, promised: &mut webhooks::Promises, repo_id: &str, kind: &'static str, data: Value) {
+        if !self.keep_webhook_promise(promised, repo_id, kind, &data) {
+            // A test fault: the node "died" right after the commit.
+            return;
+        }
+        self.broadcast(repo_id, kind, data);
+    }
+
+    /// The feed half of [`Code::emit`].
+    fn broadcast(&self, repo_id: &str, kind: &'static str, data: Value) {
         let ev = model::Event { repo_id: repo_id.into(), kind, data };
         if self.owns_repo(repo_id) {
             let _ = self.events.send(ev);

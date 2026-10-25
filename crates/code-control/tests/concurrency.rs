@@ -65,7 +65,7 @@ async fn numbers_are_unique_across_nodes() {
                 for k in 0..PER_THREAD {
                     let title = format!("t{i}-{k}");
                     if k % 2 == 0 {
-                        code.db.insert_change(&format!("ch_{i}_{k}"), &repo, &change(&title)).unwrap();
+                        let _ = code.db.insert_change(&format!("ch_{i}_{k}"), &repo, &change(&title)).unwrap();
                     } else {
                         let w = NewWork { title: &title, body: "", labels: &[], priority: 2, source: "native", github_url: None, state: WorkState::Open };
                         code.db.insert_work(&format!("wi_{i}_{k}"), &repo, &w).unwrap();
@@ -81,7 +81,7 @@ async fn numbers_are_unique_across_nodes() {
     assert_eq!(numbers.len(), 6 * PER_THREAD);
     assert_eq!(unique, (1..=(6 * PER_THREAD) as u64).collect::<BTreeSet<_>>(), "every number once, none skipped");
     // The next one, from either node, follows on.
-    b.code.db.insert_change("ch_last", &repo, &change("last")).unwrap();
+    let _ = b.code.db.insert_change("ch_last", &repo, &change("last")).unwrap();
     assert_eq!(a.code.db.change("ch_last").unwrap().unwrap().number, 6 * PER_THREAD as u64 + 1);
 }
 
@@ -137,7 +137,7 @@ async fn queue_positions_are_unique_across_nodes() {
     let (a, b, repo) = two_nodes().await;
     const CHANGES: usize = 30;
     for i in 0..CHANGES {
-        a.code.db.insert_change(&format!("ch_{i}"), &repo, &change(&format!("c{i}"))).unwrap();
+        let _ = a.code.db.insert_change(&format!("ch_{i}"), &repo, &change(&format!("c{i}"))).unwrap();
     }
     // Every change is enqueued by both nodes, from two threads each.
     let entries: Vec<(String, String, i64)> = std::thread::scope(|s| {

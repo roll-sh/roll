@@ -319,6 +319,24 @@ fn survives_connections_being_killed() {
 }
 
 #[test]
+fn listen_wakes_on_notify_after_commit_in_one_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(&Target::Sqlite(dir.path().join("t.db"))).unwrap();
+    let other = db.clone();
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    rt.block_on(async {
+        // Every clone of the handle shares the listeners; other channels don't wake it.
+        let mut rx = db.listen("code_test").unwrap();
+        let before = *rx.borrow_and_update();
+        other.notify_after_commit("elsewhere");
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), rx.changed()).await.is_err());
+        other.notify_after_commit("code_test");
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx.changed()).await.unwrap().unwrap();
+        assert!(*rx.borrow() > before);
+    });
+}
+
+#[test]
 fn listen_wakes_on_notify() {
     let Some(_) = pg_url() else { return };
     let dir = tempfile::tempdir().unwrap();

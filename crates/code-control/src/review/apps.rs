@@ -58,7 +58,9 @@ const MAX_APPS_PER_OWNER: usize = 50;
 /// overwritten and the possible second send is logged.
 pub struct Deliveries {
     running: AtomicBool,
-    notify: Notify,
+    /// Shared with the worker task, so it can wait without holding the `Code` (which must be
+    /// free to drop: a stopped daemon's worker ends at its next wake-up).
+    notify: Arc<Notify>,
     client: Mutex<Option<reqwest::Client>>,
     /// [`TIMEOUT`] and [`CLAIM`] (tests shorten them).
     timing: Mutex<(Duration, Duration)>,
@@ -66,7 +68,7 @@ pub struct Deliveries {
 
 impl Default for Deliveries {
     fn default() -> Self {
-        Deliveries { running: AtomicBool::new(false), notify: Notify::new(), client: Mutex::new(None), timing: Mutex::new((TIMEOUT, CLAIM)) }
+        Deliveries { running: AtomicBool::new(false), notify: Arc::new(Notify::new()), client: Mutex::new(None), timing: Mutex::new((TIMEOUT, CLAIM)) }
     }
 }
 
@@ -453,11 +455,12 @@ impl Code {
                     }
                 };
                 // Wait without holding the `Code`, so it can be dropped.
+                let notify = code.deliveries.notify.clone();
+                drop(code);
                 tokio::select! {
-                    _ = code.deliveries.notify.notified() => {}
+                    _ = notify.notified() => {}
                     _ = tokio::time::sleep(wait) => {}
                 }
-                drop(code);
             }
         });
     }

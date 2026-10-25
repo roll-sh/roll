@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{JoinHandle, Thread};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
@@ -58,6 +58,9 @@ impl std::fmt::Debug for Route {
 /// One tenure of a key on this node: from acquiring it to losing it.
 struct Tenure {
     inflight: AtomicUsize,
+    /// When a guard was last granted or dropped (ms on [`clock::now`]): how long the key has
+    /// been idle.
+    last_active: AtomicU64,
     /// Becomes true when the key starts being handed off or is lost.
     ending: watch::Sender<bool>,
 }
@@ -71,6 +74,9 @@ struct Held {
     tenure: Arc<Tenure>,
     /// Placement cache: (nodes generation, whether this node is still preferred).
     pref: (u64, bool),
+    /// When its handoff completes, delete the lease (an idle key, a deleted repo) instead of
+    /// expiring it for the preferred node to take.
+    retire: bool,
 }
 
 #[derive(Clone)]
@@ -197,6 +203,7 @@ impl std::fmt::Debug for Guard {
 
 impl Drop for Guard {
     fn drop(&mut self) {
+        self.tenure.last_active.store(now_ms(), Ordering::Relaxed);
         let before = self.tenure.inflight.fetch_sub(1, Ordering::AcqRel);
         if before == 1 && *self.tenure.ending.borrow() {
             // A handoff may be waiting for this one.
@@ -271,9 +278,9 @@ impl Inner {
 
     fn adopt(&self, st: &mut State, key: &str, epoch: i64, deadline: Duration, why: &str) {
         let (ending, _) = watch::channel(false);
-        let tenure = Arc::new(Tenure { inflight: AtomicUsize::new(0), ending });
+        let tenure = Arc::new(Tenure { inflight: AtomicUsize::new(0), last_active: AtomicU64::new(now_ms()), ending });
         // Placement is computed on first use (no generation matches `u64::MAX`).
-        st.held.insert(key.to_string(), Held { epoch, deadline, handoff: None, tenure, pref: (u64::MAX, true) });
+        st.held.insert(key.to_string(), Held { epoch, deadline, handoff: None, tenure, pref: (u64::MAX, true), retire: false });
         st.earliest = Some(st.earliest.map_or(deadline, |e| e.min(deadline)));
         st.release.remove(key);
         st.remote.remove(key);
@@ -503,6 +510,7 @@ impl Inner {
             return Local::Busy(self.cfg.sweep_every);
         }
         h.tenure.inflight.fetch_add(1, Ordering::AcqRel);
+        h.tenure.last_active.store(now_ms(), Ordering::Relaxed);
         Local::Guard(Guard { inner: self.clone(), key: key.to_string(), epoch: h.epoch, tenure: h.tenure.clone() })
     }
 
@@ -615,23 +623,57 @@ impl Inner {
             true
         };
         let _ops = self.ops.lock();
-        let rows: Vec<(String, i64)> = {
+        let (rows, retired): (Vec<(String, i64)>, Vec<(String, i64)>) = {
             let mut st = self.state.lock();
             let rows = ready(&st);
+            let mut retired = Vec::new();
             for (k, _) in &rows {
                 let inflight = st.held.get(k).map_or(0, |h| h.tenure.inflight.load(Ordering::Acquire));
                 if inflight > 0 {
                     tracing::warn!(node = %self.me(), key = %k, inflight, "handoff timed out waiting for requests in flight");
                 }
-                self.drop_held(&mut st, k, "handed off");
+                if let Some(h) = self.drop_held(&mut st, k, "handed off")
+                    && h.retire
+                {
+                    retired.push(k.clone());
+                }
                 st.release.insert(k.clone());
             }
-            rows
+            rows.into_iter().partition(|(k, _)| !retired.contains(k))
         };
         if !rows.is_empty() {
             self.release_rows(&rows);
         }
+        if !retired.is_empty() {
+            self.delete_rows(&retired);
+        }
         pending
+    }
+
+    /// Delete leases we held (after they've been dropped locally): nobody takes them until a
+    /// request comes. Must be called with `ops` held. If it fails, they're expired instead.
+    fn delete_rows(&self, rows: &[(String, i64)]) {
+        let res = self.write(Isolation::ReadCommitted, |c| {
+            for (k, e) in rows {
+                c.execute(&self.sql.delete_lease, params![k, self.me(), *e])?;
+            }
+            Ok(())
+        });
+        let mut st = self.state.lock();
+        match res {
+            Ok(()) => {
+                for (k, _) in rows {
+                    st.release.remove(k);
+                    tracing::info!(node = %self.me(), key = %k, "gave a lease up");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(node = %self.me(), error = %e, keys = rows.len(), "deleting leases failed; they're expired instead");
+                for (k, _) in rows {
+                    st.release.insert(k.clone());
+                }
+            }
+        }
     }
 
     fn rebalance(&self) {
@@ -835,6 +877,16 @@ impl Inner {
             tracing::warn!(node = %self.me(), error = %e, "deleting this node's row failed; it goes stale");
         }
     }
+}
+
+/// [`clock::now`] in ms.
+fn now_ms() -> u64 {
+    clock::now().as_millis() as u64
+}
+
+/// No guard of the tenure in flight, and none granted or dropped for `min_idle`.
+fn is_idle(t: &Tenure, min_idle: Duration) -> bool {
+    t.inflight.load(Ordering::Acquire) == 0 && now_ms().saturating_sub(t.last_active.load(Ordering::Relaxed)) >= min_idle.as_millis() as u64
 }
 
 struct LeaseRow {
@@ -1068,6 +1120,60 @@ impl Cluster {
     /// this one comes back at the next sweep.
     pub fn handoff(&self, key: &str) -> bool {
         let mut st = self.inner.state.lock();
+        self.inner.start_handoff(&mut st, key)
+    }
+
+    /// Give `key` up for good (its repo was deleted): like [`Cluster::handoff`] (no new guards,
+    /// wait for the ones in flight, `Lost`), but the lease is then deleted, so no node takes it
+    /// until a request for the key comes. False if not held.
+    pub fn retire(&self, key: &str) -> bool {
+        let mut st = self.inner.state.lock();
+        let Some(h) = st.held.get_mut(key) else { return false };
+        h.retire = true;
+        self.inner.start_handoff(&mut st, key)
+    }
+
+    /// Keys held with no guard in flight, granted or dropped none for `min_idle`, and not being
+    /// handed off.
+    pub fn idle(&self, min_idle: Duration) -> Vec<String> {
+        let now = clock::now();
+        let st = self.inner.state.lock();
+        let mut v: Vec<String> = st
+            .held
+            .iter()
+            .filter(|(_, h)| h.handoff.is_none() && h.deadline > now && is_idle(&h.tenure, min_idle))
+            .map(|(k, _)| k.clone())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Retire `key` if it's still idle for `min_idle` and `still_idle` (asked while no guard can
+    /// be granted for it, so nothing new can start meanwhile) says nothing is left to do: the
+    /// lease is deleted after `Lost`, and the next request acquires it again. Requests that
+    /// arrive while `still_idle` runs are answered Unavailable (forwarders retry). Blocks for as
+    /// long as `still_idle` does. True if the key is being given up.
+    pub fn release_if_idle(&self, key: &str, min_idle: Duration, still_idle: impl FnOnce() -> bool) -> bool {
+        {
+            let mut st = self.inner.state.lock();
+            let now = clock::now();
+            let Some(h) = st.held.get_mut(key) else { return false };
+            if h.handoff.is_some() || h.deadline <= now || !is_idle(&h.tenure, min_idle) {
+                return false;
+            }
+            // No guards while we look (as during a handoff, but nothing has ended yet).
+            h.handoff = Some(now);
+        }
+        let idle = still_idle();
+        let mut st = self.inner.state.lock();
+        let Some(h) = st.held.get_mut(key) else { return false };
+        let quiet = h.tenure.inflight.load(Ordering::Acquire) == 0;
+        h.handoff = None;
+        if !idle || !quiet || self.inner.no_acquire() {
+            return false;
+        }
+        h.retire = true;
+        tracing::info!(node = %self.inner.me(), key, "giving an idle lease up");
         self.inner.start_handoff(&mut st, key)
     }
 

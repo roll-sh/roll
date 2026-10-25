@@ -44,6 +44,7 @@ pub(crate) struct Sql {
     pub renew: String,
     pub acquire: String,
     pub release: String,
+    pub delete_lease: String,
     pub sweep: String,
     pub lease: String,
 }
@@ -95,6 +96,10 @@ impl Sql {
             // tenure we held (same node and epoch).
             // ?1 key, ?2 id, ?3 epoch
             release: format!("UPDATE code_leases SET expires_at = {now} - 1 WHERE key = ?1 AND node_id = ?2 AND epoch = CAST(?3 AS BIGINT)"),
+            // Give a lease up for good (an idle key, a deleted repo): no sweep takes it back; the
+            // next request acquires it again. Only the tenure we held.
+            // ?1 key, ?2 id, ?3 epoch
+            delete_lease: "DELETE FROM code_leases WHERE key = ?1 AND node_id = ?2 AND epoch = CAST(?3 AS BIGINT)".into(),
             // A page of expired leases after a (expires_at, key) cursor.
             // ?1 cursor expires_at, ?2 cursor key, ?3 page size
             sweep: format!(

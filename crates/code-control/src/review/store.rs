@@ -316,30 +316,36 @@ fn delivery_row(r: &Row<'_>) -> code_sql::Result<DeliveryRow> {
 impl Db {
     // ── reviews ──
 
-    pub fn insert_review(&self, n: &NewReview) -> Result<()> {
+    /// Insert a review, promising its `review` event to the repo's webhooks in the same
+    /// transaction (see [`crate::webhooks::Promises`]).
+    pub fn insert_review(&self, n: &NewReview) -> Result<crate::webhooks::Promises> {
         let t = now();
-        self.sql().execute(
-            "INSERT INTO reviews (id, change_id, repo_id, revision, head, reviewer_kind, reviewer_name, reviewer_app, verdict, body, \
-             source, external_id, url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                n.id,
-                n.change_id,
-                n.repo_id,
-                n.revision as i64,
-                n.head,
-                n.reviewer.kind.as_str(),
-                n.reviewer.name,
-                n.reviewer.app,
-                n.verdict.as_str(),
-                n.body,
-                n.source,
-                n.external_id,
-                n.url,
-                t,
-                t
-            ],
-        )?;
-        Ok(())
+        Ok(self.write(|c| {
+            c.execute(
+                "INSERT INTO reviews (id, change_id, repo_id, revision, head, reviewer_kind, reviewer_name, reviewer_app, verdict, body, \
+                 source, external_id, url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    n.id,
+                    n.change_id,
+                    n.repo_id,
+                    n.revision as i64,
+                    n.head,
+                    n.reviewer.kind.as_str(),
+                    n.reviewer.name,
+                    n.reviewer.app,
+                    n.verdict.as_str(),
+                    n.body,
+                    n.source,
+                    n.external_id,
+                    n.url,
+                    t,
+                    t
+                ],
+            )?;
+            let mut p = crate::webhooks::Promises::default();
+            p.promise(c, n.repo_id, "review", n.id, None)?;
+            Ok(p)
+        })?)
     }
 
     pub fn review(&self, id: &str) -> Result<Option<Review>> {

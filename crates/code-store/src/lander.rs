@@ -1129,7 +1129,13 @@ fn write_ref_blocking(store: &Store, w: &RefWrite) -> anyhow::Result<Written> {
         _ => {}
     }
     match r {
-        Ok(true) => Ok(Written::Committed { exact: true }),
+        Ok(true) => {
+            // SQLite: wake this process's land log readers (Postgres notified inside the transaction).
+            if !w.log.is_empty() {
+                store.db.notify_after_commit(&store.land_channel);
+            }
+            Ok(Written::Committed { exact: true })
+        }
         Ok(false) => Ok(Written::Moved),
         Err(code_sql::Error::CommitUnknown(msg)) => {
             tracing::warn!(repo = %w.repo, r#ref = %w.name, error = %msg, "lost the reply to a ref update's commit; asking the database whether it happened");
@@ -1147,7 +1153,8 @@ fn apply(store: &Store, w: &RefWrite, xid: &RefCell<Option<String>>, abort: bool
     let pg = store.db.backend() == Backend::Postgres;
     let now = now_ms();
     let prune = !w.log.is_empty() && random() % 1024 < w.log.len() as u64;
-    let steps = steps(w, store.land_log_lock, now, prune);
+    let notify = (store.db.backend() == Backend::Postgres).then_some(store.land_channel.as_str());
+    let steps = steps(w, store.land_log_lock, notify, now, prune);
     store.db.write_with(Isolation::ReadCommitted, |c| {
         // The ref row first: on Postgres its lock is then held to the commit, so a lander
         // elsewhere that moves the ref waits for this transaction rather than racing it.
@@ -1300,7 +1307,7 @@ pub const LAND_LOG_RETENTION_MS: i64 = 7 * 86_400_000;
 /// concurrent transactions take numbers in one order and may commit in another, so appends take
 /// a transaction-scoped lock (`lock`) first: whoever takes a later number commits later. It's
 /// held only for the append and the commit. `prune` drops entries past the retention too.
-fn steps<'a>(w: &'a RefWrite, lock: Option<i64>, now: i64, prune: bool) -> Steps<'a> {
+fn steps<'a>(w: &'a RefWrite, lock: Option<i64>, notify: Option<&'a str>, now: i64, prune: bool) -> Steps<'a> {
     use ValueRef::{Int, Text};
     let (repo, name) = (Text(&w.repo), Text(&w.name));
     let mut steps = Steps::default();
@@ -1334,6 +1341,10 @@ fn steps<'a>(w: &'a RefWrite, lock: Option<i64>, now: i64, prune: bool) -> Steps
         }
         // The rows of one statement take sequence numbers in order.
         steps.insert("INSERT INTO land_log (repo, at_ms, record)", "", w.log.iter().map(|(at, rec)| vec![repo, Int(*at), Text(rec)]).collect());
+        // Wakes every node's land log reader once this commits (Postgres delivers it then).
+        if let Some(channel) = notify {
+            steps.push("SELECT pg_notify(?, '')", vec![Text(channel)]);
+        }
         if prune {
             steps.push("DELETE FROM land_log WHERE at_ms < ?", vec![Int(now - LAND_LOG_RETENTION_MS)]);
         }

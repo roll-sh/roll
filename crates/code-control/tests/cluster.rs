@@ -659,7 +659,15 @@ async fn a_running_review_runs_again_after_its_owner_dies() {
         assert!(Instant::now() < deadline, "no roll review: {v}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let jobs = net.ok(p, "GET", &format!("/v1/code/changes/{id}/ai-jobs"), None).await;
+    // The review is posted before its job is marked done: wait for that too.
+    let mut jobs = Value::Null;
+    while Instant::now() < deadline {
+        jobs = net.ok(p, "GET", &format!("/v1/code/changes/{id}/ai-jobs"), None).await;
+        if jobs[0]["state"] == "done" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert_eq!((jobs[0]["state"].as_str(), jobs[0]["attempts"].as_u64()), (Some("done"), Some(2)), "{jobs}");
     assert_ne!(net.owner(&repo_id), Some(o));
 }
@@ -790,6 +798,196 @@ async fn the_land_forwarder_moves_with_its_singleton() {
         ids.dedup();
         assert_eq!(ids.len(), 1, "landing {cs} went out in {} deliveries", ids.len());
     }
+}
+
+/// A landing on one node reaches a webhook within well under the forwarder's 5 s poll when the
+/// forwarder runs on another node: the landing's transaction wakes every node's forwarder
+/// (Postgres `NOTIFY`; in-process on SQLite).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn landings_on_one_node_wake_the_forwarder_on_another() {
+    let got: Arc<Mutex<HashMap<String, Instant>>> = Arc::default();
+    let g = got.clone();
+    let app = axum::Router::new().fallback(move |body: Bytes| {
+        let got = g.clone();
+        async move {
+            let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            if v["event"] == "landed" {
+                got.lock().entry(v["data"]["changeset"].as_str().unwrap_or("").to_string()).or_insert_with(Instant::now);
+            }
+            StatusCode::OK
+        }
+    });
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/hook", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    let net = net_with("wake", 3, Arc::new(|c: &mut Config| c.review_app_retry_ms = 50)).await;
+    for n in &net.nodes {
+        n.code.start_webhooks();
+    }
+    let holder = |n: &Node| n.owns(&format!("singleton:{}", code_control::webhooks::LAND_FORWARDER));
+    until("a node runs the forwarder", Duration::from_secs(30), || net.nodes.iter().any(holder)).await;
+    let f = net.nodes.iter().position(holder).unwrap();
+    // A repo whose owner (where its landings run) isn't the forwarder's node.
+    let mut name = String::new();
+    for i in 0..20 {
+        let n = format!("r{i}");
+        let id = net.repo(i % 3, &n).await;
+        if net.owner(&id).is_some_and(|o| o != f) {
+            name = n;
+            break;
+        }
+    }
+    assert!(!name.is_empty(), "some repo lives off the forwarder's node");
+    let (s, v) = net.req(f, "POST", &format!("/v1/code/repos/acme/{name}/webhooks"), Some(json!({ "url": url, "events": ["landed"] }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let mut took = Vec::new();
+    for i in 0..5 {
+        // Spaced out so the 5 s poll can't explain them all.
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let at = Instant::now();
+        let v = net.ok((f + 1 + i % 2) % 3, "POST", &format!("/v1/code/repos/acme/{name}/land"), Some(land_body(&format!("w{i}"), &format!("w{i}.txt")))).await;
+        let cs = v["changeset"].as_str().unwrap().to_string();
+        until("the landing is delivered", Duration::from_secs(20), || got.lock().contains_key(&cs)).await;
+        took.push(got.lock()[&cs].duration_since(at));
+    }
+    assert_eq!(net.nodes.iter().position(holder), Some(f), "the forwarder stayed put");
+    let slowest = took.iter().max().unwrap();
+    assert!(*slowest < Duration::from_millis(2500), "deliveries took {took:?}");
+}
+
+// ── leases and indexes ──
+
+/// The lease row of a repo (from any node's control database).
+fn lease_row(n: &Node, repo_id: &str) -> Option<String> {
+    use code_sql::OptionalExtension;
+    n.code.db.sql().query_row("SELECT node_id FROM code_leases WHERE key = ?", [repo_id], |r| r.get(0)).optional().unwrap()
+}
+
+fn index_file(n: &Node, repo_id: &str) -> std::path::PathBuf {
+    n._home.path().join("code").join("index").join(format!("{repo_id}.db"))
+}
+
+/// Search a repo through `node` until its owner has built the index.
+async fn search_ready(net: &Net, node: usize) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (s, v) = net.req(node, "GET", "/v1/code/repos/acme/api/search?q=api", None).await;
+        if s == StatusCode::OK {
+            return;
+        }
+        assert!(Instant::now() < deadline, "search never worked: {s} {v}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// A node that loses a repo removes its code index; deleting a repo (through a node that
+/// doesn't own it) stops its work on the owner, removes the owner's index and deletes its lease
+/// row, which no node takes back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn moving_or_deleting_a_repo_leaves_no_index_or_lease_behind() {
+    let net = net_with("delete", 3, Arc::new(|c: &mut Config| c.review.index = true)).await;
+    let repo_id = net.repo(0, "api").await;
+    let o = net.owner(&repo_id).unwrap();
+    search_ready(&net, (o + 1) % 3).await;
+    assert!(index_file(&net.nodes[o], &repo_id).exists(), "the owner built the index");
+    // Moving away (it may come back to the same node, its preferred one): losing it drops the
+    // index, and whoever owns it next builds its own.
+    let mut ownership = net.nodes[o].code.subscribe_ownership();
+    assert!(net.nodes[o].cluster().handoff(&repo_id));
+    let lost = tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(ev) = ownership.recv().await {
+            if ev == code_control::cluster::RepoOwnership::Lost(repo_id.clone()) {
+                return;
+            }
+        }
+    });
+    lost.await.expect("the old owner lets go");
+    until("the old owner's index is gone", Duration::from_secs(10), || !index_file(&net.nodes[o], &repo_id).exists()).await;
+    search_ready(&net, o).await;
+    let n = net.owner(&repo_id).unwrap();
+    assert!(index_file(&net.nodes[n], &repo_id).exists());
+    // Deleted through another node: the owner runs the delete.
+    let other = (0..3).find(|i| *i != n).unwrap();
+    let (s, v) = net.req(other, "DELETE", "/v1/code/repos/acme/api", None).await;
+    assert!(s.is_success(), "{s} {v}");
+    until("the lease row is deleted", Duration::from_secs(20), || lease_row(&net.nodes[0], &repo_id).is_none()).await;
+    until("nobody owns it", Duration::from_secs(10), || net.owner(&repo_id).is_none()).await;
+    assert!(!index_file(&net.nodes[n], &repo_id).exists(), "the owner's index is gone");
+    // Several sweeps later the row hasn't come back, and the name is free.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(lease_row(&net.nodes[0], &repo_id).is_none() && net.owner(&repo_id).is_none());
+    let (s, _) = net.req(other, "GET", "/v1/code/repos/acme/api", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(lease_row(&net.nodes[0], &repo_id).is_none(), "a 404 takes no lease");
+}
+
+/// An owner gives up a repo it hasn't used for `repo_idle_release` once nothing is left to do
+/// (an open event stream or a promised webhook event keeps it); the lease row goes, and the
+/// next request takes the repo again, on any node.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn idle_repos_are_released_and_taken_again_on_demand() {
+    let idle = Duration::from_millis(1500);
+    let net = net_with("idle", 3, Arc::new(move |c: &mut Config| c.repo_idle_release = idle)).await;
+    let repo_id = net.repo(0, "api").await;
+    let o = net.owner(&repo_id).unwrap();
+    let p = (o + 1) % 3;
+    // An open event stream is use: the repo stays.
+    let mut stream = net.http.get(format!("{}/v1/code/repos/acme/api/events", net.nodes[p].url)).send().await.unwrap();
+    assert_eq!(stream.status().as_u16(), 200);
+    let reader = tokio::spawn(async move { while let Ok(Some(_)) = stream.chunk().await {} });
+    tokio::time::sleep(idle * 3).await;
+    assert_eq!(net.owner(&repo_id), Some(o), "kept while a stream is open");
+    reader.abort();
+    // Work left to do keeps it too (a promised webhook event nobody delivered yet).
+    let sql = net.nodes[o].code.db.sql().clone();
+    sql.execute("INSERT INTO webhook_outbox (id, repo_id, kind, subject, data, created_at) VALUES ('ob_test', ?, 'change', 'x', NULL, ?)", code_sql::params![repo_id.as_str(), i64::MAX / 2])
+        .unwrap();
+    tokio::time::sleep(idle * 3).await;
+    assert_eq!(net.owner(&repo_id), Some(o), "kept while work is waiting");
+    sql.execute("DELETE FROM webhook_outbox WHERE id = 'ob_test'", ()).unwrap();
+    until("the idle repo is given up", idle * 4 + Duration::from_secs(10), || net.owner(&repo_id).is_none() && lease_row(&net.nodes[0], &repo_id).is_none()).await;
+    // Nobody takes it back on their own.
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert!(net.owner(&repo_id).is_none() && lease_row(&net.nodes[0], &repo_id).is_none());
+    // The next request does, wherever it arrives.
+    net.ok(p, "POST", "/v1/code/repos/acme/api/land", Some(land_body("after idle", "i.txt"))).await;
+    assert!(net.owner(&repo_id).is_some() && lease_row(&net.nodes[0], &repo_id).is_some());
+    assert_exactly_once(&net.log(p, "api").await, &["after idle".into()]);
+}
+
+/// Indexes left on disk by an earlier process: a single node removes those of repos that no
+/// longer exist; a cluster node, which starts owning nothing, removes them all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leftover_indexes_are_removed_at_startup() {
+    let env = Env::new("indexes");
+    let home = tempfile::tempdir().unwrap();
+    let objects = || Objects::new(&StorageConfig::Local(env.dir.path().join("objects"))).unwrap();
+    let config = || {
+        let mut c = Config::local(home.path().to_path_buf());
+        c.review.index = true;
+        c
+    };
+    let code = Code::open(config(), objects()).unwrap();
+    code.create_owner(&code_control::Caller::Admin, "acme", code_control::model::OwnerKind::Org, None).unwrap();
+    let id = code.create_repo(&code_control::Caller::Admin, &json!({ "owner": "acme", "name": "api" })).await.unwrap().id;
+    let dir = home.path().join("code").join("index");
+    std::fs::create_dir_all(&dir).unwrap();
+    for f in [format!("{id}.db"), "repo_gone.db".into(), "repo_gone.db-wal".into()] {
+        std::fs::write(dir.join(f), b"").unwrap();
+    }
+    drop(code);
+    let code = Code::open(config(), objects()).unwrap();
+    assert!(dir.join(format!("{id}.db")).exists(), "a single node keeps the index of a repo that exists");
+    assert!(!dir.join("repo_gone.db").exists() && !dir.join("repo_gone.db-wal").exists(), "and drops the one of a repo that's gone");
+    drop(code);
+    // The same home as a cluster node: it owns nothing yet.
+    let node = start_node(&env, "n-a", &|c: &mut Config| {
+        c.home = home.path().to_path_buf();
+        c.review.index = true;
+    })
+    .await;
+    assert!(!dir.join(format!("{id}.db")).exists(), "a cluster node starts with no index");
+    node.cluster().leave();
 }
 
 // ── membership ──
@@ -996,10 +1194,19 @@ async fn an_event_stream_ends_when_its_repo_moves() {
 async fn health_follows_each_node() {
     let net = net("health", 3).await;
     for (i, n) in net.nodes.iter().enumerate() {
-        let (s, v) = net.req(i, "GET", "/v1/code/health", None).await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-        assert_eq!((v["status"].as_str(), v["database"].as_bool(), v["cluster"]["node"].as_str()), (Some("ok"), Some(true), Some(n.id.as_str())));
-        assert_eq!(v["cluster"]["nodes"], 3);
+        // Under load a heartbeat can come late enough for a peer to drop out of the view for a
+        // moment: each node's view comes back to all three.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let (s, v) = net.req(i, "GET", "/v1/code/health", None).await;
+            assert_eq!(s, StatusCode::OK, "{v}");
+            assert_eq!((v["status"].as_str(), v["database"].as_bool(), v["cluster"]["node"].as_str()), (Some("ok"), Some(true), Some(n.id.as_str())));
+            if v["cluster"]["nodes"] == 3 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{} never saw all three nodes: {v}", n.id);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
     net.nodes[1].cluster().fault_db(true);
     let deadline = Instant::now() + Duration::from_secs(10);

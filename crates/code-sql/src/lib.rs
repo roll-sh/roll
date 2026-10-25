@@ -362,13 +362,24 @@ impl Db {
         }
     }
 
-    /// A wake-up for `NOTIFY channel` on Postgres: notified on each notification, and after the
-    /// listening connection is re-established (anything may have been missed meanwhile).
-    /// `None` on SQLite. Wake-ups are hints: readers must also poll.
+    /// A wake-up for notifications on `channel`: notified on each one. On Postgres, for
+    /// `NOTIFY channel` from any connection (and after the listening connection is
+    /// re-established: anything may have been missed meanwhile). On SQLite, for
+    /// [`Db::notify_after_commit`] through this handle or a clone of it (one process). Wake-ups are
+    /// hints: readers must also poll.
     pub fn listen(&self, channel: &str) -> Option<tokio::sync::watch::Receiver<u64>> {
         match &*self.0 {
             Inner::Pg(p) => Some(p.listen(channel)),
-            Inner::Sqlite(_) => None,
+            Inner::Sqlite(s) => Some(s.listen(channel)),
+        }
+    }
+
+    /// After a write committed: wake SQLite listeners of `channel` in this process. Postgres
+    /// needs no call (send `SELECT pg_notify(channel, '')` inside the transaction: it's delivered
+    /// at the commit); this does nothing there.
+    pub fn notify_after_commit(&self, channel: &str) {
+        if let Inner::Sqlite(s) = &*self.0 {
+            s.notify(channel);
         }
     }
 }
