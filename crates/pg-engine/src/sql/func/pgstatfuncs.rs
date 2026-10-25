@@ -99,6 +99,12 @@ fn xact_count(a: &[Value], c: &FnCtx, get: fn(&TabCounts) -> i64, live: u8) -> R
         .get(&rel)
         .copied()
         .unwrap_or_default();
+    // (Counts of earlier transactions not flushed yet are pending too.)
+    if let Some(u) = pgstat::unflushed_table(c.exec.sess, rel) {
+        let mut sum = u;
+        pgstat::add_pending(&mut sum, &counts);
+        counts = sum;
+    }
     let txn = c.exec.txn.borrow();
     // Aborted subtransactions' counts are already the backend's.
     if let Some(d) = txn.pgstat.done(rel) {
@@ -154,7 +160,16 @@ fn function_self_time(a: &[Value], c: &FnCtx) -> Result<Value> {
 }
 
 fn pending_function(c: &FnCtx, f: u32) -> Option<pgstat::FuncCounts> {
-    c.exec.sess.pgstat.borrow().funcs.get(&f).copied()
+    let mine = c.exec.sess.pgstat.borrow().funcs.get(&f).copied();
+    match (pgstat::unflushed_function(c.exec.sess, f), mine) {
+        (Some(mut u), Some(m)) => {
+            u.calls += m.calls;
+            u.total_time += m.total_time;
+            u.self_time += m.self_time;
+            Some(u)
+        }
+        (u, m) => u.or(m),
+    }
 }
 
 fn xact_function_calls(a: &[Value], c: &FnCtx) -> Result<Value> {

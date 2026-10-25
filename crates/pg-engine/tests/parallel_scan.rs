@@ -71,6 +71,9 @@ fn run_all(s: &mut Session) -> Vec<Vec<String>> {
 }
 
 fn seq_read(s: &mut Session) -> String {
+    // (The counts reach the shared statistics when flushed: forced, as within a second of
+    // the last flush they wait.)
+    out(s, "SELECT pg_stat_force_next_flush()");
     out(s, "SELECT seq_scan, seq_tup_read FROM pg_stat_user_tables WHERE relname = 'big'").join(",")
 }
 

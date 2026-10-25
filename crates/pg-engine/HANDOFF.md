@@ -166,8 +166,12 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   and DDL (a statement that waited binds again; DDL re-resolves names), object locks of
   dependencies, four-strength row locks, and true SERIALIZABLE (SSI, `txn/ssi.rs`, with page
   locks for btree / hash / GiST / GIN). Transaction snapshots are taken by the first statement
-  needing one. What's left is classified there (DETACH CONCURRENTLY, TOAST relations, catalog
-  row locks, statistics timing, ...).
+  needing one. Round 18 (agent 56): the stats and horizons specs match (96 specs, 1,481
+  permutations at that commit): statistics reach other sessions when pgstat_report_stat would
+  flush them (`exec/pgstat.rs` `report`: PGSTAT_MIN_INTERVAL / IDLE_INTERVAL,
+  `pg_stat_force_next_flush`), and snapshots hold back the pruning horizon (`txn/xids.rs`
+  `horizon`; temporary tables' is their session's). What's left is classified there (DETACH
+  CONCURRENTLY, TOAST relations, catalog row locks, ...).
 
 ## Repository layout
 

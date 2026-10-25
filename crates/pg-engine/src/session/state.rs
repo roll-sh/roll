@@ -505,6 +505,7 @@ impl SessionState {
 impl Drop for SessionState {
     fn drop(&mut self) {
         self.release_advisory();
+        crate::exec::pgstat::session_ends(self);
     }
 }
 

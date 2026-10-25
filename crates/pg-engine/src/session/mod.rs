@@ -635,6 +635,7 @@ impl Session {
     ) -> Result<T> {
         self.ensure_txn();
         self.sync_lex();
+        crate::exec::pgstat::busy(&self.state);
         // (What a panic left half-set in an earlier statement goes.)
         crate::scoped::reset_statement_scratch();
         let txn = self.txn.as_ref().unwrap();
@@ -2189,7 +2190,26 @@ impl Session {
                     .hint("Set \"max_prepared_transactions\" to a nonzero value.")
                 })
             }
-            K::TransStmtPrepare | K::TransStmtCommitPrepared | K::TransStmtRollbackPrepared => {
+            // FinishPreparedTransaction: no transaction is ever prepared here, so LockGXact
+            // finds none (it doesn't look at max_prepared_transactions).
+            K::TransStmtCommitPrepared | K::TransStmtRollbackPrepared => {
+                let what = if kind == K::TransStmtCommitPrepared {
+                    "COMMIT PREPARED"
+                } else {
+                    "ROLLBACK PREPARED"
+                };
+                if self.status != TxnStatus::Idle {
+                    return Err(Error::new(
+                        code::ACTIVE_SQL_TRANSACTION,
+                        format!("{what} cannot run inside a transaction block"),
+                    ));
+                }
+                Err(Error::new(
+                    code::UNDEFINED_OBJECT,
+                    format!("prepared transaction with identifier \"{}\" does not exist", t.gid),
+                ))
+            }
+            K::TransStmtPrepare => {
                 Err(Error::new(
                     code::OBJECT_NOT_IN_PREREQUISITE_STATE,
                     "prepared transactions are disabled",
@@ -2707,6 +2727,8 @@ fn committed_notify(state: &SessionState, committed: bool, notes: &[(String, Str
             (_, ch) => hub.unlisten(state.pid, ch.as_deref()),
         }
     }
+    let zeroed = hub.queue_entries(notes);
+    crate::exec::pgstat::count_slru_zeroed(state, "notify", zeroed);
     hub.notify(state.pid, notes);
 }
 

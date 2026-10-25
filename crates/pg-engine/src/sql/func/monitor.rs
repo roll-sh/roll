@@ -153,13 +153,18 @@ fn wal_receiver(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
 
 fn slru(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
     let z = zero(&DataType::Int8, c);
+    let zeroed = crate::exec::pgstat::fetch_slru(c.exec);
     rows(
         super::admin::SLRUS
             .iter()
             .map(|n| {
                 let reset = crate::exec::pgstat::reset_time(c.exec, &format!("slru:{n}"))
                     .map_or(Value::Null, Value::Timestamptz);
-                [vec![text(*n)], vec![z.clone(); 7], vec![reset]].concat()
+                let mut counts = vec![z.clone(); 7];
+                if let Some(v) = zeroed.get(*n) {
+                    counts[0] = Value::Int8(*v);
+                }
+                [vec![text(*n)], counts, vec![reset]].concat()
             })
             .collect(),
     )

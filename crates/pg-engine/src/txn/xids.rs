@@ -39,6 +39,9 @@ struct State {
     subs: BTreeSet<u64>,
     aborted: BTreeSet<u64>,
     latest_completed: u64,
+    /// The xmins of the snapshots transactions hold (PGPROC.xmin), by registration, with
+    /// how many hold each.
+    snapshots: std::collections::BTreeMap<u64, usize>,
 }
 
 pub struct Xids {
@@ -49,6 +52,30 @@ pub struct Xids {
     /// Ids before this (and after the special ones) have no status any more.
     oldest: u64,
     persist: Box<dyn Fn(u64) + Send + Sync>,
+}
+
+/// A snapshot's xmin, registered (`Xids::register_snapshot`) until this is dropped.
+pub struct SnapshotXmin {
+    xids: std::sync::Arc<Xids>,
+    xmin: u64,
+}
+
+impl Drop for SnapshotXmin {
+    fn drop(&mut self) {
+        let mut s = self.xids.state.lock();
+        if let Some(n) = s.snapshots.get_mut(&self.xmin) {
+            *n -= 1;
+            if *n == 0 {
+                s.snapshots.remove(&self.xmin);
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for SnapshotXmin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SnapshotXmin({})", self.xmin)
+    }
 }
 
 impl std::fmt::Debug for Xids {
@@ -71,6 +98,7 @@ impl Xids {
                 subs: BTreeSet::new(),
                 aborted: BTreeSet::new(),
                 latest_completed: next - 1,
+                snapshots: Default::default(),
             }),
             exported: Mutex::new(std::collections::HashMap::new()),
             oldest: FIRST_NORMAL_XID,
@@ -159,6 +187,37 @@ impl Xids {
             .min()
             .unwrap_or(xmax);
         Snapshot { xmin, xmax, xip }
+    }
+
+    /// The oldest transaction a snapshot taken now could see as running: its xmin.
+    fn xmin_now(s: &State) -> u64 {
+        let xmax = s.latest_completed + 1;
+        s.running.first().map_or(xmax, |x| (*x).min(xmax))
+    }
+
+    /// A transaction took a snapshot: until the guard goes, the snapshot's xmin holds back
+    /// what pruning and VACUUM may remove (the backend's PGPROC.xmin).
+    pub fn register_snapshot(self: &std::sync::Arc<Self>) -> SnapshotXmin {
+        let mut s = self.state.lock();
+        let xmin = Self::xmin_now(&s);
+        *s.snapshots.entry(xmin).or_default() += 1;
+        SnapshotXmin { xids: self.clone(), xmin }
+    }
+
+    /// The pruning horizon of a database's relations (ComputeXidHorizons'
+    /// data_oldest_nonremovable): deletions by transactions before it are dead to everyone.
+    /// Every running transaction and every snapshot held counts.
+    pub fn horizon(&self) -> u64 {
+        let s = self.state.lock();
+        let run = Self::xmin_now(&s);
+        s.snapshots.first_key_value().map_or(run, |(x, _)| run.min(*x))
+    }
+
+    /// The pruning horizon of a session's temporary relations (temp_oldest_nonremovable):
+    /// only its own changes matter, so its running transaction's id (`own`), else
+    /// everything completed.
+    pub fn temp_horizon(&self, own: Option<u64>) -> u64 {
+        own.unwrap_or_else(|| self.state.lock().latest_completed + 1)
     }
 
     /// Register an exported snapshot under `id`.

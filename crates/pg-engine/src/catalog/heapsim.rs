@@ -47,7 +47,8 @@ enum Xs {
 }
 
 /// Transaction states as pruning and VACUUM see them: `horizon` is the oldest
-/// transaction still running (anything that ended before it is settled for everyone).
+/// transaction a running transaction or a snapshot still held may see as running
+/// (anything that ended before it is settled for everyone: GlobalVisState).
 pub struct Vis<'a> {
     xids: &'a Xids,
     pub horizon: u64,
@@ -58,7 +59,16 @@ pub struct Vis<'a> {
 
 impl<'a> Vis<'a> {
     pub fn new(xids: &'a Xids) -> Vis<'a> {
-        let horizon = xids.snapshot(None).xmin;
+        Self::with_horizon(xids, xids.horizon())
+    }
+
+    /// A session's temporary relation's (GlobalVisTempRels): only its own transaction
+    /// (`own`, its id if it has one) holds deletions back.
+    pub fn temp(xids: &'a Xids, own: Option<u64>) -> Vis<'a> {
+        Self::with_horizon(xids, xids.temp_horizon(own))
+    }
+
+    fn with_horizon(xids: &'a Xids, horizon: u64) -> Vis<'a> {
         Vis {
             xids,
             horizon,

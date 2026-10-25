@@ -34,14 +34,12 @@ it implemented over the old lock manager.
 |---|---|---:|
 | D2 | reindex-concurrently-toast | 60 |
 | D1 | detach-partition-concurrently-1, detach-partition-concurrently-2, detach-partition-concurrently-3, detach-partition-concurrently-4 | 51 |
-| I1 | stats | 25 |
 | L3 | fk-partitioned-1, fk-partitioned-2, partition-concurrent-attach | 10 |
 | E1 | eval-plan-qual, eval-plan-qual-trigger, merge-update, merge-match-recheck | 10 |
 | E2 | partition-key-update-1, partition-key-update-2, partition-key-update-3 | 10 |
 | L2 | intra-grant-inplace, intra-grant-inplace-db | 8 |
 | E4 | insert-conflict-specconflict | 5 |
 | T2 | subxid-overflow | 4 |
-| I2 | horizons | 4 |
 | T1 | temp-schema-cleanup | 2 |
 | L6 | reindex-concurrently, multiple-cic | 2 |
 | L5 | alter-table-4 | 2 |
@@ -55,8 +53,7 @@ it implemented over the old lock manager.
 - **E2**: Rows moved to another partition by a concurrent UPDATE: lockers now get Postgres's 'tuple to be locked was already moved' error; INSERT ... ON CONFLICT's wait for the moving transaction's new row in the other partition differs.
 - **E3**: A REPEATABLE READ foreign key check on a partitioned referenced table uses the transaction snapshot where Postgres's RI check crosses into a fresh one (and fails).
 - **E4**: Speculative insertion (INSERT ... ON CONFLICT) races: Postgres inserts the tuple first and checks again afterwards, waiting on the other inserter's speculative token; the engine checks once, under its key lock.
-- **I1**: Cumulative statistics: when a backend's pending counts reach the shared stats (pgstat_report_stat's flush timing, stats_fetch_consistency snapshots) differs.
-- **I2**: Pruning horizons (`GlobalVisState`): what an index-only / bitmap scan sees as dead after another session's snapshot is released.
+- (I1, stats, and I2, horizons, match since round 18, agent 56: see "Which differences are engine internals" below.)
 - **L1**: DROP OWNED's privilege changes on a role's objects: Postgres's second DROP OWNED waits on the first's catalog row (tuple) lock and then redoes its work over the committed catalog; the engine has no row locks on catalog rows, so the second commits into a merge conflict.
 - **L2**: GRANT's in-place catalog tuple lock (heap_inplace_lock) on the object's pg_class / pg_database row: a concurrent ALTER TABLE / VACUUM doesn't wait for it.
 - **L3**: ATTACH PARTITION and partitioned foreign keys: the locks ATTACH takes on the referencing side of a foreign key, and an insert routed to a default partition whose constraint an ATTACH that it waited for changed (Postgres rechecks the row against the default partition's new constraint and fails).
@@ -169,8 +166,8 @@ it implemented over the old lock manager.
 | vacuum-concurrent-drop | 6/6 | 24/24 |
 | vacuum-conflict | 16/16 | 108/108 |
 | vacuum-skip-locked | 16/16 | 50/50 |
-| stats ✗ | 31/56 | 573/604 |
-| horizons ✗ | 1/5 | 44/51 |
+| stats | 56/56 | 604/604 |
+| horizons | 5/5 | 51/51 |
 | predicate-hash | 40/40 | 240/240 |
 | predicate-gist | 40/40 | 240/240 |
 | predicate-gin | 31/31 | 189/189 |
@@ -195,11 +192,35 @@ it implemented over the old lock manager.
 
 ## Which differences are engine internals
 
-- **I1, I2** depend on Postgres's shared-memory statistics flushing and on its pruning horizons
-  (which dead tuples a scan may skip): what the specs check there is timing of internals the
-  engine computes differently (its statistics are counted when a statement ends; it has no
-  heap pruning horizon of its own). They're not wrong results; matching them means modelling
-  pgstat's flush points and GlobalVisState, not locking.
+- **Statistics and pruning horizons are client-visible, not internals** (round 18, agent 56; the
+  stats and horizons specs, 29 permutations, used to be classed as internals here). What a
+  client sees through pg_stat_* and EXPLAIN ANALYZE / VACUUM now follows Postgres's semantics,
+  computed the engine's way:
+  - *When counts reach other sessions* (`exec/pgstat.rs` `report`): a backend's counts are
+    pending until it goes idle; then pgstat_report_stat's rules apply: flushed unless the last
+    flush was less than PGSTAT_MIN_INTERVAL (1 s) ago, at once after
+    `pg_stat_force_next_flush()`, and counts kept go when the backend has been idle for
+    PGSTAT_IDLE_INTERVAL (10 s) (flushed by the next reader of the statistics: no timer
+    thread), when they have waited PGSTAT_MAX_INTERVAL, or when the session ends. The
+    backend's own pg_stat_get_xact_* include what it kept. Dropped objects' entries go at
+    the dropping commit. (Before: every transaction end flushed.)
+  - Resets (`pg_stat_reset`, `pg_stat_reset_single_*_counters`) keep the entries, zeroed (a
+    reset function's calls read 0, not NULL); `pg_stat_reset` leaves shared catalogs' alone.
+  - pg_stat_slru counts the notify SLRU's zeroed pages as committed notifications move the
+    queue head over pages (asyncQueueAddEntries), and is part of a stats_fetch_consistency
+    snapshot / cache like the other statistics.
+  - `COMMIT PREPARED` / `ROLLBACK PREPARED` of a name never prepared fail as Postgres's
+    LockGXact does ("prepared transaction with identifier ... does not exist"), not with
+    "prepared transactions are disabled".
+  - *Pruning horizons* (`txn/xids.rs` `horizon`, `catalog/heapsim.rs` `Vis`): a transaction's
+    snapshot registers its xmin (PGPROC.xmin; READ COMMITTED: the statement's, kept until the
+    next statement), and what pruning, index-entry killing (kill_prior_tuple) and VACUUM may
+    remove is what no running transaction or held snapshot can see; a temporary table's
+    horizon is its own session's transaction only (GlobalVisTempRels). An index-only scan's
+    Heap Fetches count every index entry it passes that isn't LP_DEAD on a page not
+    all-visible, dead rows' included (`exec/scan.rs` `IosEntries`). Not modelled: horizons
+    per database (snapshots in other databases hold back this one's), and a READ COMMITTED
+    transaction idle between statements still holds its last statement's xmin.
 - **D2** needs TOAST tables as relations of their own (the engine stores out-of-line values in
   its rows' keyspace); **T2** is the engine's stack use per PL/pgSQL subtransaction.
 - Everything else (D1, E*, L*, T1) is client-visible behaviour that can be implemented: the

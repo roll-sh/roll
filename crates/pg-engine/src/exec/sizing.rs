@@ -1186,6 +1186,19 @@ fn check_size(db: &Database, t: &Table) {
     }
 }
 
+/// The pruning horizon for `table` (GlobalVisTestFor): a temporary table's (or its TOAST
+/// table's) is its session's own transaction, everything else's the running transactions'
+/// and held snapshots'.
+fn vis_for<'a>(xids: &'a Xids, table: u32, ctx: &ExecCtx) -> Vis<'a> {
+    let cat = ctx.catalog();
+    let rel = cat.tables.get(&table).or_else(|| cat.toast_owner(table).map(|(o, _)| o));
+    if rel.is_some_and(|t| cat.schema_name(t.schema).starts_with("pg_temp")) {
+        Vis::temp(xids, ctx.txn.borrow().xid_if_assigned())
+    } else {
+        Vis::new(xids)
+    }
+}
+
 /// Add a btree entry for a new heap tuple at `tid`.
 fn index_insert(
     btrees: &mut HashMap<u32, Btree>,
@@ -1355,7 +1368,7 @@ pub fn updated(
         if !heaps.contains_key(&t.oid) {
             return Ok(None);
         }
-        let v = Vis::new(&xids);
+        let v = vis_for(&xids, t.oid, ctx);
         if !old_exts.is_empty() || !exts.is_empty() {
             let tt = toast.entry(t.oid).or_default();
             let mut keep: Vec<Ext> = Vec::new();
@@ -1442,7 +1455,7 @@ pub fn deleted(t: &Table, indexes: &[BoundIndex], key: &[u8], ctx: &ExecCtx) -> 
     let xid = ctx.txn.borrow_mut().cur_xid();
     let db = &ctx.sess.db;
     let xids = db.xids();
-    let v = Vis::new(&xids);
+    let v = vis_for(&xids, t.oid, ctx);
     let mut rf = db.relfiles.lock();
     let RelFiles { heaps, toast, .. } = &mut *rf;
     if let Some(heap) = heaps.get_mut(&t.oid) {
@@ -1461,7 +1474,7 @@ pub fn scanned(table: u32, ctx: &ExecCtx) {
     let xids = db.xids();
     let mut rf = db.relfiles.lock();
     if let Some(heap) = rf.heaps.get_mut(&table) {
-        heap.prune_all(&Vis::new(&xids));
+        heap.prune_all(&vis_for(&xids, table, ctx));
     }
 }
 
@@ -1472,7 +1485,7 @@ pub fn scanned_pages(table: u32, from: u32, to: Option<u32>, ctx: &ExecCtx) {
     let xids = db.xids();
     let mut rf = db.relfiles.lock();
     if let Some(heap) = rf.heaps.get_mut(&table) {
-        let v = Vis::new(&xids);
+        let v = vis_for(&xids, table, ctx);
         let end = to.unwrap_or(heap.nblocks()).min(heap.nblocks());
         for b in from..end {
             heap.prune_opt(b, &v);
@@ -1488,7 +1501,7 @@ pub fn fetched(table: u32, key: &[u8], last: Option<u32>, ctx: &ExecCtx) -> Opti
     let xids = db.xids();
     let mut rf = db.relfiles.lock();
     let heap = rf.heaps.get_mut(&table)?;
-    let v = Vis::new(&xids);
+    let v = vis_for(&xids, table, ctx);
     let blk = heap.locate(key, &v)?.0;
     if last != Some(blk) {
         heap.prune_opt(blk, &v);
@@ -1498,28 +1511,34 @@ pub fn fetched(table: u32, key: &[u8], last: Option<u32>, ctx: &ExecCtx) -> Opti
 
 /// An index scan of btree `index` over storage key ranges `ranges` (each key starting
 /// with `prefix`, the index's): the entries it passes whose heap tuples are all dead get
-/// LP_DEAD, for a later insertion's simple deletion to reclaim.
+/// LP_DEAD, for a later insertion's simple deletion to reclaim. With `entries`, the
+/// entries the scan returns (those not LP_DEAD before it), in index order: each heap TID
+/// and whether its page isn't all-visible (an index-only scan's heap fetch); None when
+/// the index isn't modelled.
 pub fn index_scanned(
     table: u32,
     index: u32,
     prefix: &[u8],
     ranges: &[(Vec<u8>, Vec<u8>)],
+    entries: bool,
     ctx: &ExecCtx,
-) {
+) -> Option<Vec<(Tid, bool)>> {
     let db = &ctx.sess.db;
     let xids = db.xids();
     let mut rf = db.relfiles.lock();
     let rf = &mut *rf;
     let (Some(heap), Some(bt)) = (rf.heaps.get(&table), rf.btrees.get_mut(&index)) else {
-        return;
+        return None;
     };
-    let v = Vis::new(&xids);
+    let v = vis_for(&xids, table, ctx);
     let all_dead = |t: Tid| heap.chain_dead(t, &v);
+    let mut seen = entries.then(Vec::new);
     for (lo, hi) in ranges {
         let lo = lo.strip_prefix(prefix);
         let hi = hi.strip_prefix(prefix);
-        bt.kill(lo, hi, &all_dead);
+        bt.kill(lo, hi, &all_dead, seen.as_mut());
     }
+    seen.map(|s| s.into_iter().map(|t| (t, !heap.page_all_visible(t.0))).collect())
 }
 
 /// What gave relation `rel` new storage (TRUNCATE, a rewrite) rolled back: its old files
@@ -2603,7 +2622,7 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
     let Some(heap) = heaps.get_mut(&t.oid) else {
         return Ok(None);
     };
-    let v = Vis::new(&xids);
+    let v = vis_for(&xids, t.oid, ctx);
     // VACUUM's TRUNCATE option, else the vacuum_truncate storage parameter (its toast.
     // one for the TOAST table).
     // (Else the vacuum_truncate setting.)

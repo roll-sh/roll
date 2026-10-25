@@ -235,6 +235,7 @@ impl Database {
             start_ts: ts,
             snapshot_fixed: false,
             _pin: Some(pin),
+            xmin: None,
             writes: BTreeMap::new(),
             journal: Vec::new(),
             rollbacks: 0,
@@ -607,6 +608,9 @@ pub struct Txn {
     /// A transaction snapshot (REPEATABLE READ / SERIALIZABLE) was taken.
     snapshot_fixed: bool,
     _pin: Option<SnapshotPin>,
+    /// The xmin of the snapshot held (the statement's in READ COMMITTED, the
+    /// transaction's), as pruning and VACUUM see it held back.
+    xmin: Option<xids::SnapshotXmin>,
     /// Buffered writes: the value (None: a delete) and the command id of the latest write of
     /// the key (None: one that records none, `replace_catalog`'s).
     writes: BTreeMap<Vec<u8>, (Option<Bytes>, Option<u32>)>,
@@ -850,16 +854,22 @@ impl Txn {
                     self.register_serializable()?;
                 }
             }
-        } else if self.db.store.visible_ts() != self.snapshot_ts {
-            let pin = self.db.store.pin_visible();
-            self.snapshot_ts = pin.ts;
-            self._pin = Some(pin);
+        } else {
+            if self.db.store.visible_ts() != self.snapshot_ts {
+                let pin = self.db.store.pin_visible();
+                self.snapshot_ts = pin.ts;
+                self._pin = Some(pin);
+            }
+            // The statement's snapshot holds back pruning while it runs (and, here, until
+            // the next statement or the transaction's end).
+            self.xmin = needs_snapshot.then(|| self.db.xids().register_snapshot());
         }
         Ok(())
     }
 
     /// (Pinned atomically with the timestamp it reads: `Store::pin_visible`.)
     fn take_snapshot(&mut self) {
+        self.xmin = Some(self.db.xids().register_snapshot());
         if self.db.store.visible_ts() != self.snapshot_ts && !self.wrote {
             let pin = self.db.store.pin_visible();
             self.snapshot_ts = pin.ts;
@@ -1950,6 +1960,7 @@ impl Txn {
             );
         }
         self._pin = Some(self.db.store.pin(ts));
+        self.xmin = Some(self.db.xids().register_snapshot());
         self.snapshot_ts = ts;
         self.start_ts = ts;
         // (The transaction's snapshot is this one now: SSI tracks it from here.)

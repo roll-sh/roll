@@ -1963,3 +1963,147 @@ fn serializable_write_skew() {
     });
     s.engine.shutdown();
 }
+
+/// Cumulative statistics reach other sessions when pgstat_report_stat sends them: a backend
+/// going idle flushes its counts unless it flushed less than PGSTAT_MIN_INTERVAL (1 s) ago,
+/// pg_stat_force_next_flush() overrides that, and counts kept go once the backend has been
+/// idle for PGSTAT_IDLE_INTERVAL (10 s); the backend's own pg_stat_get_xact_* see them
+/// meanwhile. A reset keeps zeroed entries; stats_fetch_consistency = snapshot covers
+/// pg_stat_slru, whose notify SLRU counts the queue pages committed NOTIFYs zero.
+#[test]
+fn statistics_reach_other_sessions_when_flushed() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        let ins = "SELECT n_tup_ins FROM pg_stat_user_tables WHERE relname = 'st'";
+        a.batch_execute("CREATE TABLE st (x int)").await.unwrap();
+        a.batch_execute("SELECT pg_stat_force_next_flush()").await.unwrap();
+        // Within a second of the last flush: kept by the backend.
+        let t = Instant::now();
+        a.batch_execute("INSERT INTO st VALUES (1)").await.unwrap();
+        let seen = lines(&b, ins).await.unwrap();
+        if t.elapsed() < Duration::from_millis(900) {
+            assert_eq!(seen, ["0"]);
+        }
+        assert_eq!(
+            lines(&a, "SELECT pg_stat_get_xact_tuples_inserted('st'::regclass)").await.unwrap(),
+            ["1"]
+        );
+        // Forced: flushed at once.
+        a.batch_execute("SELECT pg_stat_force_next_flush()").await.unwrap();
+        assert_eq!(lines(&b, ins).await.unwrap(), ["1"]);
+        // Kept, then flushed by the idle timeout.
+        let t = Instant::now();
+        a.batch_execute("INSERT INTO st VALUES (2)").await.unwrap();
+        let seen = lines(&b, ins).await.unwrap();
+        if t.elapsed() < Duration::from_millis(900) {
+            assert_eq!(seen, ["1"]);
+        }
+        tokio::time::sleep(Duration::from_millis(10_500)).await;
+        assert_eq!(lines(&b, ins).await.unwrap(), ["2"]);
+
+        // A reset function's entry stays, zeroed.
+        a.batch_execute(
+            "CREATE FUNCTION stf() RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$; \
+             SET track_functions = 'all'",
+        )
+        .await
+        .unwrap();
+        a.batch_execute("SELECT stf()").await.unwrap();
+        a.batch_execute("SELECT pg_stat_force_next_flush()").await.unwrap();
+        let calls = "SELECT pg_stat_get_function_calls('stf'::regproc)";
+        assert_eq!(lines(&b, calls).await.unwrap(), ["1"]);
+        b.batch_execute("SELECT pg_stat_reset_single_function_counters('stf'::regproc)").await.unwrap();
+        assert_eq!(lines(&b, calls).await.unwrap(), ["0"]);
+        b.batch_execute("SELECT pg_stat_reset()").await.unwrap();
+        assert_eq!(lines(&b, calls).await.unwrap(), ["0"]);
+
+        // The notify queue's new pages, as of the reader's snapshot.
+        let zeroed = "SELECT blks_zeroed FROM pg_stat_slru WHERE name = 'notify'";
+        b.batch_execute("SET stats_fetch_consistency = snapshot").await.unwrap();
+        b.batch_execute("BEGIN").await.unwrap();
+        let before: i64 = lines(&b, zeroed).await.unwrap()[0].parse().unwrap();
+        a.batch_execute("SELECT pg_notify('big', repeat('x', 4000)) FROM generate_series(1, 3)")
+            .await
+            .unwrap();
+        a.batch_execute("SELECT pg_stat_force_next_flush()").await.unwrap();
+        assert_eq!(lines(&b, zeroed).await.unwrap(), [before.to_string()]);
+        b.batch_execute("COMMIT").await.unwrap();
+        let after: i64 = lines(&b, zeroed).await.unwrap()[0].parse().unwrap();
+        assert!(after > before, "{after} > {before}");
+
+        // No transaction is ever prepared.
+        let err = a.batch_execute("COMMIT PREPARED 'nope'").await.unwrap_err();
+        let db = err.as_db_error().unwrap();
+        assert_eq!(db.code().code(), "42704");
+        assert_eq!(db.message(), "prepared transaction with identifier \"nope\" does not exist");
+    });
+    s.engine.shutdown();
+}
+
+/// What an index-only scan finds dead and what VACUUM removes follow the pruning horizon:
+/// another session's snapshot keeps deleted rows (their index entries still send the scan to
+/// the heap: Heap Fetches), a temporary table's horizon is its own session's only.
+#[test]
+fn pruning_horizons_follow_snapshots() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let lifeline = s.connect("postgres").await;
+        async fn fetches(c: &Client, t: &str) -> String {
+            let plan = lines(
+                c,
+                &format!(
+                    "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) \
+                     SELECT * FROM {t} ORDER BY data"
+                ),
+            )
+            .await
+            .unwrap();
+            plan.iter()
+                .find_map(|l| l.trim().strip_prefix("Heap Fetches: ").map(str::to_string))
+                .unwrap_or_else(|| panic!("{plan:?}"))
+        }
+        a.batch_execute("SET enable_seqscan = off; SET enable_bitmapscan = off").await.unwrap();
+        for temp in [false, true] {
+            let t = if temp { "hz_temp" } else { "hz" };
+            let kind = if temp { "TEMPORARY" } else { "" };
+            a.batch_execute(&format!(
+                "CREATE {kind} TABLE {t} (data int unique) WITH (autovacuum_enabled = off); \
+                 INSERT INTO {t} VALUES (1), (2)"
+            ))
+            .await
+            .unwrap();
+            lifeline.batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT 1").await.unwrap();
+            assert_eq!(fetches(&a, t).await, "2");
+            a.batch_execute(&format!("DELETE FROM {t}")).await.unwrap();
+            if temp {
+                // The first scan finds them dead to everyone and marks their entries.
+                assert_eq!(fetches(&a, t).await, "2");
+                assert_eq!(fetches(&a, t).await, "0");
+            } else {
+                assert_eq!(fetches(&a, t).await, "2");
+                assert_eq!(fetches(&a, t).await, "2");
+                // VACUUM can't remove what the other snapshot may see.
+                a.batch_execute(&format!("VACUUM {t}")).await.unwrap();
+                assert_eq!(fetches(&a, t).await, "2");
+            }
+            lifeline.batch_execute("COMMIT").await.unwrap();
+            a.batch_execute(&format!("VACUUM {t}")).await.unwrap();
+            assert_eq!(fetches(&a, t).await, "0");
+        }
+        // Rows the session's own open transaction deleted aren't dead yet.
+        a.batch_execute(
+            "CREATE TEMPORARY TABLE hz_own (data int unique) WITH (autovacuum_enabled = off); \
+             INSERT INTO hz_own VALUES (1), (2)",
+        )
+        .await
+        .unwrap();
+        a.batch_execute("BEGIN; DELETE FROM hz_own").await.unwrap();
+        assert_eq!(fetches(&a, "hz_own").await, "2");
+        assert_eq!(fetches(&a, "hz_own").await, "2");
+        a.batch_execute("COMMIT").await.unwrap();
+    });
+    s.engine.shutdown();
+}

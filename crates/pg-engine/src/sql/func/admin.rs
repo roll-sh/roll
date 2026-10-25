@@ -72,8 +72,10 @@ fn pg_log_backend_memory_contexts(a: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(Value::Bool(false))
 }
 
-/// Statistics are not collected, so resetting them changes nothing.
-fn stat_reset(_: &[Value], _: &FnCtx) -> Result<Value> {
+/// pg_stat_force_next_flush: the backend's next report flushes its counts however recent
+/// its last flush was.
+fn stat_force_next_flush(_: &[Value], c: &FnCtx) -> Result<Value> {
+    crate::exec::pgstat::force_next_flush(c.exec.sess);
     Ok(Value::Null)
 }
 
@@ -692,7 +694,7 @@ pub fn register(r: &mut Registry) {
     })
     .volatile();
     // Statistics are flushed when each transaction ends: nothing waits longer.
-    r.func("pg_stat_force_next_flush", vec![], Void, stat_reset)
+    r.func("pg_stat_force_next_flush", vec![], Void, stat_force_next_flush)
         .volatile()
         .non_strict();
     r.func(

@@ -429,6 +429,7 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             emitted: 0,
             keys: Some(keys.into_iter()),
             ios: false,
+            ios_entries: None,
             tid_order: false,
             sorted: None,
             streamed: false,
@@ -475,6 +476,7 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             emitted: 0,
             keys: Some(keys.into_iter()),
             ios: false,
+            ios_entries: None,
             tid_order: false,
             sorted: None,
             streamed: false,
@@ -556,14 +558,16 @@ fn open_scan_as(
         .map(|ts| Sampler::new(ts, ctx))
         .transpose()?;
     // A btree index scan marks the dead entries it passes (kill_prior_tuple).
+    let ios = matches!(s.access, Access::Index { only: true, .. }) && ctx.instrumented();
+    let mut ios_entries = None;
     if let (Some((ix, _)), None) = (&s.index, &s.current_of)
         && ix.method == "btree"
         && matches!(s.access, Access::Index { .. } | Access::Unplanned)
     {
         let prefix = index_prefix(s.table.oid, ix.id);
-        super::sizing::index_scanned(s.table.oid, ix.oid, &prefix, &ranges, ctx);
+        ios_entries = super::sizing::index_scanned(s.table.oid, ix.oid, &prefix, &ranges, ios, ctx)
+            .map(IosEntries::new);
     }
-    let ios = matches!(s.access, Access::Index { only: true, .. }) && ctx.instrumented();
     let heap_read = s
         .index
         .as_ref()
@@ -647,6 +651,7 @@ fn open_scan_as(
         emitted: 0,
         keys: None,
         ios,
+        ios_entries,
         tid_order,
         sorted: None,
         streamed: false,
@@ -957,6 +962,45 @@ impl Node for Reordered {
     }
 }
 
+/// An index-only scan's index entries in its ranges (`sizing::index_scanned`), in index
+/// order: (heap TID, whether its page isn't all-visible). As rows come out, the entries up
+/// to each row's are passed: those of dead rows before it as well.
+struct IosEntries {
+    entries: Vec<(crate::catalog::heapsim::Tid, bool)>,
+    at: std::collections::HashMap<crate::catalog::heapsim::Tid, usize>,
+    next: usize,
+}
+
+impl IosEntries {
+    fn new(entries: Vec<(crate::catalog::heapsim::Tid, bool)>) -> IosEntries {
+        let mut at = std::collections::HashMap::with_capacity(entries.len());
+        for (i, (t, _)) in entries.iter().enumerate() {
+            at.entry(*t).or_insert(i);
+        }
+        IosEntries { entries, at, next: 0 }
+    }
+
+    /// The heap fetches up to and including the entry of the row at data key `key` (None:
+    /// the row has no entry here).
+    fn upto_row(&mut self, t: &Table, key: &[u8], ctx: &ExecCtx) -> Option<u64> {
+        let root = super::sizing::row_roots(t, &[key.to_vec()], ctx)?.into_iter().next()??;
+        let i = *self.at.get(&root)?;
+        if i < self.next {
+            return Some(0);
+        }
+        let n = self.entries[self.next..=i].iter().filter(|(_, f)| *f).count() as u64;
+        self.next = i + 1;
+        Some(n)
+    }
+
+    /// The heap fetches of the entries not passed yet.
+    fn rest(&mut self) -> u64 {
+        let n = self.entries[self.next.min(self.entries.len())..].iter().filter(|(_, f)| *f).count();
+        self.next = self.entries.len();
+        n as u64
+    }
+}
+
 /// Rows of a backward index scan.
 struct Backward {
     inner: Option<BoxNode>,
@@ -1163,6 +1207,10 @@ struct ScanNode {
     keys: Option<std::vec::IntoIter<Vec<u8>>>,
     /// An index-only scan under EXPLAIN ANALYZE: count the heap fetches.
     ios: bool,
+    /// Its index's entries in the scanned ranges, when the index is modelled: the heap
+    /// fetches are those of the entries it passes, the dead rows' too (each entry not yet
+    /// LP_DEAD on a page not all-visible).
+    ios_entries: Option<IosEntries>,
     /// Rows come out in heap (TID) order, as Postgres reads its pages: a sequential
     /// scan's, and an index scan's runs of equal keys (btree keys end in the heap TID).
     tid_order: bool,
@@ -1766,6 +1814,13 @@ impl Node for ScanNode {
         loop {
             ctx.check()?;
             let Some((key, bytes)) = self.next_raw(ctx)? else {
+                // (The entries after the last row returned were passed too.)
+                if let Some(e) = &mut self.ios_entries {
+                    let n = e.rest();
+                    if n > 0 {
+                        ctx.count(self.key, |s| s.fetches += n);
+                    }
+                }
                 return Ok(None);
             };
             match self.stat {
@@ -1786,15 +1841,25 @@ impl Node for ScanNode {
                 }
             }
             if self.ios {
-                let fetch = super::sizing::row_locations(
-                    &self.plan.table,
-                    std::slice::from_ref(&key),
-                    ctx,
-                )
-                .and_then(|l| l.into_iter().next().flatten())
-                .is_none_or(|(_, all_visible)| !all_visible);
-                if fetch {
-                    ctx.count(self.key, |s| s.fetches += 1);
+                let counted = match &mut self.ios_entries {
+                    Some(e) => e.upto_row(&self.plan.table, &key, ctx),
+                    None => None,
+                };
+                let fetches = match counted {
+                    Some(n) => n,
+                    None => {
+                        let fetch = super::sizing::row_locations(
+                            &self.plan.table,
+                            std::slice::from_ref(&key),
+                            ctx,
+                        )
+                        .and_then(|l| l.into_iter().next().flatten())
+                        .is_none_or(|(_, all_visible)| !all_visible);
+                        u64::from(fetch)
+                    }
+                };
+                if fetches > 0 {
+                    ctx.count(self.key, |s| s.fetches += fetches);
                 }
             }
             let mut row = self.full_row(&key, &bytes, ctx)?;

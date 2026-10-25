@@ -30,6 +30,20 @@ struct Listener {
 #[derive(Default)]
 pub struct Hub {
     listeners: Mutex<HashMap<i32, Arc<Mutex<Listener>>>>,
+    /// The queue's head (QUEUE_HEAD): its page and the offset in it, as committed
+    /// notifications advance it (what pg_stat_slru counts the notify SLRU's new pages by).
+    head: Mutex<(u64, usize)>,
+}
+
+/// The notify queue's page size (QUEUE_PAGESIZE, BLCKSZ).
+const QUEUE_PAGESIZE: usize = 8192;
+/// AsyncQueueEntryEmptySize, QUEUEALIGNed: a header and two string terminators.
+const ENTRY_EMPTY: usize = 20;
+
+/// An AsyncQueueEntry's length: the 16-byte header, the channel and payload with their
+/// terminators, 4-aligned.
+fn entry_len(channel: &str, payload: &str) -> usize {
+    (16 + channel.len() + 1 + payload.len() + 1).div_ceil(4) * 4
 }
 
 impl Hub {
@@ -78,6 +92,37 @@ impl Hub {
         }
     }
 
+    /// Append a committing transaction's notifications to the queue
+    /// (asyncQueueAddEntries): the pages it zeroed, the first page ever and each page the
+    /// head moves onto (an entry not fitting in what is left of a page fills it with a
+    /// dummy entry first).
+    pub fn queue_entries(&self, notes: &[(String, String)]) -> i64 {
+        if notes.is_empty() {
+            return 0;
+        }
+        let mut head = self.head.lock();
+        let (mut page, mut offset) = *head;
+        let mut zeroed = i64::from(page == 0 && offset == 0);
+        let mut it = notes.iter().peekable();
+        while let Some((c, p)) = it.peek() {
+            let mut len = entry_len(c, p);
+            if offset + len <= QUEUE_PAGESIZE {
+                it.next();
+            } else {
+                len = QUEUE_PAGESIZE - offset;
+            }
+            // asyncQueueAdvance.
+            offset += len;
+            if offset + ENTRY_EMPTY > QUEUE_PAGESIZE {
+                page += 1;
+                offset = 0;
+                zeroed += 1;
+            }
+        }
+        *head = (page, offset);
+        zeroed
+    }
+
     /// A transaction from `pid` committed these (channel, payload) notifications.
     pub fn notify(&self, pid: i32, notes: &[(String, String)]) {
         if notes.is_empty() {
@@ -121,7 +166,7 @@ impl Hub {
                 l.lock()
                     .pending
                     .iter()
-                    .map(|n| (16 + n.channel.len() + 1 + n.payload.len() + 1).div_ceil(4) * 4)
+                    .map(|n| entry_len(&n.channel, &n.payload))
                     .sum::<usize>()
             })
             .max()

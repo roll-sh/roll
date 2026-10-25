@@ -771,8 +771,15 @@ impl Btree {
 
     /// An index scan over storage keys [lo, hi) (key attributes' encodings; None:
     /// unbounded) met the entries there: those whose heap tuples are all dead to everyone
-    /// are marked LP_DEAD (kill_prior_tuple, _bt_killitems).
-    pub fn kill(&mut self, lo: Option<&[u8]>, hi: Option<&[u8]>, all_dead: &dyn Fn(Tid) -> bool) {
+    /// are marked LP_DEAD (kill_prior_tuple, _bt_killitems). `seen` gets the heap TIDs of
+    /// the entries the scan returns (those not LP_DEAD already), in index order.
+    pub fn kill(
+        &mut self,
+        lo: Option<&[u8]>,
+        hi: Option<&[u8]>,
+        all_dead: &dyn Fn(Tid) -> bool,
+        mut seen: Option<&mut Vec<Tid>>,
+    ) {
         let nkey = self.opts.nkey;
         let Some(mut blk) = self.root else {
             return;
@@ -813,6 +820,12 @@ impl Btree {
                     let m = k.len().min(lo.len());
                     k[..m] >= lo[..m]
                 });
+                if !it.dead
+                    && above
+                    && let Some(seen) = seen.as_deref_mut()
+                {
+                    seen.extend_from_slice(&it.tids);
+                }
                 if !it.dead && above && it.tids.iter().all(|t| all_dead(*t)) {
                     it.dead = true;
                 }
