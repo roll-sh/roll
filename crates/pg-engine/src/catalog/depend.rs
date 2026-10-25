@@ -1980,6 +1980,10 @@ impl Walk<'_> {
                 continue;
             }
             match d.kind {
+                // A member of the extension whose script is running may go (its update
+                // scripts drop objects of their own).
+                'e' if other.0 == EXTENSION
+                    && crate::session::ddl::extension::creating_extension() == Some(other.1) => {}
                 'i' | 'e' => {
                     if stack.is_empty() {
                         if self.pending.contains(&other) {

@@ -58,8 +58,13 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   extensions' own PostgreSQL 18.6 scripts (`src/ext/`, `session/ddl/extension.rs`), C
   functions are native code by library and symbol; the contrib modules' regression tests run
   with `pg_contrib` (`tests/pg_contrib.rs`). Per-module scores and how it works:
-  `tests/contrib/STATUS.md`. uuid-ossp, citext and pgcrypto match their contrib suites fully;
-  extension types the engine implements natively are `Value::Ext` (`src/ext/types.rs`).
+  `tests/contrib/STATUS.md`. 19 modules are native (4,147 of their 4,158 contrib units):
+  pgcrypto, uuid-ossp, citext, hstore, pg_trgm, btree_gin, ltree, intarray, tablefunc, cube,
+  earthdistance, isn, unaccent, fuzzystrmatch, lo, pg_buffercache at 100%; btree_gist, seg,
+  amcheck nearly. Extension types the engine implements natively are `Value::Ext`
+  (`src/ext/types.rs`); extension libraries' GUCs are `session/ext_gucs.tsv`. Left:
+  pg_stat_statements (a 96.9% branch exists, not merged yet), pageinspect (not applicable),
+  postgres_fdw / dblink (an outbound-network policy decision), see STATUS.md.
 - **Performance** (round 17, agent 36): measured for the first time, `tools/bench/` against a
   pinned PostgreSQL 18.6 on the same 4 cores; numbers, method and the optimisations made are
   in `BENCH.md`. Over the wire the engine beats PostgreSQL on single-client OLTP (point

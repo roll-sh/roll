@@ -4323,7 +4323,11 @@ fn sort_suffix(k: &SortKey) -> String {
         if k.desc {
             s.push_str(" DESC");
         }
-    } else if let Some(op) = &k.using {
+    // (An enum's own `<` / `>`, which the engine carries to compare its labels: its default
+    // btree class's, so no USING.)
+    } else if let Some(op) = k.using.as_ref().filter(|op| {
+        !(matches!(op.name, "<" | ">") && matches!(k.expr.ty(), crate::types::DataType::Enum(..)))
+    }) {
         let _ = write!(s, " USING {}", op.name);
     } else if k.desc {
         s.push_str(" DESC");
@@ -18177,6 +18181,12 @@ fn setop_sortable(t: &DataType) -> bool {
 
 /// A type whose `=` hashes (it has a hash operator class).
 fn hashable_key(t: &DataType) -> bool {
+    // An extension's native type: when its script gives it a hash operator class.
+    if let DataType::Base(b) = t
+        && b.ext != 0
+    {
+        return crate::ext::types::get(b.ext).is_some_and(|x| x.hash);
+    }
     !matches!(
         t,
         DataType::Json

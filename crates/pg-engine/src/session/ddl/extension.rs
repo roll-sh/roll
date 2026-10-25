@@ -516,6 +516,16 @@ impl Ddl<'_, '_> {
     fn run_script_statement(&self, node: &NodeEnum, sql: &str) -> Result<()> {
         let ctx = self.ctx.refreshed();
         let r = match node {
+            // (Superuser DML on pg_depend, as the session runs it.)
+            NodeEnum::UpdateStmt(u) if super::catalog_dml::is_pg_depend_update(u) => {
+                super::catalog_dml::pg_depend_dml(&ctx, node).map(|_| ())
+            }
+            NodeEnum::DeleteStmt(d) if super::catalog_dml::is_pg_depend_delete(d) => {
+                super::catalog_dml::pg_depend_dml(&ctx, node).map(|_| ())
+            }
+            NodeEnum::InsertStmt(i) if super::catalog_dml::is_pg_depend_insert(i) => {
+                super::catalog_dml::pg_depend_dml(&ctx, node).map(|_| ())
+            }
             NodeEnum::SelectStmt(_)
             | NodeEnum::InsertStmt(_)
             | NodeEnum::UpdateStmt(_)
@@ -528,6 +538,11 @@ impl Ddl<'_, '_> {
                 crate::sql::binder::perms::check(&bq.perms, &ctx)?;
                 let plan = Arc::new(bq.plan);
                 ctx.new_statement(|| crate::exec::collect(&plan, &ctx, None)).map(|_| ())
+            }
+            // (An update script's DO block: ProcessUtility runs it, atomically.)
+            NodeEnum::DoStmt(d) => {
+                let body = crate::plpgsql::do_body(d)?;
+                crate::plpgsql::run_do(&ctx, &body, true)
             }
             n => super::run_nested(|| super::execute(&ctx, n, sql)).map(|_| ()),
         };

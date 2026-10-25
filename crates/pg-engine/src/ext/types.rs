@@ -14,6 +14,15 @@ use std::cmp::Ordering;
 
 /// Kinds are stored with values: never renumber one.
 pub const CITEXT: u16 = 1;
+pub const HSTORE: u16 = 2;
+pub const LTREE: u16 = 3;
+pub const LQUERY: u16 = 4;
+pub const LTXTQUERY: u16 = 5;
+pub const LTREE_GIST: u16 = 6;
+pub const QUERY_INT: u16 = 7;
+pub const INTBIG_GKEY: u16 = 8;
+pub const CUBE: u16 = 9;
+pub const SEG: u16 = 10;
 
 /// What the engine knows of one native type.
 pub struct ExtType {
@@ -23,8 +32,8 @@ pub struct ExtType {
     pub name: &'static str,
     /// The input function: text to the type's bytes.
     pub input: fn(&str) -> Result<Vec<u8>>,
-    /// The output function.
-    pub output: fn(&[u8]) -> String,
+    /// The output function (under the session's formatting settings: extra_float_digits).
+    pub output: fn(&[u8], &crate::types::text::FormatCtx) -> String,
     /// The default btree operator class's comparison.
     pub cmp: fn(&[u8], &[u8]) -> Ordering,
     /// One form for all equal values (hashing).
@@ -35,9 +44,30 @@ pub struct ExtType {
     pub to_builtin: Option<fn(&[u8]) -> Value>,
     /// The type's value made of a built-in one (a binary-coercible cast to it).
     pub from_builtin: Option<fn(&Value) -> Option<Vec<u8>>>,
+    /// The extension's script gives it a default hash operator class (grouping may hash).
+    pub hash: bool,
 }
 
-static TYPES: &[ExtType] = &[super::citext::TYPE];
+static TYPES: &[ExtType] = &[
+    super::citext::TYPE,
+    super::hstore::TYPE,
+    super::intarray::QUERY_TYPE,
+    super::intarray::GKEY_TYPE,
+    super::ltree::LTREE_TYPE,
+    super::ltree::LQUERY_TYPE,
+    super::ltree::LTXTQUERY_TYPE,
+    super::ltree::GIST_TYPE,
+    super::isn::TYPE_EAN13,
+    super::isn::TYPE_ISBN13,
+    super::isn::TYPE_ISMN13,
+    super::isn::TYPE_ISSN13,
+    super::isn::TYPE_ISBN,
+    super::isn::TYPE_ISMN,
+    super::isn::TYPE_ISSN,
+    super::isn::TYPE_UPC,
+    super::cube::TYPE,
+    super::seg::TYPE,
+];
 
 /// The native type `kind`.
 pub fn get(kind: u16) -> Option<&'static ExtType> {
@@ -73,9 +103,9 @@ pub fn key(kind: u16, a: &[u8], out: &mut Vec<u8>) {
     }
 }
 
-pub fn output(kind: u16, a: &[u8]) -> String {
+pub fn output(kind: u16, a: &[u8], ctx: &crate::types::text::FormatCtx) -> String {
     match get(kind) {
-        Some(t) => (t.output)(a),
+        Some(t) => (t.output)(a, ctx),
         None => String::new(),
     }
 }
@@ -106,6 +136,14 @@ pub fn wants_builtin(t: &crate::types::DataType) -> bool {
 
 /// Built-in value `v` as native type `kind`'s (unchanged when it can't be).
 pub fn from_builtin(kind: u16, v: Value) -> Value {
+    // (A binary-coercible cast between two of the types, isbn13 to ean13: the same bytes,
+    // now the target's.)
+    if let Value::Ext(k, b) = &v
+        && *k != kind
+        && get(*k).is_some_and(|t| get(kind).is_some_and(|u| t.extension == u.extension))
+    {
+        return Value::Ext(kind, b.clone());
+    }
     if matches!(v, Value::Ext(..) | Value::Null) {
         return v;
     }
@@ -125,4 +163,9 @@ pub fn key_bytes(b: &[u8], out: &mut Vec<u8>) {
         }
     }
     out.extend_from_slice(&[0x00, 0x01]);
+}
+
+/// `output` under the default formatting settings (a type whose output doesn't read them).
+pub fn output_plain(kind: u16, a: &[u8]) -> String {
+    output(kind, a, &crate::types::text::FormatCtx::default())
 }

@@ -1708,7 +1708,8 @@ impl Binder<'_, '_> {
             if let Some(p) = prior
                 && (rt.indirection.is_empty()
                     || plain_cols.contains(&col)
-                    || !matches!(sets[p].1, Expr::Assign { .. }))
+                    || !(matches!(sets[p].1, Expr::Assign { .. })
+                        || matches!(&sets[p].1, Expr::Call(d, ..) if d.name == "subscript" && d.oid == 0)))
             {
                 // (Through a view: the base column's name.)
                 let name = if view.is_some() {
@@ -2101,6 +2102,50 @@ impl Binder<'_, '_> {
             .count();
         if matches!(ty, DataType::Jsonb) && n == path.len() {
             return self.assign_jsonb_path(base, path, value, column);
+        }
+        // A type whose SUBSCRIPT handler is native code (hstore): one text subscript, the
+        // element assigned as text.
+        if let Some(ns) = crate::ext::native_subscript(&self.cat, &ty) {
+            let one = match path {
+                [p] => match inner(p) {
+                    Some(NodeEnum::AIndices(ix)) if !ix.is_slice => ix.uidx.as_deref(),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(key) = one else {
+                return Err(Error::new(
+                    code::FEATURE_NOT_SUPPORTED,
+                    format!("{} allows only one subscript", ns.what),
+                ));
+            };
+            let at = super::ast::location(key);
+            let key = self.bind_expr(key)?;
+            let key = self.coerce_assign(key, &DataType::Text, column).map_err(|_| {
+                with_pos(
+                    Error::new(
+                        code::DATATYPE_MISMATCH,
+                        format!("{} subscript must have type text", ns.what),
+                    ),
+                    at,
+                )
+            })?;
+            let col = column.to_string();
+            let value = self.coerce_with(value, &DataType::Text, crate::types::cast::CastContext::Assignment, &|from| {
+                with_pos(
+                    Error::new(
+                        code::DATATYPE_MISMATCH,
+                        format!(
+                            "subscripted assignment to \"{col}\" requires type text but expression is of type {}",
+                            from.display()
+                        ),
+                    )
+                    .hint("You will need to rewrite or cast the expression."),
+                    loc,
+                )
+            })?;
+            let def = super::expr::native_subscript_def(ns.assign, vec![ty.clone(), DataType::Text, DataType::Text], false);
+            return Ok(Expr::Call(def, vec![base, key, value], ty));
         }
         let elem = match &ty {
             DataType::Array(elem) => (**elem).clone(),

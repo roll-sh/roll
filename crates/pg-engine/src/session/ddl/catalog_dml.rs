@@ -282,6 +282,68 @@ pub(crate) fn is_pg_depend_delete(s: &pb::DeleteStmt) -> bool {
     s.relation.as_ref().is_some_and(is_pg_depend) && s.with_clause.is_none()
 }
 
+/// Whether `s` updates pg_depend (unqualified or in pg_catalog).
+pub(crate) fn is_pg_depend_update(s: &pb::UpdateStmt) -> bool {
+    s.relation.as_ref().is_some_and(is_pg_depend) && s.with_clause.is_none() && crate::sql::binder::ast::returning(&s.returning_clause).is_empty()
+}
+
+/// UPDATE pg_depend as a query: each matching row's columns, then the row as SET leaves
+/// it (the columns SET names cast to theirs). Bound by the caller's binder (a PL/pgSQL
+/// function's sees its variables), run, then applied by `apply_depend_update`.
+pub(crate) fn depend_update_query(s: &pb::UpdateStmt) -> Result<pb::Node> {
+    let rv = s.relation.clone().unwrap();
+    let rel = rv
+        .alias
+        .as_ref()
+        .map_or_else(|| rv.relname.clone(), |a| a.aliasname.clone());
+    let types = ["oid", "oid", "int4", "oid", "oid", "int4", "char"];
+    let mut targets: Vec<pb::Node> = DEPEND_COLS.iter().map(|c| target(qcol(&rel, c))).collect();
+    let mut set: Vec<Option<pb::Node>> = vec![None; DEPEND_COLS.len()];
+    for t in &s.target_list {
+        let Some(NodeEnum::ResTarget(rt)) = inner(t) else { continue };
+        let Some(i) = DEPEND_COLS.iter().position(|c| *c == rt.name) else {
+            return Err(Error::new(
+                code::UNDEFINED_COLUMN,
+                format!("column \"{}\" of relation \"pg_depend\" does not exist", rt.name),
+            ));
+        };
+        set[i] = rt.val.as_deref().cloned();
+    }
+    for (i, v) in set.into_iter().enumerate() {
+        let v = v.unwrap_or_else(|| qcol(&rel, DEPEND_COLS[i]));
+        targets.push(target(cast(v, types[i])));
+    }
+    let mut from = vec![mk(NodeEnum::RangeVar(rv))];
+    from.extend(s.from_clause.iter().cloned());
+    Ok(mk(NodeEnum::SelectStmt(Box::new(pb::SelectStmt {
+        target_list: targets,
+        from_clause: from,
+        where_clause: s.where_clause.clone(),
+        ..Default::default()
+    }))))
+}
+
+/// The rows `depend_update_query` returned, applied: each old row masked, the new one added.
+/// Returns how many rows it updated.
+pub(crate) fn apply_depend_update(ctx: &crate::exec::ExecCtx, rows: &[crate::exec::Row]) -> Result<u64> {
+    let cat = ctx.catalog();
+    if !cat.is_superuser(ctx.sess.current_role(&cat)) {
+        return Err(Error::new(code::INSUFFICIENT_PRIVILEGE, "permission denied for table pg_depend"));
+    }
+    let mut d = Ddl::new(ctx, "");
+    let mut n = 0;
+    for r in rows {
+        let (Some(old), Some(new)) = (depend_row(&r[..7]), depend_row(&r[7..])) else {
+            continue;
+        };
+        d.cat.depend_edits.remove(old);
+        d.cat.depend_edits.add(new);
+        n += 1;
+    }
+    d.save()?;
+    Ok(n)
+}
+
 /// Whether `s` inserts into pg_depend.
 pub(crate) fn is_pg_depend_insert(s: &pb::InsertStmt) -> bool {
     s.relation.as_ref().is_some_and(is_pg_depend)
@@ -351,6 +413,14 @@ pub(crate) fn pg_depend_dml(ctx: &crate::exec::ExecCtx, node: &NodeEnum) -> Resu
     };
     let mut d = Ddl::new(ctx, "");
     match node {
+        NodeEnum::UpdateStmt(s) => {
+            let node = depend_update_query(s)?;
+            let mut b = Binder::new(&child, Vec::new());
+            let bq = b.bind_statement(&node)?;
+            let rows = crate::exec::collect(&bq.plan, &child, None)?;
+            let n = apply_depend_update(ctx, &rows)?;
+            Ok((Vec::new(), Vec::new(), format!("UPDATE {n}")))
+        }
         NodeEnum::DeleteStmt(s) => {
             let rv = s.relation.clone().unwrap();
             let rel = rv

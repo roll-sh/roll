@@ -3549,6 +3549,32 @@ impl Binder<'_, '_> {
                     let path = Expr::Array(keys, DataType::array_of(DataType::Text));
                     return b.binop("#>", base, path, -1);
                 }
+                // A type whose SUBSCRIPT handler is native code (hstore): its transform
+                // (one subscript, of text) and fetch.
+                t if let Some(ns) = crate::ext::native_subscript(&b.cat, t) => {
+                    if slice || subs.len() != 1 {
+                        return Err(Error::new(
+                            code::FEATURE_NOT_SUPPORTED,
+                            format!("{} allows only one subscript", ns.what),
+                        ));
+                    }
+                    let Some((Some(key), _, _)) = subs.pop() else {
+                        return Err(crate::error::internal("subscript"));
+                    };
+                    flushed.set(flushed.get() + 1);
+                    let at = sub_locs.get(flushed.get() - 1).copied().unwrap_or(-1);
+                    let key = b.coerce_assign(key, &DataType::Text, "").map_err(|_| {
+                        with_pos(
+                            Error::new(
+                                code::DATATYPE_MISMATCH,
+                                format!("{} subscript must have type text", ns.what),
+                            ),
+                            at,
+                        )
+                    })?;
+                    let def = native_subscript_def(ns.fetch, vec![bt.clone(), DataType::Text], true);
+                    return Ok(Expr::Call(def, vec![base, key], DataType::Text));
+                }
                 DataType::Int2Vector => DataType::Int2,
                 DataType::OidVector => DataType::Oid,
                 t if t.fixed_elem().is_some() => {
@@ -3583,7 +3609,10 @@ impl Binder<'_, '_> {
                         match n.as_deref() {
                             Some(n) => {
                                 let e = b.bind_expr(n)?;
-                                if matches!(base.ty(), DataType::Jsonb) {
+                                // (A type's own subscripting takes the subscript as is.)
+                                if matches!(base.ty(), DataType::Jsonb)
+                                    || crate::ext::native_subscript(&b.cat, &base.ty()).is_some()
+                                {
                                     return Ok(Some(e));
                                 }
                                 // (transformContainerSubscripts: an assignment
@@ -7337,6 +7366,17 @@ impl Binder<'_, '_> {
         })
     }
 
+    /// A C function's library is loaded once called (fmgr's load_external_function): its
+    /// `_PG_init` defines its parameters for the session.
+    pub(crate) fn load_library(&self, fdef: &crate::catalog::Function) {
+        if let Some(bin) = &fdef.probin {
+            let w = self.ctx.sess.settings.borrow_mut().load_module(crate::ext::native::library(bin));
+            for e in w {
+                self.ctx.notice(e);
+            }
+        }
+    }
+
     /// A call of a C function: its native code (a set-returning one as the select list's
     /// ProjectSet runs it).
     fn native_call(
@@ -7345,6 +7385,7 @@ impl Binder<'_, '_> {
         coerced: Vec<Expr>,
         loc: i32,
     ) -> Result<Expr> {
+        self.load_library(fdef);
         let Some(def) = Self::native_def(fdef) else {
             return Err(with_pos(
                 crate::error::unsupported(format!("functions in language {}", fdef.language)),
@@ -9029,4 +9070,27 @@ pub fn check_folds(e: &Expr, ctx: &crate::exec::ExecCtx) -> Result<()> {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// The call a native subscripting routine runs as (fetch: `(value, key)`; assign:
+/// `(value, key, element)`).
+pub(crate) fn native_subscript_def(imp: func::FnImpl, args: Vec<DataType>, strict: bool) -> Arc<FuncDef> {
+    let ret = args[0].clone();
+    Arc::new(FuncDef {
+        oid: 0,
+        name: "subscript",
+        min_args: args.len(),
+        args,
+        variadic: false,
+        spread: false,
+        ret: func::Ret::Fixed(if strict { DataType::Text } else { ret }),
+        strict,
+        volatility: 'i',
+        imp,
+        srf: None,
+        out_cols: vec![],
+        arg_names: vec![],
+        defaults: vec![],
+        coll: None,
+    })
 }

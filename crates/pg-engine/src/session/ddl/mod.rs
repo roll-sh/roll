@@ -10,7 +10,8 @@ pub(crate) use objects::EXTENSIONS;
 mod aggregate;
 mod catalog_dml;
 pub(crate) use catalog_dml::{
-    is_pg_class_update, is_pg_depend_delete, is_pg_depend_insert, merge_pg_class,
+    apply_depend_update, depend_update_query, is_pg_class_update, is_pg_depend_delete,
+    is_pg_depend_insert, is_pg_depend_update, merge_pg_class,
     might_merge_pg_class, pg_depend_dml,
 };
 mod collation;

@@ -531,6 +531,12 @@ pub fn value_to_jsonb(v: &Value, ty: &T, fmt: &FormatCtx) -> Result<Jsonb> {
         Value::Numeric(n) if n.is_finite() => Jsonb::Number((**n).clone()),
         Value::Jsonb(j) => (**j).clone(),
         Value::Json(s) => parse_jsonb(s)?,
+        // A type with a cast to jsonb (JSONTYPE_CAST): what the cast makes of it.
+        Value::Ext(..) if let Some(r) = crate::ext::json_cast(v, ty, true) => match r? {
+            Value::Jsonb(j) => (*j).clone(),
+            Value::Null => Jsonb::Null,
+            other => value_to_jsonb(&other, &T::Jsonb, fmt)?,
+        },
         Value::Array(a) => array_to_jsonb(a, fmt)?,
         Value::Record(fields) => {
             let types = crate::types::record_field_types(ty, fields.len());
@@ -631,6 +637,12 @@ pub fn value_to_json_text(v: &Value, ty: &T, fmt: &FormatCtx, out: &mut String) 
             rec(a, 0, 0, fmt, out)?;
         }
         Value::Text(s) if !matches!(ty, T::Json | T::Jsonb) => write_json_string(out, s),
+        // A type with a cast to json (JSONTYPE_CAST): the cast's json text.
+        Value::Ext(..) if let Some(r) = crate::ext::json_cast(v, ty, false) => match r? {
+            Value::Json(s) => out.push_str(&s),
+            Value::Null => out.push_str("null"),
+            other => value_to_json_text(&other, &T::Json, fmt, out)?,
+        },
         Value::Float4(f) if !f.is_finite() => {
             write_json_string(out, &crate::types::text::format_float4(*f, 1))
         }
@@ -1424,7 +1436,7 @@ impl<'a> JsObject<'a> {
 }
 
 /// The domain each field of composite `row` is declared as.
-fn field_domains(row: &crate::types::RowType, c: &FnCtx) -> Vec<Option<u32>> {
+pub(crate) fn field_domains(row: &crate::types::RowType, c: &FnCtx) -> Vec<Option<u32>> {
     if row.oid == 0 {
         return vec![None; row.fields.len()];
     }
@@ -1438,7 +1450,7 @@ fn field_domains(row: &crate::types::RowType, c: &FnCtx) -> Vec<Option<u32>> {
     }
 }
 
-fn domain_check(oid: u32, v: &Value, c: &FnCtx) -> Result<()> {
+pub(crate) fn domain_check(oid: u32, v: &Value, c: &FnCtx) -> Result<()> {
     if let Some(dc) = crate::sql::binder::Binder::new(c.exec, Vec::new()).domain_coerce(oid)? {
         dc.check(v, c.exec)?;
     }

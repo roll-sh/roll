@@ -314,6 +314,10 @@ pub trait TsLookup {
     fn template(&self, oid: u32) -> Option<TsTemplateDef> {
         builtin_templates().iter().find(|t| t.oid == oid).cloned()
     }
+    /// A C function's library and symbol (an extension's template's).
+    fn function_symbol(&self, _oid: u32) -> Option<(String, String)> {
+        None
+    }
 }
 
 /// The built-in template whose code a template runs: the one with its lexize function.
@@ -508,6 +512,26 @@ pub enum Dict {
     },
     Thesaurus(Box<Thesaurus>),
     Ispell(Box<super::ispell::IspellDict>),
+    /// A template whose functions are an extension's C code (unaccent).
+    Ext(Box<dyn ExtDict>),
+}
+
+/// The lexize function of a dictionary an extension's template makes.
+pub trait ExtDict: Send + Sync {
+    fn lexize(&self, word: &str) -> Result<Lexized>;
+}
+
+/// The dictionary template `t` makes with `options`: an extension's C template's, or one of
+/// the built-in templates'.
+pub fn init_template(t: &TsTemplateDef, options: &[DictOption], lookup: &dyn TsLookup) -> Result<Dict> {
+    let kind = template_kind(t);
+    if kind == 0
+        && let Some((lib, init)) = lookup.function_symbol(t.init)
+        && let Some(d) = crate::ext::native::ts_dict(&lib, &init, options)?
+    {
+        return Ok(Dict::Ext(d));
+    }
+    Dict::init(kind, options, lookup)
 }
 
 /// `defGetBoolean`.
@@ -660,6 +684,7 @@ impl Dict {
             }
             Dict::Thesaurus(t) => t.lexize(word, state),
             Dict::Ispell(d) => Ok(d.lexize(word)),
+            Dict::Ext(d) => d.lexize(word),
         }
     }
 }
@@ -779,10 +804,10 @@ pub fn lookup_dict(lookup: &dyn TsLookup, oid: u32) -> Result<Arc<Dict>> {
     {
         return Ok(d.clone());
     }
-    let kind = lookup
-        .template(def.template)
-        .map_or(def.template, |t| template_kind(&t));
-    let d = Arc::new(Dict::init(kind, &def.options, lookup)?);
+    let d = Arc::new(match lookup.template(def.template) {
+        Some(t) => init_template(&t, &def.options, lookup)?,
+        None => Dict::init(def.template, &def.options, lookup)?,
+    });
     dict_cache().insert(oid, (def.template, def.options.clone(), d.clone()));
     Ok(d)
 }

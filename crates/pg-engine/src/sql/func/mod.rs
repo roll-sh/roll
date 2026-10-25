@@ -3,6 +3,7 @@
 
 pub mod admin;
 pub mod amutils;
+pub mod amvalidate;
 pub mod pgstatfuncs;
 pub mod array;
 pub mod bits;

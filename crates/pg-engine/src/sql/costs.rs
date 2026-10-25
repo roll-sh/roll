@@ -802,6 +802,13 @@ impl Est<'_> {
         r: &Expr,
     ) -> Option<f64> {
         let rest = o.restrict.as_deref()?;
+        // geo_selfuncs.c's fixed estimates (cube's and seg's operators name them).
+        match rest {
+            "contsel" => return Some(0.001),
+            "areasel" => return Some(0.005),
+            "positionsel" => return Some(0.1),
+            _ => {}
+        }
         let (neg, ineq) = match rest {
             "eqsel" => (false, false),
             "neqsel" => (true, false),

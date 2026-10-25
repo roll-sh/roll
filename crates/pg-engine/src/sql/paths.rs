@@ -251,9 +251,70 @@ struct IndexInfo {
     /// Per key column of a GiST, SP-GiST, GIN or BRIN index: its operator family's
     /// operators (pg_amop: oid, purpose 's' search / 'o' ordering, sort family).
     fam_ops: Vec<Vec<(u32, char, u32)>>,
+    /// The user-defined operators among `fam_ops` (an extension's operator class's), by
+    /// their function: how a call of one is known as the operator.
+    user_ops: Vec<UserOp>,
     /// Per key column: its collation (the index's COLLATE, else its column's; None: the
     /// default).
     colls: Vec<Option<String>>,
+}
+
+/// A user-defined operator of an index's operator family.
+#[derive(Clone, Debug)]
+struct UserOp {
+    oid: u32,
+    name: String,
+    func: u32,
+    /// Its commutator: the operator and a call target for it.
+    com: Option<(u32, Arc<FuncDef>)>,
+}
+
+impl IndexInfo {
+    /// The pg_operator oid of a binary operator call (0: none known): a built-in operator,
+    /// or one of the family's user-defined operators (its function, by name as shown).
+    fn op_oid(&self, def: &FuncDef) -> u32 {
+        match call_operator(def) {
+            0 => self.user_op(def).map_or(0, |u| u.oid),
+            o => o,
+        }
+    }
+
+    fn user_op(&self, def: &FuncDef) -> Option<&UserOp> {
+        let shown = def.name.strip_prefix("OPERATOR(").and_then(|n| n.strip_suffix(')'));
+        let shown = shown.map_or(def.name, |n| n.rsplit('.').next().unwrap_or(n));
+        self.user_ops.iter().find(|u| u.func == def.oid && u.name == shown)
+    }
+
+    /// The commutator of an operator call: its oid and a call target for it.
+    fn commutator(&self, def: &FuncDef) -> Option<(u32, Arc<FuncDef>)> {
+        if let Some(u) = self.user_op(def) {
+            return u.com.clone();
+        }
+        let com = crate::sql::func::oper_row(def.name, def).com;
+        let info = crate::sql::func::operator_by_oid(com)?;
+        let cdef = crate::sql::func::resolve_binop(info.name, info.left.as_ref()?, &info.right).ok()?.def;
+        Some((com, cdef))
+    }
+}
+
+/// The user-defined operators of an index's operator families (`fam_ops`).
+fn user_ops(cat: &crate::catalog::Catalog, fam_ops: &[Vec<(u32, char, u32)>]) -> Vec<UserOp> {
+    let target = |oid: u32| -> Option<Arc<FuncDef>> {
+        let o = cat.operators.get(&oid)?;
+        let f = cat.functions.get(&o.func)?;
+        let mut d = crate::sql::binder::Binder::native_def(f)?;
+        d.name = crate::sql::func::intern(&o.name);
+        Some(Arc::new(d))
+    };
+    fam_ops
+        .iter()
+        .flatten()
+        .filter_map(|(oid, _, _)| {
+            let o = cat.operators.get(oid)?;
+            let com = (o.commutator != 0).then(|| target(o.commutator).map(|d| (o.commutator, d))).flatten();
+            Some(UserOp { oid: o.oid, name: o.name.clone(), func: o.func, com })
+        })
+        .collect()
 }
 
 /// A base relation as path generation sees it.
@@ -510,6 +571,7 @@ fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo>
             tuples,
             height,
             order,
+            user_ops: user_ops(&cat, &fam_ops),
             fam_ops,
             colls,
         });
@@ -703,21 +765,13 @@ fn family_clause(ii: &IndexInfo, col: usize, qn: usize, q: &Expr) -> Option<ICla
         }
         Expr::Call(def, args, ty) if args.len() == 2 => {
             let (a, b) = (&args[0], &args[1]);
-            let oid = call_operator(def);
+            let oid = ii.op_oid(def);
             if matches_key(a, key) && scan_const(b) && searchable(oid) {
                 return Some(mk(q.clone(), Kind::Op(def.name), Some(b.clone())));
             }
             if matches_key(b, key) && scan_const(a) {
-                let com = crate::sql::func::oper_row(def.name, def).com;
+                let (com, cdef) = ii.commutator(def)?;
                 if searchable(com) {
-                    let info = crate::sql::func::operator_by_oid(com)?;
-                    let cdef = crate::sql::func::resolve_binop(
-                        info.name,
-                        info.left.as_ref()?,
-                        &info.right,
-                    )
-                    .ok()?
-                    .def;
                     let e = Expr::Call(cdef.clone(), vec![b.clone(), a.clone()], ty.clone());
                     return Some(mk(e, Kind::Op(cdef.name), Some(a.clone())));
                 }
@@ -741,11 +795,14 @@ fn match_clause(
     booleq: Option<&Arc<FuncDef>>,
 ) -> Option<IClause> {
     let key = &ii.keys[col];
-    if ii.am.by_family() {
-        return family_clause(ii, col, qn, q);
-    }
-    // match_boolean_index_clause: `k`, `NOT k`, `k IS TRUE` / `IS FALSE` as `k = bool`.
-    if let (Some(eq), Am::Btree, DataType::Bool) = (booleq, ii.am, key.ty()) {
+    // match_boolean_index_clause: `k`, `NOT k`, `k IS TRUE` / `IS FALSE` as `k = bool`, for
+    // a btree column or a family with boolean `=` (btree_gin's bool_ops).
+    let boolean = match ii.am {
+        Am::Btree => true,
+        am if am.by_family() => ii.fam_ops.get(col).is_some_and(|ops| ops.iter().any(|(o, p, _)| *o == 91 && *p == 's')),
+        _ => false,
+    };
+    if let (Some(eq), true, DataType::Bool) = (booleq, boolean, key.ty()) {
         let val = match q {
             e if matches_key(e, key) => Some(true),
             Expr::Not(x) if matches_key(x, key) => Some(false),
@@ -769,6 +826,9 @@ fn match_clause(
                 lossy: false,
             });
         }
+    }
+    if ii.am.by_family() {
+        return family_clause(ii, col, qn, q);
     }
     // A column a made operator class orders: its family's operators (the index's byte
     // order isn't theirs: no key range, the scan checks them on each row).
@@ -2958,26 +3018,23 @@ fn order_by_ops(ii: &IndexInfo, w: &Want) -> (Vec<PathKey>, Vec<Expr>) {
             let ordering = |oid: u32| {
                 oid != 0 && ops.iter().any(|(o, p, sf)| *o == oid && *p == 'o' && *sf != 0)
             };
-            if matches_key(&args[0], key) && fixed(&args[1]) && ordering(call_operator(def)) {
+            if matches_key(&args[0], key) && fixed(&args[1]) && ordering(ii.op_oid(def)) {
                 keys.push(pk.clone());
                 exprs.push(pk.expr.clone());
                 continue 'keys;
             }
-            if matches_key(&args[1], key) && fixed(&args[0]) {
-                let com = crate::sql::func::oper_row(def.name, def).com;
-                if ordering(com)
-                    && let Some(info) = crate::sql::func::operator_by_oid(com)
-                    && let Some(l) = info.left.as_ref()
-                    && let Ok(r) = crate::sql::func::resolve_binop(info.name, l, &info.right)
-                {
-                    keys.push(pk.clone());
-                    exprs.push(Expr::Call(
-                        r.def,
-                        vec![args[1].clone(), args[0].clone()],
-                        ty.clone(),
-                    ));
-                    continue 'keys;
-                }
+            if matches_key(&args[1], key)
+                && fixed(&args[0])
+                && let Some((com, cdef)) = ii.commutator(def)
+                && ordering(com)
+            {
+                keys.push(pk.clone());
+                exprs.push(Expr::Call(
+                    cdef,
+                    vec![args[1].clone(), args[0].clone()],
+                    ty.clone(),
+                ));
+                continue 'keys;
             }
         }
         break;
@@ -3500,7 +3557,7 @@ impl Planner<'_, '_> {
                         },
                     ));
                 }
-                if booleq.is_none() && key.ty() == DataType::Bool && ii.am == Am::Btree {
+                if booleq.is_none() && key.ty() == DataType::Bool && (ii.am == Am::Btree || ii.am.by_family()) {
                     let mut b = crate::sql::binder::Binder::new(self.ctx, Vec::new());
                     // (Over two non-constants: `x = true` folds to x.)
                     if let Ok(Expr::Call(d, ..)) = b.builtin_binop("=", key.clone(), key.clone()) {

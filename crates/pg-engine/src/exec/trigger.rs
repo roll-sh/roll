@@ -281,6 +281,27 @@ fn call_trigger_fn(
         }
         return builtin_trigger(&bt.func.name, before, row, event, old, new);
     }
+    // A C trigger function (an extension's): its native code, with the TriggerData it reads.
+    if bt.func.language == "c"
+        && let Some(f) = bt.func.probin.as_deref().and_then(|bin| crate::ext::native::trigger(bin, &bt.func.body))
+    {
+        let set_cols = UPDATED_COLS.with(|c| c.borrow().clone());
+        return f(
+            crate::ext::native::TriggerData {
+                name: &bt.trig.name,
+                before,
+                row,
+                update: event & tt::UPDATE != 0,
+                delete: event & tt::DELETE != 0,
+                table: t,
+                args: &bt.trig.args,
+                old,
+                new,
+                updated_cols: &set_cols,
+            },
+            ctx,
+        );
+    }
     // (An UPDATE's BEFORE triggers each see them unset again; an INSERT's see what the
     // trigger before set.)
     let (old, new) = (hide(old, false), hide(new, before && row && event & tt::UPDATE != 0));
@@ -798,6 +819,7 @@ fn fire_pending(p: &Pending, ctx: &ExecCtx) -> Result<()> {
                         old: ev.old.clone(),
                         new: ev.new.clone(),
                         role: 0,
+                        set_cols: set_cols.to_vec(),
                     };
                     ctx.txn.borrow_mut().deferred_triggers.push(d);
                     continue;
@@ -830,23 +852,27 @@ fn fire_pending(p: &Pending, ctx: &ExecCtx) -> Result<()> {
                     old: ev.old.clone(),
                     new: ev.new.clone(),
                     role: ctx.sess.current_role(&ctx.catalog()),
+                    set_cols: set_cols.to_vec(),
                 };
                 ctx.txn.borrow_mut().deferred_triggers.push(d);
                 continue;
             }
             // (The rows' tuple slots pin their pages while the trigger runs.)
             let pins = super::sizing::trigger_pin(t.oid, &ev.key, event & tt::UPDATE != 0, ctx);
-            let r = call_with(
-                bt,
-                t,
-                false,
-                true,
-                event,
-                ev.old.clone(),
-                ev.new.clone(),
-                trans_of(event, bt).as_ref(),
-                ctx,
-            );
+            let r = {
+                let _g = crate::scoped::set_ref(&UPDATED_COLS, set_cols.to_vec(), "trigger::UPDATED_COLS");
+                call_with(
+                    bt,
+                    t,
+                    false,
+                    true,
+                    event,
+                    ev.old.clone(),
+                    ev.new.clone(),
+                    trans_of(event, bt).as_ref(),
+                    ctx,
+                )
+            };
             super::sizing::trigger_unpin(t.oid, &pins, ctx);
             r?;
         }
@@ -907,7 +933,10 @@ pub fn fire_deferred(ctx: &ExecCtx, only: Option<&std::collections::HashSet<u32>
             }
             // (It runs as the role that queued it.)
             ctx.sess.definer.borrow_mut().push(d.role);
-            let r = call(bt, t, false, true, d.event, d.old, d.new, ctx);
+            let r = {
+                let _g = crate::scoped::set_ref(&UPDATED_COLS, d.set_cols, "trigger::UPDATED_COLS");
+                call(bt, t, false, true, d.event, d.old, d.new, ctx)
+            };
             ctx.sess.definer.borrow_mut().pop();
             r?;
         }

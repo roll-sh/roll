@@ -6,8 +6,8 @@ use crate::catalog::tsearch::{TsCatalog, TsKind};
 use crate::error::{Error, Result, code};
 use crate::sql::binder::ast::{self, inner, names};
 use crate::types::tsearch::config::{
-    Dict, DictOption, PARSER_FUNCS, TEMPLATE_FUNCS, TsConfigDef, TsDictDef, TsParserDef,
-    TsTemplateDef, template_kind,
+    DictOption, PARSER_FUNCS, TEMPLATE_FUNCS, TsConfigDef, TsDictDef, TsParserDef,
+    TsTemplateDef,
 };
 use crate::types::tsearch::parser;
 use pg_query::NodeEnum;
@@ -331,7 +331,7 @@ impl Ddl<'_, '_> {
                 Error::new(code::SYNTAX_ERROR, format!("{name} requires a parameter"))
             })?);
         }
-        Dict::init(template_kind(&t), &out, &self.ts())?;
+        crate::types::tsearch::config::init_template(&t, &out, &self.ts())?;
         Ok(out)
     }
 
@@ -471,10 +471,33 @@ impl Ddl<'_, '_> {
             .iter()
             .find(|f| builtin && f.1 == fname && f.2 == args);
         let Some(f) = found else {
-            return Err(Error::new(
-                code::UNDEFINED_FUNCTION,
-                format!("function {} does not exist", shown()),
-            ));
+            // A function made by CREATE FUNCTION (an extension's C template functions):
+            // LookupFuncName by name and argument types, through the search path.
+            let path: Vec<u32> = match schema {
+                Some(s) => vec![self.cat.schema_oid(s)?],
+                None => self.cat.routine_path(self.search_path()),
+            };
+            let user = path.iter().find_map(|sc| {
+                self.cat.functions.values().find(|f| {
+                    f.schema == *sc
+                        && f.name == fname
+                        && f.args.len() == args.len()
+                        && f.args.iter().zip(args).all(|(a, t)| a.1.display() == *t)
+                })
+            });
+            let Some(u) = user else {
+                return Err(Error::new(
+                    code::UNDEFINED_FUNCTION,
+                    format!("function {} does not exist", shown()),
+                ));
+            };
+            if u.ret.display() != ret {
+                return Err(Error::new(
+                    code::INVALID_OBJECT_DEFINITION,
+                    format!("function {} should return type {ret}", shown()),
+                ));
+            }
+            return Ok(u.oid);
         };
         if f.3 != ret {
             return Err(Error::new(

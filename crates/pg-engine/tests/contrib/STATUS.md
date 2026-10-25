@@ -41,38 +41,63 @@ PGCONTRIB_ONLY=uuid-ossp,citext PGREGRESS_DIR=$D PGREGRESS_CONTAINER=a39-ref \
 
 ## Scores
 
-Baseline (before any extension was ported; CREATE EXTENSION was a stand-in): 2,752 / 7,733
+Last full run: 4,147 / 4,158 units of the 19 modules ported (99.7%). Baseline (before any
+extension was ported; CREATE EXTENSION was a stand-in): 2,752 / 7,733
 units (35.6%). The reference matches `expected/` for every module except postgres_fdw and
 dblink (they connect to a loopback server).
-
-Done since: uuid-ossp, citext and pgcrypto at 100% (citext's run also fixed engine-wide:
-index elements' and COLLATE clauses' collations resolved through the search path, an index
-build's GUC changes discarded at its end as DefineIndex's nest level does, explicit text to
-`bit(n)` casts truncating, assignment errors naming types without typmods, VALUES errors at a
-cast's argument, `textlen`).
 
 | module | units | matching | status |
 |---|---|---|---|
 | uuid-ossp | 23 | 23 | done |
-| pgcrypto | 369 | 369 | done |
+| pgcrypto | 369 | 369 | done (OpenSSL 3 provider behaviour: bf/des/cast5 refused as the reference refuses them) |
 | citext | 544 | 544 | done |
-| hstore | 309 | 21 | not started |
-| pg_trgm | 261 | 140 | not started (stand-in) |
-| btree_gin | 297 | 245 | not started (stand-in) |
-| btree_gist | 616 | 485 | not started (stand-in) |
-| pg_stat_statements | 1013 | 728 | not started (stand-in) |
-| unaccent | 34 | 6 | not started |
-| fuzzystrmatch | 56 | 6 | not started |
-| ltree | 363 | 13 | not started |
-| intarray | 182 | 29 | not started |
-| tablefunc | 91 | 31 | not started |
-| cube | 316 | 13 | not started |
-| earthdistance | 170 | 13 | not started |
-| isn | 51 | 1 | not started |
-| seg | 196 | 16 | not started |
-| lo | 38 | 15 | not started |
-| amcheck | 204 | 130 | not started |
-| pageinspect | 291 | 102 | not started |
-| pg_buffercache | 38 | 15 | not started |
-| postgres_fdw | 2053 | 613 | not assessed |
-| dblink | 218 | 55 | not assessed |
+| hstore | 309 | 309 | done |
+| pg_trgm | 261 | 261 | done (GIN/GiST plans included) |
+| btree_gin | 297 | 297 | done |
+| btree_gist | 616 | 611 | see below |
+| pg_stat_statements | 1013 | 728 | in progress (separate work) |
+| unaccent | 34 | 34 | done |
+| fuzzystrmatch | 56 | 56 | done |
+| ltree | 363 | 363 | done |
+| intarray | 182 | 182 | done |
+| tablefunc | 91 | 91 | done |
+| cube | 316 | 316 | done |
+| earthdistance | 170 | 170 | done |
+| isn | 51 | 51 | done |
+| seg | 196 | 193 | see below |
+| lo | 38 | 38 | done |
+| amcheck | 204 | 201 | applicable checks only (see below) |
+| pageinspect | 291 | — | not applicable (not available) |
+| pg_buffercache | 38 | 38 | done (no buffer pool: every buffer unused) |
+| postgres_fdw | 2053 | — | assessed, not done |
+| dblink | 218 | — | assessed, not done |
+
+### What is left, per module
+
+- **btree_gist**: rows of an unordered GiST index scan come back in PostgreSQL's GiST tree
+  order (macaddr, macaddr8, bytea units without ORDER BY): the engine reads the index's rows in
+  its own order. A real GiST page model for these classes would be needed.
+- **seg** (unit 167): an Index Only Scan PostgreSQL picks on the GiST index for `@>`.
+- **seg** unit 170: `GROUP BY` of a type without a hash operator class (seg; money too) is
+  planned as a HashAggregate; PostgreSQL sorts.
+- **seg security** (2 units): inside a PL/pgSQL block, `set_config('search_path', ...)` doesn't
+  change how the block's later statements resolve names. PostgreSQL re-reads the path per
+  statement; the engine binds them with the block's starting path. This is a PL/pgSQL gap
+  (and a search_path-safety one), not seg's.
+- **amcheck**: the engine's storage isn't PostgreSQL's pages, so there are no nbtree, GIN or
+  heap page invariants to verify; the functions check what applies (target, access method,
+  validity, arguments, block ranges) and report no corruption. Units that differ: superuser
+  `UPDATE pg_attribute` (catalog DML the engine doesn't take), and `pg_stat_io` bulk reads
+  not counted by verify_heapam.
+- **pageinspect**: reads raw 8 kB PostgreSQL pages (heap, btree, GIN, GiST, BRIN, hash
+  layouts, checksums). The engine's tables and indexes are key-value data, so there are no
+  such pages to show; making the functions up would mislead. Not available
+  (`CREATE EXTENSION pageinspect` fails as for an uninstalled extension).
+- **postgres_fdw / dblink**: they open libpq connections from the server to other servers.
+  Feasible in principle (the workspace has a PostgreSQL client; the FDW machinery exists),
+  but in roll's model an engine dialing arbitrary hosts is an outbound-network (SSRF) and
+  credential-handling decision, like server-side files: it should be an opt-in startup
+  setting with an allow-list, the same policy as `--allow-server-files`. Not implemented; the
+  suites need a loopback server too.
+- **pg_stat_statements**: query jumbling and normalization as PostgreSQL 18 groups statements,
+  the views and functions, tracking levels; being done separately.

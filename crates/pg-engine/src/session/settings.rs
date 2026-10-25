@@ -167,6 +167,9 @@ struct Def {
     flags: &'static [&'static str],
     /// pg_settings.source when the session hasn't changed it.
     source: &'static str,
+    /// An extension library's parameter (`ext_gucs.tsv`): the library's prefix. A session
+    /// has it once it has loaded the library.
+    module: Option<&'static str>,
 }
 
 impl Def {
@@ -239,7 +242,9 @@ fn table() -> &'static Table {
     static T: OnceLock<Table> = OnceLock::new();
     T.get_or_init(|| {
         let mut defs = Vec::new();
-        for line in include_str!("gucs.tsv").lines() {
+        let builtin = include_str!("gucs.tsv").lines().map(|l| (l, false));
+        let modules = include_str!("ext_gucs.tsv").lines().map(|l| (l, true));
+        for (line, module) in builtin.chain(modules) {
             if line.starts_with('#') || line.is_empty() {
                 continue;
             }
@@ -277,8 +282,11 @@ fn table() -> &'static Table {
                 default: s(11),
                 flags: Box::leak(flags.into_boxed_slice()),
                 source: s(13),
+                module: module.then(|| leak(f[0].split('.').next().unwrap_or("").to_string())),
             });
         }
+        // (By name, as pg_settings lists them: the libraries' among the built-ins.)
+        defs.sort_by_key(|d| d.name.to_ascii_lowercase());
         let mut by_name: HashMap<&'static str, usize, _> = HashMap::default();
         for (i, d) in defs.iter().enumerate() {
             debug_assert!(d.name.len() <= MAX_NAME);
@@ -293,8 +301,18 @@ fn table() -> &'static Table {
     })
 }
 
-/// The built-in parameter `name` (any case), without allocating.
+/// The built-in parameter `name` (any case): not an extension library's.
 fn find(name: &str) -> Option<&'static Def> {
+    find_any(name).filter(|d| d.module.is_none())
+}
+
+/// The prefix library `lib` reserves when it defines parameters (`ext_gucs.tsv`).
+fn find_module_prefix(lib: &str) -> Option<&'static str> {
+    table().defs.iter().filter_map(|d| d.module).find(|m| *m == lib)
+}
+
+/// The parameter `name` (any case), an extension library's too, without allocating.
+fn find_any(name: &str) -> Option<&'static Def> {
     let t = table();
     if let Some(&i) = t.by_name.get(name) {
         return Some(&t.defs[i]);
@@ -1267,13 +1285,41 @@ impl Settings {
             .keys()
             .chain(self.defaults.keys())
             .filter(|n| {
-                find(n).is_none()
+                self.def(n).is_none()
                     && n.split('.').next().is_some_and(|p| p.eq_ignore_ascii_case(prefix))
             })
             .cloned()
             .collect();
         gone.sort();
         gone.dedup();
+        // The library's own parameters take the placeholders' values (define_custom_variable:
+        // an invalid one is a WARNING, and the parameter keeps its default).
+        let mut warnings = Vec::new();
+        let mut defined: Vec<(String, &'static Def)> = self
+            .values
+            .keys()
+            .chain(self.defaults.keys())
+            .filter_map(|n| Some((n.clone(), self.def(n).filter(|d| d.module.is_some_and(|m| m.eq_ignore_ascii_case(prefix)))?)))
+            .collect();
+        defined.sort_by(|a, b| a.0.cmp(&b.0));
+        defined.dedup_by(|a, b| a.0 == b.0);
+        for (n, d) in defined {
+            for map in [&mut self.values, &mut self.defaults] {
+                let Some(v) = map.remove(&n) else { continue };
+                match normalize(d, &v) {
+                    Ok(v) => {
+                        map.insert(d.name.to_string(), v);
+                    }
+                    Err(mut e) => {
+                        e.severity = crate::error::Severity::Warning;
+                        warnings.push(e);
+                    }
+                }
+            }
+        }
+        if !warnings.is_empty() {
+            self.derived = DerivedCache::default();
+        }
         if !gone.is_empty() {
             self.derived = DerivedCache::default();
         }
@@ -1290,7 +1336,23 @@ impl Settings {
                 e.severity = crate::error::Severity::Warning;
                 e
             })
+            .chain(warnings)
             .collect()
+    }
+
+    /// The parameter `name` as this session has it: a built-in one, or one of an extension
+    /// library it has loaded.
+    fn def(&self, name: &str) -> Option<&'static Def> {
+        find_any(name).filter(|d| d.module.is_none_or(|m| self.reserved.iter().any(|r| r.eq_ignore_ascii_case(m))))
+    }
+
+    /// An extension library is loaded (its `_PG_init`): its parameters are defined and its
+    /// prefix reserved. Returns the WARNINGs that raises.
+    pub fn load_module(&mut self, lib: &str) -> Vec<Error> {
+        match find_module_prefix(lib) {
+            Some(prefix) => self.reserve_prefix(prefix),
+            None => Vec::new(),
+        }
     }
 
     /// Current raw (normalised, unit-less) value.
@@ -1306,7 +1368,7 @@ impl Settings {
                 .or_else(|| self.defaults.get(canon))
                 .map(String::as_str)
         };
-        match find(name) {
+        match self.def(name) {
             Some(d) => Some(get(d.name).unwrap_or(d.default)),
             None if name.bytes().any(|c| c.is_ascii_uppercase()) => {
                 get(&name.to_ascii_lowercase())
@@ -1326,7 +1388,7 @@ impl Settings {
 
     /// `SHOW name` / current_setting(name).
     pub fn show(&self, name: &str) -> Result<String> {
-        match find(name) {
+        match self.def(name) {
             Some(d) if d.name == "seed" => Ok("unavailable".into()),
             Some(d) => Ok(Self::shown(d, self.get_str(d.name).unwrap_or_default())),
             None => match self
@@ -1344,7 +1406,7 @@ impl Settings {
     }
 
     pub fn exists(&self, name: &str) -> bool {
-        find(name).is_some()
+        self.def(name).is_some()
             || self.values.contains_key(&name.to_ascii_lowercase())
             || self.defaults.contains_key(&name.to_ascii_lowercase())
     }
@@ -1382,7 +1444,7 @@ impl Settings {
         granted: bool,
         startup: bool,
     ) -> Result<()> {
-        let def = find(name);
+        let def = self.def(name);
         let canon = match def {
             Some(d) => d.name.to_string(),
             None => name.to_ascii_lowercase(),
@@ -1600,7 +1662,7 @@ impl Settings {
                 },
                 // A placeholder (custom) parameter stays once made, at its empty reset
                 // value.
-                None if find(&name).is_none() && !self.defaults.contains_key(&name) => {
+                None if self.def(&name).is_none() && !self.defaults.contains_key(&name) => {
                     self.values.insert(name.clone(), String::new());
                 }
                 None => {
@@ -1698,7 +1760,7 @@ impl Settings {
         let mut names: Vec<String> = self
             .values
             .keys()
-            .filter(|n| find(n).is_none_or(|d| !d.flag("NO_RESET_ALL")))
+            .filter(|n| self.def(n).is_none_or(|d| !d.flag("NO_RESET_ALL")))
             .cloned()
             .collect();
         names.sort();
@@ -1712,7 +1774,7 @@ impl Settings {
             if REPORTED.contains(&n.as_str()) {
                 self.changed.push(n.clone());
             }
-            if find(&n).is_some() || self.defaults.contains_key(&n) {
+            if self.def(&n).is_some() || self.defaults.contains_key(&n) {
                 self.values.remove(&n);
             } else {
                 // A placeholder stays, empty.
@@ -1866,7 +1928,7 @@ impl Settings {
         table()
             .defs
             .iter()
-            .filter(|d| !d.flag("NO_SHOW_ALL"))
+            .filter(|d| !d.flag("NO_SHOW_ALL") && self.def(d.name).is_some())
             .map(|d| {
                 let raw = self.get_raw(d.name).unwrap_or_default();
                 let (unit, vartype) = match d.kind {

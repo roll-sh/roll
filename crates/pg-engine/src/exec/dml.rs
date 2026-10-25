@@ -611,7 +611,18 @@ pub fn index_values(ix: &BoundIndex, row: &[Value], ctx: &ExecCtx) -> Result<Opt
     {
         return Ok(None);
     }
-    Ok(Some(eval_all(&ix.keys, row, ctx)?))
+    let vals = eval_all(&ix.keys, row, ctx)?;
+    // A made operator class's compress function checks the key it is given (intarray's
+    // gist__int_ops refuses arrays too big for its ranges).
+    if ix.index.columns.iter().any(|c| c.opclass >= crate::catalog::FIRST_USER_OID) {
+        let cat = ctx.catalog();
+        for (c, v) in ix.index.columns.iter().zip(&vals) {
+            if c.opclass >= crate::catalog::FIRST_USER_OID {
+                crate::ext::native::check_key_for(&cat, c.opclass, v, &c.opclass_options)?;
+            }
+        }
+    }
+    Ok(Some(vals))
 }
 
 /// A unique-key conflict: which index, and the existing row's data key.

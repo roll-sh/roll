@@ -940,6 +940,10 @@ impl Session {
                 let (_, _, tag) = self.with_ctx(params, |ctx| ddl::pg_depend_dml(ctx, node))?;
                 done(QueryResult::command(tag))
             }
+            NodeEnum::UpdateStmt(u) if ddl::is_pg_depend_update(u) => {
+                let (_, _, tag) = self.with_ctx(params, |ctx| ddl::pg_depend_dml(ctx, node))?;
+                done(QueryResult::command(tag))
+            }
             NodeEnum::SelectStmt(_)
             | NodeEnum::InsertStmt(_)
             | NodeEnum::UpdateStmt(_)

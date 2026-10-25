@@ -492,7 +492,8 @@ impl Ddl<'_, '_> {
             }
         })?;
         let mut sub = false;
-        e.walk(&mut |x| sub |= matches!(x, Expr::Subquery(_)));
+        // (A user function's call, run as a subquery here, is no sub-select.)
+        e.walk(&mut |x| sub |= matches!(x, Expr::Subquery(s) if s.func.is_none()));
         if sub {
             return Err(with_pos(
                 Error::new(

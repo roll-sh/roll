@@ -1296,7 +1296,9 @@ fn index_body(
                     IndexKey::Column(i) => crate::catalog::system::column_collation(&t.columns[*i]),
                     IndexKey::Expr(_) => 100,
                 };
-                if crate::catalog::system::collation_oid(coll).unwrap_or(100) != natural {
+                // (A made collation is another collation, even one copying the column's.)
+                let oid = crate::types::collation::def_by_name(&ctx.catalog(), coll).map_or(100, |d| d.oid);
+                if oid != natural {
                     s.push_str(&format!(" COLLATE {}", quote_ident(coll)));
                 }
             }
@@ -4687,16 +4689,13 @@ pub fn register(r: &mut Registry) {
     // amvalidate: the access method's check of an operator class (Postgres's own pass).
     r.func("amvalidate", vec![Oid], Bool, |a, c| {
         let oid = oid_arg(&a[0]);
-        let cat = c.exec.catalog();
-        Ok(match cat.opclass_info(oid) {
-            Some(_) => Value::Bool(true),
-            None => {
-                return Err(Error::new(
-                    code::UNDEFINED_OBJECT,
-                    format!("cache lookup failed for operator class {oid}"),
-                ));
-            }
-        })
+        if c.exec.catalog().opclass_info(oid).is_none() {
+            return Err(Error::new(
+                code::UNDEFINED_OBJECT,
+                format!("cache lookup failed for operator class {oid}"),
+            ));
+        }
+        Ok(Value::Bool(super::amvalidate::amvalidate(oid, c)?))
     })
     .stable();
     r.func(

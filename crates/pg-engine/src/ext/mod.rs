@@ -11,9 +11,23 @@
 
 mod files;
 pub mod native;
+mod amcheck;
+mod btree;
 mod citext;
+mod cube;
+mod fuzzystrmatch;
+mod hstore;
+mod intarray;
+mod isn;
+mod lo;
+mod ltree;
+mod pg_buffercache;
+mod pg_trgm;
 mod pgcrypto;
+mod seg;
+mod tablefunc;
 pub mod types;
+mod unaccent;
 mod uuid_ossp;
 
 use std::collections::HashMap;
@@ -170,6 +184,49 @@ pub fn available_version_rows() -> Vec<(String, String, bool, bool, bool, Option
         }
     }
     out
+}
+
+/// The C symbols extension `name`'s scripts bind (`AS 'MODULE_PATHNAME'[, 'symbol']`, the
+/// function's own name without one): what its library exports.
+pub fn script_symbols(name: &str) -> &'static std::collections::HashSet<String> {
+    static S: OnceLock<std::sync::Mutex<HashMap<String, &'static std::collections::HashSet<String>>>> = OnceLock::new();
+    let mut m = S.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(s) = m.get(name) {
+        return s;
+    }
+    let mut out = std::collections::HashSet::new();
+    let prefix = format!("{name}--");
+    for (_, text) in files::FILES.iter().filter(|(f, _)| f.starts_with(&prefix)) {
+        for stmt in text.split(';') {
+            let lower = stmt.to_ascii_lowercase();
+            if !lower.contains("language c") {
+                continue;
+            }
+            // `AS 'MODULE_PATHNAME'` or `AS '$libdir/name'`, then an optional symbol.
+            let Some(i) = stmt.find("MODULE_PATHNAME'").map(|i| i + 16).or_else(|| {
+                let j = stmt.find("'$libdir/")?;
+                Some(j + 1 + stmt[j + 1..].find('\'')? + 1)
+            }) else {
+                continue;
+            };
+            // (After CREATE [OR REPLACE] FUNCTION: comments before it may say "function".)
+            let Some(fp) = lower.find("create function ").map(|p| p + 16).or_else(|| lower.find("create or replace function ").map(|p| p + 27)) else {
+                continue;
+            };
+            let fname: String = stmt[fp..].trim_start().chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            let rest = stmt[i..].trim_start();
+            let sym = rest
+                .strip_prefix(',')
+                .map(str::trim_start)
+                .and_then(|r| r.strip_prefix('\''))
+                .and_then(|r| r.split('\'').next())
+                .map(str::to_string);
+            out.insert(sym.unwrap_or(fname));
+        }
+    }
+    let leaked: &'static std::collections::HashSet<String> = Box::leak(Box::new(out));
+    m.insert(name.to_string(), leaked);
+    leaked
 }
 
 /// The script installing `version` (`name--version.sql`), or updating `from` to `version`:
@@ -388,6 +445,69 @@ pub fn check_extension_name(n: &str) -> crate::Result<()> {
     Ok(())
 }
 
+/// `json_categorize_type`'s JSONTYPE_CAST for a value of an extension's native type: its
+/// type's cast to json (`jsonb`: to jsonb) by function, run on it. None when there is none
+/// (the value is then a JSON string of its text).
+pub fn json_cast(v: &crate::types::Value, ty: &crate::types::DataType, jsonb: bool) -> Option<crate::Result<crate::types::Value>> {
+    use crate::types::{DataType, Value};
+    let Value::Ext(kind, _) = v else {
+        return None;
+    };
+    let target = if jsonb { 3802 } else { 114 };
+    crate::session::current::with_current(|ctx| {
+        let cat = ctx.catalog();
+        // (The value's own type when the declared one isn't known: an anonymous record's
+        // field.)
+        let oid = match ty {
+            DataType::Base(b) => b.oid,
+            _ => cat.base_types.values().find(|t| t.ty.ext == *kind)?.ty.oid,
+        };
+        let cast = cat
+            .casts_all()
+            .into_iter()
+            .find(|x| x.source == oid && x.target == target && x.method == 'f')?;
+        let f = cat.functions.get(&cast.func)?.clone();
+        if f.language == "c" {
+            let def = crate::sql::binder::Binder::native_def(&f)?;
+            let args = [crate::sql::expr::Expr::Const(Value::Null, ty.clone())];
+            let fc = crate::sql::func::FnCtx {
+                exec: ctx,
+                ret: &f.ret,
+                args: &args,
+                coll: None,
+            };
+            return Some((def.imp)(std::slice::from_ref(v), &fc));
+        }
+        Some(
+            crate::plpgsql::call_function(ctx, &f, vec![v.clone()])
+                .map(|rows| rows.into_iter().next().and_then(|r| r.into_iter().next()).unwrap_or(Value::Null)),
+        )
+    })
+    .flatten()
+    .map(|r| {
+        r.map(|x| match (x, jsonb) {
+            (Value::Text(s), false) => Value::Json(s),
+            (x, _) => x,
+        })
+    })
+}
+
+/// The native subscripting of type `ty` (its SUBSCRIPT handler a native one).
+pub fn native_subscript(cat: &crate::catalog::Catalog, ty: &crate::types::DataType) -> Option<native::NativeSubscript> {
+    let crate::types::DataType::Base(b) = ty else {
+        return None;
+    };
+    if b.ext == 0 {
+        return None;
+    }
+    let def = cat.base_types.get(&b.oid)?;
+    let f = cat.functions.get(&def.subscript)?;
+    if f.language != "c" {
+        return None;
+    }
+    native::subscript(f.probin.as_deref()?, &f.body)
+}
+
 /// `parse_extension_control_file`'s error for an extension that isn't installed here (no
 /// control file on `extension_control_path`).
 pub fn not_available(name: &str) -> crate::Error {
@@ -413,5 +533,12 @@ mod tests {
         let c = control("pgcrypto").unwrap();
         assert!(c.relocatable && c.trusted && c.superuser);
         assert_eq!(c.module_pathname.as_deref(), Some("$libdir/pgcrypto"));
+    }
+
+    #[test]
+    fn symbols_of_scripts() {
+        let s = script_symbols("btree_gist");
+        assert!(s.contains("gbt_date_consistent") && s.contains("int4_dist") && !s.contains("date"));
+        assert!(script_symbols("pgcrypto").contains("pg_digest"));
     }
 }

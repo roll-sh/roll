@@ -2083,7 +2083,7 @@ pub fn format_value(v: &Value, ty: &DataType, ctx: &FormatCtx) -> String {
     use DataType as T;
     match (v, ty) {
         (Value::Null, _) => String::new(),
-        (Value::Ext(k, b), _) => crate::ext::types::output(*k, b),
+        (Value::Ext(k, b), _) => crate::ext::types::output(*k, b, ctx),
         // Fields of a known row type print by their types (a regclass as its name).
         (Value::Record(fields), T::Row(rt)) if fields.len() == rt.fields.len() => {
             // (A table's row with dropped columns, as a trigger's OLD / NEW: they don't print.)
@@ -2183,7 +2183,7 @@ fn reg_name(
 pub fn format_plain(v: &Value, ctx: &FormatCtx) -> String {
     match v {
         Value::Null => String::new(),
-        Value::Ext(k, b) => crate::ext::types::output(*k, b),
+        Value::Ext(k, b) => crate::ext::types::output(*k, b, ctx),
         Value::Bool(b) => if *b { "t" } else { "f" }.into(),
         Value::Int2(i) => i.to_string(),
         Value::Int4(i) => i.to_string(),

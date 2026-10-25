@@ -658,6 +658,21 @@ impl Catalog {
         {
             return c.oid;
         }
+        // (GetDefaultOpClass: a class for a polymorphic type the type is of: btree_gin's
+        // enum_ops is for anyenum.)
+        use crate::types::DataType as T;
+        let poly = match ty {
+            T::Enum(..) => Some(3500),
+            T::Array(_) => Some(2277),
+            T::Range(_) => Some(3831),
+            _ => None,
+        };
+        if let Some(p) = poly
+            && super::system::default_opclass(am, ty) == 0
+            && let Some(c) = self.opclasses.values().find(|c| c.method == am && c.default && c.intype == p)
+        {
+            return c.oid;
+        }
         super::system::default_opclass(am, ty)
     }
 

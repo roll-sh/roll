@@ -671,8 +671,11 @@ impl Ddl<'_, '_> {
                 return Err(virtual_err(true));
             }
             let opclass_options = match opc_parts.last() {
+                // A made class's options support function says what it accepts (an
+                // extension's native one).
                 Some(name) if !e.opclassopts.is_empty() => {
-                    opclass_options(name, method, &e.opclassopts)?
+                    let user = crate::ext::native::user_opclass_options(&self.cat, opclass, method);
+                    opclass_options(name, method, &e.opclassopts, user)?
                 }
                 _ => Vec::new(),
             };
@@ -2213,13 +2216,21 @@ impl Ddl<'_, '_> {
         };
         let mut elts: Vec<&pb::Node> = s.schema_elts.iter().collect();
         elts.sort_by_key(rank);
+        // The elements run with the new schema first in the search path (CreateSchemaCommand's
+        // override path), what they call included.
+        let mut path = vec![name.clone()];
+        path.extend(self.ctx.search_path.iter().cloned());
         for e in elts {
             let Some(mut node) = e.node.clone() else {
                 continue;
             };
             set_creation_schema(&mut node, &name)?;
             let node = self.qualify_in_schema(node, oid, &name)?;
-            self.run(&node)?;
+            let child = self.ctx.child_with_path(self.ctx.params, path.clone());
+            let r = super::Ddl::new(&child, self.sql).run(&node);
+            self.ctx.notices.borrow_mut().extend(child.notices.borrow_mut().drain(..));
+            r?;
+            self.cat = (*self.ctx.catalog()).clone();
         }
         Ok("CREATE SCHEMA".into())
     }
@@ -3667,6 +3678,10 @@ impl Ddl<'_, '_> {
                         ),
                     ));
                 }
+                // (fmgr_c_validator loads the library: its parameters are defined.)
+                for w in self.ctx.sess.settings.borrow_mut().load_module(lib) {
+                    self.ctx.notice(w);
+                }
                 probin = Some(body);
                 symbol
             }
@@ -4075,12 +4090,13 @@ impl Ddl<'_, '_> {
                 types.push(resolve_type_name(&self.cat, self.search_path(), tn)?);
             }
         }
+        // (A signature's types without their typmods: `character` names bpchar.)
         let by_inputs = |f: &Function| {
             f.args.len() == types.len()
                 && types
                     .iter()
                     .enumerate()
-                    .all(|(i, (t, d))| f.args[i].1 == *t && f.arg_domain(i) == *d)
+                    .all(|(i, (t, d))| f.args[i].1.without_typmod() == t.without_typmod() && f.arg_domain(i) == *d)
         };
         // LookupFuncWithArgs: a procedure may also be named by its whole signature, OUT
         // parameters included; without argument modes either reading counts.
@@ -6534,12 +6550,22 @@ fn sql_body_source(sql: &str) -> Option<(String, Vec<(usize, usize)>)> {
 /// `text` (from `sql_body_source`) parses into as many statements as the body has.
 /// index_opclass_options: an index column's operator class options checked against what
 /// the class accepts (parseLocalRelOptions), as `name=value`.
-fn opclass_options(class: &str, method: &str, opts: &[pb::Node]) -> Result<Vec<String>> {
+fn opclass_options(
+    class: &str,
+    method: &str,
+    opts: &[pb::Node],
+    user: Option<Vec<(&'static str, i64, i64, i64, i64)>>,
+) -> Result<Vec<String>> {
     enum Kind {
         Int(i64, i64),
         Real(f64, f64),
     }
     let accepted: Vec<(&str, Kind)> = match method {
+        _ if user.is_some() => user
+            .iter()
+            .flatten()
+            .map(|(n, _, lo, hi, _)| (*n, Kind::Int(*lo, *hi)))
+            .collect(),
         "gist" if class == "tsvector_ops" => vec![("siglen", Kind::Int(1, 2024))],
         "brin" if class.ends_with("_minmax_multi_ops") => {
             vec![("values_per_range", Kind::Int(8, 256))]
@@ -6613,6 +6639,18 @@ fn opclass_options(class: &str, method: &str, opts: &[pb::Node]) -> Result<Vec<S
             }
         }
         out.push(format!("{name}={value}"));
+    }
+    // (The options' validator: an integer option that must be a multiple of something.)
+    for (n, _, _, _, multiple) in user.iter().flatten() {
+        if *multiple > 1
+            && let Some(v) = out.iter().find_map(|o| o.strip_prefix(&format!("{n}=")))
+            && v.trim().parse::<i64>().is_ok_and(|v| v % multiple != 0)
+        {
+            return Err(Error::new(
+                code::INVALID_PARAMETER_VALUE,
+                format!("{n} value must be a multiple of {multiple}"),
+            ));
+        }
     }
     Ok(out)
 }

@@ -550,6 +550,8 @@ pub struct DeferredTrigger {
     pub new: Option<Vec<crate::types::Value>>,
     /// The role that queued it (the function runs as it).
     pub role: u32,
+    /// The columns the UPDATE that queued it assigned (tg_updatedcols).
+    pub set_cols: Vec<usize>,
 }
 
 /// A foreign-key check postponed to COMMIT (or SET CONSTRAINTS ... IMMEDIATE).

@@ -406,4 +406,10 @@ impl TsLookup for TsCatalog<'_> {
     fn template(&self, oid: u32) -> Option<TsTemplateDef> {
         self.catalog.ts_template(oid)
     }
+
+    fn function_symbol(&self, oid: u32) -> Option<(String, String)> {
+        let f = self.catalog.functions.get(&oid)?;
+        let lib = crate::ext::native::library(f.probin.as_deref()?).to_string();
+        (f.language == "c").then(|| (lib, f.body.clone()))
+    }
 }

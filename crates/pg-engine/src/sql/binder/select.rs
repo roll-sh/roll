@@ -5785,6 +5785,7 @@ impl Binder<'_, '_> {
         if fdef.language == "c"
             && let Some(def) = Self::native_def(fdef)
         {
+            self.load_library(fdef);
             if !record {
                 if fdef.out_cols.len() > 1 {
                     cols = fdef
@@ -7159,6 +7160,8 @@ impl Binder<'_, '_> {
 fn hashable(ty: &DataType) -> bool {
     match ty {
         DataType::Array(e) => hashable(e),
+        // An extension's native type: when its script gives it a hash operator class.
+        DataType::Base(b) if b.ext != 0 => crate::ext::types::get(b.ext).is_some_and(|x| x.hash),
         t => {
             let name = t.display();
             let base = name.split('(').next().unwrap_or("").trim();

@@ -1517,6 +1517,9 @@ enum Compiled {
         /// A simple expression (`exec_simple_check_plan`): one value, no FROM, no subqueries;
         /// it runs without SPI.
         simple_expr: bool,
+        /// An UPDATE of pg_depend: the plan is `depend_update_query`'s, its rows applied by
+        /// `apply_depend_update` (the derived catalog has no heap to update).
+        depend_update: bool,
     },
     Utility(Box<Node>),
 }
@@ -1549,6 +1552,9 @@ struct Place {
     field: Option<usize>,
     subscripts: Vec<i32>,
     ty: DataType,
+    /// A subscript of a type whose subscripting is native code (hstore): the key and the
+    /// handler's assign routine.
+    key: Option<(Value, crate::sql::func::FnImpl)>,
 }
 
 struct Interp<'c, 'a> {
@@ -1908,6 +1914,7 @@ impl<'c, 'a> Interp<'c, 'a> {
             simple,
             coerce,
             perms,
+            depend_update,
             ..
         } = c
         else {
@@ -1949,6 +1956,10 @@ impl<'c, 'a> Interp<'c, 'a> {
             .borrow_mut()
             .extend(child.notices.borrow_mut().drain(..));
         let rows = r?;
+        if *depend_update {
+            let n = crate::session::ddl::apply_depend_update(self.ctx, &rows)?;
+            return Ok((Vec::new(), n));
+        }
         Ok((rows, child.processed.get()))
     }
 
@@ -2246,6 +2257,24 @@ impl<'c, 'a> Interp<'c, 'a> {
             },
         };
         let mut subscripts = Vec::new();
+        if !t.subscripts.is_empty()
+            && let Some(ns) = crate::ext::native_subscript(&self.ctx.catalog(), &ty)
+        {
+            if t.subscripts.len() != 1 {
+                return Err(Error::new(
+                    code::FEATURE_NOT_SUPPORTED,
+                    format!("{} allows only one subscript", ns.what),
+                ));
+            }
+            let key = self.eval(&t.subscripts[0], Some(&DataType::Text))?.0;
+            return Ok(Place {
+                slot,
+                field,
+                subscripts,
+                ty: DataType::Text,
+                key: Some((key, ns.assign)),
+            });
+        }
         for (k, s) in t.subscripts.iter().enumerate() {
             match self.eval(s, Some(&DataType::Int4))?.0 {
                 Value::Int4(i) => subscripts.push(i),
@@ -2278,13 +2307,14 @@ impl<'c, 'a> Interp<'c, 'a> {
             field,
             subscripts,
             ty,
+            key: None,
         })
     }
 
     fn store(&mut self, p: &Place, v: Value, vty: &DataType) -> Result<()> {
         let ctx = self.ctx;
         let var = &mut self.vars[p.slot];
-        if p.field.is_none() && p.subscripts.is_empty() {
+        if p.field.is_none() && p.subscripts.is_empty() && p.key.is_none() {
             if var.not_null && v.is_null() {
                 return Err(Error::new(
                     code::NULL_VALUE_NOT_ALLOWED,
@@ -2311,7 +2341,15 @@ impl<'c, 'a> Interp<'c, 'a> {
             },
             None => var.value.clone(),
         };
-        if !p.subscripts.is_empty() {
+        if let Some((key, assign)) = &p.key {
+            let fc = crate::sql::func::FnCtx {
+                exec: ctx,
+                ret: &p.ty,
+                args: &[],
+                coll: None,
+            };
+            cur = assign(&[cur, key.clone(), v], &fc)?;
+        } else if !p.subscripts.is_empty() {
             cur = set_element(cur, &p.subscripts, v, &p.ty)?;
         } else {
             cur = v;
@@ -4294,6 +4332,7 @@ fn bind_simple(
         select: true,
         perms: Arc::new(b.perms.clone()),
         simple_expr,
+        depend_update: false,
     }))
 }
 
@@ -4306,6 +4345,23 @@ fn bind_node(b: &mut Binder, node: Node, targets: Option<&[DataType]>) -> Result
         return Ok(c);
     }
     let select = matches!(node.node, Some(NodeEnum::SelectStmt(_)));
+    // UPDATE pg_depend (an extension's update script's DO block runs one).
+    if let Some(NodeEnum::UpdateStmt(u)) = node.node.as_ref()
+        && crate::session::ddl::is_pg_depend_update(u)
+    {
+        let q = crate::session::ddl::depend_update_query(u)?;
+        let bq = b.bind_statement(&q)?;
+        return Ok(Compiled::Query {
+            plan: bq.plan.clone(),
+            cols: Vec::new(),
+            simple: None,
+            coerce: None,
+            select: false,
+            perms: Arc::new(Default::default()),
+            simple_expr: false,
+            depend_update: true,
+        });
+    }
     match node.node {
         Some(NodeEnum::SelectStmt(ref s)) if s.into_clause.is_some() => {
             Ok(Compiled::Utility(Box::new(node)))
@@ -4343,6 +4399,7 @@ fn bind_node(b: &mut Binder, node: Node, targets: Option<&[DataType]>) -> Result
                 select,
                 perms: bq.perms.clone(),
                 simple_expr: false,
+                depend_update: false,
             })
         }
         _ => Ok(Compiled::Utility(Box::new(node))),

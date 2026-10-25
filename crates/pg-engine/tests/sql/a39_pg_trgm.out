@@ -1,0 +1,142 @@
+> CREATE EXTENSION pg_trgm
+-- CREATE EXTENSION
+
+> SELECT show_trgm('Hello, World! héllo'), show_trgm('')
+show_trgm:text[] | show_trgm:text[]
+{"  h","  l","  w"," h "," he"," ll"," wo",ell,hel,"ld ",llo,"lo ",orl,rld,wor} | {}
+-- SELECT 1
+
+> SELECT similarity('word', 'two words'), similarity('', ''), word_similarity('word', 'two words'), strict_word_similarity('word', 'two words')
+similarity:float4 | similarity:float4 | word_similarity:float4 | strict_word_similarity:float4
+0.36363637 | 0 | 0.8 | 0.5714286
+-- SELECT 1
+
+> SELECT word_similarity('Kabankala', 'Kabankala Kabankala'), strict_word_similarity('kab', 'Kabankala')
+word_similarity:float4 | strict_word_similarity:float4
+1 | 0.27272728
+-- SELECT 1
+
+> SELECT 'hello' % 'hallo', 'hello' <-> 'hallo', 'word' <% 'two words', 'word' <<-> 'two words'
+?column?:bool | ?column?:float4 | ?column?:bool | ?column?:float4
+t | 0.6666666 | t | 0.19999999
+-- SELECT 1
+
+> SHOW pg_trgm.similarity_threshold
+pg_trgm.similarity_threshold:text
+0.3
+-- SHOW
+
+> SET pg_trgm.similarity_threshold = 0.1
+-- SET
+
+> SELECT show_limit(), set_limit(0.4), current_setting('pg_trgm.similarity_threshold')
+show_limit:float4 | set_limit:float4 | current_setting:text
+0.1 | 0.4 | 0.4
+-- SELECT 1
+
+> SET pg_trgm.similarity_threshold = 2
+ERROR 22023: 2 is outside the valid range for parameter "pg_trgm.similarity_threshold" (0 .. 1)
+
+> SET pg_trgm.nosuch = 1
+ERROR 42602: invalid configuration parameter name "pg_trgm.nosuch"
+DETAIL: "pg_trgm" is a reserved prefix.
+
+> SELECT name, setting, vartype, min_val, max_val FROM pg_settings WHERE name LIKE 'pg_trgm.%' ORDER BY 1
+name:text | setting:text | vartype:text | min_val:text | max_val:text
+pg_trgm.similarity_threshold | 0.4 | real | 0 | 1
+pg_trgm.strict_word_similarity_threshold | 0.5 | real | 0 | 1
+pg_trgm.word_similarity_threshold | 0.6 | real | 0 | 1
+-- SELECT 3
+
+> RESET pg_trgm.similarity_threshold
+-- RESET
+
+> CREATE TABLE a39_trgm (t text)
+-- CREATE TABLE
+
+> INSERT INTO a39_trgm SELECT 'row ' || i || ' qwerty' FROM generate_series(1, 200) i
+-- INSERT 0 200
+
+> CREATE INDEX a39_trgm_gin ON a39_trgm USING gin (t gin_trgm_ops)
+-- CREATE INDEX
+
+> SET enable_seqscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT t FROM a39_trgm WHERE t % 'row 17 qwerty' ORDER BY t
+QUERY PLAN:text
+Sort
+  Sort Key: t
+  ->  Bitmap Heap Scan on a39_trgm
+        Recheck Cond: (t % 'row 17 qwerty'::text)
+        ->  Bitmap Index Scan on a39_trgm_gin
+              Index Cond: (t % 'row 17 qwerty'::text)
+-- EXPLAIN
+
+> SELECT t FROM a39_trgm WHERE t % 'row 17 qwerty' ORDER BY similarity(t, 'row 17 qwerty') DESC, t LIMIT 3
+t:text
+row 17 qwerty
+row 117 qwerty
+row 170 qwerty
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT t FROM a39_trgm WHERE t LIKE '%w 19%'
+QUERY PLAN:text
+Bitmap Heap Scan on a39_trgm
+  Recheck Cond: (t ~~ '%w 19%'::text)
+  ->  Bitmap Index Scan on a39_trgm_gin
+        Index Cond: (t ~~ '%w 19%'::text)
+-- EXPLAIN
+
+> SELECT t FROM a39_trgm WHERE t LIKE '%w 19%' ORDER BY t
+t:text
+row 19 qwerty
+row 190 qwerty
+row 191 qwerty
+row 192 qwerty
+row 193 qwerty
+row 194 qwerty
+row 195 qwerty
+row 196 qwerty
+row 197 qwerty
+row 198 qwerty
+row 199 qwerty
+-- SELECT 11
+
+> CREATE INDEX a39_trgm_gist ON a39_trgm USING gist (t gist_trgm_ops(siglen = 32))
+-- CREATE INDEX
+
+> DROP INDEX a39_trgm_gin
+-- DROP INDEX
+
+> EXPLAIN (COSTS OFF) SELECT t, t <-> 'row 42' FROM a39_trgm ORDER BY t <-> 'row 42' LIMIT 2
+QUERY PLAN:text
+Limit
+  ->  Index Scan using a39_trgm_gist on a39_trgm
+        Order By: (t <-> 'row 42'::text)
+-- EXPLAIN
+
+> SELECT t, t <-> 'row 42' FROM a39_trgm ORDER BY t <-> 'row 42' LIMIT 2
+t:text | ?column?:float4
+row 42 qwerty | 0.5
+row 4 qwerty | 0.6666666
+-- SELECT 2
+
+> CREATE INDEX a39_bad ON a39_trgm USING gist (t gist_trgm_ops(siglen = 0))
+ERROR 22023: value 0 out of bounds for option "siglen"
+DETAIL: Valid values are between "1" and "2024".
+
+> CREATE INDEX a39_bad ON a39_trgm USING gist (t gist_trgm_ops(foo = 1))
+ERROR 22023: unrecognized parameter "foo"
+
+> DROP TABLE a39_trgm
+-- DROP TABLE
+
+> DROP EXTENSION pg_trgm
+-- DROP EXTENSION
+
+> SHOW pg_trgm.similarity_threshold
+pg_trgm.similarity_threshold:text
+0.3
+-- SHOW
+

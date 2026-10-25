@@ -16,7 +16,7 @@ pub(super) const TYPE: ExtType = ExtType {
     extension: "citext",
     name: "citext",
     input: |s| Ok(s.as_bytes().to_vec()),
-    output: |b| String::from_utf8_lossy(b).into_owned(),
+    output: |b, _| String::from_utf8_lossy(b).into_owned(),
     cmp: |a, b| lower(a).cmp(&lower(b)),
     canon: lower,
     key: |a, out| key_bytes(&lower(a), out),
@@ -25,6 +25,7 @@ pub(super) const TYPE: ExtType = ExtType {
         Value::Text(s) => Some(s.as_bytes().to_vec()),
         _ => None,
     }),
+    hash: true,
 };
 
 /// `str_tolower` with the C locale's default collation: ASCII letters lowered.

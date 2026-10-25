@@ -3764,6 +3764,12 @@ pub(crate) fn hashable_type(t: &DataType) -> bool {
 
 /// Types whose `=` is exactly equality of the stored value (so hashing agrees with it).
 fn hashable(t: &DataType) -> bool {
+    // (An extension's native type hashes by its canonical bytes, as its hash class does.)
+    if let DataType::Base(b) = t
+        && b.ext != 0
+    {
+        return crate::ext::types::get(b.ext).is_some_and(|x| x.hash);
+    }
     matches!(
         t,
         DataType::Bool
