@@ -788,6 +788,17 @@ directory, with `ClusterConfig::for_tests` timings (docs/code/cluster.md).
 | GitHub deliveries for a repo another node owns are recorded before GitHub is answered: the owner dying mid-delivery, or unreachable when one arrives, gets 202 and the next owner handles each part once; redeliveries don't run twice | `cluster.rs::github_deliveries_survive_their_owner_dying` |
 | WebSocket-style upgrades through a non-owner reach the owner and stream both ways (3 MiB echoed); reads whose connection drops before an answer are sent again, writes never | `code-cluster/tests/forward.rs::upgrades_are_forwarded_and_stream_both_ways`, `code-cluster/tests/forward.rs::reads_are_sent_again_when_the_connection_drops_before_an_answer` |
 
+### Cluster in Docker (`rolld/tests/code_cluster_e2e.rs`)
+
+Three real `rolld --code-only` containers from `deploy/code/Dockerfile` (dev profile) on a private
+network, with Postgres 18 and SeaweedFS (S3), production cluster timings, an admin token and a
+webhook receiver container. Runs in `pnpm test:code` (not `--unit`) with `ROLL_E2E=1`; skipped
+otherwise. The module docs give the client retry policy and exactly what is asserted.
+
+| Behaviour | Tests |
+| --- | --- |
+| under continuous traffic through every node (API landings on four repos, pushes to `refs/land/main`, clones, fetches, reads): SIGKILL of the busiest repo's owner, a rolling restart (SIGTERM: health 503 while draining, exit 0 within the drain timeout, no leases left, healthy again on start) and a Postgres restart (every node healthy again without restarting). Every acknowledged landing (API or push) is on its branch exactly once (changeset ids, messages, and each operation's file added by one first-parent commit); nothing landed twice or unsent; the first-parent history over the git protocol is the API's log; a clone through each node has the same head; every landing after a webhook's creation reaches it under exactly one delivery id, signed, repeated only for attempts sent in a disruption window; health 200 on every node; no client operation fails after the retry policy. Prints the timeline (kill, lease moved, served again, drain time, Postgres recovery) and per-kind error counts | `rolld/tests/code_cluster_e2e.rs::code_cluster_keeps_every_landing_through_kill_rolling_restart_and_postgres_restart` |
+
 ## code-store
 
 | Invariant | Tests |

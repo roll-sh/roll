@@ -44,4 +44,7 @@ tracing-subscriber.workspace = true
 futures-util.workspace = true
 lapin.workspace = true
 parking_lot.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
 tokio.workspace = true

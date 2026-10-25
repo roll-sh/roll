@@ -3,7 +3,8 @@
 # round-trips, the HTTP API, GitHub against a mock), `roll code` against a live API, the
 # dashboard's unit tests (vitest), the checks/previews tests in Docker, and the release-mode
 # landing throughput test (40,000 merges; prints merges/s) and 2,000 changes through the merge
-# queue. The Rust suites run twice: on SQLite, and on Postgres (a throwaway Postgres 18 in Docker,
+# queue, and a three-node cluster of real `rolld` containers through a kill, a rolling restart and a
+# Postgres restart (crates/rolld/tests/code_cluster_e2e.rs). The Rust suites run twice: on SQLite, and on Postgres (a throwaway Postgres 18 in Docker,
 # through ROLL_CODE_TEST_DATABASE). docs/code/test-coverage.md maps features to tests.
 #
 # Only runs when something code-related changed since the last green run. `--force` runs
@@ -14,7 +15,7 @@ cd "$(dirname "$0")/.."
 
 PATHS=(crates/code-sql crates/code-cluster crates/code-store crates/code-git crates/code-github crates/code-index crates/code-review crates/code-control crates/code-preview crates/rolld crates/roll-cli
        apps/dashboard/src apps/dashboard/package.json apps/dashboard/vitest.config.mts
-       Cargo.toml Cargo.lock scripts/test-code.sh)
+       deploy/code Cargo.toml Cargo.lock scripts/test-code.sh)
 STAMP=target/.test-code.hash
 
 force=0 unit_only=0
@@ -71,6 +72,9 @@ if [[ $unit_only == 0 ]]; then
   ROLL_CODE_DOCKER_REQUIRED=1 cargo test -p code-preview --test docker
   CODE_THROUGHPUT_N=${CODE_THROUGHPUT_N:-40000} cargo test -p code-store --release --test throughput -- --nocapture
   CODE_QUEUE_N=${CODE_QUEUE_N:-2000} cargo test -p code-control --test queue throughput -- --nocapture
+  # The cluster as real containers (deploy/code/Dockerfile): a kill, a rolling restart and a
+  # Postgres restart under load; prints its timeline and error counts.
+  ROLL_E2E=1 cargo test -p rolld --test code_cluster_e2e -- --nocapture
 fi
 
 # Only a full run counts as green.
