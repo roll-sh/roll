@@ -476,21 +476,87 @@ impl SimpleHash {
     }
 }
 
-/// A TupleHashTable (BuildTupleHashTable) sized for `ngroups` estimated groups, of
-/// entries `entry_bytes` each: nodeAgg's hash_choose_num_buckets caps the buckets at
-/// what fits hash_mem.
-pub fn agg_table(ngroups: f64, entry_bytes: f64, hash_mem: f64) -> SimpleHash {
-    let ngroups = ngroups.clamp(1.0, i64::MAX as f64) as u64;
-    let max = ((hash_mem / entry_bytes.max(1.0)) as u64).max(1);
-    let max = 1u64 << (63 - max.leading_zeros());
-    SimpleHash::new(ngroups.min(max).max(1))
+/// What sizes a hashed aggregation's tables (nodeAgg.c): the input's row width (the
+/// child plan's), the transition states per group and their space, and how many hash
+/// tables (grouping sets) share hash_mem, with all their groups (the estimates).
+#[derive(Clone, Copy, Debug)]
+pub struct AggSizing {
+    pub input_width: f64,
+    pub num_trans: usize,
+    pub trans_space: f64,
+    pub num_hashes: usize,
+    pub total_groups: f64,
 }
 
-/// Groups' output order through a TupleHashTable: `hashes[i]` is input row i's group
-/// hash and `groups[i]` its group (numbered by first appearance); every row looks its
-/// group up (inserting it the first time).
-pub fn table_order(ngroups_est: f64, hashes: &[(u32, usize)], entry_bytes: f64, hash_mem: f64) -> Vec<usize> {
-    let mut t = agg_table(ngroups_est, entry_bytes, hash_mem);
+/// TupleHashEntrySize() (sizeof(TupleHashEntryData)), sizeof(AggStatePerGroupData),
+/// BLCKSZ.
+const TUPLE_HASH_ENTRY: f64 = 16.0;
+const PER_GROUP: f64 = 16.0;
+const BLCKSZ: f64 = 8192.0;
+
+fn maxalign(x: f64) -> f64 {
+    (x / 8.0).ceil() * 8.0
+}
+
+impl AggSizing {
+    /// hash_agg_entry_size.
+    pub fn entry_size(&self) -> f64 {
+        let trans = if self.trans_space > 0.0 {
+            8.0 + (self.trans_space as u64).next_power_of_two() as f64
+        } else {
+            0.0
+        };
+        TUPLE_HASH_ENTRY + maxalign(16.0 + self.input_width) + PER_GROUP * self.num_trans as f64 + trans
+    }
+
+    /// hash_agg_set_limits' memory limit.
+    fn mem_limit(&self, hash_mem: f64) -> f64 {
+        let entry = self.entry_size();
+        if self.total_groups * entry <= hash_mem {
+            return hash_mem;
+        }
+        // hash_choose_num_partitions (used_bits 0).
+        let partition_limit = (hash_mem * 0.25 - BLCKSZ) / BLCKSZ;
+        let mut d = 1.0 + 1.5 * self.total_groups * entry / hash_mem;
+        if d > partition_limit {
+            d = partition_limit;
+        }
+        let n = d.clamp(4.0, 1024.0) as u64;
+        let parts = n.next_power_of_two() as f64;
+        let partition_mem = BLCKSZ + BLCKSZ * parts;
+        if hash_mem > 4.0 * partition_mem {
+            hash_mem - partition_mem
+        } else {
+            (hash_mem * 0.75).floor()
+        }
+    }
+
+    /// The bucket count a table for `ngroups` estimated groups asks simplehash for:
+    /// build_hash_tables' hash_choose_num_buckets (half of what fits its share of the
+    /// memory limit), capped by BuildTupleHashTable at what hash_mem holds of bare entries.
+    pub fn nbuckets(&self, ngroups: f64, hash_mem: f64) -> u64 {
+        let entry = self.entry_size();
+        let memory = (self.mem_limit(hash_mem) as u64 / self.num_hashes.max(1) as u64) as f64;
+        let max = ((memory / entry) as i64) >> 1;
+        let ngroups = ngroups.clamp(0.0, i64::MAX as f64) as i64;
+        let nb = ngroups.min(max).max(1) as u64;
+        let bare = TUPLE_HASH_ENTRY + maxalign(PER_GROUP * self.num_trans as f64);
+        nb.min(((hash_mem / bare) as u64).max(1))
+    }
+}
+
+/// A HashSetOp's table (nodeSetOp.c): sized for its estimated groups, capped by
+/// BuildTupleHashTable at what hash_mem holds of entries with a SetOpStatePerGroupData.
+pub fn setop_nbuckets(ngroups: f64, hash_mem: f64) -> u64 {
+    let ngroups = ngroups.clamp(1.0, i64::MAX as f64) as u64;
+    ngroups.min(((hash_mem / (TUPLE_HASH_ENTRY + 16.0)) as u64).max(1))
+}
+
+/// Groups' output order through a TupleHashTable created for `nbuckets` entries:
+/// `hashes[i]` is input row i's group hash and its group (numbered by first appearance);
+/// every row looks its group up (inserting it the first time).
+pub fn table_order(nbuckets: u64, hashes: &[(u32, usize)]) -> Vec<usize> {
+    let mut t = SimpleHash::new(nbuckets.max(1));
     let mut seen = 0usize;
     for &(h, g) in hashes {
         let existing = g < seen;
@@ -592,15 +658,46 @@ impl JoinTable {
     }
 }
 
-/// The planner's row estimate for plan node `plan` (EXPLAIN's), kept for the statement.
-pub fn estimated_rows(plan: &std::sync::Arc<crate::sql::plan::Plan>, ctx: &super::ExecCtx) -> f64 {
+/// What the planner says of an aggregation or grouping node: its group count, its
+/// input's row width, and for a sorted grouping (GroupAggregate, Group) the keys its input
+/// is sorted on (key, descending, NULLS FIRST), in order: its groups come out so.
+#[derive(Debug)]
+pub struct AggEstimate {
+    pub rows: f64,
+    pub input_width: f64,
+    pub sorted: Option<Vec<(usize, bool, bool)>>,
+    /// The serial plan's grouping sorts its whole input (a GroupAggregate over a Sort): the
+    /// keys, as `sorted`. Its aggregates (the serial plan's, also where the plan is a
+    /// parallel one) see each group's rows in that sort's order.
+    pub presort: Option<Vec<(usize, bool, bool)>>,
+}
+
+/// `AggEstimate` of plan node `plan` (EXPLAIN's), kept for the statement.
+pub fn agg_estimate(plan: &std::sync::Arc<crate::sql::plan::Plan>, ctx: &super::ExecCtx) -> std::rc::Rc<AggEstimate> {
     let key = std::sync::Arc::as_ptr(plan) as usize;
-    if let Some(r) = ctx.estimates.borrow().get(&key) {
-        return *r;
+    if let Some(e) = ctx.agg_estimates.borrow().get(&key) {
+        return e.clone();
     }
-    let r = crate::sql::explain::estimate(plan, ctx).rows;
-    ctx.estimates.borrow_mut().insert(key, r);
-    r
+    let e = crate::sql::explain::estimate(plan, ctx);
+    let sorted = e.group_sort.clone();
+    let made = std::rc::Rc::new(AggEstimate {
+        rows: e.rows,
+        input_width: e.input_width as f64,
+        sorted,
+        presort: {
+            // (A parallel plan's aggregates: the serial plan's.)
+            let serial;
+            let s = if matches!(e.input_type, "Gather" | "Gather Merge") {
+                serial = crate::sql::explain::estimate_serial(plan, ctx);
+                &serial
+            } else {
+                &e
+            };
+            if s.input_type == "Sort" { s.group_sort.clone() } else { None }
+        },
+    });
+    ctx.agg_estimates.borrow_mut().insert(key, made.clone());
+    made
 }
 
 /// hash_mem in bytes.
@@ -647,11 +744,9 @@ impl GroupOrder {
         self.lookups.push((hash, group));
     }
 
-    /// The groups in the hash table's iteration order, the table sized for `ngroups`.
-    pub fn order(&self, ngroups: f64, width: usize, ctx: &super::ExecCtx) -> Vec<usize> {
-        // TupleHashEntryData, the group's MinimalTuple and per-group states, roughly.
-        let entry = 24.0 + 16.0 + 16.0 + width as f64 * 8.0;
-        table_order(ngroups, &self.lookups, entry, hash_mem(ctx))
+    /// The groups in the hash table's iteration order, the table created for `nbuckets`.
+    pub fn order(&self, nbuckets: u64) -> Vec<usize> {
+        table_order(nbuckets, &self.lookups)
     }
 }
 
@@ -688,6 +783,44 @@ pub fn presorted_keys(plan: &std::sync::Arc<crate::sql::plan::Plan>, ctx: &super
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// nodeAgg's bucket counts for tables PostgreSQL 18.6 built (work_mem 4MB: hash_mem
+    /// 8MB), and the simplehash sizes they make.
+    #[test]
+    fn agg_buckets_follow_postgres() {
+        let hash_mem = 8.0 * 1024.0 * 1024.0;
+        let sizing = |input_width: f64, num_trans: usize, trans_space: f64, groups: f64| AggSizing {
+            input_width,
+            num_trans,
+            trans_space,
+            num_hashes: 1,
+            total_groups: groups,
+        };
+        // `k % 50, count(*)` over 2M rows, 100,112 groups estimated: all of hash_mem,
+        // halved, under the estimate.
+        let s = sizing(4.0, 1, 0.0, 100112.0);
+        assert_eq!(s.entry_size(), 56.0);
+        assert_eq!(s.nbuckets(100112.0, hash_mem), 74898);
+        assert_eq!(SimpleHash::new(74898).size, 131072);
+        // With sum(x): wider entries, half the table.
+        let s = sizing(12.0, 2, 0.0, 100112.0);
+        assert_eq!(s.nbuckets(100112.0, hash_mem), 52428);
+        assert_eq!(SimpleHash::new(52428).size, 65536);
+        // Expected to spill: the partitions' buffers come out of the limit (8 of them).
+        let s = sizing(43.0, 3, 160.0, 100112.0);
+        assert_eq!(s.entry_size(), 392.0);
+        assert_eq!(s.nbuckets(100112.0, hash_mem), 10605);
+        assert_eq!(SimpleHash::new(10605).size, 16384);
+        // Few groups: the estimate.
+        assert_eq!(sizing(4.0, 1, 0.0, 50.0).nbuckets(50.0, hash_mem), 50);
+        // Two grouping sets share the memory.
+        let mut s = sizing(12.0, 2, 0.0, 200000.0);
+        s.num_hashes = 2;
+        assert_eq!(s.nbuckets(100000.0, hash_mem), 26086);
+        // A HashSetOp: its estimate, at most what hash_mem holds of 32-byte entries.
+        assert_eq!(setop_nbuckets(100000.0, hash_mem), 100000);
+        assert_eq!(setop_nbuckets(1e9, hash_mem), 262144);
+    }
 
     #[test]
     fn matches_postgres() {

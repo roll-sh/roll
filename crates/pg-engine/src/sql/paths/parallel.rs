@@ -513,6 +513,57 @@ pub fn agg_internal_state(oid: u32) -> bool {
     m.get(&oid).copied().unwrap_or(false)
 }
 
+/// An aggregate's transition function and whether its final function may modify the state
+/// (aggfinalmodify 'w': a state it can't share): pg_aggregate.
+fn agg_transfn(oid: u32) -> Option<(u32, bool)> {
+    static MAP: std::sync::OnceLock<std::collections::HashMap<u32, (u32, bool)>> =
+        std::sync::OnceLock::new();
+    let m = MAP.get_or_init(|| {
+        include_str!("../../catalog/data/pg_aggregate.tsv")
+            .lines()
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split('\t').collect();
+                let oid = f.first()?.parse::<u32>().ok()?;
+                let trans = f.get(3)?.parse::<u32>().unwrap_or(0);
+                Some((oid, (trans, f.get(13).is_some_and(|m| *m == "w"))))
+            })
+            .collect()
+    });
+    m.get(&oid).copied()
+}
+
+/// The transition states a level's aggregates keep (preprocess_aggrefs: equal calls share
+/// one, and so do calls of one transition function over the same inputs, unless a final
+/// function writes its state) and their transition space (get_agg_clause_costs, per state).
+pub fn agg_transitions(aggs: &[crate::sql::plan::AggCall]) -> (usize, f64) {
+    // (Calls seen: the aggregate and its inputs; states: a transition function and inputs.)
+    let mut calls: Vec<(u32, String)> = Vec::new();
+    let mut states: Vec<(u32, String)> = Vec::new();
+    let (mut n, mut space) = (0, 0.0);
+    for a in aggs {
+        let inputs = format!("{:?}|{:?}|{}|{:?}|{:?}", a.args, a.filter, a.distinct, a.order_by, a.direct);
+        let oid = a.def.sig.oid;
+        let call = (oid, inputs.clone());
+        if calls.contains(&call) {
+            continue;
+        }
+        calls.push(call);
+        if a.user.is_none()
+            && let Some((t, false)) = agg_transfn(oid)
+            && t != 0
+        {
+            let k = (t, inputs);
+            if states.contains(&k) {
+                continue;
+            }
+            states.push(k);
+        }
+        n += 1;
+        space += agg_trans_space(oid);
+    }
+    (n, space)
+}
+
 /// get_agg_clause_costs' transition space of an aggregate: its state's average width when
 /// the state type is passed by reference (MAXALIGNed; an internal state without a declared
 /// size: ALLOCSET_DEFAULT_INITSIZE), else 0.

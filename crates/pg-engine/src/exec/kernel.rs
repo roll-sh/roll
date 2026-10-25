@@ -35,6 +35,26 @@ pub enum K {
     ArrayOp(Box<[K; 2]>, PureFn, bool),
 }
 
+/// A row's columns as kernels read them: a row, or a joined row's two sides unjoined
+/// (`pipe::Joined`).
+pub trait Cols {
+    fn col(&self, i: usize) -> Option<&Value>;
+}
+
+impl Cols for [Value] {
+    #[inline]
+    fn col(&self, i: usize) -> Option<&Value> {
+        self.get(i)
+    }
+}
+
+impl Cols for Vec<Value> {
+    #[inline]
+    fn col(&self, i: usize) -> Option<&Value> {
+        self.get(i)
+    }
+}
+
 fn truthy(v: &Value) -> Option<bool> {
     match v {
         Value::Null => None,
@@ -105,9 +125,9 @@ pub fn compile(e: &Expr) -> Option<K> {
 
 impl K {
     /// An argument's value: a column's or a constant's in place, else computed into `tmp`.
-    fn arg<'r>(&'r self, row: &'r [Value], tmp: &'r mut Value) -> Option<&'r Value> {
+    pub fn arg<'r, R: Cols + ?Sized>(&'r self, row: &'r R, tmp: &'r mut Value) -> Option<&'r Value> {
         match self {
-            K::Col(i) => row.get(*i),
+            K::Col(i) => row.col(*i),
             K::Const(v) => Some(v),
             k => {
                 *tmp = k.run(row)?;
@@ -117,9 +137,9 @@ impl K {
     }
 
     /// The value `eval` gives over `row` (None: leave it to `eval`).
-    pub fn run(&self, row: &[Value]) -> Option<Value> {
+    pub fn run<R: Cols + ?Sized>(&self, row: &R) -> Option<Value> {
         Some(match self {
-            K::Col(i) => row.get(*i)?.clone(),
+            K::Col(i) => row.col(*i)?.clone(),
             K::Const(v) => v.clone(),
             K::Call { f, args, strict, ret } => {
                 let (mut t0, mut t1) = (Value::Null, Value::Null);
@@ -234,7 +254,7 @@ impl K {
     }
 
     /// Whether the row passes as a filter (None: leave it to `eval`).
-    pub fn passes(&self, row: &[Value]) -> Option<bool> {
+    pub fn passes<R: Cols + ?Sized>(&self, row: &R) -> Option<bool> {
         Some(truthy(&self.run(row)?) == Some(true))
     }
 }

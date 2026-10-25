@@ -327,6 +327,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                     *nleft,
                     *nright,
                     meta,
+                    need,
                 ))
             } else if *kind == JoinKind::Full
                 && params.iter().all(|e| e.columns().is_empty())
@@ -1771,11 +1772,19 @@ fn hashed_distinct_keyed(
         };
         order.lookup(hashes[g], g);
     }
-    let width = firsts.first().map_or(1, Vec::len);
-    let est = super::pghash::estimated_rows(plan, ctx);
+    // (A HashAggregate without aggregates.)
+    let e = super::pghash::agg_estimate(plan, ctx);
+    let (est, width) = (e.rows, e.input_width);
+    let sizing = super::pghash::AggSizing {
+        input_width: width,
+        num_trans: 0,
+        trans_space: 0.0,
+        num_hashes: 1,
+        total_groups: est,
+    };
     let mut slots: Vec<Option<Row>> = firsts.into_iter().map(Some).collect();
     Ok(order
-        .order(est, width, ctx)
+        .order(sizing.nbuckets(est, super::pghash::hash_mem(ctx)))
         .into_iter()
         .filter_map(|i| slots[i].take())
         .collect())
@@ -2125,9 +2134,8 @@ impl SetOpNode {
                 groups[*g].2 += 1;
             }
         }
-        let width = groups.first().map_or(1, |g| g.0.len());
         let mut out = Vec::new();
-        for g in order.order(est, width, ctx) {
+        for g in order.order(super::pghash::setop_nbuckets(est, super::pghash::hash_mem(ctx))) {
             let (row, l, r) = &groups[g];
             let n = match (self.kind, self.all) {
                 (SetOpKind::Intersect, false) => usize::from(*l > 0 && *r > 0),
@@ -2586,18 +2594,6 @@ impl Node for NestLoopNode {
     }
 }
 
-/// A hash join's inner rows in their hash table: the bucket chains Postgres builds
-/// (pghash::JoinTable), each row's place in its chain, and the rows by key.
-struct HashBuilt {
-    rows: Vec<Row>,
-    /// Rows by key, in their chain's order (the most recently inserted first; a merge
-    /// join's: in their order).
-    map: HashMap<Vec<Value>, Rc<[usize]>>,
-    /// No rows (a probe matching nothing).
-    none: Rc<[usize]>,
-    table: super::pghash::JoinTable,
-}
-
 /// The types hash keys hash as.
 fn key_types(keys: &[Expr]) -> Vec<crate::types::DataType> {
     keys.iter().map(Expr::ty).collect()
@@ -2636,45 +2632,20 @@ fn value_type(v: &Value) -> crate::types::DataType {
 /// Build a hash join's table from `rows`: each row's keys hashed (ExecHashGetHashValue);
 /// a row with a NULL key goes in (hashing as 0) only when unmatched inner rows are
 /// returned (`keep_nulls`). `nbuckets`: the planner's bucket count (None: as many as
-/// rows, at least 1024).
-/// Hash join keys of the integer family compared across types (int4 = int8): as one
-/// type, so equal values meet.
-/// Join keys as equality sees them: integers of any width alike, bpchar without its
-/// trailing spaces (bpchareq; `char(2)` 'a ' equals `char(4)` 'a   ').
-fn int_keys(k: Vec<Value>, keys: &[Expr]) -> Vec<Value> {
-    k.into_iter()
-        .zip(keys.iter().map(Some).chain(std::iter::repeat(None)))
-        .map(|(v, e)| int_key(v, e))
-        .collect()
-}
-
-/// `int_keys` of one key's value (`e`: its expression, when known).
-fn int_key(v: Value, e: Option<&Expr>) -> Value {
-    match v {
-        Value::Int2(x) => Value::Int8(x as i64),
-        Value::Int4(x) => Value::Int8(x as i64),
-        Value::Text(s)
-            if e.is_some_and(|e| matches!(e.ty(), crate::types::DataType::Bpchar(_)))
-                && s.ends_with(' ') =>
-        {
-            Value::text(s.trim_end_matches(' '))
-        }
-        v => v,
-    }
-}
-
+/// rows, at least 1024). `norms`: how each key's values are compared (`pipe::norms`).
 fn build_hash(
     rows: Vec<Row>,
     keys: &[Expr],
+    norms: &[super::pipe::Norm],
     nbuckets: Option<u32>,
     keep_nulls: bool,
     merge: bool,
     ctx: &ExecCtx,
-) -> Result<HashBuilt> {
+) -> Result<super::pipe::Built> {
     let types = key_types(keys);
     let cat = ctx.catalog();
     let mut tuples = Vec::with_capacity(rows.len());
-    let mut by_key: Vec<(Vec<Value>, usize)> = Vec::new();
+    let mut by_key: Vec<(Vec<Value>, usize)> = Vec::with_capacity(rows.len());
     for (i, r) in rows.iter().enumerate() {
         let k = eval_all(keys, r, ctx)?;
         let null = k.iter().any(Value::is_null);
@@ -2684,7 +2655,7 @@ fn build_hash(
         let h = super::pghash::combine(&k, &types, Some(&cat));
         tuples.push((i, h, 0));
         if !null {
-            by_key.push((int_keys(k, keys), i));
+            by_key.push((normed(k, norms), i));
         }
     }
     let nb = nbuckets.unwrap_or_else(|| (tuples.len() as u32).max(1024));
@@ -2695,27 +2666,15 @@ fn build_hash(
         }
     }
     let table = super::pghash::JoinTable::build(nb, tuples);
-    // Each row's place in its chain.
-    let mut pos = vec![usize::MAX; rows.len()];
-    for (p, i) in table.scan().enumerate() {
-        pos[i] = p;
-    }
-    let mut map: HashMap<Vec<Value>, Vec<usize>> = HashMap::default();
-    for (k, i) in by_key {
-        map.entry(k).or_default().push(i);
-    }
-    let map = map
-        .into_iter()
-        .map(|(k, mut v)| {
-            if merge {
-                v.sort_unstable();
-            } else {
-                v.sort_by_key(|&i| pos[i]);
-            }
-            (k, Rc::from(v))
-        })
-        .collect();
-    Ok(HashBuilt { rows, map, table, none: Rc::from(Vec::new()) })
+    Ok(super::pipe::Built::new(rows, by_key, table, merge))
+}
+
+/// Key values as the join compares them (`pipe::norm`).
+fn normed(k: Vec<Value>, norms: &[super::pipe::Norm]) -> Vec<Value> {
+    k.into_iter()
+        .zip(norms.iter().copied().chain(std::iter::repeat(super::pipe::Norm::Int)))
+        .map(|(v, n)| super::pipe::norm(v, n))
+        .collect()
 }
 
 /// Hash join on equality keys; the right side is the build side. A merge join runs this
@@ -2729,9 +2688,10 @@ struct HashJoinNode {
     cond: Option<Expr>,
     nleft: usize,
     nright: usize,
-    table: Option<HashBuilt>,
+    table: Option<Arc<super::pipe::Built>>,
     matched: Vec<bool>,
-    cur: Option<(Row, Rc<[usize]>, usize, bool)>,
+    /// The outer row being joined, its candidates, the next one, and whether one matched.
+    cur: Option<(Row, (u32, u32), u32, bool)>,
     unmatched_right: Option<std::vec::IntoIter<usize>>,
     nbuckets: Option<u32>,
     merge: bool,
@@ -2743,6 +2703,28 @@ struct HashJoinNode {
     first: Option<Row>,
     /// The probe key's vector, reused.
     kbuf: Vec<Value>,
+    /// How the outer and inner keys' values are compared (`pipe::norms`).
+    lnorm: Vec<super::pipe::Norm>,
+    rnorm: Vec<super::pipe::Norm>,
+    /// The joined rows' columns anything reads, the condition's too (None: all).
+    keep: Option<Box<[bool]>>,
+    /// Its probes run in a parallel scan's workers below (`pipe`): the level of its rows
+    /// (`pipe::ALL`: not).
+    level: u8,
+    /// Whether that was tried.
+    tried: bool,
+}
+
+/// What a join's output needs copied: `need` and the columns its condition reads.
+fn join_keep(need: Option<&[bool]>, cond: Option<&Expr>, width: usize) -> Option<Box<[bool]>> {
+    let mut k: Vec<bool> = need?.to_vec();
+    if let Some(c) = cond
+        && !super::need::mark(c, &mut k)
+    {
+        return None;
+    }
+    k.resize(width.max(k.len()), false);
+    Some(k.into_boxed_slice())
 }
 
 impl HashJoinNode {
@@ -2757,8 +2739,15 @@ impl HashJoinNode {
         nleft: usize,
         nright: usize,
         meta: &crate::sql::plan::JoinMeta,
+        need: Option<&[bool]>,
     ) -> Self {
+        let (lnorm, rnorm) = super::pipe::norms(&lkeys, &rkeys);
         HashJoinNode {
+            keep: join_keep(need, cond.as_ref(), nleft + nright),
+            lnorm,
+            rnorm,
+            level: super::pipe::ALL,
+            tried: false,
             kind,
             left,
             right_plan,
@@ -2827,9 +2816,9 @@ impl HashJoinNode {
         }
         let keep = matches!(self.kind, JoinKind::Right | JoinKind::Full);
         // (A merge join meets equal inner rows in their (sorted) order.)
-        let built = build_hash(rows, &self.rkeys, self.nbuckets, keep, self.merge, ctx)?;
+        let built = build_hash(rows, &self.rkeys, &self.rnorm, self.nbuckets, keep, self.merge, ctx)?;
         self.matched = vec![false; built.rows.len()];
-        self.table = Some(built);
+        self.table = Some(Arc::new(built));
         Ok(())
     }
 }
@@ -2870,11 +2859,11 @@ impl HashJoinNode {
             .collect();
         let okeys: Vec<Vec<Value>> = outer
             .iter()
-            .map(|r| eval_all(&self.lkeys, r, ctx).map(|k| int_keys(k, &self.lkeys)))
+            .map(|r| eval_all(&self.lkeys, r, ctx).map(|k| normed(k, &self.lnorm)))
             .collect::<Result<_>>()?;
         let ikeys: Vec<Vec<Value>> = inner
             .iter()
-            .map(|r| eval_all(&self.rkeys, r, ctx).map(|k| int_keys(k, &self.rkeys)))
+            .map(|r| eval_all(&self.rkeys, r, ctx).map(|k| normed(k, &self.rnorm)))
             .collect::<Result<_>>()?;
         let cmp = |a: &[Value], b: &[Value]| -> Result<Ordering> {
             for (i, k) in sort_keys.iter().enumerate() {
@@ -2950,15 +2939,55 @@ impl HashJoinNode {
     }
 }
 
-impl Node for HashJoinNode {
-    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+impl HashJoinNode {
+    /// This join's probe as a stage a parallel scan's workers run (`pipe`), when it can
+    /// be one: a hash join (not a merge join's, not one returning unmatched inner rows)
+    /// whose outer keys and condition compile to kernels. Builds the table.
+    fn probe_stage(&mut self, ctx: &ExecCtx) -> Result<Option<Arc<super::pipe::Probe>>> {
+        use super::kernel::compile;
+        if self.merge
+            || !matches!(self.kind, JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti)
+            || ctx.instrumented()
+        {
+            return Ok(None);
+        }
+        let Some(keys) = self
+            .lkeys
+            .iter()
+            .zip(&self.lnorm)
+            .map(|(e, n)| compile(e).map(|k| (k, *n)))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Ok(None);
+        };
+        let cond = match &self.cond {
+            Some(c) => match compile(c) {
+                Some(k) => Some(k),
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        self.build(ctx)?;
+        Ok(Some(Arc::new(super::pipe::Probe {
+            built: self.table.clone().unwrap(),
+            keys,
+            cond,
+            kind: self.kind,
+            nright: self.nright,
+            keep: self.keep.clone(),
+        })))
+    }
+
+    /// The next row (with its level) or part.
+    fn step(&mut self, ctx: &ExecCtx) -> Result<Option<super::pipe::Item>> {
+        use super::pipe::Item;
         if self.merge && matches!(self.kind, JoinKind::Right | JoinKind::Full) {
             if self.unmatched_right.is_none() {
                 let rows = self.merge_outer(ctx)?;
                 self.merged = rows.into_iter();
                 self.unmatched_right = Some(Vec::new().into_iter());
             }
-            return Ok(self.merged.next());
+            return Ok(self.merged.next().map(|r| Item::Row(r, self.level)));
         }
         // ExecMergeJoin reads the outer side first: without rows, the inner side never
         // runs.
@@ -2968,7 +2997,17 @@ impl Node for HashJoinNode {
             };
             self.first = Some(l);
         }
+        // (Its probes in the workers of a parallel scan below, when it has one.)
+        if !self.tried && self.table.is_none() {
+            self.tried = true;
+            if let Some(p) = self.probe_stage(ctx)?
+                && let Some(l) = self.left.pipeline(vec![p], None, ctx)?
+            {
+                self.level = l + 1;
+            }
+        }
         self.build(ctx)?;
+        let level = self.level;
         loop {
             if let Some(it) = self.unmatched_right.as_mut() {
                 let rows = &self.table.as_ref().unwrap().rows;
@@ -2976,7 +3015,7 @@ impl Node for HashJoinNode {
                     if !self.matched[j] {
                         let mut out = vec![Value::Null; self.nleft];
                         out.extend(rows[j].iter().cloned());
-                        return Ok(Some(out));
+                        return Ok(Some(Item::Row(out, level)));
                     }
                 }
                 return Ok(None);
@@ -2984,6 +3023,13 @@ impl Node for HashJoinNode {
             if self.cur.is_none() {
                 let next = match self.first.take() {
                     Some(r) => Some(r),
+                    None if level != super::pipe::ALL => match self.left.next_item(ctx)? {
+                        None => None,
+                        Some(Item::Part(p)) => return Ok(Some(Item::Part(p))),
+                        // (Joined in the workers already.)
+                        Some(Item::Row(r, l)) if l >= level => return Ok(Some(Item::Row(r, l))),
+                        Some(Item::Row(r, _)) => Some(r),
+                    },
                     None => self.left.next(ctx)?,
                 };
                 match next {
@@ -2992,17 +3038,12 @@ impl Node for HashJoinNode {
                         // (The probe's key in one vector for all rows.)
                         let mut k = std::mem::take(&mut self.kbuf);
                         k.clear();
-                        for e in &self.lkeys {
-                            k.push(int_key(eval(e, &l, ctx)?, Some(e)));
+                        for (e, n) in self.lkeys.iter().zip(&self.lnorm) {
+                            k.push(super::pipe::norm(eval(e, &l, ctx)?, *n));
                         }
-                        let t = self.table.as_ref().unwrap();
-                        let cands = if k.iter().any(Value::is_null) {
-                            t.none.clone()
-                        } else {
-                            t.map.get(&k).unwrap_or(&t.none).clone()
-                        };
+                        let span = self.table.as_ref().unwrap().lookup(&k);
                         self.kbuf = k;
-                        self.cur = Some((l, cands, 0, false));
+                        self.cur = Some((l, span, 0, false));
                     }
                     None => {
                         if matches!(self.kind, JoinKind::Right | JoinKind::Full) {
@@ -3021,12 +3062,12 @@ impl Node for HashJoinNode {
                     }
                 }
             }
-            let (l, cands, i, matched) = self.cur.as_mut().unwrap();
-            while *i < cands.len() {
-                let j = cands[*i];
+            let (l, span, i, matched) = self.cur.as_mut().unwrap();
+            let t = self.table.as_ref().unwrap();
+            while *i < span.1 {
+                let j = t.cand(*span, *i);
                 *i += 1;
-                let rows = &self.table.as_ref().unwrap().rows;
-                let combined = concat_rows(l, &rows[j]);
+                let combined = super::pipe::joined(l, &t.rows[j], self.keep.as_deref());
                 if let Some(c) = &self.cond
                     && !eval_bool(c, &combined, ctx)?
                 {
@@ -3036,15 +3077,14 @@ impl Node for HashJoinNode {
                 self.matched[j] = true;
                 match self.kind {
                     JoinKind::Semi => {
-                        let out = l.clone();
-                        self.cur = None;
-                        return Ok(Some(out));
+                        let Some((l, ..)) = self.cur.take() else { unreachable!() };
+                        return Ok(Some(Item::Row(l, level)));
                     }
                     JoinKind::Anti => {
                         self.cur = None;
                         break;
                     }
-                    _ => return Ok(Some(combined)),
+                    _ => return Ok(Some(Item::Row(combined, level))),
                 }
             }
             let Some((l, _, _, matched)) = self.cur.take() else {
@@ -3055,11 +3095,55 @@ impl Node for HashJoinNode {
                     JoinKind::Left | JoinKind::Full => {
                         let mut out = l;
                         out.extend(std::iter::repeat_n(Value::Null, self.nright));
-                        return Ok(Some(out));
+                        return Ok(Some(Item::Row(out, level)));
                     }
-                    JoinKind::Anti => return Ok(Some(l)),
+                    JoinKind::Anti => return Ok(Some(Item::Row(l, level))),
                     _ => {}
                 }
+            }
+        }
+    }
+}
+
+impl Node for HashJoinNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        match self.step(ctx)? {
+            None => Ok(None),
+            Some(super::pipe::Item::Row(r, _)) => Ok(Some(r)),
+            Some(super::pipe::Item::Part(_)) => Err(crate::error::internal("parts from a join")),
+        }
+    }
+
+    fn next_item(&mut self, ctx: &ExecCtx) -> Result<Option<super::pipe::Item>> {
+        self.step(ctx)
+    }
+
+    fn pipeline(
+        &mut self,
+        above: Vec<Arc<super::pipe::Probe>>,
+        spec: Option<Arc<super::partial::Spec>>,
+        ctx: &ExecCtx,
+    ) -> Result<Option<u8>> {
+        if self.tried || self.table.is_some() {
+            return Ok(None);
+        }
+        let with_spec = spec.is_some();
+        let Some(p) = self.probe_stage(ctx)? else {
+            self.tried = !with_spec;
+            return Ok(None);
+        };
+        let mut stages = vec![p];
+        stages.extend(above);
+        match self.left.pipeline(stages, spec, ctx)? {
+            Some(l) => {
+                self.tried = true;
+                self.level = l + 1;
+                Ok(Some(l + 1))
+            }
+            None => {
+                // (Without the aggregation it may still start on its own.)
+                self.tried = !with_spec;
+                Ok(None)
             }
         }
     }
@@ -3082,21 +3166,18 @@ struct RightSemiNode {
 impl RightSemiNode {
     fn run(&self, ctx: &ExecCtx) -> Result<Vec<Row>> {
         let rows = collect(&self.left, ctx, None)?;
-        let built = build_hash(rows, &self.lkeys, self.nbuckets, self.anti, false, ctx)?;
+        let (lnorm, rnorm) = super::pipe::norms(&self.lkeys, &self.rkeys);
+        let built = build_hash(rows, &self.lkeys, &lnorm, self.nbuckets, self.anti, false, ctx)?;
         let rows = &built.rows;
         let mut emitted = vec![false; rows.len()];
         let mut out = Vec::new();
         let mut right = open(&self.right, ctx)?;
         while let Some(r) = right.next(ctx)? {
             ctx.check()?;
-            let k = int_keys(eval_all(&self.rkeys, &r, ctx)?, &self.rkeys);
-            if k.iter().any(Value::is_null) {
-                continue;
-            }
-            let Some(cands) = built.map.get(&k) else {
-                continue;
-            };
-            for &j in cands.iter() {
+            let k = normed(eval_all(&self.rkeys, &r, ctx)?, &rnorm);
+            let span = built.lookup(&k);
+            for c in 0..span.1 {
+                let j = built.cand(span, c);
                 if emitted[j] {
                     continue;
                 }

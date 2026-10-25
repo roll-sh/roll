@@ -2169,6 +2169,37 @@ pub struct AggState {
     /// The input arrives sorted for this aggregate (its DISTINCT / ORDER BY): rows go to
     /// the transition function as they come (DISTINCT: the last one fed, to skip repeats).
     presorted: Option<Option<Vec<Value>>>,
+    /// A DISTINCT aggregate whose result doesn't depend on its rows' order (`hash_distinct`):
+    /// the values fed so far, each fed once, as they come.
+    seen: Option<super::fasthash::HashSet<Value>>,
+}
+
+/// Whether DISTINCT aggregate `a` can skip the sort Postgres does for it: its result is the
+/// same in any order (counts, exact sums and averages) and its argument's equality is the
+/// values' own (`Value`'s, which their hash agrees with: no collation that isn't
+/// deterministic, no bpchar padding, scalar types).
+pub fn hash_distinct(a: &AggCall) -> bool {
+    use crate::types::DataType as D;
+    if !a.distinct || !a.order_by.is_empty() || a.user.is_some() || a.args.len() != 1 || a.def.kind.is_ordered() {
+        return false;
+    }
+    if matches!(&a.args[0], crate::sql::expr::Expr::Collate(..)) {
+        return false;
+    }
+    let exact = |t: &D| matches!(t, D::Int2 | D::Int4 | D::Int8 | D::Numeric(_));
+    let Some(t) = a.arg_types.first() else { return false };
+    match a.def.sig.name {
+        "count" => {
+            exact(t)
+                || matches!(
+                    t,
+                    D::Float4 | D::Float8 | D::Date | D::Timestamp(_) | D::Timestamptz(_) | D::Bool | D::Uuid | D::Oid
+                )
+                || matches!(t, D::Text | D::Varchar(_))
+        }
+        "sum" | "avg" => exact(t),
+        _ => false,
+    }
 }
 
 /// Aggregates that share another's transition state (`find_compatible_trans`): the same
@@ -2237,11 +2268,13 @@ pub fn new_state(call: &AggCall, direct: Vec<Value>) -> Result<AggState> {
     } else {
         None
     };
+    let seen = hash_distinct(call).then(Default::default);
     Ok(AggState {
         acc,
-        buffered,
+        buffered: if seen.is_some() { None } else { buffered },
         hypothetical,
         presorted: None,
+        seen,
     })
 }
 
@@ -2250,6 +2283,15 @@ pub fn feed(call: &AggCall, st: &mut AggState, row: &[Value], ctx: &ExecCtx) -> 
     if let Some(f) = &call.filter
         && !crate::sql::expr::eval_bool(f, row, ctx)?
     {
+        return Ok(());
+    }
+    if let Some(seen) = &mut st.seen {
+        let v = eval(&call.args[0], row, ctx)?;
+        if (call.def.skip_nulls && v.is_null()) || seen.contains(&v) {
+            return Ok(());
+        }
+        st.acc.add(std::slice::from_ref(&v), ctx)?;
+        seen.insert(v);
         return Ok(());
     }
     // (One argument straight to the transition: no vector per row; a column not even
@@ -2556,20 +2598,64 @@ impl AggNode {
         let Some(plan) = &self.plan else {
             return Ok((0..n).collect());
         };
-        let est = super::pghash::estimated_rows(plan, ctx);
-        Ok(hashed.order(est, self.groups.len() + self.aggs.len(), ctx))
+        let e = super::pghash::agg_estimate(plan, ctx);
+        if let Some(keys_sorted) = &e.sorted {
+            // A GroupAggregate: its groups in the order its input is sorted on.
+            let sk: Vec<(usize, SortKey)> = keys_sorted
+                .iter()
+                .filter(|(i, _, _)| *i < self.groups.len())
+                .map(|&(i, desc, nulls_first)| {
+                    (
+                        i,
+                        SortKey {
+                            expr: crate::sql::expr::Expr::Col(i, self.groups[i].ty()),
+                            desc,
+                            nulls_first,
+                            using: None,
+                        },
+                    )
+                })
+                .collect();
+            let mut idx: Vec<usize> = (0..n).collect();
+            let mut f = |a: &usize, b: &usize| -> Result<Ordering> {
+                for (i, k) in &sk {
+                    match super::nodes::compare_values(&keys[*a][*i], &keys[*b][*i], k, ctx)? {
+                        Ordering::Equal => {}
+                        o => return Ok(o),
+                    }
+                }
+                Ok(Ordering::Equal)
+            };
+            let mut cmp = super::pgsort::Cmp::new(&mut f);
+            super::pgsort::pg_qsort(&mut idx, &mut cmp);
+            if let Some(e) = cmp.err {
+                return Err(e);
+            }
+            return Ok(idx);
+        }
+        let (est, width) = (e.rows, e.input_width);
+        let (num_trans, trans_space) = crate::sql::paths::parallel::agg_transitions(&self.aggs);
+        let sizing = super::pghash::AggSizing {
+            input_width: width,
+            num_trans,
+            trans_space,
+            num_hashes: 1,
+            total_groups: est,
+        };
+        Ok(hashed.order(sizing.nbuckets(est, super::pghash::hash_mem(ctx))))
     }
 
-    /// The input's rows aggregated in parts by a parallel scan (`partial`), when the input
-    /// is one that can and every key and aggregate can be: kernels for the keys and
-    /// arguments, exact aggregates without DISTINCT, ORDER BY, FILTER or direct arguments.
-    fn partial_run(&self, input: &mut BoxNode, ctx: &ExecCtx) -> Result<Option<super::parscan::PartialRun>> {
+    /// Whether the input's rows come aggregated in parts by a parallel scan (`partial`,
+    /// through hash join probes in its workers, `pipe`): when the input is one that can and
+    /// every key and aggregate can be: kernels for the keys and arguments, exact
+    /// aggregates without DISTINCT, ORDER BY, FILTER or direct arguments.
+    fn partial_run(&self, input: &mut BoxNode, ctx: &ExecCtx) -> Result<bool> {
         use super::kernel::compile;
         if ctx.instrumented() || self.split(ctx) {
-            return Ok(None);
+            return Ok(false);
         }
         let Some(keys) = self.groups.iter().map(compile).collect::<Option<Vec<_>>>() else {
-            return Ok(None);
+            return Ok(false);
         };
         let mut aggs = Vec::with_capacity(self.aggs.len());
         for a in &self.aggs {
@@ -2581,21 +2667,22 @@ impl AggNode {
                 || a.def.kind.is_ordered()
                 || a.args.len() > 1
             {
-                return Ok(None);
+                return Ok(false);
             }
             let Some(empty) = new_state(a, Vec::new())?.acc.partial() else {
-                return Ok(None);
+                return Ok(false);
             };
             let arg = match a.args.first() {
                 Some(e) => match compile(e) {
                     Some(k) => Some(k),
-                    None => return Ok(None),
+                    None => return Ok(false),
                 },
                 None => None,
             };
             aggs.push((arg, a.def.skip_nulls, empty));
         }
-        input.partials(Arc::new(super::partial::Spec { keys, aggs }), ctx)
+        let spec = Arc::new(super::partial::Spec { keys, aggs });
+        Ok(input.pipeline(Vec::new(), Some(spec), ctx)?.is_some())
     }
 
     /// A new group's aggregate states; direct arguments see the group's key.
@@ -2639,6 +2726,7 @@ impl AggNode {
             // the filter, which might keep rows whose sort keys fail to evaluate.)
             let presortable = |a: &AggCall| {
                 (a.distinct || !a.order_by.is_empty())
+                    && !hash_distinct(a)
                     && (a.filter.is_none()
                         || a.args.iter().chain(a.order_by.iter().map(|k| &k.expr)).all(|e| {
                             let mut e = e;
@@ -2692,6 +2780,26 @@ impl AggNode {
                     }
                     keys
                 });
+            // A GroupAggregate over a Sort (which the plan here doesn't run): its
+            // aggregates see each group's rows in the sort's order, which aggregates whose
+            // results depend on their rows' order (float sums, array_agg, ties of min /
+            // max) show.
+            let presort = presort.or_else(|| {
+                let e = super::pghash::agg_estimate(self.plan.as_ref()?, ctx);
+                let sorted = e.presort.as_ref()?;
+                (!self.groups.is_empty() && !self.aggs.iter().all(order_insensitive)).then(|| {
+                    sorted
+                        .iter()
+                        .filter(|(i, _, _)| *i < self.groups.len())
+                        .map(|&(i, desc, nulls_first)| SortKey {
+                            expr: self.groups[i].clone(),
+                            desc,
+                            nulls_first,
+                            using: None,
+                        })
+                        .collect()
+                })
+            });
             if let Some(keys) = presort {
                 let mut rows = Vec::new();
                 while let Some(r) = input.next(ctx)? {
@@ -2706,10 +2814,7 @@ impl AggNode {
             let mut ghash: Vec<u32> = Vec::new();
             let nondet = colls.iter().any(Option::is_some);
             // A parallel scan below aggregating its rows in parts (`partial`).
-            let mut run = match presorted_agg.is_none() && !nondet {
-                true => self.partial_run(&mut input, ctx)?,
-                false => None,
-            };
+            let parts = presorted_agg.is_none() && !nondet && self.partial_run(&mut input, ctx)?;
             // A group's first row (key `$key`, its hash key `$hkey`): its index.
             macro_rules! new_group {
                 ($key:expr, $hkey:expr) => {{
@@ -2737,11 +2842,11 @@ impl AggNode {
             // (The key is made in one vector, copied only for a new group.)
             let mut key: Vec<Value> = Vec::with_capacity(self.groups.len());
             loop {
-                let row = match &mut run {
-                    Some(r) => match r.next(ctx)? {
+                let row = match parts {
+                    true => match input.next_item(ctx)? {
                         None => break,
-                        Some(super::parscan::PartialItem::Row(row)) => row,
-                        Some(super::parscan::PartialItem::Part(p)) => {
+                        Some(super::pipe::Item::Row(row, _)) => row,
+                        Some(super::pipe::Item::Part(p)) => {
                             // Its groups in their order of appearance (the serial order:
                             // the part's rows come before the later ones), each row's
                             // lookup, then its states added.
@@ -2769,7 +2874,7 @@ impl AggNode {
                             continue;
                         }
                     },
-                    None => match input.next(ctx)? {
+                    false => match input.next(ctx)? {
                         Some(row) => row,
                         None => break,
                     },
@@ -2911,6 +3016,17 @@ impl AggNode {
             (0..sets.len()).filter(|&i| sets[i].is_empty()).map(|i| (i, Vec::new())).collect();
         order.extend(hashed_sets_order(sets));
         let red = self.redundant_keys(ctx);
+        // (The hash tables share the memory limit, sized for all their groups.)
+        let width = self.plan.as_ref().map_or(0.0, |p| super::pghash::agg_estimate(p, ctx).input_width);
+        let (num_trans, trans_space) = crate::sql::paths::parallel::agg_transitions(&self.aggs);
+        let hashed_sets: Vec<usize> = (0..sets.len()).filter(|&i| !sets[i].is_empty()).collect();
+        let sizing = |e: &[f64]| super::pghash::AggSizing {
+            input_width: width,
+            num_trans,
+            trans_space,
+            num_hashes: hashed_sets.len(),
+            total_groups: hashed_sets.iter().map(|&i| e[i]).sum(),
+        };
         let mut out = Vec::new();
         for (si, key_cols) in order {
             let set = &key_cols;
@@ -2946,7 +3062,7 @@ impl AggNode {
             }
             let idx: Vec<usize> = match &estimates {
                 Some(e) if !set.is_empty() && groups.len() > 1 => {
-                    hashed.order(e[si], set.len() + self.aggs.len(), ctx)
+                    hashed.order(sizing(e).nbuckets(e[si], super::pghash::hash_mem(ctx)))
                 }
                 _ => (0..groups.len()).collect(),
             };
@@ -3058,6 +3174,24 @@ impl Node for AggNode {
             self.out = rows.into_iter();
         }
         Ok(self.out.next())
+    }
+}
+
+/// Whether an aggregate's result is the same whatever order its rows come in (counts,
+/// exact sums and averages, min / max of types whose equal values are the same).
+fn order_insensitive(a: &AggCall) -> bool {
+    use crate::types::DataType as D;
+    if a.user.is_some() || a.distinct || !a.order_by.is_empty() {
+        return a.user.is_none() && (a.distinct || !a.order_by.is_empty());
+    }
+    let arg = a.arg_types.first();
+    match a.def.sig.name {
+        "count" | "bool_and" | "bool_or" | "every" | "bit_and" | "bit_or" | "bit_xor" => true,
+        "sum" | "avg" => arg.is_some_and(|t| matches!(t, D::Int2 | D::Int4 | D::Int8 | D::Numeric(_))),
+        "min" | "max" => arg.is_some_and(|t| {
+            matches!(t, D::Int2 | D::Int4 | D::Int8 | D::Date | D::Timestamp(_) | D::Timestamptz(_) | D::Oid | D::Bool)
+        }),
+        _ => false,
     }
 }
 

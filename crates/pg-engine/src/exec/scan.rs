@@ -1690,6 +1690,7 @@ impl ScanNode {
     fn start_parallel(
         &mut self,
         spec: Option<Arc<super::partial::Spec>>,
+        stages: Vec<Arc<super::pipe::Probe>>,
         ctx: &ExecCtx,
     ) -> Result<Option<super::parscan::ParScan>> {
         use super::parscan::{Decode, ParScan, split_keys};
@@ -1751,30 +1752,81 @@ impl ScanNode {
             filter: p.filter.as_ref().and_then(super::kernel::compile),
             filtered: p.filter.is_some(),
             spec,
+            stages,
         };
 
         Ok(ParScan::start(scans, workers, pool, d))
     }
 }
 
+impl ScanNode {
+    /// A parallel scan's next row (with its level) or part.
+    fn next_par(&mut self, ctx: &ExecCtx) -> Result<Option<super::pipe::Item>> {
+        use super::parscan::Piece;
+        let par = self.par.as_mut().unwrap();
+        loop {
+            ctx.check()?;
+            let Some(piece) = par.next_piece()? else {
+                if let StatTarget::Seq(t) = self.stat {
+                    super::pgstat::count_returned(ctx, t, par.trailing() as i64);
+                }
+                return Ok(None);
+            };
+            match piece {
+                Piece::Part(p) => {
+                    if let StatTarget::Seq(t) = self.stat {
+                        super::pgstat::count_returned(ctx, t, p.read as i64);
+                    }
+                    return Ok(Some(super::pipe::Item::Part(p)));
+                }
+                Piece::Row(row, lvl, done, read) => {
+                    // (Rows the workers' filter or joins dropped were read all the same.)
+                    if let StatTarget::Seq(t) = self.stat {
+                        super::pgstat::count_returned(ctx, t, read as i64);
+                    }
+                    if !done
+                        && let Some(f) = &self.plan.filter
+                        && !eval_bool(f, &row, ctx)?
+                    {
+                        ctx.filtered(self.key);
+                        continue;
+                    }
+                    if lvl == 0 {
+                        self.emitted += 1;
+                    }
+                    return Ok(Some(super::pipe::Item::Row(row, lvl)));
+                }
+            }
+        }
+    }
+}
+
 impl Node for ScanNode {
-    fn partials(
+    fn pipeline(
         &mut self,
-        spec: Arc<super::partial::Spec>,
+        above: Vec<Arc<super::pipe::Probe>>,
+        spec: Option<Arc<super::partial::Spec>>,
         ctx: &ExecCtx,
-    ) -> Result<Option<super::parscan::PartialRun>> {
-        if self.par_tried || self.emitted > 0 || self.sorted.is_some() || self.streamed {
+    ) -> Result<Option<u8>> {
+        if self.par_tried || self.emitted > 0 || self.sorted.is_some() || self.streamed || self.plan.limit.is_some() {
             return Ok(None);
         }
-        let Some(par) = self.start_parallel(Some(spec), ctx)? else {
+        if above.is_empty() && spec.is_none() {
+            return Ok(None);
+        }
+        let Some(par) = self.start_parallel(spec, above, ctx)? else {
             return Ok(None);
         };
         self.par_tried = true;
-        let stat = match self.stat {
-            StatTarget::Seq(t) => Some(t),
-            _ => None,
-        };
-        Ok(Some(super::parscan::PartialRun::new(par, stat, self.plan.filter.clone(), self.key)))
+        self.par = Some(par);
+        Ok(Some(0))
+    }
+
+    fn next_item(&mut self, ctx: &ExecCtx) -> Result<Option<super::pipe::Item>> {
+        if self.par.is_some() {
+            return self.next_par(ctx);
+        }
+        Ok(self.next(ctx)?.map(|r| super::pipe::Item::Row(r, super::pipe::ALL)))
     }
 
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
@@ -1784,32 +1836,15 @@ impl Node for ScanNode {
         if !self.par_tried {
             self.par_tried = true;
             if self.sorted.is_none() && !self.streamed {
-                self.par = self.start_parallel(None, ctx)?;
+                self.par = self.start_parallel(None, Vec::new(), ctx)?;
             }
         }
-        if let Some(par) = &mut self.par {
-            loop {
-                ctx.check()?;
-                let Some((row, done, skipped)) = par.next_row()? else {
-                    if let StatTarget::Seq(t) = self.stat {
-                        super::pgstat::count_returned(ctx, t, par.trailing() as i64);
-                    }
-                    return Ok(None);
-                };
-                // (Rows the workers' filter dropped were read all the same.)
-                if let StatTarget::Seq(t) = self.stat {
-                    super::pgstat::count_returned(ctx, t, skipped as i64 + 1);
-                }
-                if !done
-                    && let Some(f) = &self.plan.filter
-                    && !eval_bool(f, &row, ctx)?
-                {
-                    ctx.filtered(self.key);
-                    continue;
-                }
-                self.emitted += 1;
-                return Ok(Some(row));
-            }
+        if self.par.is_some() {
+            return match self.next_par(ctx)? {
+                None => Ok(None),
+                Some(super::pipe::Item::Row(r, _)) => Ok(Some(r)),
+                Some(super::pipe::Item::Part(_)) => Err(crate::error::internal("parts from a scan")),
+            };
         }
         loop {
             ctx.check()?;

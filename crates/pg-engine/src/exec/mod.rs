@@ -12,6 +12,7 @@ pub mod partial;
 pub mod nodes;
 pub mod scan;
 pub mod pghash;
+pub mod pipe;
 pub mod pgstat;
 pub mod pgsort;
 pub mod sizing;
@@ -65,14 +66,23 @@ pub trait Node {
     /// Rows of the children for this (parent) DML node's transition tables.
     fn add_captured(&mut self, _rows: Vec<trigger::AfterRow>) {}
 
-    /// This node's rows aggregated as `spec` says off the executor's thread (`partial`),
-    /// when it can (a parallel scan that hasn't started): then its rows come from the run.
-    fn partials(
+    /// Run this node's rows as a pipeline in a parallel scan's workers (`pipe`), when it
+    /// can (a parallel scan below that hasn't started, through nodes that can be stages):
+    /// the scan's workers run the hash join probes `above` (bottom first) after this
+    /// node's own, and aggregate the rows coming out of the last as `spec` says
+    /// (`partial`). Some(the level of this node's own rows): then `next_item` gives them.
+    fn pipeline(
         &mut self,
-        _spec: Arc<partial::Spec>,
+        _above: Vec<Arc<pipe::Probe>>,
+        _spec: Option<Arc<partial::Spec>>,
         _ctx: &ExecCtx,
-    ) -> Result<Option<parscan::PartialRun>> {
+    ) -> Result<Option<u8>> {
         Ok(None)
+    }
+
+    /// The next row, with the stages it has been through, or part (after `pipeline`).
+    fn next_item(&mut self, ctx: &ExecCtx) -> Result<Option<pipe::Item>> {
+        Ok(self.next(ctx)?.map(|r| pipe::Item::Row(r, pipe::ALL)))
     }
 }
 
@@ -241,6 +251,8 @@ pub struct ExecCtx<'a> {
     pub need: Cell<Option<Rc<[bool]>>>,
     /// Planner estimates the executor sizes hash tables by, per plan node.
     pub estimates: RefCell<HashMap<usize, f64>>,
+    /// The planner's view of aggregation and grouping nodes (`pghash::agg_estimate`).
+    pub agg_estimates: RefCell<HashMap<usize, Rc<pghash::AggEstimate>>>,
     /// Correlated EXISTS subqueries run as hashed lookups (by subquery id; None: not
     /// convertible).
     exists_hash: RefCell<HashMap<usize, Option<Rc<ExistsHash>>>>,
@@ -553,6 +565,7 @@ impl<'a> ExecCtx<'a> {
             sort_bound: Cell::new(None),
             need: Cell::new(None),
             estimates: RefCell::default(),
+            agg_estimates: RefCell::default(),
             exists_hash: RefCell::default(),
             scalar_hash: RefCell::default(),
             sys_cols: RefCell::default(),
@@ -666,6 +679,7 @@ impl<'a> ExecCtx<'a> {
             sort_bound: Cell::new(None),
             need: Cell::new(None),
             estimates: RefCell::default(),
+            agg_estimates: RefCell::default(),
             exists_hash: RefCell::default(),
             scalar_hash: RefCell::default(),
             sys_cols: RefCell::default(),

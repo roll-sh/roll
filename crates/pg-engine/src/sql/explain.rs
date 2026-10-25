@@ -402,6 +402,29 @@ enum Detail {
     /// A MERGE's tuples inserted, updated, deleted and skipped under ANALYZE (by its
     /// source's key).
     MergeTuples(usize),
+    /// A sorted grouping (GroupAggregate, Group): the group keys its input is sorted on, in
+    /// order (key, descending, NULLS FIRST; `sort_dir`). Not shown: what the executor
+    /// emits its groups by. (Here rather than a field: `ExNode`s fill big stack frames.)
+    GroupSort(Vec<(usize, bool, bool)>),
+}
+
+/// Set a node's `Detail::GroupSort` (none: empty).
+fn put_group_sort(details: &mut Vec<Detail>, keys: Vec<(usize, bool, bool)>) {
+    details.retain(|d| !matches!(d, Detail::GroupSort(_)));
+    if !keys.is_empty() {
+        details.push(Detail::GroupSort(keys));
+    }
+}
+
+/// A node's `Detail::GroupSort` (empty: none).
+fn group_sort_of(details: &[Detail]) -> Vec<(usize, bool, bool)> {
+    details
+        .iter()
+        .find_map(|d| match d {
+            Detail::GroupSort(k) => Some(k.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 impl Detail {
@@ -13255,6 +13278,15 @@ impl Builder<'_, '_> {
             if !groups.is_empty() {
                 n.strategy = Some("Sorted");
                 n.title = "GroupAggregate".into();
+                let keys = presort_idx
+                    .iter()
+                    .filter(|i| !redundant.get(**i).copied().unwrap_or(false))
+                    .map(|&i| {
+                        let (d, nf) = sort_dir(&sfx_of(i));
+                        (i, d, nf)
+                    })
+                    .collect();
+                put_group_sort(&mut n.details, keys);
                 n.details.push(Detail::List("Group Key", keys_ref(self, &presort_idx)));
                 // (Its groups come out in the keys' order.)
                 n.order = keys_sfx(self, &presort_idx);
@@ -13690,6 +13722,13 @@ impl Builder<'_, '_> {
                     ord.into_iter().filter(|(i, _)| !redundant.get(*i).copied().unwrap_or(false)).collect();
                 let group_names: Vec<String> = ord.iter().map(|(i, _)| names_all[*i].clone()).collect();
                 let keys_ord: Vec<String> = ord.iter().map(|(i, sfx)| names_all[*i].clone() + sfx).collect();
+                let group_sort: Vec<(usize, bool, bool)> = ord
+                    .iter()
+                    .map(|(i, sfx)| {
+                        let (d, nf) = sort_dir(sfx);
+                        (*i, d, nf)
+                    })
+                    .collect();
                 let ord: Vec<usize> = ord.iter().map(|o| o.0).collect();
                 if oi == 0
                     && let Some((pi, others, rel_rows)) = &gather_in
@@ -13764,6 +13803,7 @@ impl Builder<'_, '_> {
                 }
                 let mut ga = n.clone();
                 ga.strategy = Some("Sorted");
+                put_group_sort(&mut ga.details, group_sort.clone());
                 ga.details.retain(|d| !matches!(d, Detail::HashAggInfo));
                 for d in &mut ga.details {
                     if let Detail::List("Group Key", k) = d {
@@ -17797,6 +17837,7 @@ impl Render<'_> {
                 | Detail::HeapFetches(_)
                 | Detail::HeapBlocks(_)
                 | Detail::MergeTuples(_)
+                | Detail::GroupSort(_)
                 | Detail::MemoizeInfo => {}
             }
         }
@@ -17997,6 +18038,20 @@ fn estimate_builder<'c, 'a>(plan: &Arc<Plan>, ctx: &'c ExecCtx<'a>, o: &'c Optio
     }
 }
 
+/// A sort key's direction from the suffix EXPLAIN shows after it (" DESC", " NULLS
+/// FIRST", …): (descending, NULLS FIRST).
+fn sort_dir(sfx: &str) -> (bool, bool) {
+    let desc = sfx.contains(" DESC");
+    let nulls_first = if sfx.contains("NULLS FIRST") {
+        true
+    } else if sfx.contains("NULLS LAST") {
+        false
+    } else {
+        desc
+    };
+    (desc, nulls_first)
+}
+
 /// A plan's estimates as EXPLAIN makes them (the planner sizes FROM items it can't plan
 /// itself this way).
 pub struct PlanEstimate {
@@ -18004,6 +18059,12 @@ pub struct PlanEstimate {
     pub startup: f64,
     pub total: f64,
     pub width: u32,
+    /// The top node's first child's row width (a hashed aggregation's input width).
+    pub input_width: u32,
+    /// The top node's first child's type ("Sort", …; "": none).
+    pub input_type: &'static str,
+    /// A sorted grouping on top: the group keys its input is sorted on (`ExNode::group_sort`).
+    pub group_sort: Option<Vec<(usize, bool, bool)>>,
     /// The top node's type.
     pub node_type: &'static str,
     /// An Incremental Sort on top: its presorted keys.
@@ -18955,19 +19016,27 @@ fn level_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> ExNode {
 }
 
 pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
-    estimate_in(plan, ctx, false)
+    estimate_in(plan, ctx, false, true)
 }
 
 /// `estimate` of a sub-select's plan (a level of its own): every `Outer(d, ..)` in it is a
 /// value of an enclosing level, so a sub-select of it reading only those is an InitPlan its
 /// top node pays for once (SS_charge_for_initplans), not a SubPlan run per row.
 pub fn estimate_subquery(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
-    estimate_in(plan, ctx, true)
+    estimate_in(plan, ctx, true, true)
 }
 
-fn estimate_in(plan: &Arc<Plan>, ctx: &ExecCtx, sublevel: bool) -> PlanEstimate {
+/// `estimate` of the plan Postgres would make without parallel workers (its serial plan).
+pub fn estimate_serial(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
+    estimate_in(plan, ctx, false, false)
+}
+
+fn estimate_in(plan: &Arc<Plan>, ctx: &ExecCtx, sublevel: bool, parallel: bool) -> PlanEstimate {
     let o = estimate_options();
     let mut b = estimate_builder(plan, ctx, &o);
+    if !parallel {
+        b.par = None;
+    }
     if sublevel {
         b.outer_depth = vec![usize::MAX; 16];
     }
@@ -18994,6 +19063,9 @@ fn estimate_in(plan: &Arc<Plan>, ctx: &ExecCtx, sublevel: bool) -> PlanEstimate 
         startup: n.startup_cost,
         total: n.total_cost,
         width: n.width,
+        input_width: n.children.first().map_or(0, |c| c.width),
+        input_type: n.children.first().map_or("", |c| c.node_type),
+        group_sort: (n.strategy == Some("Sorted") || n.node_type == "Group").then(|| group_sort_of(&n.details)),
         node_type: n.node_type,
         presorted,
         disabled: parallel::disabled_nodes(&n),

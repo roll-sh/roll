@@ -501,6 +501,176 @@ its workers' order differ from its parallel plan; they equal `max_parallel_worke
   showed an old difference from PostgreSQL, not this round's: `GROUP BY k % 50` over the 2M
   rows comes out in another hash order than PostgreSQL's, from both engines.)
 
+## Round 19 (agent 48): joins, DISTINCT aggregates, sorts; hash order fixes
+
+The same harness and settings, on cores 8–11 (both servers) and 12–15 (the client), the
+machine as busy as in round 18 (load 25–35; PostgreSQL's times are within 0.6–1.2x of round
+18's). **pg** is PostgreSQL 18.6 (container `a48-pg`); **before** the engine at `52f786e`;
+**after** this round's; each engine run after a restart and a first read of the big tables
+(a table loaded by the running process keeps its heap model and isn't scanned in parallel:
+see "Where analytic work is still slower"); medians of 3, the better of two interleaved runs
+per side; **spread** the larger of the two sides' run-to-run differences (one run of each
+shared the machine with a difftest run).
+
+### Analytic, 2M rows
+
+| query | pg | before | after | after / pg | after / before | spread |
+|---|---|---|---|---|---|---|
+| filtered scan | 0.102 | 0.246 | 0.276 | 0.37x | 0.9x | 47% |
+| full sort, float | 1.238 | 2.413 | 2.482 | 0.50x | 1.0x | 42% |
+| full sort, text | 1.030 | 3.032 | 2.371 | 0.43x | 1.3x | 41% |
+| top-100 | 0.145 | 0.417 | 0.453 | 0.32x | 0.9x | 50% |
+| hash aggregate (1000 groups) | 0.211 | 0.642 | 0.393 | 0.54x | 1.6x | 109% |
+| count(DISTINCT) | 0.624 | 3.617 | 0.518 | **1.20x** | 7.0x | 96% |
+| hash join + aggregate | 0.384 | 2.176 | 0.720 | 0.53x | 3.0x | 54% |
+| window functions | 1.921 | 4.927 | 4.878 | 0.39x | 1.0x | 37% |
+| index range (49k rows) | 0.011 | 0.081 | 0.097 | 0.11x | 0.8x | 32% |
+| numeric sum / avg | 0.143 | 0.263 | 0.209 | 0.68x | 1.3x | 84% |
+
+### TPC-H SF1
+
+| query | pg | before | after | after / pg | after / before | spread |
+|---|---|---|---|---|---|---|
+| q01 | 2.361 | 8.437 | 8.127 | 0.29x | 1.0x | 9% |
+| q02 | 0.326 | 1.430 | 1.295 | 0.25x | 1.1x | 23% |
+| q03 | 0.518 | 7.171 | 7.114 | 0.07x | 1.0x | 26% |
+| q04 | 0.221 | 3.281 | 3.367 | 0.07x | 1.0x | 41% |
+| q05 | 0.399 | 2.733 | 2.950 | 0.14x | 0.9x | 12% |
+| q06 | 0.507 | 0.943 | 1.022 | 0.50x | 0.9x | 36% |
+| q07 | 0.436 | 5.267 | 5.144 | 0.08x | 1.0x | 17% |
+| q08 | 0.207 | 1.366 | 1.446 | 0.14x | 0.9x | 18% |
+| q09 | 1.508 | 11.99 | 10.19 | 0.15x | 1.2x | 31% |
+| q10 | 0.689 | 6.389 | 5.672 | 0.12x | 1.1x | 7% |
+| q11 | 0.117 | 0.359 | 0.336 | 0.35x | 1.1x | 16% |
+| q12 | 0.624 | 8.100 | 7.234 | 0.09x | 1.1x | 7% |
+| q13 | 1.161 | 5.710 | 4.949 | 0.23x | 1.2x | 27% |
+| q14 | 0.239 | 1.536 | 1.400 | 0.17x | 1.1x | 21% |
+| q15 | 0.473 | 0.988 | 0.971 | 0.49x | 1.0x | 26% |
+| q16 | 0.379 | 2.869 | 2.363 | 0.16x | 1.2x | 10% |
+| q17 | 1.178 | 3.461 | 3.226 | 0.37x | 1.1x | 29% |
+| q18 | 2.823 | 5.383 | 4.027 | 0.70x | 1.3x | 20% |
+| q19 | 0.083 | 0.445 | 0.413 | 0.20x | 1.1x | 34% |
+| q20 | 0.129 | 2.973 | 2.754 | 0.05x | 1.1x | 26% |
+| q21 | 0.548 | 6.342 | 2.670 | 0.21x | 2.4x | 9% |
+| q22 | 0.200 | 1.392 | 1.275 | 0.16x | 1.1x | 6% |
+| all 22 | 15.13 | 88.6 | 78.0 | 0.19x | 1.14x | |
+
+Every result hash agrees with PostgreSQL's, as in round 18 (the two float sums PostgreSQL adds
+in its parallel workers' order equal its serial plan's digit for digit). Changes under 30% are
+within this machine's noise; the clear gains are count(DISTINCT), the hash join, the hash
+aggregate and q21.
+
+### What changed
+
+1. **Hash join probes in the scan's workers** (`exec/pipe.rs`, PostgreSQL's Parallel Hash
+   Join, its probe side). A hash join (inner, left, semi, anti; not a merge join's, not one
+   returning unmatched inner rows) whose outer keys and condition compile to kernels builds
+   its table on the executor's thread as before, then shares it read-only (`pipe::Built`,
+   in an `Arc`) with the workers of a parallel scan below it, which probe it for every row
+   they read and filter, in the scan's order. Joins over joins stack their probes the same way
+   (`pipe::Probe` stages, bottom first: `Node::pipeline` asks down the tree), and an
+   aggregation above them aggregates the joined rows in parts (`partial`) without making
+   them: the condition and the partial aggregates read the outer and inner rows in place
+   (`pipe::Joined`, `kernel::Cols`), and groups are looked up by borrowed keys
+   (`hashbrown`'s `Equivalent`: no shared refcounts touched per row). Every row comes to the
+   executor's thread tagged with the stages it went through (`pipe::Item`); one a kernel
+   left to `eval` (a key, the condition) comes out of the stage before, in its place, and the
+   join node it belongs to runs it as the serial join does, so errors come at the same row.
+   The scan's statistics count each scan row once, at the first item it produced.
+2. **Joined rows copy only what's read** (`pipe::joined`, `HashJoinNode::keep`): a join's
+   output columns nothing above reads stay NULL (the need mask, plus the join condition's
+   columns), serial or parallel; candidate lists are ranges of one array, not `Rc` lists.
+3. **A map of its own for single-integer join keys** (`pipe::KeyMap::Int`): when every inner
+   key is one int8 (any integer type, normalised), keys are `i64` in a map keyed by them.
+4. **DISTINCT aggregates without a sort** (`agg::hash_distinct`): count(DISTINCT x) over
+   integers, numerics, floats, dates and times, booleans, uuids, text in a deterministic
+   collation, and sum / avg(DISTINCT x) over integers and numerics give the same result in
+   any order, so each group keeps the values seen in a hash set and feeds each once, as the
+   rows come (no input buffered and sorted). The groups' order stays the GroupAggregate's.
+5. **Sorts**: numeric keys encode as order-preserving bytes (`fastsort::numeric_key`: the
+   decimal exponent and significant digits, so 1.0 and 1.00 are equal); and when rows with
+   equal keys differ, PostgreSQL's quicksort (`pgsort::tuplesort`) now runs over the encoded
+   bytes rather than over `Value`s (the same comparisons' outcomes, so the same order).
+
+### Correctness fixes (each with tests; observable before)
+
+- **Hash aggregation's group order** (the `GROUP BY k % 50` order round 18 found): the hash
+  table model was sized with a rough entry width and the largest power of two that fits
+  hash_mem; PostgreSQL 18 sizes it from hash_agg_entry_size (the input's width, the
+  transition states and their space: `paths::parallel::agg_transitions`), takes half of what
+  fits the memory limit (`hash_choose_num_buckets`' `>>= 1`), and takes the spill partitions'
+  buffers out of that limit when it expects to spill (`pghash::AggSizing`). Grouping sets
+  share the limit among their tables; a HashSetOp's table is sized for its estimate, capped
+  at what hash_mem holds of its entries (`pghash::setop_nbuckets`). Of 19 probe queries over
+  the 2M-row table (hashed groupings, DISTINCT, set operations, grouping sets, other key
+  types, work_mem), 14 came out otherwise than PostgreSQL's; 7 match now (with the next fix);
+  of the others, 3 differ through the planner's group estimates (agents 46 / 47), 3 spill
+  (below), and 1 is PostgreSQL's parallel float sum.
+- **Sorted groupings came out in hash order**: where PostgreSQL's plan (EXPLAIN's) is a
+  GroupAggregate or Group (enable_hashagg off, groups that would spill, presorted input), the
+  executor still ran a hash aggregation and emitted its hash table's order; its groups now
+  come out in the plan's sort order (`AggEstimate::sorted`, the keys and directions EXPLAIN
+  sorts on). And where that plan sorts its whole input (a Sort below; for a parallel plan: the
+  serial plan's), aggregates whose results depend on their rows' order (float sums,
+  array_agg / string_agg without ORDER BY, min / max ties of values equal but different)
+  aggregate the rows in PostgreSQL's sort order (`AggEstimate::presort`).
+- **Hash join keys of different types**: the probe normalised integers only; key values
+  `Value` finds equal but hashes apart (an int8 and a numeric, a float and an integer) could
+  meet only through a hash collision. Both sides are now normalised per key for their types'
+  pair (`pipe::norm_for`: integers as int8, a float pair as float8, an integer meeting a
+  numeric as a numeric, bpchar without its padding), so equal values hash alike
+  (`pipe::tests::keys_of_both_sides_hash_alike`). No SQL found made the planner join such
+  keys (it casts first), so no result changed.
+
+### Where analytic work is still slower (round 19)
+
+- **Index scans over many rows** (q03, q04, q09, q10, q12, q20, q21; agent 43's storage work)
+  and **the engine's TPC-H plans**: at SF1 its EXPLAIN differs from PostgreSQL's in most join
+  queries (nested loops over index scans where PostgreSQL has parallel hash joins over
+  parallel scans: q03, q05, q07–q10, q12–q14, …), the planner's estimates for the big tables,
+  so the parallel probes of item 1 rarely apply there.
+- **Spilling hash aggregation isn't modelled**: when PostgreSQL's table outgrows hash_mem at
+  run time it spills new groups to partitions and emits them after the in-memory ones, batch
+  by batch; the engine emits one table's order (e.g. `work_mem = 64kB`, 3,000 groups). Doing it
+  exactly needs PostgreSQL's memory accounting (the bucket array, the bump and AllocSet
+  blocks of entries and transition values) as hash_agg_check_limits sees it.
+- **External sorts aren't modelled**: a Sort past work_mem merges runs in PostgreSQL, which
+  orders rows with equal keys otherwise than the in-memory quicksort the engine reproduces.
+- Joins whose build side is the big table, Parallel Hash's parallel build, right / full
+  joins and merge joins still run on the executor's thread; so do window functions, sorts and
+  the merge of partial aggregates (each part's lookups in the hash table model, float values
+  summed in order).
+- **Numeric values still allocate** (an `Arc` and a BigInt each): q01's workers.
+- **A table loaded by the running server** keeps the heap model the load built, which keeps its
+  scans serial until the server restarts (q06: 6.0 s right after the load, 1.4 s after a
+  restart); persisting the size estimate with the table, or dropping the model past its
+  limit, would let them run in parallel (agent 43's area).
+
+### Verification (round 19)
+
+- `cargo test -p pg-engine` (all of it; new: `tests/parallel_scan.rs`
+  `parallel_joins_match_serial`, 17 joins over a 420,000-row table with keys, conditions and
+  errors the kernels can and can't do, serial against parallel with the same statistics; the
+  serial / parallel check now allows the groups' order to differ only where the two settings'
+  plans group differently, as PostgreSQL's do; unit tests of the table sizing against
+  PostgreSQL's bucket counts, key normalisation, the integer map, numeric sort keys and
+  PostgreSQL's order for ties; golden `a48_hashagg_order`, recorded from PostgreSQL), and
+  `cargo clippy -p pg-engine --all-targets` with no new warnings.
+- The regression suite in full, each with its own reference container, at `c904737c` and with
+  this round's changes on it: **51,144 / 51,150 both, identical per file and per differing
+  unit** (and before the later rebases, at `a319ebb`: 51,141 both; `52f786e`: 51,140;
+  `75986d8`: 51,138; identical each time).
+- `difftest smoke` passes (after the last rebase too); 150 seeds × 120 statements with
+  planner-setting variants (`DIFFTEST_PLAN=0.5`): the same mismatch records as the engine at
+  `75986d8`, statement for statement, and again at `a319ebb`.
+- Stack: in debug builds the EXPLAIN builder's `convert` has a 272 kB frame and recurses per
+  plan node, so EXPLAIN's estimate (which the executor asks for a hash table's size and a
+  grouping's order) runs near a 2 MB thread's end over a nested plan
+  (`pg_stat_user_tables` in `parallel_scan.rs`); this round's per-node data went into
+  `Detail::GroupSort` rather than an `ExNode` field to keep those frames as they were (a field
+  made that test overflow by under 128 kB). Release frames are under 4 kB.
+- Every benchmark query's result hash, as above.
+
 ## Catalog, DDL and sessions (round 18, agent 44)
 
 Measured on the same machine and harness as above (PostgreSQL in `a44-pg`, the pinned image

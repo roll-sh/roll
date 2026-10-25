@@ -17,6 +17,7 @@ clap.workspace = true
 crc32fast.workspace = true
 crossbeam-skiplist.workspace = true
 getrandom.workspace = true
+hashbrown.workspace = true
 hmac.workspace = true
 icu_casemap = { workspace = true, optional = true }
 icu_collator = { workspace = true, optional = true }

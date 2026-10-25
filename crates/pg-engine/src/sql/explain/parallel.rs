@@ -839,6 +839,9 @@ impl Builder<'_, '_> {
             a.node_type = "Aggregate";
             a.strategy = Some(kind);
             a.partial_mode = Some(mode);
+            // (Sorted on the keys in their order: its groups come out so.)
+            let sort_keys = if kind == "Sorted" { (0..groups.len()).map(|i| (i, false, false)).collect() } else { Vec::new() };
+            super::put_group_sort(&mut a.details, sort_keys);
             let base = match kind {
                 "Plain" => "Aggregate",
                 "Hashed" => "HashAggregate",

@@ -1,10 +1,11 @@
 //! Sorts that come out exactly as Postgres's quicksort's (`pgsort`) would, done faster:
 //! when every sort key's values encode as bytes that order as `compare_values` orders them
-//! (no USING operator; integers, floats, dates and times, booleans, text compared as its
-//! bytes), the rows are sorted by those bytes with Rust's sort. That gives the quicksort's
-//! order whenever no two rows with equal keys differ (how equal, identical rows are
-//! arranged can't be seen), which is checked after sorting; when some do, the caller sorts
-//! as Postgres does instead, from the rows as they were.
+//! (no USING operator; integers, floats, numerics, dates and times, booleans, text compared
+//! as its bytes), the rows are sorted by those bytes with Rust's sort. That gives the
+//! quicksort's order whenever no two rows with equal keys differ (how equal, identical rows
+//! are arranged can't be seen), which is checked after sorting; when some do, Postgres's
+//! sort runs from the rows as they were, comparing their bytes (the same comparisons'
+//! outcomes as comparing the values: the same order).
 
 use super::Row;
 use crate::sql::plan::SortKey;
@@ -20,6 +21,7 @@ enum Class {
     Date,
     Micros,
     Text,
+    Numeric,
 }
 
 fn class(v: &Value) -> Option<Class> {
@@ -30,6 +32,7 @@ fn class(v: &Value) -> Option<Class> {
         Value::Date(_) => Class::Date,
         Value::Time(_) | Value::Timestamp(_) | Value::Timestamptz(_) => Class::Micros,
         Value::Text(s) if !s.as_bytes().contains(&0) => Class::Text,
+        Value::Numeric(_) => Class::Numeric,
         _ => return None,
     })
 }
@@ -65,12 +68,44 @@ fn encode(v: &Value, desc: bool, nulls_first: bool, out: &mut Vec<u8>) {
             out.extend_from_slice(s.as_bytes());
             out.push(0);
         }
+        Value::Numeric(n) => numeric_key(n, out),
         v => {
             let i = v.as_i64().unwrap_or(0);
             out.extend_from_slice(&((i as u64) ^ (1 << 63)).to_be_bytes());
         }
     }
     if desc {
+        for b in &mut out[start..] {
+            *b = !*b;
+        }
+    }
+}
+
+/// A numeric's order-preserving bytes, equal for equal values (1.0 and 1.00): -Infinity,
+/// negatives, zero, positives, Infinity, NaN; a finite value's decimal exponent then its
+/// significant digits (trailing zeros dropped), inverted for negatives.
+fn numeric_key(n: &crate::types::numeric::Numeric, out: &mut Vec<u8>) {
+    use crate::types::numeric::Numeric as N;
+    use num_traits::{Signed, Zero};
+    let (int, scale) = match n {
+        N::NegInf => return out.push(0),
+        N::PosInf => return out.push(4),
+        N::NaN => return out.push(5),
+        N::Finite { int, scale } => (int, *scale),
+    };
+    if int.is_zero() {
+        return out.push(2);
+    }
+    let digits = int.abs().to_string();
+    let sig = digits.trim_end_matches('0');
+    let exp = digits.len() as i64 - scale as i64;
+    let neg = int.is_negative();
+    out.push(if neg { 1 } else { 3 });
+    let start = out.len();
+    out.extend_from_slice(&((exp.clamp(i32::MIN as i64, i32::MAX as i64) as i32 as u32) ^ (1 << 31)).to_be_bytes());
+    out.extend_from_slice(sig.as_bytes());
+    out.push(0);
+    if neg {
         for b in &mut out[start..] {
             *b = !*b;
         }
@@ -157,22 +192,29 @@ pub fn order<'a>(
             let cut = idx[b];
             idx.truncate(b);
             idx.sort_unstable_by(by);
-            if bytes(idx[b - 1]) == bytes(cut) {
-                return None;
-            }
-            b
+            if bytes(idx[b - 1]) == bytes(cut) { None } else { Some(b) }
         }
         _ => {
             idx.sort_unstable_by(by);
-            n
+            Some(n)
         }
     };
-    for w in idx[..want].windows(2) {
-        if bytes(w[0]).cmp(bytes(w[1])) == Ordering::Equal && !same_row(row(w[0] as usize), row(w[1] as usize)) {
-            return None;
-        }
+    let ties = |idx: &[u32], want: usize| {
+        idx[..want].windows(2).any(|w| {
+            bytes(w[0]).cmp(bytes(w[1])) == Ordering::Equal && !same_row(row(w[0] as usize), row(w[1] as usize))
+        })
+    };
+    if let Some(want) = want
+        && !ties(&idx, want)
+    {
+        return Some(idx.into_iter().map(|i| i as usize).collect());
     }
-    Some(idx.into_iter().map(|i| i as usize).collect())
+    // Rows with equal keys that differ: Postgres's sort, from the rows' order, comparing
+    // their bytes.
+    let mut f = |a: &u32, b: &u32| Ok(bytes(*a).cmp(bytes(*b)));
+    let mut cmp = super::pgsort::Cmp::new(&mut f);
+    let sorted = super::pgsort::tuplesort((0..n as u32).collect(), bound, &mut cmp);
+    Some(sorted.into_iter().map(|i| i as usize).collect())
 }
 
 /// `rows` put in `order` (a permutation, or its first places).
@@ -214,6 +256,13 @@ mod tests {
             [i32::MIN, -1, 0, 1, i32::MAX].iter().map(|&d| Value::Date(d)).collect(),
             [i64::MIN, -1, 0, 1, i64::MAX].iter().map(|&t| Value::Timestamp(t)).collect(),
             ["", "a", "ab", "abc", "b", "\u{e9}", "\u{ff}x"].iter().map(|s| Value::text(*s)).collect(),
+            [
+                "-Infinity", "-1e30", "-12.5", "-12.50", "-12.4", "-1.2", "-1.23", "-0.001", "0", "0.000", "1e-20",
+                "0.001", "0.0010", "1.2", "1.23", "1.230", "9.99", "10", "10.0", "12", "120", "1e30", "Infinity", "NaN",
+            ]
+            .iter()
+            .map(|s| Value::Numeric(std::sync::Arc::new(s.parse::<crate::types::numeric::Numeric>().unwrap())))
+            .collect(),
             vec![Value::Bool(false), Value::Bool(true)],
         ];
         for mut set in sets {
@@ -249,13 +298,27 @@ mod tests {
         // Equal keys, the same rows: sorted here.
         let o = order(3, &[key(false)], |i, _| &rows[i][0], |i| &rows[i], None).unwrap();
         assert_eq!(o[0], 1);
-        // Equal keys, different rows: Postgres's order decides.
+        // Equal keys, different rows: Postgres's order (its sort over the bytes, which is
+        // its sort over the values).
         let mut rows2 = rows.clone();
         rows2[2][1] = Value::text("z");
-        assert!(order(3, &[key(false)], |i, _| &rows2[i][0], |i| &rows2[i], None).is_none());
-        // A bound cutting through a tie of different rows, or keeping both of them.
-        assert!(order(3, &[key(true)], |i, _| &rows2[i][0], |i| &rows2[i], Some(1)).is_none());
-        assert!(order(3, &[key(true)], |i, _| &rows2[i][0], |i| &rows2[i], Some(2)).is_none());
+        let pg = |keys: &[SortKey], rows: &[Row], bound: Option<usize>| -> Vec<usize> {
+            let mut f = |a: &usize, b: &usize| {
+                let k = &keys[0];
+                let o = rows[*a][0].cmp_total(&rows[*b][0]);
+                Ok(if k.desc { o.reverse() } else { o })
+            };
+            let mut c = super::super::pgsort::Cmp::new(&mut f);
+            super::super::pgsort::tuplesort((0..rows.len()).collect(), bound, &mut c)
+        };
+        for (desc, bound) in [(false, None), (true, Some(1)), (true, Some(2)), (false, Some(2))] {
+            let k = [key(desc)];
+            assert_eq!(
+                order(3, &k, |i, _| &rows2[i][0], |i| &rows2[i], bound).unwrap(),
+                pg(&k, &rows2, bound),
+                "desc={desc} bound={bound:?}"
+            );
+        }
         let o = order(3, &[key(false)], |i, _| &rows2[i][0], |i| &rows2[i], Some(1)).unwrap();
         assert_eq!(o, vec![1]);
     }

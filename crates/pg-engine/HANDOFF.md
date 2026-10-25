@@ -101,6 +101,28 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   still slower (index-scan fetches, joins and aggregates over joins on one thread) in
   BENCH.md's round 18 section.
   The regression suite, goldens and difftest are unchanged unit for unit.
+- **Joins, DISTINCT aggregates, sorts; hash order** (round 19, agent 48; BENCH.md "Round 19"):
+  hash join probes run in a parallel scan's workers against the join's table shared
+  read-only, stacked joins and the aggregation above them too, over the outer and inner rows
+  in place (`exec/pipe.rs`; rows tagged with the stages they went through, a row a kernel
+  can't do run by its join node on the executor's thread); joined rows copy only the columns
+  read; single-integer join keys in an `i64` map; order-insensitive DISTINCT aggregates
+  deduplicate by hash set without sorting; numeric sort keys as bytes, PostgreSQL's quicksort
+  over the bytes for ties. count(DISTINCT) 7x (now 1.2x PostgreSQL's speed), the 2M-row hash
+  join 3x, q21 2.4x, TPC-H 1.14x in all. Fixed: the hash aggregate's table sized as
+  PostgreSQL 18 sizes it (the `GROUP BY k % 50` order), groups of a sorted grouping
+  (GroupAggregate / Group) in its sort order rather than hash order, with order-dependent
+  aggregates over the rows in the serial plan's sort order, join keys normalised per type
+  pair. Not modelled yet: a hash aggregation's spill to disk and external sorts (both change
+  orders PostgreSQL shows once work_mem is exceeded).
+  Found and left open (not executor work): **deep expressions overflow a 2 MB thread that
+  embeds the engine** instead of failing with "stack depth limit exceeded": in-process on a
+  plain 2 MB thread, `SELECT 1 + 1 + ...` with 400 terms aborts the process (release build;
+  100 in debug), where PostgreSQL computes it (and errors at 10,000). The server's connection
+  threads have big stacks and error cleanly. The binder's expression recursion checks the
+  stack only at function calls (`bind_func_call`); a check in `bind_node` (as
+  transformExprRecurse has) turns 400 into the error, but 1,000 still overflows elsewhere on
+  the raw parse tree before binding. Probe and partial patch: agent 48's report.
 - **Catalog, DDL and sessions** (round 18, agent 44; BENCH.md "Catalog, DDL and sessions"): the
   catalog is stored as a record per object (`catalog/persist.rs`, catalog format 1: older
   databases are rewritten when first opened), so a DDL commit writes only what changed; its
@@ -538,7 +560,8 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
   - `exec::parscan` (round 18, agent 42): a parallel scan's worker threads run only kernels
     (`exec::kernel`, pure functions of a row) and row decoding, never `eval` or anything of a
     session; the process-wide `ACTIVE` counts running workers against max_parallel_workers,
-    `STARTED` counts scans (for tests). A worker's rows reach the statement in key order.
+    `STARTED` counts scans (for tests). A worker's rows reach the statement in key order. Hash join probes in those workers (`exec::pipe`, round 19) read
+    the join's table through an `Arc`, built and then never changed on the executor's thread.
   - Subquery / CTE ids (`Binder::fresh_id`) are unique in the process: `ExecCtx`'s
     `subq_cache`, `exists_hash`, `scalar_hash`, `ctes`, `work` are keyed by them, and a SQL
     function's statements (bound by binders of their own) run in their caller's context.

@@ -8,7 +8,7 @@
 //! to the executor's thread as a row, in its place, for the serial path.
 
 use super::Row;
-use super::kernel::K;
+use super::kernel::{Cols, K};
 use crate::types::Value;
 use crate::types::numeric::Numeric;
 use std::cmp::Ordering;
@@ -205,20 +205,86 @@ pub struct Part {
 }
 
 /// A chunk's rows as they come: aggregated parts, and rows left to the serial path (each
-/// with how many rows the filter dropped right before it).
+/// with the pipeline stages it went through, `pipe`, and whether the scan's filter is
+/// done with it).
 pub enum Seg {
     Part(Part),
-    Rows(Vec<(Row, u32)>),
+    Rows(Vec<(Row, u8, bool)>),
 }
 
 /// Aggregates a run of rows (a worker's chunk) into parts, handing rows it can't do over
 /// as rows.
 pub struct Partials<'a> {
     spec: &'a Spec,
-    index: super::fasthash::HashMap<Vec<Value>, u32>,
+    index: hashbrown::HashMap<Box<[Value]>, u32, super::fasthash::FastState>,
     part: Part,
+    /// The keys and arguments a row computes (those that aren't columns or constants).
     key: Vec<Value>,
     args: Vec<Value>,
+}
+
+/// A kernel's value over `row`: a column's or constant's in place, else the next of the
+/// values computed before (`computed`, at `*at`).
+#[inline]
+fn value<'v, R: Cols + ?Sized>(k: &'v K, row: &'v R, computed: &'v [Value], at: &mut usize) -> &'v Value {
+    match k {
+        K::Col(i) => row.col(*i).unwrap_or(&Value::Null),
+        K::Const(v) => v,
+        _ => {
+            *at += 1;
+            &computed[*at - 1]
+        }
+    }
+}
+
+/// An aggregate's argument over `row` (`value`; count(*)'s: NULL).
+#[inline]
+fn arg<'v, R: Cols + ?Sized>(a: &'v Option<K>, row: &'v R, computed: &'v [Value], at: &mut usize) -> &'v Value {
+    match a {
+        Some(k) => value(k, row, computed, at),
+        None => &Value::Null,
+    }
+}
+
+/// Whether a kernel's value needs computing (not a column or a constant).
+fn computed(k: &K) -> bool {
+    !matches!(k, K::Col(_) | K::Const(_))
+}
+
+/// A row's group key as it is (its columns not copied), to look its group up by.
+struct KeyRef<'x, R: ?Sized> {
+    keys: &'x [K],
+    row: &'x R,
+    computed: &'x [Value],
+}
+
+impl<R: Cols + ?Sized> KeyRef<'_, R> {
+    fn each(&self, mut f: impl FnMut(&Value) -> bool) -> bool {
+        let mut at = 0;
+        self.keys.iter().all(|k| f(value(k, self.row, self.computed, &mut at)))
+    }
+}
+
+impl<R: Cols + ?Sized> std::hash::Hash for KeyRef<'_, R> {
+    /// As the key's `[Value]` hashes (its length, then each value).
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_usize(self.keys.len());
+        self.each(|v| {
+            v.hash(state);
+            true
+        });
+    }
+}
+
+impl<R: Cols + ?Sized> hashbrown::Equivalent<Box<[Value]>> for KeyRef<'_, R> {
+    fn equivalent(&self, key: &Box<[Value]>) -> bool {
+        let mut i = 0;
+        key.len() == self.keys.len()
+            && self.each(|v| {
+                i += 1;
+                *v == key[i - 1]
+            })
+    }
 }
 
 impl<'a> Partials<'a> {
@@ -232,36 +298,41 @@ impl<'a> Partials<'a> {
         }
     }
 
-    /// A row the filter dropped.
-    pub fn dropped(&mut self) {
-        self.part.read += 1;
+    /// Rows read (the scan's: what its statistics count), aggregated or not.
+    pub fn read(&mut self, n: u64) {
+        self.part.read += n;
     }
 
     /// A row that passed the filter: aggregated (true), or left for the serial path
-    /// (false; the caller ends the part first: `take`).
-    pub fn row(&mut self, row: &[Value]) -> bool {
+    /// (false; the caller ends the part first: `take`). Its columns are read in place.
+    pub fn row<R: Cols + ?Sized>(&mut self, row: &R) -> bool {
         self.key.clear();
-        for k in &self.spec.keys {
+        for k in self.spec.keys.iter().filter(|k| computed(k)) {
             match k.run(row) {
                 Some(v) => self.key.push(v),
                 None => return false,
             }
         }
         self.args.clear();
-        for (a, _, _) in &self.spec.aggs {
-            match a {
-                Some(a) => match a.run(row) {
-                    Some(v) => self.args.push(v),
-                    None => return false,
-                },
-                None => self.args.push(Value::Null),
+        for a in self.spec.aggs.iter().filter_map(|(a, _, _)| a.as_ref()).filter(|a| computed(a)) {
+            match a.run(row) {
+                Some(v) => self.args.push(v),
+                None => return false,
             }
         }
-        let g = self.index.get(&self.key).map(|g| *g as usize);
+        // (Columns past the row's end: left to the serial path, as `run` would.)
+        let present = |k: &K| !matches!(k, K::Col(i) if row.col(*i).is_none());
+        if !self.spec.keys.iter().all(present) || !self.spec.aggs.iter().filter_map(|a| a.0.as_ref()).all(present) {
+            return false;
+        }
+        let kr = KeyRef { keys: &self.spec.keys, row, computed: &self.key };
+        let g = self.index.get(&kr).map(|g| *g as usize);
         // (A state that can't take its value leaves the whole row to the serial path:
         // checked before anything changes.)
         let skipped = |a: &Option<K>, skip: bool, v: &Value| a.is_some() && skip && v.is_null();
-        for (i, ((a, skip, empty), v)) in self.spec.aggs.iter().zip(&self.args).enumerate() {
+        let mut at = 0;
+        for (i, (a, skip, empty)) in self.spec.aggs.iter().enumerate() {
+            let v = arg(a, row, &self.args, &mut at);
             let st = match g {
                 Some(g) => &self.part.groups[g].1[i],
                 None => empty,
@@ -273,21 +344,27 @@ impl<'a> Partials<'a> {
         let g = match g {
             Some(g) => g,
             None => {
+                let mut key = Vec::with_capacity(self.spec.keys.len());
+                kr.each(|v| {
+                    key.push(v.clone());
+                    true
+                });
+                let key: Box<[Value]> = key.into_boxed_slice();
                 let states = self.spec.aggs.iter().map(|(_, _, p)| p.clone()).collect();
-                self.part.groups.push((self.key.clone(), states));
+                self.part.groups.push((key.to_vec(), states));
                 let g = self.part.groups.len() - 1;
-                self.index.insert(self.key.clone(), g as u32);
+                self.index.insert(key, g as u32);
                 g
             }
         };
-        let states = &mut self.part.groups[g].1;
-        for (((a, skip, _), v), st) in self.spec.aggs.iter().zip(&self.args).zip(states.iter_mut()) {
+        let mut at = 0;
+        for (i, (a, skip, _)) in self.spec.aggs.iter().enumerate() {
+            let v = arg(a, row, &self.args, &mut at);
             if !skipped(a, *skip, v) {
-                st.add(v);
+                self.part.groups[g].1[i].add(v);
             }
         }
         self.part.seq.push(g as u32);
-        self.part.read += 1;
         true
     }
 
@@ -298,7 +375,7 @@ impl<'a> Partials<'a> {
 
     /// The part so far (the next one starts empty).
     pub fn take(&mut self) -> Option<Part> {
-        if self.part.read == 0 {
+        if self.part.read == 0 && self.part.seq.is_empty() {
             return None;
         }
         self.index.clear();
