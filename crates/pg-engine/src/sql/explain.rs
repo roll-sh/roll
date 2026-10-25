@@ -19458,7 +19458,10 @@ pub fn explain(
             .settings
             .borrow()
             .get_raw("compute_query_id")
-            .is_some_and(|v| v.eq_ignore_ascii_case("on"))
+            .is_some_and(|v| {
+                v.eq_ignore_ascii_case("on")
+                    || (v.eq_ignore_ascii_case("auto") && ctx.sess.cluster.statements().is_some())
+            })
     {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();

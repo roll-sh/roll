@@ -24,6 +24,7 @@ mod ltree;
 mod pg_buffercache;
 mod pg_trgm;
 mod pgcrypto;
+pub mod pg_stat_statements;
 mod seg;
 mod tablefunc;
 pub mod types;

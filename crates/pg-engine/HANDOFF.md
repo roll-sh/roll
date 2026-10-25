@@ -67,7 +67,8 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   earthdistance, isn, unaccent, fuzzystrmatch, lo, pg_buffercache at 100%; btree_gist, seg,
   amcheck nearly. Extension types the engine implements natively are `Value::Ext`
   (`src/ext/types.rs`); extension libraries' GUCs are `session/ext_gucs.tsv`. Left:
-  pg_stat_statements (a 96.9% branch exists, not merged yet), pageinspect (not applicable),
+  pg_stat_statements at 982 / 1,013 (2PC, a few EXPLAIN / jumbling cases), pageinspect
+  (not applicable),
   postgres_fdw / dblink (an outbound-network policy decision), see STATUS.md.
 - **Performance** (round 17, agent 36): measured for the first time, `tools/bench/` against a
   pinned PostgreSQL 18.6 on the same 4 cores; numbers, method and the optimisations made are
@@ -240,6 +241,9 @@ PGREGRESS_PORT=55843 PGREGRESS_REPORT_DIR=/tmp/pgregress/report \
 The contrib modules' tests are a test binary of their own (`--test pg_contrib`, same harness,
 `PGCONTRIB_ONLY=<modules>`), so `--test pg_regress -- --ignored` runs only the main suite; its
 engine's data directory and binary copy are per process, never the main suite's.
+Its engine starts with `--shared-preload-libraries pg_stat_statements`, and the reference must
+run with that module's temp-config (`-c shared_preload_libraries=pg_stat_statements -c
+max_prepared_transactions=5`): use a private container of the pinned image, not the shared one.
 
 - A full run takes about an hour; subsets take minutes.
 - **STATUS.md's numbers come from the latest full run, never from hand edits.** A full run

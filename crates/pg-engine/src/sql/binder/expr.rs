@@ -2741,6 +2741,18 @@ impl Binder<'_, '_> {
                 Expr::Or(parts)
             });
         }
+        // (Values of no common type: each compared with its own coercion of the left side,
+        // ORed, as transformAExprIn's fallback; NOT IN's `<>` ANDed.)
+        let mut types = vec![l.ty()];
+        types.extend(items.iter().map(|e| e.ty()));
+        if items.len() > 1 && super::unify_types(&types, "IN").is_err() {
+            let op = if not { "<>" } else { "=" };
+            let parts = items
+                .into_iter()
+                .map(|it| self.binop(op, l.clone(), it, loc))
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(if not { Expr::And(parts) } else { Expr::Or(parts) });
+        }
         let mut list = Vec::new();
         let mut left = l;
         for it in items {

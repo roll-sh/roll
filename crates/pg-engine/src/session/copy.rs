@@ -968,6 +968,7 @@ impl Session {
         if r.is_err() {
             self.on_error();
         }
+        self.pgss_copy_done(&r);
         r
     }
 

@@ -1203,6 +1203,9 @@ impl EngineProc {
                 "--allow-server-files",
                 files.to_str().unwrap(),
             ])
+            // (The contrib suites' reference preloads pg_stat_statements, as its
+            // temp-config does: so does the engine.)
+            .args(if contrib_mode() { &["--shared-preload-libraries", "pg_stat_statements"][..] } else { &[][..] })
             .env("RUST_LOG", "warn")
             .env("RUST_BACKTRACE", "0")
             .stdout(logf.try_clone().unwrap())
@@ -1572,10 +1575,13 @@ fn run_engine_file(
         };
         out.push_str(&o);
         statuses.push(st);
+        // (Without running a statement in contrib mode: pg_stat_statements would count it.)
         let alive = engine.child.try_wait().ok().flatten().is_none()
-            && psql(cfg, &eng, db_name(), "pg_regress", b"SELECT 1;\n", 20)
-                .0
-                .contains("(1 row)");
+            && if contrib_mode() {
+                psql(cfg, &eng, db_name(), "pg_regress", b"\\echo alive\n", 20).1 == "ok"
+            } else {
+                psql(cfg, &eng, db_name(), "pg_regress", b"SELECT 1;\n", 20).0.contains("(1 row)")
+            };
         if !alive || st == "timeout" {
             if !alive {
                 *statuses.last_mut().unwrap() = "server died";

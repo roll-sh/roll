@@ -202,6 +202,7 @@ fn golden_wire() {
         superuser: "postgres".into(),
         password: Some("pw".into()),
         server_files: None,
+        shared_preload_libraries: Vec::new(),
     };
     let engine = pg_engine::engine::Engine::open(opts).unwrap();
     let server = pg_engine::server::ServerOptions {

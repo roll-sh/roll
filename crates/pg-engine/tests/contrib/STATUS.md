@@ -41,7 +41,7 @@ PGCONTRIB_ONLY=uuid-ossp,citext PGREGRESS_DIR=$D PGREGRESS_CONTAINER=a39-ref \
 
 ## Scores
 
-Last full run: 4,147 / 4,158 units of the 19 modules ported (99.7%). Baseline (before any
+Last full runs: 4,147 / 4,158 units of 19 modules (99.7%), pg_stat_statements 982 / 1,013. Baseline (before any
 extension was ported; CREATE EXTENSION was a stand-in): 2,752 / 7,733
 units (35.6%). The reference matches `expected/` for every module except postgres_fdw and
 dblink (they connect to a loopback server).
@@ -55,7 +55,7 @@ dblink (they connect to a loopback server).
 | pg_trgm | 261 | 261 | done (GIN/GiST plans included) |
 | btree_gin | 297 | 297 | done |
 | btree_gist | 616 | 611 | see below |
-| pg_stat_statements | 1013 | 728 | in progress (separate work) |
+| pg_stat_statements | 1013 | 982 | see below |
 | unaccent | 34 | 34 | done |
 | fuzzystrmatch | 56 | 56 | done |
 | ltree | 363 | 363 | done |
@@ -99,5 +99,14 @@ dblink (they connect to a loopback server).
   credential-handling decision, like server-side files: it should be an opt-in startup
   setting with an allow-list, the same policy as `--allow-server-files`. Not implemented; the
   suites need a loopback server too.
-- **pg_stat_statements**: query jumbling and normalization as PostgreSQL 18 groups statements,
-  the views and functions, tracking levels; being done separately.
+- **pg_stat_statements** (`src/ext/pg_stat_statements/`, `session/pgss.rs`): the engine
+  starts it with `--shared-preload-libraries pg_stat_statements` (EngineOptions
+  `shared_preload_libraries`; the contrib harness passes it). Statements are grouped by a
+  jumble of the parsed statement and the catalog's column types (constants and aliases
+  ignored, PostgreSQL 18's squashed IN / ARRAY lists), texts normalized with `$n`; calls, rows,
+  plans, toplevel / nested tracking, track_utility / track_planning, privileges, the info view
+  and reset. The engine has no WAL or shared buffers: blocks written report table growth,
+  wal_records rows written, wal_bytes 64 per row, other buffer columns 0; plan time is the
+  engine's binding and planning time. Left (31 units): two-phase commit statements (the engine
+  has 2PC off), EXPLAIN of unreferenced CTEs and nested DO-block listing in level_tracking, a
+  parallel plan's worker counts, three squashing cases.

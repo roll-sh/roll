@@ -1505,6 +1505,8 @@ impl Ddl<'_, '_> {
                 ),
             ));
         }
+        // (The rows the command processed, which pg_stat_statements counts.)
+        self.ctx.sess.pgss.borrow_mut().utility_rows = Some(rows.len() as u64);
         if s.concurrent {
             self.refresh_concurrently(v, storage, bixs, rows)?;
         } else {

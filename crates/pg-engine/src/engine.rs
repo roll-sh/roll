@@ -50,6 +50,9 @@ pub struct EngineOptions {
     /// `COPY ... FROM / TO '<file>'`) for the roles Postgres allows, confined to this
     /// directory (see `server_files`). None (the default): refused for every role.
     pub server_files: Option<PathBuf>,
+    /// Libraries loaded at server start (`shared_preload_libraries`): `pg_stat_statements`
+    /// collects statement statistics from then on.
+    pub shared_preload_libraries: Vec<String>,
 }
 
 impl Default for EngineOptions {
@@ -63,6 +66,7 @@ impl Default for EngineOptions {
             superuser: "postgres".into(),
             password: None,
             server_files: None,
+            shared_preload_libraries: Vec::new(),
         }
     }
 }
@@ -158,6 +162,7 @@ pub struct Engine {
     stopped: AtomicBool,
     me: Weak<Engine>,
     server_files: Option<crate::server_files::ServerFiles>,
+    statements: Option<crate::ext::pg_stat_statements::Store>,
 }
 
 const REGISTRY_FILE: &str = "databases.json";
@@ -200,6 +205,11 @@ impl Engine {
             Err(e) => return Err(e.into()),
         };
         let cache = BlockCache::new(opts.cache_bytes);
+        let statements = opts
+            .shared_preload_libraries
+            .iter()
+            .any(|l| l == "pg_stat_statements")
+            .then(|| crate::ext::pg_stat_statements::Store::new(crate::types::datetime::Clock::system().now, 5000));
         let engine = Arc::new_cyclic(|me: &Weak<Engine>| {
             let weak = me.clone();
             let oids = Arc::new(OidGen::new(registry.next_oid, move |n| {
@@ -239,6 +249,7 @@ impl Engine {
                 stopped: AtomicBool::new(false),
                 me: me.clone(),
                 server_files,
+                statements,
             }
         });
         engine.init_shared()?;
@@ -1316,6 +1327,10 @@ fn dir_size(p: &Path) -> u64 {
 impl Cluster for Engine {
     fn server_files(&self) -> Option<&crate::server_files::ServerFiles> {
         self.server_files.as_ref()
+    }
+
+    fn statements(&self) -> Option<&crate::ext::pg_stat_statements::Store> {
+        self.statements.as_ref()
     }
 
     fn database_owner(&self, name: &str) -> Option<String> {

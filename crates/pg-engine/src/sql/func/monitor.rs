@@ -298,7 +298,9 @@ fn activity_rows(want: Option<i64>, c: &FnCtx) -> Vec<Vec<Value>> {
                 let on = |n: &str, v: &[&str]| {
                     settings.show(n).is_ok_and(|s| v.contains(&s.as_str()))
                 };
-                if on("compute_query_id", &["on", "regress"]) && on("track_activities", &["on"]) {
+                // (auto: on when a preloaded module needs it, as pg_stat_statements does.)
+                let auto = c.exec.sess.cluster.statements().is_some() && on("compute_query_id", &["auto"]);
+                if (auto || on("compute_query_id", &["on", "regress"])) && on("track_activities", &["on"]) {
                     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
                     for byte in b.query.bytes() {
                         h = (h ^ byte as u64).wrapping_mul(0x0100_0000_01b3);

@@ -48,6 +48,10 @@ struct Args {
     /// for every role). For development and testing.
     #[arg(long, value_name = "DIR")]
     allow_server_files: Option<PathBuf>,
+    /// Libraries to preload (comma-separated, as `shared_preload_libraries`):
+    /// `pg_stat_statements` collects statement statistics from server start.
+    #[arg(long, value_name = "LIBS", value_delimiter = ',')]
+    shared_preload_libraries: Vec<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -71,6 +75,7 @@ fn main() -> anyhow::Result<()> {
         superuser: a.user,
         password: a.password,
         server_files: a.allow_server_files,
+        shared_preload_libraries: a.shared_preload_libraries,
         ..EngineOptions::default()
     })?;
     // SIGTERM / SIGINT: a clean shutdown (pg_ctl stop's smart / fast modes end sessions the

@@ -49,6 +49,10 @@ pub trait Cluster: Send + Sync {
     fn server_files(&self) -> Option<&crate::server_files::ServerFiles> {
         None
     }
+    /// pg_stat_statements' statistics, when the library is preloaded.
+    fn statements(&self) -> Option<&crate::ext::pg_stat_statements::Store> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -143,6 +147,8 @@ pub struct SessionState {
     /// types, from SQL, generic plans, custom plans).
     /// SQL PREPAREd statements, for EXPLAIN EXECUTE run by a function (SPI).
     pub prepared_sql: RefCell<HashMap<String, Arc<crate::session::Prepared>>>,
+    /// pg_stat_statements: the nesting level and prepared statements' query ids.
+    pub pgss: RefCell<crate::ext::pg_stat_statements::SessionStats>,
     pub prepared_list: RefCell<
         Vec<(
             String,
@@ -194,6 +200,11 @@ impl SessionState {
             .map(|r| r.oid)
             .unwrap_or(crate::catalog::BOOTSTRAP_SUPERUSER_OID);
         let mut settings = Settings::new();
+        // A preloaded library's parameters are there from the start.
+        if cluster.statements().is_some() {
+            let _ = settings.load_module("pg_stat_statements");
+            settings.set_internal("shared_preload_libraries", "pg_stat_statements");
+        }
         settings.set_internal("session_authorization", user);
         settings.set_internal(
             "is_superuser",
@@ -227,6 +238,7 @@ impl SessionState {
             temp_ever: std::cell::Cell::new(false),
             backend_start: crate::types::datetime::Clock::system().now,
             prepared_sql: RefCell::new(HashMap::new()),
+            pgss: RefCell::default(),
             prepared_list: RefCell::new(Vec::new()),
             cursors: RefCell::new(HashMap::new()),
             pl_conflicts: RefCell::new(HashMap::new()),

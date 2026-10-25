@@ -796,11 +796,13 @@ fn call_sql(ctx: &ExecCtx, f: &Function, args: Vec<Value>) -> Result<Vec<Row>> {
                             ctx.with_outer(Rc::new(args.clone()), || collect(&plan, ctx, None))
                         };
                         // Each statement of a volatile function is a command of its own.
+                        let started = std::time::Instant::now();
                         let rows = if f.volatility == 'v' {
                             ctx.new_statement(run)?
                         } else {
                             ctx.statement(run)?
                         };
+                        sql_fn_pgss(ctx, f, &text, rows.len() as u64, started);
                         if final_stmt {
                             last = (rows, cols);
                             return sql_result(ctx, f, std::mem::take(&mut last)).map(Some);
@@ -827,7 +829,14 @@ fn call_sql(ctx: &ExecCtx, f: &Function, args: Vec<Value>) -> Result<Vec<Row>> {
                             r?;
                         }
                     }
+                    // SHOW: the setting is read (its row goes nowhere in a procedure).
+                    Some(NodeEnum::VariableShowStmt(v)) => {
+                        let started = std::time::Instant::now();
+                        ctx.sess.settings.borrow().show(&v.name)?;
+                        sql_fn_pgss(ctx, f, &text, 0, started);
+                    }
                     Some(n) => {
+                        let started = std::time::Instant::now();
                         crate::session::ddl::run_nested(|| {
                             // PreventInTransactionBlock (VACUUM, not ANALYZE alone).
                             if let NodeEnum::VacuumStmt(v) = n
@@ -837,6 +846,7 @@ fn call_sql(ctx: &ExecCtx, f: &Function, args: Vec<Value>) -> Result<Vec<Row>> {
                             }
                             crate::session::ddl::execute(ctx, n, &text)
                         })?;
+                        sql_fn_pgss(ctx, f, &text, 0, started);
                     }
                     None => {}
                 }
@@ -857,6 +867,21 @@ fn call_sql(ctx: &ExecCtx, f: &Function, args: Vec<Value>) -> Result<Vec<Row>> {
         Some(rows) => Ok(rows),
         None => sql_result(ctx, f, last),
     }
+}
+
+/// pg_stat_statements: a statement of SQL function `f` ran (its parameters are `$n`, by
+/// name too).
+fn sql_fn_pgss(ctx: &ExecCtx, f: &Function, text: &str, rows: u64, started: std::time::Instant) {
+    if ctx.sess.cluster.statements().is_none() {
+        return;
+    }
+    let vars: Vec<(String, i32)> = f
+        .args
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (n, _))| Some((n.clone()?, i as i32 + 1)))
+        .collect();
+    crate::ext::pg_stat_statements::nested(ctx.sess, text, &vars, rows, started.elapsed());
 }
 
 /// CALL in a SQL function's body: its arguments evaluated over the function's parameters,
@@ -3118,9 +3143,11 @@ impl<'c, 'a> Interp<'c, 'a> {
             }
             StmtKind::Perform(e) => {
                 let c = self.spi("SQL statement", &e.text, 0, |me| me.compile(e, true, None))?;
+                let started = std::time::Instant::now();
                 let (rows, _) = self.spi("SQL statement", &e.text, 0, |me| me.run(&c))?;
                 self.row_count = rows.len() as u64;
                 self.set_found(!rows.is_empty());
+                self.pgss(&format!("SELECT {}", e.text), rows.len() as u64, started);
             }
             StmtKind::Sql { sql, into, shown } => self.sql(sql, into.as_ref(), shown)?,
             StmtKind::Execute { query, into, using } => {
@@ -3334,13 +3361,24 @@ impl<'c, 'a> Interp<'c, 'a> {
     }
 
     /// A static SQL statement.
+    /// pg_stat_statements: a statement this routine ran (one level down from its caller).
+    fn pgss(&self, text: &str, rows: u64, started: std::time::Instant) {
+        if self.ctx.sess.cluster.statements().is_none() {
+            return;
+        }
+        let vars: Vec<(String, i32)> = self.scope.iter().map(|(n, slot)| (n.clone(), *slot as i32 + 1)).collect();
+        crate::ext::pg_stat_statements::nested(self.ctx.sess, text, &vars, rows, started.elapsed());
+    }
+
     fn sql(&mut self, sql: &PlExpr, into: Option<&IntoClause>, shown: &str) -> Result<()> {
         let c = self.spi("SQL statement", shown, 0, |me| me.compile(sql, true, None))?;
+        let started = std::time::Instant::now();
         match &*c {
             Compiled::Query { cols, select, .. } => {
                 let cols = cols.clone();
                 let select = *select;
                 let (rows, processed) = self.spi("SQL statement", shown, 0, |me| me.run(&c))?;
+                self.pgss(&sql.text, if select { rows.len() as u64 } else { processed }, started);
                 match into {
                     Some(into) => {
                         if cols.is_empty() {
@@ -3380,6 +3418,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                 }
                 self.spi("SQL statement", shown, 0, |me| me.utility(node, &[]))?;
                 self.row_count = 0;
+                self.pgss(&sql.text, 0, started);
             }
         }
         Ok(())
@@ -3607,9 +3646,10 @@ impl<'c, 'a> Interp<'c, 'a> {
             shift: 0,
         };
         let ctx = self.ctx;
+        // (Several commands run in turn, without parameters: SPI_execute_extended.)
         let stmts = sess.framed(frame(), |_| {
             let stmts = parse_spi(ctx, &sql)?;
-            if stmts.len() > 1 {
+            if stmts.len() > 1 && !using.is_empty() {
                 return Err(Error::new(
                     code::SYNTAX_ERROR,
                     "cannot insert multiple commands into a prepared statement",
@@ -3617,9 +3657,36 @@ impl<'c, 'a> Interp<'c, 'a> {
             }
             Ok(stmts)
         })?;
-        let Some(node) = stmts.into_iter().next().and_then(|s| s.stmt) else {
-            return Ok((Vec::new(), Vec::new(), 0));
+        let mut last = (Vec::new(), Vec::new(), 0);
+        for raw in stmts {
+            let text = crate::sql::parse::stmt_text(&sql, &raw).to_string();
+            let Some(node) = raw.stmt else { continue };
+            let started = std::time::Instant::now();
+            let r = self.execute_node(*node, &sql, vals.clone(), types.clone(), framed_run)?;
+            crate::ext::pg_stat_statements::nested(self.ctx.sess, &text, &[], r.2, started.elapsed());
+            last = r;
+        }
+        self.row_count = last.2;
+        Ok(last)
+    }
+
+    /// One command of an EXECUTE.
+    fn execute_node(
+        &mut self,
+        node: pg_query::protobuf::Node,
+        sql: &str,
+        vals: Vec<Value>,
+        types: Vec<DataType>,
+        framed_run: bool,
+    ) -> Result<(Vec<Row>, Vec<OutCol>, u64)> {
+        let sess = self.ctx.sess;
+        let sql = sql.to_string();
+        let frame = || Frame::Query {
+            kind: "SQL statement",
+            text: sql.clone(),
+            shift: 0,
         };
+        let node = Box::new(node);
         let child = self.ctx.child(&vals);
         let r = (|| -> Result<(Vec<Row>, Vec<OutCol>, u64)> {
             let mut b = Binder::new(&child, types.clone());
@@ -3690,9 +3757,7 @@ impl<'c, 'a> Interp<'c, 'a> {
             .notices
             .borrow_mut()
             .extend(child.notices.borrow_mut().drain(..));
-        let r = r?;
-        self.row_count = r.2;
-        Ok(r)
+        r
     }
 
     // ── CALL ──

@@ -125,7 +125,8 @@ impl Session {
         let name = s.name.as_str();
         let value: Option<String> = match kind {
             K::VarSetDefault | K::VarReset => None,
-            K::VarSetCurrent => return Err(crate::error::unsupported("SET ... FROM CURRENT")),
+            // FROM CURRENT: the value it has (GetConfigOptionByName).
+            K::VarSetCurrent => Some(self.state.settings.borrow().show(name)?),
             _ => Some(set_value(name, &s.args)?),
         };
         match name {

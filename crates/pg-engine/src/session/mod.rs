@@ -10,6 +10,7 @@ pub(crate) use utility::{bind_call, bind_call_typed};
 pub mod ddl;
 pub mod settings;
 pub mod state;
+mod pgss;
 mod utility;
 pub(crate) use utility::{LIST_QUOTE, split_guc_list};
 pub(crate) use utility::set_value;
@@ -214,6 +215,12 @@ pub struct Session {
     /// executor makes them, so the client has these (and a chunked-mode psql, FETCH_COUNT,
     /// prints the full chunks) before the ErrorResponse.
     pub partial_rows: Option<QueryResult>,
+    /// pg_stat_statements: the top-level statement running, and the parallel workers its
+    /// plan used.
+    pgss_tracked: Option<pgss::Tracked>,
+    pgss_workers: i64,
+    /// A COPY FROM STDIN waiting for its data, to be counted when it ends.
+    pgss_copy: Option<pgss::Tracked>,
 }
 
 impl Session {
@@ -305,6 +312,9 @@ impl Session {
             ro_stack: Vec::new(),
             source: String::new(),
             partial_rows: None,
+            pgss_tracked: None,
+            pgss_workers: 0,
+            pgss_copy: None,
         }
     }
 
@@ -837,7 +847,24 @@ impl Session {
     ) -> Result<Outcome> {
         let before = self.notices.len();
         crate::catalog::set_session_temp_schema(&self.state.temp_schema());
+        // pg_stat_statements (when preloaded): what runs inside is one level down.
+        let tracked = self.pgss_begin(p);
+        let mine = tracked.is_some();
+        if mine {
+            self.pgss_tracked = tracked;
+            self.pgss_workers = 0;
+        }
+        let counted = self.state.cluster.statements().is_some();
+        if counted {
+            self.state.pgss.borrow_mut().level += 1;
+        }
         let r = self.execute_with_inner(p, params, max_rows);
+        if counted {
+            self.state.pgss.borrow_mut().level -= 1;
+        }
+        if mine && let Some(t) = self.pgss_tracked.take() {
+            self.pgss_end(t, &r);
+        }
         // Every message the statement raised goes through client_min_messages.
         if self.notices.len() > before {
             let st = self.state.settings.borrow();
@@ -1294,7 +1321,10 @@ impl Session {
 
     fn run_query(&mut self, p: &Prepared, stmt: &Node, params: &[Value]) -> Result<QueryResult> {
         self.ensure_txn();
+        let planning = std::time::Instant::now();
         let bq = self.planned(p, stmt, params)?.0;
+        self.pgss_planned(planning.elapsed());
+        self.pgss_measure(false);
         // A SELECT's rows go out as they're made (PORTAL_ONE_SELECT); a data-modifying
         // query's when it has finished.
         let streams = !bq.plan.writes() && matches!(inner(stmt), Some(NodeEnum::SelectStmt(_)));
@@ -1302,11 +1332,13 @@ impl Session {
         // ExecutorRun began (past ExecutorStart's permission checks): the RowDescription went
         // out, so an error from here on follows it.
         let mut started = false;
+        let mut parallel = false;
         let r = self.with_ctx(params, |ctx| {
             bq.check_perms(ctx)?;
             started = true;
             if streams && in_parallel_worker(ctx, &bq.plan) {
                 crate::exec::pgstat::count_parallel_workers(ctx, 1, 1);
+                parallel = true;
                 let frame = crate::error::Frame::Text("parallel worker".into());
                 ctx.sess.framed(frame, |_| crate::exec::collect_into(&bq.plan, ctx, &mut made))?;
                 return Ok((std::mem::take(&mut made), ctx.processed.get()));
@@ -1327,6 +1359,10 @@ impl Session {
                 return Err(e);
             }
         };
+        if parallel {
+            self.pgss_workers += 1;
+        }
+        self.pgss_measure(true);
         let tag = query_tag(&bq.plan, stmt, rows.len(), processed);
         let returns = !bq.cols.is_empty() || matches!(inner(stmt), Some(NodeEnum::SelectStmt(_)));
         Ok(QueryResult {
