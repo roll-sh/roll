@@ -87,9 +87,54 @@ pub(in crate::sql::ruleutils) fn rule_def(ctx: &ExecCtx, r: &Rule, pretty: bool)
                 b.coerce_bool(e, "WHERE")
             })
             .ok();
-        b.levels.pop();
+        let Some(e) = e else {
+            b.levels.pop();
+            return None;
+        };
         out.push_str("\n   WHERE ");
-        out.push_str(&super::super::deparse(&e?, &names, ctx, pretty)?);
+        let text = match super::super::deparse(&e, &names, ctx, pretty) {
+            Some(t) => t,
+            // With a subquery: printed with the view printer, over OLD and NEW, the range
+            // table names being those of the first action (make_ruledef prints the condition
+            // in its context: its target's name is taken).
+            None => {
+                let used: Vec<String> = r
+                    .actions
+                    .first()
+                    .and_then(|a| ast::parse_stmt(a).ok())
+                    .and_then(|n| match n.node {
+                        Some(NodeEnum::InsertStmt(s)) => s.relation,
+                        Some(NodeEnum::UpdateStmt(s)) => s.relation,
+                        Some(NodeEnum::DeleteStmt(s)) => s.relation,
+                        _ => None,
+                    })
+                    .map(|rv| vec![rv.alias.map_or(rv.relname, |a| a.aliasname)])
+                    .unwrap_or_default();
+                let mut v = Views {
+                    b: &mut b,
+                    ctx,
+                    pretty,
+                    wrap: 0,
+                    used,
+                    enclosing: vec![Vec::new()],
+                };
+                let level = super::ViewLevel {
+                    cols: names.clone(),
+                    qual: names.clone(),
+                    refs: vec!["old".into(), "new".into()],
+                    ..super::ViewLevel::default()
+                };
+                let mut buf = String::new();
+                {
+                    let _g = crate::scoped::set(&RTABLES, RTABLES.get() + 1, "ruleutils::RTABLES.rule_qual");
+                    // (The condition's level stays pushed: the subqueries bind again in it.)
+                    v.print(&level, super::STD, &mut buf, &[], |d| d.expr(&e, false))?;
+                }
+                buf
+            }
+        };
+        b.levels.pop();
+        out.push_str(&text);
     }
     out.push_str(" DO ");
     if r.instead {

@@ -1249,7 +1249,20 @@ impl EngineProc {
         *self = EngineProc::start(&self.bin, &self.data, &self.log, self.port, &self.files);
     }
 
+    /// A clean shutdown (SIGTERM: sequences keep their positions, as after a Postgres
+    /// shutdown, so a database kept with PGREGRESS_KEEP dumps the reference's values), killed
+    /// if it doesn't end within 20 s.
     fn stop(&mut self) {
+        let _ = Command::new("kill")
+            .args(["-TERM", &self.child.id().to_string()])
+            .status();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if let Ok(Some(_)) = self.child.try_wait() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

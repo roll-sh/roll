@@ -593,12 +593,24 @@ pub fn index_tuple(
     key: &[Value],
     text: &dyn Fn(&Value, &DataType) -> String,
 ) -> usize {
+    // index_form_tuple compresses a varlena bigger than TOAST_INDEX_TARGET (MaxHeapTupleSize /
+    // 16), as default_toast_compression (pglz) does.
+    const TOAST_INDEX_TARGET: usize = 8160 / 16;
     let has_null = key.iter().any(Value::is_null);
     let mut off = if has_null { align(8 + 4, MAXALIGN) } else { 8 };
     for (v, ty) in key.iter().zip(types) {
-        if !v.is_null() {
-            off += datum_bytes(off, v, ty, text);
+        if v.is_null() {
+            continue;
         }
+        if type_layout(ty).0 < 0
+            && !matches!(ty, DataType::Cstring)
+            && varlena_payload(v, ty, text) > TOAST_INDEX_TARGET
+            && let Some(c) = super::pglz::compressed_len(text(v, ty).as_bytes())
+        {
+            off = align(off, type_layout(ty).1) + c + 8;
+            continue;
+        }
+        off += datum_bytes(off, v, ty, text);
     }
     align(off, MAXALIGN)
 }
@@ -656,6 +668,9 @@ pub fn posting_tuples(base: usize, n: usize, out: &mut Vec<usize>) {
     }
 }
 
+/// BTMaxItemSize for 8 kB pages.
+const BT_MAX_ITEM: usize = 2704;
+
 /// Pages of a btree built over index tuples of these sizes (in key order): leaves filled
 /// to 90%, inner pages to 70%, a metapage, and a root above more than one leaf.
 pub fn btree_pages(tuples: &[usize]) -> i32 {
@@ -669,7 +684,8 @@ pub fn btree_pages(tuples: &[usize]) -> i32 {
         let mut free = 0usize;
         let mut started = false;
         for &it in items {
-            let need = it + ITEM_ID;
+            // (No btree tuple is bigger than BTMaxItemSize: a page holds at least three.)
+            let need = it.min(BT_MAX_ITEM) + ITEM_ID;
             // PageGetFreeSpace leaves room for one more line pointer.
             if !started || free.saturating_sub(ITEM_ID) < need + reserve {
                 firsts.push(it);

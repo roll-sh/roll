@@ -130,14 +130,18 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   trips of the regression database in every format and the common options with restores
   both ways (`pg_dump_roundtrip`; `pg_regress` keeps its databases with `PGREGRESS_KEEP=1`),
   and psql's backslash commands (`pg_psql_meta`). Scores, the fixes and what is open:
-  `tests/pg_dump/STATUS.md`. pg_dump couldn't start before; 002_pg_dump.pl passes 14,603 of
+  `tests/pg_dump/STATUS.md`. pg_dump couldn't start before; 002_pg_dump.pl passes 14,604 of
   14,609 checks and parallel dump / restore works. Fixes with effects beyond pg_dump:
   concurrent DDL in different sessions commits (the catalog is merged onto the current one,
   `txn/catmerge.rs`; it used to fail, or silently drop the other transaction's DDL when that
   committed while a command ran), stored expressions are qualified when stored (they kept
   working only under the search_path they were made in), snapshot export
-  (`pg_export_snapshot`, `SET TRANSACTION SNAPSHOT`), and `roll-engine` shuts down cleanly on
-  SIGTERM keeping sequence positions.
+  (`pg_export_snapshot`, `SET TRANSACTION SNAPSHOT`), `roll-engine` shuts down cleanly on
+  SIGTERM keeping sequence positions, and CREATE INDEX over keys bigger than a btree page no
+  longer loops forever (the page-count model, `relsize::btree_pages`). Open: databases' own
+  options (CONNECTION LIMIT, ALLOW_CONNECTIONS, IS_TEMPLATE, invalid databases) aren't kept,
+  and every engine database reports the builtin C.UTF-8 locale where the reference has libc
+  C (a decision about the default collation).
 
 ## Repository layout
 

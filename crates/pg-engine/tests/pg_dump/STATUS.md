@@ -49,12 +49,30 @@ cargo test -p pg-engine --test pg_dump -- --ignored --nocapture pg_dump_tap
 
 | measure | before (2d82227) | now |
 |---|---|---|
-| 002_pg_dump.pl TAP checks | 32 / 14,609 (pg_dump could not start) | 14,603 / 14,609 |
+| 002_pg_dump.pl TAP checks | 32 / 14,609 (pg_dump could not start) | 14,604 / 14,609 |
 | 001_basic.pl, 005_pg_dump_filterfile.pl | not run | 96 / 96, 108 / 108 |
 | 004_pg_dump_parallel.pl (parallel dump and restore) | 2 / 4 | 4 / 4 |
 | regression database dumps (pg_dump runs at all) | fails (`acldefault`, `name` subscripts, `"char" = text`, `pg_export_snapshot`) | every format and option dumps |
 
-ROUNDTRIP_TABLE
+Over the regression database (round 17's run; entries are the dump's `-- Name:` sections):
+
+| run | entries matching |
+|---|---|
+| plain, custom, directory, directory `-j 4`, tar, `--inserts`, `--column-inserts` | 2,690 / 2,733 |
+| `--schema-only` | 2,025 / 2,031 (2,031 / 2,031 with this batch's fixes, measured per entry) |
+| `--data-only` | 658 / 695 |
+| `--no-owner --no-privileges` | 2,675 / 2,718 |
+| `-n public -N regress_*` | 2,218 / 2,257 |
+| `-t tenk1 -t onek* -t public.road` | 20 / 21 |
+| engine dump restored into the reference (pg_restore, psql) | 4 errors, 2,675 / 2,733 |
+| psql backslash commands (`psql_meta.sql`) | 122 / 146 (before this batch's psql fixes) |
+
+The first round-trip run (before the fixes after it) had 2,647 / 2,738 plain entries and
+1,990 / 2,033 schema entries matching. What still differs in the data and sequence entries is
+the databases' state, not pg_dump: values computed from `random()` / `now()`, rows in another
+physical order (UPDATEs' new versions placed differently), TOAST relation names (oids), the
+large objects' oids, and the regression engine's sequences, which came back 32 values ahead
+after the regression harness killed the engine (it now stops it with SIGTERM).
 
 ## Bugs fixed (round 17, agent 37)
 
@@ -112,10 +130,44 @@ pg_dump couldn't dump any database at first; what it needed, and what the compar
   shutdown) keeps its sequences' positions: they came back 32 values ahead after every
   restart, as PostgreSQL's only do after a crash.
 
+Second batch, from the round trips and psql:
+
+- `ALTER DATABASE ... SET / RESET` was a no-op: it is pg_db_role_setting's (setrole 0) entry
+  now, which sessions there start with (`\drds`, `\dconfig`, pg_dumpall).
+- `pg_tablespace_size`, and `pg_database_size(oid)` sizes that database (it sized the
+  current one); unknown oids error as in PostgreSQL. `format_type(0)` is `-` (`\do`).
+- `pg_get_ruledef`: a condition with a subquery and an action writing a view printed
+  nothing (pg_dump dropped those rules).
+- A range type's constructors: pg_get_function_arguments / _result (`\df`), and qualified
+  names in deparsed expressions.
+- A domain CHECK's `VALUE[1]` prints `(VALUE)[1]`; a domain-typed column without COLLATE has
+  the domain's collation.
+- The regression harness and this one stop the engine with SIGTERM.
+
 Goldens: `tests/sql/a37_pgdump_catalog.sql`, `a37_pgdump_catalog2.sql`,
-`a37_stored_expr_path.sql`; wire tests `exported_snapshots`, `concurrent_ddl`,
-`sequences_survive_a_clean_close`.
+`a37_stored_expr_path.sql`, `a37_psql_catalog.sql`; wire tests `exported_snapshots`,
+`concurrent_ddl`, `sequences_survive_a_clean_close`, `database_settings`.
 
 ## What's left
 
-REMAINING
+- **Databases' own options**: `ALTER DATABASE ... CONNECTION LIMIT / ALLOW_CONNECTIONS /
+  IS_TEMPLATE` and `UPDATE pg_database SET datconnlimit` are not kept (pg_database shows -1,
+  true, false), so the invalid-database TAP checks (datconnlimit = -2: "cannot connect to
+  invalid database", pg_dumpall skipping it) fail: 4 of 002's 5 failures. Needs the cluster
+  registry's database entries to keep them (`engine.rs` `DbEntry`).
+- **Locale provider**: every engine database reports the builtin provider with locale
+  C.UTF-8 (and behaves so: `upper('é')` is 'É'), where the reference cluster (initdb
+  `--locale=C`) and `CREATE DATABASE ... LOCALE 'C'` give libc C (`upper('é')` is 'é').
+  pg_dumpall writes `LOCALE_PROVIDER = builtin ... BUILTIN_LOCALE = 'C.UTF-8'`; the 5th TAP
+  failure. A decision about the engine's default collation, not taken here.
+- `ALTER FUNCTION <built-in> OWNER TO` (002's setup) is refused.
+- A range constructor over a domain subtype prints without the casts to the domain
+  (`gtestdomain1range(a, a + 5)` for PostgreSQL's `...((a)::gtestdomain1, ((a + 5))::...)`).
+- psql: sizes (`\dt+`, `\di+`, `\l+`, `\db+`) are the engine's storage's; `\dnS` lacks the
+  `pg_temp_N` / `pg_toast_temp_N` schemas PostgreSQL keeps after sessions end; `\l` shows the
+  locale provider above.
+- Restoring the regression database into the engine is slow (a debug engine took over an
+  hour for psql's 450,000-line restore): each DDL statement copies and stores the catalog,
+  which grows with the database (agent 36's per-object catalog storage is the place).
+- `003_pg_dump_with_server.pl` (a test extension in the server) and `010_dump_connstr.pl`
+  (clusters made with other bootstrap superusers) don't run.

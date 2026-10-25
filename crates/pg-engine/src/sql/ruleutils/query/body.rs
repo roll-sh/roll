@@ -238,7 +238,9 @@ impl Views<'_, '_, '_> {
             )
         };
         let oid = self.ctx.fmt().names.clone()?.rel_oid(&full).ok()?;
-        self.b.cat.tables.get(&oid).cloned()
+        // (A view: a rule's action may write one.)
+        (self.b.cat.tables.get(&oid).cloned())
+            .or_else(|| self.b.cat.views.get(&oid).map(|v| v.as_table()))
     }
 
     /// A range-table name for `base`, unique among the levels being printed.

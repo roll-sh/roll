@@ -2060,9 +2060,30 @@ fn pg_indexam_progress_phasename(_: &[Value], _: &FnCtx) -> Result<Value> {
     Ok(Value::Null)
 }
 
+/// A range type's constructor (two of the range, three of the multirange): its arguments
+/// and its result as pg_get_function_arguments / _result print them.
+fn range_ctor_text(cat: &Catalog, oid: u32, search_path: &[String]) -> Option<(String, String)> {
+    let r = cat.ranges.values().find(|r| r.fn_oids.iter().take(5).any(|o| *o == oid))?;
+    let i = r.fn_oids.iter().position(|o| *o == oid)?;
+    let rt = crate::types::DataType::Range(r.range_type());
+    let st = cat.format_type(&r.subtype, r.subtype_domain, search_path);
+    let range = cat.format_type(&rt, None, search_path);
+    let multi = cat.qualified_name(cat.multirange_schema(r), &r.multi_name, search_path);
+    Some(match i {
+        0 => (format!("{st}, {st}"), range),
+        1 => (format!("{st}, {st}, text"), range),
+        2 => (String::new(), multi),
+        3 => (range, multi),
+        _ => (format!("VARIADIC {range}[]"), multi),
+    })
+}
+
 fn pg_get_function_arguments(a: &[Value], c: &FnCtx) -> Result<Value> {
     let oid = oid_arg(&a[0]);
     let cat = c.exec.catalog();
+    if let Some((args, _)) = range_ctor_text(&cat, oid, &c.exec.search_path) {
+        return Ok(text(args));
+    }
     if let Some(f) = cat.functions.get(&oid) {
         return Ok(text(function_arguments(&cat, f, true, &c.exec.search_path)));
     }
@@ -2077,6 +2098,9 @@ fn pg_get_function_arguments(a: &[Value], c: &FnCtx) -> Result<Value> {
 fn pg_get_function_identity_arguments(a: &[Value], c: &FnCtx) -> Result<Value> {
     let oid = oid_arg(&a[0]);
     let cat = c.exec.catalog();
+    if let Some((args, _)) = range_ctor_text(&cat, oid, &c.exec.search_path) {
+        return Ok(text(args));
+    }
     if let Some(f) = cat.functions.get(&oid) {
         return Ok(text(function_arguments(
             &cat,
@@ -2096,6 +2120,9 @@ fn pg_get_function_identity_arguments(a: &[Value], c: &FnCtx) -> Result<Value> {
 fn pg_get_function_result(a: &[Value], c: &FnCtx) -> Result<Value> {
     let oid = oid_arg(&a[0]);
     let cat = c.exec.catalog();
+    if let Some((_, ret)) = range_ctor_text(&cat, oid, &c.exec.search_path) {
+        return Ok(text(ret));
+    }
     if let Some(f) = cat.functions.get(&oid) {
         // A procedure has no result.
         if f.procedure {
@@ -2802,13 +2829,66 @@ fn total_relation_size(a: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(size_value(crate::exec::sizing::total_size(oid, c.exec)?))
 }
 fn database_size(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let dbs = c.exec.sess.cluster.databases();
     let name = match &a[0] {
-        Value::Text(t) => t.to_string(),
-        _ => c.exec.sess.database.clone(),
+        Value::Text(t) => {
+            if !dbs.iter().any(|d| *d.1 == **t) && **t != *c.exec.sess.database {
+                bail!(UNDEFINED_DATABASE, "database \"{t}\" does not exist");
+            }
+            t.to_string()
+        }
+        v => match dbs.iter().find(|d| Some(d.0 as i64) == v.as_i64()) {
+            Some(d) => d.1.clone(),
+            None if dbs.is_empty() => c.exec.sess.database.clone(),
+            None => bail!(
+                UNDEFINED_OBJECT,
+                "database with OID {} does not exist",
+                v.as_i64().unwrap_or(0) as u32
+            ),
+        },
     };
     Ok(match c.exec.sess.cluster.database_size(&name) {
         Some(s) => Value::Int8(s),
         None => Value::Int8(c.exec.sess.db.store.size_bytes() as i64),
+    })
+}
+
+/// pg_tablespace_size: pg_default holds every database here; the others (pg_global's
+/// shared catalogs live with the cluster's registry, a tablespace made in place holds
+/// nothing) are empty directories.
+fn tablespace_size(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let cat = c.exec.catalog();
+    let oid = match &a[0] {
+        Value::Text(t) => match t.as_ref() {
+            "pg_default" => 1663,
+            "pg_global" => 1664,
+            n => match cat.tablespaces.values().find(|x| x.name == n) {
+                Some(x) => x.oid,
+                None => bail!(UNDEFINED_OBJECT, "tablespace \"{n}\" does not exist"),
+            },
+        },
+        v => v.as_i64().unwrap_or(0) as u32,
+    };
+    Ok(match oid {
+        1663 => {
+            // (A database the cluster can't size is this one's store: as pg_database_size.)
+            let total: i64 = c
+                .exec
+                .sess
+                .cluster
+                .databases()
+                .iter()
+                .filter_map(|d| c.exec.sess.cluster.database_size(&d.1))
+                .sum();
+            Value::Int8(if total == 0 {
+                c.exec.sess.db.store.size_bytes() as i64
+            } else {
+                total
+            })
+        }
+        1664 => Value::Int8(0),
+        o if cat.tablespaces.contains_key(&o) => Value::Int8(0),
+        o => bail!(UNDEFINED_OBJECT, "tablespace with OID {o} does not exist"),
     })
 }
 /// pg_size_bytes: "1.5 GB" and the like, in bytes.
@@ -4571,6 +4651,10 @@ pub fn register(r: &mut Registry) {
     r.func("pg_database_size", vec![Name], Int8, database_size)
         .volatile();
     r.func("pg_database_size", vec![Oid], Int8, database_size)
+        .volatile();
+    r.func("pg_tablespace_size", vec![Name], Int8, tablespace_size)
+        .volatile();
+    r.func("pg_tablespace_size", vec![Oid], Int8, tablespace_size)
         .volatile();
     r.func("pg_size_bytes", vec![Text], Int8, pg_size_bytes);
     r.func("pg_size_pretty", vec![Int8], Text, pg_size_pretty);

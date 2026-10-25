@@ -599,6 +599,62 @@ fn sequences_survive_a_clean_close() {
     s.engine.shutdown();
 }
 
+/// ALTER DATABASE ... SET / RESET: pg_db_role_setting (setrole 0), and every new session
+/// there starts with it (a role's own settings in it win).
+#[test]
+fn database_settings() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        a.batch_execute(
+            "CREATE DATABASE setdb;
+             ALTER DATABASE setdb SET work_mem = '2MB';
+             ALTER DATABASE setdb SET search_path = a, \"b c\";",
+        )
+        .await
+        .unwrap();
+        let conf: Vec<String> = a
+            .query_one(
+                "SELECT setconfig FROM pg_db_role_setting s JOIN pg_database d
+                   ON d.oid = s.setdatabase WHERE d.datname = 'setdb' AND s.setrole = 0",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(conf, ["work_mem=2MB", "search_path=a, \"b c\""]);
+        {
+            let c = s.connect("setdb").await;
+            let row = c.query_one("SELECT current_setting('work_mem'), current_setting('search_path')", &[]).await.unwrap();
+            assert_eq!((row.get::<_, String>(0), row.get::<_, String>(1)), ("2MB".into(), "a, \"b c\"".into()));
+        }
+        a.batch_execute("ALTER ROLE postgres IN DATABASE setdb SET work_mem = '3MB'; ALTER DATABASE setdb RESET search_path")
+            .await
+            .unwrap();
+        {
+            let c = s.connect("setdb").await;
+            let row = c.query_one("SELECT current_setting('work_mem'), current_setting('search_path')", &[]).await.unwrap();
+            assert_eq!((row.get::<_, String>(0), row.get::<_, String>(1)), ("3MB".into(), "\"$user\", public".into()));
+        }
+        let e = a.batch_execute("ALTER DATABASE setdb SET work_mem = 'lots'").await.unwrap_err();
+        assert_eq!(e.code().map(|c| c.code()), Some("22023"));
+        a.batch_execute("ALTER DATABASE setdb RESET ALL; ALTER ROLE postgres IN DATABASE setdb RESET ALL")
+            .await
+            .unwrap();
+        let n: i64 = a
+            .query_one(
+                "SELECT count(*) FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase
+                   WHERE d.datname = 'setdb'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(n, 0);
+    });
+    s.engine.shutdown();
+}
+
 #[test]
 fn copy_in_and_out() {
     let s = server(AuthMethod::ScramSha256);

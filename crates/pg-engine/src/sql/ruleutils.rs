@@ -1171,9 +1171,21 @@ impl Deparser<'_, '_> {
                     }
                     return Some(());
                 }
+                // A range type's constructors: qualified unless their schema is searched.
+                let ctor = self
+                    .cat
+                    .ranges
+                    .values()
+                    .find_map(|r| {
+                        let i = r.fn_oids.iter().take(5).position(|o| *o == def.oid)?;
+                        Some(if i < 2 { r.schema } else { self.cat.multirange_schema(r) })
+                    });
                 let name = match self.cat.functions.get(&def.oid) {
                     Some(f) if f.name == def.name => {
                         self.cat.function_name(f, &self.ctx.search_path)
+                    }
+                    None if let Some(schema) = ctor => {
+                        self.cat.qualified_name(schema, def.name, &self.ctx.search_path)
                     }
                     // (information_schema's own, qualified unless it is on the search path:
                     // generate_function_name.)
@@ -1463,7 +1475,13 @@ impl Deparser<'_, '_> {
                 }
             },
             Expr::Subscript(base, idx, _) => {
-                let bare = matches!(**base, Expr::Col(..) | Expr::Field(..));
+                // (A domain CHECK's VALUE is no Var: `(VALUE)[1]`. It prints as the bare
+                // word, which a column's quoted name never is.)
+                let bare = match &**base {
+                    Expr::Col(i, _) => self.cols.get(*i).map(String::as_str) != Some("VALUE"),
+                    Expr::Field(..) => true,
+                    _ => false,
+                };
                 if !bare {
                     self.buf.push('(');
                 }

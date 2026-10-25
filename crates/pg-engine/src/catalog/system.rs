@@ -774,6 +774,18 @@ fn index_attr_collation(cat: &Catalog, ix: &super::Index, i: usize, ty: &DataTyp
     }
 }
 
+/// A domain's collation (typcollation): its COLLATE, information_schema's text domains' "C",
+/// or its base type's.
+pub fn domain_collation(cat: &Catalog, d: &super::Domain) -> u32 {
+    let base = type_collation(&d.base);
+    match &d.collation {
+        _ if base == 0 => 0,
+        Some(c) => collation_oid_in(cat, c).unwrap_or(100),
+        None if d.schema == INF => 950,
+        None => base,
+    }
+}
+
 /// `column_collation`, a CREATE COLLATION collation included.
 pub fn column_collation_in(cat: &Catalog, col: &super::Column) -> u32 {
     match &col.collation {
@@ -1990,6 +2002,12 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                         b(col.as_ref().is_none_or(|c| c.islocal)),
                         i2(col.as_ref().map_or(0, |c| c.inhcount as i64)),
                         o(match (&col, sys) {
+                            // A domain-typed column without COLLATE takes the domain's.
+                            (Some(c), _) if c.collation.is_none()
+                                && let Some(d) = c.domain.and_then(|d| cat.domains.get(&d)) =>
+                            {
+                                domain_collation(cat, d)
+                            }
                             (Some(c), _) => column_collation_in(cat, c),
                             (None, Some(a)) => a.1,
                             (None, None) => cat
