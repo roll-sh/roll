@@ -1,0 +1,110 @@
+> CREATE TABLE a (x int, b jsonb, t text)
+-- CREATE TABLE
+
+> CREATE TABLE c (z int, b jsonb, t text)
+-- CREATE TABLE
+
+> INSERT INTO a VALUES (1, '{"k":1}', 'a'), (2, NULL, 'b')
+-- INSERT 0 2
+
+> INSERT INTO c VALUES (1, '{"k":1}', 'a'), (3, '[]', NULL)
+-- INSERT 0 2
+
+> SELECT * FROM a FULL JOIN c ON NULLIF(c.b ? 'k', false)
+ERROR 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+
+> SELECT * FROM a FULL JOIN c ON CASE WHEN a.x > 0 THEN true END
+ERROR 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+
+> SELECT * FROM a FULL JOIN c ON COALESCE(a.x = c.z, false)
+ERROR 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+
+> SELECT * FROM a FULL JOIN c ON a.x = c.z AND NULLIF(c.b ? 'k', false)
+x:int4 | b:jsonb | t:text | z:int4 | b:jsonb | t:text
+1 | {"k": 1} | a | 1 | {"k": 1} | a
+2 | NULL | b | NULL | NULL | NULL
+NULL | NULL | NULL | 3 | [] | NULL
+-- SELECT 3
+
+> SELECT * FROM a FULL JOIN c ON (SELECT a.x = c.z)
+ERROR 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+
+> SELECT * FROM a FULL JOIN c ON NULLIF(true, false)
+x:int4 | b:jsonb | t:text | z:int4 | b:jsonb | t:text
+1 | {"k": 1} | a | 1 | {"k": 1} | a
+1 | {"k": 1} | a | 3 | [] | NULL
+2 | NULL | b | 1 | {"k": 1} | a
+2 | NULL | b | 3 | [] | NULL
+-- SELECT 4
+
+> SELECT * FROM a FULL JOIN c ON (SELECT true)
+ERROR 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+
+> SELECT * FROM a FULL JOIN c ON a.x = c.z AND (SELECT true)
+x:int4 | b:jsonb | t:text | z:int4 | b:jsonb | t:text
+1 | {"k": 1} | a | 1 | {"k": 1} | a
+2 | NULL | b | NULL | NULL | NULL
+NULL | NULL | NULL | 3 | [] | NULL
+-- SELECT 3
+
+> SELECT * FROM a FULL JOIN c ON a.x = c.z AND random() < 2
+x:int4 | b:jsonb | t:text | z:int4 | b:jsonb | t:text
+1 | {"k": 1} | a | 1 | {"k": 1} | a
+2 | NULL | b | NULL | NULL | NULL
+NULL | NULL | NULL | 3 | [] | NULL
+-- SELECT 3
+
+> SELECT * FROM a FULL JOIN c ON a.t = c.t COLLATE "C"
+x:int4 | b:jsonb | t:text | z:int4 | b:jsonb | t:text
+1 | {"k": 1} | a | 1 | {"k": 1} | a
+2 | NULL | b | NULL | NULL | NULL
+NULL | NULL | NULL | 3 | [] | NULL
+-- SELECT 3
+
+> SELECT count(*) FROM a FULL JOIN c ON (a.x = c.z) IS TRUE
+ERROR 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+
+> SELECT count(*) FROM a FULL JOIN c ON a.x::text = c.z::text
+count:int8
+3
+-- SELECT 1
+
+> SELECT count(*) FROM a FULL JOIN c ON a.x = c.z + 0
+count:int8
+3
+-- SELECT 1
+
+> SELECT count(*) FROM a FULL JOIN c ON a.x + c.z = 2
+ERROR 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+
+> SELECT count(*) FROM a FULL JOIN c ON a.b = c.b
+count:int8
+3
+-- SELECT 1
+
+> SELECT count(*) FROM a FULL JOIN c ON a.x = c.z OR a.x = 2
+ERROR 0A000: FULL JOIN is only supported with merge-joinable or hash-joinable join conditions
+
+> SELECT array_remove('[0:1]={-2,-1}'::int4[], 5), array_remove('[0:1]={-2,-1}'::int4[], -2), array_remove('[0:1]={-2,-2}'::int4[], -2), array_replace('[3:4]={1,2}'::int4[], 1, 0)
+array_remove:int4[] | array_remove:int4[] | array_remove:int4[] | array_replace:int4[]
+[0:1]={-2,-1} | [0:0]={-1} | {} | [3:4]={0,2}
+-- SELECT 1
+
+> CREATE TABLE ua (a int)
+-- CREATE TABLE
+
+> INSERT INTO ua VALUES (1)
+-- INSERT 0 1
+
+> SELECT 1 FROM (SELECT 1/0 AS c FROM ua UNION ALL SELECT 1) s
+ERROR 22012: division by zero
+
+> SELECT count(*) FROM (SELECT a, 1/0 AS c FROM ua UNION ALL SELECT 1, 1) s
+ERROR 22012: division by zero
+
+> SELECT a FROM (SELECT a, 1 AS c FROM ua UNION ALL SELECT 2, 3) s ORDER BY 1
+a:int4
+1
+2
+-- SELECT 2
+

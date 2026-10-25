@@ -294,8 +294,17 @@ fn array_remove(a: &[Value], _: &FnCtx) -> Result<Value> {
             "removing elements from multidimensional arrays is not supported"
         );
     }
-    let items = x.items.iter().filter(|v| !eq(v, &a[1])).cloned().collect();
-    Ok(mk(x.elem.clone(), items))
+    let items: Vec<Value> = x.items.iter().filter(|v| !eq(v, &a[1])).cloned().collect();
+    // (array_replace_internal: the result keeps the array's lower bound; none left is the
+    // empty array.)
+    match x.dims.first() {
+        Some(&(_, lb)) if !items.is_empty() => Ok(Value::Array(Arc::new(crate::types::array::ArrayValue {
+            elem: x.elem.clone(),
+            dims: vec![(items.len(), lb)],
+            items,
+        }))),
+        _ => Ok(mk(x.elem.clone(), items)),
+    }
 }
 fn array_replace(a: &[Value], _: &FnCtx) -> Result<Value> {
     let Some(x) = arr(&a[0]) else {

@@ -226,7 +226,24 @@ impl Planner<'_, '_> {
                 visit(right);
             }
             // (Not into an inheritance tree's members: scans of the parent's columns.)
-            Plan::Append { inputs, inh: None, .. } => inputs.iter_mut().for_each(visit),
+            // (A UNION ALL appendrel's members' outputs are its translated vars, which
+            // Postgres simplifies all: a constant left unfolded there (it failed to fold)
+            // stays, to fail the statement.)
+            Plan::Append { inputs, inh: None, .. } => {
+                for c in inputs.iter_mut() {
+                    let mut n = needs
+                        .next()
+                        .unwrap_or_else(|| vec![true; crate::sql::binder::plan_width(c)]);
+                    if let Plan::Project { exprs, .. } = &**c {
+                        for (k, e) in exprs.iter().enumerate() {
+                            if k < n.len() && !crate::sql::binder::fold::candidates_in(std::slice::from_ref(e)).is_empty() {
+                                n[k] = true;
+                            }
+                        }
+                    }
+                    self.drop_unused_outputs(take(c), &n);
+                }
+            }
             // (Each arm's whole row: the set operation compares them.)
             Plan::SetOp { left, right, .. } => {
                 for c in [left, right] {

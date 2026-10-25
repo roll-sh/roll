@@ -3026,6 +3026,14 @@ pub(crate) fn full_join_supported(cat: &Catalog, cond: Option<&Expr>, has_keys: 
             | Expr::InList(..)
             | Expr::ArrayOp { .. }
             | Expr::Col(..) => (false, false, None),
+            // (Nor is any other expression over the sides' columns: a NULLIF, CASE,
+            // COALESCE.)
+            // (An outer join's clause of no column is no gating qual but a join clause too:
+            // a sub-select alone is one.)
+            Expr::Subquery(_) => (false, false, None),
+            Expr::NullIf(..) | Expr::Case { .. } | Expr::Coalesce(..) | Expr::Field(..) if !p.columns().is_empty() => {
+                (false, false, None)
+            }
             _ => (true, true, None),
         };
         clauses.push(info);

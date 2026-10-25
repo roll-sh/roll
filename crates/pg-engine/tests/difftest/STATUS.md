@@ -230,6 +230,21 @@ found by the wider grammar (seeds from 1000 on, below):
   immutable function call over constants that fails when the binder runs it waits for the
   plan too, and a cursor's query folds as any other.
 
+Round 18, agent 45, batch 4 (`a45_full_join_quals`):
+
+- **Wrong rows**: `array_remove` of a one-dimensional array with a lower bound other than 1
+  rebased it to 1 (`array_remove('[0:1]={-2,-1}', 5)` is `[0:1]={-2,-1}`).
+- **Missing errors**: a FULL JOIN whose ON clause is a NULLIF, CASE or COALESCE over the
+  sides, or a sub-select (even one of no column: an outer join's clause is never a gating
+  qual), is neither merge- nor hash-joinable: "FULL JOIN is only supported with
+  merge-joinable or hash-joinable join conditions".
+- Constant folding: a sub-select is planned after the expression around it is simplified, so
+  what fails inside it doesn't keep an `OR true` / `AND false` from deciding the clause,
+  and the sub-selects of a decided clause are never planned (`NOT IN (SELECT ... failing)
+  OR 11 > 9` deletes rows instead of failing). A UNION ALL appendrel's members keep the
+  outputs whose constants failed to fold (PostgreSQL simplifies all of an appendrel's
+  translated vars): `SELECT 1 FROM (SELECT 1/0 FROM t UNION ALL SELECT 1) s` fails.
+
 ## Wider grammar (round 18)
 
 `generate.rs` `wide_expr` and the statement kinds after it, for seeds from `WIDE_SEEDS`
@@ -248,12 +263,12 @@ errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with E
 |---|---|---|---|
 | wide, before batch 3 | 1000–1039 × 100 | 4,000 | wrong_rows 2, tlp 1 |
 | wide, before batch 3 | 1040–1139 × 100 | 9,893 | wrong_rows 2, wrong_state 3, tag 3 |
+| wide, batch 3 engine | 1140–1339 × 100 | 19,995 | wrong_rows 1, wrong_order 1, wrong_state 1, tag 6 |
 
 ## Open
 
-- **Constant folding, left**: a pulled-up UNION ALL arm's unused output (PostgreSQL
-  simplifies the appendrel's translated vars and fails: `SELECT 1 FROM (SELECT 1/0 FROM t
-  UNION ALL SELECT 1) s`); a strict call over a pulled-up subquery's output whose expression
+- **Constant folding, left**: a UNION ALL arm found empty (`... WHERE false UNION ALL ...`)
+  is dropped with its outputs, which PostgreSQL still simplifies; a strict call over a pulled-up subquery's output whose expression
   fails (`NULL + s.c` with `c` = `width_bucket('NaN', ...)`: PostgreSQL substitutes first);
   a CASE arm a pulled-up constant makes unreachable. The five new smoke entries (s5 #6, s10
   #33, s12 #52, s20 #42, s22 #62) are these.

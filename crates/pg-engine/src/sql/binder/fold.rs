@@ -56,14 +56,18 @@ impl Cx<'_, '_> {
             Expr::Const(..) => None,
             Expr::And(args) | Expr::Or(args) => {
                 let and = matches!(e, Expr::And(_));
+                // (A constant deciding the clause replaces it: the sub-selects of the
+                // arguments before it are never planned.)
+                let mut mine = Vec::new();
                 for a in args {
-                    if let Some(x) = self.expr(a, subs) {
+                    if let Some(x) = self.expr(a, &mut mine) {
                         return Some(x);
                     }
                     if matches!(a, Expr::Const(Value::Bool(b), _) if *b != and) {
-                        break;
+                        return None;
                     }
                 }
+                subs.extend(mine);
                 None
             }
             Expr::Case { operand, whens, else_, .. } => {
@@ -315,11 +319,25 @@ pub(crate) fn first_error(plan: &Plan, pending: &[(Expr, Error)], ctx: &ExecCtx)
     Cx { ctx, pending }.plan(plan)
 }
 
-/// Whether simplifying `e` fails (an inlined function's body, a sub-select planned with
-/// it, a function call run while planning, `pending`, included).
+/// Whether simplifying `e` fails (an inlined function's body and a function call run while
+/// planning, `pending`, included).
 pub(crate) fn fails(e: &Expr, ctx: &ExecCtx, pending: &[(Expr, Error)]) -> bool {
     let cx = Cx { ctx, pending };
     let mut subs = Vec::new();
+    // (A sub-select is planned after the expression is simplified (SS_process_sublinks):
+    // what fails in it doesn't stop the AND / OR around it; a SQL function's body inlined
+    // into it does.)
+    let mut calls: Vec<*const Plan> = Vec::new();
+    e.walk(&mut |x| {
+        if let Expr::Subquery(s) = x
+            && s.call.is_some()
+        {
+            calls.push(Arc::as_ptr(&s.plan));
+        }
+    });
     cx.expr(e, &mut subs).is_some()
-        || subs.into_iter().any(|(p, exists)| if exists { cx.exists_plan(p) } else { cx.plan(p) }.is_some())
+        || subs
+            .into_iter()
+            .filter(|(p, _)| calls.contains(&Arc::as_ptr(p)))
+            .any(|(p, exists)| if exists { cx.exists_plan(p) } else { cx.plan(p) }.is_some())
 }
