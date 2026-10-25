@@ -2078,6 +2078,7 @@ fn pruning_horizons_follow_snapshots() {
             lifeline.batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT 1").await.unwrap();
             assert_eq!(fetches(&a, t).await, "2");
             a.batch_execute(&format!("DELETE FROM {t}")).await.unwrap();
+            a.batch_execute("SELECT pg_stat_force_next_flush()").await.unwrap();
             if temp {
                 // The first scan finds them dead to everyone and marks their entries.
                 assert_eq!(fetches(&a, t).await, "2");
@@ -2085,9 +2086,17 @@ fn pruning_horizons_follow_snapshots() {
             } else {
                 assert_eq!(fetches(&a, t).await, "2");
                 assert_eq!(fetches(&a, t).await, "2");
-                // VACUUM can't remove what the other snapshot may see.
+                // VACUUM can't remove what the other snapshot may see (and reports it as
+                // the table's dead tuples).
                 a.batch_execute(&format!("VACUUM {t}")).await.unwrap();
                 assert_eq!(fetches(&a, t).await, "2");
+                a.batch_execute("SELECT pg_stat_force_next_flush()").await.unwrap();
+                let tup = "SELECT n_live_tup, n_dead_tup FROM pg_stat_user_tables WHERE relname = 'hz'";
+                assert_eq!(lines(&a, tup).await.unwrap(), ["0|2"]);
+                lifeline.batch_execute("COMMIT").await.unwrap();
+                a.batch_execute(&format!("VACUUM {t}")).await.unwrap();
+                assert_eq!(lines(&a, tup).await.unwrap(), ["0|0"]);
+                lifeline.batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT 1").await.unwrap();
             }
             lifeline.batch_execute("COMMIT").await.unwrap();
             a.batch_execute(&format!("VACUUM {t}")).await.unwrap();

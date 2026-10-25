@@ -212,7 +212,8 @@ it implemented over the old lock manager.
     remove is what no running transaction or held snapshot can see; a temporary table's
     horizon is its own session's transaction only (GlobalVisTempRels). An index-only scan's
     Heap Fetches count every index entry it passes that isn't LP_DEAD on a page not
-    all-visible, dead rows' included (`exec/scan.rs` `IosEntries`). Not modelled: horizons
+    all-visible, dead rows' included (`exec/scan.rs` `IosEntries`). VACUUM reports the dead
+    tuples it had to keep (recently dead) as the table's n_dead_tup. Not modelled: horizons
     per database (snapshots in other databases hold back this one's), and a READ COMMITTED
     transaction idle between statements still holds its last statement's xmin.
 - **D2** needs TOAST tables as relations of their own (the engine stores out-of-line values in

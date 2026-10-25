@@ -49,6 +49,9 @@ pub struct RelFiles {
     gin_built: HashMap<u32, Vec<HashSet<Vec<u8>>>>,
     /// BRIN indexes: which page ranges have a summary.
     brin: HashMap<u32, BrinRanges>,
+    /// The dead tuples the last VACUUM of each table had to keep (what it reports as the
+    /// table's dead tuples), until reported.
+    vacuum_kept: HashMap<u32, i64>,
 }
 
 /// A BRIN index's summarized page ranges: those its build covered (the heap's pages then,
@@ -2627,6 +2630,12 @@ pub fn set_vacuum_truncate(v: Option<bool>) {
     VACUUM_TRUNCATE.with(|c| c.set(v));
 }
 
+/// The dead tuples the last VACUUM of `table` had to keep, still visible to someone
+/// (pgstat_report_vacuum's dead tuples; 0 when the heap isn't modelled).
+pub fn take_vacuum_kept(table: u32, db: &Database) -> i64 {
+    db.relfiles.lock().vacuum_kept.remove(&table).unwrap_or(0)
+}
+
 /// What VACUUM found and left.
 pub struct Vacuumed {
     pub pages: i32,
@@ -2647,7 +2656,7 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
     let db = &ctx.sess.db;
     let xids = db.xids();
     let mut rf = db.relfiles.lock();
-    let RelFiles { heaps, btrees, .. } = &mut *rf;
+    let RelFiles { heaps, btrees, vacuum_kept, .. } = &mut *rf;
     let Some(heap) = heaps.get_mut(&t.oid) else {
         return Ok(None);
     };
@@ -2664,6 +2673,7 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
         })
     };
     let res = heap.vacuum(&v, indexes.len(), truncate("vacuum_truncate"));
+    vacuum_kept.insert(t.oid, res.recently_dead as i64);
     let mut out = Vacuumed {
         pages: res.pages as i32,
         tuples: res.live,

@@ -635,6 +635,9 @@ pub struct VacuumResult {
     pub all_visible: u32,
     /// Heap tuples whose index entries VACUUM removed (their line pointers are reusable).
     pub dead: Vec<Tid>,
+    /// Dead tuples it had to keep, still visible to a running transaction or a snapshot
+    /// (vacrel->recently_dead_tuples).
+    pub recently_dead: u32,
 }
 
 #[derive(Debug, Default)]
@@ -1373,6 +1376,12 @@ impl Heap {
             }
             let (hastup, dead, live, all_visible) = self.prune(b, v, nindexes == 0);
             res.live += live as f64;
+            // HEAPTUPLE_RECENTLY_DEAD: dead, but a transaction or snapshot may still see it.
+            res.recently_dead += self.pages[b as usize]
+                .lps
+                .iter()
+                .filter(|l| matches!(l, Lp::Normal(t) if t.status(v) == Htsv::RecentlyDead))
+                .count() as u32;
             if hastup {
                 nonempty = b + 1;
             }

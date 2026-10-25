@@ -434,7 +434,7 @@ impl Ddl<'_, '_> {
                                     .unwrap_or(0) as i64;
                                 crate::exec::pgstat::count_io(self.ctx, "relation", "vacuum", "reads", pages.max(1));
                                 crate::exec::pgstat::count_io(self.ctx, "relation", "vacuum", "reuses", 1);
-                                crate::exec::pgstat::report_vacuum(self.ctx, r.oid, live as i64, 0, ms(started));
+                                crate::exec::pgstat::report_vacuum(self.ctx, r.oid, live as i64, crate::exec::sizing::take_vacuum_kept(r.oid, &self.ctx.sess.db), ms(started));
                             }
                             if process_toast && r.toast != 0 {
                                 crate::exec::pgstat::report_vacuum(self.ctx, r.toast, 0, 0, 0.0);
