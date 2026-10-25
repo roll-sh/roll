@@ -266,6 +266,9 @@ Batch 7 (`a45_inline_strict`):
   GREATEST / LEAST, ARRAY[], ROW()) isn't inlined (inline_function's
   contain_nonstrict_functions), so what its body would fold to doesn't fail the statement.
 
+Batch 8 (`a45_cbrt_musl`): `cbrt()` follows musl's algorithm (the reference's C library)
+instead of the host libm, whose last digit differs for some inputs (`cbrt(3.75)`).
+
 ## Wider grammar (round 18)
 
 `generate.rs` `wide_expr` and the statement kinds after it, for seeds from `WIDE_SEEDS`

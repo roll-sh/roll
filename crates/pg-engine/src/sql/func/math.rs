@@ -67,7 +67,46 @@ pub fn sqrt_f(a: &[Value], _: &FnCtx) -> Result<Value> {
 }
 
 pub fn cbrt_f(a: &[Value], _: &FnCtx) -> Result<Value> {
-    f8(float_arg(&a[0]).cbrt())
+    f8(cbrt(float_arg(&a[0])))
+}
+
+/// dcbrt is the C library's cbrt(); the reference PostgreSQL is built against musl, whose
+/// cbrt (FreeBSD's s_cbrt.c) rounds some results differently from the host's libm: its
+/// algorithm, so the digits match.
+fn cbrt(x: f64) -> f64 {
+    const B1: u32 = 715094163;
+    const B2: u32 = 696219795;
+    const P0: f64 = 1.87595182427177009643;
+    const P1: f64 = -1.88497979543377169875;
+    const P2: f64 = 1.621429720105354466140;
+    const P3: f64 = -0.758397934778766047437;
+    const P4: f64 = 0.145996192886612446982;
+    let mut ui = x.to_bits();
+    let mut hx = ((ui >> 32) as u32) & 0x7fff_ffff;
+    if hx >= 0x7ff0_0000 {
+        return x + x;
+    }
+    if hx < 0x0010_0000 {
+        ui = (x * f64::from_bits(0x4350_0000_0000_0000)).to_bits(); // x * 2^54
+        hx = ((ui >> 32) as u32) & 0x7fff_ffff;
+        if hx == 0 {
+            return x;
+        }
+        hx = hx / 3 + B2;
+    } else {
+        hx = hx / 3 + B1;
+    }
+    ui &= 1u64 << 63;
+    ui |= (hx as u64) << 32;
+    let mut t = f64::from_bits(ui);
+    let r = (t * t) * (t / x);
+    t *= (P0 + r * (P1 + r * P2)) + ((r * r) * r) * (P3 + r * P4);
+    t = f64::from_bits((t.to_bits().wrapping_add(0x8000_0000)) & 0xffff_ffff_c000_0000);
+    let s = t * t;
+    let r = x / s;
+    let w = t + t;
+    let r = (r - t) / (w + r);
+    t + t * r
 }
 
 fn abs_num(a: &[Value], _: &FnCtx) -> Result<Value> {
