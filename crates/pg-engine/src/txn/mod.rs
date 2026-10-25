@@ -1177,6 +1177,11 @@ impl Txn {
     /// writes, its parents (and the top level) theirs first.
     pub fn cur_xid(&mut self) -> u64 {
         let top = self.xid();
+        // (Every level has its id already: the usual case, every write of a statement,
+        // without touching the shared id registry.)
+        if self.savepoints.iter().all(|sp| sp.xid != 0) {
+            return self.savepoints.last().map_or(top, |sp| sp.xid);
+        }
         let xids = self.db.xids();
         let mut cur = top;
         for sp in &mut self.savepoints {
@@ -1461,6 +1466,41 @@ impl Txn {
             Some(None) => self.db.store.get(key, st.ts),
             None => self.get_at(key, st.ts),
         }
+    }
+
+    /// `get_snap` of each of `keys` (any order), the store's reads made together
+    /// (`Store::get_versions`).
+    pub fn get_many_snap(&self, keys: &[Vec<u8>], s: &Snap) -> Result<Vec<Option<Bytes>>> {
+        self.catch_up(s);
+        let st = s.st.borrow();
+        let mut out: Vec<Option<Bytes>> = vec![None; keys.len()];
+        // The keys the store answers: (key, its place in `keys`).
+        let mut reads: Vec<(&[u8], usize)> = Vec::new();
+        for (i, key) in keys.iter().enumerate() {
+            match st.prev.get(key.as_slice()) {
+                Some(Some(v)) => out[i] = v.clone(),
+                Some(None) => reads.push((key, i)),
+                None => match self.writes.get(key.as_slice()) {
+                    Some((v, _)) => out[i] = v.clone(),
+                    None => reads.push((key, i)),
+                },
+            }
+        }
+        if reads.is_empty() {
+            return Ok(out);
+        }
+        reads.sort_unstable();
+        let mut uniq: Vec<&[u8]> = reads.iter().map(|r| r.0).collect();
+        uniq.dedup();
+        let got = self.db.store.get_versions(&uniq, st.ts)?;
+        let mut u = 0;
+        for (key, i) in reads {
+            while uniq[u] != key {
+                u += 1;
+            }
+            out[i] = got[u].as_ref().and_then(|(_, v)| v.clone());
+        }
+        Ok(out)
     }
 
     /// Whether this transaction holds heavyweight lock `key` (in any mode).

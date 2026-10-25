@@ -25,6 +25,23 @@ use std::sync::Arc;
 
 /// Tables with more row versions than this aren't modelled (their sizes are estimated).
 const MAX_VERSIONS: usize = 400_000;
+
+thread_local! {
+    /// `MAX_VERSIONS` on this thread (`with_max_versions`).
+    static MAX_VERSIONS_HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_VERSIONS) };
+}
+
+/// Run `f` with tables of more than `n` row versions too big to model, on this thread (so a
+/// test's small tables take the big ones' paths).
+#[doc(hidden)]
+pub fn with_max_versions<R>(n: usize, f: impl FnOnce() -> R) -> R {
+    let _g = crate::scoped::set(&MAX_VERSIONS_HERE, n, "sizing::MAX_VERSIONS_HERE");
+    f()
+}
+
+fn max_versions() -> usize {
+    MAX_VERSIONS_HERE.with(|m| m.get())
+}
 /// COPY's multi-insert buffer limits (MAX_BUFFERED_TUPLES, MAX_BUFFERED_BYTES).
 const COPY_TUPLES: usize = 1000;
 const COPY_BYTES: usize = 65535;
@@ -1063,11 +1080,11 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
         let mut it = ctx.txn.borrow().scan(&start, &end);
         for r in it.by_ref() {
             raw.push(r?);
-            if raw.len() > MAX_VERSIONS {
+            if raw.len() > max_versions() {
                 break;
             }
         }
-        if raw.len() > MAX_VERSIONS {
+        if raw.len() > max_versions() {
             // The rows read so far are laid out as stored; the rest (a big table's, read
             // when its database opens) by their stored length, scaled as the first rows'
             // tuples are to theirs: no decoding, nothing held.
@@ -1199,7 +1216,7 @@ fn check_size(db: &Database, t: &Table) {
         .lock()
         .heaps
         .get(&t.oid)
-        .is_some_and(|h| h.versions() > MAX_VERSIONS);
+        .is_some_and(|h| h.versions() > max_versions());
     if big {
         untrack(db, t, None);
     }
@@ -1734,10 +1751,13 @@ pub fn truncated(t: &Table, db: &Database) {
 /// the buckets estimate_rel_size's guess for the new, empty files gives.
 pub fn indexes_emptied(t: &Table, ctx: &ExecCtx) {
     let est = crate::sql::costs::empty_rel_tuples(t, ctx);
+    let cat = ctx.catalog();
     let mut rf = ctx.sess.db.relfiles.lock();
     for ix in &t.indexes {
         rf.hash_est.insert(*ix, est);
-        rf.gin_built.insert(*ix, vec![HashSet::new()]);
+        if cat.index(*ix).is_none_or(|i| models_build(&i.method)) {
+            rf.gin_built.insert(*ix, vec![HashSet::new()]);
+        }
         rf.brin.insert(*ix, BrinRanges::default());
     }
 }
@@ -2329,7 +2349,7 @@ pub fn loaded(
     for (k, r) in rows {
         note_compression(t, r, Some(k), ctx);
     }
-    if rows.len() > MAX_VERSIONS {
+    if rows.len() > max_versions() {
         let est = estimate_rows(t, rows.iter().map(|(_, r)| r.as_slice()), ctx);
         untrack(&ctx.sess.db, t, Some(est));
         return Vec::new();
@@ -2551,20 +2571,33 @@ pub fn gin_rekeyed(t: &Table, rekey: &[(Vec<u8>, Vec<u8>)], db: &Database) {
     }
 }
 
+/// Whether an index of this access method has its build modelled apart from the rows
+/// inserted later (GIN's pending list, GiST's sorted build): its model keeps the rows its
+/// build read (`RelFiles::gin_built`). The others keep no set of the table's keys, which a
+/// big table's would make big.
+pub fn models_build(method: &str) -> bool {
+    matches!(method, "gin" | "gist")
+}
+
 /// CREATE INDEX (or a rebuild): the index is built afresh from the table's rows.
 /// An index made with its (empty) table: every row is inserted into it later.
-pub fn index_created(index: u32, ctx: &ExecCtx) {
+/// (`build`: `models_build`.)
+pub fn index_created(index: u32, build: bool, ctx: &ExecCtx) {
     let mut rf = ctx.sess.db.relfiles.lock();
-    rf.gin_built.insert(index, vec![HashSet::new()]);
+    if build {
+        rf.gin_built.insert(index, vec![HashSet::new()]);
+    } else {
+        rf.gin_built.remove(&index);
+    }
     rf.brin.insert(index, BrinRanges::default());
 }
 
-pub fn index_built(t: &Table, index: u32, ctx: &ExecCtx) -> Result<()> {
+pub fn index_built(t: &Table, index: u32, build: bool, ctx: &ExecCtx) -> Result<()> {
     // A hash index's buckets come from estimate_rel_size's tuples at build time (kept
     // for any index: the new one may not be in the catalog yet).
     let est = crate::sql::costs::rel_size(t, ctx).tuples;
-    // A GIN index's build reads the rows there now (kept for any index, as above).
-    {
+    // A GIN or GiST index's build reads the rows there now.
+    if build {
         let start = index_prefix(t.oid, 0);
         let end = prefix_end(&start);
         let keys: HashSet<Vec<u8>> = ctx
@@ -2574,6 +2607,8 @@ pub fn index_built(t: &Table, index: u32, ctx: &ExecCtx) -> Result<()> {
             .map(|r| r.map(|(k, _)| k))
             .collect::<Result<_>>()?;
         ctx.sess.db.relfiles.lock().gin_built.insert(index, vec![keys]);
+    } else {
+        ctx.sess.db.relfiles.lock().gin_built.remove(&index);
     }
     {
         let mut rf = ctx.sess.db.relfiles.lock();

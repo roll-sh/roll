@@ -2696,7 +2696,7 @@ impl Ddl<'_, '_> {
             self.build_index(t, &index)?;
             self.validate_exclusion(t, ix_oid, &name)?;
         } else {
-            crate::exec::sizing::index_created(ix_oid, self.ctx);
+            crate::exec::sizing::index_created(ix_oid, crate::exec::sizing::models_build(&index.method), self.ctx);
         }
         Ok(())
     }
@@ -2783,7 +2783,9 @@ impl Ddl<'_, '_> {
     }
 
     pub(super) fn validate_check(&self, t: &Table, name: &str, e: &Expr) -> Result<()> {
-        for (_, row) in self.table_rows(t)? {
+        for r in self.scan_rows(t) {
+            self.ctx.check()?;
+            let (_, row) = r?;
             if eval(e, &row, self.ctx)? == Value::Bool(false) {
                 return Err(Error::new(
                     code::CHECK_VIOLATION,
@@ -2800,7 +2802,9 @@ impl Ddl<'_, '_> {
     }
 
     pub(super) fn check_not_null(&self, t: &Table, col: usize) -> Result<()> {
-        for (_, row) in self.table_rows(t)? {
+        for r in self.scan_rows(t) {
+            self.ctx.check()?;
+            let (_, row) = r?;
             if row[col].is_null() {
                 return Err(Error::new(
                     code::NOT_NULL_VIOLATION,
@@ -3378,7 +3382,9 @@ impl Ddl<'_, '_> {
         if period {
             // Row by row, as the check trigger does (RI_Initial_Check isn't used).
             let parent = Arc::new(parent.clone());
-            for (_, row) in self.table_rows(t)? {
+            for r in self.scan_rows(t) {
+                self.ctx.check()?;
+                let (_, row) = r?;
                 crate::exec::dml::check_fk_period(t, &parent, cols, ref_cols, name, match_full, &row, self.ctx)?;
             }
             return Ok(());
@@ -3408,7 +3414,9 @@ impl Ddl<'_, '_> {
             .into_iter()
             .map(|r| key_of(&ref_cols.iter().map(|c| r[*c].clone()).collect::<Vec<_>>()))
             .collect();
-        for (_, row) in self.table_rows(t)? {
+        for r in self.scan_rows(t) {
+            self.ctx.check()?;
+            let (_, row) = r?;
             let vals: Vec<Value> = cols.iter().map(|c| row[*c].clone()).collect();
             let nulls = vals.iter().filter(|v| v.is_null()).count();
             // RI_Initial_Check: MATCH FULL takes all or none of the key NULL.
@@ -3457,21 +3465,34 @@ impl Ddl<'_, '_> {
         else {
             return Ok(None);
         };
-        let mut seen = std::collections::HashMap::new();
+        // (Unique keys with the data key of the row that had each first: `build_index`.)
+        let mut seen = UniqueKeys::default();
         let nondet = crate::types::collation::index_nondet(&self.cat, t, ix);
-        for (_, row) in &self.table_rows(t)? {
-            let vals = match index_values(&bix, row, self) {
+        let norms: Vec<_> = nondet.iter().cloned().map(crate::exec::agg::KeyNorm::of).collect();
+        let unique_key = |vals: &[Value]| key_bytes(&crate::exec::agg::group_key(vals, &norms));
+        let stored_values = |d: &[u8]| -> Result<Option<Vec<Value>>> {
+            let bytes = self.ctx.txn.borrow().get(d)?;
+            match bytes {
+                Some(b) => index_values(&bix, &crate::exec::scan::decode_table_row(t, &b)?, self),
+                None => Ok(None),
+            }
+        };
+        for r in self.scan_rows(t) {
+            self.ctx.check()?;
+            let (dkey, row) = r?;
+            let vals = match index_values(&bix, &row, self) {
                 Ok(Some(v)) => v,
                 Ok(None) => continue,
                 Err(e) => return Ok(Some(e)),
             };
             if ix.unique && (ix.nulls_not_distinct || !vals.iter().any(Value::is_null)) {
-                let k = key_bytes(&crate::exec::agg::group_key(&vals, &nondet.iter().cloned().map(crate::exec::agg::KeyNorm::of).collect::<Vec<_>>()));
-                if let Some(first) = seen.get(&k) {
-                    let first: &Vec<Value> = first;
-                    return Ok(Some(self.duplicate_key(t, &bix, first, &ix.name)));
+                let first = seen.insert(unique_key(&vals), &dkey, |d| {
+                    Ok(stored_values(d)?.map(|v| unique_key(&v)))
+                })?;
+                if let Some(first) = first {
+                    let first = stored_values(&first)?;
+                    return Ok(Some(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(&vals), &ix.name)));
                 }
-                seen.insert(k, vals.clone());
             }
         }
         Ok(None)
@@ -3515,28 +3536,43 @@ impl Ddl<'_, '_> {
                     .ok_or_else(|| crate::error::internal("index not found"))?
             }
         };
-        let mut seen = std::collections::HashMap::new();
+        // Unique keys seen so far, with the data key of the row that had each first (its
+        // values are read again for the error).
+        let mut seen = UniqueKeys::default();
         // Keys under a nondeterministic collation are duplicates when it finds them equal.
         let nondet = crate::types::collation::index_nondet(&self.cat, t, ix);
-        let rows = self.table_rows(t)?;
-        for (dkey, row) in &rows {
-            let Some(vals) = index_values(&bix, row, self)? else {
+        let norms: Vec<_> = nondet.iter().cloned().map(crate::exec::agg::KeyNorm::of).collect();
+        let unique_key = |vals: &[Value]| key_bytes(&crate::exec::agg::group_key(vals, &norms));
+        let stored_values = |d: &[u8]| -> Result<Option<Vec<Value>>> {
+            let bytes = self.ctx.txn.borrow().get(d)?;
+            match bytes {
+                Some(b) => index_values(&bix, &crate::exec::scan::decode_table_row(t, &b)?, self),
+                None => Ok(None),
+            }
+        };
+        // (A row at a time: nothing of the table is held but the unique keys.)
+        for r in self.scan_rows(t) {
+            self.ctx.check()?;
+            let (dkey, row) = r?;
+            let Some(vals) = index_values(&bix, &row, self)? else {
                 continue;
             };
             if ix.unique && (ix.nulls_not_distinct || !vals.iter().any(Value::is_null)) {
-                let k = key_bytes(&crate::exec::agg::group_key(&vals, &nondet.iter().cloned().map(crate::exec::agg::KeyNorm::of).collect::<Vec<_>>()));
-                if let Some(first) = seen.get(&k) {
-                    let first: &Vec<Value> = first;
-                    return Err(self.duplicate_key(t, &bix, first, &ix.name));
+                let first = seen.insert(unique_key(&vals), &dkey, |d| {
+                    Ok(stored_values(d)?.map(|v| unique_key(&v)))
+                })?;
+                if let Some(first) = first {
+                    let first = stored_values(&first)?;
+                    return Err(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(&vals), &ix.name));
                 }
-                seen.insert(k, vals.clone());
             }
             if ix.id != 0 {
-                let k = index_entry_key(t, ix, &vals, dkey);
-                self.ctx.txn.borrow_mut().put(k, dkey.clone())?;
+                let k = index_entry_key(t, ix, &vals, &dkey);
+                self.ctx.txn.borrow_mut().put(k, dkey)?;
             }
         }
-        self.index_built(t, ix.oid, rows.into_iter().map(|(_, r)| r).collect())
+        drop(seen);
+        self.index_built(t, ix)
     }
 
     fn duplicate_key(&self, t: &Table, bix: &BoundIndex, vals: &[Value], name: &str) -> Error {
@@ -9426,6 +9462,56 @@ pub(super) fn key_bytes(vals: &[Value]) -> Vec<u8> {
         crate::storage::keys::encode_value(&mut k, v, false);
     }
     k
+}
+
+/// The unique keys an index build has seen, each with the data key of the row that had it
+/// first: a 64-bit hash of the key, and the data keys end to end (about 45 bytes a row,
+/// where the keys and data keys themselves took about 170). Two keys with one hash are
+/// told apart by the first row's key, computed again from the row.
+#[derive(Default)]
+pub(super) struct UniqueKeys {
+    by_hash: std::collections::HashMap<u64, u32>,
+    dkeys: Vec<u8>,
+    ends: Vec<u64>,
+    /// Keys whose hash an unequal key took first.
+    others: std::collections::HashMap<Vec<u8>, Vec<u8>>,
+}
+
+impl UniqueKeys {
+    /// Note `key` for the row stored under `dkey`; if an earlier row had it, that row's
+    /// data key. `key_of` gives a stored row's key (None: it has none) from its data key.
+    pub(super) fn insert(
+        &mut self,
+        key: Vec<u8>,
+        dkey: &[u8],
+        key_of: impl FnOnce(&[u8]) -> Result<Option<Vec<u8>>>,
+    ) -> Result<Option<Vec<u8>>> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut h);
+        let h = h.finish();
+        match self.by_hash.get(&h) {
+            None => {
+                self.by_hash.insert(h, self.ends.len() as u32);
+                self.dkeys.extend_from_slice(dkey);
+                self.ends.push(self.dkeys.len() as u64);
+                Ok(None)
+            }
+            Some(&i) => {
+                let i = i as usize;
+                let start = if i == 0 { 0 } else { self.ends[i - 1] as usize };
+                let first = &self.dkeys[start..self.ends[i] as usize];
+                if key_of(first)?.as_deref() == Some(key.as_slice()) {
+                    return Ok(Some(first.to_vec()));
+                }
+                if let Some(d) = self.others.get(&key) {
+                    return Ok(Some(d.clone()));
+                }
+                self.others.insert(key, dkey.to_vec());
+                Ok(None)
+            }
+        }
+    }
 }
 
 pub(super) fn index_values(ix: &BoundIndex, row: &[Value], d: &Ddl) -> Result<Option<Vec<Value>>> {

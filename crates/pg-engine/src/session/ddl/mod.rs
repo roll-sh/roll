@@ -1216,20 +1216,35 @@ impl<'c, 'a> Ddl<'c, 'a> {
 
     /// Every stored row of a table (as of this transaction), with its storage key.
     fn table_rows(&self, t: &Table) -> Result<Vec<(Vec<u8>, Row)>> {
-        let start = index_prefix(t.oid, 0);
-        let end = prefix_end(&start);
-        let entries: Vec<(Vec<u8>, bytes::Bytes)> = self
-            .ctx
-            .txn
-            .borrow()
-            .scan(&start, &end)
-            .collect::<Result<_>>()?;
-        let mut out = Vec::with_capacity(entries.len());
-        for (k, v) in entries {
+        let mut out = Vec::new();
+        for r in self.scan_rows(t) {
             self.ctx.check()?;
-            out.push((k, decode_table_row(t, &v)?));
+            out.push(r?);
         }
         Ok(out)
+    }
+
+    /// `table_rows` a row at a time: nothing but the row being read is held (the scan
+    /// holds no borrow of the transaction, so the caller may write as it reads).
+    fn scan_rows(&self, t: &Table) -> TableRows {
+        let start = index_prefix(t.oid, 0);
+        let end = prefix_end(&start);
+        TableRows {
+            scan: self.ctx.txn.borrow().scan(&start, &end),
+            table: Arc::new(t.clone()),
+        }
+    }
+
+    /// How many rows a table stores (as of this transaction), none decoded.
+    fn count_rows(&self, t: &Table) -> Result<usize> {
+        let start = index_prefix(t.oid, 0);
+        let end = prefix_end(&start);
+        let mut n = 0;
+        for r in self.ctx.txn.borrow().scan(&start, &end) {
+            r?;
+            n += 1;
+        }
+        Ok(n)
     }
 
     /// A table's rows with its partitions' (over its columns).
@@ -1277,6 +1292,24 @@ impl<'c, 'a> Ddl<'c, 'a> {
 
     fn qualified(&self, schema: u32, name: &str) -> String {
         self.cat.qualified_name(schema, name, self.search_path())
+    }
+}
+
+/// A table's stored rows, decoded as they are read (`Ddl::scan_rows`).
+pub(super) struct TableRows {
+    scan: crate::txn::TxnScan,
+    table: Arc<Table>,
+}
+
+impl Iterator for TableRows {
+    type Item = Result<(Vec<u8>, Row)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let r = self.scan.next()?;
+        Some(r.and_then(|(k, v)| {
+            let row = decode_table_row(&self.table, &v)?;
+            Ok((k, row))
+        }))
     }
 }
 

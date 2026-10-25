@@ -444,7 +444,7 @@ impl Ddl<'_, '_> {
                     if analyze {
                         let started = std::time::Instant::now();
                         self.analyze_columns(&r, &cols, false)?;
-                        let live = self.table_rows(&r)?.len() as i64;
+                        let live = self.count_rows(&r)? as i64;
                         crate::exec::pgstat::report_analyze(
                             self.ctx,
                             r.oid,
@@ -472,7 +472,7 @@ impl Ddl<'_, '_> {
                     crate::exec::pgstat::report_analyze(self.ctx, r.oid, 0, 0, cols.is_empty(), true, 0.0);
                     let mut tuples = 0.0;
                     for leaf in self.cat.leaves(r.oid) {
-                        tuples += self.table_rows(&leaf)?.len() as f64;
+                        tuples += self.count_rows(&leaf)? as f64;
                     }
                     self.cat.relstats.insert(
                         r.oid,
@@ -636,17 +636,18 @@ impl Ddl<'_, '_> {
         if with_exprs.is_empty() {
             return Ok(());
         }
-        let rows = self.table_rows(t)?;
+        // (Index by index, as the rebuilds go: an error is the first index's.)
         for b in &with_exprs {
-            for (_, r) in &rows {
-                super::table::index_values(b, r, self)?;
+            for r in self.scan_rows(t) {
+                self.ctx.check()?;
+                let (_, r) = r?;
+                super::table::index_values(b, &r, self)?;
             }
         }
         Ok(())
     }
 
     fn measure_quiet(&mut self, t: &Table, vacuum: bool) -> Result<f64> {
-        let rows: Vec<crate::exec::Row> = self.table_rows(t)?.into_iter().map(|(_, r)| r).collect();
         // (A lazy VACUUM doesn't compute index expressions; when modelling the indexes
         // would, and that fails, the heap isn't modelled.)
         if vacuum && let Some(v) = crate::exec::sizing::vacuum(t, self.ctx).ok().flatten() {
@@ -674,8 +675,10 @@ impl Ddl<'_, '_> {
             }
             return Ok(v.tuples);
         }
-        let pages = self.heap_pages(t, &rows);
-        let tuples = rows.len() as f64;
+        // (ANALYZE measures the indexes too, from the same pass over the rows.)
+        let m = self.measure_rows(t, (!vacuum).then_some(None))?;
+        let pages = self.heap_pages(t, &m);
+        let tuples = m.rows as f64;
         let before = self.cat.relstats.get(&t.oid).map_or(0, |s| s.allvisible);
         let modelled = if vacuum {
             crate::exec::sizing::measured(t, self.ctx).ok().flatten()
@@ -708,7 +711,7 @@ impl Ddl<'_, '_> {
             },
         );
         if !vacuum {
-            self.measure_indexes(t, &rows, None)?;
+            self.store_index_measures(m.indexes);
         }
         Ok(tuples)
     }
@@ -737,9 +740,9 @@ impl Ddl<'_, '_> {
             self.cat.put_storage(st);
         }
         crate::exec::sizing::rewritten(t, order, self.ctx)?;
-        let rows: Vec<crate::exec::Row> = self.table_rows(t)?.into_iter().map(|(_, r)| r).collect();
-        let pages = self.heap_pages(t, &rows);
-        let tuples = rows.len() as f64;
+        let m = self.measure_rows(t, Some(None))?;
+        let pages = self.heap_pages(t, &m);
+        let tuples = m.rows as f64;
         self.cat.relstats.insert(
             t.oid,
             RelStats {
@@ -749,7 +752,7 @@ impl Ddl<'_, '_> {
                 allfrozen: 0,
             },
         );
-        self.measure_indexes(t, &rows, None)?;
+        self.store_index_measures(m.indexes);
         Ok(tuples)
     }
 
@@ -1018,29 +1021,19 @@ impl Ddl<'_, '_> {
 
     /// CREATE INDEX measures the new index and its table (an empty table that was never
     /// measured keeps its unknown tuple count).
-    pub(super) fn index_built(
-        &mut self,
-        t: &Table,
-        index: u32,
-        rows: Vec<crate::exec::Row>,
-    ) -> Result<()> {
+    pub(super) fn index_built(&mut self, t: &Table, index: &crate::catalog::Index) -> Result<()> {
         // (Modelling the index's pages evaluates its expressions again: what they say then
         // isn't Postgres's.)
         let hold = self.ctx.sess.hold_notices();
         let quiet = self.ctx.notices.borrow().len();
-        let r = self.index_built_measured(t, index, rows);
+        let r = self.index_built_measured(t, index);
         self.ctx.notices.borrow_mut().truncate(quiet);
         drop(hold);
         r
     }
 
-    fn index_built_measured(
-        &mut self,
-        t: &Table,
-        index: u32,
-        rows: Vec<crate::exec::Row>,
-    ) -> Result<()> {
-        crate::exec::sizing::index_built(t, index, self.ctx)?;
+    fn index_built_measured(&mut self, t: &Table, index: &crate::catalog::Index) -> Result<()> {
+        crate::exec::sizing::index_built(t, index.oid, crate::exec::sizing::models_build(&index.method), self.ctx)?;
         // index_update_stats leaves the table's statistics alone when autovacuum is off
         // for it (a dump restoring statistics before its indexes keeps them).
         let autovacuum_off = t.options.iter().any(|o| {
@@ -1049,30 +1042,35 @@ impl Ddl<'_, '_> {
                     && crate::types::text::parse_bool(v.trim_matches('\'')).is_ok_and(|b| !b)
             })
         });
+        let m = self.measure_rows(t, Some(Some(index.oid)))?;
         let before = self.cat.relstats.get(&t.oid).copied();
-        if !autovacuum_off && (!rows.is_empty() || before.is_some_and(|s| s.tuples >= 0.0)) {
-            let pages = self.heap_pages(t, &rows);
+        if !autovacuum_off && (m.rows > 0 || before.is_some_and(|s| s.tuples >= 0.0)) {
+            let pages = self.heap_pages(t, &m);
             self.cat.relstats.insert(
                 t.oid,
                 RelStats {
                     pages,
-                    tuples: rows.len() as f64,
+                    tuples: m.rows as f64,
                     allvisible: before.map_or(0, |s| s.allvisible).min(pages),
                     allfrozen: before.map_or(0, |s| s.allfrozen).min(pages),
                 },
             );
         }
-        self.measure_indexes(t, &rows, Some(index))
+        self.store_index_measures(m.indexes);
+        Ok(())
     }
 
-    fn heap_pages(&self, t: &Table, rows: &[crate::exec::Row]) -> i32 {
-        let blocks = crate::exec::sizing::heap_blocks(t, self.ctx);
+    /// One pass over a table's rows for what measuring it takes, nothing but the row being
+    /// read held: how many there are, the heap's pages (modelled, or packed from the
+    /// rows' tuples when the table is too big to model), and for its indexes (`indexes`:
+    /// None, none; Some(None), all of them; else that one) their pages and tuples.
+    fn measure_rows(&self, t: &Table, indexes: Option<Option<u32>>) -> Result<RowMeasure> {
         let db = &self.ctx.sess.db;
-        if !crate::exec::sizing::is_estimated(t.oid, db)
-            && let Ok(Some(n)) = blocks
-        {
-            return n as i32;
-        }
+        let blocks = crate::exec::sizing::heap_blocks(t, self.ctx);
+        let modelled = match blocks {
+            Ok(Some(n)) if !crate::exec::sizing::is_estimated(t.oid, db) => Some(n as i32),
+            _ => None,
+        };
         let types: Vec<DataType> = t.columns.iter().map(|c| c.ty.clone()).collect();
         let fmt = self.ctx.fmt().clone();
         let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, &fmt);
@@ -1084,68 +1082,125 @@ impl Ddl<'_, '_> {
             .filter(|(_, c)| c.virtual_gen)
             .map(|(i, _)| i)
             .collect();
-        let live = relsize::heap_pages(rows.iter().map(|r| {
-            if virt.is_empty() {
-                return relsize::heap_tuple(&types, r, &text);
-            }
-            let mut r = r.clone();
-            for &i in &virt {
-                if i < r.len() {
-                    r[i] = Value::Null;
+        struct Ix {
+            bix: crate::sql::plan::BoundIndex,
+            types: Vec<DataType>,
+            /// Its pages when they are modelled (only its tuples are counted then).
+            modelled: Option<u32>,
+            tuples: usize,
+            /// (sort key, index tuple size), when its pages aren't modelled.
+            keys: Vec<(Vec<u8>, usize)>,
+        }
+        let mut ixs: Vec<Ix> = Vec::new();
+        if let Some(only) = indexes {
+            for bix in self.binder().bound_indexes(&Arc::new(t.clone()))? {
+                if only.is_some_and(|o| o != bix.index.oid) {
+                    continue;
                 }
+                let mut types: Vec<DataType> = bix.keys.iter().map(|k| k.ty()).collect();
+                types.extend(bix.index.include.iter().map(|&i| t.columns[i].ty.clone()));
+                let modelled = crate::exec::sizing::btree_blocks(bix.index.oid, db);
+                ixs.push(Ix {
+                    bix,
+                    types,
+                    modelled,
+                    tuples: 0,
+                    keys: Vec::new(),
+                });
             }
-            relsize::heap_tuple(&types, &r, &text)
-        }));
-        // A table too big to model: its file keeps its estimated pages.
-        crate::exec::sizing::measured_live(t.oid, live.max(0) as u32, db).map_or(live, |p| p as i32)
-    }
-
-    /// pg_class stats of a table's indexes (or just `only`) over its rows.
-    fn measure_indexes(
-        &mut self,
-        t: &Table,
-        rows: &[crate::exec::Row],
-        only: Option<u32>,
-    ) -> Result<()> {
-        let bixs = self.binder().bound_indexes(&Arc::new(t.clone()))?;
-        let fmt = self.ctx.fmt().clone();
-        let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, &fmt);
-        for bix in bixs
-            .into_iter()
-            .filter(|b| only.is_none_or(|o| o == b.index.oid))
-        {
-            let mut types: Vec<DataType> = bix.keys.iter().map(|k| k.ty()).collect();
-            types.extend(bix.index.include.iter().map(|&i| t.columns[i].ty.clone()));
-            let mut keys: Vec<(Vec<u8>, usize)> = Vec::new();
-            for row in rows {
-                let Some(mut vals) = super::table::index_values(&bix, row, self)? else {
+        }
+        let mut rows = 0usize;
+        let mut sizes: Vec<usize> = Vec::new();
+        for r in self.scan_rows(t) {
+            self.ctx.check()?;
+            let (_, mut row) = r?;
+            rows += 1;
+            for ix in &mut ixs {
+                let Some(mut vals) = super::table::index_values(&ix.bix, &row, self)? else {
                     continue;
                 };
-                let sort = super::table::key_bytes(&vals);
-                vals.extend(bix.index.include.iter().map(|&i| row[i].clone()));
-                keys.push((sort, relsize::index_tuple(&types, &vals, &text)));
+                ix.tuples += 1;
+                if ix.modelled.is_none() {
+                    let sort = super::table::key_bytes(&vals);
+                    vals.extend(ix.bix.index.include.iter().map(|&i| row[i].clone()));
+                    ix.keys.push((sort, relsize::index_tuple(&ix.types, &vals, &text)));
+                }
             }
-            keys.sort();
-            let dedup = !bix.index.unique
-                && bix.index.include.is_empty()
-                && types.iter().all(relsize::equal_image);
-            let mut sizes = Vec::with_capacity(keys.len());
-            for group in keys.chunk_by(|a, b| dedup && a.0 == b.0) {
-                relsize::posting_tuples(group[0].1, group.len(), &mut sizes);
+            if modelled.is_none() {
+                for &i in &virt {
+                    if i < row.len() {
+                        row[i] = Value::Null;
+                    }
+                }
+                sizes.push(relsize::heap_tuple(&types, &row, &text));
             }
-            let tuples = keys.len() as f64;
-            let modelled = crate::exec::sizing::btree_blocks(bix.index.oid, &self.ctx.sess.db);
+        }
+        let (modelled, live) = match modelled {
+            Some(n) => (Some(n), n),
+            None => (None, relsize::heap_pages(sizes.into_iter())),
+        };
+        let mut measured = Vec::with_capacity(ixs.len());
+        for mut ix in ixs {
+            let pages = match ix.modelled {
+                Some(n) => n as i32,
+                None => {
+                    ix.keys.sort();
+                    let dedup = !ix.bix.index.unique
+                        && ix.bix.index.include.is_empty()
+                        && ix.types.iter().all(relsize::equal_image);
+                    let mut sizes = Vec::with_capacity(ix.keys.len());
+                    for group in ix.keys.chunk_by(|a, b| dedup && a.0 == b.0) {
+                        relsize::posting_tuples(group[0].1, group.len(), &mut sizes);
+                    }
+                    relsize::btree_pages(&sizes)
+                }
+            };
+            measured.push((ix.bix.index.oid, pages, ix.tuples as f64));
+        }
+        Ok(RowMeasure {
+            rows,
+            modelled,
+            live,
+            indexes: measured,
+        })
+    }
+
+    /// pg_class stats of indexes measured (`measure_rows`).
+    fn store_index_measures(&mut self, indexes: Vec<(u32, i32, f64)>) {
+        for (oid, pages, tuples) in indexes {
             self.cat.relstats.insert(
-                bix.index.oid,
+                oid,
                 RelStats {
-                    pages: modelled.map_or_else(|| relsize::btree_pages(&sizes), |n| n as i32),
+                    pages,
                     tuples,
                     allvisible: 0,
                     allfrozen: 0,
                 },
             );
         }
-        Ok(())
+    }
+}
+
+/// What `measure_rows` found.
+struct RowMeasure {
+    rows: usize,
+    /// The heap's modelled pages (None: too big to model), else the live rows' tuples
+    /// packed afresh (`Ddl::heap_pages`).
+    modelled: Option<i32>,
+    live: i32,
+    /// (index, pages, tuples).
+    indexes: Vec<(u32, i32, f64)>,
+}
+
+impl Ddl<'_, '_> {
+    /// The heap's pages as `measure_rows` found them: a table too big to model keeps its
+    /// estimated pages (its file doesn't shrink), the space past the live rows free.
+    fn heap_pages(&self, t: &Table, m: &RowMeasure) -> i32 {
+        match m.modelled {
+            Some(n) => n,
+            None => crate::exec::sizing::measured_live(t.oid, m.live.max(0) as u32, &self.ctx.sess.db)
+                .map_or(m.live, |p| p as i32),
+        }
     }
 }
 

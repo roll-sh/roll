@@ -42,6 +42,9 @@ pub struct StoreOptions {
     pub l0_compaction_trigger: usize,
     pub target_file_bytes: u64,
     pub cache: Arc<BlockCache>,
+    /// Flush and compact in a background thread (off: only when asked, for tests that
+    /// need the store left as a crash would leave it).
+    pub background: bool,
 }
 
 impl Default for StoreOptions {
@@ -53,6 +56,7 @@ impl Default for StoreOptions {
             l0_compaction_trigger: 4,
             target_file_bytes: 64 << 20,
             cache: BlockCache::new(256 << 20),
+            background: true,
         }
     }
 }
@@ -97,19 +101,44 @@ struct Manifest {
     /// Every commit <= this is in SSTs.
     flushed_ts: u64,
     last_ts: u64,
-    /// Newest first.
+    /// Newest first (by commit timestamp: each file holds one range of them, a flushed
+    /// memtable's or an ingested commit's, and the ranges don't overlap).
     l0: Vec<SstMeta>,
     /// Sorted by key, non-overlapping.
     l1: Vec<SstMeta>,
+}
+
+/// Where an L0 file goes in a list kept newest first.
+fn l0_place(l0: &[SstMeta], meta: &SstMeta) -> usize {
+    l0.partition_point(|m| m.max_ts > meta.max_ts)
+}
+
+/// A frozen source: a memtable waiting to be flushed, or a big commit written as an SST
+/// (`Store::ingest_locked`), in the manifest's L0 already, waiting for the memtables
+/// older than it to be flushed before it joins the view's L0.
+#[derive(Clone)]
+enum Frozen {
+    Mem(Arc<Memtable>),
+    Sst(Arc<SstReader>),
 }
 
 /// An immutable picture of the store's sources. Readers hold one for their whole scan.
 pub struct View {
     mem: Arc<Memtable>,
     /// Newest first.
-    imm: Vec<Arc<Memtable>>,
+    imm: Vec<Frozen>,
     l0: Vec<Arc<SstReader>>,
     l1: Vec<Arc<SstReader>>,
+}
+
+impl View {
+    /// The memtables, newest first.
+    fn memtables(&self) -> impl Iterator<Item = &Arc<Memtable>> {
+        std::iter::once(&self.mem).chain(self.imm.iter().filter_map(|f| match f {
+            Frozen::Mem(m) => Some(m),
+            Frozen::Sst(_) => None,
+        }))
+    }
 }
 
 struct CommitState {
@@ -218,38 +247,53 @@ impl Store {
             .map(|m| SstReader::open(dir, m.clone(), opts.cache.clone()).map(Arc::new))
             .collect::<Result<Vec<_>>>()?;
 
-        // Replay WAL files on top of the SSTs.
+        // Replay WAL files on top of the SSTs. Commits ingested as SSTs (`ingest_locked`)
+        // have no WAL records and split the others: those between two of them go to a
+        // memtable of their own, so every L0 file still holds one range of commit
+        // timestamps, in order.
         let wal_seqs = wal::list(dir)?;
         let mut next_id = manifest
             .next_id
             .max(wal_seqs.last().map(|s| s + 1).unwrap_or(1));
         let replay_seq = next_id;
         next_id += 1;
-        let mem = Arc::new(Memtable::new(replay_seq));
+        let mut barriers: Vec<u64> = manifest
+            .l0
+            .iter()
+            .map(|m| m.max_ts)
+            .filter(|&t| t > manifest.flushed_ts)
+            .collect();
+        barriers.sort_unstable();
+        let groups: Vec<Memtable> = (0..=barriers.len()).map(|_| Memtable::new(replay_seq)).collect();
         let mut last_ts = manifest.last_ts.max(manifest.flushed_ts);
+        last_ts = last_ts.max(barriers.last().copied().unwrap_or(0));
         let mut replayed = 0usize;
         for seq in &wal_seqs {
             let max = wal::replay(&wal::wal_path(dir, *seq), |ts, entries| {
                 if ts <= manifest.flushed_ts {
                     return;
                 }
+                let g = &groups[barriers.partition_point(|&b| b < ts)];
                 for (k, v) in entries {
-                    mem.insert(mvcc_key(&k, ts), v, ts);
+                    g.insert(mvcc_key(&k, ts), v, ts);
                 }
                 replayed += 1;
             })?;
             last_ts = last_ts.max(max);
         }
+        let mem = Arc::new(Memtable::new(replay_seq));
+        // (Frozen sources go newest first; flushing takes them oldest first.)
+        let imm: Vec<Frozen> = groups
+            .into_iter()
+            .rev()
+            .filter(|g| !g.is_empty())
+            .map(|g| Frozen::Mem(Arc::new(g)))
+            .collect();
         let wal = WalWriter::create(dir, replay_seq, if opts.sync { wal::PREALLOC } else { 0 })?;
         let store = Arc::new(Store {
             dir: dir.to_path_buf(),
             opts,
-            view: RwLock::new(Arc::new(View {
-                mem,
-                imm: Vec::new(),
-                l0,
-                l1,
-            })),
+            view: RwLock::new(Arc::new(View { mem, imm, l0, l1 })),
             commit: Mutex::new(CommitState { wal }),
             manifest: Mutex::new(Manifest {
                 next_id,
@@ -334,14 +378,23 @@ impl Store {
     pub fn get_version(&self, key: &[u8], ts: u64) -> Result<Option<(u64, Option<Bytes>)>> {
         let view = self.view();
         let seek = mvcc_key(key, ts);
-        for m in std::iter::once(&view.mem).chain(view.imm.iter()) {
-            if let Some(e) = m
-                .map
+        let mem_get = |m: &Memtable| {
+            m.map
                 .range::<[u8], _>((Bound::Included(seek.as_slice()), Bound::Unbounded))
                 .next()
-                && user_key(e.key()) == key
-            {
-                return Ok(Some((key_ts(e.key()), e.value().clone())));
+                .filter(|e| user_key(e.key()) == key)
+                .map(|e| (key_ts(e.key()), e.value().clone()))
+        };
+        if let Some(hit) = mem_get(&view.mem) {
+            return Ok(Some(hit));
+        }
+        for f in &view.imm {
+            let hit = match f {
+                Frozen::Mem(m) => mem_get(m),
+                Frozen::Sst(s) => sst_get(s, key, &seek)?,
+            };
+            if hit.is_some() {
+                return Ok(hit);
             }
         }
         for sst in view.l0.iter() {
@@ -365,6 +418,69 @@ impl Store {
         Ok(self.get_version(key, u64::MAX >> 1)?.map(|(ts, _)| ts))
     }
 
+    /// `get_version` of each of `keys` (ascending, no duplicates), read together: one view
+    /// of the sources, each file's blocks read once for the keys falling in them (an index
+    /// scan's heap fetches, a run at a time).
+    pub fn get_versions(
+        &self,
+        keys: &[&[u8]],
+        ts: u64,
+    ) -> Result<Vec<Option<(u64, Option<Bytes>)>>> {
+        debug_assert!(keys.windows(2).all(|w| w[0] < w[1]));
+        let view = self.view();
+        let mut out: Vec<Option<(u64, Option<Bytes>)>> = vec![None; keys.len()];
+        let seeks: Vec<Vec<u8>> = keys.iter().map(|k| mvcc_key(k, ts)).collect();
+        // The keys no source has answered yet.
+        let mut left: Vec<usize> = (0..keys.len()).collect();
+        let mut found = Vec::new();
+        let mem_get = |m: &Memtable, left: &mut Vec<usize>, out: &mut Vec<Option<(u64, Option<Bytes>)>>| {
+            if m.is_empty() {
+                return;
+            }
+            left.retain(|&i| {
+                let hit = m
+                    .map
+                    .range::<[u8], _>((Bound::Included(seeks[i].as_slice()), Bound::Unbounded))
+                    .next()
+                    .filter(|e| user_key(e.key()) == keys[i]);
+                match hit {
+                    Some(e) => {
+                        out[i] = Some((key_ts(e.key()), e.value().clone()));
+                        false
+                    }
+                    None => true,
+                }
+            });
+        };
+        mem_get(&view.mem, &mut left, &mut out);
+        // Files in age order: the frozen ones, then L0's, then L1 (one level).
+        let files = view
+            .imm
+            .iter()
+            .map(|f| match f {
+                Frozen::Mem(m) => Err(m),
+                Frozen::Sst(s) => Ok(std::slice::from_ref(s)),
+            })
+            .chain(view.l0.iter().map(|s| Ok(std::slice::from_ref(s))))
+            .chain((!view.l1.is_empty()).then_some(Ok(view.l1.as_slice())));
+        for f in files {
+            if left.is_empty() {
+                break;
+            }
+            match f {
+                Err(m) => mem_get(m, &mut left, &mut out),
+                Ok(ssts) => {
+                    ssts_get(ssts, keys, &seeks, &left, &mut found)?;
+                    for (i, hit) in found.drain(..) {
+                        out[i] = Some(hit);
+                    }
+                    left.retain(|&i| out[i].is_none());
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Ascending scan of user keys in [start, end) at snapshot `ts`.
     pub fn scan(&self, start: &[u8], end: &[u8], ts: u64) -> Scan {
         Scan::new(self.view(), start.to_vec(), end.to_vec(), ts, self.gc_horizon())
@@ -384,7 +500,7 @@ impl Store {
         writes: Vec<(Vec<u8>, Option<Bytes>)>,
         check: impl FnOnce(&Store) -> Result<()>,
     ) -> Result<u64> {
-        if !self.opts.sync {
+        if !self.opts.sync || self.ingests(&writes) {
             return self.commit_with(writes, |s, _| check(s), |_| {});
         }
         let rotate;
@@ -413,6 +529,20 @@ impl Store {
             self.schedule_background();
         }
         Ok(ts)
+    }
+
+    /// Whether a commit of `writes` is big enough to go in as an SST of its own
+    /// (`ingest_locked`): a quarter of a memtable.
+    fn ingests(&self, writes: &[(Vec<u8>, Option<Bytes>)]) -> bool {
+        let limit = self.opts.memtable_bytes / 4;
+        let mut n = 0usize;
+        for (k, v) in writes {
+            n += k.len() + v.as_ref().map_or(0, |v| v.len()) + 16;
+            if n >= limit {
+                return true;
+            }
+        }
+        false
     }
 
     /// Wait until commit `ts` is fsynced (and so visible), fsyncing the WAL for every commit
@@ -455,6 +585,7 @@ impl Store {
     ) -> Result<u64> {
         let rotate;
         let ts;
+        let ingest = self.ingests(&writes);
         {
             let mut c = self.commit.lock();
             // (Checked under the commit lock: `close` rotates under it, so no commit lands
@@ -467,25 +598,104 @@ impl Store {
                 return Ok(self.visible_ts());
             }
             ts = self.assigned.load(Ordering::Acquire) + 1;
-            c.wal.append(ts, &writes)?;
-            if self.opts.sync {
-                // (Also makes every group commit appended before this one durable.)
-                c.wal.sync()?;
+            if ingest {
+                self.ingest_locked(&mut c, ts, writes)?;
+                after(ts);
+                rotate = false;
+            } else {
+                c.wal.append(ts, &writes)?;
+                if self.opts.sync {
+                    // (Also makes every group commit appended before this one durable.)
+                    c.wal.sync()?;
+                }
+                self.assigned.store(ts, Ordering::Release);
+                let mem = self.view.read().mem.clone();
+                for (k, v) in writes {
+                    mem.insert(mvcc_key(&k, ts), v, ts);
+                }
+                self.made_durable(ts);
+                after(ts);
+                rotate = mem.bytes() >= self.opts.memtable_bytes;
             }
-            self.assigned.store(ts, Ordering::Release);
-            let mem = self.view.read().mem.clone();
-            for (k, v) in writes {
-                mem.insert(mvcc_key(&k, ts), v, ts);
-            }
-            self.made_durable(ts);
-            after(ts);
-            rotate = mem.bytes() >= self.opts.memtable_bytes;
         }
         if rotate {
             self.rotate()?;
+        }
+        if rotate || ingest {
             self.schedule_background();
         }
         Ok(ts)
+    }
+
+    /// Commit `writes` at `ts` as an SST of their own instead of WAL records and memtable
+    /// entries (a bulk load's, an index build's): written once, with no copy in memory. The
+    /// memtable is frozen first, so every earlier commit is in an older source; the file is
+    /// fsynced and in the manifest's L0 (durable) before the commit is visible, and joins
+    /// the view's L0 when the memtables frozen before it have been flushed (`flush_all`).
+    /// After a crash, the WAL's commits before and after it are replayed around it
+    /// (`Store::open`).
+    fn ingest_locked(
+        &self,
+        c: &mut CommitState,
+        ts: u64,
+        mut writes: Vec<(Vec<u8>, Option<Bytes>)>,
+    ) -> Result<()> {
+        // (A transaction's writes come sorted; others are sorted here.)
+        if !writes.windows(2).all(|w| w[0].0 < w[1].0) {
+            writes.sort_by(|a, b| a.0.cmp(&b.0));
+            writes.dedup_by(|b, a| {
+                // (The last write of a key wins.)
+                if a.0 == b.0 {
+                    std::mem::swap(a, b);
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+        self.rotate_locked(c)?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let mut w = SstWriter::create(&self.dir, id, self.opts.compress)?;
+        let mut key = Vec::new();
+        for (k, v) in &writes {
+            key.clear();
+            key.extend_from_slice(k);
+            key.extend_from_slice(&(!ts).to_be_bytes());
+            w.add(&key, v.as_deref())?;
+        }
+        drop(writes);
+        let meta = w.finish()?;
+        let reader = match SstReader::open(&self.dir, meta.clone(), self.opts.cache.clone()) {
+            Ok(r) => Arc::new(r),
+            Err(e) => {
+                let _ = std::fs::remove_file(sst::sst_path(&self.dir, id));
+                return Err(e);
+            }
+        };
+        {
+            let mut m = self.manifest.lock();
+            let mut next = m.clone();
+            next.l0.insert(l0_place(&next.l0, &meta), meta);
+            next.last_ts = ts;
+            next.next_id = self.next_id.load(Ordering::Relaxed);
+            if let Err(e) = write_manifest(&self.dir, &next) {
+                reader.mark_obsolete();
+                return Err(e);
+            }
+            *m = next;
+            let mut v = self.view.write();
+            let mut imm = vec![Frozen::Sst(reader)];
+            imm.extend(v.imm.iter().cloned());
+            *v = Arc::new(View {
+                mem: v.mem.clone(),
+                imm,
+                l0: v.l0.clone(),
+                l1: v.l1.clone(),
+            });
+        }
+        self.assigned.store(ts, Ordering::Release);
+        self.made_durable(ts);
+        Ok(())
     }
 
     /// Freeze the memtable and start a new one (with its own WAL file).
@@ -500,6 +710,11 @@ impl Store {
         if self.closed.load(Ordering::Acquire) && !closing {
             return Ok(());
         }
+        self.rotate_locked(&mut c)
+    }
+
+    /// `rotate` under the commit lock.
+    fn rotate_locked(&self, c: &mut CommitState) -> Result<()> {
         let seq = self.next_id.fetch_add(1, Ordering::Relaxed);
         let new_wal = WalWriter::create(
             &self.dir,
@@ -525,7 +740,7 @@ impl Store {
             });
             return Ok(());
         }
-        let mut imm = vec![v.mem.clone()];
+        let mut imm = vec![Frozen::Mem(v.mem.clone())];
         imm.extend(v.imm.iter().cloned());
         *v = Arc::new(View {
             mem: Arc::new(Memtable::new(seq)),
@@ -537,27 +752,66 @@ impl Store {
     }
 
     fn schedule_background(self: &Arc<Self>) {
-        if self.bg_running.swap(true, Ordering::AcqRel) {
+        if !self.opts.background || self.bg_running.swap(true, Ordering::AcqRel) {
             return;
         }
         let this = self.clone();
         std::thread::Builder::new()
             .name("roll-flush".into())
             .spawn(move || {
-                if let Err(e) = this.flush_all().and_then(|_| this.maybe_compact()) {
-                    warn!(dir = %this.dir.display(), error = %e, "background flush/compaction failed");
+                loop {
+                    let r = this.flush_all().and_then(|_| this.maybe_compact());
+                    this.bg_running.store(false, Ordering::Release);
+                    if let Err(e) = r {
+                        warn!(dir = %this.dir.display(), error = %e, "background flush/compaction failed");
+                        break;
+                    }
+                    // (Sources frozen while it ran, which their scheduling left to it.)
+                    if this.view.read().imm.is_empty()
+                        || this.closed.load(Ordering::Acquire)
+                        || this.bg_running.swap(true, Ordering::AcqRel)
+                    {
+                        break;
+                    }
                 }
-                this.bg_running.store(false, Ordering::Release);
             })
             .ok();
     }
 
-    /// Write every frozen memtable to L0, oldest first.
+    /// Write every frozen memtable to L0, oldest first (an ingested commit's SST, in the
+    /// manifest's L0 already, just joins the view's when its turn comes).
     pub fn flush_all(&self) -> Result<()> {
         let _g = self.bg.lock();
         loop {
             let oldest = { self.view.read().imm.last().cloned() };
-            let Some(mem) = oldest else { return Ok(()) };
+            let Some(frozen) = oldest else { return Ok(()) };
+            let mem = match &frozen {
+                Frozen::Mem(m) => m.clone(),
+                Frozen::Sst(s) => {
+                    let mut m = self.manifest.lock();
+                    // (Every commit up to it is in SSTs now.)
+                    m.flushed_ts = m.flushed_ts.max(s.meta.max_ts);
+                    m.last_ts = self.visible_ts();
+                    write_manifest(&self.dir, &m)?;
+                    let mut v = self.view.write();
+                    let imm: Vec<Frozen> = v
+                        .imm
+                        .iter()
+                        .filter(|x| !matches!(x, Frozen::Sst(y) if Arc::ptr_eq(y, s)))
+                        .cloned()
+                        .collect();
+                    let mut l0 = v.l0.clone();
+                    let at = l0.partition_point(|x| x.meta.max_ts > s.meta.max_ts);
+                    l0.insert(at, s.clone());
+                    *v = Arc::new(View {
+                        mem: v.mem.clone(),
+                        imm,
+                        l0,
+                        l1: v.l1.clone(),
+                    });
+                    continue;
+                }
+            };
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             let mut w = SstWriter::create(&self.dir, id, self.opts.compress)?;
             for e in mem.map.iter() {
@@ -572,20 +826,22 @@ impl Store {
             let flushed_ts = mem.max_ts.load(Ordering::Relaxed);
             {
                 let mut m = self.manifest.lock();
-                m.l0.insert(0, meta);
+                let at = l0_place(&m.l0, &meta);
+                m.l0.insert(at, meta);
                 m.flushed_ts = m.flushed_ts.max(flushed_ts);
                 m.last_ts = self.visible_ts();
                 m.next_id = self.next_id.load(Ordering::Relaxed);
                 write_manifest(&self.dir, &m)?;
                 let mut v = self.view.write();
-                let imm: Vec<_> = v
+                let imm: Vec<Frozen> = v
                     .imm
                     .iter()
-                    .filter(|x| !Arc::ptr_eq(x, &mem))
+                    .filter(|x| !matches!(x, Frozen::Mem(y) if Arc::ptr_eq(y, &mem)))
                     .cloned()
                     .collect();
-                let mut l0 = vec![reader];
-                l0.extend(v.l0.iter().cloned());
+                let mut l0 = v.l0.clone();
+                let at = l0.partition_point(|x| x.meta.max_ts > reader.meta.max_ts);
+                l0.insert(at, reader);
                 *v = Arc::new(View {
                     mem: v.mem.clone(),
                     imm,
@@ -606,6 +862,9 @@ impl Store {
         self.compact()
     }
 
+    /// Merge L0 into L1: every L0 file with the L1 files whose user keys overlap theirs
+    /// (the others stay as they are: a bulk load into a new table rewrites none of the
+    /// database's other files).
     pub fn compact(&self) -> Result<()> {
         let _g = self.bg.lock();
         // A closed store's files may belong to a store opened after it (`close` waits for a
@@ -618,7 +877,25 @@ impl Store {
             return Ok(());
         }
         let inputs_l0 = view.l0.clone();
-        let inputs_l1 = view.l1.clone();
+        // (By user key: a user key's versions are all in one L1 file.)
+        let lo = inputs_l0
+            .iter()
+            .map(|s| user_key(&s.meta.first_key))
+            .min()
+            .unwrap_or_default();
+        let hi = inputs_l0
+            .iter()
+            .map(|s| user_key(&s.meta.last_key))
+            .max()
+            .unwrap_or_default();
+        let first = view
+            .l1
+            .partition_point(|s| user_key(&s.meta.last_key) < lo);
+        let last = view
+            .l1
+            .partition_point(|s| user_key(&s.meta.first_key) <= hi)
+            .max(first);
+        let inputs_l1: Vec<Arc<SstReader>> = view.l1[first..last].to_vec();
         let horizon = self.gc_horizon();
         let mut sources: Vec<Cursor> = inputs_l0
             .iter()
@@ -628,22 +905,28 @@ impl Store {
         let mut merge = Merge::new(sources, Vec::new());
         let mut outputs: Vec<SstMeta> = Vec::new();
         let mut writer: Option<SstWriter> = None;
-        let mut cur_user: Option<Vec<u8>> = None;
+        let mut cur_user: Vec<u8> = Vec::new();
+        let mut started = false;
         let mut kept_old = false;
-        while let Some((k, v)) = merge.next_raw()? {
-            let uk = user_key(&k);
-            let ts = key_ts(&k);
-            if cur_user.as_deref() != Some(uk) {
-                cur_user = Some(uk.to_vec());
+        while let Some(i) = merge.min()? {
+            let (k, v) = merge.sources[i].head().expect("a head entry");
+            let uk = user_key(k);
+            let ts = key_ts(k);
+            if !started || cur_user.as_slice() != uk {
+                started = true;
+                cur_user.clear();
+                cur_user.extend_from_slice(uk);
                 kept_old = false;
             }
             if ts <= horizon {
                 if kept_old {
+                    merge.sources[i].advance();
                     continue;
                 }
                 kept_old = true;
                 // L1 is the bottom level, so a tombstone nobody can see past can go.
                 if v.is_none() {
+                    merge.sources[i].advance();
                     continue;
                 }
             }
@@ -662,7 +945,8 @@ impl Store {
                     self.opts.compress,
                 )?);
             }
-            writer.as_mut().unwrap().add(&k, v.as_deref())?;
+            writer.as_mut().unwrap().add(k, v)?;
+            merge.sources[i].advance();
         }
         if let Some(w) = writer {
             if w.entries() > 0 {
@@ -683,7 +967,11 @@ impl Store {
                 .map(|s| s.meta.id)
                 .collect();
             m.l0.retain(|s| !input_ids.contains(&s.id));
-            m.l1 = outputs.clone();
+            // (Only compaction changes L1, under `bg`: the view's is the manifest's.)
+            let mut l1_meta: Vec<SstMeta> = view.l1[..first].iter().map(|s| s.meta.clone()).collect();
+            l1_meta.extend(outputs.iter().cloned());
+            l1_meta.extend(view.l1[last..].iter().map(|s| s.meta.clone()));
+            m.l1 = l1_meta;
             m.next_id = self.next_id.load(Ordering::Relaxed);
             write_manifest(&self.dir, &m)?;
             let mut v = self.view.write();
@@ -692,11 +980,14 @@ impl Store {
                     .filter(|s| !input_ids.contains(&s.meta.id))
                     .cloned()
                     .collect();
+            let mut l1: Vec<Arc<SstReader>> = view.l1[..first].to_vec();
+            l1.extend(readers);
+            l1.extend(view.l1[last..].iter().cloned());
             *v = Arc::new(View {
                 mem: v.mem.clone(),
                 imm: v.imm.clone(),
                 l0,
-                l1: readers,
+                l1,
             });
         }
         for s in inputs_l0.iter().chain(inputs_l1.iter()) {
@@ -723,20 +1014,17 @@ impl Store {
     /// Total bytes in SSTs and memtables (for metering).
     pub fn size_bytes(&self) -> u64 {
         let v = self.view();
-        let sst: u64 = v.l0.iter().chain(v.l1.iter()).map(|s| s.meta.size).sum();
-        let mem: usize = std::iter::once(&v.mem)
-            .chain(v.imm.iter())
-            .map(|m| m.bytes())
-            .sum();
+        let ingested = v.imm.iter().filter_map(|f| match f {
+            Frozen::Sst(s) => Some(s),
+            Frozen::Mem(_) => None,
+        });
+        let sst: u64 = v.l0.iter().chain(v.l1.iter()).chain(ingested).map(|s| s.meta.size).sum();
+        let mem: usize = v.memtables().map(|m| m.bytes()).sum();
         sst + mem as u64
     }
 
     pub fn memory_bytes(&self) -> usize {
-        let v = self.view();
-        std::iter::once(&v.mem)
-            .chain(v.imm.iter())
-            .map(|m| m.bytes())
-            .sum()
+        self.view().memtables().map(|m| m.bytes()).sum()
     }
 }
 
@@ -750,16 +1038,62 @@ fn sst_get(sst: &SstReader, key: &[u8], seek: &[u8]) -> Result<Option<(u64, Opti
     let mut b = sst.find_block(seek);
     while b < sst.block_count() {
         let block = sst.block(b)?;
-        let i = block.partition_point(|(k, _)| k.as_slice() < seek);
-        if let Some((k, v)) = block.get(i) {
+        let i = block.seek(seek);
+        if i < block.len() {
+            let k = block.key(i);
             if user_key(k) == key {
-                return Ok(Some((key_ts(k), v.clone())));
+                return Ok(Some((key_ts(k), block.value(i))));
             }
             return Ok(None);
         }
         b += 1;
     }
     Ok(None)
+}
+
+/// `sst_get` of the keys `left` picks (ascending) over non-overlapping files in key
+/// order (one L0 file, or L1), each block read once for every key in it: the hits, by
+/// key index, go to `found`.
+fn ssts_get(
+    ssts: &[Arc<SstReader>],
+    keys: &[&[u8]],
+    seeks: &[Vec<u8>],
+    left: &[usize],
+    found: &mut Vec<(usize, (u64, Option<Bytes>))>,
+) -> Result<()> {
+    let mut file = 0;
+    let mut cur: Option<(usize, usize, Arc<sst::Block>)> = None;
+    for &i in left {
+        let (key, seek) = (keys[i], seeks[i].as_slice());
+        while file < ssts.len() && user_key(&ssts[file].meta.last_key) < key {
+            file += 1;
+        }
+        let Some(sst) = ssts.get(file) else { break };
+        if key < user_key(&sst.meta.first_key) || !sst.may_contain(key) {
+            continue;
+        }
+        let mut b = sst.find_block(seek);
+        while b < sst.block_count() {
+            let block = match &cur {
+                Some((f, bi, blk)) if *f == file && *bi == b => blk.clone(),
+                _ => {
+                    let blk = sst.block(b)?;
+                    cur = Some((file, b, blk.clone()));
+                    blk
+                }
+            };
+            let j = block.seek(seek);
+            if j < block.len() {
+                let k = block.key(j);
+                if user_key(k) == key {
+                    found.push((i, (key_ts(k), block.value(j))));
+                }
+                break;
+            }
+            b += 1;
+        }
+    }
+    Ok(())
 }
 
 // ── merging iteration ──
@@ -819,7 +1153,9 @@ impl Cursor {
         }
     }
 
-    fn peek(&mut self) -> Result<Option<&RawEntry>> {
+    /// Position on the next entry (reading a batch or a block when needed); `head` then
+    /// shows it.
+    fn fill(&mut self) -> Result<()> {
         match self {
             Cursor::Mem {
                 mem,
@@ -833,14 +1169,14 @@ impl Cursor {
                     let upper = if end.is_empty() {
                         Bound::Unbounded
                     } else {
-                        Bound::Excluded(end.clone())
+                        Bound::Excluded(end.as_slice())
                     };
                     let lower = match from {
-                        Bound::Included(k) => Bound::Included(k.clone()),
-                        Bound::Excluded(k) => Bound::Excluded(k.clone()),
+                        Bound::Included(k) => Bound::Included(k.as_slice()),
+                        Bound::Excluded(k) => Bound::Excluded(k.as_slice()),
                         Bound::Unbounded => Bound::Unbounded,
                     };
-                    for e in mem.map.range::<Vec<u8>, _>((lower, upper)).take(*batch) {
+                    for e in mem.map.range::<[u8], _>((lower, upper)).take(*batch) {
                         buf.push_back((e.key().clone(), e.value().clone()));
                     }
                     if buf.len() < *batch {
@@ -851,7 +1187,7 @@ impl Cursor {
                         *from = Bound::Excluded(k.clone());
                     }
                 }
-                Ok(buf.front())
+                Ok(())
             }
             Cursor::Level {
                 ssts,
@@ -859,67 +1195,56 @@ impl Cursor {
                 block,
                 block_idx,
                 pos,
-                end,
+                end: _,
                 start,
                 started,
-            } => {
-                loop {
-                    if *file >= ssts.len() {
-                        return Ok(None);
-                    }
-                    if !*started {
-                        *started = true;
-                        // Position at the first entry >= start.
-                        if !start.is_empty() {
-                            *file = ssts
-                                .partition_point(|s| s.meta.last_key.as_slice() < start.as_slice());
-                            if *file >= ssts.len() {
-                                return Ok(None);
-                            }
-                            let sst = &ssts[*file];
-                            *block_idx = sst.find_block(start);
-                            if *block_idx < sst.block_count() {
-                                let b = sst.block(*block_idx)?;
-                                *pos = b.partition_point(|(k, _)| k.as_slice() < start.as_slice());
-                                *block = Some(b);
-                            }
+            } => loop {
+                if *file >= ssts.len() {
+                    return Ok(());
+                }
+                if !*started {
+                    *started = true;
+                    // Position at the first entry >= start.
+                    if !start.is_empty() {
+                        *file =
+                            ssts.partition_point(|s| s.meta.last_key.as_slice() < start.as_slice());
+                        if *file >= ssts.len() {
+                            return Ok(());
+                        }
+                        let sst = &ssts[*file];
+                        *block_idx = sst.find_block(start);
+                        if *block_idx < sst.block_count() {
+                            let b = sst.block(*block_idx)?;
+                            *pos = b.seek(start);
+                            *block = Some(b);
                         }
                     }
-                    let sst = &ssts[*file];
-                    if block.is_none() {
-                        if *block_idx >= sst.block_count() {
-                            *file += 1;
-                            *block_idx = 0;
-                            *pos = 0;
-                            continue;
-                        }
-                        *block = Some(sst.block(*block_idx)?);
+                }
+                let sst = &ssts[*file];
+                if block.is_none() {
+                    if *block_idx >= sst.block_count() {
+                        *file += 1;
+                        *block_idx = 0;
                         *pos = 0;
-                    }
-                    let b = block.as_ref().unwrap();
-                    if *pos >= b.len() {
-                        *block = None;
-                        *block_idx += 1;
                         continue;
                     }
-                    let entry = &b[*pos];
-                    if !end.is_empty() && entry.0.as_slice() >= end.as_slice() {
-                        *file = ssts.len();
-                        return Ok(None);
-                    }
-                    // Safe: the block Arc lives in self.
-                    let b: &sst::Block = block.as_ref().unwrap();
-                    return Ok(Some(&b[*pos]));
+                    *block = Some(sst.block(*block_idx)?);
+                    *pos = 0;
                 }
-            }
+                if *pos >= block.as_ref().unwrap().len() {
+                    *block = None;
+                    *block_idx += 1;
+                    continue;
+                }
+                return Ok(());
+            },
         }
     }
 
-    /// The entry the last `peek` returned (None where it returned None), without
-    /// reading further.
-    fn head(&self) -> Option<&RawEntry> {
+    /// The entry `fill` positioned on (None: none left), without reading further.
+    fn head(&self) -> Option<(&[u8], Option<&[u8]>)> {
         match self {
-            Cursor::Mem { buf, .. } => buf.front(),
+            Cursor::Mem { buf, .. } => buf.front().map(|(k, v)| (k.as_slice(), v.as_deref())),
             Cursor::Level {
                 ssts,
                 file,
@@ -931,8 +1256,25 @@ impl Cursor {
                 if *file >= ssts.len() {
                     return None;
                 }
-                let e = block.as_ref()?.get(*pos)?;
-                (end.is_empty() || e.0.as_slice() < end.as_slice()).then_some(e)
+                let b = block.as_ref()?;
+                if *pos >= b.len() {
+                    return None;
+                }
+                let k = b.key(*pos);
+                (end.is_empty() || k < end.as_slice()).then(|| (k, b.value_ref(*pos)))
+            }
+        }
+    }
+
+    /// The head entry, owned, and on past it.
+    fn take(&mut self) -> RawEntry {
+        match self {
+            Cursor::Mem { buf, .. } => buf.pop_front().expect("a head entry"),
+            Cursor::Level { block, pos, .. } => {
+                let b = block.as_ref().expect("a head entry");
+                let e = (b.key(*pos).to_vec(), b.value(*pos));
+                *pos += 1;
+                e
             }
         }
     }
@@ -983,15 +1325,15 @@ impl Cursor {
                     return;
                 }
                 if let Some(b) = block.as_ref() {
-                    if b.get(*pos).is_some_and(|e| e.0.as_slice() >= target) {
+                    if *pos < b.len() && b.key(*pos) >= target {
                         return;
                     }
-                    if b.last().is_some_and(|e| e.0.as_slice() >= target) {
-                        *pos = b.partition_point(|(k, _)| k.as_slice() < target);
+                    if b.last_key().is_some_and(|k| k >= target) {
+                        *pos = b.seek(target);
                         return;
                     }
                 }
-                // Further on: positioned again as at the start (`peek`).
+                // Further on: positioned again as at the start (`fill`).
                 *start = target.to_vec();
                 *started = false;
                 *block = None;
@@ -1010,30 +1352,27 @@ impl Merge {
         Merge { sources, end }
     }
 
-    /// Smallest raw entry across sources. Identical storage keys can't occur in two sources
-    /// (a commit ts belongs to one memtable), so ties don't need breaking.
-    fn next_raw(&mut self) -> Result<Option<RawEntry>> {
-        // Each source's next entry, then the smallest (the first of equals), compared in
-        // place.
+    /// The source holding the smallest raw entry left (None: none below the end). Identical
+    /// storage keys can't occur in two sources (a commit ts belongs to one memtable), so
+    /// ties don't need breaking.
+    fn min(&mut self) -> Result<Option<usize>> {
         for c in &mut self.sources {
-            c.peek()?;
+            c.fill()?;
         }
-        let mut best: Option<(usize, &RawEntry)> = None;
+        let mut best: Option<(usize, &[u8])> = None;
         for (i, c) in self.sources.iter().enumerate() {
-            let Some(e) = c.head() else {
+            let Some((k, _)) = c.head() else {
                 continue;
             };
-            if best.is_none_or(|(_, b)| e.0 < b.0) {
-                best = Some((i, e));
+            if best.is_none_or(|(_, b)| k < b) {
+                best = Some((i, k));
             }
         }
-        let Some((b, e)) = best else { return Ok(None) };
-        let e = e.clone();
-        self.sources[b].advance();
-        if !self.end.is_empty() && e.0 >= self.end {
+        let Some((i, k)) = best else { return Ok(None) };
+        if !self.end.is_empty() && k >= self.end.as_slice() {
             return Ok(None);
         }
-        Ok(Some(e))
+        Ok(Some(i))
     }
 
     /// Every source on to its first entry >= `target`.
@@ -1064,8 +1403,11 @@ impl Scan {
     fn new(view: Arc<View>, start: Vec<u8>, end: Vec<u8>, ts: u64, horizon: u64) -> Scan {
         let mut sources = Vec::new();
         sources.push(Cursor::mem(view.mem.clone(), &start, &end));
-        for m in &view.imm {
-            sources.push(Cursor::mem(m.clone(), &start, &end));
+        for f in &view.imm {
+            sources.push(match f {
+                Frozen::Mem(m) => Cursor::mem(m.clone(), &start, &end),
+                Frozen::Sst(s) => Cursor::level(vec![s.clone()], &start, &end),
+            });
         }
         for s in &view.l0 {
             sources.push(Cursor::level(vec![s.clone()], &start, &end));
@@ -1095,7 +1437,7 @@ impl Scan {
         let from = mvcc_key(uk, self.decided_ts);
         let mut to = uk.to_vec();
         to.extend_from_slice(&[0xFF; 9]);
-        for m in std::iter::once(&self._view.mem).chain(self._view.imm.iter()) {
+        for m in self._view.memtables() {
             let range = (Bound::Excluded(from.as_slice()), Bound::Excluded(to.as_slice()));
             for e in m.map.range::<[u8], _>(range) {
                 e.remove();
@@ -1109,33 +1451,41 @@ impl Iterator for Scan {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let (mut k, v) = match self.merge.next_raw() {
-                Ok(Some(e)) => e,
+            let i = match self.merge.min() {
+                Ok(Some(i)) => i,
                 Ok(None) => return None,
                 Err(e) => return Some(Err(e)),
             };
-            let uk = user_key(&k);
+            // (Entries passed over are never copied.)
+            let (k, v) = self.merge.sources[i].head().expect("a head entry");
+            let uk = user_key(k);
             if self.decided.as_deref() == Some(uk) {
                 // Another version of a key decided already. Past a second one, a seek past
                 // all of them (with the dead ones pruned): a row updated many times. (User
                 // keys are prefix-free, so no other key's entries lie before the target.)
                 self.skipped += 1;
                 if self.skipped >= 2 {
-                    self.prune(uk);
                     let mut target = uk.to_vec();
                     target.extend_from_slice(&[0xFF; 9]);
+                    self.merge.sources[i].advance();
+                    self.prune(&target[..target.len() - 9]);
                     self.merge.seek(&target);
+                } else {
+                    self.merge.sources[i].advance();
                 }
                 continue;
             }
-            if key_ts(&k) > self.ts {
+            let ts = key_ts(k);
+            if ts > self.ts {
                 // Versions newer than the snapshot: past a second one, a seek to the newest
                 // one it sees.
                 if self.newer.as_deref() == Some(uk) {
                     let target = mvcc_key(uk, self.ts);
+                    self.merge.sources[i].advance();
                     self.merge.seek(&target);
                 } else {
                     self.newer = Some(uk.to_vec());
+                    self.merge.sources[i].advance();
                 }
                 continue;
             }
@@ -1149,11 +1499,14 @@ impl Iterator for Scan {
                 }
                 None => self.decided = Some(uk.to_vec()),
             }
-            self.decided_ts = key_ts(&k);
-            if let Some(v) = v {
-                k.truncate(k.len().saturating_sub(8));
-                return Some(Ok((k, v)));
+            self.decided_ts = ts;
+            if v.is_none() {
+                self.merge.sources[i].advance();
+                continue;
             }
+            let (mut k, v) = self.merge.sources[i].take();
+            k.truncate(k.len().saturating_sub(8));
+            return Some(Ok((k, v.expect("a value"))));
         }
     }
 }
@@ -1185,7 +1538,7 @@ enum RevCursor {
 }
 
 impl RevCursor {
-    fn peek(&mut self) -> Result<Option<&RawEntry>> {
+    fn fill(&mut self) -> Result<()> {
         match self {
             RevCursor::Mem {
                 mem,
@@ -1210,7 +1563,7 @@ impl RevCursor {
                         *to = Some(k.clone());
                     }
                 }
-                Ok(buf.front())
+                Ok(())
             }
             RevCursor::Level {
                 ssts,
@@ -1232,7 +1585,7 @@ impl RevCursor {
                         ssts.partition_point(|s| s.meta.first_key.as_slice() < end.as_slice())
                     };
                     if *file == 0 {
-                        return Ok(None);
+                        return Ok(());
                     }
                     let sst = &ssts[*file - 1];
                     let n = sst.block_count();
@@ -1247,22 +1600,18 @@ impl RevCursor {
                         continue;
                     }
                     let b = sst.block(*block_idx)?;
-                    *pos = if end.is_empty() {
-                        b.len()
-                    } else {
-                        b.partition_point(|(k, _)| k.as_slice() < end.as_slice())
-                    };
+                    *pos = if end.is_empty() { b.len() } else { b.seek(end) };
                     *block = Some(b);
                 }
                 if *file == 0 {
-                    return Ok(None);
+                    return Ok(());
                 }
                 if block.is_none() {
                     if *block_idx == 0 {
                         // On to the previous file's last block.
                         *file -= 1;
                         if *file == 0 {
-                            return Ok(None);
+                            return Ok(());
                         }
                         let sst = &ssts[*file - 1];
                         if sst.block_count() == 0 {
@@ -1280,20 +1629,17 @@ impl RevCursor {
                     *block = None;
                     continue;
                 }
-                let b: &sst::Block = block.as_ref().unwrap();
-                let entry = &b[*pos - 1];
-                if entry.0.as_slice() < start.as_slice() {
+                if block.as_ref().unwrap().key(*pos - 1) < start.as_slice() {
                     *file = 0;
-                    return Ok(None);
                 }
-                return Ok(Some(entry));
+                return Ok(());
             },
         }
     }
 
-    fn head(&self) -> Option<&RawEntry> {
+    fn head(&self) -> Option<&[u8]> {
         match self {
-            RevCursor::Mem { buf, .. } => buf.front(),
+            RevCursor::Mem { buf, .. } => buf.front().map(|e| e.0.as_slice()),
             RevCursor::Level {
                 file,
                 block,
@@ -1304,18 +1650,20 @@ impl RevCursor {
                 if *file == 0 || *pos == 0 {
                     return None;
                 }
-                let e = block.as_ref()?.get(*pos - 1)?;
-                (e.0.as_slice() >= start.as_slice()).then_some(e)
+                let k = block.as_ref()?.key(*pos - 1);
+                (k >= start.as_slice()).then_some(k)
             }
         }
     }
 
-    fn advance(&mut self) {
+    fn take(&mut self) -> RawEntry {
         match self {
-            RevCursor::Mem { buf, .. } => {
-                buf.pop_front();
+            RevCursor::Mem { buf, .. } => buf.pop_front().expect("a head entry"),
+            RevCursor::Level { block, pos, .. } => {
+                let b = block.as_ref().expect("a head entry");
+                *pos -= 1;
+                (b.key(*pos).to_vec(), b.value(*pos))
             }
-            RevCursor::Level { pos, .. } => *pos -= 1,
         }
     }
 }
@@ -1350,7 +1698,10 @@ impl RevScan {
             started: false,
         };
         let mut sources = vec![mem(&view.mem)];
-        sources.extend(view.imm.iter().map(mem));
+        sources.extend(view.imm.iter().map(|f| match f {
+            Frozen::Mem(m) => mem(m),
+            Frozen::Sst(s) => level(vec![s.clone()]),
+        }));
         sources.extend(view.l0.iter().map(|s| level(vec![s.clone()])));
         if !view.l1.is_empty() {
             sources.push(level(view.l1.clone()));
@@ -1366,19 +1717,17 @@ impl RevScan {
     /// The greatest raw entry left across the sources.
     fn next_raw(&mut self) -> Result<Option<RawEntry>> {
         for c in &mut self.sources {
-            c.peek()?;
+            c.fill()?;
         }
-        let mut best: Option<(usize, &RawEntry)> = None;
+        let mut best: Option<(usize, &[u8])> = None;
         for (i, c) in self.sources.iter().enumerate() {
-            let Some(e) = c.head() else { continue };
-            if best.is_none_or(|(_, b)| e.0 > b.0) {
-                best = Some((i, e));
+            let Some(k) = c.head() else { continue };
+            if best.is_none_or(|(_, b)| k > b) {
+                best = Some((i, k));
             }
         }
-        let Some((b, e)) = best else { return Ok(None) };
-        let e = e.clone();
-        self.sources[b].advance();
-        Ok(Some(e))
+        let Some((b, _)) = best else { return Ok(None) };
+        Ok(Some(self.sources[b].take()))
     }
 }
 
@@ -1620,5 +1969,202 @@ mod tests {
             s.get(b"a", s.visible_ts()).unwrap().as_deref(),
             Some(&b"new"[..])
         );
+    }
+
+    /// Every version written: key -> [(ts, value)].
+    type Model = BTreeMap<Vec<u8>, Vec<(u64, Option<Bytes>)>>;
+
+    /// What a snapshot at `ts` sees in `model`.
+    fn model_at(model: &Model, ts: u64) -> Vec<(Vec<u8>, Bytes)> {
+        model
+            .iter()
+            .filter_map(|(k, vs)| {
+                let v = vs.iter().rev().find(|(t, _)| *t <= ts)?.1.clone()?;
+                Some((k.clone(), v))
+            })
+            .collect()
+    }
+
+    /// The store at `ts` read every way (scans both ways, point and batched reads) against
+    /// the model.
+    fn check_at(s: &Store, model: &Model, ts: u64, what: &str) {
+        let expect = model_at(model, ts);
+        let all: Vec<_> = s.scan(b"", b"", ts).map(|r| r.unwrap()).collect();
+        assert_eq!(all, expect, "{what}: scan at {ts}");
+        let mut rev: Vec<_> = s.scan_rev(b"", b"", ts).map(|r| r.unwrap()).collect();
+        rev.reverse();
+        assert_eq!(rev, expect, "{what}: reverse scan at {ts}");
+        let keys: Vec<&[u8]> = model.keys().map(|k| k.as_slice()).collect();
+        let got = s.get_versions(&keys, ts).unwrap();
+        for (k, g) in keys.iter().zip(got) {
+            let want = model_at(&BTreeMap::from([(k.to_vec(), model[*k].clone())]), ts)
+                .pop()
+                .map(|e| e.1);
+            assert_eq!(g.and_then(|(_, v)| v), want, "{what}: get_versions {k:?} at {ts}");
+            assert_eq!(s.get(k, ts).unwrap(), want, "{what}: get {k:?} at {ts}");
+        }
+    }
+
+    /// Big commits go in as SSTs of their own; small ones before and after them, unflushed,
+    /// are recovered around them after a crash (the store dropped unclosed, its background
+    /// work off so nothing was flushed), and flushing and partial compactions keep every
+    /// version a pinned snapshot needs.
+    #[test]
+    fn ingested_commits_and_crash_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = || StoreOptions {
+            memtable_bytes: 16 << 10,
+            sync: false,
+            background: false,
+            l0_compaction_trigger: 3,
+            ..StoreOptions::default()
+        };
+        let mut s = Store::open(dir.path(), o()).unwrap();
+        let mut model: Model = BTreeMap::new();
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut rnd = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let mut pins: Vec<SnapshotPin> = Vec::new();
+        let mut around = 0;
+        for round in 0..40u64 {
+            // Small commits: a few keys each, under the ingest size.
+            for _ in 0..rnd(6) {
+                let writes: Vec<(Vec<u8>, Option<Bytes>)> = (0..1 + rnd(4))
+                    .map(|_| {
+                        let k = format!("k{:04}", rnd(600)).into_bytes();
+                        let v = (rnd(5) != 0).then(|| Bytes::from(format!("s{round}-{}", rnd(1000))));
+                        (k, v)
+                    })
+                    .collect::<BTreeMap<_, _>>()
+                    .into_iter()
+                    .collect();
+                assert!(!s.ingests(&writes));
+                let ts = s.commit(writes.clone(), |_| Ok(())).unwrap();
+                for (k, v) in writes {
+                    model.entry(k).or_default().push((ts, v));
+                }
+            }
+            // A big one now and then: a run of keys, some deleted.
+            if rnd(3) == 0 {
+                let from = rnd(500);
+                let writes: Vec<(Vec<u8>, Option<Bytes>)> = (from..from + 100 + rnd(200))
+                    .map(|i| {
+                        let v = (i % 7 != 3).then(|| Bytes::from(format!("big{round}-{i}-{}", "x".repeat(40))));
+                        (format!("k{i:04}").into_bytes(), v)
+                    })
+                    .collect();
+                assert!(s.ingests(&writes));
+                let ts = s.commit(writes.clone(), |_| Ok(())).unwrap();
+                for (k, v) in writes {
+                    model.entry(k).or_default().push((ts, v));
+                }
+            }
+            match rnd(6) {
+                0 => s.flush_all().unwrap(),
+                1 => {
+                    s.rotate().unwrap();
+                    s.flush_all().unwrap();
+                    s.maybe_compact().unwrap();
+                }
+                2 => {
+                    // A crash: nothing closed or flushed; pinned snapshots are gone with it.
+                    pins.clear();
+                    let last = s.visible_ts();
+                    // (The case to recover around: an ingested commit with older commits
+                    // only in the WAL.)
+                    let imm = s.view().imm.clone();
+                    if imm.iter().position(|f| matches!(f, Frozen::Sst(_)))
+                        .is_some_and(|i| imm[i..].iter().any(|f| matches!(f, Frozen::Mem(_))))
+                    {
+                        around += 1;
+                    }
+                    drop(imm);
+                    drop(s);
+                    s = Store::open(dir.path(), o()).unwrap();
+                    assert_eq!(s.visible_ts(), last, "round {round}: recovered visible ts");
+                    // (Recovery flushed every memtable: L0 holds one range of commits per
+                    // file, in order.)
+                    let v = s.view();
+                    assert!(v.imm.is_empty());
+                    assert!(v.l0.windows(2).all(|w| w[0].meta.min_ts > w[1].meta.max_ts));
+                }
+                _ => {}
+            }
+            if rnd(4) == 0 {
+                pins.push(s.pin_visible());
+            }
+            let latest = s.visible_ts();
+            check_at(&s, &model, latest, &format!("round {round}"));
+            for p in &pins {
+                check_at(&s, &model, p.ts, &format!("round {round}, pinned"));
+            }
+        }
+        // A clean close leaves nothing to replay; reopened, everything reads the same.
+        assert!(around > 0, "no crash with an ingested commit over unflushed ones");
+        let last = s.visible_ts();
+        s.close().unwrap();
+        drop(s);
+        let s = Store::open(dir.path(), o()).unwrap();
+        assert_eq!(s.visible_ts(), last);
+        check_at(&s, &model, last, "after close");
+        assert!(wal::list(dir.path()).unwrap().iter().all(|seq| {
+            std::fs::metadata(wal::wal_path(dir.path(), *seq)).map_or(true, |m| m.len() == 0)
+        }));
+    }
+
+    /// Compaction rewrites only the L1 files overlapping L0's keys.
+    #[test]
+    fn compaction_leaves_other_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(
+            dir.path(),
+            StoreOptions {
+                memtable_bytes: 64 << 10,
+                sync: false,
+                background: false,
+                target_file_bytes: 8 << 10,
+                ..StoreOptions::default()
+            },
+        )
+        .unwrap();
+        let mut model: Model = BTreeMap::new();
+        let mut write = |s: &Arc<Store>, keys: std::ops::Range<u32>, tag: &str| {
+            let writes: Vec<_> = keys
+                .map(|i| (format!("t{i:05}").into_bytes(), Some(Bytes::from(format!("{tag}-{i}-{}", "y".repeat(30))))))
+                .collect();
+            let ts = s.commit(writes.clone(), |_| Ok(())).unwrap();
+            for (k, v) in writes {
+                model.entry(k).or_default().push((ts, v));
+            }
+        };
+        write(&s, 0..2000, "a");
+        s.flush_all().unwrap();
+        s.compact().unwrap();
+        let before: Vec<u64> = s.view().l1.iter().map(|f| f.meta.id).collect();
+        assert!(before.len() > 4);
+        // New keys past the end (a new table's rows): no L1 file is rewritten.
+        write(&s, 5000..5100, "b");
+        s.rotate().unwrap();
+        s.flush_all().unwrap();
+        s.compact().unwrap();
+        let after: Vec<u64> = s.view().l1.iter().map(|f| f.meta.id).collect();
+        assert_eq!(&after[..before.len()], &before[..], "{before:?} -> {after:?}");
+        // An update inside: the files around it are, the rest aren't.
+        write(&s, 1000..1010, "c");
+        s.rotate().unwrap();
+        s.flush_all().unwrap();
+        s.compact().unwrap();
+        let again: Vec<u64> = s.view().l1.iter().map(|f| f.meta.id).collect();
+        let kept = after.iter().filter(|id| again.contains(id)).count();
+        assert!(kept >= after.len() - 2, "{after:?} -> {again:?}");
+        let v = s.view();
+        assert!(v.l0.is_empty());
+        assert!(v.l1.windows(2).all(|w| user_key(&w[0].meta.last_key) < user_key(&w[1].meta.first_key)));
+        drop(v);
+        check_at(&s, &model, s.visible_ts(), "compacted");
     }
 }

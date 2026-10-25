@@ -348,6 +348,73 @@ pub fn prefix_end(prefix: &[u8]) -> Vec<u8> {
     vec![0xFF; prefix.len() + 1]
 }
 
+/// The value `encode_index_value` encoded at `*pos` for a column of type `ty`, moving `pos`
+/// past it, for the types whose encoding gives the stored value back exactly (an
+/// index-only scan reads them from the entry); None for any other type (or bad bytes).
+pub fn decode_index_value(
+    b: &[u8],
+    pos: &mut usize,
+    ty: &crate::types::DataType,
+    desc: bool,
+) -> Option<Value> {
+    use crate::types::DataType as T;
+    let flip = if desc { 0xFF } else { 0 };
+    let first = *b.get(*pos)?;
+    // NULL is 0xFF, inverted when descending, or the other one where NULLS FIRST / LAST
+    // moves it (no tag is either).
+    if first == 0x00 || first == 0xFF {
+        *pos += 1;
+        return Some(Value::Null);
+    }
+    let tag = first ^ flip;
+    let mut p = *pos + 1;
+    let fixed = |p: &mut usize, n: usize| -> Option<Vec<u8>> {
+        let s = b.get(*p..*p + n)?;
+        *p += n;
+        Some(s.iter().map(|x| x ^ flip).collect())
+    };
+    let v = match (tag, ty) {
+        (BOOL, T::Bool) => Value::Bool(fixed(&mut p, 1)?[0] != 0),
+        (INT, T::Int2 | T::Int4 | T::Int8 | T::Oid | T::Date | T::Timestamp(_) | T::Timestamptz(_)) => {
+            let raw = u64::from_be_bytes(fixed(&mut p, 8)?.try_into().ok()?);
+            let i = (raw ^ (1 << 63)) as i64;
+            match ty {
+                T::Int2 => Value::Int2(i16::try_from(i).ok()?),
+                T::Int4 => Value::Int4(i32::try_from(i).ok()?),
+                T::Int8 => Value::Int8(i),
+                T::Oid => Value::Oid(u32::try_from(i).ok()?),
+                T::Date => Value::Date(i32::try_from(i).ok()?),
+                T::Timestamp(_) => Value::Timestamp(i),
+                _ => Value::Timestamptz(i),
+            }
+        }
+        (UUID, T::Uuid) => Value::Uuid(u128::from_be_bytes(fixed(&mut p, 16)?.try_into().ok()?)),
+        (BYTES, T::Text | T::Varchar(_) | T::Bpchar(_) | T::Name) => {
+            // `put_bytes`: a 0 byte as 0 0xFF, the end as 0 1.
+            let mut out = Vec::new();
+            loop {
+                let c = *b.get(p)? ^ flip;
+                p += 1;
+                if c != 0 {
+                    out.push(c);
+                    continue;
+                }
+                match *b.get(p)? ^ flip {
+                    0xFF => out.push(0),
+                    0x01 => break,
+                    _ => return None,
+                }
+                p += 1;
+            }
+            p += 1;
+            Value::Text(std::sync::Arc::from(String::from_utf8(out).ok()?))
+        }
+        _ => return None,
+    };
+    *pos = p;
+    Some(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,5 +477,49 @@ mod tests {
         let mut b = enc(&Value::text("ab"));
         b.extend(enc(&Value::text("")));
         assert!(a < b);
+    }
+
+    #[test]
+    fn index_values_decode() {
+        use crate::types::DataType as T;
+        let cases = [
+            (Value::Int4(-7), T::Int4),
+            (Value::Int4(i32::MAX), T::Int4),
+            (Value::Int2(3), T::Int2),
+            (Value::Int8(i64::MIN), T::Int8),
+            (Value::Oid(4_000_000_000), T::Oid),
+            (Value::Bool(true), T::Bool),
+            (Value::Date(-12), T::Date),
+            (Value::Timestamp(1_234_567), T::Timestamp(-1)),
+            (Value::Timestamptz(-9), T::Timestamptz(-1)),
+            (Value::Uuid(0x0123_4567_89ab_cdef_0011_2233_4455_6677), T::Uuid),
+            (Value::text(""), T::Text),
+            (Value::text("a\0b\u{ff}é"), T::Varchar(14)),
+            (Value::Null, T::Int4),
+            (Value::Null, T::Text),
+        ];
+        for desc in [false, true] {
+            for nulls_first in [false, true] {
+                // Two columns in a row, then the data key's suffix.
+                for (v, ty) in &cases {
+                    let mut k = vec![0u8; 8];
+                    encode_index_value(&mut k, v, desc, nulls_first);
+                    encode_index_value(&mut k, &Value::Int4(5), desc, nulls_first);
+                    k.extend_from_slice(&[0x20, 1, 2, 3]);
+                    let mut pos = 8;
+                    let got = decode_index_value(&k, &mut pos, ty, desc);
+                    assert_eq!(got.as_ref(), Some(v), "{v:?} desc {desc} nulls first {nulls_first}");
+                    assert_eq!(
+                        decode_index_value(&k, &mut pos, &T::Int4, desc),
+                        Some(Value::Int4(5))
+                    );
+                    assert_eq!(&k[pos..], &[0x20, 1, 2, 3]);
+                }
+            }
+        }
+        // Types whose encoding loses something aren't decoded.
+        let mut k = Vec::new();
+        encode_value(&mut k, &Value::numeric("1.50".parse().unwrap()), false);
+        assert_eq!(decode_index_value(&k, &mut 0, &T::Numeric(-1), false), None);
     }
 }

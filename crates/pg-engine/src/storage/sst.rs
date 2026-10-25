@@ -312,7 +312,124 @@ pub struct SstReader {
     obsolete: AtomicBool,
 }
 
-pub type Block = Vec<(Vec<u8>, Option<Bytes>)>;
+/// A decoded block: its decompressed bytes (values are slices of them), every entry's full
+/// key laid end to end, and per entry where its key ends and where its value lies. Three
+/// allocations a block, where a `Vec` of owned keys and values took two an entry (and held
+/// about three times the bytes the cache counted).
+pub struct Block {
+    data: Bytes,
+    keys: Vec<u8>,
+    ents: Vec<BlockEnt>,
+}
+
+#[derive(Clone, Copy)]
+struct BlockEnt {
+    key_end: u32,
+    val_off: u32,
+    /// `TOMBSTONE`: a deletion.
+    val_len: u32,
+}
+
+const TOMBSTONE: u32 = u32::MAX;
+
+impl Block {
+    pub fn len(&self) -> usize {
+        self.ents.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ents.is_empty()
+    }
+
+    pub fn key(&self, i: usize) -> &[u8] {
+        let start = if i == 0 { 0 } else { self.ents[i - 1].key_end as usize };
+        &self.keys[start..self.ents[i].key_end as usize]
+    }
+
+    /// Entry `i`'s value (None: a tombstone).
+    pub fn value(&self, i: usize) -> Option<Bytes> {
+        let e = self.ents[i];
+        (e.val_len != TOMBSTONE)
+            .then(|| self.data.slice(e.val_off as usize..(e.val_off + e.val_len) as usize))
+    }
+
+    /// Entry `i`'s value, borrowed.
+    pub fn value_ref(&self, i: usize) -> Option<&[u8]> {
+        let e = self.ents[i];
+        (e.val_len != TOMBSTONE)
+            .then(|| &self.data[e.val_off as usize..(e.val_off + e.val_len) as usize])
+    }
+
+    pub fn last_key(&self) -> Option<&[u8]> {
+        (!self.ents.is_empty()).then(|| self.key(self.ents.len() - 1))
+    }
+
+    /// The first entry whose key is >= `key`.
+    pub fn seek(&self, key: &[u8]) -> usize {
+        let (mut lo, mut hi) = (0, self.ents.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.key(mid) < key {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    /// The bytes it holds (what the block cache counts).
+    pub fn mem_bytes(&self) -> usize {
+        self.data.len()
+            + self.keys.capacity()
+            + self.ents.capacity() * std::mem::size_of::<BlockEnt>()
+            + std::mem::size_of::<Block>()
+    }
+
+    fn decode(raw: Bytes) -> Result<Block> {
+        let mut keys: Vec<u8> = Vec::with_capacity(raw.len());
+        let mut ents = Vec::with_capacity(raw.len() / 32);
+        let mut pos = 0;
+        let mut prev = 0usize;
+        let bad = || internal("bad sst block");
+        while pos < raw.len() {
+            let shared = get_varint(&raw, &mut pos)? as usize;
+            let unshared = get_varint(&raw, &mut pos)? as usize;
+            let vl = get_varint(&raw, &mut pos)? as usize;
+            if shared > keys.len() - prev || pos + unshared > raw.len() {
+                return Err(bad());
+            }
+            // The previous key's first `shared` bytes, then this one's own.
+            let start = keys.len();
+            keys.extend_from_within(prev..prev + shared);
+            keys.extend_from_slice(&raw[pos..pos + unshared]);
+            prev = start;
+            pos += unshared;
+            let (val_off, val_len) = if vl == 0 {
+                (pos as u32, TOMBSTONE)
+            } else {
+                if pos + vl - 1 > raw.len() {
+                    return Err(bad());
+                }
+                let v = (pos as u32, (vl - 1) as u32);
+                pos += vl - 1;
+                v
+            };
+            ents.push(BlockEnt {
+                key_end: keys.len() as u32,
+                val_off,
+                val_len,
+            });
+        }
+        keys.shrink_to_fit();
+        ents.shrink_to_fit();
+        Ok(Block {
+            data: raw,
+            keys,
+            ents,
+        })
+    }
+}
 
 impl SstReader {
     pub fn open(dir: &Path, meta: SstMeta, cache: Arc<BlockCache>) -> Result<SstReader> {
@@ -402,41 +519,20 @@ impl SstReader {
                 format!("checksum mismatch in {} block {i}", self.path.display()),
             ));
         }
-        let raw: Vec<u8> = match buf[0] {
-            0 => buf[1..crc_pos].to_vec(),
+        let raw: Bytes = match buf[0] {
+            0 => Bytes::from(buf).slice(1..crc_pos),
             1 => {
                 let n = u32::from_le_bytes(buf[1..5].try_into().unwrap()) as usize;
-                zstd::bulk::decompress(&buf[5..crc_pos], n)
-                    .map_err(|e| internal(format!("zstd: {e}")))?
+                Bytes::from(
+                    zstd::bulk::decompress(&buf[5..crc_pos], n)
+                        .map_err(|e| internal(format!("zstd: {e}")))?,
+                )
             }
             _ => return Err(internal("unknown block compression")),
         };
-        let raw = Bytes::from(raw);
-        let mut entries: Block = Vec::new();
-        let mut pos = 0;
-        let mut prev: Vec<u8> = Vec::new();
-        while pos < raw.len() {
-            let shared = get_varint(&raw, &mut pos)? as usize;
-            let unshared = get_varint(&raw, &mut pos)? as usize;
-            let vl = get_varint(&raw, &mut pos)? as usize;
-            let mut k = Vec::with_capacity(shared + unshared);
-            k.extend_from_slice(&prev[..shared]);
-            k.extend_from_slice(&raw[pos..pos + unshared]);
-            pos += unshared;
-            let v = if vl == 0 {
-                None
-            } else {
-                let v = raw.slice(pos..pos + vl - 1);
-                pos += vl - 1;
-                Some(v)
-            };
-            prev.clear();
-            prev.extend_from_slice(&k);
-            entries.push((k, v));
-        }
-        let block = Arc::new(entries);
-        self.cache
-            .insert(self.cache_id, i as u32, block.clone(), raw.len());
+        let block = Arc::new(Block::decode(raw)?);
+        let size = block.mem_bytes();
+        self.cache.insert(self.cache_id, i as u32, block.clone(), size);
         Ok(block)
     }
 }

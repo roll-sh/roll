@@ -122,38 +122,45 @@ impl Ddl<'_, '_> {
             .max()
             .unwrap_or(0);
         // The sample: every row while they fit in 300 × the largest target, else rows
-        // spread evenly over the table.
-        let rows: Vec<Row> = if inherit {
-            self.inherited_rows(t)?
-        } else {
-            self.table_rows(t)?.into_iter().map(|(_, r)| r).collect()
-        };
-        let total = rows.len();
+        // spread evenly over the table: a reservoir sample (Vitter's algorithm R, as
+        // acquire_sample_rows's reservoir), from a fixed seed so it repeats (evenly spaced
+        // rows would alias with periodic data). Taken as the rows are read: only the
+        // reservoir is held.
         let want = 300 * max_target.max(1) as usize;
-        let sample: Vec<Row> = if total <= want {
-            rows
-        } else {
-            // A reservoir sample (Vitter's algorithm R, as acquire_sample_rows's
-            // reservoir), from a fixed seed so it repeats; evenly spaced rows would alias
-            // with periodic data.
-            let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
-            let mut next = || {
-                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-                let mut z = state;
-                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-                z ^ (z >> 31)
-            };
-            let mut pick: Vec<usize> = (0..want).collect();
-            for i in want..total {
-                let j = (next() % (i as u64 + 1)) as usize;
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        // (Each kept row with its place in the table.)
+        let mut reservoir: Vec<(usize, Row)> = Vec::new();
+        let mut total = 0usize;
+        let mut offer = |row: Row| {
+            if total < want {
+                reservoir.push((total, row));
+            } else {
+                let j = (next() % (total as u64 + 1)) as usize;
                 if j < want {
-                    pick[j] = i;
+                    reservoir[j] = (total, row);
                 }
             }
-            pick.sort_unstable();
-            pick.into_iter().map(|i| rows[i].clone()).collect()
+            total += 1;
         };
+        if inherit {
+            for row in self.inherited_rows(t)? {
+                offer(row);
+            }
+        } else {
+            for r in self.scan_rows(t) {
+                self.ctx.check()?;
+                offer(r?.1);
+            }
+        }
+        reservoir.sort_unstable_by_key(|(i, _)| *i);
+        let sample: Vec<Row> = reservoir.into_iter().map(|(_, r)| r).collect();
         if sample.is_empty() {
             return Ok(());
         }

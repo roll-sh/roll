@@ -442,6 +442,9 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             prune_next: 0,
             nblocks: None,
             last_block: None,
+            fetched: Default::default(),
+            batch: FETCH_BATCH_MIN,
+            ios_cols: None,
         }));
     }
     // A GiST point_ops index scan: the rows the index's consistent and distance functions
@@ -489,6 +492,9 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             prune_next: 0,
             nblocks: None,
             last_block: None,
+            fetched: Default::default(),
+            batch: FETCH_BATCH_MIN,
+            ios_cols: None,
         }));
     }
     if s.index.is_none() && s.current_of.is_none() && s.sample.is_some() {
@@ -568,6 +574,11 @@ fn open_scan_as(
         ios_entries = super::sizing::index_scanned(s.table.oid, ix.oid, &prefix, &ranges, ios, ctx)
             .map(IosEntries::new);
     }
+    let ios_cols = if secondary && only.is_none() {
+        index_only_columns(s, ctx)
+    } else {
+        None
+    };
     let heap_read = s
         .index
         .as_ref()
@@ -663,6 +674,9 @@ fn open_scan_as(
         prune_next: 0,
         nblocks: None,
         last_block: None,
+        fetched: Default::default(),
+        batch: FETCH_BATCH_MIN,
+        ios_cols,
         one_run: collation_equal_run(s),
     }))
 }
@@ -1235,6 +1249,87 @@ struct ScanNode {
     nblocks: Option<u32>,
     /// An index or bitmap heap scan: the heap page it last fetched from.
     last_block: Option<u32>,
+    /// Index entries (entry key, data key) with their rows, fetched ahead a batch at a
+    /// time (`fetch_rows`); a bitmap heap scan's have an empty entry key.
+    fetched: std::collections::VecDeque<(Vec<u8>, Vec<u8>, Option<bytes::Bytes>)>,
+    /// How many to fetch next: a few at first (a LIMIT may want one), more as the scan
+    /// goes on.
+    batch: usize,
+    /// An index-only scan answered from its entries (`index_only_columns`): each index
+    /// column's table column, type and direction. The rows aren't fetched; the entry key
+    /// stands in for the row's bytes.
+    ios_cols: Option<Vec<(usize, crate::types::DataType, bool)>>,
+}
+
+/// Rows index-only scans made from index entries alone (`ScanNode::index_row`), for tests.
+#[doc(hidden)]
+pub static ROWS_FROM_INDEX_ENTRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// An index-only scan whose rows can come from the index entries alone: a btree's over
+/// plain columns of types whose key encoding gives the value back (`decode_index_value`),
+/// with no INCLUDE columns, row marks or system columns, of a table too big to model
+/// (whose heap order of equal keys isn't modelled either) that never stored a compressed or
+/// out-of-line value (whose reads aren't tracked). An entry visible to the snapshot points
+/// at a row version visible to it (both are written in one commit, and a row's entries go
+/// as it does), so the row isn't read: the planner asked for nothing outside the index,
+/// as Postgres's index-only scans do.
+fn index_only_columns(s: &ScanPlan, ctx: &ExecCtx) -> Option<Vec<(usize, crate::types::DataType, bool)>> {
+    use crate::catalog::IndexKey;
+    use crate::types::DataType as T;
+    let (ix, _) = s.index.as_ref()?;
+    if !matches!(s.access, Access::Index { only: true, .. })
+        || ix.method != "btree"
+        || !ix.include.is_empty()
+        || s.mark.is_some()
+        || s.sys
+        || s.sample.is_some()
+        || !super::sizing::is_estimated(s.table.oid, &ctx.sess.db)
+        || super::sizing::tracked(s.table.oid)
+        // (SSI predicate-locks the heap tuples a scan fetches: `ssi_fetched`.)
+        || predicate_locked(&s.table, ctx)
+    {
+        return None;
+    }
+    ix.columns
+        .iter()
+        .map(|c| {
+            let IndexKey::Column(i) = c.key else { return None };
+            let ty = s.table.columns.get(i)?.ty.clone();
+            matches!(
+                ty,
+                T::Bool
+                    | T::Int2
+                    | T::Int4
+                    | T::Int8
+                    | T::Oid
+                    | T::Date
+                    | T::Timestamp(_)
+                    | T::Timestamptz(_)
+                    | T::Uuid
+                    | T::Text
+                    | T::Varchar(_)
+                    | T::Bpchar(_)
+                    | T::Name
+            )
+            .then_some((i, ty, c.desc))
+        })
+        .collect()
+}
+
+/// An index scan's heap fetches made together, from this many entries up to
+/// `FETCH_BATCH_MAX` as the scan goes on.
+const FETCH_BATCH_MIN: usize = 4;
+const FETCH_BATCH_MAX: usize = 128;
+
+/// The rows stored under `keys` (None: none visible), as the statement's snapshot sees
+/// them, read together (`Txn::get_many_snap`). Without a statement snapshot, one at a time
+/// through the transaction's writes as they are now.
+fn fetch_rows(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Vec<Option<bytes::Bytes>>> {
+    let txn = ctx.txn.borrow();
+    match ctx.snapshot().as_deref() {
+        Some(s) => txn.get_many_snap(keys, s),
+        None => keys.iter().map(|k| txn.get(k)).collect(),
+    }
 }
 
 /// TABLESAMPLE: keeps a row when the hash of its key (or, for SYSTEM, of its group of
@@ -1445,55 +1540,86 @@ impl ScanNode {
         Ok(Some((ikey[..cut].to_vec(), dkey, row)))
     }
 
-    /// The next index entry's key, with the row it points at (secondary index scans).
+    /// The next index entry's key, with the row it points at (secondary index scans). The
+    /// entries are read a batch ahead and their rows fetched together; nothing a client sees
+    /// happens on fetching (the scan's counts, pruning and locks are taken as rows are
+    /// returned), and the rows are read at the statement's snapshot, so reading ahead reads
+    /// what reading one at a time would.
     fn next_indexed(
         &mut self,
         ctx: &ExecCtx,
     ) -> Result<Option<(Vec<u8>, Vec<u8>, bytes::Bytes)>> {
         loop {
-            if self.iter.is_none() {
-                let Some((start, end)) = self.ranges.get(self.cur_range) else {
-                    return Ok(None);
-                };
-                let txn = ctx.txn.borrow();
-                self.iter = Some(match ctx.snapshot().as_deref() {
-                    Some(s) => txn.scan_snap(start, end, s),
-                    None => txn.scan(start, end),
-                });
-                drop(txn);
-                self.cur_range += 1;
-            }
-            match self.iter.as_mut().unwrap().next() {
-                Some(r) => {
-                    let (k, v) = r?;
-                    let dkey = v.to_vec();
-                    let row = match ctx.snapshot().as_deref() {
-                        Some(s) => ctx.txn.borrow().get_snap(&dkey, s)?,
-                        None => ctx.txn.borrow().get(&dkey)?,
-                    };
-                    match row {
-                        Some(row) => return Ok(Some((k, dkey, row))),
-                        None => continue,
-                    }
+            while let Some((k, dkey, row)) = self.fetched.pop_front() {
+                if let Some(row) = row {
+                    return Ok(Some((k, dkey, row)));
                 }
-                None => self.iter = None,
             }
+            let want = if ctx.snapshot().is_some() { self.batch } else { 1 };
+            let mut ents: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(want);
+            while ents.len() < want {
+                if self.iter.is_none() {
+                    let Some((start, end)) = self.ranges.get(self.cur_range) else {
+                        break;
+                    };
+                    let txn = ctx.txn.borrow();
+                    self.iter = Some(match ctx.snapshot().as_deref() {
+                        Some(s) => txn.scan_snap(start, end, s),
+                        None => txn.scan(start, end),
+                    });
+                    drop(txn);
+                    self.cur_range += 1;
+                }
+                match self.iter.as_mut().unwrap().next() {
+                    Some(r) => {
+                        let (k, v) = r?;
+                        ents.push((k, v.to_vec()));
+                    }
+                    None => self.iter = None,
+                }
+            }
+            if ents.is_empty() {
+                return Ok(None);
+            }
+            self.batch = (self.batch * 2).min(FETCH_BATCH_MAX);
+            if self.ios_cols.is_some() {
+                // (The entry key stands in for the row: `index_row`.)
+                self.fetched.extend(ents.into_iter().map(|(k, d)| {
+                    let b = bytes::Bytes::copy_from_slice(&k);
+                    (k, d, Some(b))
+                }));
+                continue;
+            }
+            let (iks, dks): (Vec<Vec<u8>>, Vec<Vec<u8>>) = ents.into_iter().unzip();
+            let rows = fetch_rows(&dks, ctx)?;
+            self.fetched
+                .extend(iks.into_iter().zip(dks).zip(rows).map(|((k, d), r)| (k, d, r)));
         }
     }
 
     /// Next (data key, stored row bytes) in storage order.
     fn next_stored(&mut self, ctx: &ExecCtx) -> Result<Option<(Vec<u8>, bytes::Bytes)>> {
         if let Some(keys) = &mut self.keys {
-            for k in keys.by_ref() {
-                let row = match ctx.snapshot().as_deref() {
-                    Some(s) => ctx.txn.borrow().get_snap(&k, s)?,
-                    None => ctx.txn.borrow().get(&k)?,
-                };
-                if let Some(row) = row {
-                    return Ok(Some((k, row)));
+            loop {
+                while let Some((_, k, row)) = self.fetched.pop_front() {
+                    if let Some(row) = row {
+                        return Ok(Some((k, row)));
+                    }
                 }
+                let want = if ctx.snapshot().is_some() { self.batch } else { 1 };
+                let batch: Vec<Vec<u8>> = keys.by_ref().take(want).collect();
+                if batch.is_empty() {
+                    return Ok(None);
+                }
+                self.batch = (self.batch * 2).min(FETCH_BATCH_MAX);
+                let rows = fetch_rows(&batch, ctx)?;
+                self.fetched
+                    .extend(batch.into_iter().zip(rows).map(|(k, r)| (Vec::new(), k, r)));
             }
-            return Ok(None);
+        }
+        if self.secondary {
+            // Index entry → its row.
+            return Ok(self.next_indexed(ctx)?.map(|(_, dkey, row)| (dkey, row)));
         }
         loop {
             if self.iter.is_none() {
@@ -1513,18 +1639,6 @@ impl ScanNode {
                     let (k, v) = r?;
                     if self.only.as_ref().is_some_and(|o| *o != k) {
                         continue;
-                    }
-                    if self.secondary {
-                        // Index entry → fetch the row.
-                        let dkey = v.to_vec();
-                        let row = match ctx.snapshot().as_deref() {
-                            Some(s) => ctx.txn.borrow().get_snap(&dkey, s)?,
-                            None => ctx.txn.borrow().get(&dkey)?,
-                        };
-                        match row {
-                            Some(row) => return Ok(Some((dkey, row))),
-                            None => continue,
-                        }
                     }
                     if let Some(s) = &mut self.sample
                         && !s.keep(&k, &v)
@@ -1546,6 +1660,38 @@ impl ScanNode {
             Some(need) => scan_row_need(&self.plan, key, bytes, need, ctx),
             None => scan_row(&self.plan, key, bytes, ctx),
         }
+    }
+
+    /// An index-only scan's row from its index entry (`ios_cols`): the index's columns,
+    /// the others NULL (nothing reads them), then the key if asked. An entry that doesn't
+    /// decode (it can't: the types were checked) has its row read after all.
+    fn index_row(
+        &self,
+        cols: &[(usize, crate::types::DataType, bool)],
+        key: &[u8],
+        entry: &[u8],
+        ctx: &ExecCtx,
+    ) -> Result<Row> {
+        let mut row = vec![Value::Null; self.plan.table.columns.len()];
+        // (Past the table and index ids.)
+        let mut pos = 8;
+        for (col, ty, desc) in cols {
+            match crate::storage::keys::decode_index_value(entry, &mut pos, ty, *desc) {
+                Some(v) => row[*col] = v,
+                None => {
+                    let bytes = fetch_rows(&[key.to_vec()], ctx)?.pop().flatten();
+                    let Some(bytes) = bytes else {
+                        return Err(crate::error::internal("index entry without its row"));
+                    };
+                    return self.full_row(key, &bytes, ctx);
+                }
+            }
+        }
+        if self.plan.with_key {
+            row.push(Value::Bytea(Arc::from(key)));
+        }
+        ROWS_FROM_INDEX_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(row)
     }
 }
 
@@ -1897,9 +2043,15 @@ impl Node for ScanNode {
                     ctx.count(self.key, |s| s.fetches += fetches);
                 }
             }
-            let mut row = self.full_row(&key, &bytes, ctx)?;
+            // (An index-only scan from the entries never takes predicate locks:
+            // `index_only_columns`.)
+            let mut row = match &self.ios_cols {
+                Some(cols) => self.index_row(cols, &key, &bytes, ctx)?,
+                None => self.full_row(&key, &bytes, ctx)?,
+            };
             if (self.plan.index.is_some() || self.keys.is_some())
                 && self.only.is_none()
+                && self.ios_cols.is_none()
                 && predicate_locked(&self.plan.table, ctx)
             {
                 ssi_fetched(&self.plan.table, &key, &bytes, ctx)?;
