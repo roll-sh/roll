@@ -83,16 +83,16 @@ From the full run of commit `ed6356cc` (debug build of the engine, 2026-10-25 09
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 2 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 1 | 50% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
-| by design | 0 | 0% |
+| by design: accepted internal difference (EXPLAIN ANALYZE counts of PostgreSQL's on-disk row versions) | 1 | 50% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
 | heap-layout simulation, qual evaluation order | 0 | 0% |
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 2 units
-join (1: 368), partition_prune (1: 410)
+### EXPLAIN (group C1) — 1 unit
+join (1: 368)
 (join 808 and partition_join 204 match since round 16, agent 47, join 783 since round 16,
 agent 46, join 362 / 363 since round 16, agent 52, and join 360 since agent 55 (93f18763),
 counted by agent 57's full runs.)
@@ -110,9 +110,13 @@ Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `
 Fixed in round 12: join 740–743, 745 and 791 match; 744 now runs and differs only in its plan
 (counted under C1).
 
-### By design — 0 units
-aggregates `balk` matches since round 16, agent 14: an aggregation planned as a Finalize
-Aggregate over partial ones runs the user-defined aggregates' combine functions.
+### By design — 1 unit
+partition_prune 410, an accepted internal difference since round 19 (agent 61, section
+below): its EXPLAIN ANALYZE counts index entries of row versions the command can't see and
+when a nested loop's inner side is read, PostgreSQL's storage and executor internals that no
+query result, error or lock depends on.
+(aggregates `balk` matches since round 16, agent 14: an aggregation planned as a Finalize
+Aggregate over partial ones runs the user-defined aggregates' combine functions.)
 
 ### Server-side files — 0 units (were 28 by design)
 misc_functions (14), largeobject (13) and copy (1) match now. Server-side file access stays
@@ -147,6 +151,68 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 19, agent 61 (partition_prune 410: an accepted internal difference)
+
+partition_prune 410 is `EXPLAIN ANALYZE update ab_a1 set b = 3 from ab where ab.a = 1 and
+ab.a = ab_a1.a`. The query's rows, the rows it updates and its errors and locks all match.
+Only two counts differ, on the `ab_a1_b3` scans:
+- PostgreSQL's Bitmap Index Scan finds 1 entry (`rows=1.00`), and its Bitmap Heap Scan reads 1
+  page (`Heap Blocks: exact=1`).
+- The engine's find nothing.
+
+Why PostgreSQL counts it. Two internals combine:
+1. **Storage.** A btree index keeps an entry per heap tuple version. The cross-partition UPDATE
+   moves (1,2) into `ab_a1_b3` and inserts the moved row's index entry there. A later bitmap
+   scan in the same command puts that entry in its bitmap and counts it. It also reads the
+   entry's heap page, then drops the tuple as invisible to the command's snapshot.
+   The engine's index entries are MVCC like its rows and are read at the command's snapshot,
+   so they never yield the version.
+2. **Executor order.** The join's inner side (`Materialize` over the `ab` Append) pulls its
+   input lazily. Its `ab_3` scan runs only after the first joined row has been updated.
+   The engine's nested loop collects its inner side at the first outer row
+   (`NestLoopNode::right_rows`), before any row moves. EXPLAIN shows that collection as the
+   Materialize.
+
+**Decision (user scope, round 19):** the engine has to match what applications see: results,
+errors, locking, notices, catalogs. It doesn't have to match PostgreSQL's storage or executor
+internals. These counts describe PostgreSQL's on-disk row versions and the order its executor
+reads them in. No application depends on them, so 410 is an accepted internal difference.
+The bar for fixing it was a cheap change confined to reporting, with no storage, speed or
+memory cost. No such change makes the unit identical:
+- **Storage half.** It can be done from reporting alone, and was tried.
+  - The btree size model (`catalog/btsim.rs`, kept up on every write for relation sizes,
+    VACUUM, LP_DEAD hints and the index-only scan's Heap Fetches) already holds an entry per
+    version.
+  - Under EXPLAIN ANALYZE only, a bitmap index scan over a modelled btree whose key ranges are
+    exactly its index conditions read the model's entries in those ranges that aren't LP_DEAD.
+    It counted those entries as its rows, combined them as TID sets through BitmapAnd /
+    BitmapOr, and counted the pages they name as Heap Blocks.
+  - Against PostgreSQL 18.6 that matched 15 bitmap scans: after DELETEs and non-HOT UPDATEs,
+    over a transaction's own new versions, over a cross-partition move, and after VACUUM.
+  - It fixed 410's outer `ab_a1_3` scan, but not the inner `ab_3` one.
+- **Executor half.** This needs the nested loop to pull its inner side lazily, a Materialize
+  that reads on demand. That is an executor change in agent 48's area, not reporting, so the
+  work stopped there and the code was not kept.
+
+The same storage difference shows in other client-visible counters. All of them are accepted
+on the same grounds. Probed against PostgreSQL 18.6:
+- **Bitmap scans after DELETE or non-HOT UPDATE, before VACUUM.** PostgreSQL's Bitmap Index
+  Scan counts the dead entries (9 rows where 4 are visible), and Heap Blocks counts their
+  pages. The engine counts the visible rows.
+- **`pg_stat_user_indexes.idx_tup_read`.**
+  - PostgreSQL counts every entry an index scan returns: dead versions until the scan marks
+    them LP_DEAD, versions the snapshot doesn't see, and every TID of a bitmap scan. The
+    engine counts the rows it returns.
+  - After an early stop (LIMIT), PostgreSQL also counts the dead entries before the row it
+    returned, and marks only the entries it passed. The engine's model marks the whole range
+    when the scan starts.
+- **`idx_tup_fetch` of index-only scans.** PostgreSQL counts no heap fetch for a page the
+  visibility map marks all-visible. The engine counts one per row.
+
+Index-only scans' `Heap Fetches` already come from the model and match, dead entries included.
+
+No code change and no golden: the unit stays as it was.
 
 ## Round 16, agent 52 (PlaceHolderVars holding sub-selects: their subqueries pulled up, PlaceHolderVar parameters by the join path's parameterization, LATERAL references' unused copies)
 
