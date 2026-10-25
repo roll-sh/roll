@@ -1077,8 +1077,16 @@ impl Session {
     }
 
     /// Drop the temporary objects of this session's temporary schema, or (`all`) of every
-    /// session's (the last session of a database leaving: the others are gone).
+    /// session's (the last session of a database leaving: the others are gone). Quietly, as
+    /// RemoveTempRelations deletes (PERFORM_DELETION_QUIETLY): no notices are sent.
     pub(crate) fn drop_temp_objects(&mut self, all: bool) -> Result<()> {
+        let held = self.state.notice_hold.replace(self.state.notice_hold.get() + 1);
+        let r = self.drop_temp_objects_quietly(all);
+        self.state.notice_hold.set(held);
+        r
+    }
+
+    fn drop_temp_objects_quietly(&mut self, all: bool) -> Result<()> {
         let own = self.state.temp_schema();
         let in_scope = |name: &str| {
             if all {
@@ -1101,15 +1109,18 @@ impl Session {
             })
             .collect();
         drop(cat);
+        // (RemoveTempRelations deletes quietly: no "drop cascades to" notices.)
         if !names.is_empty() {
+            let before = self.notices.len();
             let sql = format!("DROP TABLE IF EXISTS {} CASCADE", names.join(", "));
             for p in self.parse(&sql)? {
                 self.execute(&p)?;
             }
             self.end_batch()?;
+            self.notices.truncate(before);
         }
-        // Then what else is left in the schema (ResetTempTableNamespace empties it): views
-        // and sequences of their own.
+        // Then what else is left in the schema (ResetTempTableNamespace empties it): views,
+        // sequences, functions and types of their own.
         let cat = self.state.db.catalog();
         let qualified = |schema: u32, name: &str| {
             format!("{}.{}", quote_ident(cat.schema_name(schema)), quote_ident(name))
@@ -1135,6 +1146,22 @@ impl Session {
         if !seqs.is_empty() {
             stmts.push(format!("DROP SEQUENCE IF EXISTS {} CASCADE", seqs.join(", ")));
         }
+        let path: Vec<String> = Vec::new();
+        for f in cat.functions.values().filter(|f| in_scope(cat.schema_name(f.schema))) {
+            stmts.push(format!(
+                "DROP ROUTINE IF EXISTS {}({}) CASCADE",
+                qualified(f.schema, &f.name),
+                cat.param_type_names(f, &path).join(", ")
+            ));
+        }
+        let mut types: Vec<String> = Vec::new();
+        for d in cat.domains.values().filter(|d| in_scope(cat.schema_name(d.schema))) {
+            types.push(format!("DROP DOMAIN IF EXISTS {} CASCADE", qualified(d.schema, &d.name)));
+        }
+        for e in cat.enums.values().filter(|e| in_scope(cat.schema_name(e.schema))) {
+            types.push(format!("DROP TYPE IF EXISTS {} CASCADE", qualified(e.schema, &e.name)));
+        }
+        stmts.extend(types);
         drop(cat);
         for sql in stmts {
             // (A view's drop may have taken a sequence along: no "skipping" notices.)

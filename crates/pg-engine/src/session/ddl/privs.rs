@@ -1346,6 +1346,27 @@ impl Ddl<'_, '_> {
         }
         let cascade = s.behavior == pb::DropBehavior::DropCascade as i32;
         let mut targets = self.grant_targets(s, objtype)?;
+        // ExecGrant_Relation / ExecGrant_Database update the object's pg_class /
+        // pg_database row (SearchSysCacheLocked1, then heap_update): they wait for another
+        // transaction updating or locking it, then work over what it committed.
+        let mut locked = false;
+        for t in &targets {
+            let class = match t.kind {
+                ObjKind::Table => 1259,
+                ObjKind::Database => 1262,
+                _ => continue,
+            };
+            self.ctx.txn.borrow_mut().lock_catalog_row(
+                class,
+                t.oid,
+                crate::txn::locks::RowLockMode::NoKeyUpdate,
+                true,
+            )?;
+            locked = true;
+        }
+        if locked && self.reload_after_wait() {
+            targets = self.grant_targets(s, objtype)?;
+        }
         // A parameter gets its pg_parameter_acl row when first granted on (revoking from
         // one without has nothing to do).
         if objtype == O::ObjectParameterAcl {
@@ -3291,6 +3312,20 @@ impl Ddl<'_, '_> {
             }
         }
         const SP: &str = "\0drop_owned";
+        // shdepDropOwned: each role membership they granted is locked for its deletion
+        // (AcquireDeletionLock) and looked for again once that is held: one another DROP
+        // OWNED removed meanwhile is gone from what this one then works over.
+        let grants: Vec<u32> = self
+            .cat
+            .members
+            .iter()
+            .filter(|m| roles.contains(&m.grantor))
+            .map(|m| m.oid)
+            .collect();
+        for oid in grants {
+            self.lock_object(super::AUTH_MEMBERS_CLASS, oid, crate::txn::locks::LockMode::AccessExclusive)?;
+        }
+        self.reload_after_wait();
         self.ctx.txn.borrow_mut().savepoint(SP);
         let r = self.drop_owned_inner(&roles, s.behavior == pb::DropBehavior::DropCascade as i32);
         let mut txn = self.ctx.txn.borrow_mut();

@@ -21,7 +21,14 @@ const GSSENC_REQUEST: i32 = 80877104;
 const CANCEL_REQUEST: i32 = 80877102;
 const PROTOCOL_3: i32 = 196608;
 const MAX_MESSAGE: usize = 1 << 30;
+/// A connection thread's stack. An unoptimized build's frames are many times a release
+/// build's (a PL/pgSQL recursion level takes ~250 kB of it), so it gets more, to recurse
+/// as deep as Postgres does at max_stack_depth's 2 MB (subxid-overflow's 100 levels with
+/// exception blocks); untouched pages cost nothing.
+#[cfg(not(debug_assertions))]
 const THREAD_STACK: usize = 16 << 20;
+#[cfg(debug_assertions)]
+const THREAD_STACK: usize = 64 << 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthMethod {

@@ -475,12 +475,69 @@ fn lock_some(perms: &Perms, ctx: &ExecCtx, n: usize) -> Result<()> {
     if perms.locks.is_empty() {
         return Ok(());
     }
+    // (The catalog the statement was planned over.)
     let cat = ctx.catalog();
-    for (oid, mode) in &perms.locks[..n.min(perms.locks.len())] {
+    for (i, (oid, mode)) in perms.locks[..n.min(perms.locks.len())].iter().enumerate() {
         let name = || rel_word(&cat, *oid).1;
+        let before = ctx.catalog().version;
         ctx.txn
             .borrow_mut()
             .lock_relation(*oid, *mode, WaitPolicy::Block, &name)?;
+        // An inheritance child the plan found, locked after a wait (find_all_inheritors):
+        // looked at again as other transactions left it.
+        if i >= perms.named_locks && ctx.catalog().version != before {
+            recheck_child(&cat, *oid, perms, ctx)?;
+        }
+    }
+    Ok(())
+}
+
+/// An inheritance child after waiting for its lock: one dropped meanwhile is left out (it
+/// reads as empty); one whose columns no longer match a parent the statement reads fails as
+/// make_inh_translation_list does.
+fn recheck_child(planned: &crate::catalog::Catalog, oid: u32, perms: &Perms, ctx: &ExecCtx) -> Result<()> {
+    let Some(old) = planned.tables.get(&oid) else {
+        return Ok(());
+    };
+    if old.inherits.is_empty() || old.partbound.is_some() {
+        return Ok(());
+    }
+    let now = ctx.catalog();
+    let Some(child) = now.tables.get(&oid) else {
+        ctx.gone_rels.borrow_mut().insert(oid);
+        return Ok(());
+    };
+    for p in &old.inherits {
+        if !perms.locks.iter().any(|(o, _)| o == p) {
+            continue;
+        }
+        let Some(parent) = now.tables.get(p) else { continue };
+        for pc in parent.columns.iter().filter(|c| !c.dropped) {
+            let Some(cc) = child.columns.iter().find(|c| !c.dropped && c.name == pc.name) else {
+                return Err(crate::error::internal(format!(
+                    "could not find inherited attribute \"{}\" of relation \"{}\"",
+                    pc.name, child.name
+                )));
+            };
+            if cc.ty != pc.ty {
+                return Err(Error::new(
+                    code::INVALID_COLUMN_DEFINITION,
+                    format!(
+                        "attribute \"{}\" of relation \"{}\" does not match parent's type",
+                        pc.name, child.name
+                    ),
+                ));
+            }
+            if cc.collation != pc.collation {
+                return Err(Error::new(
+                    code::INVALID_COLUMN_DEFINITION,
+                    format!(
+                        "attribute \"{}\" of relation \"{}\" does not match parent's collation",
+                        pc.name, child.name
+                    ),
+                ));
+            }
+        }
     }
     Ok(())
 }

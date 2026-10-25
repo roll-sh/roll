@@ -110,12 +110,32 @@ impl Ddl<'_, '_> {
             ..Default::default()
         };
         let node = mk(NodeEnum::SelectStmt(Box::new(sel)));
-        let child = self.ctx.child(&[]);
-        let rows = {
+        let query = |this: &mut Self| -> Result<Vec<crate::exec::Row>> {
+            let child = this.ctx.child(&[]);
             let mut b = Binder::new(&child, Vec::new());
             let bq = b.bind_statement(&node)?;
-            crate::exec::collect(&bq.plan, &child, None)?
+            crate::exec::collect(&bq.plan, &child, None)
         };
+        let mut rows = query(self)?;
+        // heap_update of each row found: a row another transaction is updating (or locking
+        // FOR UPDATE / NO KEY UPDATE) is waited for, then the rows are found again over what
+        // it committed (EvalPlanQual over the newest versions).
+        loop {
+            for r in &rows {
+                if let Value::Oid(oid) = r[0] {
+                    self.ctx.txn.borrow_mut().lock_catalog_row(
+                        1259,
+                        oid,
+                        crate::txn::locks::RowLockMode::NoKeyUpdate,
+                        true,
+                    )?;
+                }
+            }
+            if !self.reload_after_wait() {
+                break;
+            }
+            rows = query(self)?;
+        }
         let num = |v: &Value| match v {
             Value::Int4(i) => *i as f64,
             Value::Float4(f) => *f as f64,
@@ -730,14 +750,35 @@ pub(crate) fn merge_pg_class(
         where_clause: s.join_condition.clone(),
         ..Default::default()
     };
-    let child = ctx.child(&[]);
-    let (cols, rows) = {
-        let node = mk(NodeEnum::SelectStmt(Box::new(sel)));
+    let node = mk(NodeEnum::SelectStmt(Box::new(sel)));
+    let query = || -> Result<(Vec<crate::sql::plan::OutCol>, Vec<crate::exec::Row>)> {
+        let child = ctx.child(&[]);
         let mut b = Binder::new(&child, Vec::new());
         let bq = b.bind_statement(&node)?;
         let rows = crate::exec::collect(&bq.plan, &child, None)?;
-        (bq.cols, rows)
+        Ok((bq.cols, rows))
     };
+    let (mut cols, mut rows) = query()?;
+    // The rows matched are updated (heap_update): one another transaction is updating is
+    // waited for, then the join is run again over what it committed (EvalPlanQual).
+    loop {
+        let before = ctx.catalog().version;
+        for r in &rows {
+            if let Value::Oid(oid) = r[0] {
+                ctx.txn.borrow_mut().lock_catalog_row(
+                    1259,
+                    oid,
+                    crate::txn::locks::RowLockMode::NoKeyUpdate,
+                    true,
+                )?;
+            }
+        }
+        let unchanged = ctx.txn.borrow().changed_catalog().is_none();
+        if !unchanged || ctx.catalog().version == before {
+            break;
+        }
+        (cols, rows) = query()?;
+    }
     let num = |v: &Value| match v {
         Value::Int4(i) => *i as f64,
         Value::Float4(f) => *f as f64,

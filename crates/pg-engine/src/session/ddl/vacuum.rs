@@ -37,6 +37,7 @@ impl Ddl<'_, '_> {
         let mut analyze = !s.is_vacuumcmd;
         let (mut full, mut skip_pages, mut only_db, mut verbose) = (false, false, false, false);
         let mut freeze = false;
+        let mut skip_db = false;
         let mut skip_locked = false;
         let (mut process_main, mut process_toast) = (true, true);
         let mut truncate: Option<bool> = None;
@@ -78,9 +79,7 @@ impl Ddl<'_, '_> {
                 (true, "process_main") => process_main = flag()?,
                 (true, "process_toast") => process_toast = flag()?,
                 (true, "truncate") => truncate = Some(flag()?),
-                (true, "skip_database_stats") => {
-                    flag()?;
-                }
+                (true, "skip_database_stats") => skip_db = flag()?,
                 (true, "index_cleanup") => {
                     if def_arg_str(d).is_some_and(|v| v.eq_ignore_ascii_case("auto")) {
                         continue;
@@ -160,6 +159,9 @@ impl Ddl<'_, '_> {
                     "ONLY_DATABASE_STATS cannot be specified with a list of tables",
                 ));
             }
+            // vac_update_datfrozenxid: the database's pg_database row, in place.
+            let db = self.ctx.sess.db.oid;
+            self.ctx.txn.borrow_mut().inplace_lock_catalog_row(1262, db)?;
             return Ok(what.into());
         }
         if !analyze && rels.iter().any(|r| !r.va_cols.is_empty()) {
@@ -457,6 +459,8 @@ impl Ddl<'_, '_> {
                             live = Some(self.measure(&r, vacuum)?);
                         }
                         if vacuum {
+                            // vac_update_relstats: the table's pg_class row, in place.
+                            self.ctx.txn.borrow_mut().inplace_lock_catalog_row(1259, r.oid)?;
                             self.advance_frozen_xid(&r, freeze, process_main, process_toast)?;
                             // pgstat_report_vacuum, of the table and of its TOAST table.
                             if let Some(live) = live {
@@ -518,6 +522,12 @@ impl Ddl<'_, '_> {
         }
         // VACUUM updates pg_class in place, taking no transaction id; so does ANALYZE unless
         // it stores statistics (it found rows).
+        // (Then vac_update_datfrozenxid updates the database's pg_database row in place,
+        // waiting for a transaction updating it: a GRANT on the database.)
+        if vacuum && !skip_db {
+            let db = self.ctx.sess.db.oid;
+            self.ctx.txn.borrow_mut().inplace_lock_catalog_row(1262, db)?;
+        }
         let stored = analyzed
             .iter()
             .any(|o| self.cat.colstats.get(o).is_some_and(|s| !s.is_empty()));
@@ -1054,6 +1064,9 @@ impl Ddl<'_, '_> {
     pub(super) fn index_built(&mut self, t: &Table, index: &crate::catalog::Index) -> Result<()> {
         // (Modelling the index's pages evaluates its expressions again: what they say then
         // isn't Postgres's.)
+        // index_update_stats updates the table's pg_class row in place (relhasindex and its
+        // statistics): heap_inplace_lock waits for a transaction updating the row.
+        self.ctx.txn.borrow_mut().inplace_lock_catalog_row(1259, t.oid)?;
         let hold = self.ctx.sess.hold_notices();
         let quiet = self.ctx.notices.borrow().len();
         let r = self.index_built_measured(t, index);

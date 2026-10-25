@@ -971,11 +971,19 @@ pub(crate) fn relation_lock_rows(ctx: &ExecCtx) -> Vec<Vec<Value>> {
     };
     let now = crate::types::datetime::Clock::system().now;
     for l in ctx.sess.db.locks.snapshot() {
+        // A wait for a transaction that has no id (WaitForOlderSnapshots,
+        // WaitForLockers): on its virtual transaction id. (Every transaction holds its own;
+        // this one's is the row added below.)
+        let mut vxid_waited = None;
         let (locktype, database, relation, xid, classid, objid, objsubid) = match &l.tag {
             Tag::Relation { db, rel } => ("relation", Value::Oid(*db), Value::Oid(*rel), n(), n(), n(), n()),
             Tag::Tuple { db, rel, .. } => ("tuple", Value::Oid(*db), Value::Oid(*rel), n(), n(), n(), n()),
             Tag::Transaction { xid, .. } if *xid != 0 => {
                 ("transactionid", n(), n(), Value::Oid(*xid as u32), n(), n(), n())
+            }
+            Tag::Transaction { id, .. } if !l.granted => {
+                vxid_waited = Some(format!("3/{}", *id as u32));
+                ("virtualxid", n(), n(), n(), n(), n(), n())
             }
             Tag::SpecToken { xid, token } => {
                 ("spectoken", n(), n(), Value::Oid(*xid as u32), n(), Value::Oid(*token), n())
@@ -1017,7 +1025,7 @@ pub(crate) fn relation_lock_rows(ctx: &ExecCtx) -> Vec<Vec<Value>> {
             relation,
             n(),
             n(),
-            n(),
+            vxid_waited.map_or_else(n, Value::text),
             xid,
             classid,
             objid,

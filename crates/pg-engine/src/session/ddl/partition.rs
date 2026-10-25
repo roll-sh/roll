@@ -738,7 +738,9 @@ impl Ddl<'_, '_> {
             }
             let mut b = self.binder();
             let exprs = b.partition_key(parent, &leaf)?;
-            for (_, row) in self.table_rows(&leaf)? {
+            // (ATRewriteTable checks over the latest snapshot: rows a writer it waited
+            // for committed count.)
+            for (_, row) in self.table_rows_at(&leaf, true)? {
                 let k: Vec<Value> = exprs
                     .iter()
                     .map(|e| eval(e, &row, self.ctx))

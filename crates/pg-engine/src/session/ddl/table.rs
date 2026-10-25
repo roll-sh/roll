@@ -3391,6 +3391,9 @@ impl Ddl<'_, '_> {
         oid
     }
 
+    /// Check a foreign key's existing rows, as adding it does (the referenced table locked
+    /// SHARE ROW EXCLUSIVE: addFkConstraint).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn validate_fk(
         &self,
         t: &Table,
@@ -3400,6 +3403,23 @@ impl Ddl<'_, '_> {
         name: &str,
         match_full: bool,
         period: bool,
+    ) -> Result<()> {
+        self.validate_fk_locking(t, parent, cols, ref_cols, name, match_full, period, lockmode::SHARE_ROW_EXCLUSIVE)
+    }
+
+    /// `validate_fk`, locking the referenced table in `ref_mode` (VALIDATE CONSTRAINT:
+    /// ROW SHARE).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn validate_fk_locking(
+        &self,
+        t: &Table,
+        parent: &Table,
+        cols: &[usize],
+        ref_cols: &[usize],
+        name: &str,
+        match_full: bool,
+        period: bool,
+        ref_mode: i32,
     ) -> Result<()> {
         if t.partkey.is_some() {
             // Each partition checks its own rows.
@@ -3418,7 +3438,7 @@ impl Ddl<'_, '_> {
                                 if *columns == lcols && *ref_table == parent.oid)
                     })
                     .map_or(name.to_string(), |c| c.name.clone());
-                self.validate_fk(&leaf, parent, &lcols, ref_cols, &lname, match_full, period)?;
+                self.validate_fk_locking(&leaf, parent, &lcols, ref_cols, &lname, match_full, period, ref_mode)?;
             }
             return Ok(());
         }
@@ -3431,6 +3451,15 @@ impl Ddl<'_, '_> {
                 crate::exec::dml::check_fk_period(t, &parent, cols, ref_cols, name, match_full, &row, self.ctx)?;
             }
             return Ok(());
+        }
+        // addFkConstraint: SHARE ROW EXCLUSIVE on the referenced table and (partitioned) its
+        // partitions, so its rows' writers are out; RI_Initial_Check then reads over the
+        // latest snapshot (what they committed while this waited).
+        self.note_lock(parent.oid, ref_mode)?;
+        if parent.partkey.is_some() {
+            for p in self.cat.inheritors(parent.oid) {
+                self.note_lock(p, ref_mode)?;
+            }
         }
         // Keys compare under the referenced columns' collations: a nondeterministic one by
         // its sort keys.
@@ -3453,7 +3482,7 @@ impl Ddl<'_, '_> {
             key_bytes(&vals)
         };
         let parents: HashSet<Vec<u8>> = self
-            .tree_rows(parent)?
+            .tree_rows_at(parent, true)?
             .into_iter()
             .map(|r| key_of(&ref_cols.iter().map(|c| r[*c].clone()).collect::<Vec<_>>()))
             .collect();
@@ -4952,7 +4981,8 @@ impl Ddl<'_, '_> {
                                 .get(&ref_table)
                                 .cloned()
                                 .ok_or_else(|| crate::error::internal("parent"))?;
-                            self.validate_fk(
+                            // (ATExecValidateConstraint: ROW SHARE on the referenced table.)
+                            self.validate_fk_locking(
                                 &t,
                                 &parent,
                                 &columns,
@@ -4960,6 +4990,7 @@ impl Ddl<'_, '_> {
                                 &cmd.name,
                                 match_full,
                                 t.constraints[i].is_period(),
+                                lockmode::ROW_SHARE,
                             )?;
                         }
                         ConstraintKind::NotNull { column } => {
@@ -9089,17 +9120,25 @@ impl Ddl<'_, '_> {
                 self.note_lock(toast_rel, heap_mode)?;
                 self.note_lock(toast_rel + 1, index_mode)?;
             }
-            // ReindexRelationConcurrently's phases: writers out (ShareLock), then every
-            // transaction using the table before the swap (AccessExclusiveLock).
+            // ReindexRelationConcurrently's phases: writers out before the build and again
+            // before the validation (ShareLock), the transactions with older snapshots
+            // (WaitForOlderSnapshots), then every transaction using the table before the
+            // swap and again before the old indexes go (AccessExclusiveLock): each wait is
+            // for the lockers there are when it begins.
             if concurrently {
                 use crate::txn::locks::LockMode as L;
-                self.ctx.txn.borrow_mut().wait_for_lockers(table, L::Share)?;
-                if toast_rel != 0 {
-                    self.ctx.txn.borrow_mut().wait_for_lockers(toast_rel, L::Share)?;
+                let rels: Vec<u32> = std::iter::once(table).chain((toast_rel != 0).then_some(toast_rel)).collect();
+                let mut txn = self.ctx.txn.borrow_mut();
+                for _ in 0..2 {
+                    for &r in &rels {
+                        txn.wait_for_lockers(r, L::Share)?;
+                    }
                 }
-                self.ctx.txn.borrow_mut().wait_for_lockers(table, L::AccessExclusive)?;
-                if toast_rel != 0 {
-                    self.ctx.txn.borrow_mut().wait_for_lockers(toast_rel, L::AccessExclusive)?;
+                txn.wait_for_older_snapshots()?;
+                for _ in 0..2 {
+                    for &r in &rels {
+                        txn.wait_for_lockers(r, L::AccessExclusive)?;
+                    }
                 }
             }
             if let Some(spc) = spc {

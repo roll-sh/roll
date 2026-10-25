@@ -18,9 +18,9 @@ run is a faithful isolationtester.
 
 | | before (round 17 start) | round 18 start | now |
 |---|---:|---:|---:|
-| specs matching | 30 of 122 (24.6%) | 94 of 122 (77.0%) | 109 of 122 (89.3%) |
-| permutations matching | 921 of 1648 (55.9%) | 1452 of 1648 (88.1%) | 1616 of 1648 (98.1%) |
-| steps matching | 10146 of 12238 (82.9%) | 11397 of 12238 (93.1%) | 12154 of 12238 (99.3%) |
+| specs matching | 30 of 122 (24.6%) | 94 of 122 (77.0%) | 120 of 122 (98.4%) |
+| permutations matching | 921 of 1648 (55.9%) | 1452 of 1648 (88.1%) | 1646 of 1648 (99.9%) |
+| steps matching | 10146 of 12238 (82.9%) | 11397 of 12238 (93.1%) | 12232 of 12238 (100.0%) |
 
 A *step* is one `step ...` line of isolationtester's output with what follows it (its rows,
 errors, notices, `<waiting ...>` and `<... completed>`); a permutation matches when all of its
@@ -32,15 +32,8 @@ it implemented over the old lock manager.
 
 | class | specs | permutations differing |
 |---|---|---:|
-| L3 | fk-partitioned-1, fk-partitioned-2, partition-concurrent-attach | 10 |
-| L2 | intra-grant-inplace, intra-grant-inplace-db | 8 |
-| T2 | subxid-overflow | 4 |
-| E1 | eval-plan-qual | 2 |
-| T1 | temp-schema-cleanup | 2 |
-| L6 | reindex-concurrently, multiple-cic | 2 |
-| L5 | alter-table-4 | 2 |
+| L2 | intra-grant-inplace | 1 |
 | L4 | deadlock-parallel | 1 |
-| L1 | drop-owned-grant | 1 |
 
 - **D1** (done, round 18, agent 56: all 56 permutations of detach-partition-concurrently-1..4
   match; see "DETACH PARTITION CONCURRENTLY" below).
@@ -57,16 +50,13 @@ it implemented over the old lock manager.
   AccessExclusiveLock on the TOAST table and index; REINDEX of a table locks its TOAST table
   and index too. Not modelled: detoasting's AccessShareLock on the TOAST table when a read
   fetches an out-of-line value, and deletes from tables too big for the size model.)
-- **E1**: A catalog row (pg_class) updated by two transactions at once (`UPDATE pg_class`, `MERGE INTO pg_class`): the engine has no row locks on catalog rows, so the second fails at commit where Postgres's waits and updates the first's version. (The rest of E1, E2, E3 and E4 match since round 18, agent 56: below.)
-- (I1, stats, and I2, horizons, match since round 18, agent 56: see "Which differences are engine internals" below.)
-- **L1**: DROP OWNED's privilege changes on a role's objects: Postgres's second DROP OWNED waits on the first's catalog row (tuple) lock and then redoes its work over the committed catalog; the engine has no row locks on catalog rows, so the second commits into a merge conflict.
-- **L2**: GRANT's in-place catalog tuple lock (heap_inplace_lock) on the object's pg_class / pg_database row: a concurrent ALTER TABLE / VACUUM doesn't wait for it.
-- **L3**: ATTACH PARTITION and partitioned foreign keys: the locks ATTACH takes on the referencing side of a foreign key, and an insert routed to a default partition whose constraint an ATTACH that it waited for changed (Postgres rechecks the row against the default partition's new constraint and fails).
+- (E1–E4, L1, L3, L5, L6, T1 and T2 match since round 18, agent 56: "What round 18 changed"
+  below. I1, stats, and I2, horizons, too: see "Which differences are engine internals".)
+- **L2**: intra-grant-inplace's last permutation deletes the table's pg_class row with
+  `DELETE FROM pg_class` (a catalog corruption Postgres permits a superuser); the engine
+  refuses DML deleting catalog rows ("permission denied for table pg_class"), so the
+  waits on that row and REVOKE's "cache lookup failed" don't happen. Not planned.
 - **L4**: A parallel worker's own advisory locks and the deadlock checker's queue reordering across a lock group: the engine runs the worker's part in the leader, so the order the waiters are woken in differs once.
-- **L5**: A query waiting for an inheritance child's lock re-reads the child as it is once the lock is held (a dropped child is skipped, a child whose column type changed fails 'does not match parent's type'): the engine keeps the plan it made before the wait.
-- **L6**: CONCURRENTLY index builds: WaitForOlderSnapshots (transactions holding a snapshot but no lock on the table) isn't modelled, and an IMMUTABLE function in an index predicate isn't folded when the index is opened (multiple-cic's advisory lock).
-- **T1**: The cleanup of a terminated session's temporary schema: Postgres drops its objects silently (and without the cascade notice) when the next session takes the schema; the engine sends the DROP's notices to the terminating session.
-- **T2**: A PL/pgSQL recursion creating thousands of subtransactions runs out of stack where Postgres doesn't.
 
 ## Per spec
 
@@ -106,19 +96,19 @@ it implemented over the old lock manager.
 | fk-contention | 3/3 | 9/9 |
 | fk-deadlock | 14/14 | 90/90 |
 | fk-deadlock2 | 11/11 | 72/72 |
-| fk-partitioned-1 ✗ | 8/14 | 72/90 |
-| fk-partitioned-2 ✗ | 4/6 | 40/42 |
+| fk-partitioned-1 | 14/14 | 90/90 |
+| fk-partitioned-2 | 6/6 | 42/42 |
 | fk-snapshot | 7/7 | 59/59 |
-| subxid-overflow ✗ | 0/4 | 25/31 |
-| eval-plan-qual ✗ | 54/56 | 336/342 |
+| subxid-overflow | 4/4 | 31/31 |
+| eval-plan-qual | 56/56 | 342/342 |
 | eval-plan-qual-trigger | 39/39 | 503/503 |
 | inplace-inval | 2/2 | 9/9 |
-| intra-grant-inplace ✗ | 3/10 | 39/69 |
-| intra-grant-inplace-db ✗ | 0/1 | 5/8 |
+| intra-grant-inplace ✗ | 9/10 | 65/69 |
+| intra-grant-inplace-db | 1/1 | 8/8 |
 | lock-update-delete | 12/12 | 84/84 |
 | lock-update-traversal | 3/3 | 26/26 |
 | inherit-temp | 9/9 | 72/72 |
-| temp-schema-cleanup ✗ | 0/2 | 6/9 |
+| temp-schema-cleanup | 2/2 | 9/9 |
 | insert-conflict-do-nothing | 2/2 | 12/12 |
 | insert-conflict-do-nothing-2 | 8/8 | 60/60 |
 | insert-conflict-do-update | 2/2 | 12/12 |
@@ -139,7 +129,7 @@ it implemented over the old lock manager.
 | lock-committed-update | 24/24 | 222/222 |
 | lock-committed-keyupdate | 18/18 | 171/171 |
 | update-locked-tuple | 6/6 | 42/42 |
-| reindex-concurrently ✗ | 5/6 | 45/47 |
+| reindex-concurrently | 6/6 | 47/47 |
 | reindex-concurrently-toast | 60/60 | 348/348 |
 | reindex-schema | 2/2 | 12/12 |
 | propagate-lock-delete | 8/8 | 80/80 |
@@ -158,11 +148,11 @@ it implemented over the old lock manager.
 | skip-locked-3 | 1/1 | 7/7 |
 | skip-locked-4 | 1/1 | 9/9 |
 | drop-index-concurrently-1 | 1/1 | 16/16 |
-| multiple-cic ✗ | 0/1 | 2/5 |
+| multiple-cic | 1/1 | 5/5 |
 | alter-table-1 | 137/137 | 1407/1407 |
 | alter-table-2 | 48/48 | 453/453 |
 | alter-table-3 | 48/48 | 400/400 |
-| alter-table-4 ✗ | 2/4 | 24/26 |
+| alter-table-4 | 4/4 | 26/26 |
 | create-trigger | 25/25 | 185/185 |
 | sequence-ddl | 5/5 | 21/21 |
 | async-notify | 6/6 | 35/35 |
@@ -176,7 +166,7 @@ it implemented over the old lock manager.
 | predicate-hash | 40/40 | 240/240 |
 | predicate-gist | 40/40 | 240/240 |
 | predicate-gin | 31/31 | 189/189 |
-| partition-concurrent-attach ✗ | 1/3 | 20/24 |
+| partition-concurrent-attach | 3/3 | 24/24 |
 | partition-drop-index-locking | 2/2 | 20/20 |
 | partition-key-update-1 | 13/13 | 95/95 |
 | partition-key-update-2 | 2/2 | 17/17 |
@@ -193,7 +183,7 @@ it implemented over the old lock manager.
 | lock-nowait | 1/1 | 6/6 |
 | ddl-dependency-locking | 17/17 | 85/85 |
 | pub-concurrent-drop | 1/1 | 4/4 |
-| drop-owned-grant ✗ | 0/1 | 2/5 |
+| drop-owned-grant | 1/1 | 5/5 |
 
 ## Which differences are engine internals
 
@@ -227,12 +217,11 @@ it implemented over the old lock manager.
     tuples it had to keep (recently dead) as the table's n_dead_tup. Not modelled: horizons
     per database (snapshots in other databases hold back this one's), and a READ COMMITTED
     transaction idle between statements still holds its last statement's xmin.
-- **T2** is the engine's stack use per PL/pgSQL subtransaction. (D2's TOAST relations are
-  modelled since round 18: the engine still stores out-of-line values in its rows' keyspace,
-  and the TOAST table is a name, locks and its size model's chunks.)
-- Everything else (D1, E1, L*, T1) is client-visible behaviour that can be implemented: the
-  catalog-row tuple locks of L1 / L2 / the rest of E1 and DETACH CONCURRENTLY's two
-  transactions are the biggest pieces left.
+- (T2 was a fixed cap on PL/pgSQL nesting, not the stack: gone in round 18. D2's TOAST
+  relations are modelled since round 18: the engine still stores out-of-line values in its
+  rows' keyspace, and the TOAST table is a name, locks and its size model's chunks.)
+- What's left is two corner cases: L2's catalog-corrupting DELETE and L4's parallel lock
+  group.
 - **SSI** is implemented (`txn/ssi.rs`): no anomaly the suite checks commits, and the failures
   come where Postgres raises them. Not modelled: summarizing old serializable transactions into
   the SLRU when shared memory runs out (the engine keeps them until no snapshot needs them, the
@@ -277,6 +266,46 @@ under concurrency (E1–E4; wire tests `unique_checks_wait_for_writers_in_progre
 - An UPDATE / DELETE by TID range rechecks the new version's TID (eval-plan-qual).
 - pg_stat_activity shows application_name as `SET` left it (isolationtester names its
   sessions so; specs read pg_locks joined with it).
+
+Locks on catalog rows, and what a statement finds after waiting for DDL (L1–L6, T1, T2;
+wire tests `catalog_row_locks`, `after_waits_for_ddl`,
+`concurrent_index_builds_wait_for_old_snapshots`):
+
+- **Catalog rows are locked as Postgres's catalog tuples are** (`locks::catalog_row_key`,
+  `Txn::lock_catalog_row`, `inplace_lock_catalog_row`). GRANT / REVOKE on a relation or a
+  database updates its pg_class / pg_database row (waits for a transaction updating it or
+  locking it FOR UPDATE / NO KEY UPDATE, then works over what it committed); an index build's
+  in-place update of relhasindex, VACUUM's of pg_class and of datfrozenxid wait for a
+  transaction updating the row (heap_inplace_lock, holding the tuple lock meanwhile, so
+  deadlocks are detected); `SELECT ... FOR UPDATE / SHARE` over a catalog with an oid column
+  locks its rows; `UPDATE pg_class` / `MERGE INTO pg_class` of the same row serialize, the
+  second applying to the first's result (it failed with "concurrent schema change").
+  DROP OWNED locks each role membership it deletes (AcquireDeletionLock), so a second one
+  waits and then finds nothing left (it failed at commit). (intra-grant-inplace,
+  intra-grant-inplace-db, drop-owned-grant, eval-plan-qual)
+- **After a lock wait**: an inheritance child dropped while a query waited for it is left
+  out (it was read: rows of a dropped table), one whose column changed type fails "does not
+  match parent's type" (alter-table-4); a row routed to a default partition is checked
+  against the constraint an ATTACH it waited for gave the partition (it went in, duplicating
+  rows another partition then held), and ATTACH validates the default partition's rows over
+  the latest snapshot (partition-concurrent-attach); a foreign key ATTACH or ADD CONSTRAINT
+  adds locks the referenced table and its partitions SHARE ROW EXCLUSIVE and checks over the
+  latest snapshot; a REPEATABLE READ RI check whose referenced row a transaction it waited for
+  deleted fails "could not serialize access" (fk-partitioned-1/2).
+- **Concurrent index builds**: CREATE INDEX CONCURRENTLY waits for the table's writers again
+  after the build and then for every transaction holding a snapshot as old as its own
+  (WaitForOlderSnapshots: snapshots are registered by transaction, `Xids::register_snapshot_of`;
+  builds on plain columns are skipped, PROC_IN_SAFE_IC); its predicate's immutable functions
+  run over constants when the build opens the index (eval_const_expressions); REINDEX
+  CONCURRENTLY waits in all five of its phases (reindex-concurrently, multiple-cic).
+- **Temporary objects**: DISCARD TEMP and the end of a session drop the session's temporary
+  functions and types too, quietly (no "drop cascades" notices); a session's objects go when
+  it ends, not with the database's last session (temp-schema-cleanup).
+- PL/pgSQL calls nested more than 64 deep failed "stack depth limit exceeded" whatever the
+  stack (a fixed cap from the engine's first version); only the stack bounds them now, as
+  check_stack_depth does. An unoptimized build's connection threads get a 64 MB stack (16 MB
+  optimized): its frames are ~10x bigger (~250 kB per PL/pgSQL level), and subxid-overflow's
+  100 levels with exception blocks ran out.
 
 ## What this round changed (round 17, agent 34)
 

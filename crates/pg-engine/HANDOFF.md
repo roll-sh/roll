@@ -434,7 +434,13 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   REPEATABLE READ; and DETACH PARTITION ... CONCURRENTLY runs as Postgres's two transactions
   with the detach-pending state queries plan around by snapshot (catalog views without the
   partition, `Catalog::detach_view`) and FINALIZE (detach-partition-concurrently-1..4: 56 of
-  56). What's left is classified there (TOAST relations, catalog row locks, ...).
+  56). Then catalog rows locked as Postgres's catalog tuples (GRANT, in-place updates, SELECT
+  FOR UPDATE over catalogs, DROP OWNED; `locks::catalog_row_key`), what a statement finds
+  after waiting for DDL (dropped inheritance children, a default partition's new constraint,
+  FK checks over the latest snapshot), WaitForOlderSnapshots for concurrent index builds,
+  quiet temporary-object cleanup at session end, and no fixed cap on PL/pgSQL nesting; TOAST
+  relations nameable and locked (D2). 120 specs, 1,646 of 1,648 permutations; what's left
+  is classified there (two corner cases).
 
 ## Repository layout
 

@@ -2983,3 +2983,235 @@ fn cancel_while_rows_stream() {
     });
     s.engine.shutdown();
 }
+
+/// Catalog rows locked as Postgres's catalog tuples are: GRANT updates the relation's
+/// pg_class row (waiting for SELECT ... FOR UPDATE of it), an index build's in-place update
+/// of it waits for the GRANT, two UPDATEs of pg_class serialize (the second over the
+/// first's result), and a second DROP OWNED waits for the first and then finds nothing left.
+#[test]
+fn catalog_row_locks() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        let c = s.connect("postgres").await;
+        a.batch_execute(
+            "CREATE TABLE crl (c int);
+             CREATE ROLE regress_crl_role; CREATE ROLE regress_crl_member;
+             CREATE ROLE regress_crl_grantor;
+             GRANT regress_crl_role TO regress_crl_grantor WITH ADMIN OPTION;
+             SET ROLE regress_crl_grantor; GRANT regress_crl_role TO regress_crl_member; RESET ROLE",
+        )
+        .await
+        .unwrap();
+        let pa = lines(&a, "SELECT pg_backend_pid()").await.unwrap().remove(0);
+        let pb = lines(&b, "SELECT pg_backend_pid()").await.unwrap().remove(0);
+        // FOR UPDATE of the pg_class row holds off GRANT; FOR KEY SHARE doesn't.
+        a.batch_execute("BEGIN; SELECT relhasindex FROM pg_class WHERE oid = 'crl'::regclass FOR KEY SHARE")
+            .await
+            .unwrap();
+        b.batch_execute("GRANT SELECT ON crl TO PUBLIC").await.unwrap();
+        a.batch_execute("ROLLBACK; BEGIN; SELECT relhasindex FROM pg_class WHERE oid = 'crl'::regclass FOR UPDATE")
+            .await
+            .unwrap();
+        let w = tokio::spawn(async move {
+            let r = b.batch_execute("BEGIN; REVOKE SELECT ON crl FROM PUBLIC").await;
+            (b, r)
+        });
+        until_blocked(&c, &pb).await;
+        a.batch_execute("ROLLBACK").await.unwrap();
+        let (b, r) = w.await.unwrap();
+        r.unwrap();
+        // The REVOKE in progress: ADD PRIMARY KEY's in-place update of relhasindex waits.
+        let w = tokio::spawn(async move {
+            let r = a.batch_execute("ALTER TABLE crl ADD PRIMARY KEY (c)").await;
+            (a, r)
+        });
+        until_blocked(&c, &pa).await;
+        b.batch_execute("COMMIT").await.unwrap();
+        let (a, r) = w.await.unwrap();
+        r.unwrap();
+        assert_eq!(
+            lines(&c, "SELECT relhasindex, relacl IS NULL OR relacl::text NOT LIKE '%=r/%' FROM pg_class WHERE oid = 'crl'::regclass")
+                .await
+                .unwrap(),
+            ["t|t"]
+        );
+        // UPDATE pg_class twice at once: the second applies to the first's result.
+        a.batch_execute("BEGIN; UPDATE pg_class SET reltuples = 123 WHERE oid = 'crl'::regclass")
+            .await
+            .unwrap();
+        let w = tokio::spawn(async move {
+            let r = b
+                .batch_execute("UPDATE pg_class SET reltuples = reltuples * 2 WHERE oid = 'crl'::regclass")
+                .await;
+            (b, r)
+        });
+        until_blocked(&c, &pb).await;
+        a.batch_execute("COMMIT").await.unwrap();
+        let (b, r) = w.await.unwrap();
+        r.unwrap();
+        assert_eq!(
+            lines(&c, "SELECT reltuples FROM pg_class WHERE oid = 'crl'::regclass").await.unwrap(),
+            ["246"]
+        );
+        // DROP OWNED twice at once: the second waits, then has nothing to do.
+        a.batch_execute("BEGIN; DROP OWNED BY regress_crl_grantor").await.unwrap();
+        let w = tokio::spawn(async move {
+            let r = b.batch_execute("DROP OWNED BY regress_crl_grantor").await;
+            (b, r)
+        });
+        until_blocked(&c, &pb).await;
+        a.batch_execute("COMMIT").await.unwrap();
+        let (b, r) = w.await.unwrap();
+        r.unwrap();
+        b.batch_execute(
+            "DROP ROLE regress_crl_member; DROP ROLE regress_crl_grantor; DROP ROLE regress_crl_role",
+        )
+        .await
+        .unwrap();
+    });
+    s.engine.shutdown();
+}
+
+/// What a statement finds once a lock it waited for is granted: a row routed to a default
+/// partition is checked against that partition's constraint as an ATTACH left it, an
+/// inheritance child dropped meanwhile is left out, a foreign key added by ATTACH sees the
+/// referenced rows a delete it waited for removed; and temporary objects go quietly at
+/// DISCARD TEMP and when the session ends.
+#[test]
+fn after_waits_for_ddl() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        let c = s.connect("postgres").await;
+        a.batch_execute(
+            "CREATE TABLE tp (i int, j text) PARTITION BY RANGE (i);
+             CREATE TABLE tp_def PARTITION OF tp DEFAULT;
+             CREATE TABLE tp_2 (LIKE tp);
+             CREATE TABLE ip (a int); INSERT INTO ip VALUES (1);
+             CREATE TABLE ic () INHERITS (ip); INSERT INTO ic VALUES (10);
+             CREATE TABLE ppk (a int PRIMARY KEY) PARTITION BY LIST (a);
+             CREATE TABLE ppk1 PARTITION OF ppk FOR VALUES IN (1);
+             INSERT INTO ppk VALUES (1);
+             CREATE TABLE pfk (a int REFERENCES ppk) PARTITION BY LIST (a);
+             CREATE TABLE pfk1 (a int NOT NULL); INSERT INTO pfk1 VALUES (1)",
+        )
+        .await
+        .unwrap();
+        let pb = lines(&b, "SELECT pg_backend_pid()").await.unwrap().remove(0);
+        // ATTACH takes 100..200 from the default partition while the insert waits.
+        a.batch_execute("BEGIN; ALTER TABLE tp ATTACH PARTITION tp_2 FOR VALUES FROM (100) TO (200)")
+            .await
+            .unwrap();
+        let w = tokio::spawn(async move {
+            let r = b.batch_execute("INSERT INTO tp VALUES (110, 'x')").await;
+            (b, r)
+        });
+        until_blocked(&c, &pb).await;
+        a.batch_execute("COMMIT").await.unwrap();
+        let (b, r) = w.await.unwrap();
+        let err = r.unwrap_err();
+        assert_eq!(err.code().map(|c| c.code()), Some("23514"));
+        assert_eq!(
+            err.as_db_error().unwrap().message(),
+            "new row for relation \"tp_def\" violates partition constraint"
+        );
+        assert_eq!(lines(&c, "SELECT count(*) FROM tp").await.unwrap(), ["0"]);
+        // A child dropped while the query waited for it is left out.
+        a.batch_execute("BEGIN; DROP TABLE ic").await.unwrap();
+        let w = tokio::spawn(async move {
+            let r = lines(&b, "SELECT sum(a) FROM ip").await;
+            (b, r)
+        });
+        until_blocked(&c, &pb).await;
+        a.batch_execute("COMMIT").await.unwrap();
+        let (b, r) = w.await.unwrap();
+        assert_eq!(r.unwrap(), ["1"]);
+        // ATTACH of a partition with a foreign key waits for the referenced partition's
+        // writer, then checks against what it committed.
+        a.batch_execute("BEGIN; DELETE FROM ppk1 WHERE a = 1").await.unwrap();
+        let w = tokio::spawn(async move {
+            let r = b.batch_execute("ALTER TABLE pfk ATTACH PARTITION pfk1 FOR VALUES IN (1)").await;
+            (b, r)
+        });
+        until_blocked(&c, &pb).await;
+        a.batch_execute("COMMIT").await.unwrap();
+        let (b, r) = w.await.unwrap();
+        assert_eq!(r.unwrap_err().code().map(|c| c.code()), Some("23503"));
+        // DISCARD TEMP drops temporary functions too, without notices; a session's
+        // temporary objects are gone once it ends.
+        b.batch_execute(
+            "CREATE TEMP TABLE tt (id serial PRIMARY KEY);
+             CREATE FUNCTION pg_temp.tf() RETURNS int LANGUAGE sql AS 'SELECT 1';
+             CREATE FUNCTION uses_tt(tt) RETURNS int LANGUAGE sql AS 'SELECT 1'",
+        )
+        .await
+        .unwrap();
+        let schema = lines(&b, "SELECT pg_my_temp_schema()::regnamespace").await.unwrap().remove(0);
+        b.batch_execute("DISCARD TEMP").await.unwrap();
+        let left = format!(
+            "SELECT (SELECT count(*) FROM pg_class WHERE relnamespace = '{schema}'::regnamespace)
+                  + (SELECT count(*) FROM pg_proc WHERE pronamespace = '{schema}'::regnamespace
+                     OR proname = 'uses_tt')"
+        );
+        assert_eq!(lines(&c, &left).await.unwrap(), ["0"]);
+        b.batch_execute(
+            "CREATE TEMP TABLE tt2 (x int);
+             CREATE FUNCTION pg_temp.tf2() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+        )
+        .await
+        .unwrap();
+        drop(b);
+        let mut n = Vec::new();
+        for _ in 0..200 {
+            n = lines(&c, &left).await.unwrap();
+            if n == ["0"] {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(n, ["0"]);
+    });
+    s.engine.shutdown();
+}
+
+/// CREATE INDEX CONCURRENTLY waits for transactions holding snapshots older than its
+/// validation's, whatever they read (WaitForOlderSnapshots); REINDEX CONCURRENTLY waits for
+/// the table's lockers again before the old index goes.
+#[test]
+fn concurrent_index_builds_wait_for_old_snapshots() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        let c = s.connect("postgres").await;
+        a.batch_execute("CREATE TABLE cic1 (x int); CREATE TABLE cic2 (y int)").await.unwrap();
+        let pb = lines(&b, "SELECT pg_backend_pid()").await.unwrap().remove(0);
+        a.batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT * FROM cic2").await.unwrap();
+        let w = tokio::spawn(async move {
+            let r = b.batch_execute("CREATE INDEX CONCURRENTLY cic1_x ON cic1 ((x + 1))").await;
+            (b, r)
+        });
+        until_blocked(&c, &pb).await;
+        a.batch_execute("COMMIT").await.unwrap();
+        let (b, r) = w.await.unwrap();
+        r.unwrap();
+        // A reader holding the table before the swap, and a writer coming in after.
+        a.batch_execute("BEGIN; SELECT * FROM cic1").await.unwrap();
+        let w = tokio::spawn(async move {
+            let r = b.batch_execute("REINDEX TABLE CONCURRENTLY cic1").await;
+            (b, r)
+        });
+        until_blocked(&c, &pb).await;
+        c.batch_execute("BEGIN; INSERT INTO cic1 VALUES (1)").await.unwrap();
+        a.batch_execute("COMMIT").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!w.is_finished(), "REINDEX waits for the writer that came in");
+        c.batch_execute("COMMIT").await.unwrap();
+        let (_b, r) = w.await.unwrap();
+        r.unwrap();
+    });
+    s.engine.shutdown();
+}

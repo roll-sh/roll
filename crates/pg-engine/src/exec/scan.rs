@@ -366,6 +366,9 @@ fn open_foreign(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<Bo
 }
 
 pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNode> {
+    if ctx.gone_rels.borrow().contains(&s.table.oid) {
+        return Ok(Box::new(super::nodes::VecNode::new(Vec::new())));
+    }
     if s.table.foreign.is_some() {
         return open_foreign(s, need, ctx);
     }

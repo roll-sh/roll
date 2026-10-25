@@ -2751,12 +2751,35 @@ impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.finish_txn(false);
         // RemoveTempRelationsCallback: the session's temporary objects go with it (done by
-        // the server, whoever the current user is). A catalog change while another session
-        // of the database runs could make its statement fail (a concurrent schema change),
-        // so this waits for the database's last session, which drops every session's. The
-        // cleanup is announced before the sessions are counted, and a session logging in
-        // counts itself before it looks for cleanups (Session::new / login), so one of the
-        // two always sees the other.
+        // the server, whoever the current user is), quietly, before the session is gone:
+        // another session looking at the schema afterwards finds it empty. (Concurrent DDL
+        // of other sessions merges with the drop at commit.)
+        let own_temp = |me: &Self| {
+            let cat = me.state.db.catalog();
+            let own = me.state.temp_schema();
+            cat.schemas.values().filter(|s| s.name == own).any(|s| {
+                cat.tables.values().any(|t| t.schema == s.oid)
+                    || cat.views.values().any(|v| v.schema == s.oid)
+                    || cat.sequences.values().any(|q| q.schema == s.oid)
+                    || cat.functions.values().any(|f| f.schema == s.oid)
+            })
+        };
+        if own_temp(self) {
+            self.state
+                .definer
+                .borrow_mut()
+                .push(crate::catalog::BOOTSTRAP_SUPERUSER_OID);
+            for _ in 0..20 {
+                let ok = self.drop_temp_objects(false).is_ok();
+                let _ = self.finish_txn(false);
+                if ok || !own_temp(self) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            self.state.definer.borrow_mut().pop();
+        }
+        // Leftovers of sessions that couldn't clean up go with the database's last session.
         let has_temp = |me: &Self| {
             let cat = me.state.db.catalog();
             cat.schemas

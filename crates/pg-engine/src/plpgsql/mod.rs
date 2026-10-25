@@ -29,9 +29,6 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// Nested PL/pgSQL calls allowed before "stack depth limit exceeded".
-const MAX_DEPTH: u32 = 64;
-
 thread_local! {
     static DEPTH: Cell<u32> = const { Cell::new(0) };
     static PARSED: RefCell<HashMap<String, Rc<Block>>> = RefCell::new(HashMap::new());
@@ -534,13 +531,10 @@ fn internal_pos(mut e: Error) -> Error {
 struct DepthGuard;
 
 impl DepthGuard {
+    /// (Only the stack bounds the nesting, as in Postgres: check_stack_depth.)
     fn enter() -> Result<DepthGuard> {
         crate::stack::check()?;
-        let d = DEPTH.with(|d| d.get());
-        if d >= MAX_DEPTH {
-            return Err(crate::stack::depth_error());
-        }
-        DEPTH.with(|x| x.set(d + 1));
+        DEPTH.with(|x| x.set(x.get() + 1));
         Ok(DepthGuard)
     }
 }

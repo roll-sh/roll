@@ -42,6 +42,11 @@ struct State {
     /// The xmins of the snapshots transactions hold (PGPROC.xmin), by registration, with
     /// how many hold each.
     snapshots: std::collections::BTreeMap<u64, usize>,
+    /// The same, by the transaction (lock owner) holding them (GetCurrentVirtualXIDs).
+    owners: std::collections::HashMap<u64, Vec<u64>>,
+    /// Transactions building an index on plain columns concurrently (PROC_IN_SAFE_IC):
+    /// other concurrent builds don't wait for their snapshots.
+    safe_ic: BTreeSet<u64>,
 }
 
 pub struct Xids {
@@ -58,6 +63,7 @@ pub struct Xids {
 pub struct SnapshotXmin {
     xids: std::sync::Arc<Xids>,
     xmin: u64,
+    owner: Option<u64>,
 }
 
 impl Drop for SnapshotXmin {
@@ -67,6 +73,16 @@ impl Drop for SnapshotXmin {
             *n -= 1;
             if *n == 0 {
                 s.snapshots.remove(&self.xmin);
+            }
+        }
+        if let Some(o) = self.owner
+            && let Some(v) = s.owners.get_mut(&o)
+        {
+            if let Some(i) = v.iter().position(|x| *x == self.xmin) {
+                v.swap_remove(i);
+            }
+            if v.is_empty() {
+                s.owners.remove(&o);
             }
         }
     }
@@ -99,6 +115,8 @@ impl Xids {
                 aborted: BTreeSet::new(),
                 latest_completed: next - 1,
                 snapshots: Default::default(),
+                owners: Default::default(),
+                safe_ic: BTreeSet::new(),
             }),
             exported: Mutex::new(std::collections::HashMap::new()),
             oldest: FIRST_NORMAL_XID,
@@ -198,10 +216,56 @@ impl Xids {
     /// A transaction took a snapshot: until the guard goes, the snapshot's xmin holds back
     /// what pruning and VACUUM may remove (the backend's PGPROC.xmin).
     pub fn register_snapshot(self: &std::sync::Arc<Self>) -> SnapshotXmin {
+        self.register_snapshot_of(None)
+    }
+
+    /// `register_snapshot` for transaction (lock owner) `owner`: concurrent index builds
+    /// wait for the transactions holding snapshots older than theirs.
+    pub fn register_snapshot_of(self: &std::sync::Arc<Self>, owner: Option<u64>) -> SnapshotXmin {
         let mut s = self.state.lock();
         let xmin = Self::xmin_now(&s);
         *s.snapshots.entry(xmin).or_default() += 1;
-        SnapshotXmin { xids: self.clone(), xmin }
+        if let Some(o) = owner {
+            s.owners.entry(o).or_default().push(xmin);
+        }
+        SnapshotXmin { xids: self.clone(), xmin, owner }
+    }
+
+    /// The xmin a snapshot taken now would have.
+    pub fn current_xmin(&self) -> u64 {
+        Self::xmin_now(&self.state.lock())
+    }
+
+    /// GetCurrentVirtualXIDs for WaitForOlderSnapshots: the transactions other than `me`
+    /// holding a snapshot whose xmin is `limit` or older, not building an index on plain
+    /// columns concurrently.
+    pub fn older_snapshot_owners(&self, limit: u64, me: u64) -> Vec<u64> {
+        let s = self.state.lock();
+        let mut out: Vec<u64> = s
+            .owners
+            .iter()
+            .filter(|(o, x)| **o != me && !s.safe_ic.contains(o) && x.iter().any(|x| *x <= limit))
+            .map(|(o, _)| *o)
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// Whether transaction `owner` still holds a snapshot whose xmin is `limit` or older.
+    pub fn holds_snapshot_older(&self, owner: u64, limit: u64) -> bool {
+        let s = self.state.lock();
+        !s.safe_ic.contains(&owner) && s.owners.get(&owner).is_some_and(|x| x.iter().any(|x| *x <= limit))
+    }
+
+    /// Mark transaction `owner` as building an index on plain columns concurrently
+    /// (PROC_IN_SAFE_IC), or no longer.
+    pub fn set_safe_ic(&self, owner: u64, on: bool) {
+        let mut s = self.state.lock();
+        if on {
+            s.safe_ic.insert(owner);
+        } else {
+            s.safe_ic.remove(&owner);
+        }
     }
 
     /// The pruning horizon of a database's relations (ComputeXidHorizons'

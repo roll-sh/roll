@@ -105,8 +105,26 @@ fn seq_read(s: &mut Session) -> String {
     out(s, "SELECT seq_scan, seq_tup_read FROM pg_stat_user_tables WHERE relname = 'big'").join(",")
 }
 
+/// Run a test's sessions on a big stack, as the server gives its session threads (an
+/// unoptimized build's frames don't fit the 2 MB of a test thread).
+fn on_session_thread(f: fn()) {
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || {
+            pg_engine::stack::set_limit(60 << 20);
+            f()
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[test]
 fn parallel_scans_match_serial() {
+    on_session_thread(parallel_scans_match_serial_inner);
+}
+
+fn parallel_scans_match_serial_inner() {
     let dir = tempfile::tempdir().unwrap();
     let engine = open(dir.path());
     let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
@@ -190,6 +208,10 @@ const JOIN_QUERIES: &[&str] = &[
 
 #[test]
 fn parallel_joins_match_serial() {
+    on_session_thread(parallel_joins_match_serial_inner);
+}
+
+fn parallel_joins_match_serial_inner() {
     let dir = tempfile::tempdir().unwrap();
     let engine = open(dir.path());
     let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();

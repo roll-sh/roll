@@ -920,7 +920,10 @@ impl Txn {
             }
             // The statement's snapshot holds back pruning while it runs (and, here, until
             // the next statement or the transaction's end).
-            self.xmin = needs_snapshot.then(|| self.db.xids().register_snapshot());
+            self.xmin = needs_snapshot.then(|| self.db.xids().register_snapshot_of(Some(self.id)));
+            if needs_snapshot {
+                self.hold_own_xact_lock();
+            }
         }
         Ok(())
     }
@@ -936,9 +939,19 @@ impl Txn {
         }
     }
 
+    /// Its own (virtual) transaction lock, which others waiting for it wait on: held by a
+    /// transaction from its first lock or snapshot on.
+    fn hold_own_xact_lock(&mut self) {
+        if !self.xact_locks.contains(&self.id) {
+            self.db.locks.hold_xact_lock(self.id, self.id, self.lock_proc(), self.xid);
+            self.xact_locks.push(self.id);
+        }
+    }
+
     /// (Pinned atomically with the timestamp it reads: `Store::pin_visible`.)
     fn take_snapshot(&mut self) {
-        self.xmin = Some(self.db.xids().register_snapshot());
+        self.xmin = Some(self.db.xids().register_snapshot_of(Some(self.id)));
+        self.hold_own_xact_lock();
         if self.db.store.visible_ts() != self.snapshot_ts && !self.wrote {
             let pin = self.db.store.pin_visible();
             self.snapshot_ts = pin.ts;
@@ -1599,6 +1612,36 @@ impl Txn {
         Ok(())
     }
 
+    /// WaitForOlderSnapshots: wait for every other transaction holding a snapshot as old as
+    /// one taken now (a concurrent index build's last phase), each until it ends, unless it
+    /// let go of every such snapshot meanwhile. While it waits, this transaction holds no
+    /// snapshot others would wait for (Postgres's waiting backend has xmin 0).
+    pub fn wait_for_older_snapshots(&mut self) -> Result<()> {
+        let xids = self.db.xids();
+        let limit = xids.current_xmin();
+        let had = self.xmin.take().is_some();
+        let mut r = Ok(());
+        for owner in xids.older_snapshot_owners(limit, self.id) {
+            if !xids.holds_snapshot_older(owner, limit) {
+                continue;
+            }
+            r = self.wait_for_lock(&locks::xact_key(owner));
+            if r.is_err() {
+                break;
+            }
+        }
+        if had {
+            self.xmin = Some(xids.register_snapshot_of(Some(self.id)));
+        }
+        r
+    }
+
+    /// Whether this transaction builds an index on plain columns concurrently
+    /// (PROC_IN_SAFE_IC: others' WaitForOlderSnapshots skip it).
+    pub fn set_safe_index_build(&self, on: bool) {
+        self.db.xids().set_safe_ic(self.id, on);
+    }
+
     /// Where the heavyweight locks taken so far end (`release_locks_since`).
     pub fn lock_mark(&self) -> usize {
         self.lock_journal.len()
@@ -1611,6 +1654,47 @@ impl Txn {
             let k = self.lock_journal.pop().unwrap();
             self.locks_held.remove(&k);
             self.db.locks.release(&k.0, self.id, k.1);
+        }
+    }
+
+    /// Lock the row of object `oid` in system catalog `class` in `mode` until the
+    /// transaction ends (heap_lock_tuple, or heap_update / heap_delete of the row when
+    /// `modifies`: others' in-place updates of it then wait for us).
+    pub fn lock_catalog_row(&mut self, class: u32, oid: u32, mode: RowLockMode, modifies: bool) -> Result<()> {
+        let key = locks::catalog_row_key(class, oid);
+        let name = catalog_name(class);
+        self.lock_row(class, &key, mode, WaitPolicy::Block, &|| name.to_string())?;
+        if modifies {
+            self.row_modified(&key);
+        }
+        Ok(())
+    }
+
+    /// heap_inplace_lock of the row of object `oid` in system catalog `class` (an in-place
+    /// update: VACUUM's and index builds' statistics, datfrozenxid): its tuple lock, held
+    /// while waiting for another transaction updating the row or locking it more strongly
+    /// than FOR KEY SHARE, which is waited for over and over until none is left.
+    pub fn inplace_lock_catalog_row(&mut self, class: u32, oid: u32) -> Result<()> {
+        let key = locks::catalog_row_key(class, oid);
+        let tuple = locks::tuple_key(self.db.oid, class, &key);
+        let proc = self.lock_proc();
+        loop {
+            let name = catalog_name(class);
+            self.db.locks.acquire(
+                &tuple,
+                self.id,
+                proc,
+                LockMode::Exclusive,
+                &self.waits(WaitPolicy::Block),
+                &|| format!("row in relation \"{name}\""),
+            )?;
+            let Some(&holder) = self.db.locks.row_conflicts(&key, self.id, RowLockMode::NoKeyUpdate).first() else {
+                self.db.locks.release(&tuple, self.id, LockMode::Exclusive);
+                return Ok(());
+            };
+            let r = self.wait_for_xact(holder);
+            self.db.locks.release(&tuple, self.id, LockMode::Exclusive);
+            r?;
         }
     }
 
@@ -2212,7 +2296,7 @@ impl Txn {
             );
         }
         self._pin = Some(self.db.store.pin(ts));
-        self.xmin = Some(self.db.xids().register_snapshot());
+        self.xmin = Some(self.db.xids().register_snapshot_of(Some(self.id)));
         self.snapshot_ts = ts;
         self.start_ts = ts;
         // (The transaction's snapshot is this one now: SSI tracks it from here.)
@@ -2236,6 +2320,20 @@ impl Txn {
             ));
         }
         Ok(())
+    }
+}
+
+/// The name of a system catalog whose rows are locked (lock waits' messages).
+fn catalog_name(class: u32) -> &'static str {
+    match class {
+        1259 => "pg_class",
+        1260 => "pg_authid",
+        1261 => "pg_auth_members",
+        1262 => "pg_database",
+        1255 => "pg_proc",
+        2615 => "pg_namespace",
+        1247 => "pg_type",
+        _ => "pg_catalog",
     }
 }
 

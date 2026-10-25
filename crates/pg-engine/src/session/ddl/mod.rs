@@ -59,6 +59,8 @@ const TYPE_CLASS: u32 = 1247;
 const PROC_CLASS: u32 = 1255;
 const FDW_CLASS: u32 = 2328;
 const ROLE_CLASS: u32 = 1260;
+/// pg_auth_members (role memberships, shared).
+pub(super) const AUTH_MEMBERS_CLASS: u32 = 1261;
 
 /// Whether `oid` is a user type of `c`: an enum, composite, range, multirange or domain.
 fn before_has_type(c: &Catalog, oid: u32) -> bool {
@@ -522,6 +524,18 @@ impl<'c, 'a> Ddl<'c, 'a> {
         Ok(())
     }
 
+    /// After waiting for a lock: start over from the catalog other transactions committed
+    /// meanwhile (what Postgres's lock acquisition accepts invalidations for), unless this
+    /// transaction changed the catalog itself (its commit merges then). True if it did.
+    pub(super) fn reload_after_wait(&mut self) -> bool {
+        let unchanged = self.ctx.txn.borrow().changed_catalog().is_none();
+        if unchanged && self.ctx.catalog().version != self.base.version {
+            self.reload_catalog();
+            return true;
+        }
+        false
+    }
+
     /// Store the edited catalog in the transaction.
     fn save(&mut self) -> Result<()> {
         self.lock_references()?;
@@ -535,7 +549,7 @@ impl<'c, 'a> Ddl<'c, 'a> {
     /// Lock database object (`class`, `oid`) in `mode` (LockDatabaseObject; a role's
     /// is a shared object's, LockSharedObject) until the transaction ends.
     pub(super) fn lock_object(&self, class: u32, oid: u32, mode: crate::txn::locks::LockMode) -> Result<()> {
-        let db = if class == ROLE_CLASS { 0 } else { self.ctx.sess.db.oid };
+        let db = if matches!(class, ROLE_CLASS | AUTH_MEMBERS_CLASS | 1262 | 1213) { 0 } else { self.ctx.sess.db.oid };
         let key = crate::txn::locks::object_key(db, class, oid, 0);
         self.ctx
             .txn
@@ -1226,6 +1240,24 @@ impl<'c, 'a> Ddl<'c, 'a> {
         Ok(out)
     }
 
+    /// `table_rows`, or (`latest`) the newest committed rows plus this transaction's
+    /// (GetLatestSnapshot: what a check made after waiting for a lock reads).
+    fn table_rows_at(&self, t: &Table, latest: bool) -> Result<Vec<(Vec<u8>, Row)>> {
+        if !latest || t.foreign.is_some() {
+            return self.table_rows(t);
+        }
+        let start = index_prefix(t.oid, 0);
+        let end = prefix_end(&start);
+        let entries: Vec<(Vec<u8>, bytes::Bytes)> =
+            self.ctx.txn.borrow().scan_latest(&start, &end).collect::<Result<_>>()?;
+        let mut out = Vec::with_capacity(entries.len());
+        for (k, v) in entries {
+            self.ctx.check()?;
+            out.push((k, decode_table_row(t, &v)?));
+        }
+        Ok(out)
+    }
+
     /// `table_rows` a row at a time: nothing but the row being read is held (the scan
     /// holds no borrow of the transaction, so the caller may write as it reads).
     fn scan_rows(&self, t: &Table) -> TableRows {
@@ -1251,8 +1283,13 @@ impl<'c, 'a> Ddl<'c, 'a> {
 
     /// A table's rows with its partitions' (over its columns).
     fn tree_rows(&self, t: &Table) -> Result<Vec<Row>> {
+        self.tree_rows_at(t, false)
+    }
+
+    /// `tree_rows`, or (`latest`) over the newest committed rows (`table_rows_at`).
+    fn tree_rows_at(&self, t: &Table, latest: bool) -> Result<Vec<Row>> {
         if t.partkey.is_none() {
-            return Ok(self.table_rows(t)?.into_iter().map(|(_, r)| r).collect());
+            return Ok(self.table_rows_at(t, latest)?.into_iter().map(|(_, r)| r).collect());
         }
         let mut out = Vec::new();
         for leaf in self.cat.leaves(t.oid) {
@@ -1267,7 +1304,7 @@ impl<'c, 'a> Ddl<'c, 'a> {
                     }
                 })
                 .collect();
-            for (_, r) in self.table_rows(&leaf)? {
+            for (_, r) in self.table_rows_at(&leaf, latest)? {
                 out.push(
                     map.iter()
                         .map(|m| m.map_or(crate::types::Value::Null, |j| r[j].clone()))

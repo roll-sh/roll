@@ -6231,6 +6231,7 @@ impl Search<'_, '_, '_> {
                             filter: s.filter.clone(),
                             path: Some(Arc::new(crate::sql::plan::SysPath { scan: s, ordered })),
                             alias: alias.clone(),
+                            mark: None,
                         }
                     };
                     return (plan, (l.off..l.off + l.ncols).collect());
@@ -9005,7 +9006,7 @@ impl Planner<'_, '_> {
                 }
                 // (A catalog with indexes: its stand-in table's paths, parameterized ones
                 // too.)
-                Plan::SysScan { table, filter, path: None, alias }
+                Plan::SysScan { table, filter, path: None, alias, mark: None }
                     if !laterals.iter().any(|(li, _)| *li == i) =>
                 {
                     match super::syscat::sys_leaf_scan(*table, filter.as_ref()) {

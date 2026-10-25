@@ -1185,6 +1185,9 @@ pub enum Plan {
         path: Option<Arc<SysPath>>,
         /// The FROM-clause alias, when it has one (EXPLAIN's reference name).
         alias: Option<String>,
+        /// A locking clause's strength for its rows (catalogs with an `oid` column: their
+        /// rows are locked as the scan returns them, `locks::catalog_row_key`).
+        mark: Option<(RowMark, Wait)>,
     },
     /// ROWS FROM (f(...), g(...)) [WITH ORDINALITY]
     FunctionScan {

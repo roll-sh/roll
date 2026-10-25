@@ -517,7 +517,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
         }
         // No rows stay no rows.
         Plan::Empty { ncols, cols, info } => Plan::Empty { ncols, cols, info },
-        Plan::SysScan { table, filter, alias, .. } => {
+        Plan::SysScan { table, filter, alias, mark, .. } => {
             let mut all = Vec::new();
             if let Some(f) = filter {
                 conjuncts(f, &mut all);
@@ -528,6 +528,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 filter: and_all(all),
                 path: None,
                 alias,
+                mark,
             }
         }
         Plan::Filter { input, pred } => {

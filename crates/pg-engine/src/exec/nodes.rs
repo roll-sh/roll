@@ -42,6 +42,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             i: 0,
         }),
         Plan::Scan(s) => super::scan::open_scan(s, need, ctx)?,
+        Plan::SysScan { mark: Some(_), .. } => open_locked_sys_scan(plan, need, ctx)?,
         Plan::SysScan { table, filter, path, .. } => {
             if let Some(rows) = sys_rescan(*table, filter.as_ref(), path.as_deref(), ctx)? {
                 return Ok(Box::new(VecNode::new(rows)));
@@ -590,8 +591,77 @@ impl Node for LockRowsNode {
     }
 }
 
+/// SELECT ... FOR UPDATE / SHARE over a catalog: its scan under a `CatalogLockNode`. (Out of
+/// line: `open_node` recurses once per plan node, and an unoptimized build gives every
+/// arm's locals room in its frame.)
+#[inline(never)]
+fn open_locked_sys_scan(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNode> {
+    let Plan::SysScan { table, filter, path, alias, mark: Some((m, w)) } = &**plan else {
+        return open_node(plan, need, ctx);
+    };
+    let unmarked = Arc::new(Plan::SysScan {
+        table: *table,
+        filter: filter.clone(),
+        path: path.clone(),
+        alias: alias.clone(),
+        mark: None,
+    });
+    let input = open_node(&unmarked, need, ctx)?;
+    Ok(match table.columns().iter().position(|(n, _)| n == "oid") {
+        Some(col) => Box::new(CatalogLockNode {
+            input,
+            class: table.oid(),
+            col,
+            mode: super::scan::lock_mode(*m),
+            wait: *w,
+        }),
+        None => input,
+    })
+}
+
 pub struct VecNode {
     rows: std::vec::IntoIter<Row>,
+}
+
+/// SELECT ... FOR UPDATE / SHARE over a system catalog: each row the scan returns is locked
+/// (`locks::catalog_row_key` by its oid) as heap_lock_tuple locks a catalog tuple, so DDL
+/// updating it (GRANT, an in-place update) waits, and waits for it.
+struct CatalogLockNode {
+    input: BoxNode,
+    class: u32,
+    col: usize,
+    mode: crate::txn::locks::RowLockMode,
+    wait: crate::sql::plan::Wait,
+}
+
+impl Node for CatalogLockNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        use crate::sql::plan::Wait;
+        use crate::txn::locks::WaitPolicy;
+        loop {
+            let Some(row) = self.input.next(ctx)? else {
+                return Ok(None);
+            };
+            let Some(Value::Oid(oid)) = row.get(self.col) else {
+                return Ok(Some(row));
+            };
+            let key = crate::txn::locks::catalog_row_key(self.class, *oid);
+            let policy = match self.wait {
+                Wait::Block => WaitPolicy::Block,
+                Wait::NoWait => WaitPolicy::NoWait,
+                Wait::SkipLocked => WaitPolicy::SkipLocked,
+            };
+            let name = crate::catalog::system::SysTable::by_oid(self.class)
+                .map_or_else(String::new, |t| t.name().to_string());
+            let got = ctx
+                .txn
+                .borrow_mut()
+                .lock_row(self.class, &key, self.mode, policy, &|| name.clone())?;
+            if got {
+                return Ok(Some(row));
+            }
+        }
+    }
 }
 
 impl VecNode {

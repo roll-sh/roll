@@ -4433,7 +4433,14 @@ impl Binder<'_, '_> {
                         col.name = n.clone();
                     }
                     // Catalogs like pg_statistic and pg_authid are superuser-only.
-                    self.require_rel(st.oid(), crate::catalog::acl::SELECT);
+                    // (FOR UPDATE / SHARE needs UPDATE on it too.)
+                    let name = alias.as_deref().unwrap_or(&rv.relname).to_string();
+                    let mark = locking.and_then(|l| l.mark_for(&name)).map(|(m, w, _)| (m, w));
+                    self.require_rel(
+                        st.oid(),
+                        crate::catalog::acl::SELECT
+                            | if mark.is_some() { crate::catalog::acl::UPDATE } else { 0 },
+                    );
                     let mut rel = derived_rel(alias.as_deref().unwrap_or(&rv.relname), &cols, 0);
                     rel.sys_table = Some(st.oid());
                     if alias.is_none() {
@@ -4449,6 +4456,7 @@ impl Binder<'_, '_> {
                             filter: None,
                             path: None,
                             alias: alias.clone().filter(|a| a != &rv.relname),
+                            mark,
                         },
                         rel,
                     ));

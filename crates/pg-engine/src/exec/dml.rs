@@ -560,6 +560,7 @@ pub fn insert_routed_oc(
     let l = &routing.leaves[leaf];
     // ExecInitPartitionInfo opens the leaf a row goes to with RowExclusiveLock (an
     // ATTACH PARTITION changing a default partition holds it off).
+    let before = ctx.catalog().version;
     {
         let name = l.rules.table.name.clone();
         ctx.txn.borrow_mut().lock_relation(
@@ -568,6 +569,9 @@ pub fn insert_routed_oc(
             WaitPolicy::Block,
             &|| name.clone(),
         )?;
+    }
+    if ctx.catalog().version != before {
+        recheck_default_partitions(routing, &row, ctx)?;
     }
     // ExecInitPartitionInfo's CheckValidResultRel: ON CONFLICT DO UPDATE updates the leaf.
     if on_conflict.is_some_and(|oc| matches!(oc.action, crate::sql::plan::ConflictAction::Update { .. })) {
@@ -578,6 +582,66 @@ pub fn insert_routed_oc(
     let r = insert_new(&l.rules, &target, vals, &[], leaf_on_conflict(l, on_conflict, ctx).as_ref(), &mut queue, ctx)?;
     after.extend(queue.into_iter().map(|a| (leaf, a)));
     Ok(routed(l, leaf, r))
+}
+
+/// ExecFindPartition after a wait for a partition's lock: a row routed to a default
+/// partition is checked against that partition's constraint as other transactions left it
+/// (a partition attached meanwhile may take its keys now): Postgres rechecks it rather than
+/// routing again.
+fn recheck_default_partitions(routing: &PartRouting, row: &[Value], ctx: &ExecCtx) -> Result<()> {
+    use crate::catalog::partition::{PartBound, route};
+    let cat = ctx.catalog();
+    let mut r = &routing.router;
+    loop {
+        let key: Vec<Value> = r.key.iter().map(|e| eval(e, row, ctx)).collect::<Result<_>>()?;
+        let _g = crate::catalog::partition::under(r.colls.clone());
+        let Some(i) = route(r.parts.iter().map(|(b, _)| b), &key, &r.types) else {
+            return Ok(());
+        };
+        let (bound, target) = &r.parts[i];
+        let part = match target {
+            crate::sql::plan::PartTarget::Leaf(l) => routing.leaves[*l].rules.table.clone(),
+            crate::sql::plan::PartTarget::Sub(s) => s.table.clone(),
+        };
+        if matches!(bound, PartBound::Default) {
+            let siblings: Vec<PartBound> = cat
+                .tables
+                .values()
+                .filter(|t| t.oid != part.oid && t.inherits.first() == Some(&r.table.oid))
+                .filter_map(|t| t.partbound.clone())
+                .filter(|b| !matches!(b, PartBound::Default))
+                .collect();
+            if siblings.iter().any(|b| crate::catalog::partition::accepts(b, &key, &r.types)) {
+                let now = cat.tables.get(&part.oid).cloned().unwrap_or_else(|| part.clone());
+                let root = &routing.router.table;
+                let as_part: Row = now
+                    .columns
+                    .iter()
+                    .map(|c| {
+                        root.columns
+                            .iter()
+                            .position(|rc| !rc.dropped && !c.dropped && rc.name == c.name)
+                            .and_then(|j| row.get(j).cloned())
+                            .unwrap_or(Value::Null)
+                    })
+                    .collect();
+                return Err(with_failing_row(
+                    Error::new(
+                        code::CHECK_VIOLATION,
+                        format!("new row for relation \"{}\" violates partition constraint", now.name),
+                    ),
+                    &now,
+                    &as_part,
+                    ctx,
+                )
+                .table(cat.schema_name(now.schema), &now.name));
+            }
+        }
+        match target {
+            crate::sql::plan::PartTarget::Leaf(_) => return Ok(()),
+            crate::sql::plan::PartTarget::Sub(s) => r = s,
+        }
+    }
 }
 
 /// The ON CONFLICT clause as a leaf applies it (its own arbiter indexes).
@@ -1847,6 +1911,8 @@ fn find_parent(
                 Err(e) => Err(e),
             };
         }
+        // (The version the latest snapshot sees, before any wait.)
+        let seen = ctx.txn.borrow().get_latest(dkey)?.map(|(ts, _)| ts);
         let got = ctx
             .txn
             .borrow_mut()
@@ -1857,7 +1923,38 @@ fn find_parent(
             return Ok(false);
         }
         let txn = ctx.txn.borrow();
-        match txn.get_latest(dkey)? {
+        let latest = txn.get_latest(dkey)?;
+        let enc = |v: &Value| {
+            let mut out = Vec::new();
+            encode_value(&mut out, v, false);
+            out
+        };
+        let key_matches = |bytes: &[u8]| -> Result<bool> {
+            if nondet {
+                return Ok(true);
+            }
+            let row = decode_table_row(parent, bytes)?;
+            Ok(cols
+                .iter()
+                .zip(&vals)
+                .all(|(c, v)| row.get(*c).is_some_and(|r| enc(r) == enc(v))))
+        };
+        // REPEATABLE READ (a partitioned referenced table, read over the latest snapshot):
+        // a row deleted, or its key changed, by the transaction the lock waited for is
+        // ExecLockRows's serialization failure, not a missing row.
+        if txn.isolation.txn_snapshot() && latest.as_ref().map(|(ts, _)| *ts) != seen {
+            let gone = match &latest {
+                Some((_, Some(b))) => !key_matches(b)?,
+                _ => true,
+            };
+            if gone {
+                return Err(Error::new(
+                    code::SERIALIZATION_FAILURE,
+                    "could not serialize access due to concurrent update",
+                ));
+            }
+        }
+        match latest {
             // Moved to another partition by the update it waited for: heap_lock_tuple's
             // error (EvalPlanQual can't follow it).
             Some((ts, None)) if txn.moved_at(dkey, ts) => Err(Error::new(
@@ -1865,21 +1962,7 @@ fn find_parent(
                 super::scan::MOVED_TO_PARTITION,
             )),
             // The newest version, rechecked against the key (EvalPlanQual).
-            Some((_, Some(bytes))) => {
-                if nondet {
-                    return Ok(true);
-                }
-                let row = decode_table_row(parent, &bytes)?;
-                let enc = |v: &Value| {
-                    let mut out = Vec::new();
-                    encode_value(&mut out, v, false);
-                    out
-                };
-                Ok(cols
-                    .iter()
-                    .zip(&vals)
-                    .all(|(c, v)| row.get(*c).is_some_and(|r| enc(r) == enc(v))))
-            }
+            Some((_, Some(bytes))) => key_matches(&bytes),
             _ => Ok(false),
         }
     };

@@ -483,7 +483,24 @@ impl Ddl<'_, '_> {
                 self.ctx.sess.commit_on_error.set(true);
                 return Err(e);
             }
-            self.build_index(&t, &ix)?;
+            if !s.concurrent {
+                self.build_index(&t, &ix)?;
+            } else {
+                // DefineIndex's later phases: after the build, the table's writers again
+                // (WaitForLockers, ShareLock), then the transactions with snapshots older
+                // than the validation's (WaitForOlderSnapshots). A build on plain columns
+                // is one others' builds needn't wait for (PROC_IN_SAFE_IC).
+                let safe = ix.predicate.is_none()
+                    && ix.columns.iter().all(|c| matches!(c.key, crate::catalog::IndexKey::Column(_)));
+                self.ctx.txn.borrow().set_safe_index_build(safe);
+                let r = self.fold_index_predicate(&t, &ix).and_then(|_| self.build_index(&t, &ix)).and_then(|_| {
+                    let mut txn = self.ctx.txn.borrow_mut();
+                    txn.wait_for_lockers(t.oid, crate::txn::locks::LockMode::Share)?;
+                    txn.wait_for_older_snapshots()
+                });
+                self.ctx.txn.borrow().set_safe_index_build(false);
+                r?;
+            }
         } else if rv.inh {
             for p in self.cat.partitions(t.oid) {
                 let Some(part) = self.cat.tables.get(&p).cloned() else {
@@ -495,6 +512,85 @@ impl Ddl<'_, '_> {
         }
         self.save()?;
         Ok("CREATE INDEX".into())
+    }
+
+    /// RelationGetIndexPredicate as a concurrent build opens its index: the predicate goes
+    /// through eval_const_expressions, which runs its immutable functions over constants
+    /// (whatever they do: take or release advisory locks, raise notices).
+    fn fold_index_predicate(&mut self, t: &Table, ix: &crate::catalog::Index) -> Result<()> {
+        if ix.predicate.is_none() {
+            return Ok(());
+        }
+        let ta = Arc::new(t.clone());
+        let mut b = self.binder();
+        b.cat = Arc::new(self.cat.clone());
+        let Some(pred) = b
+            .bound_indexes_all(&ta)?
+            .into_iter()
+            .find(|x| x.index.oid == ix.oid)
+            .and_then(|x| x.predicate)
+        else {
+            return Ok(());
+        };
+        fn fold(e: &crate::sql::expr::Expr, ctx: &crate::exec::ExecCtx) -> Result<bool> {
+            use crate::sql::expr::Expr;
+            Ok(match e {
+                Expr::Const(..) => true,
+                // A user function's call (its body run as a subquery over its arguments).
+                Expr::Subquery(sq) if sq.func.is_some() => {
+                    let mut all = true;
+                    for a in &sq.params {
+                        all &= fold(a, ctx)?;
+                    }
+                    if all && sq.func == Some('i') {
+                        crate::sql::expr::eval(e, &[], ctx)?;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Expr::Call(def, args, _) => {
+                    let mut all = true;
+                    for a in args {
+                        all &= fold(a, ctx)?;
+                    }
+                    if all && def.volatility == 'i' && !def.is_srf() {
+                        crate::sql::expr::eval(e, &[], ctx)?;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Expr::And(xs) | Expr::Or(xs) => {
+                    for x in xs {
+                        fold(x, ctx)?;
+                    }
+                    false
+                }
+                Expr::Not(x) | Expr::IsNull(x, _) | Expr::BoolTest(x, _) => {
+                    fold(x, ctx)?;
+                    false
+                }
+                _ => false,
+            })
+        }
+        // (As the table's owner, in a security-restricted operation: index_build's.)
+        let pushed = t.owner != self.ctx.current_user();
+        if pushed {
+            self.ctx.sess.definer.borrow_mut().push(t.owner);
+        }
+        let level = self.ctx.sess.settings.borrow_mut().restrict_search_path();
+        let sro = &self.ctx.sess.sro;
+        sro.set(sro.get() + 1);
+        let r = fold(&pred, self.ctx);
+        let sro = &self.ctx.sess.sro;
+        sro.set(sro.get() - 1);
+        self.ctx.sess.settings.borrow_mut().pop_restricted(level);
+        if pushed {
+            self.ctx.sess.definer.borrow_mut().pop();
+        }
+        r?;
+        Ok(())
     }
 
     /// The key columns, INCLUDE columns and predicate of an index (or index-backed

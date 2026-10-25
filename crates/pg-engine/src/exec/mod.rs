@@ -263,6 +263,9 @@ pub struct ExecCtx<'a> {
     /// (their permission checks note them): a view column Postgres computes with a function
     /// that can fail (pg_relation_is_updatable) fails only when read.
     pub sys_cols: RefCell<HashMap<u32, std::collections::BTreeSet<i16>>>,
+    /// Inheritance children the statement planned that were dropped while it waited for
+    /// their locks (find_inheritance_children leaves them out): scanned as empty.
+    pub gone_rels: RefCell<std::collections::HashSet<u32>>,
     /// EvalPlanQual: while a LockRows rechecks a row a concurrent update changed, the test
     /// row each of its level's scans returns instead of reading its table (by the scan's
     /// address; None: no row).
@@ -569,6 +572,7 @@ impl<'a> ExecCtx<'a> {
             exists_hash: RefCell::default(),
             scalar_hash: RefCell::default(),
             sys_cols: RefCell::default(),
+            gone_rels: RefCell::default(),
             epq: RefCell::new(None),
             sys_rescans: RefCell::default(),
             sys_rel_scans: Default::default(),
@@ -693,6 +697,7 @@ impl<'a> ExecCtx<'a> {
             exists_hash: RefCell::default(),
             scalar_hash: RefCell::default(),
             sys_cols: RefCell::default(),
+            gone_rels: RefCell::default(),
             epq: RefCell::new(None),
             sys_rescans: RefCell::default(),
             sys_rel_scans: Default::default(),

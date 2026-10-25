@@ -174,11 +174,23 @@ pub const TUPLE: u8 = 7;
 pub const TRANSACTION: u8 = 8;
 pub const OBJECT: u8 = 9;
 pub const SPECTOKEN: u8 = 10;
+/// A system catalog row's key for row locks (`catalog_row_key`).
+pub const CATALOG_ROW: u8 = 11;
 /// A unique index key's lock (the engine's in-progress index entry, `unique_key_lock`).
 pub const UNIQUE_KEY: u8 = 4;
 
 fn prefixed(kind: u8) -> Vec<u8> {
     vec![0, 0, 0, 0, 0, 0, 0, kind]
+}
+
+/// The row of object `oid` in system catalog `class` (pg_class, pg_database, ...), as row
+/// locks name it: the engine keeps catalogs as objects, Postgres as heap tuples other
+/// transactions lock, update and update in place.
+pub fn catalog_row_key(class: u32, oid: u32) -> Vec<u8> {
+    let mut k = prefixed(CATALOG_ROW);
+    k.extend_from_slice(&class.to_be_bytes());
+    k.extend_from_slice(&oid.to_be_bytes());
+    k
 }
 
 /// A speculative insertion's token lock (LOCKTAG_SPECULATIVE_TOKEN): held by the inserter
@@ -935,6 +947,18 @@ impl LockManager {
                 }
             }
         }
+    }
+
+    /// The (sub)transactions (lock ids) of other transactions than `owner` holding row
+    /// `row` in a mode conflicting with `mode`.
+    pub fn row_conflicts(&self, row: &[u8], owner: u64, mode: RowLockMode) -> Vec<u64> {
+        let s = self.state.lock();
+        s.rows.get(row).map_or_else(Vec::new, |v| {
+            v.iter()
+                .filter(|h| h.owner != owner && h.mode.conflicts_with(mode))
+                .map(|h| h.holder)
+                .collect()
+        })
     }
 
     /// The (sub)transaction of another backend than `proc` updating or deleting row `row`
