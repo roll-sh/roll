@@ -349,6 +349,9 @@ pub(crate) struct SelectState {
     /// Per GROUP BY expression: written as a constant (a literal, perhaps cast), so its
     /// bound form is the expression as written.
     pub group_literal: Vec<bool>,
+    /// Per GROUP BY expression not written as a constant: its text as written (location-free
+    /// parse tree), which the items naming it in an expression contain.
+    pub group_text: Vec<Option<String>>,
     pub grouping_sets: bool,
     /// The FROM clause reads the recursive CTE's work table (a recursive term).
     pub self_ref: bool,

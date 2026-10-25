@@ -169,3 +169,25 @@ MixedAggregate
         Output: 1, 'a'::text, 'a'::text
 -- EXPLAIN
 
+> CREATE TABLE ge (a int, b int)
+-- CREATE TABLE
+
+> SELECT a, CASE WHEN a > 0 THEN abs(9) ELSE abs(9) END AS c1, count(*) FROM ge GROUP BY GROUPING SETS ((a, abs(9)), ())
+a:int4 | c1:int4 | count:int8
+NULL | NULL | 0
+-- SELECT 1
+
+> INSERT INTO ge VALUES (1, 2)
+-- INSERT 0 1
+
+> SELECT a, abs(9) + 1 AS c1, count(*) FROM ge GROUP BY GROUPING SETS ((a, abs(9)), ()) ORDER BY 1, 2
+a:int4 | c1:int4 | count:int8
+1 | 10 | 1
+NULL | 10 | 1
+-- SELECT 2
+
+> SELECT 1 AS c0, 1+1 AS c2, 2 FROM ge WHERE false GROUP BY GROUPING SETS ((1+1), ())
+c0:int4 | c2:int4 | ?column?:int4
+1 | NULL | 2
+-- SELECT 1
+

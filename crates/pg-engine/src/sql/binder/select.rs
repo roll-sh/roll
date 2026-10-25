@@ -2227,10 +2227,25 @@ impl Binder<'_, '_> {
             group_literal.resize(ng, false);
             // (With grouping sets: the constant keys' other occurrences in the select list
             // and HAVING, values passed through from the group's rows.)
+            let mut group_text = std::mem::take(&mut st.group_text);
+            group_text.resize(ng, None);
             let pass = PassThrough {
                 literal: &group_literal,
+                texts: &group_text,
+                item: Default::default(),
                 found: Default::default(),
             };
+            // (The item's text as written: a key written as an expression is matched where the
+            // item contains it.)
+            let item_text = |n: Option<&Node>| n.map(|n| strip_locations(&format!("{n:?}")));
+            let target_nodes: Vec<Option<&Node>> = s
+                .target_list
+                .iter()
+                .map(|t| match inner(t) {
+                    Some(NodeEnum::ResTarget(rt)) => rt.val.as_deref(),
+                    _ => None,
+                })
+                .collect();
             let pass_on = sets.is_some() && !self.deparse;
             let tx_pass = |e: Expr, outer_keys: bool| {
                 post_agg_with(e, &groups, ng, mask_col, &scope, outer_keys, pass_on.then_some(&pass))
@@ -2240,6 +2255,7 @@ impl Binder<'_, '_> {
                 .into_iter()
                 .enumerate()
                 .map(|(i, e)| {
+                    *pass.item.borrow_mut() = item_text(target_nodes.get(i).copied().flatten());
                     match group_targets.iter().position(|t| *t == Some(i)) {
                         Some(k) if k < ng && groups[k].same_as(&e) => Ok(Expr::Col(k, e.ty())),
                         _ => tx_pass(e, true),
@@ -2249,6 +2265,7 @@ impl Binder<'_, '_> {
             if let Some(h) = having.take() {
                 // (A key of outer references only is a Param to HAVING, which moves to WHERE:
                 // not nulled there, unlike in the select list.)
+                *pass.item.borrow_mut() = item_text(s.having_clause.as_deref());
                 having = Some(tx_pass(h, false)?);
             }
             // A sort key that is a constant names the select-list item equal to it (by
@@ -3386,9 +3403,11 @@ impl Binder<'_, '_> {
             _ => Some(g),
         };
         let literal = written.is_some_and(literal_node);
+        let text = (!literal).then(|| written.map(|w| strip_locations(&format!("{w:?}")))).flatten();
         let st = &mut self.level().st;
         st.group_targets.resize(groups.len(), None);
         st.group_literal.resize(groups.len(), false);
+        st.group_text.resize(groups.len(), None);
         // An item named by alias or position is its own key; an expression is that of an
         // equal key.
         let found = match tgt {
@@ -3411,6 +3430,7 @@ impl Binder<'_, '_> {
                 groups.push(e);
                 st.group_targets.push(tgt);
                 st.group_literal.push(literal);
+                st.group_text.push(text);
                 groups.len() - 1
             }
         };
@@ -7291,6 +7311,9 @@ fn literal_node(n: &Node) -> bool {
 /// row over no input rows). Each occurrence is a value of its own, a column past the keys.
 struct PassThrough<'a> {
     literal: &'a [bool],
+    /// Keys written as expressions: their text, and the text of the item being mapped.
+    texts: &'a [Option<String>],
+    item: std::cell::RefCell<Option<String>>,
     found: std::cell::RefCell<Vec<Expr>>,
 }
 
@@ -7330,7 +7353,10 @@ fn post_agg_with(
         && let Some(k) = groups
             .iter()
             .position(|g| !keyed(g) && !g.has_outer_refs() && g.same_as(&e))
-        && pt.literal.get(k) == Some(&true)
+        && (pt.literal.get(k) == Some(&true)
+            || pt.texts.get(k).cloned().flatten().is_some_and(|t| {
+                pt.item.borrow().as_ref().is_some_and(|it| it.contains(t.as_str()))
+            }))
     {
         let mut f = pt.found.borrow_mut();
         f.push(e.clone());

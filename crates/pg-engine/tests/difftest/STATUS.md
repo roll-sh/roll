@@ -245,6 +245,11 @@ Round 18, agent 45, batch 4 (`a45_full_join_quals`):
   outputs whose constants failed to fold (PostgreSQL simplifies all of an appendrel's
   translated vars): `SELECT 1 FROM (SELECT 1/0 FROM t UNION ALL SELECT 1) s` fails.
 
+Batch 5: a grouping key written as an expression (`abs(9)`, `extract(...)::int`) is a
+pass-through value in the items that contain it as written (`CASE WHEN a > 0 THEN abs(9)
+ELSE abs(9) END`: NULL in the empty set's row over no input), not only literal keys; one
+the binder folds away with its surroundings (`abs(9) + 1`) still isn't.
+
 ## Wider grammar (round 18)
 
 `generate.rs` `wide_expr` and the statement kinds after it, for seeds from `WIDE_SEEDS`
