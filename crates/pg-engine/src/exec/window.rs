@@ -51,13 +51,16 @@ impl Node for WindowNode {
                 rows.push(r);
             }
             let n = rows.len();
-            let mut results: Vec<Vec<Value>> = vec![vec![Value::Null; self.calls.len()]; n];
+            // (Row i's results at i * k.., one array for all rows.)
+            let k = self.calls.len();
+            let mut results: Vec<Value> = vec![Value::Null; n * k];
             let order = run_windows(&self.calls, &rows, &mut results, &self.presorted, ctx)?;
             let mut out = Vec::with_capacity(n);
             let mut rows: Vec<Option<Row>> = rows.into_iter().map(Some).collect();
             for i in order {
                 let mut r = rows[i].take().unwrap();
-                r.extend(std::mem::take(&mut results[i]));
+                r.reserve_exact(k);
+                r.extend(results[i * k..(i + 1) * k].iter_mut().map(|v| std::mem::replace(v, Value::Null)));
                 out.push(r);
             }
             self.out = out.into_iter();
@@ -90,10 +93,32 @@ fn cmp_need(a: &Value, b: &Value, k: &NeedKey, ctx: &ExecCtx) -> Result<Ordering
 /// together, the windows in select_active_windows's order, each over the input sorted
 /// for it (a Sort, or an Incremental Sort when a prefix of its keys is sorted already)
 /// and split into partitions as the sorted rows go by. Returns the rows' final order.
+/// The columns `exprs` are, when every one is a plain column every row has (its values are
+/// then read in place rather than computed into a vector per row).
+fn plain_cols(exprs: &[&crate::sql::expr::Expr], rows: &[Row]) -> Option<Vec<usize>> {
+    let cols: Vec<usize> = exprs
+        .iter()
+        .map(|e| match e {
+            crate::sql::expr::Expr::Col(i, _) => Some(*i),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    rows.iter().all(|r| cols.iter().all(|&c| c < r.len())).then_some(cols)
+}
+
+/// Key `k` of the `j`th row (`rows[at(j)]`): in place (`cols`) or computed before (`vals[j]`).
+#[inline]
+fn key_at<'r>(cols: &Option<Vec<usize>>, rows: &'r [Row], vals: &'r [Vec<Value>], row: usize, j: usize, k: usize) -> &'r Value {
+    match cols {
+        Some(c) => &rows[row][c[k]],
+        None => &vals[j][k],
+    }
+}
+
 fn run_windows(
     calls: &[WindowCall],
     rows: &[Row],
-    results: &mut [Vec<Value>],
+    results: &mut [Value],
     presorted: &[String],
     ctx: &ExecCtx,
 ) -> Result<Vec<usize>> {
@@ -216,13 +241,18 @@ fn run_windows(
             .take_while(|(a, b)| a.repr == **b)
             .count();
         if !need.is_empty() && common < need.len() {
-            let vals: Vec<Vec<Value>> = rows
-                .iter()
-                .map(|r| need.iter().map(|k| eval(&k.key.expr, r, ctx)).collect())
-                .collect::<Result<_>>()?;
+            let vcols = plain_cols(&need.iter().map(|k| &k.key.expr).collect::<Vec<_>>(), rows);
+            let vals: Vec<Vec<Value>> = match vcols {
+                Some(_) => Vec::new(),
+                None => rows
+                    .iter()
+                    .map(|r| need.iter().map(|k| eval(&k.key.expr, r, ctx)).collect())
+                    .collect::<Result<_>>()?,
+            };
+            let val = |r: usize, k: usize| key_at(&vcols, rows, &vals, r, r, k);
             let cmp_range = |a: usize, b: usize, from: usize, to: usize| -> Result<Ordering> {
                 for (i, k) in need.iter().enumerate().take(to).skip(from) {
-                    match cmp_need(&vals[a][i], &vals[b][i], k, ctx)? {
+                    match cmp_need(val(a, i), val(b, i), k, ctx)? {
                         Ordering::Equal => {}
                         o => return Ok(o),
                     }
@@ -255,7 +285,7 @@ fn run_windows(
                     if need.iter().any(|k| k.coll.is_some()) {
                         return None;
                     }
-                    super::fastsort::order(n, &keys, |i, k| &vals[order[i]][k], |i| &rows[order[i]], None)
+                    super::fastsort::order(n, &keys, |i, k| val(order[i], k), |i| &rows[order[i]], None)
                 })
                 .flatten()
             {
@@ -273,10 +303,14 @@ fn run_windows(
             .iter()
             .take_while(|k| part_exprs.iter().any(|e| key_repr(e, false, false) == k.repr))
             .count();
-        let pvals: Vec<Vec<Value>> = order
-            .iter()
-            .map(|&i| part_exprs.iter().map(|e| eval(e, &rows[i], ctx)).collect())
-            .collect::<Result<_>>()?;
+        let pcols = plain_cols(&part_exprs, rows);
+        let pvals: Vec<Vec<Value>> = match pcols {
+            Some(_) => Vec::new(),
+            None => order
+                .iter()
+                .map(|&i| part_exprs.iter().map(|e| eval(e, &rows[i], ctx)).collect())
+                .collect::<Result<_>>()?,
+        };
         let pkeys: Vec<&NeedKey> = need.iter().take(npart).collect();
         // (Each partition key's comparison, found once rather than per row.)
         let pk: Vec<Option<&NeedKey>> = part_exprs
@@ -286,11 +320,16 @@ fn run_windows(
                 pkeys.iter().find(|k| k.repr == r).copied()
             })
             .collect();
-        let same_part = |a: &[Value], b: &[Value]| -> Result<bool> {
+        // (Rows at positions `a` and `b` of the order.)
+        let same_part = |a: usize, b: usize| -> Result<bool> {
             for (i, k) in pk.iter().enumerate() {
+                let (x, y) = (
+                    key_at(&pcols, rows, &pvals, order[a], a, i),
+                    key_at(&pcols, rows, &pvals, order[b], b, i),
+                );
                 let o = match k {
-                    Some(k) => cmp_need(&a[i], &b[i], k, ctx)?,
-                    None => a[i].cmp_total(&b[i]),
+                    Some(k) => cmp_need(x, y, k, ctx)?,
+                    None => x.cmp_total(y),
                 };
                 if o != Ordering::Equal {
                     return Ok(false);
@@ -300,23 +339,30 @@ fn run_windows(
         };
         let mut parts: Vec<Vec<usize>> = Vec::new();
         for (p, &i) in order.iter().enumerate() {
-            if p == 0 || !same_part(&pvals[p - 1], &pvals[p])? {
+            if p == 0 || !same_part(p - 1, p)? {
                 parts.push(Vec::new());
             }
             parts.last_mut().unwrap().push(i);
         }
+        // (The window's calls share its ORDER BY: its keys computed once.)
+        let okeys: Vec<Vec<Value>> = rows
+            .iter()
+            .map(|r| call0.order_by.iter().map(|k| eval(&k.expr, r, ctx)).collect())
+            .collect::<Result<_>>()?;
+        // (Each partition's peer groups, found by its first call: the window's calls share
+        // its ORDER BY.)
+        let mut peers: Vec<Option<Vec<(usize, usize)>>> = vec![None; parts.len()];
         for &ci in &wins[wi].1 {
             let call = &calls[ci];
-            let okeys: Vec<Vec<Value>> = rows
-                .iter()
-                .map(|r| call.order_by.iter().map(|k| eval(&k.expr, r, ctx)).collect())
-                .collect::<Result<_>>()?;
             let mut out = vec![Value::Null; n];
-            for part in &parts {
-                compute_partition(call, rows, &okeys, part, &mut out, ctx)?;
+            for (part, pp) in parts.iter().zip(peers.iter_mut()) {
+                if pp.is_none() {
+                    *pp = Some(peer_groups(part, &okeys, &call.order_by, ctx)?);
+                }
+                compute_partition(call, rows, &okeys, part, pp.as_deref().unwrap_or_default(), &mut out, ctx)?;
             }
             for (i, v) in out.into_iter().enumerate() {
-                results[i][ci] = v;
+                results[i * calls.len() + ci] = v;
             }
         }
         first = false;
@@ -673,11 +719,11 @@ fn compute_partition(
     rows: &[Row],
     okeys: &[Vec<Value>],
     part: &[usize],
+    peers: &[(usize, usize)],
     out: &mut [Value],
     ctx: &ExecCtx,
 ) -> Result<()> {
     let m = part.len();
-    let peers = peer_groups(part, okeys, &call.order_by, ctx)?;
     let offsets = (
         match &call.frame.start {
             FrameBound::Preceding(e) | FrameBound::Following(e) => {
@@ -795,9 +841,9 @@ fn compute_partition(
                         }
                     }
                     WinKind::FirstValue | WinKind::LastValue | WinKind::NthValue => {
-                        let (s, e) = frame_of(call, i, m, &peers, part, okeys, &offsets, ctx)?;
+                        let (s, e) = frame_of(call, i, m, peers, part, okeys, &offsets, ctx)?;
                         let positions: Vec<usize> =
-                            (s..e).filter(|p| !excluded(call, i, *p, &peers)).collect();
+                            (s..e).filter(|p| !excluded(call, i, *p, peers)).collect();
                         let mut vals = Vec::new();
                         for p in &positions {
                             let v = eval(&call.args[0], &rows[part[*p]], ctx)?;
@@ -838,7 +884,7 @@ fn compute_partition(
                 && agg.user.as_ref().is_some_and(|u| u.moving.is_some()) =>
         {
             let mv = agg.user.as_ref().and_then(|u| u.moving.as_deref()).unwrap();
-            moving_aggregate(call, agg, mv, rows, part, &peers, okeys, &offsets, out, ctx)?;
+            moving_aggregate(call, agg, mv, rows, part, peers, okeys, &offsets, out, ctx)?;
         }
         WinFunc::Agg(agg) => {
             let incremental = matches!(call.frame.start, FrameBound::UnboundedPreceding)
@@ -850,7 +896,7 @@ fn compute_partition(
                 let mut st = new_state(agg, direct.clone())?;
                 let mut fed = 0usize;
                 for i in 0..m {
-                    let (_, e) = frame_of(call, i, m, &peers, part, okeys, &offsets, ctx)?;
+                    let (_, e) = frame_of(call, i, m, peers, part, okeys, &offsets, ctx)?;
                     while fed < e {
                         feed(agg, &mut st, &rows[part[fed]], ctx)?;
                         fed += 1;
@@ -861,10 +907,10 @@ fn compute_partition(
                 }
             } else {
                 for i in 0..m {
-                    let (s, e) = frame_of(call, i, m, &peers, part, okeys, &offsets, ctx)?;
+                    let (s, e) = frame_of(call, i, m, peers, part, okeys, &offsets, ctx)?;
                     let mut st = new_state(agg, direct.clone())?;
                     for p in s..e {
-                        if excluded(call, i, p, &peers) {
+                        if excluded(call, i, p, peers) {
                             continue;
                         }
                         feed(agg, &mut st, &rows[part[p]], ctx)?;

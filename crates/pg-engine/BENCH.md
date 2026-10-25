@@ -592,6 +592,12 @@ aggregate and q21.
    equal keys differ, PostgreSQL's quicksort (`pgsort::tuplesort`) now runs over the encoded
    bytes rather than over `Value`s (the same comparisons' outcomes, so the same order).
 
+6. **Window functions** (a second commit): plain-column sort and partition keys are read from
+   the rows in place (other keys computed as before, in the same order), the ORDER BY keys
+   once per window rather than per call, each partition's peer groups by the window's first
+   call for all of them, the results in one array. The window benchmark, measured apart
+   (interleaved, two runs each): 5.7 s -> 4.0 s (PostgreSQL 1.9 s), the same rows.
+
 ### Correctness fixes (each with tests; observable before)
 
 - **Hash aggregation's group order** (the `GROUP BY k % 50` order round 18 found): the hash
@@ -637,7 +643,8 @@ aggregate and q21.
 - **External sorts aren't modelled**: a Sort past work_mem merges runs in PostgreSQL, which
   orders rows with equal keys otherwise than the in-memory quicksort the engine reproduces.
 - Joins whose build side is the big table, Parallel Hash's parallel build, right / full
-  joins and merge joins still run on the executor's thread; so do window functions, sorts and
+  joins and merge joins still run on the executor's thread; so do window functions (copies
+  per row and frame bookkeeping, item 6 took the key vectors out), sorts and
   the merge of partial aggregates (each part's lookups in the hash table model, float values
   summed in order).
 - **Numeric values still allocate** (an `Arc` and a BigInt each): q01's workers.
