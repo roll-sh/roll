@@ -70,6 +70,8 @@ pub(crate) struct Duties {
 
 /// Events sent to an owner in one request at most.
 const EVENT_BATCH: usize = 256;
+/// Tries a kick gets (backing off up to 5 s between them: about two minutes in all).
+const KICK_ATTEMPTS: u32 = 30;
 /// How often work in flight checks that the lease it started under is still held.
 const OWNER_CHECK: Duration = Duration::from_millis(100);
 
@@ -168,9 +170,22 @@ impl Code {
         crate::github::stop(self, repo_id);
         self.forget_repo(repo_id);
         // A node keeps no index of a repo it doesn't own: the next owner builds its own, and a
-        // copy left here would go stale (or outlive the repo).
-        if let Some(i) = &self.ai.index {
-            i.remove(repo_id);
+        // copy left here would go stale (or outlive the repo). Not at once: a node that fenced
+        // itself through a slow database often gets the repo straight back.
+        if self.ai.index.is_some()
+            && let (Some(me), Some(c), Ok(rt)) = (self.me.upgrade(), self.cluster(), tokio::runtime::Handle::try_current())
+        {
+            let (id, grace) = (repo_id.to_string(), c.config().lease_ttl * 2);
+            let me = Arc::downgrade(&me);
+            rt.spawn(async move {
+                tokio::time::sleep(grace).await;
+                if let Some(code) = me.upgrade()
+                    && !code.owns_repo(&id)
+                    && let Some(i) = &code.ai.index
+                {
+                    i.remove(&id);
+                }
+            });
         }
     }
 
@@ -186,6 +201,13 @@ impl Code {
         };
         if crate::github::link_of(&r).is_some_and(|l| l.connected) {
             return true;
+        }
+        // GitHub delivery parts waiting for it (the table exists once the App is on).
+        if self.github_hub().is_some() {
+            match self.db.sql().query_row("SELECT EXISTS (SELECT 1 FROM github_inbox WHERE repo_id = ? AND state = 'pending')", [repo_id], |r| r.get::<_, bool>(0)) {
+                Ok(false) => {}
+                _ => return true,
+            }
         }
         let busy = self.db.sql().query_row(
             "SELECT (EXISTS (SELECT 1 FROM queue_entries WHERE repo_id = ?1 AND state NOT IN ('ejected', 'landed'))) \
@@ -270,6 +292,11 @@ impl Code {
             Ok(e) if !e.is_empty() => self.kick(repo_id),
             Ok(_) => {}
             Err(e) => tracing::warn!(repo = %repo_id, error = %e, "resuming a merge queue"),
+        }
+        // GitHub delivery parts recorded for it (github::resume starts them for connected
+        // repos; a part can outlive the connection, and is then dropped by its handler).
+        if crate::github::link_of(&r).is_none_or(|l| !l.connected) {
+            crate::github::inbox::process_due(self, repo_id).await;
         }
         match self.requeue_running_ai_jobs_of(repo_id) {
             Ok(0) => {}
@@ -413,41 +440,62 @@ impl Code {
     }
 
     /// Have the repo's owner resume its work (a node that doesn't own it noticed something the
-    /// owner must act on: a queue to run, a GitHub repo connected). In the background.
+    /// owner must act on: a queue to run, a GitHub repo connected, delivery parts recorded for
+    /// it). In the background, retried until some node takes it (taking the repo over resumes
+    /// its work too, so a kick only has to reach whoever owns it next): the work itself is in the
+    /// database, the kick only makes it start now.
     pub(crate) fn kick_owner(&self, repo_id: &str) {
         let (Some(me), Ok(rt)) = (self.me.upgrade(), tokio::runtime::Handle::try_current()) else { return };
         let id = repo_id.to_string();
+        let weak = Arc::downgrade(&me);
+        drop(me);
         rt.spawn(async move {
-            let resp = me.to_owner(&id, "kick", None, Bytes::new()).await;
-            if !resp.status().is_success() {
-                tracing::warn!(repo = %id, status = %resp.status(), "waking a repo's owner");
+            let mut wait = Duration::from_millis(100);
+            for attempt in 0..KICK_ATTEMPTS {
+                let Some(me) = weak.upgrade() else { return };
+                let resp = me.to_owner(&id, "kick", Bytes::new()).await;
+                if resp.status().is_success() {
+                    return;
+                }
+                if attempt + 1 == KICK_ATTEMPTS {
+                    tracing::warn!(repo = %id, status = %resp.status(), "waking a repo's owner failed; its next owner resumes the work");
+                    return;
+                }
+                drop(me);
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(Duration::from_secs(5));
             }
         });
     }
 
-    /// Run one repo's part of a GitHub delivery on its owner.
-    pub(crate) async fn github_on_owner(&self, repo_id: &str, event: &str, body: Bytes) -> Result<()> {
-        let resp = self.to_owner(repo_id, "github", Some(event), body).await;
+    /// One repo's part of a GitHub delivery (recorded as `part`, claimed until `claimed_until`),
+    /// handled on the repo's owner.
+    pub(crate) async fn github_on_owner(&self, repo_id: &str, part: &str, claimed_until: i64) -> crate::github::inbox::Outcome {
+        use crate::github::inbox::Outcome;
+        let body = Bytes::from(json!({ "part": part, "claimed_until": claimed_until }).to_string());
+        let resp = self.to_owner(repo_id, "github", body).await;
         let status = resp.status();
         if status.is_success() {
-            return Ok(());
+            return Outcome::Done;
+        }
+        // Nothing ran, or the owner went away mid-way: the part stays recorded.
+        if matches!(status, StatusCode::SERVICE_UNAVAILABLE | StatusCode::BAD_GATEWAY | StatusCode::GATEWAY_TIMEOUT | StatusCode::LOOP_DETECTED) {
+            return Outcome::Unavailable;
         }
         let text = axum::body::to_bytes(resp.into_body(), 64 << 10).await.map(|b| String::from_utf8_lossy(&b).to_string()).unwrap_or_default();
-        Err(match status {
-            StatusCode::SERVICE_UNAVAILABLE => Error::Unavailable(format!("the repo's owner can't take the delivery now: {}", text.trim())),
+        Outcome::Failed(match status {
+            StatusCode::NOT_FOUND => Error::NotFound(text.trim().to_string()),
+            StatusCode::BAD_REQUEST => Error::Invalid(text.trim().to_string()),
             _ => Error::Internal(anyhow::anyhow!("the repo's owner answered {status}: {}", text.trim())),
         })
     }
 
     /// `POST /internal/code/repos/{id}/{what}`, run where the repo lives: here, or on its owner.
-    async fn to_owner(&self, repo_id: &str, what: &'static str, github_event: Option<&str>, body: Bytes) -> Response {
+    async fn to_owner(&self, repo_id: &str, what: &'static str, body: Bytes) -> Response {
         let (Some(cluster), Some(me)) = (self.cluster().cloned(), self.me.upgrade()) else {
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         };
-        let mut b = Request::builder().method(Method::POST).uri(format!("/internal/code/repos/{repo_id}/{what}")).header(header::CONTENT_TYPE, "application/json");
-        if let Some(ev) = github_event.and_then(|e| HeaderValue::from_str(e).ok()) {
-            b = b.header("x-github-event", ev);
-        }
+        let b = Request::builder().method(Method::POST).uri(format!("/internal/code/repos/{repo_id}/{what}")).header(header::CONTENT_TYPE, "application/json");
         let Ok(req) = b.body(Body::from(body)) else { return StatusCode::BAD_REQUEST.into_response() };
         let id = repo_id.to_string();
         cluster.dispatch(repo_id, req, move |req, guard| internal_local(me, id, what, req, guard)).await
@@ -670,7 +718,6 @@ async fn internal_github(State(code): State<Arc<Code>>, Path(id): Path<String>, 
 
 /// An internal request, on the repo's owner.
 async fn internal_local(code: Arc<Code>, repo_id: String, what: &'static str, req: Request, guard: Guard) -> Response {
-    let event = req.headers().get("x-github-event").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
     let body = match axum::body::to_bytes(req.into_body(), 32 << 20).await {
         Ok(b) => b,
         Err(e) => return Error::Invalid(format!("reading the body: {e}")).into_response(),
@@ -691,10 +738,16 @@ async fn internal_local(code: Arc<Code>, repo_id: String, what: &'static str, re
             code.resume_repo(&repo_id).await;
             StatusCode::NO_CONTENT.into_response()
         }
-        "github" => match crate::github::handle_for_repo(&code, &repo_id, &event, &body).await {
-            Ok(()) => StatusCode::NO_CONTENT.into_response(),
-            Err(e) => e.into_response(),
-        },
+        "github" => {
+            let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let (Some(part), Some(claimed_until)) = (v["part"].as_str(), v["claimed_until"].as_i64()) else {
+                return Error::Invalid("a GitHub delivery part needs part and claimed_until".into()).into_response();
+            };
+            match crate::github::inbox::process(&code, &repo_id, part, claimed_until).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => e.into_response(),
+            }
+        }
         _ => StatusCode::NOT_FOUND.into_response(),
     };
     drop(guard);
@@ -724,7 +777,7 @@ async fn forward_events(code: Weak<Code>, mut rx: mpsc::UnboundedReceiver<Event>
         for (repo, evs) in groups {
             let body = Bytes::from(serde_json::to_vec(&evs).unwrap_or_default());
             for attempt in 0..4u64 {
-                let resp = code.to_owner(&repo, "events", None, body.clone()).await;
+                let resp = code.to_owner(&repo, "events", body.clone()).await;
                 if resp.status().is_success() {
                     break;
                 }

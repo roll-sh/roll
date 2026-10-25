@@ -47,6 +47,11 @@ struct Env {
 
 impl Env {
     fn new(name: &str) -> Env {
+        // Warnings (slow renewals, fenced leases, failed forwards) show up for failing tests.
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "code_cluster=info,code_control=warn".into()))
+            .with_test_writer()
+            .try_init();
         let dir = tempfile::tempdir().unwrap();
         let db = match std::env::var(code_sql::TEST_DATABASE_ENV) {
             Ok(url) if !url.is_empty() => {
@@ -887,27 +892,22 @@ async fn search_ready(net: &Net, node: usize) {
 async fn moving_or_deleting_a_repo_leaves_no_index_or_lease_behind() {
     let net = net_with("delete", 3, Arc::new(|c: &mut Config| c.review.index = true)).await;
     let repo_id = net.repo(0, "api").await;
+    until("someone owns it", Duration::from_secs(20), || net.owner(&repo_id).is_some()).await;
     let o = net.owner(&repo_id).unwrap();
     search_ready(&net, (o + 1) % 3).await;
     assert!(index_file(&net.nodes[o], &repo_id).exists(), "the owner built the index");
-    // Moving away (it may come back to the same node, its preferred one): losing it drops the
-    // index, and whoever owns it next builds its own.
-    let mut ownership = net.nodes[o].code.subscribe_ownership();
-    assert!(net.nodes[o].cluster().handoff(&repo_id));
-    let lost = tokio::time::timeout(Duration::from_secs(20), async {
-        while let Some(ev) = ownership.recv().await {
-            if ev == code_control::cluster::RepoOwnership::Lost(repo_id.clone()) {
-                return;
-            }
-        }
-    });
-    lost.await.expect("the old owner lets go");
-    until("the old owner's index is gone", Duration::from_secs(10), || !index_file(&net.nodes[o], &repo_id).exists()).await;
-    search_ready(&net, o).await;
+    // Moving away (the owner drains): the old owner drops its copy once the repo has stayed
+    // away for a while, and the new owner builds its own.
+    net.nodes[o].code.drain(Duration::from_secs(30)).await;
+    net.nodes[o].dead.store(true, Ordering::SeqCst);
+    until("the old owner's index is gone", Duration::from_secs(30), || !index_file(&net.nodes[o], &repo_id).exists()).await;
+    let first = (0..3).find(|i| *i != o).unwrap();
+    search_ready(&net, first).await;
+    until("someone owns it", Duration::from_secs(20), || net.owner(&repo_id).is_some()).await;
     let n = net.owner(&repo_id).unwrap();
-    assert!(index_file(&net.nodes[n], &repo_id).exists());
+    assert!(n != o && index_file(&net.nodes[n], &repo_id).exists());
     // Deleted through another node: the owner runs the delete.
-    let other = (0..3).find(|i| *i != n).unwrap();
+    let other = (0..3).find(|i| *i != n && *i != o).unwrap();
     let (s, v) = net.req(other, "DELETE", "/v1/code/repos/acme/api", None).await;
     assert!(s.is_success(), "{s} {v}");
     until("the lease row is deleted", Duration::from_secs(20), || lease_row(&net.nodes[0], &repo_id).is_none()).await;
@@ -929,6 +929,7 @@ async fn idle_repos_are_released_and_taken_again_on_demand() {
     let idle = Duration::from_millis(1500);
     let net = net_with("idle", 3, Arc::new(move |c: &mut Config| c.repo_idle_release = idle)).await;
     let repo_id = net.repo(0, "api").await;
+    until("someone owns it", Duration::from_secs(20), || net.owner(&repo_id).is_some()).await;
     let o = net.owner(&repo_id).unwrap();
     let p = (o + 1) % 3;
     // An open event stream is use: the repo stays.
@@ -936,22 +937,23 @@ async fn idle_repos_are_released_and_taken_again_on_demand() {
     assert_eq!(stream.status().as_u16(), 200);
     let reader = tokio::spawn(async move { while let Ok(Some(_)) = stream.chunk().await {} });
     tokio::time::sleep(idle * 3).await;
-    assert_eq!(net.owner(&repo_id), Some(o), "kept while a stream is open");
+    assert_eq!(lease_row(&net.nodes[0], &repo_id), Some(net.nodes[o].id.clone()), "kept while a stream is open");
     reader.abort();
     // Work left to do keeps it too (a promised webhook event nobody delivered yet).
     let sql = net.nodes[o].code.db.sql().clone();
     sql.execute("INSERT INTO webhook_outbox (id, repo_id, kind, subject, data, created_at) VALUES ('ob_test', ?, 'change', 'x', NULL, ?)", code_sql::params![repo_id.as_str(), i64::MAX / 2])
         .unwrap();
     tokio::time::sleep(idle * 3).await;
-    assert_eq!(net.owner(&repo_id), Some(o), "kept while work is waiting");
+    assert_eq!(lease_row(&net.nodes[0], &repo_id), Some(net.nodes[o].id.clone()), "kept while work is waiting");
     sql.execute("DELETE FROM webhook_outbox WHERE id = 'ob_test'", ()).unwrap();
-    until("the idle repo is given up", idle * 4 + Duration::from_secs(10), || net.owner(&repo_id).is_none() && lease_row(&net.nodes[0], &repo_id).is_none()).await;
+    until("the idle repo is given up", idle * 4 + Duration::from_secs(10), || lease_row(&net.nodes[0], &repo_id).is_none()).await;
+    until("nobody holds it", Duration::from_secs(10), || net.owner(&repo_id).is_none()).await;
     // Nobody takes it back on their own.
     tokio::time::sleep(Duration::from_millis(1000)).await;
     assert!(net.owner(&repo_id).is_none() && lease_row(&net.nodes[0], &repo_id).is_none());
     // The next request does, wherever it arrives.
     net.ok(p, "POST", "/v1/code/repos/acme/api/land", Some(land_body("after idle", "i.txt"))).await;
-    assert!(net.owner(&repo_id).is_some() && lease_row(&net.nodes[0], &repo_id).is_some());
+    assert!(lease_row(&net.nodes[0], &repo_id).is_some(), "taken again");
     assert_exactly_once(&net.log(p, "api").await, &["after idle".into()]);
 }
 
@@ -988,6 +990,119 @@ async fn leftover_indexes_are_removed_at_startup() {
     .await;
     assert!(!dir.join(format!("{id}.db")).exists(), "a cluster node starts with no index");
     node.cluster().leave();
+}
+
+// ── GitHub ──
+
+const GH_SECRET: &str = "github webhook secret";
+
+/// Every node runs the GitHub App (its API unreachable: the events used here need no calls), and
+/// `acme/app` is connected to GitHub's acme/app.
+async fn github_net(name: &str) -> (Net, String) {
+    let net = net(name, 3).await;
+    let repo_id = net.repo(0, "app").await;
+    let link = json!({
+        "installation_id": 7, "owner": "acme", "repo": "app", "url": "https://github.com/acme/app",
+        "default_branch_protected": null, "mirror": { "state": "ok", "last_push_at": null, "behind": 0, "error": null },
+        "remote_head": null, "connected": true,
+    });
+    net.nodes[0]
+        .code
+        .db
+        .sql()
+        .execute("UPDATE repos SET source = 'github', github = ?, import = ? WHERE id = ?", code_sql::params![link.to_string(), json!({ "state": "done" }).to_string(), repo_id.as_str()])
+        .unwrap();
+    for n in &net.nodes {
+        use rsa::pkcs1::EncodeRsaPrivateKey;
+        let key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap().to_pkcs1_pem(rsa::pkcs8::LineEnding::LF).unwrap().to_string();
+        let mut config = code_github::AppConfig::new(1, key, GH_SECRET, "roll-test");
+        config.api_base = format!("http://{}:9/api", [127, 0, 0, 1].map(|b: u8| b.to_string()).join("."));
+        config.web_base = "https://github.com".into();
+        let client = code_github::ClientOptions { max_retries: 0, timeout: Duration::from_secs(2), ..Default::default() };
+        let mirror = code_github::MirrorConfig { debounce: Duration::from_secs(600), max_delay: Duration::from_secs(600), ..Default::default() };
+        code_control::github::enable(&n.code, config, code_control::github::Options { mirror, client }).unwrap();
+        n.code.set_github_delivery_claim(Duration::from_secs(2));
+    }
+    (net, repo_id)
+}
+
+async fn github_hook(http: &reqwest::Client, base: &str, event: &str, delivery: &str, body: &Value) -> StatusCode {
+    let body = body.to_string();
+    let r = http
+        .post(format!("{base}/v1/code/github/webhook"))
+        .header("x-github-event", event)
+        .header("x-github-delivery", delivery)
+        .header("x-hub-signature-256", code_github::webhook::sign(GH_SECRET.as_bytes(), body.as_bytes()))
+        .header("content-type", "application/json")
+        .body(body)
+        .timeout(Duration::from_secs(60))
+        .send()
+        .await
+        .unwrap();
+    StatusCode::from_u16(r.status().as_u16()).unwrap()
+}
+
+fn issue_opened(n: u64) -> Value {
+    json!({
+        "action": "opened",
+        "issue": { "number": n, "title": format!("Issue {n}"), "body": "b", "state": "open", "labels": [], "html_url": format!("https://github.com/acme/app/issues/{n}"), "user": { "login": "octo", "id": 9 } },
+        "repository": { "id": 1, "name": "app", "full_name": "acme/app", "private": false, "default_branch": "main", "owner": { "login": "acme", "id": 1, "type": "Organization" } },
+        "installation": { "id": 7 },
+    })
+}
+
+/// Work items made from GitHub issue `n` (through any live node).
+async fn issue_items(net: &Net, node: usize, n: u64) -> usize {
+    let (s, v) = net.req(node, "GET", "/v1/code/repos/acme/app/work", None).await;
+    if s != StatusCode::OK {
+        return 0;
+    }
+    v.as_array().map_or(0, |a| a.iter().filter(|w| w["source"] == format!("github#{n}")).count())
+}
+
+/// A GitHub delivery for a repo another node owns is recorded before GitHub is answered: the
+/// owner dying while it handles it (GitHub gets 202, not an error it would have to redeliver)
+/// loses nothing: the node that takes the repo over handles it, once. A delivery that arrives
+/// while the owner can't be reached is recorded and handled the same way, and redeliveries are
+/// answered without running twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn github_deliveries_survive_their_owner_dying() {
+    let (net, repo_id) = github_net("github").await;
+    let o = net.owner(&repo_id).unwrap();
+    let p = (o + 1) % 3;
+    let q = (o + 2) % 3;
+    // Through a node that doesn't own the repo, handled on the owner.
+    assert_eq!(github_hook(&net.http, &net.nodes[p].url, "issues", "d-1", &issue_opened(1)).await, StatusCode::OK);
+    assert_eq!(issue_items(&net, q, 1).await, 1);
+    assert_eq!(github_hook(&net.http, &net.nodes[q].url, "issues", "d-1", &issue_opened(1)).await, StatusCode::OK, "a redelivery");
+    // The owner gets stuck handling the next one, then dies.
+    net.nodes[o].code.github_hang_deliveries(true);
+    let started = net.nodes[o].code.github_deliveries_started();
+    let send = {
+        let (http, url) = (net.http.clone(), net.nodes[p].url.clone());
+        tokio::spawn(async move { github_hook(&http, &url, "issues", "d-2", &issue_opened(2)).await })
+    };
+    until("the owner starts on it", Duration::from_secs(20), || net.nodes[o].code.github_deliveries_started() > started).await;
+    net.nodes[o].kill();
+    assert_eq!(send.await.unwrap(), StatusCode::ACCEPTED, "recorded, so GitHub is told it's taken");
+    // While nobody can serve the repo (the dead owner's lease hasn't expired), another one.
+    assert_eq!(github_hook(&net.http, &net.nodes[q].url, "issues", "d-3", &issue_opened(3)).await, StatusCode::ACCEPTED);
+    let deadline = Instant::now() + net.env.takeover() + Duration::from_secs(30);
+    loop {
+        if issue_items(&net, p, 2).await == 1 && issue_items(&net, p, 3).await == 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the recorded deliveries were never handled");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let n = net.owner(&repo_id).expect("a survivor owns it");
+    assert_ne!(n, o);
+    let pending: i64 = net.nodes[n].code.db.sql().query_row("SELECT COUNT(*) FROM github_inbox", (), |r| r.get(0)).unwrap();
+    assert_eq!(pending, 0, "every recorded part was handled and removed");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    for i in 1..=3 {
+        assert_eq!(issue_items(&net, p, i).await, 1, "issue {i} became one work item");
+    }
 }
 
 // ── membership ──

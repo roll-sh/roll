@@ -121,7 +121,7 @@ mod sql;
 
 pub use cluster::{Cluster, Guard, Node, Ownership, Route};
 pub use config::ClusterConfig;
-pub use forward::{ClientAddr, Forwarded, MAX_HOPS, accept_forwarded, client_addr, hops, require_signed, unavailable};
+pub use forward::{ClientAddr, Forwarded, MAX_HOPS, accept_forwarded, client_addr, hops, is_upgrade, require_signed, unavailable};
 pub use sign::VerifyError;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

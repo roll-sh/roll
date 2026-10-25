@@ -525,7 +525,10 @@ fn blocked(code: &Code, r: &RepoRow, why: String) -> Result<()> {
 
 // ── webhooks ──
 
-/// `POST /v1/code/github/webhook`.
+/// `POST /v1/code/github/webhook`: verified and de-duplicated by whichever node receives it.
+/// Events about the App are handled here; each connected repo's part is recorded
+/// ([`super::inbox`]) and handled on that repo's owner. GitHub gets 2xx only once every part
+/// is handled or recorded.
 pub async fn webhook(code: Arc<Code>, headers: HeaderMap, body: Bytes) -> Result<StatusCode> {
     let Some(hub) = code.github_hub().cloned() else { return Err(Error::NotFound("GitHub App".into())) };
     let header = |k: &str| headers.get(k).and_then(|v| v.to_str().ok());
@@ -535,32 +538,67 @@ pub async fn webhook(code: Arc<Code>, headers: HeaderMap, body: Bytes) -> Result
     let event_name = header("x-github-event").unwrap_or("").to_string();
     let event = Event::parse(&event_name, &body).map_err(|e| Error::Invalid(e.to_string()))?;
     let delivery = header("x-github-delivery").map(str::to_string);
-    if let Some(d) = &delivery {
-        let fresh = code.db.sql().execute("INSERT OR IGNORE INTO github_deliveries (id, at) VALUES (?, ?)", params![d, now()])? > 0;
-        if !fresh {
-            return Ok(StatusCode::OK);
-        }
-    }
+    let repos: Vec<String> = match repo_of(&event) {
+        Some(full_name) => repos_for(&code, full_name)?.into_iter().map(|(r, _)| r.id).collect(),
+        None => Vec::new(),
+    };
+    let Some((receipt, parts, claimed_until)) = super::inbox::persist(&code, &hub, delivery.as_deref(), &event_name, &body, &repos)? else {
+        return Ok(StatusCode::OK);
+    };
     let task = tokio::spawn({
         let code = code.clone();
         async move {
-            let r = handle(&code, &hub, &event_name, &body, event).await;
-            if let Err(e) = &r {
-                tracing::warn!(event = %event_name, error = %e, "GitHub webhook failed");
-                // Let a redelivery try again.
-                if let Some(d) = &delivery {
-                    let _ = code.db.sql().execute("DELETE FROM github_deliveries WHERE id = ?", [d]);
+            if repo_of(&event).is_none() {
+                return match handle_app(&code, event) {
+                    Ok(()) => (super::inbox::Outcome::Done, Vec::new()),
+                    Err(e) => (super::inbox::Outcome::Failed(e), Vec::new()),
+                };
+            }
+            let mut unreached = Vec::new();
+            for (id, repo) in &parts {
+                match run_part(&code, repo, id, claimed_until).await {
+                    super::inbox::Outcome::Done => {}
+                    super::inbox::Outcome::Unavailable => unreached.push((id.clone(), repo.clone())),
+                    failed => return (failed, unreached),
                 }
             }
-            r
+            let outcome = if unreached.is_empty() { super::inbox::Outcome::Done } else { super::inbox::Outcome::Unavailable };
+            (outcome, unreached)
         }
     });
     match tokio::time::timeout(WEBHOOK_BUDGET, task).await {
-        Ok(Ok(Ok(()))) => Ok(StatusCode::OK),
-        Ok(Ok(Err(e))) => Err(e),
+        Ok(Ok((super::inbox::Outcome::Done, _))) => Ok(StatusCode::OK),
+        Ok(Ok((super::inbox::Outcome::Failed(e), _))) => {
+            tracing::warn!(event = %event_name, error = %e, "GitHub webhook failed");
+            // GitHub is told, and its redelivery runs the whole delivery again.
+            super::inbox::forget(&code, &receipt, delivery.as_deref());
+            Err(e)
+        }
+        // Recorded: the owners handle them once they can (or whoever takes their repos next).
+        Ok(Ok((super::inbox::Outcome::Unavailable, unreached))) => {
+            let ids: Vec<String> = unreached.iter().map(|(id, _)| id.clone()).collect();
+            super::inbox::release(&code, &ids, claimed_until);
+            for (_, repo) in &unreached {
+                code.kick_owner(repo);
+            }
+            Ok(StatusCode::ACCEPTED)
+        }
         Ok(Err(e)) => Err(Error::Internal(e.into())),
+        // Still running: it finishes in the background, and retries on its own if it fails.
         Err(_) => Ok(StatusCode::ACCEPTED),
     }
+}
+
+/// One repo's part of a delivery, on the repo's owner: here, or sent there.
+async fn run_part(code: &Arc<Code>, repo_id: &str, id: &str, claimed_until: i64) -> super::inbox::Outcome {
+    use super::inbox::Outcome;
+    if code.cluster().is_none() || code.owns_repo(repo_id) {
+        return match super::inbox::process(code, repo_id, id, claimed_until).await {
+            Ok(()) => Outcome::Done,
+            Err(e) => Outcome::Failed(e),
+        };
+    }
+    code.github_on_owner(repo_id, id, claimed_until).await
 }
 
 /// Connected repos linked to a GitHub `owner/name`.
@@ -609,21 +647,7 @@ fn repo_of(event: &Event) -> Option<&str> {
     })
 }
 
-/// A delivery, verified and de-duplicated by whichever node received it. Each connected repo's
-/// part runs on that repo's owner: here, or sent there with the original payload.
-async fn handle(code: &Arc<Code>, hub: &Hub, event_name: &str, body: &Bytes, event: Event) -> Result<()> {
-    let Some(full_name) = repo_of(&event) else { return handle_app(code, event) };
-    for (r, link) in repos_for(code, full_name)? {
-        if code.cluster().is_none() || code.owns_repo(&r.id) {
-            handle_repo(code, hub, &r, &link, &event).await?;
-        } else {
-            code.github_on_owner(&r.id, event_name, body.clone()).await?;
-        }
-    }
-    Ok(())
-}
-
-/// One repo's part of a delivery, on the repo's owner (what a non-owner sends it).
+/// One repo's part of a delivery, on the repo's owner ([`super::inbox::process`] runs it).
 pub(crate) async fn handle_for_repo(code: &Arc<Code>, repo_id: &str, event_name: &str, body: &[u8]) -> Result<()> {
     let Some(hub) = code.github_hub().cloned() else { return Err(Error::NotFound("GitHub App".into())) };
     let event = Event::parse(event_name, body).map_err(|e| Error::Invalid(e.to_string()))?;

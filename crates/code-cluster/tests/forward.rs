@@ -88,6 +88,38 @@ async fn handle(s: AppState, req: Request, guard: Guard) -> Response {
         let mut r = Response::new(Body::from_stream(stream));
         r.headers_mut().insert("content-type", HeaderValue::from_static("text/event-stream"));
         r
+    } else if path.ends_with("/ws") {
+        // An upgrade (a WebSocket, or any protocol): switch, then echo every byte back.
+        let mut req = req;
+        let on = hyper::upgrade::on(&mut req);
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let Ok(u) = on.await else { return };
+            let mut io = hyper_util::rt::TokioIo::new(u);
+            let mut buf = vec![0u8; 64 << 10];
+            loop {
+                match io.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => {
+                        if io.write_all(&buf[..n]).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        let mut r = Response::new(Body::empty());
+        *r.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+        r.headers_mut().insert("upgrade", HeaderValue::from_static("echo"));
+        r.headers_mut().insert("connection", HeaderValue::from_static("upgrade"));
+        r
+    } else if path.ends_with("/dropfirst") {
+        // The first one dies without an answer (its connection drops), as a node going away
+        // mid-request or a pooled connection closing under it would.
+        if s.flaky.fetch_add(1, Ordering::SeqCst) == 0 {
+            panic!("dropping the connection on purpose");
+        }
+        "second time".into_response()
     } else if path.ends_with("/flaky") {
         // Read the body first, so a client still sending it sees the answer, not a broken pipe.
         let body = req.into_body().collect().await.unwrap().to_bytes();
@@ -249,6 +281,82 @@ async fn streams_responses_incrementally() {
     eprintln!("first event after {first:?}, last after {last:?}, {} chunks", arrivals.len());
     assert!(arrivals.len() >= 3, "events arrived in one lump: {arrivals:?}");
     assert!(last - first >= Duration::from_millis(700), "events weren't streamed as they were sent: {arrivals:?}");
+}
+
+/// The head of an HTTP/1.1 response read off a raw connection (up to the blank line).
+async fn read_head(s: &mut tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt;
+    let mut head = Vec::new();
+    let mut b = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        assert_eq!(s.read(&mut b).await.unwrap(), 1, "connection closed in the head: {}", String::from_utf8_lossy(&head));
+        head.push(b[0]);
+    }
+    String::from_utf8(head).unwrap().to_ascii_lowercase()
+}
+
+/// An HTTP/1.1 upgrade (a WebSocket) through a node that doesn't own the key reaches the owner,
+/// which switches protocols; then bytes flow both ways through the forwarding node, large
+/// writes included, until the client closes. A key nobody has yet is taken on the way, as for
+/// any request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upgrades_are_forwarded_and_stream_both_ways() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (_env, a, b) = pair("fwd_upgrade").await;
+    let key = key_for(&["a", "b"], "b", "ws");
+    let mut s = tokio::net::TcpStream::connect(a.addr).await.unwrap();
+    s.write_all(format!("GET /r/{key}/ws?x=1 HTTP/1.1\r\nHost: preview.test\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n").as_bytes()).await.unwrap();
+    let head = read_head(&mut s).await;
+    assert!(head.starts_with("http/1.1 101"), "{head}");
+    assert!(head.contains("upgrade: echo") && head.contains("x-echo-node: b"), "switched on the owner: {head}");
+    assert!(b.cluster.owns(&key) && !a.cluster.owns(&key));
+    for msg in ["hello", "through a", "to b"] {
+        s.write_all(msg.as_bytes()).await.unwrap();
+        let mut back = vec![0u8; msg.len()];
+        s.read_exact(&mut back).await.unwrap();
+        assert_eq!(back, msg.as_bytes());
+    }
+    let big = pattern(3 << 20);
+    let (mut r, mut w) = s.into_split();
+    let sent = big.clone();
+    let writer = tokio::spawn(async move {
+        w.write_all(&sent).await.unwrap();
+        w
+    });
+    let mut back = vec![0u8; big.len()];
+    r.read_exact(&mut back).await.unwrap();
+    assert!(back == big, "3 MiB came back intact");
+    // The client closes: the echo sees the end, and so does the client.
+    let mut w = writer.await.unwrap();
+    w.shutdown().await.unwrap();
+    let mut rest = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), r.read_to_end(&mut rest)).await.expect("the connection closes").unwrap();
+    assert!(rest.is_empty());
+    // A plain request on the same route still works, and a non-upgrade answer passes through.
+    let resp = client().get(a.url(&format!("/r/{key}/echo"))).send().await.unwrap();
+    assert_eq!(parse(&resp.text().await.unwrap())["node"], "b");
+    let mut s = tokio::net::TcpStream::connect(a.addr).await.unwrap();
+    s.write_all(format!("GET /r/{key}/nothing HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n").as_bytes()).await.unwrap();
+    let head = read_head(&mut s).await;
+    assert!(head.starts_with("http/1.1 404") && head.contains("x-echo-node: b"), "{head}");
+}
+
+/// A forwarded read whose connection drops before an answer (the owner's connection broke, or a
+/// pooled connection closed as it was reused) is sent again; a write in the same spot isn't
+/// (it may have run): the client gets an answer that says to retry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reads_are_sent_again_when_the_connection_drops_before_an_answer() {
+    let (_env, a, b) = pair("fwd_drop").await;
+    let key = key_for(&["a", "b"], "b", "repo");
+    let http = client();
+    let resp = http.get(a.url(&format!("/r/{key}/dropfirst"))).send().await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.text().await.unwrap(), "second time");
+    assert_eq!(b.flaky.load(Ordering::SeqCst), 2, "sent twice");
+    b.flaky.store(0, Ordering::SeqCst);
+    let resp = http.post(a.url(&format!("/r/{key}/dropfirst"))).body("x").send().await.unwrap();
+    assert!(resp.status().is_server_error(), "{}", resp.status());
+    assert_eq!(b.flaky.load(Ordering::SeqCst), 1, "a write is never sent twice");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

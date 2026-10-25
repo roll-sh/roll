@@ -50,3 +50,4 @@ hyper-util = { workspace = true, features = ["service", "tokio"] }
 rand = "0.8"
 rsa = { version = "0.9", features = ["pem"] }
 tempfile.workspace = true
+tracing-subscriber.workspace = true

@@ -127,6 +127,18 @@ impl Cluster {
         let client = client_addr(&req);
         let (parts, body) = req.into_parts();
         let pq = path_and_query(&parts.uri, &parts.extensions);
+        if is_upgrade(&parts.headers) {
+            for attempt in 0..2 {
+                match self.send_upgrade(to, &parts, &pq, hops, client.as_deref()).await {
+                    Ok(r) => return r,
+                    Err(Failed::Connect(e)) if attempt == 0 => tracing::debug!(to = %to.id, error = %e, "forward failed to connect; retrying"),
+                    Err(Failed::Connect(e)) => return node_unreachable(to, &e),
+                    Err(Failed::Unavailable(d, _)) if attempt == 0 => tokio::time::sleep(d.min(self.inner.cfg.max_retry_wait)).await,
+                    Err(Failed::Unavailable(_, r)) => return *r,
+                }
+            }
+            return unavailable(self.inner.cfg.sweep_every);
+        }
         let mut body = Body2::Fresh(body);
         for attempt in 0..2 {
             let (rb, replayable) = match self.body_for_send(&mut body).await {
@@ -193,6 +205,29 @@ impl Cluster {
                 Route::Remote(node) => {
                     if hops >= MAX_HOPS {
                         return loop_detected();
+                    }
+                    let p = parts.as_ref().expect("parts are taken only on return");
+                    if is_upgrade(&p.headers) {
+                        // An upgrade (a WebSocket) carries no body: nothing to buffer or spend.
+                        match self.send_upgrade(&node, p, &pq, hops, client.as_deref()).await {
+                            Ok(r) => return r,
+                            Err(Failed::Connect(e)) => {
+                                self.forget(key);
+                                if last {
+                                    return node_unreachable(&node, &e);
+                                }
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                                continue;
+                            }
+                            Err(Failed::Unavailable(d, r)) => {
+                                self.forget(key);
+                                if last {
+                                    return *r;
+                                }
+                                tokio::time::sleep(d.min(self.inner.cfg.max_retry_wait)).await;
+                                continue;
+                            }
+                        }
                     }
                     let (rb, replayable) = match self.body_for_send(&mut body).await {
                         Ok(b) => b,
@@ -300,11 +335,119 @@ impl Cluster {
                 }
             }
             Err(e) if e.is_connect() => Err(Failed::Connect(e.to_string())),
+            // A pooled connection the other side closed as we reused it (or one that broke
+            // before an answer came): an idempotent request whose body we kept can go again.
+            Err(e) if buffered && idempotent(&parts.method) => {
+                tracing::info!(to = %to.id, error = %e, "forwarded request failed before an answer; it will be sent again");
+                Err(Failed::Connect(e.to_string()))
+            }
             Err(e) => {
                 tracing::warn!(to = %to.id, error = %e, "forwarded request failed");
                 Ok(plain(StatusCode::BAD_GATEWAY, format!("forwarding to node {} failed: {e}\n", to.id)))
             }
         }
+    }
+
+    /// Forward an HTTP/1.1 upgrade (a WebSocket): the request goes to `to` over a connection of
+    /// its own; if it switches protocols, the client gets the 101 and, once both sides have
+    /// upgraded, bytes are copied both ways until either side closes. Any other answer comes back
+    /// as it is.
+    async fn send_upgrade(&self, to: &Node, parts: &Parts, pq: &str, hops: u8, client: Option<&str>) -> std::result::Result<Response, Failed> {
+        let url = match reqwest::Url::parse(&format!("{}{}", to.url.trim_end_matches('/'), pq)) {
+            Ok(u) => u,
+            Err(e) => return Ok(plain(StatusCode::BAD_GATEWAY, format!("bad node url {}: {e}\n", to.url))),
+        };
+        let (Some(host), Some(port)) = (url.host_str().map(str::to_string), url.port_or_known_default()) else {
+            return Ok(plain(StatusCode::BAD_GATEWAY, format!("bad node url {}\n", to.url)));
+        };
+        if url.scheme() != "http" {
+            return Ok(plain(StatusCode::BAD_GATEWAY, format!("upgrades are forwarded over http only, not to {}\n", to.url)));
+        }
+        let sent_pq = match url.query() {
+            Some(q) => format!("{}?{q}", url.path()),
+            None => url.path().to_string(),
+        };
+        let connect = tokio::time::timeout(self.inner.cfg.connect_timeout, tokio::net::TcpStream::connect((host.as_str(), port)));
+        let stream = match connect.await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return Err(Failed::Connect(e.to_string())),
+            Err(_) => return Err(Failed::Connect("timed out connecting".into())),
+        };
+        let _ = stream.set_nodelay(true);
+        let (mut sender, conn) = match hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream)).await {
+            Ok(c) => c,
+            Err(e) => return Err(Failed::Connect(e.to_string())),
+        };
+        tokio::spawn(async move {
+            if let Err(e) = conn.with_upgrades().await {
+                tracing::debug!(error = %e, "forwarded upgrade connection");
+            }
+        });
+        let mut headers = HeaderMap::new();
+        copy_headers(&parts.headers, &mut headers, true, false);
+        // The hop-by-hop headers an upgrade needs on the next hop too.
+        headers.insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+        if let Some(u) = parts.headers.get(header::UPGRADE) {
+            headers.insert(header::UPGRADE, u.clone());
+        }
+        if !headers.contains_key(header::HOST)
+            && let Some(a) = parts.uri.authority().and_then(|a| HeaderValue::from_str(a.as_str()).ok())
+        {
+            headers.insert(header::HOST, a);
+        }
+        let me = &self.inner.cfg;
+        headers.extend(sign::sign(&me.secret, &me.node_id, &parts.method, &sent_pq, Some(hops + 1), client));
+        let mut req = axum::http::Request::builder().method(parts.method.clone()).uri(sent_pq.as_str());
+        if let Some(h) = req.headers_mut() {
+            *h = headers;
+        }
+        let Ok(req) = req.body(http_body_util::Empty::<Bytes>::new()) else {
+            return Ok(plain(StatusCode::BAD_REQUEST, "bad upgrade request\n"));
+        };
+        let mut resp = match sender.send_request(req).await {
+            Ok(r) => r,
+            Err(e) => return Err(Failed::Connect(e.to_string())),
+        };
+        if resp.status() == StatusCode::SERVICE_UNAVAILABLE
+            && let Some(ms) = resp.headers().get(UNAVAILABLE_HEADER).map(|v| v.to_str().ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(1000))
+        {
+            let mut out = Response::new(Body::empty());
+            *out.status_mut() = resp.status();
+            copy_headers(resp.headers(), out.headers_mut(), false, false);
+            return Err(Failed::Unavailable(Duration::from_millis(ms), Box::new(out)));
+        }
+        if resp.status() != StatusCode::SWITCHING_PROTOCOLS {
+            let mut out = Response::new(Body::empty());
+            *out.status_mut() = resp.status();
+            copy_headers(resp.headers(), out.headers_mut(), false, false);
+            *out.body_mut() = Body::new(resp.into_body());
+            return Ok(out);
+        }
+        let Some(client_side) = parts.extensions.get::<hyper::upgrade::OnUpgrade>().cloned() else {
+            // The server in front didn't offer the upgrade (not served with upgrades enabled).
+            return Ok(plain(StatusCode::BAD_GATEWAY, "this server can't switch protocols\n"));
+        };
+        let node_side = hyper::upgrade::on(&mut resp);
+        let mut out = Response::new(Body::empty());
+        *out.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+        copy_headers(resp.headers(), out.headers_mut(), false, false);
+        out.headers_mut().insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+        if let Some(u) = resp.headers().get(header::UPGRADE) {
+            out.headers_mut().insert(header::UPGRADE, u.clone());
+        }
+        let to_id = to.id.clone();
+        tokio::spawn(async move {
+            match tokio::join!(client_side, node_side) {
+                (Ok(c), Ok(n)) => {
+                    let (mut c, mut n) = (hyper_util::rt::TokioIo::new(c), hyper_util::rt::TokioIo::new(n));
+                    if let Err(e) = tokio::io::copy_bidirectional(&mut c, &mut n).await {
+                        tracing::debug!(to = %to_id, error = %e, "forwarded upgrade ended");
+                    }
+                }
+                (c, n) => tracing::debug!(to = %to_id, client = ?c.err(), node = ?n.err(), "a forwarded upgrade didn't complete"),
+            }
+        });
+        Ok(out)
     }
 
     /// The internal router: `GET /internal/code/ping` (signed) answers this node's id. Merge it
@@ -339,6 +482,18 @@ impl Cluster {
 
 async fn ping(State(c): State<Arc<Cluster>>) -> String {
     c.node_id().to_string()
+}
+
+/// Methods that may be sent twice: they don't change anything (RFC 9110 safe methods; PUT and
+/// DELETE are idempotent in principle but answer differently the second time).
+fn idempotent(m: &Method) -> bool {
+    matches!(*m, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
+/// An HTTP/1.1 upgrade request: `Connection: upgrade` and an `Upgrade` protocol.
+pub fn is_upgrade(h: &HeaderMap) -> bool {
+    h.contains_key(header::UPGRADE)
+        && h.get_all(header::CONNECTION).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(',')).any(|t| t.trim().eq_ignore_ascii_case("upgrade"))
 }
 
 fn into_response(resp: reqwest::Response) -> Response {

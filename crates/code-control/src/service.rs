@@ -388,6 +388,7 @@ impl Code {
         self.unsettle(&r.id);
         self.drop_worktrees(&r.id);
         self.forget_repo_hooks(&r.id)?;
+        crate::github::inbox::delete_repo(self, &r.id)?;
         self.store.delete_repo(&r.id).await?;
         // In a cluster: the lease goes too, once this request is done.
         self.retire_repo(&r.id);

@@ -38,8 +38,10 @@ const MAX_ATTEMPTS: i64 = 8;
 const MAX_BACKOFF_MS: u64 = 6 * 3600 * 1000;
 /// Longest a delivery's request may take, response included (the client's total timeout).
 const TIMEOUT: Duration = Duration::from_secs(10);
-/// How long a node holds a delivery it's sending: well past [`TIMEOUT`]. See [`Deliveries`].
-const CLAIM: Duration = Duration::from_secs(60);
+/// How long a node holds a delivery it's sending: [`TIMEOUT`] plus a margin, so a dead node's
+/// deliveries go out again within about 20 s. A send only starts while [`TIMEOUT`] and 5 s of
+/// the claim are left (`send_window`). See [`Deliveries`].
+const CLAIM: Duration = Duration::from_secs(20);
 const MAX_APPS_PER_OWNER: usize = 50;
 
 /// The delivery worker's state.
@@ -637,6 +639,17 @@ pub(crate) fn delivery_json(d: &DeliveryRow) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dead node's deliveries wait at most a claim (about 20 s), and a send still only starts
+    /// while its whole timeout and a 5 s margin of the claim are left.
+    #[test]
+    fn the_claim_is_a_send_plus_a_margin() {
+        assert!(CLAIM <= Duration::from_secs(20), "{CLAIM:?}");
+        assert_eq!(send_window(TIMEOUT, CLAIM), Duration::from_secs(5));
+        assert!(CLAIM - send_window(TIMEOUT, CLAIM) >= TIMEOUT + Duration::from_secs(5));
+        // Short test claims keep half their slack as the margin.
+        assert_eq!(send_window(Duration::from_millis(300), Duration::from_millis(1500)), Duration::from_millis(600));
+    }
 
     #[test]
     fn private_ranges() {

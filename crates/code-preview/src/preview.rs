@@ -567,7 +567,8 @@ fn page(status: StatusCode, title: &str, detail: &str, refresh: bool) -> Respons
 
 /// Middleware for the API listener: requests for a preview host go to the preview, everything
 /// else passes through. In a cluster a preview runs on its repo's owner, so the request is
-/// forwarded there (plain HTTP: a WebSocket upgrade only works on the owner itself).
+/// forwarded there (WebSocket upgrades included: `code_cluster` forwards the upgrade and then
+/// copies the bytes both ways).
 pub async fn route(State(p): State<Arc<Previews>>, req: Request, next: Next) -> Response {
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().host().map(str::to_string));
     let Some(change) = host.and_then(|h| p.change_for_host(&h)) else { return next.run(req).await };

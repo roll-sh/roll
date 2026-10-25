@@ -11,13 +11,13 @@
 //!   and checks become check runs.
 
 mod commands;
+pub(crate) mod inbox;
 mod mirror;
 mod notify;
 mod reviews;
 mod sync;
 
 pub use sync::webhook;
-pub(crate) use sync::handle_for_repo;
 
 use crate::model::RepoRow;
 use crate::{Code, Error, Result};
@@ -57,6 +57,12 @@ pub struct Hub {
     git: code_git::Client,
     mirrors: Mutex<HashMap<String, mpsc::UnboundedSender<mirror::Cmd>>>,
     imports: Mutex<HashSet<String>>,
+    /// One handler of a repo's GitHub delivery parts at a time ([`inbox`]).
+    inbox_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Tests: parts wait while set; parts started; the claim of an attempt (ms).
+    inbox_hang: std::sync::atomic::AtomicBool,
+    inbox_started: std::sync::atomic::AtomicUsize,
+    inbox_claim_ms: std::sync::atomic::AtomicU64,
 }
 
 /// A repo's link to GitHub, stored as `repos.github` and returned as `Repo.github`.
@@ -108,6 +114,7 @@ impl Code {
 /// Turn the GitHub App on: webhooks, connecting repos, mirrors and notifications.
 pub fn enable(code: &Arc<Code>, config: AppConfig, opts: Options) -> anyhow::Result<()> {
     code.db.sql().ensure_schema(SCHEMA)?;
+    code.db.sql().ensure_schema(inbox::SCHEMA)?;
     let client = GitHub::with_options(config.clone(), opts.client.clone())?;
     let hub = Arc::new(Hub {
         client,
@@ -116,9 +123,14 @@ pub fn enable(code: &Arc<Code>, config: AppConfig, opts: Options) -> anyhow::Res
         git: code_git::Client::new(code_git::Limits::default()),
         mirrors: Mutex::new(HashMap::new()),
         imports: Mutex::new(HashSet::new()),
+        inbox_locks: Mutex::new(HashMap::new()),
+        inbox_hang: Default::default(),
+        inbox_started: Default::default(),
+        inbox_claim_ms: std::sync::atomic::AtomicU64::new(inbox::CLAIM.as_millis() as u64),
     });
     code.github.set(hub).map_err(|_| anyhow::anyhow!("GitHub is already enabled"))?;
     notify::start(code.clone());
+    inbox::start_poll(code);
     // Pick up where a restart left off (in a cluster: the repos this node owns; the others
     // start on whichever node takes them).
     for r in linked_repos(code)? {
@@ -134,6 +146,12 @@ pub fn enable(code: &Arc<Code>, config: AppConfig, opts: Options) -> anyhow::Res
 pub(crate) fn resume(code: &Arc<Code>, r: &RepoRow) {
     if code.github_hub().is_none() {
         return;
+    }
+    // Delivery parts left for this repo (its last owner died, or GitHub was answered 202).
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let (code2, id) = (code.clone(), r.id.clone());
+        let t = tokio::spawn(async move { inbox::process_due(&code2, &id).await });
+        code.track(&r.id, t.abort_handle());
     }
     let Some(link) = link_of(r) else { return };
     if !link.connected {
