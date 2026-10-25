@@ -158,3 +158,90 @@ md5:text | scale:int4
 93c4871697b4c753867d0fccf9f5c7b5 | 16383
 -- SELECT 1
 
+> SELECT count(*), count(*) FILTER (WHERE barelabel), count(DISTINCT catcode) FROM pg_get_keywords()
+count:int8 | count:int8 | count:int8
+494 | 455 | 4
+-- SELECT 1
+
+> SELECT * FROM pg_get_keywords() WHERE word IN ('abs', 'between', 'authorization', 'select', 'zone') ORDER BY 1
+word:text | catcode:char | barelabel:bool | catdesc:text | baredesc:text
+authorization | T | t | reserved (can be function or type name) | can be bare label
+between | C | t | unreserved (cannot be function or type name) | can be bare label
+select | R | t | reserved | can be bare label
+zone | U | t | unreserved | can be bare label
+-- SELECT 4
+
+> SELECT string_agg(word, ',') IS NULL FROM pg_get_keywords() WHERE word <> ALL ('{a,abs,absolute,action}'::text[])
+?column?:bool
+f
+-- SELECT 1
+
+> CREATE TABLE a51_t9 (id serial, x int)
+-- CREATE TABLE
+
+> CREATE MATERIALIZED VIEW a51_mv9 AS SELECT * FROM a51_t9
+-- SELECT 0
+
+> CREATE VIEW a51_v9 AS SELECT * FROM a51_t9
+-- CREATE VIEW
+
+> SELECT pg_get_serial_sequence('a51_t9', 'id'), pg_get_serial_sequence('a51_mv9', 'id'), pg_get_serial_sequence('a51_v9', 'id')
+pg_get_serial_sequence:text | pg_get_serial_sequence:text | pg_get_serial_sequence:text
+public.a51_t9_id_seq | NULL | NULL
+-- SELECT 1
+
+> SELECT pg_get_serial_sequence('a51_mv9', 'nope')
+ERROR 42703: column "nope" of relation "a51_mv9" does not exist
+
+> DROP VIEW a51_v9
+-- DROP VIEW
+
+> DROP MATERIALIZED VIEW a51_mv9
+-- DROP MATERIALIZED VIEW
+
+> DROP TABLE a51_t9
+-- DROP TABLE
+
+> CREATE TABLE a51_s (id serial PRIMARY KEY, x int DEFAULT nextval('a51_s_id_seq'))
+-- CREATE TABLE
+
+> INSERT INTO a51_s DEFAULT VALUES
+-- INSERT 0 1
+
+> SELECT * FROM a51_s
+id:int4 | x:int4
+1 | 2
+-- SELECT 1
+
+> DROP TABLE a51_s
+-- DROP TABLE
+
+> SELECT ARRAY['uuid'::regtype]::oidvector, ARRAY[1, 2]::int2vector, ARRAY[1::int2]::int2vector
+array:30 | array:22 | array:22
+2950 | 1 2 | 1
+-- SELECT 1
+
+> SELECT '{3,4}'::int[]::oidvector
+ERROR 42846: cannot cast type integer[] to oidvector (at 22)
+
+> SELECT '{3,4}'::oid[]::oidvector
+ERROR 42846: cannot cast type oid[] to oidvector (at 22)
+
+> SELECT pg_typeof(NULL::anyarray), pg_typeof(NULL::anyrange), pg_typeof(NULL::anyelement)
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+anyarray | anyrange | unknown
+-- SELECT 1
+
+> CREATE TABLE a51_bt (b bit(4), vb varbit(8), v varbit)
+-- CREATE TABLE
+
+> SELECT column_name, data_type, character_maximum_length FROM information_schema.columns WHERE table_name = 'a51_bt' ORDER BY ordinal_position
+column_name:name | data_type:varchar | character_maximum_length:int4
+b | bit | 4
+vb | bit varying | 8
+v | bit varying | NULL
+-- SELECT 3
+
+> DROP TABLE a51_bt
+-- DROP TABLE
+

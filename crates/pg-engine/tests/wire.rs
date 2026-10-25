@@ -2498,3 +2498,93 @@ async fn until_waiting(c: &Client, pid: &str) {
     }
     panic!("session {pid} never waited");
 }
+
+/// Types and settings clients read from the protocol (sqlx's EXPLAIN (FORMAT JSON), lib/pq's
+/// startup options, tokio-postgres's domains), and COPY's NOT NULL failure as the row is
+/// read (pgx's CopyFrom of a NULL into a NOT NULL column).
+#[test]
+fn described_types_startup_options_and_copy_not_null() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    let wait = Duration::from_millis(1500);
+    // ParameterDescription and RowDescription of a statement, as raw bodies.
+    let describe = |c: &mut raw::Raw, sql: &str| -> (Vec<u8>, Vec<u8>) {
+        c.parse("", sql);
+        c.describe(b'S', "");
+        c.send(b'S', b"");
+        let (mut t, mut row) = (Vec::new(), Vec::new());
+        while let Some((k, b)) = c.next_within(wait) {
+            match k {
+                b't' => t = b,
+                b'T' => row = b,
+                b'Z' => break,
+                _ => {}
+            }
+        }
+        (t, row)
+    };
+    let type_of = |row: &[u8]| {
+        let e = 2 + row[2..].iter().position(|b| *b == 0).unwrap();
+        u32::from_be_bytes(row[e + 7..e + 11].try_into().unwrap())
+    };
+    // ExplainResultDesc: json for FORMAT JSON, xml for XML.
+    assert_eq!(type_of(&describe(&mut c, "EXPLAIN (FORMAT JSON) SELECT 1").1), 114);
+    assert_eq!(type_of(&describe(&mut c, "EXPLAIN (FORMAT XML) SELECT 1").1), 142);
+    assert_eq!(type_of(&describe(&mut c, "EXPLAIN SELECT 1").1), 25);
+    assert_eq!(type_of(&describe(&mut c, "SELECT NULL::anyarray").1), 2277);
+    // A suspended portal goes on under MOVE / FETCH (asyncpg's cursor.forward).
+    c.query("BEGIN");
+    c.parse("", "SELECT generate_series(0, 20)");
+    c.bind("pm", "");
+    c.execute("pm", 2);
+    assert_eq!(c.sync(), ["D 0", "D 1", "s"]);
+    assert_eq!(c.query("MOVE FORWARD 5 IN pm"), ["C MOVE 5"]);
+    assert_eq!(c.query("FETCH 1 FROM pm"), ["T generate_series:23/-1", "D 7", "C FETCH 1"]);
+    c.query("COMMIT");
+    // EXPLAIN EXECUTE of a CALL prepared over the protocol: ExplainOneUtility.
+    c.query("CREATE PROCEDURE p42(INOUT x int) LANGUAGE plpgsql AS $$BEGIN x := 42; END$$");
+    c.parse("p42s", "CALL p42(null)");
+    c.sync();
+    assert_eq!(
+        c.query("EXPLAIN EXECUTE p42s"),
+        ["T QUERY PLAN:25/-1", "D Utility statements have no plan structure", "C EXPLAIN"]
+    );
+    // A parameter assigned to a domain column is of the domain.
+    c.query("CREATE DOMAIN dpos AS int CHECK (VALUE > 0); CREATE TABLE dt (p dpos)");
+    let r = c.query("SELECT 'dpos'::regtype::oid");
+    let dom: u32 = r[1].strip_prefix("D ").unwrap().parse().unwrap();
+    let mut want = 1i16.to_be_bytes().to_vec();
+    want.extend_from_slice(&dom.to_be_bytes());
+    assert_eq!(describe(&mut c, "INSERT INTO dt (p) VALUES ($1)").0, want);
+    assert_eq!(describe(&mut c, "UPDATE dt SET p = $1").0, want);
+
+    // COPY: the row with a NULL for a NOT NULL column fails as it is read.
+    c.query("CREATE TABLE cnn (a int NOT NULL, b text)");
+    c.send(b'Q', b"COPY cnn FROM STDIN\0");
+    assert_eq!(c.next_within(wait).map(|m| m.0), Some(b'G'));
+    c.send(b'd', b"1\tx\n\\N\ty\n");
+    let (t, b) = c.next_within(wait).expect("the error, before CopyDone");
+    assert_eq!(t, b'E');
+    assert!(String::from_utf8_lossy(&b).contains("23502"));
+    c.read();
+    c.send(b'c', b"");
+    assert_eq!(c.query("SELECT count(*) FROM cnn"), ["T count:20/-1", "D 0", "C SELECT 1"]);
+    s.engine.shutdown();
+
+    // process_startup_options: an explicit parameter wins over `options`' -c.
+    let s = server(AuthMethod::Trust);
+    runtime().block_on(async {
+        let mut cfg = s.config("postgres", "secret");
+        cfg.options("-c application_name=fromoptions -c search_path=x");
+        cfg.application_name("explicit");
+        let (c, conn) = cfg.connect(NoTls).await.unwrap();
+        tokio::spawn(conn);
+        let r = c
+            .query_one("SELECT current_setting('application_name'), current_setting('search_path')", &[])
+            .await
+            .unwrap();
+        assert_eq!(r.get::<_, String>(0), "explicit");
+        assert_eq!(r.get::<_, String>(1), "x");
+    });
+    s.engine.shutdown();
+}

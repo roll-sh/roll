@@ -6474,6 +6474,8 @@ fn type_lengths(t: &DataType) -> (Value, Value, Value) {
     match t {
         DataType::Varchar(m) | DataType::Bpchar(m) if *m >= 4 => (i4(*m as i64 - 4), N, N),
         DataType::Bpchar(_) => (N, N, N),
+        // (_pg_char_max_length: bit and varbit's typmod is the length.)
+        DataType::Bit(m) | DataType::Varbit(m) if *m >= 0 => (i4(*m as i64), N, N),
         DataType::Int2 => (N, i4(16), i4(0)),
         DataType::Int4 => (N, i4(32), i4(0)),
         DataType::Int8 => (N, i4(64), i4(0)),

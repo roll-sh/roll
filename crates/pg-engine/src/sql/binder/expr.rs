@@ -1423,7 +1423,35 @@ impl Binder<'_, '_> {
                 None => Ok(out),
             };
         }
+        // ARRAY[...]::oidvector / int2vector: the elements to oid / int2 (transformArrayExpr
+        // takes the vector's element type), the array the vector.
+        if let (Some(NodeEnum::AArrayExpr(a)), DataType::Int2Vector | DataType::OidVector) =
+            (inner(arg), &ty)
+        {
+            let elem = if ty == DataType::OidVector { DataType::Oid } else { DataType::Int2 };
+            let e = self.bind_array_expr(a, Some(&elem))?;
+            let e = self
+                .cast_explicit(e, &DataType::array_of(elem))
+                .map_err(|e| with_pos(e, tc.location))?;
+            return Ok(Expr::Relabel(Box::new(e), ty));
+        }
         let e = self.bind_expr(arg)?;
+        // coerce_type: an unknown NULL cast to anyarray / anyrange / ... is a constant of that
+        // pseudo-type (anyelement and the other "any" types leave it unknown).
+        if matches!(e, Expr::Const(Value::Null, DataType::Unknown))
+            && matches!(
+                ty,
+                DataType::AnyArray
+                    | DataType::AnyRange
+                    | DataType::AnyMultirange
+                    | DataType::AnyEnum
+                    | DataType::AnyCompatibleArray
+                    | DataType::AnyCompatibleRange
+                    | DataType::AnyCompatibleMultirange
+            )
+        {
+            return Ok(Expr::Const(Value::Null, ty));
+        }
         if let (Expr::Param(i, DataType::Unknown), Some(d)) = (&e, domain) {
             self.param_domains.push((*i, d));
         }

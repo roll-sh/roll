@@ -624,6 +624,15 @@ impl Ddl<'_, '_> {
         {
             self.cat.put_table(t.clone());
         }
+        // (So are the serial columns' sequences, which transformColumnDefinition creates
+        // before the table: a default may name one, nextval('t_id_seq').)
+        if !defaults.is_empty() {
+            for sq in &seqs {
+                if !self.cat.sequences.contains_key(&sq.oid) {
+                    self.cat.put_sequence(sq.clone());
+                }
+            }
+        }
         let mut cook: Vec<(usize, Option<(pb::Node, DataType)>, Option<pb::Node>, String)> =
             Vec::new();
         for (name, raw) in deferred {

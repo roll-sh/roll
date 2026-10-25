@@ -1958,6 +1958,13 @@ impl<'b, 'a> Binder<'b, 'a> {
         column: &str,
     ) -> Result<Expr> {
         let col = column.to_string();
+        // A parameter the assignment types gets the column's domain (ParameterDescription
+        // names it: transformAssignedExpr coerces to the domain).
+        if let (Expr::Param(i, DataType::Unknown), Some(d)) = (&e, to_domain)
+            && !self.param_domains.iter().any(|(j, _)| j == i)
+        {
+            self.param_domains.push((*i, d));
+        }
         // (format_type_be: without typmods.)
         let shown = |b: &Self, t: &DataType, d: Option<u32>| match d {
             Some(d) => b.cat.format_type(t, Some(d), &b.ctx.search_path),

@@ -569,8 +569,21 @@ fn pg_get_serial_sequence(a: &[Value], c: &FnCtx) -> Result<Value> {
         [s, n] => (Some(s.as_str()), n.as_str()),
         _ => bail!(INVALID_NAME, "improper relation name"),
     };
-    let Some(Relation::Table(t)) = cat.find(schema, name, &c.exec.search_path) else {
-        return Err(crate::catalog::no_such_relation(schema, name));
+    let t = match cat.find(schema, name, &c.exec.search_path) {
+        Some(Relation::Table(t)) => t,
+        // A view's or materialized view's columns own no sequence (get_attnum, then NULL).
+        Some(Relation::View(v)) => {
+            let col = text_arg(&a[1]);
+            if !v.columns.iter().any(|(n, _)| n == col) {
+                bail!(
+                    UNDEFINED_COLUMN,
+                    "column \"{col}\" of relation \"{}\" does not exist",
+                    v.name
+                );
+            }
+            return Ok(Value::Null);
+        }
+        _ => return Err(crate::catalog::no_such_relation(schema, name)),
     };
     let col = text_arg(&a[1]);
     let (idx, column) = t.column(col)?;
@@ -3507,7 +3520,27 @@ pub(super) fn pg_stat_get_progress_info(a: &[Value], c: &FnCtx) -> Result<super:
 }
 
 fn pg_get_keywords(_: &[Value], _: &FnCtx) -> Result<super::SrfIter> {
-    Ok(Box::new(std::iter::empty()))
+    // PostgreSQL 18.6's kwlist.h: word, category, whether it can be a bare column label.
+    static KEYWORDS: &str = include_str!("keywords.tsv");
+    let rows = KEYWORDS.lines().filter_map(|l| {
+        let mut f = l.split('\t');
+        let (word, cat, bare) = (f.next()?, f.next()?, f.next()? == "true");
+        let catdesc = match cat {
+            "U" => "unreserved",
+            "C" => "unreserved (cannot be function or type name)",
+            "T" => "reserved (can be function or type name)",
+            _ => "reserved",
+        };
+        let baredesc = if bare { "can be bare label" } else { "requires AS" };
+        Some(Ok(vec![
+            Value::Text(word.into()),
+            Value::Char(cat.as_bytes()[0]),
+            Value::Bool(bare),
+            Value::Text(catdesc.into()),
+            Value::Text(baredesc.into()),
+        ]))
+    });
+    Ok(Box::new(rows))
 }
 
 /// The system catalogs' foreign-key relationships (`system_fk_info.h`, generated from the

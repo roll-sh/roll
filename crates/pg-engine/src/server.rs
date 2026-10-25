@@ -639,11 +639,17 @@ fn handle(
     }
 
     // Settings from the startup packet: plain parameters and `options=-c name=value`.
+    // (process_startup_options: the `options` switches first, then the other parameters,
+    // which win over them.)
     let mut settings: Vec<(String, String)> = Vec::new();
     for (k, v) in &params {
+        if k == "options" {
+            settings.extend(parse_options(v));
+        }
+    }
+    for (k, v) in &params {
         match k.as_str() {
-            "user" | "database" | "replication" => {}
-            "options" => settings.extend(parse_options(v)),
+            "user" | "database" | "replication" | "options" => {}
             k if k.starts_with("_pq_.") => {}
             k => settings.push((k.to_string(), v.clone())),
         }

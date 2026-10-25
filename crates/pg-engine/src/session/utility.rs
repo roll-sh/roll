@@ -740,6 +740,23 @@ impl Session {
             }),
         };
         if !p.is_query() {
+            // ExplainOneUtility: EXPLAIN EXECUTE of a prepared utility statement (a CALL
+            // prepared over the protocol, as sqlx's query! macro explains it).
+            if prepared.is_some() && ctas.is_none() {
+                let (ty, out) = match o.format {
+                    Format::Text => (DataType::Text, Value::Text("Utility statements have no plan structure".into())),
+                    Format::Json => (DataType::Json, Value::Json("[\n  \"Utility Statement\"\n]".into())),
+                    Format::Yaml => (DataType::Text, Value::Text("- \"Utility Statement\"".into())),
+                    Format::Xml => (
+                        DataType::Xml,
+                        Value::Text(
+                            "<explain xmlns=\"http://www.postgresql.org/2009/explain\">\n  <Utility-Statement />\n</explain>"
+                                .into(),
+                        ),
+                    ),
+                };
+                return Ok(QueryResult::rows(vec![OutCol::new("QUERY PLAN", ty)], vec![vec![out]], "EXPLAIN"));
+            }
             return Err(crate::error::unsupported("EXPLAIN of this statement"));
         }
         if ctas.is_some() && o.analyze {

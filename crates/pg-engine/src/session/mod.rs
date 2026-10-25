@@ -1703,8 +1703,23 @@ impl Session {
                     })
                 }
                 Some(NodeEnum::VariableShowStmt(s)) => Ok(Some(self.show_cols(&s.name))),
-                Some(NodeEnum::ExplainStmt(_)) => {
-                    Ok(Some(vec![OutCol::new("QUERY PLAN", DataType::Text)]))
+                Some(NodeEnum::ExplainStmt(e)) => {
+                    // (ExplainResultDesc: json for FORMAT JSON, xml for XML, else text.)
+                    let format = e.options.iter().find_map(|o| match inner(o) {
+                        Some(NodeEnum::DefElem(d)) if d.defname == "format" => {
+                            match d.arg.as_deref().and_then(inner) {
+                                Some(NodeEnum::String(s)) => Some(s.sval.to_ascii_lowercase()),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    });
+                    let ty = match format.as_deref() {
+                        Some("json") => DataType::Json,
+                        Some("xml") => DataType::Xml,
+                        _ => DataType::Text,
+                    };
+                    Ok(Some(vec![OutCol::new("QUERY PLAN", ty)]))
                 }
                 Some(NodeEnum::CallStmt(c)) => {
                     // A procedure with output parameters returns them as one row.
@@ -2027,6 +2042,25 @@ impl Session {
                 .hint("Declare it with SCROLL option to enable backward scan."));
             }
         };
+        // A SELECT an Execute suspended: its executor makes the rows FETCH / MOVE pass.
+        if self.portals[&s.portalname].lazy.is_some() && count > 0 {
+            let mut pt = self.portals.remove(&s.portalname).unwrap();
+            let lazy = pt.lazy.take().unwrap();
+            let n = if count >= i32::MAX as i64 { 0 } else { count as usize };
+            let r = self.execute_suspended(&mut pt, lazy, n);
+            let cols = pt.cols.clone().unwrap_or_default();
+            self.portals.insert(s.portalname.clone(), pt);
+            let rows = match r? {
+                (Outcome::Done(r), _) => r.rows,
+                _ => Vec::new(),
+            };
+            return Ok(Some(if s.ismove {
+                QueryResult::command(format!("MOVE {}", rows.len()))
+            } else {
+                let tag = format!("FETCH {}", rows.len());
+                QueryResult::rows(cols, rows, tag)
+            }));
+        }
         let not_started = self.portals[&s.portalname].pending.is_none();
         if not_started {
             // Run it, keeping every row in the portal for this FETCH and what follows.
@@ -2052,9 +2086,6 @@ impl Session {
         }))
     }
 
-    /// Execute on a cursor DECLARE made (cursors are portals, in one namespace with the
-    /// protocol's): the next `max_rows` rows (all for 0), tagged as its SELECT; suspended
-    /// unless it ran out of rows.
     /// Execute on a portal whose SELECT was suspended: its next `max_rows` rows (0: the rest).
     fn execute_suspended(
         &mut self,
@@ -2089,6 +2120,9 @@ impl Session {
         Ok((Outcome::Done(QueryResult { cols: pt.cols.clone(), rows, tag }), more))
     }
 
+    /// Execute on a cursor DECLARE made (cursors are portals, in one namespace with the
+    /// protocol's): the next `max_rows` rows (all for 0), tagged as its SELECT; suspended
+    /// unless it ran out of rows.
     fn execute_cursor_portal(&mut self, name: &str, max_rows: usize) -> Result<(Outcome, bool)> {
         if self.status == TxnStatus::Failed {
             return Err(Error::new(

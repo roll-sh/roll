@@ -443,6 +443,12 @@ pub struct CopyInParsed {
     ended: bool,
     /// Binary: the header was read.
     header: bool,
+    /// The target positions of NOT NULL columns, checked as rows are read (ExecConstraints
+    /// runs on each row before it is buffered); None until known, empty when that can't
+    /// be done early (BEFORE ROW triggers or a WHERE may change or drop the row).
+    not_null: Option<Vec<usize>>,
+    /// A NOT NULL column COPY doesn't give, with no default: every row fails.
+    not_null_missing: bool,
 }
 
 /// Where the complete records at the start of COPY data end (0: none yet). A text record
@@ -1044,12 +1050,76 @@ impl Session {
         data: &[u8],
         last: bool,
     ) -> Result<usize> {
+        let before = st.rows.len();
         let r = self.copy_in_parse(c, st, data, last);
         if let Err(e) = &r {
             self.on_error();
             self.pgss_copy_done(&Err(e.clone()));
+            return r;
+        }
+        // A row a NOT NULL column refuses fails the COPY as it is read: the rows up to it
+        // go in, and its own error is the one inserting them raises.
+        if !last && let Some(k) = self.copy_null_violation(c, st, before) {
+            st.rows.truncate(k + 1);
+            st.lines.truncate(k + 1);
+            let r = self.copy_in_insert(c, std::mem::take(st));
+            self.on_error();
+            let e = match r {
+                Err(e) => e,
+                Ok(_) => crate::error::internal("COPY row with a null in a NOT NULL column went in"),
+            };
+            self.pgss_copy_done(&Err(e.clone()));
+            return Err(e);
         }
         r
+    }
+
+    /// The first row from `from` on with a NULL a NOT NULL column refuses.
+    fn copy_null_violation(&mut self, c: &CopyIn, st: &mut CopyInParsed, from: usize) -> Option<usize> {
+        if st.not_null.is_none() {
+            let t = c.table.clone();
+            let early = c.filter.is_none()
+                && t.partkey.is_none()
+                && self
+                    .with_ctx(&[], |ctx| {
+                        let rules = crate::sql::binder::table_rules(&t, ctx)?;
+                        Ok(!crate::exec::trigger::any(
+                            &rules.triggers,
+                            true,
+                            true,
+                            crate::catalog::trigger_type::INSERT,
+                            ctx,
+                        ))
+                    })
+                    .unwrap_or(false);
+            let mut cols = Vec::new();
+            if early {
+                for (k, &col) in c.target.iter().enumerate() {
+                    let tc = &t.columns[col];
+                    if tc.not_null && tc.domain.is_none() {
+                        cols.push(k);
+                    }
+                }
+                st.not_null_missing = t.columns.iter().enumerate().any(|(i, tc)| {
+                    tc.not_null
+                        && !tc.dropped
+                        && !c.target.contains(&i)
+                        && tc.default.is_none()
+                        && tc.identity.is_none()
+                        && tc.generated.is_none()
+                        && tc.domain.is_none()
+                });
+            }
+            st.not_null = Some(cols);
+        }
+        if st.not_null_missing && st.rows.len() > from {
+            return Some(from);
+        }
+        let cols = st.not_null.as_ref()?;
+        (from..st.rows.len()).find(|&r| {
+            cols.iter()
+                .any(|&k| matches!(st.rows[r].get(k), Some(Expr::Const(Value::Null, _))))
+        })
     }
 
     /// The end of COPY FROM STDIN's data (after `copy_in_feed` took all of it): the rows go in.

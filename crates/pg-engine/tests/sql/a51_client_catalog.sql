@@ -53,3 +53,36 @@ DO $$BEGIN EXECUTE format('SELECT %s', (SELECT string_agg('1', ',') FROM generat
 -- The largest numeric: 131072 digits before the point, 16383 after (its binary form has
 -- more base-10000 digits than an int2 counts).
 SELECT md5(x::text), scale(x) FROM (SELECT ('1' || repeat('0', 131070) || '.' || repeat('0', 16382) || '1')::numeric AS x) s;
+
+-- pg_get_keywords: kwlist.h's words (pgjdbc's getSQLKeywords reads them).
+SELECT count(*), count(*) FILTER (WHERE barelabel), count(DISTINCT catcode) FROM pg_get_keywords();
+SELECT * FROM pg_get_keywords() WHERE word IN ('abs', 'between', 'authorization', 'select', 'zone') ORDER BY 1;
+SELECT string_agg(word, ',') IS NULL FROM pg_get_keywords() WHERE word <> ALL ('{a,abs,absolute,action}'::text[]);
+
+-- pg_get_serial_sequence of a view's / materialized view's column: NULL (SQLAlchemy's
+-- column reflection asks it of every relation).
+CREATE TABLE a51_t9 (id serial, x int);
+CREATE MATERIALIZED VIEW a51_mv9 AS SELECT * FROM a51_t9;
+CREATE VIEW a51_v9 AS SELECT * FROM a51_t9;
+SELECT pg_get_serial_sequence('a51_t9', 'id'), pg_get_serial_sequence('a51_mv9', 'id'), pg_get_serial_sequence('a51_v9', 'id');
+SELECT pg_get_serial_sequence('a51_mv9', 'nope');
+DROP VIEW a51_v9;
+DROP MATERIALIZED VIEW a51_mv9;
+DROP TABLE a51_t9;
+
+-- A default naming a serial column's sequence made by the same CREATE TABLE.
+CREATE TABLE a51_s (id serial PRIMARY KEY, x int DEFAULT nextval('a51_s_id_seq'));
+INSERT INTO a51_s DEFAULT VALUES;
+SELECT * FROM a51_s;
+DROP TABLE a51_s;
+
+-- Arrays to oidvector / int2vector; NULL cast to a polymorphic pseudo-type.
+SELECT ARRAY['uuid'::regtype]::oidvector, ARRAY[1, 2]::int2vector, ARRAY[1::int2]::int2vector;
+SELECT '{3,4}'::int[]::oidvector;
+SELECT '{3,4}'::oid[]::oidvector;
+SELECT pg_typeof(NULL::anyarray), pg_typeof(NULL::anyrange), pg_typeof(NULL::anyelement);
+
+-- information_schema.columns: bit and varbit lengths.
+CREATE TABLE a51_bt (b bit(4), vb varbit(8), v varbit);
+SELECT column_name, data_type, character_maximum_length FROM information_schema.columns WHERE table_name = 'a51_bt' ORDER BY ordinal_position;
+DROP TABLE a51_bt;
