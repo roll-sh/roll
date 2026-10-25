@@ -197,10 +197,18 @@ async fn run() -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind(args.api).await?;
         info!(addr = %args.api, "roll code API listening");
         let router = node.router(code_control::api::router(node.code.clone()));
+        let (close, closed) = tokio::sync::oneshot::channel::<()>();
+        let api = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .with_graceful_shutdown(async move {
+                let _ = closed.await;
+            })
+            .into_future();
+        tokio::pin!(api);
         tokio::select! {
-            r = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()) => r?,
-            _ = node.shutdown(&args) => info!("shut down"),
+            r = &mut api => r?,
+            grace = node.shutdown(&args) => finish_requests(api, close, grace).await?,
         }
+        info!("shut down");
         return Ok(());
     }
 
@@ -347,13 +355,36 @@ impl CodeNode {
     }
 
     /// Wait for Ctrl-C or SIGTERM; then, in a cluster, hand every repo this node owns to the
-    /// others (the API keeps serving meanwhile) before the process exits.
-    async fn shutdown(&self, args: &Args) {
+    /// others (the API keeps serving meanwhile) before the process exits. Returns how long the
+    /// API may then take to finish the requests it still has in flight: what's left of the drain
+    /// timeout, between 5 and 10 s (an open event stream holds the API until then).
+    async fn shutdown(&self, args: &Args) -> std::time::Duration {
         shutdown_signal().await;
+        let started = std::time::Instant::now();
         if self.code.cluster().is_some() {
             info!(timeout_s = args.code.code_drain_timeout_s, "roll code: draining this node");
             self.code.drain(args.code.drain_timeout()).await;
             info!("roll code: drained");
+        }
+        let left = args.code.drain_timeout().saturating_sub(started.elapsed());
+        left.clamp(std::time::Duration::from_secs(5), std::time::Duration::from_secs(10))
+    }
+}
+
+/// Stop taking connections and let the requests in flight finish, for up to `grace`: requests
+/// that passed through this node to a repo's owner on another node (forwarded requests, clones,
+/// pushes) would otherwise be cut when the process exits. Event streams don't end by themselves,
+/// hence the bound.
+async fn finish_requests<F>(api: std::pin::Pin<&mut F>, close: tokio::sync::oneshot::Sender<()>, grace: std::time::Duration) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = std::io::Result<()>>,
+{
+    let _ = close.send(());
+    match tokio::time::timeout(grace, api).await {
+        Ok(r) => r,
+        Err(_) => {
+            tracing::warn!(grace_s = grace.as_secs(), "requests still in flight after the grace period; closing them");
+            Ok(())
         }
     }
 }

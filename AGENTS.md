@@ -237,6 +237,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - dashboard components: `apps/dashboard/src/**/*.test.tsx` (vitest, Testing Library, jsdom;
       helpers in `src/test/`)
     - HTTP statuses and the auth matrix for every route: `code-control/tests/routes.rs`
+    - the cluster in one process: `code-control/tests/cluster.rs`; as real `rolld` containers
+      in Docker (kills, rolling restarts, Postgres restarts under load):
+      `rolld/tests/code_cluster_e2e.rs` (`ROLL_E2E=1`; the image is `deploy/code/Dockerfile`)
     - event stream limits: `code-control/tests/streams.rs`
     - the cluster (several nodes in one process: routing, takeover, joining, draining):
       `code-control/tests/cluster.rs`

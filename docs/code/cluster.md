@@ -114,7 +114,11 @@ last 10 s and are renewed every 2 s with one statement per node (`UPDATE … WHE
   retry), waits for the ones in flight and for queue batches and reviews running under the
   repo's guard (up to 30 s), then expires its lease. A node shutting down (SIGTERM) fails its
   health check, drains every repo it owns the same way (`--code-drain-timeout`, 30 s) while it
-  keeps serving, and only then exits, so rolling upgrades don't wait for lease expiry.
+  keeps serving, and only then exits, so rolling upgrades don't wait for lease expiry. Before it
+  exits it closes its listener and lets the requests it's still serving finish (those it was
+  passing on to other nodes; for what's left of the drain timeout, between 5 and 10 s, after
+  which open event streams are cut), so a request that reached it is answered rather than cut.
+  Set the stop timeout above the drain timeout plus 10 s.
 
 ## A repo's work, on its owner
 
