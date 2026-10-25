@@ -538,8 +538,7 @@ impl DepthGuard {
         crate::stack::check()?;
         let d = DEPTH.with(|d| d.get());
         if d >= MAX_DEPTH {
-            return Err(Error::new(code::STATEMENT_TOO_COMPLEX, "stack depth limit exceeded")
-                .hint(crate::stack::depth_hint()));
+            return Err(crate::stack::depth_error());
         }
         DEPTH.with(|x| x.set(d + 1));
         Ok(DepthGuard)

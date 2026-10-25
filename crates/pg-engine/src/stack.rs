@@ -16,6 +16,13 @@ pub fn set_max_depth_kb(kb: i64) {
     SHOWN_KB.with(|k| k.set(kb));
 }
 
+/// Postgres's "stack depth limit exceeded", with its hint. Every place that refuses deeper
+/// recursion returns this one error, whichever limit it hit first (the thread's stack or a
+/// fixed depth): which one that is depends on frame sizes, so on the build.
+pub fn depth_error() -> Error {
+    Error::new(code::STATEMENT_TOO_COMPLEX, "stack depth limit exceeded").hint(depth_hint())
+}
+
 /// The hint of "stack depth limit exceeded".
 pub fn depth_hint() -> String {
     format!(
@@ -67,10 +74,7 @@ pub fn unused_range() -> Option<(usize, usize)> {
 pub fn check() -> Result<()> {
     let (base, limit) = BASE.with(|b| b.get());
     if base != 0 && base.abs_diff(here()) > limit {
-        return Err(
-            Error::new(code::STATEMENT_TOO_COMPLEX, "stack depth limit exceeded")
-                .hint(depth_hint()),
-        );
+        return Err(depth_error());
     }
     Ok(())
 }

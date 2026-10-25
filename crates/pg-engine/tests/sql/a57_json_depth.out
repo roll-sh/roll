@@ -1,0 +1,53 @@
+> SET max_stack_depth = '100kB'
+-- SET
+
+> SELECT repeat('[', 10000)::json
+ERROR 54001: stack depth limit exceeded
+HINT: Increase the configuration parameter "max_stack_depth" (currently 100kB), after ensuring the platform's stack depth limit is adequate.
+
+> SELECT repeat('{"a":', 10000)::json
+ERROR 54001: stack depth limit exceeded
+HINT: Increase the configuration parameter "max_stack_depth" (currently 100kB), after ensuring the platform's stack depth limit is adequate.
+
+> SELECT repeat('[', 10000)::jsonb
+ERROR 54001: stack depth limit exceeded
+HINT: Increase the configuration parameter "max_stack_depth" (currently 100kB), after ensuring the platform's stack depth limit is adequate.
+
+> SELECT repeat('{"a":', 10000)::jsonb
+ERROR 54001: stack depth limit exceeded
+HINT: Increase the configuration parameter "max_stack_depth" (currently 100kB), after ensuring the platform's stack depth limit is adequate.
+
+> SELECT repeat('[', 100000)::json
+ERROR 54001: stack depth limit exceeded
+HINT: Increase the configuration parameter "max_stack_depth" (currently 100kB), after ensuring the platform's stack depth limit is adequate.
+
+> SELECT repeat('[', 100000)::jsonb
+ERROR 54001: stack depth limit exceeded
+HINT: Increase the configuration parameter "max_stack_depth" (currently 100kB), after ensuring the platform's stack depth limit is adequate.
+
+> SELECT json_typeof(repeat('[', 500)::json)
+ERROR 22P02: invalid input syntax for type json
+DETAIL: The input string ended unexpectedly.
+CONTEXT: JSON data, line 1: ...[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[
+
+> RESET max_stack_depth
+-- RESET
+
+> SELECT repeat('[', 100000)::json
+ERROR 54001: stack depth limit exceeded
+HINT: Increase the configuration parameter "max_stack_depth" (currently 2048kB), after ensuring the platform's stack depth limit is adequate.
+
+> SELECT repeat('{"a":', 100000)::jsonb
+ERROR 54001: stack depth limit exceeded
+HINT: Increase the configuration parameter "max_stack_depth" (currently 2048kB), after ensuring the platform's stack depth limit is adequate.
+
+> SELECT length((repeat('[', 1000) || repeat(']', 1000))::jsonb::text)
+length:int4
+2000
+-- SELECT 1
+
+> SELECT length((repeat('[', 1000) || repeat(']', 1000))::json::text)
+length:int4
+2000
+-- SELECT 1
+

@@ -15,8 +15,16 @@ use std::time::Duration;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// `--version`: the build profile too, which the regress harness records with a run (a few
+/// limits depend on frame sizes, so on the profile).
+const VERSION: &str = if cfg!(debug_assertions) {
+    concat!(env!("CARGO_PKG_VERSION"), " (debug build)")
+} else {
+    concat!(env!("CARGO_PKG_VERSION"), " (release build)")
+};
+
 #[derive(Parser)]
-#[command(about = "roll's Postgres-compatible database server")]
+#[command(about = "roll's Postgres-compatible database server", version = VERSION)]
 struct Args {
     /// Data directory (one subdirectory per database).
     #[arg(long, default_value = ".roll/engine")]

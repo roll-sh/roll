@@ -55,6 +55,12 @@
 //!   `PGREGRESS_UPDATE_STATUS=1` when it isn't (a private run, or `PGREGRESS_REPORT_ONLY=1` over a
 //!   full run's saved outputs). A subset never does. `PGREGRESS_COMMIT`: the commit the report
 //!   names (default the checkout's HEAD, `+dirty` with uncommitted changes).
+//! - Every run of the main suite also lists, in `REPORT.md` ("Changes against the baseline run")
+//!   and on stderr, the units that differ now but matched in a baseline run and the other way
+//!   round: `PGREGRESS_BASELINE=<results.tsv>` (`none`: no comparison), by default the committed
+//!   `tests/regress/results.tsv`. Run info, `results.tsv` and the report name the engine's build
+//!   profile (`engine_build`, from `roll-engine --version`): debug and release builds once
+//!   differed in 4 units, so compare runs of one profile.
 //! - `PGREGRESS_KEEP=1`: keep the reference's database, roles and tablespaces (and the engine's
 //!   data directory, `$PGREGRESS_DIR/enginedata`) at the end, e.g. to dump the regression
 //!   database as `tests/pg_dump.rs` does.
@@ -1698,9 +1704,10 @@ fn write_run_info(cfg: &Config, engine_bin: &str, before: &BTreeSet<String>) {
         })
         .collect();
     let s = format!(
-        "commit={}\ndate={date}\nreference={}\nengine_bin={engine_bin}\nschedule={}\ntimeout={}\nreference_preexisting={}\n",
+        "commit={}\ndate={date}\nreference={}\nengine_bin={engine_bin}\nengine_build={}\nschedule={}\ntimeout={}\nreference_preexisting={}\n",
         commit.unwrap_or_else(|| "?".into()),
         cfg.container,
+        engine_build(engine_bin),
         if cfg.only.is_some() { "subset" } else { "full" },
         cfg.timeout,
         preexisting.join(" "),
@@ -1708,12 +1715,121 @@ fn write_run_info(cfg: &Config, engine_bin: &str, before: &BTreeSet<String>) {
     std::fs::write(cfg.out.join("run.txt"), s).unwrap();
 }
 
+/// The engine binary's build profile, `debug` or `release`, from `roll-engine --version`
+/// (`unknown` for binaries older than that). Runs of the two profiles may differ where a limit
+/// depends on frame sizes: release builds once lost 4 units (json / jsonb's "stack depth limit
+/// exceeded" HINT) that debug builds matched, so compare runs of one profile.
+fn engine_build(bin: &str) -> &'static str {
+    let out = Command::new(bin).arg("--version").output();
+    let v = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    if v.contains("(debug build)") {
+        "debug"
+    } else if v.contains("(release build)") {
+        "release"
+    } else {
+        "unknown"
+    }
+}
+
+/// Per file of a `results.tsv`: its units and its differing units.
+type BaselineFiles = BTreeMap<String, (usize, BTreeSet<usize>)>;
+
+/// A `results.tsv`'s header (`# key=value` lines) and its per-file units and differing units.
+fn read_results_tsv(text: &str) -> (BTreeMap<String, String>, BaselineFiles) {
+    let mut head = BTreeMap::new();
+    let mut files = BTreeMap::new();
+    for l in text.lines() {
+        if let Some(h) = l.strip_prefix("# ") {
+            if let Some((k, v)) = h.split_once('=') {
+                head.insert(k.to_string(), v.to_string());
+            }
+            continue;
+        }
+        let f: Vec<&str> = l.split('\t').collect();
+        let Some(units) = f.get(1).and_then(|u| u.parse().ok()) else { continue };
+        let differing = f
+            .get(7)
+            .unwrap_or(&"")
+            .split(',')
+            .filter_map(|d| d.split(':').next()?.parse().ok())
+            .collect();
+        files.insert(f[0].to_string(), (units, differing));
+    }
+    (head, files)
+}
+
+/// The units that changed against an earlier run of the main suite: `PGREGRESS_BASELINE` (a
+/// `results.tsv`; `none` for no comparison), by default the committed `tests/regress/results.tsv`
+/// (the last full run). Files in both runs only; a subset's files see fewer earlier files'
+/// catalogs than a full run's, so compare like for like. This is how a regression since the
+/// last full run shows up, and how a run that differs from another of the same commit (a
+/// reference set up differently, another build profile, a flaky unit) shows which units.
+fn baseline_changes(cfg: &Config, results: &[FileResult]) -> Option<String> {
+    if !cfg.src.ends_with("src/test/regress") {
+        return None;
+    }
+    let path = match std::env::var("PGREGRESS_BASELINE") {
+        Ok(p) if p == "none" => return None,
+        Ok(p) => PathBuf::from(p),
+        Err(_) => committed_report_dir().join("results.tsv"),
+    };
+    let (head, base) = read_results_tsv(&std::fs::read_to_string(&path).ok()?);
+    let run = read_run_info(cfg);
+    let mut rows = Vec::new();
+    let (mut newly, mut fixed) = (0, 0);
+    for r in results {
+        let Some((units, before)) = base.get(&r.name) else { continue };
+        let now: BTreeSet<usize> = r.gaps.iter().map(|g| g.unit).collect();
+        let list = |s: Vec<&usize>| s.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", ");
+        let worse: Vec<&usize> = now.difference(before).collect();
+        let better: Vec<&usize> = before.difference(&now).collect();
+        newly += worse.len();
+        fixed += better.len();
+        if !worse.is_empty() || !better.is_empty() || *units != r.units {
+            let count = if *units != r.units { format!("{units} → {}", r.units) } else { r.units.to_string() };
+            rows.push(format!("| {} | {count} | {} | {} |", r.name, list(worse), list(better)));
+        }
+    }
+    let field = |m: &BTreeMap<String, String>, k: &str| m.get(k).filter(|v| !v.is_empty()).cloned().unwrap_or("?".into());
+    let mut s = format!(
+        "## Changes against the baseline run\n\nBaseline: `{}` ({} run of commit `{}`, {} build, {}, reference `{}`). This run: commit `{}`, {} build. Newly differing units: {newly}; newly matching: {fixed}.\n",
+        path.display(),
+        field(&head, "schedule"),
+        field(&head, "commit"),
+        field(&head, "engine_build"),
+        field(&head, "date"),
+        field(&head, "reference"),
+        field(&run, "commit"),
+        field(&run, "engine_build"),
+    );
+    if field(&head, "engine_build") != field(&run, "engine_build") {
+        s.push_str("\nThe two runs' engines are builds of different (or unknown) profiles.\n");
+    }
+    if !rows.is_empty() {
+        s.push_str("\n| file | units | newly differing | newly matching |\n|---|---:|---|---|\n");
+        for r in rows {
+            s.push_str(&r);
+            s.push('\n');
+        }
+    }
+    s.push('\n');
+    Some(s)
+}
+
 fn read_run_info(cfg: &Config) -> BTreeMap<String, String> {
-    std::fs::read_to_string(cfg.out.join("run.txt"))
+    let mut run: BTreeMap<String, String> = std::fs::read_to_string(cfg.out.join("run.txt"))
         .unwrap_or_default()
         .lines()
         .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
-        .collect()
+        .collect();
+    // Outputs of a harness older than `engine_build`: ask the binary they name, if it's there.
+    if !run.contains_key("engine_build")
+        && let Some(bin) = run.get("engine_bin").filter(|b| Path::new(b).is_file())
+    {
+        let b = engine_build(bin).to_string();
+        run.insert("engine_build".into(), b);
+    }
+    run
 }
 
 /// Runs one file of the suite on both sides and saves the outputs under `cfg.out`.
@@ -2254,6 +2370,8 @@ fn write_report(cfg: &Config, results: &[FileResult]) {
 
     let units: usize = results.iter().map(|r| r.units).sum();
     let matched: usize = results.iter().map(|r| r.matched).sum();
+    // Read before this report replaces it (the committed `results.tsv` is the default).
+    let changes = baseline_changes(cfg, results);
     let all_gaps: Vec<(&FileResult, &Gap)> = results
         .iter()
         .flat_map(|r| r.gaps.iter().map(move |g| (r, g)))
@@ -2275,9 +2393,10 @@ fn write_report(cfg: &Config, results: &[FileResult]) {
     if !run.is_empty() {
         let _ = writeln!(
             s,
-            "Run: {} schedule, commit `{}`, {}, reference container `{}`, `PGREGRESS_TIMEOUT={}`; cluster-global objects the reference had before the run: {}.\n",
+            "Run: {} schedule, commit `{}` ({} build of the engine), {}, reference container `{}`, `PGREGRESS_TIMEOUT={}`; cluster-global objects the reference had before the run: {}.\n",
             info("schedule"),
             info("commit"),
+            info("engine_build"),
             info("date"),
             info("reference"),
             info("timeout"),
@@ -2487,6 +2606,11 @@ fn write_report(cfg: &Config, results: &[FileResult]) {
     s.push_str(&differing_units_table(results));
     s.push('\n');
 
+    if let Some(c) = &changes {
+        s.push_str(c);
+        eprint!("pg_regress: {c}");
+    }
+
     // Panics.
     let panics: Vec<(&str, &String)> = results
         .iter()
@@ -2606,7 +2730,7 @@ fn results_tsv(cfg: &Config, results: &[FileResult]) -> String {
     let units: usize = results.iter().map(|r| r.units).sum();
     let matched: usize = results.iter().map(|r| r.matched).sum();
     let mut s = String::new();
-    for k in ["schedule", "commit", "date", "reference", "timeout", "reference_preexisting"] {
+    for k in ["schedule", "commit", "date", "reference", "timeout", "reference_preexisting", "engine_build"] {
         let _ = writeln!(s, "# {k}={}", run.get(k).map(String::as_str).unwrap_or(""));
     }
     let _ = writeln!(
@@ -2657,8 +2781,9 @@ fn status_blocks(cfg: &Config, results: &[FileResult]) -> Vec<(&'static str, Str
     let mut sum = String::new();
     let _ = writeln!(
         sum,
-        "From the full run of commit `{}` ({}, reference `{}`; cluster-global objects it had before: {}), written by the harness (HANDOFF.md, \"Regression suite\"); don't edit these numbers by hand.\n",
+        "From the full run of commit `{}` ({} build of the engine, {}, reference `{}`; cluster-global objects it had before: {}), written by the harness (HANDOFF.md, \"Regression suite\"); don't edit these numbers by hand.\n",
         info("commit"),
+        info("engine_build"),
         info("date"),
         info("reference"),
         run.get("reference_preexisting").filter(|v| !v.is_empty()).map_or("none".into(), |v| format!("`{v}`")),

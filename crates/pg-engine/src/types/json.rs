@@ -469,10 +469,7 @@ impl<'a> Parser<'a> {
         crate::stack::check()?;
         self.depth += 1;
         if self.depth > 6400 {
-            return Err(Error::new(
-                code::STATEMENT_TOO_COMPLEX,
-                "stack depth limit exceeded",
-            ));
+            return Err(crate::stack::depth_error());
         }
         let v = match self.b[self.pos] {
             b'{' => {

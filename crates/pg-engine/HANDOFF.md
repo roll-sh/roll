@@ -340,6 +340,17 @@ max_prepared_transactions=5`): use a private container of the pinned image, not 
   `PGREGRESS_ENGINE_BIN`: the engine binary to run (default: the one cargo built), e.g. one
   copied aside with the test binary (`cargo test --no-run`), so the source can change while a
   run waits for a heavy slot.
+- **Compare runs of one build profile.** Every run records the engine's profile
+  (`engine_build`, from `roll-engine --version`) in its run info, `results.tsv` and report.
+  Round 18's release-build full runs measured 51,141 where debug builds of the same commits
+  measured 51,145: json 37/38 and jsonb 38/39 lost "stack depth limit exceeded"'s HINT, because
+  release frames are small enough that the json parser's fixed depth cap (6,400) came before
+  the stack check (agent 57 gave every depth limit the same error, `stack::depth_error`).
+- Every run of the main suite lists the units that changed against a baseline run in
+  REPORT.md ("Changes against the baseline run") and on stderr: by default the committed
+  `tests/regress/results.tsv` (the last full run), or `PGREGRESS_BASELINE=<results.tsv>`
+  (`none` for no comparison). That is the regression check after a full run, and how two runs
+  that should agree (two references, two profiles) show which units they disagree on.
 - The reference cluster is shared, and tablespaces are cluster-global: when another run already
   made test_setup's `regress_tblspace`, the reference's `CREATE TABLESPACE` fails; the harness
   drops just that `ERROR` line from the reference's output (the engine is compared with what a
