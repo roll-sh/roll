@@ -1170,6 +1170,175 @@ cross-checks: scoped walk against full, name lookups and per-relation rows again
 generation, row counts against generated rows, internal triggers by oid against the full
 list, view rules index against a scan.
 
+## Round 18 (agent 43): storage, bulk paths and memory
+
+"Where it is still slower" items 2, 3 and 7 (bulk work, index scans over many rows, the first
+`count(*)` of a big table). Same harness and settings; servers on cores 20–23, clients on
+24–27 (container `a43-pg`), on an even busier machine (load 25–40, other agents' builds and
+regression runs unpinned on the same cores): over the wire, two runs of the same binary
+differ by up to 2–3x, so the in-process numbers (no sockets) are the ones to compare for
+OLTP. **pg** is PostgreSQL 18.6; **before** the engine without this round's storage work
+(`44adff0` for OLTP and the TPC-H load; `7896c328` for the bulk rows, measured back to back
+with **after**); **after** this round. Bulk times are medians of 3 from a fresh
+data directory; OLTP is the median of 2–3 interleaved runs, 10–20 s each.
+
+### Bulk, 1M rows (seconds; peak memory of the whole run)
+
+| step | pg | before | after | after / pg |
+|---|---|---|---|---|
+| COPY in | 1.21 | 6.96 | 7.37 | 0.16x |
+| CREATE INDEX | 0.55 | 4.25 | 4.03 | 0.14x |
+| CREATE UNIQUE INDEX | 0.32 | 3.58 | 2.67 | 0.12x |
+| COPY out | 0.55 | 1.85 | 1.94 | 0.28x |
+| INSERT … SELECT | 1.04 | 3.67 | 2.97 | 0.35x |
+| UPDATE half | 6.93 | 4.47 | 3.88 | 1.79x |
+| DELETE a quarter | 0.33 | 3.36 | 2.81 | 0.12x |
+| VACUUM | 0.31 | 2.16 | 0.82 | 0.38x |
+| ANALYZE | 0.16 | 1.85 | 1.52 | 0.11x |
+| count(*) after | 0.05 | 0.14 | 0.17 | 0.29x |
+| peak memory | 331 MB | 2,725 MB | 2,297 MB | |
+
+(Earlier in the round, against `44adff0` on a busier machine, this batch also had COPY FROM
+reading its lines as the insert took them, 14.2 → 8.0 s and a 1.8 GB peak; that feed was
+dropped when `0a8ec4ee` made COPY FROM parse its data as it arrives, for the client suites:
+see item 6.)
+
+### TPC-H SF1 load (COPY in 100k-row chunks, keys and indexes, VACUUM ANALYZE)
+
+| | before | after |
+|---|---|---|
+| peak memory | > 14 GB (stopped by the run's 14 GB cap in the index phase; 18.1 GB in round 17) | 4.8 GB |
+| COPY / keys and indexes / VACUUM ANALYZE (s) | 202 / — / — | 163 / 150 / 27 |
+| first `count(*)` of lineitem after opening (in-process) | 37–51 s (round 17) | 6.6–18 s (5.7 s the second time) |
+| on disk | 666 MB | 666 MB |
+
+PostgreSQL's peak for the same load was 1.2 GB (round 17).
+
+### OLTP, in-process (TPS, 1M-row table; median of 2 interleaved runs)
+
+| case | clients | before | after | after / before |
+|---|---|---|---|---|
+| point select (prepared) | 1 | 46,580 | 58,440 | 1.25x |
+| range scan, 100 rows | 1 | 1,890 | 2,210 | 1.17x |
+| secondary-index lookup | 1 | 6,505 | 9,325 | 1.43x |
+| point select (prepared) | 8 | 214,150 | 224,160 | 1.05x |
+| range scan, 100 rows | 8 | 10,300 | 12,925 | 1.25x |
+| secondary-index lookup | 8 | 45,470 | 60,100 | 1.32x |
+
+Over the wire the same cases came out within the noise (8-client secondary lookups: 7,097
+before, 8,048 after, medians of 3; range scans 2,627 / 2,658), the rest of the OLTP mix too
+(inserts and updates at 8 clients ran from 4,181 to 16,527 TPS in two runs of one binary).
+
+### What changed
+
+1. **SST blocks decoded compactly** (`storage/sst.rs` `Block`): a block was a `Vec` of
+   (key `Vec`, value `Bytes`) pairs, two allocations an entry and about three times the bytes
+   the block cache counted; it is now the decompressed bytes, every full key laid end to end
+   and a 12-byte offset entry per key (three allocations a block), and the cache counts what
+   it holds. The merging cursors borrow the entry at their head and copy only what a scan
+   returns; compaction copies nothing.
+2. **Batched heap fetches for index scans** (`exec/scan.rs` `next_indexed`, `fetch_rows`;
+   `Txn::get_many_snap`; `Store::get_versions`): an index scan reads its entries a batch ahead
+   (4 at first, doubling to 128, so a LIMIT reads little more than it needs) and fetches their
+   rows together: one view of the store's sources, sorted keys, each SST block read once for
+   all the keys in it. The rows are read at the statement's snapshot, so reading ahead reads
+   what reading one at a time would; nothing a client can see happens on fetching (counts,
+   pruning, locks and EXPLAIN ANALYZE's heap fetches stay where the rows are returned).
+   Bitmap heap scans fetch the same way.
+3. **Index-only scans from the index entries** (`index_only_columns`, `index_row`,
+   `storage::keys::decode_index_value`): the engine's index entries are versions of their own,
+   written in the commit that writes the row and deleted with it, so an entry visible to a
+   snapshot points at a row version visible to it; that is the visibility map's job here,
+   with every page all-visible. A btree index-only scan over plain columns whose key encoding
+   gives the value back exactly (integers, bool, date, timestamps, uuid, text types; not
+   numeric or floats, whose keys drop scale or the sign of zero) builds its rows from the
+   entries without reading the table, for tables too big to model (whose equal keys have no
+   modelled heap order either) that never stored a compressed or out-of-line value. EXPLAIN
+   ANALYZE's "Heap Fetches" still comes from the heap model, as before. A `count(*)` of
+   lineitem's 6M rows by index-only scan: 5.7 s, from 37–51 s.
+4. **Big commits ingested as SSTs** (`Store::ingest_locked`): a commit of more than a quarter
+   of a memtable (8 MB by default) is written as an L0 SST of its own (fsynced, then in the
+   manifest, then visible: the same durability as a WAL record's fsync) instead of one WAL
+   record built in memory and a memtable copy of every entry. The memtable is frozen first,
+   so every earlier commit is in an older source; the SST waits among the frozen memtables
+   until those older than it are flushed. After a crash, the WAL's commits are replayed in
+   groups between the ingested commits' timestamps (`Store::open`), so L0 keeps one range of
+   commit timestamps per file, in order (it is kept ordered by timestamp now, not by insertion).
+5. **Partial compaction** (`Store::compact`): L0 → L1 rewrites only the L1 files whose user
+   keys overlap L0's, not the whole database (a bulk load into a new table rewrites nothing
+   else).
+6. **COPY FROM (not landed).** A feed reading COPY FROM's lines as the insert took them (no
+   record, expression or line copies of the whole input: about ten times the input in
+   memory) was dropped when `0a8ec4ee` made COPY FROM parse records as the data arrives, so
+   a bad line fails while the client is still sending (pgx). Its rows are still parsed whole
+   into expressions before they go in: "Where it is still slower" item 2.
+7. **CREATE INDEX, VACUUM, ANALYZE and ALTER TABLE's checks stream the table**
+   (`Ddl::scan_rows`, `measure_rows`): they decoded the whole table into memory (several
+   times per statement: VACUUM ANALYZE measured, sampled and counted it apart). Now one pass
+   keeps only what each needs: heap tuple sizes when the table is too big to model, each
+   index's (key, size) when its pages aren't modelled, row counts without decoding.
+   ANALYZE's reservoir is filled as rows are read (the same picks from the same seed, so
+   pg_stats is unchanged). A unique index build keeps a 64-bit hash of each key and the
+   first row's data key (`UniqueKeys`: ~45 bytes a row, from ~170), re-reading the row on a
+   hash match. CHECK, NOT NULL and foreign key validation, and duplicate detection, stream
+   too.
+8. **Only GIN and GiST indexes keep their build's row set** (`sizing::models_build`): every
+   index build kept a set of all the table's row keys for the GIN pending-list model, and
+   every VACUUM added another set of the keys it found new: for a big table, hundreds of MB
+   per index, never freed.
+9. **Compaction's reads stay out of the block cache** (`SstReader::block_with`,
+   `Cursor::level_uncached`): every block a compaction read went into the cache, which a
+   load's compactions filled with blocks nobody reads again (the TPC-H load's COPY phase
+   peaked at 2.5 GB, now 1.9).
+10. **An index build's entries and a commit's undo log** (`Txn::put_new_index_entry`,
+    `Txn::commit`): a new index's entries go into the write buffer without an undo record
+    when no savepoint is open (no earlier snapshot can read an index that didn't exist, and
+    nothing can roll back to before it but the whole transaction); the undo log is freed
+    before a commit copies the buffer. The TPC-H load's peak (lineitem's primary key) 5.3 →
+    4.8 GB.
+11. **Size models where clients see them** (`sizing::btree_build_blocks`, `heapsim::placed`):
+    an index measured without its model (CREATE INDEX, ANALYZE) of a table small enough to
+    model is sized by the model's own sorted build, not a rougher estimate (a 300k-row date
+    index 329 → 255 pages, PostgreSQL's 255: the planner reads relpages); a heap laid out
+    again when a database reopens puts its rows back at their stored TIDs (2,250 → 2,521
+    pages after a restart, PostgreSQL's 2,521); `pg_relation_size` of an index on a table too
+    big to model is its measured pages, not 1. Bigger tables keep the cheap estimate (the
+    sorted build cost CREATE INDEX a third more over 1M rows): accepted internal
+    differences, HANDOFF.
+
+### Durability, crash recovery and the storage format
+
+- No new keys or value layouts: existing data opens unchanged, and `Engine::upgrade_storage`,
+  `tests/storage_format.rs` and `storage_upgrade_batches.rs` are unaffected.
+- New in the files: SSTs written by ingested commits (the same SST format, an L0 file holding
+  one commit's timestamp) and L0 kept in timestamp order in the MANIFEST. A database closed
+  cleanly opens in older binaries; after a crash, it must be opened once by this version
+  (whose recovery replays the WAL around ingested commits and flushes everything) before an
+  older binary opens it: an older binary would replay the unflushed commits on top of an
+  ingested one, and it can't read the zero-filled WAL tails of round 17 either (an older
+  binary's replay takes the zeros for a record). That is the documented downgrade rule now:
+  **downgrade only after a clean shutdown, or after this version has recovered the database.**
+- Tests: `storage::tests::ingested_commits_and_crash_recovery` (random small and big commits,
+  flushes, compactions and crashes, the store dropped unclosed with background work off so
+  it is left as a crash leaves it, including an ingested commit over older ones only in the
+  WAL; every scan, reverse scan, point and batched read at the latest and every pinned
+  snapshot against a model of every version), `compaction_leaves_other_files`,
+  `storage::keys::tests::index_values_decode`, `tests/big_tables.rs` (index-only scans from
+  entries against the same queries over the rows, with uncommitted writes of the session and
+  of another, and a cursor's snapshot).
+
+### Verification (round 18, agent 43)
+
+- `cargo test -p pg-engine` (all of it) and `cargo clippy -p pg-engine --all-targets` (no new
+  warnings), before and after the rebase.
+- The regression suite in full with its own reference container (`a43-ref`): 51,130 / 51,150
+  at round 17's end (`ca0c077`) and with this batch before the rebase, identical per file;
+  after the rebases, the base and this round on it identical per file each time: 51,138
+  (`44adff0`, `3461c02`, `281308c`), 51,140 (`9e1e0a7`, `bae6c68`), 51,141 (`85ec54f`),
+  51,143 (`f3fc889`), 51,144 (`93f1876`, `6be2da44`), 51,148 (`7896c328`); with item 11, on
+  `0a8ec4ee` (see the commit).
+- `difftest smoke` passes before and after the rebase.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:
@@ -1184,21 +1353,24 @@ In rough order of what it costs users:
    projection mask passed down to scans), a batch (vector) interface between scans, filters,
    projections and aggregates with typed column arrays, `i128` / scaled-integer numeric
    accumulators, and running a plan's Gather over worker threads.
-2. **Bulk loads, CREATE INDEX, DELETE, VACUUM, ANALYZE (5–25x slower; much more memory).** A
-   statement's writes are buffered whole in the transaction (`Txn::writes`, a `BTreeMap` with
-   a journal entry per write) and applied at commit; CREATE INDEX, VACUUM and ANALYZE read the
-   whole table into `Vec<Row>`; the heap / btree models are updated row by row. Peak memory
-   follows (9.6 GB for the 1M-row bulk run, 18 GB for the TPC-H load). The fixes: spill large
-   write buffers to a sorted run in the store (or write them as an SST ingested at commit),
-   build indexes from a sorted stream, measure sizes from samples.
-3. **Index scans over many rows (range scans, secondary lookups, index-only scans: 0.2–0.4x
-   at 8 clients; a `count(*)` of lineitem's 6M rows by index-only scan, 47 s).** Each index
-   entry fetches its row with a point read through every LSM source (memtable, frozen
-   memtables, each L0 file with its bloom filter, L1), a block-cache lookup under a shard
-   lock and a binary search in the decoded block. Index-only scans fetch the row too (the
-   engine has no visibility map to skip it). The fixes: batch an index scan's fetches (sort
-   a run of row keys, read them with one merging cursor, emit in index order), and answer
-   index-only scans from the index entries when the plan reads only index columns.
+2. **Bulk loads, CREATE INDEX, DELETE, VACUUM, ANALYZE (3–10x slower; 4–7x PostgreSQL's
+   memory).** Round 18 (agent 43) streamed the index builds, VACUUM, ANALYZE and ALTER
+   TABLE's checks, and ingests big commits as SSTs (the TPC-H load's peak 18 GB → 4.8 GB, the
+   1M bulk run's 2.7 → 2.3 GB). What is left: COPY FROM parses all of its rows into
+   expressions before the first goes in (about ten times the input; reading them as the
+   insert takes them, as CopyFrom does, while still failing early on a bad line, is the
+   fix); a transaction's writes are still buffered whole until commit (`Txn::writes`, a
+   `BTreeMap` with a journal entry per write: about 230 bytes per written key, 140 for an
+   index build's, 0.9 GB for lineitem's primary key; spilling a big buffer to sorted runs,
+   merged into the ingested SST at commit, would bound it); per-row executor and heap-model
+   work dominates the time (COPY spends ~7 µs a row against PostgreSQL's ~1.2); an index
+   build inserts its entries into that buffer one at a time instead of writing a sorted run.
+3. **Index scans over many rows (range scans, secondary lookups: 0.2–0.4x at 8 clients over
+   the wire in round 17).** Round 18 (agent 43) batched an index scan's heap fetches and
+   answers index-only scans of big tables from the entries (1.2–1.4x in-process). What is
+   left is per row: each fetched row is decoded into a `Vec<Value>` and goes through the
+   scan node's run and statistics bookkeeping; over the wire the protocol encoding adds as
+   much again.
 4. **DDL at scale.** Since round 18's agent 44 the catalog is stored per object, and since
    agent 49 its maps are structurally shared with secondary indexes kept on mutation ("Catalog
    and DDL at scale" above): at 10,000 tables CREATE TABLE is 2.4x PostgreSQL's speed, CREATE
@@ -1214,10 +1386,12 @@ In rough order of what it costs users:
    first use: a table past `MAX_VERSIONS` is read once to estimate its size (before: every
    row held in memory, then dropped; now the first 400k decoded and the rest's stored lengths
    summed, nothing held). Persisting the estimate with the table would remove the read. (The
-   in-process first `count(*)` of lineitem took 11.5 s before, a sequential scan of a table
-   the planner thought empty, and 37–51 s now: the index-only scan of item 3. PostgreSQL
-   plans a parallel index-only scan of `l_shipdate`'s index there; the engine's estimate of
-   the big table's indexes picks the primary key's, so that EXPLAIN still differs.)
+   in-process first `count(*)` of lineitem took 11.5 s in round 16 (a sequential scan of a
+   table the planner thought empty), 37–51 s in round 17 (an index-only scan fetching every
+   row) and 6.6–18 s since round 18, agent 43: 1–8 s of it this read, 5.7 s the index-only scan
+   from the entries. PostgreSQL plans a parallel index-only scan of `l_shipdate`'s index
+   there; the engine's estimate of the big table's indexes picks another, so that EXPLAIN
+   still differs.)
 8. **Memory per idle session**: 0.5 MB since round 18's agent 44 (PostgreSQL 1.5 MB; it was
    2–3 MB: transparent huge pages under mimalloc's per-thread heaps, and per-session catalog
    rows).
@@ -1244,7 +1418,7 @@ protocol: 2–27x PostgreSQL over the wire).
 - Storage format: unchanged (no new keys or value layouts); WAL files are zero-filled past
   their last record, which this version's replay stops at. (An older binary replaying a WAL
   this version left after a crash fails on the zeros: downgrades after a crash aren't
-  supported.)
+  supported. Round 18, agent 43, made that the rule: see its "Durability" section.)
 - Round 18, agent 44: `cargo test -p pg-engine` and clippy (no new warnings) on the tree as
   committed; the regression suite in full, each run with a reference cluster of its own
   (HANDOFF, "A private reference per run"), for the base (`44adff0`) and for the change:
