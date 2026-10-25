@@ -8273,6 +8273,28 @@ fn inlines(
                 return false;
             };
             for (n, ..) in target.nodes() {
+                // (inline_function: a strict function's body must contain only strict
+                // constructs, contain_nonstrict_functions.)
+                if f.strict {
+                    let nonstrict = match n {
+                        pg_query::NodeRef::CaseExpr(_)
+                        | pg_query::NodeRef::CoalesceExpr(_)
+                        | pg_query::NodeRef::NullTest(_)
+                        | pg_query::NodeRef::BooleanTest(_)
+                        | pg_query::NodeRef::MinMaxExpr(_)
+                        | pg_query::NodeRef::AArrayExpr(_)
+                        | pg_query::NodeRef::RowExpr(_) => true,
+                        pg_query::NodeRef::BoolExpr(b) => b.boolop != pb::BoolExprType::NotExpr as i32,
+                        pg_query::NodeRef::AExpr(a) => matches!(
+                            pb::AExprKind::try_from(a.kind),
+                            Ok(pb::AExprKind::AexprDistinct | pb::AExprKind::AexprNotDistinct | pb::AExprKind::AexprNullif)
+                        ),
+                        _ => false,
+                    };
+                    if nonstrict {
+                        return false;
+                    }
+                }
                 match n {
                     pg_query::NodeRef::SubLink(_) => return false,
                     pg_query::NodeRef::FuncCall(c)

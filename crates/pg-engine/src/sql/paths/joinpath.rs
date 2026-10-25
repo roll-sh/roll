@@ -8129,10 +8129,15 @@ impl Planner<'_, '_> {
         // A subquery's computed outputs that need no PlaceHolderVar are evaluated above
         // the joins: the group planned over its tables (`lift`).
         let done = matches!(&*p, Plan::Join { meta, .. } if meta.lifted_by == self.id);
-        if self.lifting.get() != p as *const Plan as usize
-            && !done
-            && let Some(l) = lift::lift_group(p, &self.ctx.bound_trees.borrow())
-        {
+        // (The bound trees' borrow ends before the group is planned: planning a level inside
+        // it records trees of its own, `note_bound_join_tree`.)
+        let lifted = if self.lifting.get() != p as *const Plan as usize && !done {
+            let bound = self.ctx.bound_trees.borrow();
+            lift::lift_group(p, &bound)
+        } else {
+            None
+        };
+        if let Some(l) = lifted {
             return self.plan_lifted(p, l, needed, order, sort_exprs);
         }
         // (A LATERAL subquery left to be pulled up that wasn't: planned apart, the group

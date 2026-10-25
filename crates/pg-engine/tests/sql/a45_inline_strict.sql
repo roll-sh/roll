@@ -1,0 +1,21 @@
+-- Found by the differential tester (tests/difftest.rs). A strict SQL function whose body has
+-- non-strict constructs (CASE, COALESCE, IS NULL, ...) isn't inlined (inline_function), so an
+-- error its body would fold to doesn't happen; and planning a level inside a lifted join
+-- group no longer panics (RefCell already borrowed).
+CREATE TABLE ti (a int);
+INSERT INTO ti VALUES (1), (NULL);
+CREATE FUNCTION fs1(p int) RETURNS int LANGUAGE sql STABLE STRICT AS 'SELECT CASE WHEN p > 0 THEN 1 ELSE 0 END';
+CREATE FUNCTION fs2(p int) RETURNS int LANGUAGE sql IMMUTABLE STRICT AS 'SELECT COALESCE(p, 5)';
+CREATE FUNCTION fs3(p int) RETURNS int LANGUAGE sql IMMUTABLE STRICT AS 'SELECT p + 1';
+CREATE FUNCTION fs4(p int) RETURNS bool LANGUAGE sql IMMUTABLE STRICT AS 'SELECT p IS NULL';
+CREATE FUNCTION fs5(p int) RETURNS int LANGUAGE sql STABLE STRICT AS $$ SELECT CASE WHEN p > 100 THEN ('2.50')::int ELSE 1 END $$;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT fs1(a), fs2(a), fs3(a), fs4(a) FROM ti;
+SELECT fs1(a), fs2(a), fs3(a), fs4(a) FROM ti;
+SELECT fs5(a) FROM ti;
+SELECT 1 FROM ti WHERE a > 5 AND fs5(1) = 1;
+CREATE TABLE t0 (a int2, b text[], c timestamp, d text COLLATE "und-x-icu", e float8);
+CREATE TABLE t1 (a text, e timestamptz);
+CREATE VIEW v0 AS (SELECT t1.b = '{A,a}' AS c0 FROM t0 t1 ORDER BY 1 NULLS LAST) EXCEPT (SELECT true AS c0 FROM t1 t2 ORDER BY 1 NULLS LAST);
+SELECT 1 AS c0 FROM (SELECT 1 AS c0 FROM (t1 t2 FULL JOIN t0 t3 ON t2.a = t3.d) WHERE isfinite(t3.c) ORDER BY 1) s1 CROSS JOIN (SELECT 1 AS c0 FROM (v0 t5 LEFT JOIN t1 t6 ON NULL)) s4;
+DROP VIEW v0;
+DROP FUNCTION fs1(int), fs2(int), fs3(int), fs4(int), fs5(int);

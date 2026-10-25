@@ -255,6 +255,17 @@ the first one (EXCEPT's left, INTERSECT's with fewer groups) is empty, as nodeSe
 error evaluating it doesn't happen (`SELECT 1 FROM t WHERE false EXCEPT SELECT 2147483647 * a
 FROM t`) (`exec/nodes.rs` `SetOpNode`).
 
+Batch 7 (`a45_inline_strict`):
+
+- **Crash**: planning a query level inside a lifted join group (a FROM subquery with a FULL
+  JOIN under a CROSS JOIN with a view over EXCEPT) panicked with "RefCell already borrowed":
+  `joinpath.rs` held `ExecCtx::bound_trees` borrowed across planning the group, which records
+  trees of its own (round 16's bound join trees).
+- **Errors PostgreSQL never raises**: a strict SQL function whose body has non-strict
+  constructs (CASE, COALESCE, IS [NOT] NULL, boolean tests, AND / OR, IS DISTINCT, NULLIF,
+  GREATEST / LEAST, ARRAY[], ROW()) isn't inlined (inline_function's
+  contain_nonstrict_functions), so what its body would fold to doesn't fail the statement.
+
 ## Wider grammar (round 18)
 
 `generate.rs` `wide_expr` and the statement kinds after it, for seeds from `WIDE_SEEDS`
@@ -274,6 +285,8 @@ errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with E
 | wide, before batch 3 | 1000–1039 × 100 | 4,000 | wrong_rows 2, tlp 1 |
 | wide, before batch 3 | 1040–1139 × 100 | 9,893 | wrong_rows 2, wrong_state 3, tag 3 |
 | wide, batch 3 engine | 1140–1339 × 100 | 19,995 | wrong_rows 1, wrong_order 1, wrong_state 1, tag 6 |
+| wide, batch 5 engine | 1340–1539 × 100 | 19,868 | wrong_rows 6, wrong_state 3, tag 9 |
+| wide, batch 6 engine | 1540–1739 × 100 | 19,943 | crash 2, wrong_rows 6, wrong_state 3, tag 3 |
 
 ## Open
 
