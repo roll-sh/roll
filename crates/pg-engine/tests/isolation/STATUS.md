@@ -276,3 +276,10 @@ Bugs the suite found, all of them invisible to the regression suite (single sess
   `pg_get_publication_tables` is variadic and skips tables dropped while it waited; ATTACH
   PARTITION locks the default partition and a routed insert its leaf; an UPDATE / DELETE by
   TID rechecks the TID on the row's new version; a parallel worker's own locks end with it.
+
+Client libraries' own test suites (`tests/clients`, agent 38) hit three of these from outside:
+psycopg2's test_deadlock (two sessions' `LOCK ... IN ACCESS EXCLUSIVE MODE` neither blocked nor
+deadlocked), pgx's TestTxCommitSerializationFailure (write skew between two SERIALIZABLE
+transactions committed) and pgjdbc's closeInProgressStatement (a waiting statement's notice).
+All three pass against this engine; `tests/wire.rs` heavyweight_locks_and_deadlocks and
+serializable_write_skew keep the first two.

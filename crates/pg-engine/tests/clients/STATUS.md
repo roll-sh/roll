@@ -52,14 +52,14 @@ Contrib extensions (agent 39): hstore (psycopg 3, asyncpg, lib/pq, Npgsql, SQLAl
 (pgx, Npgsql), isn (asyncpg), file_fdw (Django). citext and pgcrypto came with the rebase onto
 agent 39's work (Django's SHA functions pass now).
 
-Locking and isolation (agent 34): LOCK TABLE ... ACCESS EXCLUSIVE in two sessions doesn't
-block or deadlock (psycopg2 test_deadlock, pgjdbc closeInProgressStatement, which waits on a
-lock); serializable write skew isn't detected at commit (pgx TestTxCommitSerializationFailure).
+Locking and isolation (agent 34), fixed after the run by the heavyweight lock manager and SSI
+(tests/isolation/STATUS.md): LOCK TABLE ... ACCESS EXCLUSIVE in two sessions didn't block or
+deadlock (psycopg2 test_deadlock), serializable write skew wasn't detected at commit (pgx
+TestTxCommitSerializationFailure), and notices went out at the end of the statement rather than
+before it waits (pgjdbc closeInProgressStatement). All three pass now, run singly against the
+engine with this harness.
 
 Engine, open:
-- Notices go out at the end of the statement, not as they're raised (Postgres flushes each
-  one): pgjdbc closeInProgressStatement waits for the first. Needs the session to reach the
-  connection's output buffer mid-statement (server.rs; agent 36 works on that path).
 - COPY FROM STDIN is processed at CopyDone: a bad first row isn't reported until the client
   has sent everything (pgx TestConnCopyFromFailServerSideMidwayAbortsWithoutWaiting).
 - A portal runs to completion at its first Execute; one whose later rows fail errors at once
