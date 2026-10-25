@@ -807,6 +807,20 @@ impl Ddl<'_, '_> {
             if t.is_foreign() { "foreign table" } else { "table" },
             &t.name,
         )?;
+        // ATExecAttachPartition: the table attached AccessExclusiveLock, and the default
+        // partition too (its constraint changes; its own partitions with it).
+        self.note_lock(t.oid, super::table::lockmode::ACCESS_EXCLUSIVE)?;
+        let default = self.cat.partitions(parent.oid).into_iter().find(|p| {
+            self.cat
+                .tables
+                .get(p)
+                .is_some_and(|x| x.partbound.as_ref().is_some_and(|b| b.is_default()))
+        });
+        if let Some(d) = default {
+            for o in self.cat.inheritors(d) {
+                self.note_lock(o, super::table::lockmode::ACCESS_EXCLUSIVE)?;
+            }
+        }
         if t.partbound.is_some() {
             return Err(Error::new(
                 code::WRONG_OBJECT_TYPE,

@@ -686,10 +686,73 @@ pub fn ssi_fetched(t: &Table, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result
     ctx.sess.db.ssi.read_row(me, t.oid, key)
 }
 
+/// SSI for a bitmap index scan (btgetbitmap, hashgetbitmap, gingetbitmap): SIRead locks on
+/// the index pages it reads (the whole index where those aren't modelled), and the
+/// conflicts out to concurrent transactions' entries there.
+fn ssi_bitmap_index(
+    t: &Table,
+    ix: &Index,
+    b: &IndexBounds,
+    quals: &[crate::sql::plan::IndexQual],
+    ranges: &[(Vec<u8>, Vec<u8>)],
+    ctx: &ExecCtx,
+) -> Result<()> {
+    let table = Arc::new(t.clone());
+    let prefix = index_prefix(t.oid, ix.id);
+    let pages = match ix.method.as_str() {
+        "btree" => super::sizing::btree_leaf_pages(ix.oid, &prefix, ranges, &ctx.sess.db),
+        "hash" => hash_buckets(&table, ix, b, ctx)?,
+        "gin" => {
+            let indexes = crate::sql::binder::bound_indexes(&table, ctx)?;
+            let mut vals = Vec::new();
+            for q in quals {
+                if let crate::sql::expr::Expr::Call(_, args, _) = &q.expr
+                    && args.len() == 2
+                {
+                    vals.push(eval(&args[1], &[], ctx)?);
+                }
+            }
+            match indexes.iter().find(|bx| bx.index.oid == ix.oid) {
+                Some(bix) if !vals.is_empty() => {
+                    super::sizing::gin_ssi_pages(&table, bix, &indexes, &vals, false, ctx)?
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let me = ctx.txn.borrow().id;
+    match &pages {
+        Some(ps) if !ps.is_empty() => {
+            for p in ps {
+                ctx.txn.borrow_mut().predicate_lock_page(ix.oid, *p);
+            }
+        }
+        _ => ctx.txn.borrow_mut().predicate_lock(ix.oid, None),
+    }
+    if ix.method == "gin" {
+        if let Some(ps) = &pages {
+            ctx.sess.db.ssi.read_pages(me, ix.oid, ps)?;
+        }
+    } else {
+        ctx.sess.db.ssi.read_entries(me, ix.oid, ranges)?;
+    }
+    Ok(())
+}
+
 /// The buckets a hash index scan reads (_hash_first locks each one's primary page): one
 /// per value its `=` (or `= ANY`) condition looks up. None: not modelled.
 fn hash_scan_buckets(s: &ScanPlan, ix: &Index, ctx: &ExecCtx) -> Result<Option<Vec<u32>>> {
     let Some((_, b)) = &s.index else { return Ok(None) };
+    hash_buckets(&s.table, ix, b, ctx)
+}
+
+fn hash_buckets(
+    table: &Arc<Table>,
+    ix: &Index,
+    b: &IndexBounds,
+    ctx: &ExecCtx,
+) -> Result<Option<Vec<u32>>> {
     let mut vals = Vec::new();
     match (&b.eq[..], &b.any) {
         ([e], None) => vals.push(eval(e, &[], ctx)?),
@@ -700,13 +763,13 @@ fn hash_scan_buckets(s: &ScanPlan, ix: &Index, ctx: &ExecCtx) -> Result<Option<V
         }
         _ => return Ok(None),
     }
-    let indexes = crate::sql::binder::bound_indexes(&s.table, ctx)?;
+    let indexes = crate::sql::binder::bound_indexes(table, ctx)?;
     let Some(bix) = indexes.iter().find(|b| b.index.oid == ix.oid) else {
         return Ok(None);
     };
     let mut out = Vec::new();
     for v in vals.iter().filter(|v| !v.is_null()) {
-        match super::sizing::hash_bucket(&s.table, bix, &indexes, v, ctx)? {
+        match super::sizing::hash_bucket(table, bix, &indexes, v, ctx)? {
             Some(p) if !out.contains(&p) => out.push(p),
             Some(_) => {}
             None => return Ok(None),
@@ -951,6 +1014,9 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
             ..
         } => {
             let ranges = ranges(t, index, bounds, ctx)?;
+            if index.id != 0 && predicate_locked(t, ctx) {
+                ssi_bitmap_index(t, index, bounds, quals, &ranges, ctx)?;
+            }
             let secondary = reads_entries(index);
             let mut out = Vec::new();
             for (start, end) in &ranges {
@@ -1802,6 +1868,50 @@ pub enum Locked {
     Newer(bytes::Bytes),
 }
 
+/// TidRecheck for an UPDATE / DELETE's EvalPlanQual: whether the newer version (at `tid`)
+/// still has a TID a TID scan of `t` in `plan` asks for. None: no such scan (or its
+/// conditions aren't constant TIDs).
+pub fn tid_recheck(
+    plan: &crate::sql::plan::Plan,
+    t: u32,
+    tid: (u32, u16),
+    ctx: &ExecCtx,
+) -> Result<Option<bool>> {
+    use crate::sql::expr::Expr;
+    use crate::sql::plan::Plan;
+    fn find(p: &Plan, t: u32) -> Option<&ScanPlan> {
+        match p {
+            Plan::Scan(s) if s.table.oid == t => Some(s),
+            Plan::Filter { input, .. }
+            | Plan::Project { input, .. }
+            | Plan::LockRows { input, .. }
+            | Plan::Limit { input, .. }
+            | Plan::Sort { input, .. } => find(input, t),
+            Plan::Join { left, right, .. } => find(left, t).or_else(|| find(right, t)),
+            _ => None,
+        }
+    }
+    let Some(s) = find(plan, t) else { return Ok(None) };
+    let Access::Tid { quals, .. } = &s.access else { return Ok(None) };
+    let want = Value::Tid(tid.0, tid.1);
+    for q in quals {
+        let consts: Vec<Value> = match q {
+            Expr::Call(_, args, _) if args.len() == 2 && args[1].columns().is_empty() => {
+                vec![eval(&args[1], &[], ctx)?]
+            }
+            Expr::ArrayOp { right, .. } if right.columns().is_empty() => match eval(right, &[], ctx)? {
+                Value::Array(a) => a.items.clone(),
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        if consts.contains(&want) {
+            return Ok(Some(true));
+        }
+    }
+    Ok(Some(false))
+}
+
 /// heap_lock_tuple finding the row moved to another partition by a concurrent UPDATE.
 pub const MOVED_TO_PARTITION: &str =
     "tuple to be locked was already moved to another partition due to concurrent update";
@@ -2028,9 +2138,21 @@ fn gist_point_scan(
             .collect();
         Some(dist)
     };
-    let Some(keys) = super::sizing::gist_scan(&s.table, ix.oid, origins.len(), &mut test, ctx)? else {
+    let ssi = predicate_locked(&s.table, ctx);
+    let Some((keys, pages)) =
+        super::sizing::gist_scan_pages(&s.table, ix.oid, origins.len(), &mut test, ssi, ctx)?
+    else {
         return Ok(None);
     };
+    // SSI: gistScanPage's SIRead lock on every page the scan reads, and the conflicts out
+    // to the transactions adding entries there.
+    if ssi {
+        for p in &pages {
+            ctx.txn.borrow_mut().predicate_lock_page(ix.oid, *p);
+        }
+        let me = ctx.txn.borrow().id;
+        ctx.sess.db.ssi.read_pages(me, ix.oid, &pages)?;
+    }
     if let Some(e) = err {
         return Err(e);
     }

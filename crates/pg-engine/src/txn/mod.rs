@@ -956,6 +956,11 @@ impl Txn {
         Ok(())
     }
 
+    /// The catalog this transaction's DDL started from (None: it made none).
+    pub fn catalog_base(&self) -> Option<Arc<Catalog>> {
+        self.catalog_base_cat.clone()
+    }
+
     /// The catalog this transaction's DDL produced (None: it has none).
     pub fn changed_catalog(&self) -> Option<Arc<Catalog>> {
         self.catalog.clone()

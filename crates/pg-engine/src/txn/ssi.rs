@@ -67,6 +67,8 @@ struct Sxact {
     writes: HashSet<(u32, Vec<u8>)>,
     rels: HashSet<u32>,
     entries: Vec<(u32, Vec<u8>)>,
+    /// The index pages its writes went to (relation, page).
+    pages: HashSet<(u32, u32)>,
 }
 
 #[derive(Default)]
@@ -491,7 +493,29 @@ impl Ssi {
             }
         }
         for t in targets {
+            if let (rel, Some(page), None) = *t
+                && let Some(m) = st.sx.get_mut(&id)
+            {
+                m.pages.insert((rel, page));
+            }
             st.conflicts_in(id, *t)?;
+        }
+        Ok(())
+    }
+
+    /// A scan read these pages of `index` (one whose entries the engine doesn't keep as
+    /// keys, GiST): it meets what concurrent transactions wrote there.
+    pub fn read_pages(&self, id: u64, index: u32, pages: &[u32]) -> Result<()> {
+        let mut st = self.st.lock();
+        let mut writers: Vec<u64> = st
+            .sx
+            .iter()
+            .filter(|(w, s)| **w != id && pages.iter().any(|p| s.pages.contains(&(index, *p))))
+            .map(|(w, _)| *w)
+            .collect();
+        writers.sort_unstable();
+        for w in writers {
+            st.conflict_out(id, w)?;
         }
         Ok(())
     }

@@ -51,6 +51,21 @@ use pg_query::NodeEnum;
 use pg_query::protobuf as pb;
 use std::sync::Arc;
 
+const NAMESPACE_CLASS: u32 = 2615;
+const TYPE_CLASS: u32 = 1247;
+const PROC_CLASS: u32 = 1255;
+const FDW_CLASS: u32 = 2328;
+const ROLE_CLASS: u32 = 1260;
+
+/// Whether `oid` is a user type of `c`: an enum, composite, range, multirange or domain.
+fn before_has_type(c: &Catalog, oid: u32) -> bool {
+    c.enums.contains_key(&oid)
+        || c.composites.contains_key(&oid)
+        || c.ranges.contains_key(&oid)
+        || c.domains.contains_key(&oid)
+        || c.ranges.values().any(|r| r.multi_oid == oid)
+}
+
 thread_local! {
     /// While a client's utility statement runs on this thread: whether it is inside a
     /// transaction block. None: not at top level (inside a function).
@@ -487,10 +502,119 @@ impl<'c, 'a> Ddl<'c, 'a> {
 
     /// Store the edited catalog in the transaction.
     fn save(&mut self) -> Result<()> {
+        self.lock_references()?;
         self.prepare_save();
         self.cat.dodge_array_type_names();
         self.check_new_type_usage()?;
         self.ctx.txn.borrow_mut().set_catalog_from(self.cat.clone(), &self.base)
+    }
+
+    /// Lock database object (`class`, `oid`) in `mode` (LockDatabaseObject; a role's
+    /// is a shared object's, LockSharedObject) until the transaction ends.
+    pub(super) fn lock_object(&self, class: u32, oid: u32, mode: crate::txn::locks::LockMode) -> Result<()> {
+        let db = if class == ROLE_CLASS { 0 } else { self.ctx.sess.db.oid };
+        let key = crate::txn::locks::object_key(db, class, oid, 0);
+        self.ctx
+            .txn
+            .borrow_mut()
+            .lock(&key, mode, crate::txn::locks::WaitPolicy::Block, &|| format!("object {oid}"))?;
+        Ok(())
+    }
+
+    /// recordDependencyOn's LockNotPinnedObject (and shdepend's for roles): what the
+    /// objects this command created or changed refer to is locked (AccessShareLock), so a
+    /// concurrent DROP of it waits, and checked to be there still once that lock is held.
+    fn lock_references(&mut self) -> Result<()> {
+        let before = self.ctx.txn.borrow().catalog();
+        let mut refs: Vec<(u32, u32)> = Vec::new();
+        let mut add = |class: u32, oid: u32| {
+            if oid >= crate::catalog::FIRST_USER_OID && !refs.contains(&(class, oid)) {
+                refs.push((class, oid));
+            }
+        };
+        let ty = |t: &crate::types::DataType| crate::catalog::system::type_oid(&self.cat, t);
+        for (oid, f) in &self.cat.functions {
+            if before.functions.get(oid).is_some_and(|b| Arc::ptr_eq(b, f)) {
+                continue;
+            }
+            add(NAMESPACE_CLASS, f.schema);
+            for (i, (_, t)) in f.args.iter().enumerate() {
+                add(TYPE_CLASS, f.arg_domains.get(i).copied().flatten().unwrap_or_else(|| ty(t)));
+            }
+            add(TYPE_CLASS, f.ret_domain.unwrap_or_else(|| ty(&f.ret)));
+            add(ROLE_CLASS, f.owner);
+            if f.sql_body.is_some() {
+                for (class, o, _) in crate::catalog::depend::sql_body_refs(self.ctx, &before, f) {
+                    if class == PROC_CLASS {
+                        add(PROC_CLASS, o);
+                    }
+                }
+            }
+        }
+        for (oid, d) in &self.cat.domains {
+            if before.domains.get(oid).is_some_and(|b| Arc::ptr_eq(b, d)) {
+                continue;
+            }
+            add(NAMESPACE_CLASS, d.schema);
+            add(TYPE_CLASS, d.parent.or(d.base_domain).unwrap_or_else(|| ty(&d.base)));
+        }
+        for (oid, t) in &self.cat.tables {
+            if before.tables.get(oid).is_some_and(|b| Arc::ptr_eq(b, t)) || t.temporary {
+                continue;
+            }
+            // (A table's columns: only one this command made.)
+            if before.tables.contains_key(oid) {
+                continue;
+            }
+            add(NAMESPACE_CLASS, t.schema);
+            for c in t.columns.iter().filter(|c| !c.dropped) {
+                add(TYPE_CLASS, c.domain.unwrap_or_else(|| ty(&c.ty)));
+            }
+        }
+        for (oid, sv) in &self.cat.servers {
+            if before.servers.get(oid).is_some_and(|b| Arc::ptr_eq(b, sv)) {
+                continue;
+            }
+            add(FDW_CLASS, sv.fdw);
+        }
+        // (Types made with this command's objects, a table's row type, aren't others'.)
+        refs.retain(|(class, o)| *class != TYPE_CLASS || before_has_type(&before, *o));
+        for (class, oid) in refs {
+            self.lock_object(class, oid, crate::txn::locks::LockMode::AccessShare)?;
+            let now = self.ctx.sess.db.catalog();
+            let exists = |c: &Catalog| match class {
+                NAMESPACE_CLASS => c.schemas.contains_key(&oid),
+                TYPE_CLASS => before_has_type(c, oid),
+                PROC_CLASS => c.functions.contains_key(&oid),
+                FDW_CLASS => c.fdws.contains_key(&oid),
+                ROLE_CLASS => c.roles.contains_key(&oid),
+                _ => true,
+            };
+            // (Made by this transaction: not dropped by another.)
+            let base = self.ctx.txn.borrow().catalog_base();
+            let ours = base.as_ref().is_some_and(|b| !exists(b));
+            if !exists(&now) && !ours {
+                return Err(match class {
+                    ROLE_CLASS => Error::new(
+                        code::UNDEFINED_OBJECT,
+                        format!("role {oid} was concurrently dropped"),
+                    ),
+                    _ => Error::new(
+                        code::UNDEFINED_OBJECT,
+                        format!(
+                            "referenced {} was concurrently dropped",
+                            match class {
+                                NAMESPACE_CLASS => "schema",
+                                TYPE_CLASS => "type",
+                                PROC_CLASS => "function",
+                                _ => "foreign-data wrapper",
+                            }
+                        ),
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// USAGE on a type a command stores (aclcheck_error_type): `ty`, or domain `domain`.

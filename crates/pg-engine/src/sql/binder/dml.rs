@@ -2900,11 +2900,13 @@ impl Binder<'_, '_> {
         let (returning, cols, old_new) = r?;
         let mut members = Vec::new();
         if inh {
+            let my_temp = self.cat.schema_by_name("pg_temp").map(|s| s.oid);
             for oid in self.cat.expansion(t.oid).into_iter().skip(1) {
                 let Some(child) = self.cat.table(oid).cloned() else {
                     continue;
                 };
-                if child.partkey.is_some() {
+                // (Another session's temporary child isn't one.)
+                if child.partkey.is_some() || child.temporary && Some(child.schema) != my_temp {
                     continue;
                 }
                 members.push(self.merge_member(t, &child, &actions)?);

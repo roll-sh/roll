@@ -81,12 +81,17 @@ pub fn publication_relations(cat: &Catalog, p: &Publication) -> Vec<u32> {
 /// pg_get_publication_tables(VARIADIC pubname text[]).
 fn publication_tables(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
     let cat = c.exec.catalog();
-    let Value::Array(names) = &a[0] else {
-        return Ok(Box::new(std::iter::empty()));
-    };
+    // (The VARIADIC names: an array, or the names themselves when a call lists them.)
+    let names: Vec<Value> = a
+        .iter()
+        .flat_map(|v| match v {
+            Value::Array(arr) => arr.items.clone(),
+            v => vec![v.clone()],
+        })
+        .collect();
     let mut infos: Vec<(Arc<Publication>, u32)> = Vec::new();
     let mut via_root = false;
-    for n in names.items.iter().filter(|v| !v.is_null()) {
+    for n in names.iter().filter(|v| !v.is_null()) {
         let name = text_arg(n);
         let Some(p) = cat.publications.values().find(|p| p.name == name).cloned() else {
             return Err(Error::new(

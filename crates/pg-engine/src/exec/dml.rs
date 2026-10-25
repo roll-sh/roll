@@ -553,6 +553,17 @@ pub fn insert_routed_oc(
     }
     let leaf = route_row(routing, &row, ctx)?;
     let l = &routing.leaves[leaf];
+    // ExecInitPartitionInfo opens the leaf a row goes to with RowExclusiveLock (an
+    // ATTACH PARTITION changing a default partition holds it off).
+    {
+        let name = l.rules.table.name.clone();
+        ctx.txn.borrow_mut().lock_relation(
+            l.rules.table.oid,
+            crate::txn::locks::LockMode::RowExclusive,
+            WaitPolicy::Block,
+            &|| name.clone(),
+        )?;
+    }
     // ExecInitPartitionInfo's CheckValidResultRel: ON CONFLICT DO UPDATE updates the leaf.
     if on_conflict.is_some_and(|oc| matches!(oc.action, crate::sql::plan::ConflictAction::Update { .. })) {
         check_replica_identity(&l.rules.table, crate::catalog::pubsub::RiCmd::Update, ctx)?;
@@ -1697,8 +1708,13 @@ fn find_parent(parent: &Table, cols: &[usize], vals: &[Value], ctx: &ExecCtx) ->
             return Ok(false);
         }
     }
-    // No usable unique index: scan.
-    Ok(!scan_matching(parent, cols, &vals, ctx, true)?.is_empty())
+    // No usable unique index: scan (the row found is locked FOR KEY SHARE as well).
+    for (dkey, _) in scan_matching(parent, cols, &vals, ctx, false)? {
+        if lookup(&dkey)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn coerce_key(v: &Value, ty: &DataType, ctx: &ExecCtx) -> Result<Value> {
@@ -3587,6 +3603,12 @@ impl Node for UpdateNode {
                     {
                         continue;
                     }
+                    // (A TID scan's condition, on the new version's TID.)
+                    if let Some(tid) = super::scan::stored_tid(&bytes)
+                        && super::scan::tid_recheck(&self.plan.source, t.oid, tid, ctx)? == Some(false)
+                    {
+                        continue;
+                    }
                     src.splice(0..n, named);
                     fresh
                 }
@@ -3954,6 +3976,12 @@ impl Node for DeleteNode {
                     };
                     if let Some(f) = &self.plan.recheck
                         && !eval_bool(f, &named, ctx)?
+                    {
+                        continue;
+                    }
+                    // (A TID scan's condition, on the new version's TID.)
+                    if let Some(tid) = super::scan::stored_tid(&bytes)
+                        && super::scan::tid_recheck(&self.plan.source, t.oid, tid, ctx)? == Some(false)
                     {
                         continue;
                     }

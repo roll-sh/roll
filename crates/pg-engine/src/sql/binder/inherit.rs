@@ -25,8 +25,13 @@ fn expand(
 ) -> crate::error::Result<Plan> {
     let parent = scan.table.clone();
     let mut inputs = Vec::new();
+    let my_temp = cat.schema_by_name("pg_temp").map(|s| s.oid);
     for oid in cat.expansion(parent.oid) {
         let Some(t) = cat.table(oid) else { continue };
+        // Another session's temporary child isn't scanned (RELATION_IS_OTHER_TEMP).
+        if oid != parent.oid && t.temporary && Some(t.schema) != my_temp {
+            continue;
+        }
         // Partitioned tables hold no rows of their own.
         if t.partkey.is_some() {
             continue;

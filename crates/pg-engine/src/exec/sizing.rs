@@ -1876,6 +1876,49 @@ fn gin_model(
     Ok(Some(g))
 }
 
+/// SSI page ids a GIN index's scan for these query values locks (the metapage 0, and each
+/// key's posting tree or else its entry leaf page), or an insertion of a row with these
+/// indexed values checks (the metapage with fast update on, else the same per key).
+/// None: not modelled.
+pub fn gin_ssi_pages(
+    t: &Arc<Table>,
+    bix: &BoundIndex,
+    indexes: &[BoundIndex],
+    vals: &[Value],
+    insert: bool,
+    ctx: &ExecCtx,
+) -> Result<Option<Vec<u32>>> {
+    let opclass = bix.index.columns.first().map_or(0, |c| c.opclass);
+    let ty = bix.keys.first().map(|k| k.ty());
+    let Some(ty) = ty else { return Ok(None) };
+    let fastupdate = option(&bix.index.options, "fastupdate")
+        .is_none_or(|v| !matches!(v.to_ascii_lowercase().as_str(), "off" | "false" | "0"));
+    let Some(g) = gin_model(t, bix, indexes, ctx)? else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    if insert && fastupdate {
+        return Ok(Some(vec![0]));
+    }
+    if !insert {
+        out.push(0);
+    }
+    for v in vals.iter().filter(|v| !v.is_null()) {
+        let Some(keys) = gin_keys(v, &ty, opclass) else {
+            return Ok(None);
+        };
+        // (startScanEntry / ginEntryInsert: a key in a posting tree locks / checks its
+        // root alone, any other its entry leaf page.)
+        for k in keys {
+            let (leaf, tree) = g.key_pages(&k);
+            out.push(tree.unwrap_or(leaf));
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(Some(out))
+}
+
 /// gin_clean_pending_list: the pending list pages of GIN index `index` on `t` the cleanup
 /// frees (its rows go into the tree).
 pub fn gin_clean_pending(t: &Arc<Table>, index: u32, ctx: &ExecCtx) -> Result<i64> {
@@ -1911,6 +1954,19 @@ pub fn gist_scan(
     test: &mut dyn FnMut(Option<&crate::catalog::gistsim::Key>, bool) -> Option<Vec<Option<f64>>>,
     ctx: &ExecCtx,
 ) -> Result<Option<Vec<Vec<u8>>>> {
+    Ok(gist_scan_pages(t, index, orderbys, test, false, ctx)?.map(|r| r.0))
+}
+
+/// `gist_scan`, with the pages the scan reads (its SIRead locks) when `pages`.
+#[allow(clippy::type_complexity)]
+pub fn gist_scan_pages(
+    t: &Arc<Table>,
+    index: u32,
+    orderbys: usize,
+    test: &mut dyn FnMut(Option<&crate::catalog::gistsim::Key>, bool) -> Option<Vec<Option<f64>>>,
+    pages: bool,
+    ctx: &ExecCtx,
+) -> Result<Option<(Vec<Vec<u8>>, Vec<u32>)>> {
     let indexes = crate::sql::binder::bound_indexes(t, ctx)?;
     let Some(bix) = indexes.iter().find(|b| b.index.oid == index) else {
         return Ok(None);
@@ -1918,12 +1974,86 @@ pub fn gist_scan(
     let Some((g, keys)) = gist_model(t, bix, &indexes, ctx)? else {
         return Ok(None);
     };
-    Ok(Some(
+    let read = if pages { g.search_pages(test) } else { Vec::new() };
+    Ok(Some((
         g.search(orderbys, test)
             .into_iter()
             .filter_map(|r| keys.get(r as usize).cloned())
             .collect(),
-    ))
+        read,
+    )))
+}
+
+/// The leaf page of GiST index `bix` a row with these index values goes to (None: not
+/// modelled).
+pub fn gist_insert_page(
+    t: &Arc<Table>,
+    bix: &BoundIndex,
+    indexes: &[BoundIndex],
+    vals: &[Value],
+    ctx: &ExecCtx,
+) -> Result<Option<u32>> {
+    let Some(key) = gist_entry_key(bix, vals.first())? else {
+        return Ok(None);
+    };
+    let Some((g, _)) = gist_model(t, bix, indexes, ctx)? else {
+        return Ok(None);
+    };
+    Ok(Some(g.leaf_for(key)))
+}
+
+/// A GiST point_ops / range_ops entry's key for an indexed value (outer None: an index the
+/// model doesn't cover).
+fn gist_entry_key(
+    bix: &BoundIndex,
+    v: Option<&Value>,
+) -> Result<Option<Option<crate::catalog::gistsim::Key>>> {
+    use crate::catalog::gistsim::{GBox, Key, RKey};
+    use crate::types::geo::Geo;
+    if bix.keys.len() != 1 {
+        return Ok(None);
+    }
+    let range = match bix.keys[0].ty() {
+        DataType::Point => None,
+        DataType::Range(rt) => match rt.oid {
+            3904 | 3912 => Some((4u8, 1.0)),
+            3926 => Some((8, 1.0)),
+            3908 | 3910 => Some((8, 1e6)),
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let int = |v: &Option<Value>| -> Option<Option<i64>> {
+        match v {
+            None => Some(None),
+            Some(Value::Int4(i)) | Some(Value::Date(i)) => Some(Some(*i as i64)),
+            Some(Value::Int8(i)) | Some(Value::Timestamp(i)) | Some(Value::Timestamptz(i)) => Some(Some(*i)),
+            Some(_) => None,
+        }
+    };
+    Ok(Some(match v {
+        Some(Value::Geo(g)) if range.is_none() => match &**g {
+            Geo::Point(p) => Some(Key::Box(GBox::point(p.x, p.y))),
+            _ => return Ok(None),
+        },
+        Some(Value::Range(r)) if let Some((width, scale)) = range => {
+            let (Some(lower), Some(upper)) = (int(&r.lower), int(&r.upper)) else {
+                return Ok(None);
+            };
+            Some(Key::Range(RKey {
+                empty: r.empty,
+                lower,
+                lower_inc: r.lower_inc,
+                upper,
+                upper_inc: r.upper_inc,
+                contain_empty: false,
+                width,
+                scale,
+            }))
+        }
+        Some(Value::Null) | None => None,
+        Some(_) => return Ok(None),
+    }))
 }
 
 /// The GiST index as its pages hold it now, with the data key of each row its leaf
@@ -2585,6 +2715,24 @@ pub fn entry_pages(
             continue;
         }
         let page = match bix.index.method.as_str() {
+            "gin" if modelled => {
+                // (A row's keys: one page each.)
+                let pages = match index_values(bix, row, ctx)? {
+                    Some(v) => gin_ssi_pages(&table, bix, indexes, &v, true, ctx)?,
+                    None => None,
+                };
+                match pages {
+                    Some(ps) if !ps.is_empty() => {
+                        out.extend(ps.into_iter().map(|p| (bix.index.oid, Some(p))));
+                        continue;
+                    }
+                    _ => None,
+                }
+            }
+            "gist" if modelled => match index_values(bix, row, ctx)? {
+                Some(v) => gist_insert_page(&table, bix, indexes, &v, ctx)?,
+                None => None,
+            },
             "hash" if modelled => match index_values(bix, row, ctx)? {
                 Some(v) if v.len() == 1 && !v[0].is_null() => {
                     hash_bucket(&table, bix, indexes, &v[0], ctx)?

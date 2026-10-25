@@ -674,6 +674,22 @@ impl Ddl<'_, '_> {
                 .detail("Only roles with the CREATEROLE attribute and the ADMIN option on the target roles may drop roles."));
         }
         let mut dropping = Vec::new();
+        // The roles are locked first (shared objects, AccessExclusiveLock), then looked at
+        // as others left them.
+        let mut locked = false;
+        for r in &s.roles {
+            if let Some(NodeEnum::RoleSpec(rs)) = inner(r)
+                && let Some(role) = self.cat.role_by_name(&rs.rolename)
+                && role.oid >= crate::catalog::FIRST_USER_OID
+            {
+                let oid = role.oid;
+                self.lock_object(1260, oid, crate::txn::locks::LockMode::AccessExclusive)?;
+                locked = true;
+            }
+        }
+        if locked {
+            self.refresh_catalog();
+        }
         for r in &s.roles {
             let Some(NodeEnum::RoleSpec(rs)) = inner(r) else {
                 continue;

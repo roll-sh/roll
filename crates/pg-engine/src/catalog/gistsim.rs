@@ -1219,6 +1219,44 @@ impl Gist {
         out
     }
 
+    /// The pages a scan reads (gistScanPage locks each one): the root, then every page a
+    /// downlink `test` accepts leads to.
+    pub fn search_pages(
+        &self,
+        test: &mut dyn FnMut(Option<&Key>, bool) -> Option<Vec<Option<f64>>>,
+    ) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut todo = vec![0u32];
+        while let Some(blk) = todo.pop() {
+            let Some(page) = self.pages.get(blk as usize) else { continue };
+            out.push(blk);
+            if page.leaf {
+                continue;
+            }
+            for t in &page.tups {
+                if test(t.key.as_ref(), false).is_some() {
+                    todo.push(t.child);
+                }
+            }
+        }
+        out
+    }
+
+    /// The leaf page an insertion of `key` goes to (gistdoinsert's descent, gistchoose at
+    /// each level): what its SSI check names.
+    pub fn leaf_for(&self, key: Option<Key>) -> u32 {
+        let t = Tup::of(key);
+        let mut blk = 0u32;
+        while let Some(page) = self.pages.get(blk as usize) {
+            if page.leaf || page.tups.is_empty() {
+                break;
+            }
+            let off = self.choose(blk, &t);
+            blk = page.tups[off].child;
+        }
+        blk
+    }
+
     /// A key's box (a point_ops entry).
     pub fn key_box(key: &Key) -> Option<GBox> {
         match key {

@@ -5504,6 +5504,19 @@ impl Ddl<'_, '_> {
                 roots.push(r);
             }
         }
+        // AcquireDeletionLock: each object (but relations, locked above) is locked
+        // AccessExclusiveLock; what others committed meanwhile (an object made to depend
+        // on it) is seen once the lock is held.
+        let mut waited = false;
+        for r in &roots {
+            if r.0 != REL && r.1 >= crate::catalog::FIRST_USER_OID {
+                self.lock_object(r.0, r.1, crate::txn::locks::LockMode::AccessExclusive)?;
+                waited = true;
+            }
+        }
+        if waited {
+            self.refresh_catalog();
+        }
         // Objects initdb made are pinned (DROP_RESTRICT on them fails before anything else).
         for r in &roots {
             if r.1 < crate::catalog::FIRST_USER_OID

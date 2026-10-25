@@ -7227,11 +7227,16 @@ impl Ddl<'_, '_> {
             } else {
                 vec![t.oid]
             };
+            let my_temp = self.cat.schema_by_name("pg_temp").map(|s| s.oid);
             for oid in all {
                 let Some(t) = self.cat.table(oid).cloned() else {
                     continue;
                 };
                 if tables.iter().any(|x| x.oid == oid) {
+                    continue;
+                }
+                // (Another session's temporary child is left alone.)
+                if t.temporary && Some(t.schema) != my_temp {
                     continue;
                 }
                 // (Inherited TRUNCATE checks the parent's privileges only.)

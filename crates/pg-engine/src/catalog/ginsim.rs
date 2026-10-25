@@ -264,6 +264,39 @@ impl GinIndex {
         }
     }
 
+    /// What SSI names for a key (page ids standing for the pages, consistent for the same
+    /// index): the entry tree leaf it is (or would be inserted) on, and its posting tree
+    /// when its TIDs are in one (the tree's root, which insertions into it check).
+    pub fn key_pages(&self, key: &GinKey) -> (u32, Option<u32>) {
+        let mut cur = self.root;
+        while !self.nodes[cur].leaf {
+            let n = &self.nodes[cur];
+            let idx = n
+                .items
+                .iter()
+                .position(|it| it.key >= *key)
+                .unwrap_or(n.items.len().saturating_sub(1));
+            match n.items.get(idx) {
+                Some(it) => cur = it.child,
+                None => break,
+            }
+        }
+        let tree = self.nodes[cur].items.iter().find(|it| it.key == *key).and_then(|it| match it.post {
+            Some(Post::Tree(..)) => {
+                // (A posting tree's identity: its key's.)
+                let h = crate::catalog::hashidx::hash_bytes(&key.sort);
+                Some(0x4000_0000 | (h & 0x3fff_ffff))
+            }
+            _ => None,
+        });
+        (cur as u32 + 1, tree)
+    }
+
+    /// Whether rows wait in the pending list.
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     /// The main fork's size in pages.
     pub fn nblocks(&self) -> u64 {
         self.pages as u64
