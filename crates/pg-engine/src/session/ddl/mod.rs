@@ -38,6 +38,7 @@ mod stored;
 mod tsearch;
 mod vacuum;
 
+pub(crate) use stored::mentions;
 pub(crate) use table::rowid_sequence;
 
 use crate::catalog::{Catalog, Relation, Table};
@@ -504,7 +505,8 @@ impl<'c, 'a> Ddl<'c, 'a> {
     fn save(&mut self) -> Result<()> {
         self.lock_references()?;
         self.prepare_save();
-        self.cat.dodge_array_type_names();
+        let before = self.ctx.catalog();
+        self.cat.dodge_array_type_names_since(&before);
         self.check_new_type_usage()?;
         self.ctx.txn.borrow_mut().set_catalog_from(self.cat.clone(), &self.base)
     }
@@ -816,64 +818,152 @@ impl<'c, 'a> Ddl<'c, 'a> {
 
     /// Relations (and TOAST tables) the statement made get RecentXmin as relfrozenxid; the
     /// dropped ones' go.
+    ///
+    /// Only the relations the statement changed are visited (and the entries it set): the
+    /// others are in both catalogs, with storage and entries as before.
     fn stamp_frozen_xids(&mut self, before: &Catalog) {
-        let rels = |c: &Catalog| -> Vec<(u32, u32)> {
-            (c.tables.values())
-                .map(|t| (t.oid, t.toast))
-                .chain(
-                    (c.views.values())
-                        .filter_map(|v| v.storage.as_ref().map(|t| (v.oid, t.toast))),
-                )
-                .collect()
-        };
-        let old: std::collections::HashSet<u32> = rels(before)
-            .into_iter()
-            .flat_map(|(o, t)| [o, t])
-            .collect();
-        let now = rels(&self.cat);
-        let mut xmin = None;
-        for o in now.iter().flat_map(|(o, t)| [*o, *t]) {
-            if o != 0 && !old.contains(&o) && !self.cat.frozen_xids.contains_key(&o) {
-                let x = *xmin.get_or_insert_with(|| self.recent_xmin());
-                std::sync::Arc::make_mut(&mut self.cat.frozen_xids).insert(o, x);
+        // A relation with storage of its own (a table or materialized view): its TOAST table.
+        fn rel(c: &Catalog, oid: u32) -> Option<u32> {
+            match c.tables.get(&oid) {
+                Some(t) => Some(t.toast),
+                None => c.views.get(&oid)?.storage.as_ref().map(|t| t.toast),
             }
         }
-        let live: std::collections::HashSet<u32> =
-            now.into_iter().flat_map(|(o, t)| [o, t]).collect();
-        std::sync::Arc::make_mut(&mut self.cat.frozen_xids).retain(|o, _| live.contains(o));
+        let touched: std::collections::BTreeSet<u32> = (before.tables.changes(&self.cat.tables))
+            .into_iter()
+            .map(|(o, _, _)| o)
+            .chain(before.views.changes(&self.cat.views).into_iter().map(|(o, _, _)| o))
+            .collect();
+        let mut xmin = None;
+        for &o in &touched {
+            let Some(toast) = rel(&self.cat, o) else { continue };
+            let had = rel(before, o);
+            for x in [o, toast] {
+                // (In the old catalog: as a relation, or as its TOAST table; oids aren't reused.)
+                let old = if x == o { had.is_some() } else { had == Some(x) };
+                if x != 0 && !old && !self.cat.frozen_xids.contains_key(&x) {
+                    let v = *xmin.get_or_insert_with(|| self.recent_xmin());
+                    self.cat.frozen_xids.insert(x, v);
+                }
+            }
+        }
+        // Entries that may have lost their relation: the changed relations' (and TOAST
+        // tables', which only their own relation has), and the others this statement set.
+        let mut maybe: Vec<(u32, Option<u32>)> = Vec::new();
+        for &o in &touched {
+            maybe.push((o, Some(o)));
+            if let Some(t) = rel(before, o).filter(|t| *t != 0) {
+                maybe.push((t, Some(o)));
+            }
+        }
+        before
+            .frozen_xids
+            .diff(&self.cat.frozen_xids, |a, b| a == b, |k, _, now| {
+                if now.is_some() {
+                    maybe.push((k, None))
+                }
+            });
+        let cat = &self.cat;
+        let live = |x: u32, owner: Option<u32>| match owner {
+            Some(o) if o == x => rel(cat, o).is_some(),
+            Some(o) => rel(cat, o) == Some(x),
+            None => {
+                rel(cat, x).is_some()
+                    || touched.iter().any(|o| rel(cat, *o) == Some(x))
+                    || cat.toasted().any(|t| t.toast == x)
+            }
+        };
+        let gone: Vec<u32> = maybe
+            .into_iter()
+            .filter(|(x, o)| cat.frozen_xids.contains_key(x) && !live(*x, *o))
+            .map(|(x, _)| x)
+            .collect();
+        for x in gone {
+            self.cat.frozen_xids.remove(&x);
+        }
+        #[cfg(debug_assertions)]
+        {
+            let live: std::collections::HashSet<u32> = (self.cat.tables.values())
+                .map(|t| (t.oid, t.toast))
+                .chain(
+                    (self.cat.views.values())
+                        .filter_map(|v| v.storage.as_ref().map(|t| (v.oid, t.toast))),
+                )
+                .flat_map(|(o, t)| [o, t])
+                .collect();
+            let stale: Vec<u32> =
+                self.cat.frozen_xids.keys().copied().filter(|o| !live.contains(o)).collect();
+            let old_live: std::collections::HashSet<u32> = (before.tables.values())
+                .map(|t| (t.oid, t.toast))
+                .chain(
+                    (before.views.values())
+                        .filter_map(|v| v.storage.as_ref().map(|t| (v.oid, t.toast))),
+                )
+                .flat_map(|(o, t)| [o, t])
+                .collect();
+            let old_stale = before.frozen_xids.keys().any(|o| !old_live.contains(o));
+            // (A catalog stored by an older build may hold stale entries: they go once
+            // their relation is touched again.)
+            debug_assert!(old_stale || stale.is_empty(), "stale frozen xids {stale:?}");
+            let missing: Vec<u32> = live
+                .iter()
+                .copied()
+                .filter(|o| *o != 0 && !old_live.contains(o) && !self.cat.frozen_xids.contains_key(o))
+                .collect();
+            debug_assert!(missing.is_empty(), "frozen xids missing for {missing:?}");
+        }
     }
 
     /// A relation's new storage (TRUNCATE, a rewrite) is frozen up to `xid`; a new TOAST
     /// table goes with it.
     pub(super) fn set_frozen_xid(&mut self, t: &Table, xid: u64) {
-        std::sync::Arc::make_mut(&mut self.cat.frozen_xids).insert(t.oid, xid);
+        self.cat.frozen_xids.insert(t.oid, xid);
         if t.toast != 0 {
-            std::sync::Arc::make_mut(&mut self.cat.frozen_xids).insert(t.toast, xid);
+            self.cat.frozen_xids.insert(t.toast, xid);
         }
     }
 
     /// Tables that had triggers before the statement keep relhastriggers (until VACUUM).
     fn keep_had_triggers(&mut self, before: &Catalog) {
-        let had = crate::exec::trigger::triggered_tables(before, false);
+        // (Those that still have triggers show relhastriggers anyway: only the tables that
+        // lose their last trigger in this statement need remembering, and only the tables
+        // it changed, and the ones their foreign keys reference, can.)
+        let changed: std::collections::BTreeSet<u32> = (before.tables.changes(&self.cat.tables))
+            .into_iter()
+            .map(|(o, _, _)| o)
+            .collect();
+        #[cfg(debug_assertions)]
+        let had_in = self.cat.had_triggers.clone();
+        let lost = crate::exec::trigger::lost_triggers(before, &self.cat, &changed);
         let cat = &mut self.cat;
-        cat.had_triggers
-            .extend(had.into_iter().filter(|t| cat.tables.contains_key(t)));
-        let tables = &cat.tables;
-        cat.had_triggers.retain(|t| tables.contains_key(t));
+        cat.had_triggers.extend(lost);
+        for o in &changed {
+            if !cat.tables.contains_key(o) {
+                cat.had_triggers.remove(o);
+            }
+        }
+        #[cfg(debug_assertions)]
+        {
+            // As keeping every table that had triggers before the statement would show them.
+            let now = crate::exec::trigger::triggered_tables(cat, false);
+            let all: Vec<u32> = (had_in.iter().copied())
+                .chain(crate::exec::trigger::triggered_tables(before, false))
+                .filter(|t| cat.tables.contains_key(t) && !now.contains(t))
+                .filter(|t| !cat.had_triggers.contains(t))
+                .collect();
+            debug_assert!(all.is_empty(), "relhastriggers lost for {all:?}");
+        }
     }
 
     /// Tables the statement made or changed that came to need a TOAST table get one at its
     /// end, in oid order (ALTER TABLE's AlterTableCreateToastTable, CREATE TABLE AS).
     fn add_toast_tables(&mut self, before: &Catalog) {
-        let need: Vec<u32> = self
-            .cat
+        let need: Vec<u32> = before
             .tables
-            .values()
-            .filter(|t| {
-                t.toast == 0
-                    && !before.tables.get(&t.oid).is_some_and(|b| Arc::ptr_eq(b, t))
-                    && t.needs_toast()
-            })
+            .changes(&self.cat.tables)
+            .into_iter()
+            .filter_map(|(_, _, t)| t)
+            .filter(|t| t.toast == 0 && t.needs_toast())
             .map(|t| t.oid)
             .collect();
         for oid in need {

@@ -683,6 +683,160 @@ Also fixed on the way: `format_type(0, ...)` is `-` as in PostgreSQL (it was `??
   the old single value's parse (70 ms for 2,000 tables, 150 ms for 10,000), once per database
   open. A binary encoding, or loading objects lazily, would cut it.
 
+## Catalog and DDL at scale (round 18, agent 49)
+
+Measured on the same harness (PostgreSQL in `a49-pg`, the pinned image and settings; both
+servers on cores 28–31, clients on 2–5) while other agents' builds and two regression runs
+loaded the machine (load 25–35): read differences under ~30% as noise. **pg** PostgreSQL 18.6
+(3 runs), **before** the engine at `52f786e` (this round's base after its last rebase; 2 runs),
+**after** this round's engine (2 runs), base and change interleaved. New workload `scale-ops`
+(`tools/bench/bench.rs`): over the catalog `scale --keep 1` leaves (10,000 tables in 20
+schemas, a table of 1,000 partitions), 100 new tables are created, altered, indexed,
+commented and dropped, and the catalog queries run 5 times each (their figure is the mean,
+the first run included); every engine run starts from a copy of the same data directory.
+
+### 10,000 tables (ms per statement)
+
+| case | pg | before | after | after / pg |
+|---|---|---|---|---|
+| CREATE TABLE (key, NOT NULL, default) | 3.17 | 14.7 | 1.30 | 2.4x |
+| ALTER TABLE ADD COLUMN | 0.36 | 16.1 | 2.04 | 0.18x |
+| CREATE INDEX | 0.89 | 14.3 | 1.00 | 0.89x |
+| COMMENT ON TABLE | 0.26 | 11.0 | 0.22 | 1.2x |
+| DROP TABLE | 4.90 | 92.9 | 19.5 | 0.25x |
+| psql `\d t` columns (5 runs, the first after the setup's DDL) | 0.88 | 52.8 | 11.0 | 0.08x |
+| psql `\d t` columns, after DDL | 0.47 | 249 | 38.6 | 0.01x |
+| psql `\d t` indexes, after DDL | 0.95 | 123 | 40.2 | 0.02x |
+| psql `\d t` lookup, after DDL | 0.47 | 111 | 106 | 0.004x |
+| information_schema.columns of a table, after DDL | 4.51 | 146 | 145 | 0.03x |
+| `pg_class` × `pg_attribute` join (5 runs) | 37.3 | 10.8 | 43.5 | 0.86x |
+
+(Steady state, the join is 7.6–7.9 ms for both builds and the ORM constraints query 23 ms
+for both; their 5-run means above are dominated by the first run, which generates the
+catalog.)
+
+### Restoring a large schema (`pg_dump -s` of that catalog: 230,840 lines, 11,001 CREATE TABLE, 22,001 ALTER TABLE, `psql -f` into an empty database)
+
+| | pg | before | after |
+|---|---|---|---|
+| seconds (errors) | 42.4 (0) | 254 (0) | 21.0 (0) |
+
+The engine before this round restored it 6x slower than PostgreSQL (every statement's cost
+grew with the catalog); it is now 2x faster than PostgreSQL.
+
+The regression database's dump (`pg_dump --no-owner --no-privileges --no-tablespaces` of the
+suite's database on the reference after a full run: 445,982 lines, about 1,500 objects and
+their data) restores in 3.46 s on PostgreSQL and 7.3 s / 7.7 s on the engine before / after
+(release builds; its catalog is small, so per-statement catalog cost isn't what dominates;
+agent 37's hour-long restore was a debug build, and before 9e1e0a7 a CREATE INDEX over big
+keys hung in the B-tree size model). The engine fails 8 of its statements that PostgreSQL
+runs (identity sequences' `UNLOGGED` / `LOGGED` options, the `inet_minmax_ops` default for
+cidr under BRIN, a rule's view, ...): the same 8 before and after.
+
+### Optimisations
+
+1. **Structurally shared catalog maps** (`catalog/pmap.rs`): `PMap<V>`, an ordered map from
+   oids in chunks of 64 consecutive oids, each behind an `Arc`, under an `Arc`'d index of the
+   chunks. A catalog copy shares everything; a change copies the chunk index and one chunk
+   (it copied the whole `BTreeMap`); `diff` compares chunk pointers first, so the commit's
+   record diff (`persist::diff_into`) and the statement passes below visit only the chunks
+   that changed. `PHash` does the same for the relation-name index (256 buckets; every
+   CREATE copied every name). Both serialise as the maps they replace (records, the header,
+   `txn::catmerge`'s JSON are unchanged). Used for `tables`, `indexes`, `views`, `sequences`,
+   `functions`, `relstats`, `frozen_xids`, `class_order` and `names`.
+2. **Secondary indexes kept on mutation** (`pmap::IndexedMap`, `catalog/relindex.rs`): the
+   tables, views, indexes and sequences maps keep, as entries come and go, the tables
+   internal triggers go on (foreign keys' ends, deferrable keys), constraint names per schema,
+   constraint and default owners, the tables referencing each table by foreign keys, TOAST
+   owners, row types, the tables holding each composite type in a column, row-level-security
+   tables and security-barrier views by name, partitioned indexes' attached indexes, tables
+   with expression indexes and tables' owned sequences. What every DDL statement (and every
+   first statement over a new catalog version) found by scanning every relation is now a
+   lookup: `triggered_tables`, constraint name choice, `column_using` (find_composite_type_
+   dependencies), `toast_owner`, `rel_rowtype`, `user_type_name`, `rls_named`, a dropped
+   table's owned sequences and its cascaded deletions' owners. In debug builds each lookup is
+   checked against the scan it replaces.
+3. **Per-statement passes over what the statement changed**: `prepare_save` (qualifying new
+   expressions, TOAST tables, frozen xids, relhastriggers bookkeeping, ACL pruning) and
+   `dodge_array_type_names` iterate `PMap::changes` between the statement's catalog and the
+   one it started from; the array-name pass runs over every type only when a type the
+   statement made or renamed could clash. relhastriggers after a statement now remembers only
+   the tables that lose their last trigger in it (`trigger::lost_triggers`): tables that still
+   have triggers showed it set anyway (a debug check compares with keeping every table that
+   had triggers). ALTER TABLE's `follow_renames` skips stored expressions that can't hold FROM
+   items when only columns were added or dropped (their column aliases are all it edits).
+4. **DROP TABLE's dependencies** (`depend::drop_scope`, `depends_in`, `closed`): dropping
+   plain tables derives the dependencies of every object but the tables that can't depend on
+   them (only the roots, the tables referencing them by foreign keys, inheriting from them,
+   holding their row types, or whose stored expressions may name them, their sequences or
+   indexes are derived); when the walk finds only the roots' own objects (and foreign keys
+   referencing them) that is the answer, otherwise the whole catalog's dependencies are
+   derived as before. Debug builds compare every scoped walk with the full one.
+5. **One relation's catalog rows** (`system::rows_of_rel`, `exec/nodes.rs` `sys_rel_rows`):
+   a scan of `pg_class`, `pg_attribute` or `pg_attrdef` whose index conditions or first
+   conjunct pin the relation column (`attrelid = 'x'::regclass`, a nested loop's `adrelid =
+   a.attrelid`) generates that relation's rows alone when the shared rows of the catalog
+   version aren't generated yet (a rescan does so for its first 16 outer rows), instead of
+   the whole catalog; the rows are the full generation's, in its order (checked in debug
+   builds). The planner's row count of those catalogs (`explain::sys_tuples`) counts without
+   generating rows (`system::row_count`).
+6. **Catalog records parsed in parallel** on a database's first open (`persist::parse_all`).
+   It made no measurable difference to the first connection (below): parsing isn't what
+   that time is.
+
+### First connection to a database (in-process, 10,000 tables)
+
+| | before (`242734d`) | after |
+|---|---|---|
+| first connection (catalog loaded) | 125–143 ms | 136–139 ms |
+| its first `count(*)` of pg_class | 65–71 ms | 70–78 ms |
+
+### Upgrade implications
+
+None: the stored catalog (format 1, a header and a record per object), the WAL and the
+storage format are unchanged; `PMap` / `IndexedMap` serialise as the `BTreeMap`s they
+replace, and their indexes are rebuilt as records load.
+
+### Where it is still slower (catalog, DDL), and why
+
+- **DROP TABLE (4x PostgreSQL at 10,000 tables)**: the scoped walk still derives every
+  object's dependencies but the unrelated tables' (views, functions, types, sequences, all
+  binding their stored texts) and scans every table's stored expressions for the dropped
+  names; partitioned tables and anything a view or function depends on take the full
+  derivation. The fix is a dependency index kept like `relindex` (pg_depend by referenced
+  object), with stored texts' references recorded when they are stored.
+- **ALTER TABLE ADD COLUMN (0.18x)**: binding the new column's default and the table's
+  checks over the statement's catalog, `follow_renames`' scan of view texts naming the table,
+  and the per-statement catalog copies (now cheap) remain; not profiled further this round.
+- **Catalog queries right after DDL**: psql's `\d t` lookup matches `relname ~ '^(t)$'`,
+  which PostgreSQL turns into an index range on `pg_class_relname_nsp_index`; the engine
+  generates pg_class whole for the new version (100 ms) and evaluates the regex per row (28
+  ms even when generated). `\d` columns / indexes after DDL (39–40 ms) spend it in
+  `row_count` (pg_class / pg_attribute counted per relation, indexes' columns through
+  `rel_columns`) and in pg_index / pg_constraint, which aren't generated per relation yet.
+  The fix: per-relation counts kept in `relindex`, `rows_of_rel` for pg_index, pg_constraint
+  and pg_type, and regex prefixes as name ranges over the name index.
+- **information_schema views** (145 ms for one table's columns at 10,000 tables) still run
+  over the whole catalog per query; see HANDOFF ("information_schema") for the assessment of
+  binding their real definitions.
+- **The first connection to a database** (136 ms at 10,000 tables) is unchanged: not the
+  records' JSON parsing (parallel now, no difference). Not profiled yet.
+
+### Verification (round 18, agent 49)
+
+- `cargo test -p pg-engine` (all 18 test binaries) and clippy (no new warnings).
+- The regression suite in full with a private reference cluster per run, base `85ec54f`
+  against the change rebased onto it: **51,141 / 51,150 both, identical per file, per unit
+  and in every differing unit's hunk** (on earlier bases, `52f786e`: 51,140 both; `242734d` /
+  `75986d8`: 51,138 both; identical each time).
+- `difftest smoke` passes (before and after the last rebase).
+- New tests: `catalog::pmap` unit tests (random edits against a `BTreeMap` model: contents,
+  order, serde form, `diff` against earlier copies; `PHash` against a `HashMap`), golden
+  `a49_catalog_indexes` (recorded from PostgreSQL: relhastriggers across dropped keys and
+  VACUUM, constraint names chosen in a schema, row-type users, one relation's catalog rows
+  after DDL inside transactions and savepoints, DROP TABLE with and without dependents
+  outside the table), and the debug cross-checks named above, which every golden and test
+  statement exercises.
 ## Where it is still slower, and why
 
 In rough order of what it costs users:
@@ -712,10 +866,11 @@ In rough order of what it costs users:
    engine has no visibility map to skip it). The fixes: batch an index scan's fetches (sort
    a run of row keys, read them with one merging cursor, emit in index order), and answer
    index-only scans from the index entries when the plan reads only index columns.
-4. **DDL at scale.** Since round 18's agent 44 the catalog is stored per object and its maps
-   are shared between copies ("Catalog, DDL and sessions" above): at 500 tables CREATE TABLE
-   and CREATE INDEX are faster than PostgreSQL's, ALTER TABLE and DROP 1.4–2.4x slower; each
-   statement's work still grows with the catalog (0.02–0.3x at 10,000 tables).
+4. **DDL at scale.** Since round 18's agent 44 the catalog is stored per object, and since
+   agent 49 its maps are structurally shared with secondary indexes kept on mutation ("Catalog
+   and DDL at scale" above): at 10,000 tables CREATE TABLE is 2.4x PostgreSQL's speed, CREATE
+   INDEX and COMMENT about even, and restoring an 11,000-table schema dump 2x faster than
+   PostgreSQL; ALTER TABLE ADD COLUMN (0.18x) and DROP TABLE (0.25x) are still slower.
 5. **Catalog introspection (`\d`, ORMs).** Rows are shared per catalog version and looked up
    through hashes (above): 1.3–2.5 ms for psql's `\d` queries at 500 tables, ORM constraint
    queries ahead of PostgreSQL; the first query after DDL regenerates a catalog whole.

@@ -13,6 +13,7 @@
 //! commit.
 
 use super::Catalog;
+use super::pmap::PMap;
 use crate::error::{Result, internal};
 use bytes::Bytes;
 use serde::Serialize;
@@ -105,53 +106,99 @@ fn diff_set(tag: u8, a: &BTreeSet<u32>, b: &BTreeSet<u32>, out: &mut Writes) {
     }
 }
 
-fn put_map<V: Serialize>(tag: u8, m: &BTreeMap<u32, V>, out: &mut Writes) -> Result<()> {
-    for (k, v) in m {
-        out.push((record_key(tag, *k), Some(json(v)?)));
-    }
-    Ok(())
-}
-
 fn put_set(tag: u8, s: &BTreeSet<u32>, out: &mut Writes) {
     for x in s {
         out.push((record_key(tag, *x), Some(Bytes::new())));
     }
 }
 
-fn load_map<V: DeserializeOwned>(m: &mut BTreeMap<u32, V>, oid: u32, v: &[u8]) -> Result<()> {
-    let v = serde_json::from_slice(v).map_err(|e| internal(format!("corrupt catalog: {e}")))?;
-    m.insert(oid, v);
-    Ok(())
+fn parse<V: DeserializeOwned>(v: &[u8]) -> Result<V> {
+    serde_json::from_slice(v).map_err(|e| internal(format!("corrupt catalog: {e}")))
 }
 
-/// A stored map: a catalog's own, or one its copies share (`Arc`).
+/// Records parsed per thread at least (fewer aren't worth a thread).
+const PARSE_CHUNK: usize = 256;
+
+/// `items`' values parsed, in order: on several threads when there are many (a database's
+/// first open reads every record; parsing them is most of it).
+fn parse_all<V: DeserializeOwned + Send>(items: &[(u32, &[u8])]) -> Result<Vec<(u32, V)>> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(8)
+        .min(items.len() / PARSE_CHUNK)
+        .max(1);
+    let one = |part: &[(u32, &[u8])]| -> Result<Vec<(u32, V)>> {
+        part.iter().map(|(oid, v)| Ok((*oid, parse(v)?))).collect()
+    };
+    if threads == 1 {
+        return one(items);
+    }
+    let size = items.len().div_ceil(threads);
+    std::thread::scope(|s| {
+        let parts: Vec<_> = items.chunks(size).map(|part| s.spawn(move || one(part))).collect();
+        let mut out = Vec::with_capacity(items.len());
+        for p in parts {
+            out.extend(p.join().map_err(|_| internal("catalog parse panicked"))??);
+        }
+        Ok(out)
+    })
+}
+
+/// A stored map: a plain one, or a `PMap`, whose copies share chunks.
 trait StoredMap<V> {
-    fn map(&self) -> &BTreeMap<u32, V>;
-    fn map_mut(&mut self) -> &mut BTreeMap<u32, V>;
-    /// The same map (one two copies of a catalog share): nothing in it differs.
-    fn shared_with(&self, _other: &Self) -> bool {
-        false
+    /// The writes turning `self`'s records into `new`'s.
+    fn diff_into(&self, tag: u8, new: &Self, same: fn(&V, &V) -> bool, out: &mut Writes) -> Result<()>;
+    fn put_all(&self, tag: u8, out: &mut Writes) -> Result<()>;
+    fn load_one(&mut self, oid: u32, v: V);
+}
+
+impl<V: Serialize> StoredMap<V> for BTreeMap<u32, V> {
+    fn diff_into(&self, tag: u8, new: &Self, same: fn(&V, &V) -> bool, out: &mut Writes) -> Result<()> {
+        diff_map(tag, self, new, same, out)
+    }
+    fn put_all(&self, tag: u8, out: &mut Writes) -> Result<()> {
+        for (k, v) in self {
+            out.push((record_key(tag, *k), Some(json(v)?)));
+        }
+        Ok(())
+    }
+    fn load_one(&mut self, oid: u32, v: V) {
+        self.insert(oid, v);
     }
 }
 
-impl<V> StoredMap<V> for BTreeMap<u32, V> {
-    fn map(&self) -> &BTreeMap<u32, V> {
-        self
+/// (Chunks the two maps share are skipped: a statement's diff follows what it changed.)
+impl<V: Serialize + Clone> StoredMap<V> for PMap<V> {
+    fn diff_into(&self, tag: u8, new: &Self, same: fn(&V, &V) -> bool, out: &mut Writes) -> Result<()> {
+        let mut changed = Vec::new();
+        self.diff(new, same, |k, _, b| changed.push((k, b)));
+        for (k, b) in changed {
+            out.push((record_key(tag, k), b.map(json).transpose()?));
+        }
+        Ok(())
     }
-    fn map_mut(&mut self) -> &mut BTreeMap<u32, V> {
-        self
+    fn put_all(&self, tag: u8, out: &mut Writes) -> Result<()> {
+        for (k, v) in self {
+            out.push((record_key(tag, *k), Some(json(v)?)));
+        }
+        Ok(())
+    }
+    fn load_one(&mut self, oid: u32, v: V) {
+        self.insert(oid, v);
     }
 }
 
-impl<V: Clone> StoredMap<V> for Arc<BTreeMap<u32, V>> {
-    fn map(&self) -> &BTreeMap<u32, V> {
-        self
+impl<V: Serialize + Clone, I: super::pmap::MapIndex<V>> StoredMap<V> for super::pmap::IndexedMap<V, I> {
+    fn diff_into(&self, tag: u8, new: &Self, same: fn(&V, &V) -> bool, out: &mut Writes) -> Result<()> {
+        let (a, b): (&PMap<V>, &PMap<V>) = (self, new);
+        a.diff_into(tag, b, same, out)
     }
-    fn map_mut(&mut self) -> &mut BTreeMap<u32, V> {
-        Arc::make_mut(self)
+    fn put_all(&self, tag: u8, out: &mut Writes) -> Result<()> {
+        let a: &PMap<V> = self;
+        a.put_all(tag, out)
     }
-    fn shared_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(self, other)
+    fn load_one(&mut self, oid: u32, v: V) {
+        self.insert(oid, v);
     }
 }
 
@@ -182,25 +229,30 @@ macro_rules! stored_fields {
 
         /// The records that change catalog `a` into `b`.
         fn diff_records(a: &Catalog, b: &Catalog, out: &mut Writes) -> Result<()> {
-            $(if !a.$m.shared_with(&b.$m) {
-                diff_map($mtag, a.$m.map(), b.$m.map(), $cmp, out)?;
-            })*
+            $(a.$m.diff_into($mtag, &b.$m, $cmp, out)?;)*
             $(diff_set($stag, &a.$s, &b.$s, out);)*
             Ok(())
         }
 
         /// Every record of `c`.
         fn all_records(c: &Catalog, out: &mut Writes) -> Result<()> {
-            $(put_map($mtag, c.$m.map(), out)?;)*
+            $(c.$m.put_all($mtag, out)?;)*
             $(put_set($stag, &c.$s, out);)*
             Ok(())
         }
 
-        fn load_record(c: &mut Catalog, tag: u8, oid: u32, v: &[u8]) -> Result<()> {
+        /// One map's (or set's) records, in oid order: the values parsed on several threads
+        /// (`parse_all`), inserted in order.
+        fn load_records(c: &mut Catalog, tag: u8, items: &[(u32, &[u8])]) -> Result<()> {
             match tag {
-                $($mtag => load_map(c.$m.map_mut(), oid, v),)*
+                $($mtag => {
+                    for (oid, v) in parse_all(items)? {
+                        c.$m.load_one(oid, v);
+                    }
+                    Ok(())
+                })*
                 $($stag => {
-                    c.$s.insert(oid);
+                    c.$s.extend(items.iter().map(|(oid, _)| *oid));
                     Ok(())
                 })*
                 _ => Err(internal(format!("corrupt catalog: unknown record tag {tag}"))),
@@ -357,13 +409,24 @@ pub fn load(
     if c.catalog_format == 0 {
         return Ok(c);
     }
-    for (k, v) in records()? {
+    let records = records()?;
+    // (In key order: each map's records together, in oid order.)
+    let mut items: Vec<(u32, &[u8])> = Vec::new();
+    let mut tag = None;
+    for (k, v) in &records {
         let rest = &k[RECORD_PREFIX.len()..];
         if rest.len() != 5 {
             return Err(internal("corrupt catalog: bad record key"));
         }
-        let oid = u32::from_be_bytes([rest[1], rest[2], rest[3], rest[4]]);
-        load_record(&mut c, rest[0], oid, &v)?;
+        if tag.is_some_and(|t| t != rest[0]) {
+            load_records(&mut c, tag.unwrap(), &items)?;
+            items.clear();
+        }
+        tag = Some(rest[0]);
+        items.push((u32::from_be_bytes([rest[1], rest[2], rest[3], rest[4]]), &v[..]));
+    }
+    if let Some(t) = tag {
+        load_records(&mut c, t, &items)?;
     }
     Ok(c)
 }

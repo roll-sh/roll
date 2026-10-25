@@ -1013,6 +1013,87 @@ fn scale(cx: &Ctx) {
     }
 }
 
+/// DDL and catalog queries over a catalog `scale --keep 1` left (schemas `sc0`.. with tables
+/// `t0`..): `n` new tables are made, altered, indexed and dropped again, so runs repeat over
+/// the same catalog (for A/B runs of two builds on copies of one data directory).
+fn scale_ops(cx: &Ctx) {
+    let tables: usize = cx.opt("tables", 10_000);
+    let schemas: usize = cx.opt("schemas", 20).max(1);
+    let n: usize = cx.opt("n", 100);
+    let reps: usize = cx.opt("reps", 10);
+    let only: String = cx.opt("only", String::new());
+    let want = |w: &str| only.is_empty() || only.split(',').any(|o| o == w);
+    let mut c = cx.conn();
+    let mid = tables / 2;
+    let ms = mid % schemas;
+    let each = |c: &mut dyn Conn, what: &str, f: &dyn Fn(usize) -> String| {
+        let t = Instant::now();
+        for i in 0..n {
+            must(c.simple(&f(i)), what);
+        }
+        let s = t.elapsed().as_secs_f64();
+        cx.report(
+            "scale_ops",
+            what,
+            &[("objects", tables.to_string()), ("per_op_ms", format!("{:.3}", s * 1000.0 / n as f64))],
+        );
+    };
+    let ddl = want("ddl");
+    if ddl {
+        each(c.as_mut(), "create_table", &|i| {
+            format!(
+                "CREATE TABLE sc{}.n{i} (id int PRIMARY KEY, a text NOT NULL, b int DEFAULT 0)",
+                i % schemas
+            )
+        });
+        each(c.as_mut(), "alter_add_column", &|i| {
+            format!("ALTER TABLE sc{}.n{i} ADD COLUMN c int", i % schemas)
+        });
+        each(c.as_mut(), "create_index", &|i| format!("CREATE INDEX ON sc{}.n{i} (b)", i % schemas));
+        each(c.as_mut(), "comment_on_table", &|i| {
+            format!("COMMENT ON TABLE sc{}.n{i} IS 'x'", i % schemas)
+        });
+    }
+    let d_columns = format!("SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) FROM pg_catalog.pg_attrdef d WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef), a.attnotnull FROM pg_catalog.pg_attribute a WHERE a.attrelid = 'sc{ms}.t{mid}'::regclass AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum");
+    let d_lookup = format!("SELECT c.oid, n.nspname, c.relname FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relname OPERATOR(pg_catalog.~) '^(t{mid})$' COLLATE pg_catalog.default AND n.nspname OPERATOR(pg_catalog.~) '^(sc{ms})$' COLLATE pg_catalog.default ORDER BY 2, 3");
+    let d_indexes = format!("SELECT c2.relname, i.indisprimary, i.indisunique, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true) FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i WHERE c.oid = 'sc{ms}.t{mid}'::regclass AND c.oid = i.indrelid AND i.indexrelid = c2.oid ORDER BY i.indisprimary DESC, c2.relname");
+    let is_columns = format!("SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'sc{ms}' AND table_name = 't{mid}' ORDER BY ordinal_position");
+    let queries: Vec<(&str, String)> = vec![
+        ("psql_d_lookup", d_lookup.clone()),
+        ("psql_d_columns", d_columns.clone()),
+        ("psql_d_indexes", d_indexes.clone()),
+        ("information_schema_columns", is_columns.clone()),
+        ("information_schema_tables", format!("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'sc{ms}'")),
+        ("pg_class_count", "SELECT count(*) FROM pg_class".into()),
+        ("pg_class_join_attribute", format!("SELECT count(*) FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid WHERE c.relnamespace = 'sc{ms}'::regnamespace")),
+        ("orm_constraints", format!("SELECT con.conname, con.contype, cl.relname, pg_get_constraintdef(con.oid) FROM pg_constraint con JOIN pg_class cl ON cl.oid = con.conrelid JOIN pg_namespace n ON n.oid = cl.relnamespace WHERE n.nspname = 'sc{ms}' ORDER BY cl.relname, con.conname")),
+        // (After DDL: a catalog version no statement has read yet.)
+        ("psql_d_columns_after_ddl", format!("COMMENT ON TABLE sc{ms}.t{mid} IS 'c'; {d_columns}")),
+        ("psql_d_lookup_after_ddl", format!("COMMENT ON TABLE sc{ms}.t{mid} IS 'c'; {d_lookup}")),
+        ("psql_d_indexes_after_ddl", format!("COMMENT ON TABLE sc{ms}.t{mid} IS 'c'; {d_indexes}")),
+        ("information_schema_columns_after_ddl", format!("COMMENT ON TABLE sc{ms}.t{mid} IS 'c'; {is_columns}")),
+        ("comment_only", format!("COMMENT ON TABLE sc{ms}.t{mid} IS 'c'")),
+    ];
+    for (name, sql) in &queries {
+        if !want(name) && !want("queries") {
+            continue;
+        }
+        let (_, total) = timed(|| {
+            for _ in 0..reps {
+                must(c.simple(sql), name);
+            }
+        });
+        cx.report(
+            "scale_ops",
+            name,
+            &[("objects", tables.to_string()), ("per_query_ms", format!("{:.3}", total * 1000.0 / reps as f64))],
+        );
+    }
+    if ddl {
+        each(c.as_mut(), "drop_table", &|i| format!("DROP TABLE sc{}.n{i}", i % schemas));
+    }
+}
+
 /// In-process, after `Engine::open` (reported at startup): the first connection to the
 /// database and its first catalog query, then a second connection's.
 fn startup_catalog(cx: &Ctx) {
@@ -1166,6 +1247,7 @@ fn main() {
             "bulk" => bulk(&cx),
             "ddl" => ddl(&cx),
             "scale" => scale(&cx),
+            "scale-ops" => scale_ops(&cx),
             "startup-catalog" => startup_catalog(&cx),
             "idle" => idle(&cx),
             "startup" => {

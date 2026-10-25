@@ -2453,17 +2453,25 @@ impl Ddl<'_, '_> {
         ) {
             out.extend(a.keys().filter(|k| !b.contains_key(k)));
         }
+        // (A shared map: only the entries that changed.)
+        fn gone_p<V>(
+            a: &crate::catalog::pmap::PMap<std::sync::Arc<V>>,
+            b: &crate::catalog::pmap::PMap<std::sync::Arc<V>>,
+            out: &mut Vec<u32>,
+        ) {
+            out.extend(a.changes(b).into_iter().filter(|(_, _, n)| n.is_none()).map(|(k, _, _)| k));
+        }
         let mut rels = Vec::new();
-        gone(&before.tables, &self.cat.tables, &mut rels);
-        gone(&before.views, &self.cat.views, &mut rels);
-        gone(&before.sequences, &self.cat.sequences, &mut rels);
+        gone_p(&before.tables, &self.cat.tables, &mut rels);
+        gone_p(&before.views, &self.cat.views, &mut rels);
+        gone_p(&before.sequences, &self.cat.sequences, &mut rels);
         let mut types = Vec::new();
         gone(&before.enums, &self.cat.enums, &mut types);
         gone(&before.composites, &self.cat.composites, &mut types);
         gone(&before.domains, &self.cat.domains, &mut types);
         gone(&before.ranges, &self.cat.ranges, &mut types);
         let mut funcs = Vec::new();
-        gone(&before.functions, &self.cat.functions, &mut funcs);
+        gone_p(&before.functions, &self.cat.functions, &mut funcs);
         let mut schemas = Vec::new();
         gone(&before.schemas, &self.cat.schemas, &mut schemas);
         let tables = &self.cat.tables;
@@ -2832,7 +2840,7 @@ impl Ddl<'_, '_> {
                     self.reown_acls(ObjKind::Function, f.oid, f.owner, new);
                     let mut nf = (*f).clone();
                     nf.owner = new;
-                    std::sync::Arc::make_mut(&mut self.cat.functions).insert(f.oid, Arc::new(nf));
+                    self.cat.functions.insert(f.oid, Arc::new(nf));
                 }
             }
             O::ObjectType | O::ObjectDomain => {
@@ -3167,7 +3175,7 @@ impl Ddl<'_, '_> {
                     t.owner = new;
                     c.put_table(t);
                 } else if let Some(v) = c.views.get(&oid).cloned() {
-                    std::sync::Arc::make_mut(&mut c.views).insert(
+                    c.views.insert(
                         oid,
                         Arc::new(crate::catalog::ViewDef {
                             owner: new,
@@ -3175,7 +3183,7 @@ impl Ddl<'_, '_> {
                         }),
                     );
                 } else if let Some(q) = c.sequences.get(&oid).cloned() {
-                    std::sync::Arc::make_mut(&mut c.sequences).insert(
+                    c.sequences.insert(
                         oid,
                         Arc::new(crate::catalog::Sequence {
                             owner: new,
@@ -3186,7 +3194,7 @@ impl Ddl<'_, '_> {
             }
             ObjKind::Function => {
                 if let Some(f) = c.functions.get(&oid).cloned() {
-                    std::sync::Arc::make_mut(&mut c.functions).insert(
+                    c.functions.insert(
                         oid,
                         Arc::new(crate::catalog::Function {
                             owner: new,

@@ -990,11 +990,17 @@ pub fn triggered_tables(
     sticky: bool,
 ) -> std::collections::HashSet<u32> {
     let mut out: std::collections::HashSet<u32> = cat.triggers.values().map(|t| t.table).collect();
-    out.extend(internal_trigger_tables(cat));
+    // (Kept by the tables map as tables change: `relindex::TableIx::trigger_marks`.)
+    out.extend(cat.tables.ix().trigger_marks.keys());
     debug_assert_eq!(
         internal_trigger_tables(cat).into_iter().collect::<std::collections::BTreeSet<u32>>(),
         internal_triggers(cat).into_iter().map(|r| r.trig.table).collect(),
         "internal_trigger_tables must name internal_triggers' tables"
+    );
+    debug_assert_eq!(
+        internal_trigger_tables(cat).into_iter().collect::<std::collections::BTreeSet<u32>>(),
+        cat.tables.ix().trigger_marks.keys().collect(),
+        "the tables map's trigger marks must be internal_trigger_tables'"
     );
     if sticky {
         out.extend(cat.had_triggers.iter().copied());
@@ -1005,25 +1011,9 @@ pub fn triggered_tables(
 /// The tables `internal_triggers` puts triggers on, without making the triggers: every DDL
 /// statement asks (`triggered_tables`).
 fn internal_trigger_tables(cat: &crate::catalog::Catalog) -> Vec<u32> {
-    use crate::catalog::{Catalog, ConstraintKind};
     let mut out = Vec::new();
     for t in cat.tables.values() {
-        for con in &t.constraints {
-            if let ConstraintKind::ForeignKey { ref_table, .. } = &con.kind {
-                if !con.enforced {
-                    continue;
-                }
-                let derived = Catalog::fk_is_derived(t, con);
-                // (As `ri_triggers`: a clone's action triggers are its parent key's.)
-                let clone = con.parent != 0 && !derived;
-                if !clone {
-                    out.push(*ref_table);
-                }
-                if !derived {
-                    out.push(t.oid);
-                }
-            }
-        }
+        table_internal_triggers(t, &mut out);
     }
     for t in cat.tables.values() {
         for con in &t.constraints {
@@ -1033,6 +1023,75 @@ fn internal_trigger_tables(cat: &crate::catalog::Catalog) -> Vec<u32> {
         }
     }
     out
+}
+
+/// The tables table `t`'s constraints put internal triggers on (its foreign keys': itself,
+/// the referenced tables; its deferrable keys': itself), as `internal_trigger_tables` finds
+/// them.
+pub(crate) fn table_internal_triggers(t: &crate::catalog::Table, out: &mut Vec<u32>) {
+    use crate::catalog::{Catalog, ConstraintKind};
+    for con in &t.constraints {
+        if let ConstraintKind::ForeignKey { ref_table, .. } = &con.kind {
+            if !con.enforced {
+                continue;
+            }
+            let derived = Catalog::fk_is_derived(t, con);
+            // (As `ri_triggers`: a clone's action triggers are its parent key's.)
+            let clone = con.parent != 0 && !derived;
+            if !clone {
+                out.push(*ref_table);
+            }
+            if !derived {
+                out.push(t.oid);
+            }
+        }
+    }
+}
+
+/// Whether table `x` has triggers in `cat` (as `triggered_tables(cat, false)` has them).
+fn has_triggers(cat: &crate::catalog::Catalog, x: u32) -> bool {
+    cat.tables.ix().trigger_marks.contains(x) || cat.triggers.values().any(|t| t.table == x)
+}
+
+/// Whether `triggered_tables(cat, sticky)` has table `x`.
+pub fn table_has_triggers(cat: &crate::catalog::Catalog, x: u32, sticky: bool) -> bool {
+    has_triggers(cat, x) || (sticky && cat.had_triggers.contains(&x))
+}
+
+/// Tables of `before` that had triggers and have none in `after` (`triggered_tables(_,
+/// false)`), when only the tables `changed` names (and the triggers) differ between them:
+/// what keeps relhastriggers set until VACUUM.
+pub fn lost_triggers(
+    before: &crate::catalog::Catalog,
+    after: &crate::catalog::Catalog,
+    changed: &std::collections::BTreeSet<u32>,
+) -> Vec<u32> {
+    // Candidates: the changed tables, the tables their foreign keys (before and after)
+    // reference, and the tables of triggers that changed.
+    let mut cand: std::collections::BTreeSet<u32> = changed.clone();
+    let mut marks = Vec::new();
+    for o in changed {
+        for c in [before, after] {
+            if let Some(t) = c.tables.get(o) {
+                table_internal_triggers(t, &mut marks);
+            }
+        }
+    }
+    cand.extend(marks);
+    for (oid, x) in &before.triggers {
+        if after.triggers.get(oid).is_none_or(|y| !Arc::ptr_eq(x, y)) {
+            cand.insert(x.table);
+        }
+    }
+    for (oid, y) in &after.triggers {
+        if !before.triggers.contains_key(oid) {
+            cand.insert(y.table);
+        }
+    }
+    cand.into_iter()
+        .filter(|t| after.tables.contains_key(t))
+        .filter(|t| has_triggers(before, *t) && !has_triggers(after, *t))
+        .collect()
 }
 
 /// A foreign key's internal trigger, as pg_trigger shows it.

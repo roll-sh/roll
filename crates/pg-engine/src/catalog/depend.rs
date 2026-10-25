@@ -382,14 +382,33 @@ impl Out {
 /// Every dependency between objects of the catalog, with the rows superuser DML on
 /// pg_depend removed or added.
 pub fn depends(ctx: &ExecCtx, cat: &Arc<Catalog>) -> Vec<Depend> {
+    depends_scoped(ctx, cat, None)
+}
+
+/// `depends`, of every object but the tables outside `scope` (and their indexes, TOAST
+/// tables, owned sequences and foreign keys' triggers): what a DROP of the tables of
+/// `drop_scope` needs, when `closed` says so.
+pub fn depends_in(
+    ctx: &ExecCtx,
+    cat: &Arc<Catalog>,
+    scope: &std::collections::HashSet<u32>,
+) -> Vec<Depend> {
+    depends_scoped(ctx, cat, Some(scope))
+}
+
+fn depends_scoped(
+    ctx: &ExecCtx,
+    cat: &Arc<Catalog>,
+    scope: Option<&std::collections::HashSet<u32>>,
+) -> Vec<Depend> {
     // Stored expressions are read with the session's search_path (a system view's query
     // runs with pg_catalog's alone).
     let session_path = ctx.sess.search_path();
     let mut rows = if ctx.search_path == session_path {
-        derived_depends(ctx, cat)
+        derived_depends(ctx, cat, scope)
     } else {
         let child = ctx.child_with_path(ctx.params, session_path);
-        derived_depends(&child, cat)
+        derived_depends(&child, cat, scope)
     };
     let edits = &cat.depend_edits;
     if !edits.is_empty() {
@@ -399,8 +418,125 @@ pub fn depends(ctx: &ExecCtx, cat: &Arc<Catalog>) -> Vec<Depend> {
     rows
 }
 
-/// The dependencies the catalog's objects record.
-fn derived_depends(ctx: &ExecCtx, cat: &Arc<Catalog>) -> Vec<Depend> {
+/// The tables whose dependencies dropping the plain tables `roots` can involve (the roots,
+/// the tables referencing them by foreign keys, inheriting from them or holding their row
+/// types in columns, and those whose stored expressions may name them, their sequences or
+/// indexes), when that can be told: None for other objects, partitioned tables, catalogs
+/// with pg_depend edits, or names `mentions` can't look for.
+pub fn drop_scope(cat: &Catalog, roots: &[Addr]) -> Option<std::collections::HashSet<u32>> {
+    if roots.is_empty() || !cat.depend_edits.is_empty() {
+        return None;
+    }
+    let mut scope = std::collections::HashSet::new();
+    let mut words: Vec<String> = Vec::new();
+    for &(class, oid, sub) in roots {
+        let t = cat.tables.get(&oid).filter(|_| class == REL && sub == 0)?;
+        if t.partkey.is_some() {
+            return None;
+        }
+        scope.insert(oid);
+        words.push(t.name.clone());
+        for s in cat.sequences.ix().owned.get(&oid).into_iter().flat_map(|v| v.iter()) {
+            words.push(cat.sequences.get(s)?.name.clone());
+        }
+        for i in t.indexes.iter().chain(t.pkey_index.iter()) {
+            if let Some(ix) = cat.indexes.get(i) {
+                words.push(ix.name.clone());
+            }
+        }
+        let ix = cat.tables.ix();
+        scope.extend(ix.fk_refs.get(&oid).into_iter().flat_map(|c| c.keys()));
+        scope.extend(cat.children(oid).iter().copied());
+        for ty in [t.rowtype, t.array_type()] {
+            scope.extend(ix.row_users.get(&ty).into_iter().flat_map(|c| c.keys()));
+        }
+    }
+    // (`mentions` finds plain identifiers: a name that is quoted with doubled quotes, or
+    // isn't ASCII, isn't looked for.)
+    if words
+        .iter()
+        .any(|w| w.is_empty() || !w.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$'))
+    {
+        return None;
+    }
+    let named = |s: &str| crate::session::ddl::mentions(s, &words);
+    for t in cat.tables.values() {
+        if scope.contains(&t.oid) {
+            continue;
+        }
+        let hit = t.columns.iter().any(|c| {
+            c.default.as_deref().is_some_and(named) || c.generated.as_deref().is_some_and(named)
+        }) || t.constraints.iter().any(|c| matches!(&c.kind, super::ConstraintKind::Check { expr, .. } if named(expr)))
+            || t.partkey
+                .as_ref()
+                .is_some_and(|p| p.cols.iter().any(|k| k.expr.as_deref().is_some_and(named)));
+        if hit {
+            scope.insert(t.oid);
+        }
+    }
+    for ix in cat.indexes.values() {
+        if !scope.contains(&ix.table)
+            && (ix.predicate.as_deref().is_some_and(named)
+                || ix.columns.iter().any(|c| matches!(&c.key, IndexKey::Expr(e) if named(e))))
+        {
+            scope.insert(ix.table);
+        }
+    }
+    Some(scope)
+}
+
+/// Whether `targets` (what dropping `roots` deletes, found over `depends_in(scope)`) are all
+/// objects of the roots themselves (columns, constraints, defaults, indexes, TOAST tables,
+/// owned sequences, row types, triggers, policies, rules, statistics) or foreign keys
+/// referencing them: nothing outside the scope can depend on those (`drop_scope`), so the
+/// walk over the whole catalog would have found the same.
+pub fn closed(cat: &Catalog, roots: &[Addr], targets: &[Target]) -> bool {
+    let root = |o: u32| roots.iter().any(|r| r.1 == o);
+    let tables: Vec<&Arc<super::Table>> = roots.iter().filter_map(|r| cat.tables.get(&r.1)).collect();
+    targets.iter().all(|t| {
+        let (class, oid, _) = t.obj;
+        match class {
+            REL => {
+                root(oid)
+                    || tables.iter().any(|t| {
+                        t.indexes.contains(&oid)
+                            || t.pkey_index == Some(oid)
+                            || (t.toast != 0 && (t.toast == oid || t.toast + 1 == oid))
+                    })
+                    || cat.sequences.get(&oid).is_some_and(|s| s.owned_by.is_some_and(|o| root(o.0)))
+            }
+            TYPE => tables.iter().any(|t| t.rowtype == oid || t.array_type() == oid),
+            CONSTRAINT => {
+                tables.iter().any(|t| t.constraints.iter().any(|c| c.oid == oid))
+                    || cat.tables.ix().con_owner.get(&oid).and_then(|c| c.keys().next()).is_some_and(|o| {
+                        cat.tables.get(&o).is_some_and(|t| {
+                            t.constraints.iter().any(|c| {
+                                c.oid == oid
+                                    && matches!(&c.kind, super::ConstraintKind::ForeignKey { ref_table, .. } if root(*ref_table))
+                            })
+                        })
+                    })
+            }
+            ATTRDEF => tables.iter().any(|t| t.columns.iter().any(|c| c.def_oid == oid)),
+            // (Internal triggers have no entry: they are foreign keys', in the scope.)
+            TRIGGER => cat.triggers.get(&oid).is_none_or(|x| root(x.table)),
+            POLICY => cat.policies.get(&oid).is_some_and(|p| root(p.table)),
+            REWRITE => cat.rules.get(&oid).is_some_and(|r| root(r.table)),
+            STATEXT => cat.statistics.get(&oid).is_some_and(|s| root(s.table)),
+            _ => false,
+        }
+    })
+}
+
+/// The dependencies the catalog's objects record (of the tables in `scope` only, when
+/// given: `depends_in`).
+fn derived_depends(
+    ctx: &ExecCtx,
+    cat: &Arc<Catalog>,
+    scope: Option<&std::collections::HashSet<u32>>,
+) -> Vec<Depend> {
+    // (A relation outside the scope is skipped; a materialized view isn't a table.)
+    let keep = |t: u32| scope.is_none_or(|s| s.contains(&t)) || !cat.tables.contains_key(&t);
     let _types = UserTypes::set(cat);
     let mut out = Out { rows: Vec::new() };
     // plpgsql is an extension: its language and handlers are its members.
@@ -564,7 +700,7 @@ fn derived_depends(ctx: &ExecCtx, cat: &Arc<Catalog>) -> Vec<Depend> {
     let rowid_seqs: std::collections::HashSet<u32> =
         cat.tables.values().filter_map(|t| t.rowid_seq).collect();
     for s in cat.sequences.values() {
-        if rowid_seqs.contains(&s.oid) {
+        if rowid_seqs.contains(&s.oid) || s.owned_by.is_some_and(|(t, _)| !keep(t)) {
             continue;
         }
         out.add((REL, s.oid, 0), (NAMESPACE, s.schema, 0), 'n');
@@ -583,17 +719,17 @@ fn derived_depends(ctx: &ExecCtx, cat: &Arc<Catalog>) -> Vec<Depend> {
             );
         }
     }
-    for t in cat.tables.values() {
+    for t in cat.tables.values().filter(|t| keep(t.oid)) {
         table_depends(ctx, cat, t, &mut out);
     }
     // TOAST tables are part of their table; their index goes with their key columns.
-    for t in cat.toasted() {
+    for t in cat.toasted().filter(|t| keep(t.oid)) {
         out.add((REL, t.toast, 0), (REL, t.oid, 0), 'i');
         for col in 1..=2 {
             out.add((REL, t.toast + 1, 0), (REL, t.toast, col), 'a');
         }
     }
-    for ix in cat.indexes.values() {
+    for ix in cat.indexes.values().filter(|ix| keep(ix.table)) {
         let Some(t) = cat.index_table(ix.table) else {
             continue;
         };
@@ -721,7 +857,10 @@ fn derived_depends(ctx: &ExecCtx, cat: &Arc<Catalog>) -> Vec<Depend> {
     }
     // Foreign keys' and deferrable unique keys' internal triggers (their functions are
     // pinned).
-    for r in crate::exec::trigger::internal_triggers(cat) {
+    for r in crate::exec::trigger::internal_triggers(cat)
+        .into_iter()
+        .filter(|r| keep(r.fk_table) || keep(r.trig.table) || keep(r.other))
+    {
         out.add((TRIGGER, r.trig.oid, 0), (CONSTRAINT, r.constraint, 0), 'i');
     }
     for tg in cat.triggers.values() {

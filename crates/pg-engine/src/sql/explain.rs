@@ -16279,7 +16279,15 @@ pub(crate) fn sys_tuples(table: crate::catalog::system::SysTable, ctx: &ExecCtx)
         return n;
     }
     let n = if crate::catalog::system::rows_cacheable(table) {
-        crate::catalog::system::rows_shared(table, ctx).map_or(1000.0, |r| r.rows.len() as f64)
+        // (Counted without generating the rows, unless they are already: `row_count`.)
+        match crate::catalog::system::rows_cached(table, ctx) {
+            Some(r) => Ok(r.rows.len()),
+            None => match crate::catalog::system::row_count(table, ctx) {
+                Some(n) => Ok(n),
+                None => crate::catalog::system::rows_shared(table, ctx).map(|r| r.rows.len()),
+            },
+        }
+        .map_or(1000.0, |n| n as f64)
     } else {
         crate::catalog::system::rows(table, ctx).map_or(1000.0, |r| r.len() as f64)
     }

@@ -461,14 +461,30 @@ impl Ddl<'_, '_> {
     /// A table column whose type holds composite `oid` (directly, in an array or nested in
     /// another composite): (table, column).
     pub(super) fn column_using(&self, oid: u32) -> Option<(String, String)> {
-        // (In oid order, as the map keeps them.)
-        let tables = self.cat.tables.values();
-        let col = tables.clone().find_map(|t| {
-            t.columns
-                .iter()
-                .find(|c| !c.dropped && c.ty.contains_row(oid))
-                .map(|c| (t.oid, t.name.clone(), c.name.clone()))
+        // (In oid order, as the map keeps them; only the tables the tables map's index says
+        // hold the type, and only those with an expression index: every ALTER TABLE asks.)
+        let col = self.cat.tables.ix().row_users.get(&oid).and_then(|users| {
+            users.keys().find_map(|o| {
+                let t = self.cat.tables.get(&o)?;
+                t.columns
+                    .iter()
+                    .find(|c| !c.dropped && c.ty.contains_row(oid))
+                    .map(|c| (t.oid, t.name.clone(), c.name.clone()))
+            })
         });
+        debug_assert_eq!(
+            col,
+            self.cat.tables.values().find_map(|t| {
+                t.columns
+                    .iter()
+                    .find(|c| !c.dropped && c.ty.contains_row(oid))
+                    .map(|c| (t.oid, t.name.clone(), c.name.clone()))
+            }),
+            "row type users index"
+        );
+        let tables: Vec<&Arc<crate::catalog::Table>> = (self.cat.indexes.ix().expr_tables.keys())
+            .filter_map(|o| self.cat.tables.get(&o))
+            .collect();
         // An index's expression column of the type counts too (named as
         // FigureIndexColname named it).
         // (One binder for them all, and only tables with an expression index: every ALTER
@@ -647,16 +663,18 @@ impl Ddl<'_, '_> {
             self.cat.put_table(nt);
         }
         // Views, domains and function signatures.
-        for v in std::sync::Arc::make_mut(&mut self.cat.views).values_mut() {
-            if v.columns.iter().any(|(_, t)| subst(t, &types).is_some()) {
-                let mut nv = (**v).clone();
-                for (_, t) in &mut nv.columns {
-                    if let Some(ty) = subst(t, &types) {
-                        *t = ty;
-                    }
+        let changed: Vec<Arc<crate::catalog::ViewDef>> = (self.cat.views.values())
+            .filter(|v| v.columns.iter().any(|(_, t)| subst(t, &types).is_some()))
+            .cloned()
+            .collect();
+        for v in changed {
+            let mut nv = (*v).clone();
+            for (_, t) in &mut nv.columns {
+                if let Some(ty) = subst(t, &types) {
+                    *t = ty;
                 }
-                *v = Arc::new(nv);
             }
+            self.cat.views.insert(nv.oid, Arc::new(nv));
         }
         for d in self.cat.domains.values_mut() {
             if let Some(ty) = subst(&d.base, &types) {
@@ -665,7 +683,7 @@ impl Ddl<'_, '_> {
                 *d = Arc::new(nd);
             }
         }
-        for f in std::sync::Arc::make_mut(&mut self.cat.functions).values_mut() {
+        for f in self.cat.functions.values_mut() {
             let touches = subst(&f.ret, &types).is_some()
                 || f.args.iter().any(|(_, t)| subst(t, &types).is_some())
                 || f.out_cols.iter().any(|(_, t)| subst(t, &types).is_some());

@@ -1,0 +1,332 @@
+> CREATE SCHEMA ci
+-- CREATE SCHEMA
+
+> SET search_path = ci, public
+-- SET
+
+> CREATE TABLE ci.p (id int PRIMARY KEY, note text)
+-- CREATE TABLE
+
+> CREATE TABLE ci.c (id serial PRIMARY KEY, p_id int REFERENCES ci.p, body text DEFAULT 'x')
+-- CREATE TABLE
+
+> SELECT relname, relhastriggers FROM pg_class WHERE relnamespace = 'ci'::regnamespace
+>   AND relkind = 'r' ORDER BY 1
+relname:name | relhastriggers:bool
+c | t
+p | t
+-- SELECT 2
+
+> ALTER TABLE ci.c DROP CONSTRAINT c_p_id_fkey
+-- ALTER TABLE
+
+> SELECT relname, relhastriggers FROM pg_class WHERE relnamespace = 'ci'::regnamespace
+>   AND relkind = 'r' ORDER BY 1
+relname:name | relhastriggers:bool
+c | t
+p | t
+-- SELECT 2
+
+> VACUUM ci.p
+-- VACUUM
+
+> SELECT relname, relhastriggers FROM pg_class WHERE relnamespace = 'ci'::regnamespace
+>   AND relkind = 'r' ORDER BY 1
+relname:name | relhastriggers:bool
+c | t
+p | f
+-- SELECT 2
+
+> CREATE TABLE ci.d (x int, CONSTRAINT p_pkey CHECK (x > 0))
+-- CREATE TABLE
+
+> CREATE TABLE ci.e (x int)
+-- CREATE TABLE
+
+> ALTER TABLE ci.e ADD CONSTRAINT p_pkey UNIQUE (x)
+ERROR 42P07: relation "p_pkey" already exists
+
+> ALTER TABLE ci.e ADD UNIQUE (x)
+-- ALTER TABLE
+
+> SELECT conrelid::regclass, conname, contype FROM pg_constraint
+>   WHERE connamespace = 'ci'::regnamespace ORDER BY 1, 2
+conrelid:regclass | conname:name | contype:char
+p | p_id_not_null | n
+p | p_pkey | p
+c | c_id_not_null | n
+c | c_pkey | p
+d | p_pkey | c
+e | e_x_key | u
+-- SELECT 6
+
+> CREATE TABLE ci.holder (k int, r ci.p)
+-- CREATE TABLE
+
+> ALTER TABLE ci.p ADD COLUMN extra int DEFAULT 1
+ERROR 0A000: cannot alter table "p" because column "holder.r" uses its row type
+
+> ALTER TABLE ci.p ADD COLUMN extra2 int
+-- ALTER TABLE
+
+> DROP TABLE ci.holder
+-- DROP TABLE
+
+> ALTER TABLE ci.p ADD COLUMN extra int DEFAULT 1
+-- ALTER TABLE
+
+> COMMENT ON TABLE ci.c IS 'c'
+-- COMMENT
+
+> SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, a.atthasdef,
+>   (SELECT pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d
+>      WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef)
+>   FROM pg_attribute a WHERE a.attrelid = 'ci.c'::regclass AND a.attnum > 0
+>   AND NOT a.attisdropped ORDER BY a.attnum
+attname:name | format_type:text | attnotnull:bool | atthasdef:bool | pg_get_expr:text
+id | integer | t | t | nextval('c_id_seq'::regclass)
+p_id | integer | f | f | NULL
+body | text | f | t | 'x'::text
+-- SELECT 3
+
+> SELECT relname, relkind, relnatts, relhasindex, relchecks FROM pg_class
+>   WHERE oid = 'ci.c'::regclass
+relname:name | relkind:char | relnatts:int2 | relhasindex:bool | relchecks:int2
+c | r | 3 | t | 0
+-- SELECT 1
+
+> SELECT count(*) FROM pg_attribute WHERE attrelid = 'ci.c'::regclass
+count:int8
+9
+-- SELECT 1
+
+> SELECT count(*) FROM pg_attribute WHERE attrelid = NULL
+count:int8
+0
+-- SELECT 1
+
+> SELECT relname FROM pg_class WHERE oid = 0
+relname:name
+-- SELECT 0
+
+> SELECT c.relname = 'pg_toast_' || t.oid, c.relkind FROM pg_class c, pg_class t
+>   WHERE t.oid = 'ci.c'::regclass AND c.oid = t.reltoastrelid
+?column?:bool | relkind:char
+t | t
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> ALTER TABLE ci.c ADD COLUMN later date DEFAULT '2020-01-01'
+-- ALTER TABLE
+
+> SELECT attname FROM pg_attribute WHERE attrelid = 'ci.c'::regclass AND attnum > 0
+>   ORDER BY attnum
+attname:name
+id
+p_id
+body
+later
+-- SELECT 4
+
+> SAVEPOINT s
+-- SAVEPOINT
+
+> ALTER TABLE ci.c DROP COLUMN body
+-- ALTER TABLE
+
+> SELECT attname, attisdropped FROM pg_attribute WHERE attrelid = 'ci.c'::regclass
+>   AND attnum > 0 ORDER BY attnum
+attname:name | attisdropped:bool
+id | f
+p_id | f
+........pg.dropped.3........ | t
+later | f
+-- SELECT 4
+
+> SELECT adnum FROM pg_attrdef WHERE adrelid = 'ci.c'::regclass ORDER BY 1
+adnum:int2
+1
+4
+-- SELECT 2
+
+> ROLLBACK TO SAVEPOINT s
+-- ROLLBACK
+
+> SELECT adnum FROM pg_attrdef WHERE adrelid = 'ci.c'::regclass ORDER BY 1
+adnum:int2
+1
+3
+4
+-- SELECT 3
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT attname FROM pg_attribute WHERE attrelid = 'ci.c'::regclass AND attnum > 0
+>   ORDER BY attnum
+attname:name
+id
+p_id
+body
+-- SELECT 3
+
+> CREATE TABLE ci.q (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE ci.r (id serial, q_id int REFERENCES ci.q, t text)
+-- CREATE TABLE
+
+> DROP TABLE ci.q
+ERROR 2BP01: cannot drop table q because other objects depend on it
+DETAIL: constraint r_q_id_fkey on table r depends on table q
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TABLE ci.q CASCADE
+NOTICE 00000: drop cascades to constraint r_q_id_fkey on table r
+-- DROP TABLE
+
+> SELECT conname FROM pg_constraint WHERE conrelid = 'ci.r'::regclass ORDER BY 1
+conname:name
+r_id_not_null
+-- SELECT 1
+
+> SELECT relname, relhastriggers FROM pg_class WHERE oid = 'ci.r'::regclass
+relname:name | relhastriggers:bool
+r | t
+-- SELECT 1
+
+> DROP TABLE ci.r
+-- DROP TABLE
+
+> SELECT relname FROM pg_class WHERE relnamespace = 'ci'::regnamespace ORDER BY 1
+relname:name
+c
+c_id_seq
+c_pkey
+d
+e
+e_x_key
+p
+p_pkey
+-- SELECT 8
+
+> CREATE TABLE ci.s (id serial PRIMARY KEY, v int)
+-- CREATE TABLE
+
+> CREATE TABLE ci.u (n int DEFAULT nextval('ci.s_id_seq'))
+-- CREATE TABLE
+
+> CREATE VIEW ci.sv AS SELECT id FROM ci.s
+-- CREATE VIEW
+
+> DROP TABLE ci.s
+ERROR 2BP01: cannot drop table s because other objects depend on it
+DETAIL: default value for column n of table u depends on sequence s_id_seq
+DETAIL: view sv depends on table s
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP VIEW ci.sv
+-- DROP VIEW
+
+> DROP TABLE ci.s
+ERROR 2BP01: cannot drop table s because other objects depend on it
+DETAIL: default value for column n of table u depends on sequence s_id_seq
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TABLE ci.s CASCADE
+NOTICE 00000: drop cascades to default value for column n of table u
+-- DROP TABLE
+
+> SELECT adrelid::regclass, pg_get_expr(adbin, adrelid) FROM pg_attrdef
+>   WHERE adrelid = 'ci.u'::regclass
+adrelid:regclass | pg_get_expr:text
+-- SELECT 0
+
+> CREATE TABLE ci.base (a int)
+-- CREATE TABLE
+
+> CREATE TABLE ci.kid (b int) INHERITS (ci.base)
+-- CREATE TABLE
+
+> DROP TABLE ci.base
+ERROR 2BP01: cannot drop table base because other objects depend on it
+DETAIL: table kid depends on table base
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP TABLE ci.base CASCADE
+NOTICE 00000: drop cascades to table kid
+-- DROP TABLE
+
+> CREATE TABLE ci.w (id int)
+-- CREATE TABLE
+
+> CREATE FUNCTION ci.wf() RETURNS bigint LANGUAGE sql BEGIN ATOMIC SELECT count(*) FROM ci.w; END
+-- CREATE FUNCTION
+
+> DROP TABLE ci.w
+ERROR 2BP01: cannot drop table w because other objects depend on it
+DETAIL: function wf() depends on table w
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> DROP FUNCTION ci.wf()
+-- DROP FUNCTION
+
+> DROP TABLE ci.w
+-- DROP TABLE
+
+> BEGIN
+-- BEGIN
+
+> CREATE TABLE ci.m1 (id int PRIMARY KEY)
+-- CREATE TABLE
+
+> CREATE TABLE ci.m2 (id int PRIMARY KEY, m1 int REFERENCES ci.m1)
+-- CREATE TABLE
+
+> CREATE TABLE ci.m3 (id int PRIMARY KEY, m2 int REFERENCES ci.m2)
+-- CREATE TABLE
+
+> SELECT relname, relhastriggers FROM pg_class WHERE relname LIKE 'm_' AND
+>   relnamespace = 'ci'::regnamespace ORDER BY 1
+relname:name | relhastriggers:bool
+m1 | t
+m2 | t
+m3 | t
+-- SELECT 3
+
+> DROP TABLE ci.m2 CASCADE
+NOTICE 00000: drop cascades to constraint m3_m2_fkey on table m3
+-- DROP TABLE
+
+> SELECT relname, relhastriggers FROM pg_class WHERE relname LIKE 'm_' AND
+>   relnamespace = 'ci'::regnamespace ORDER BY 1
+relname:name | relhastriggers:bool
+m1 | t
+m3 | t
+-- SELECT 2
+
+> SELECT conrelid::regclass, conname FROM pg_constraint WHERE connamespace = 'ci'::regnamespace
+>   AND conrelid::regclass::text LIKE 'm%' ORDER BY 1, 2
+conrelid:regclass | conname:name
+m1 | m1_id_not_null
+m1 | m1_pkey
+m3 | m3_id_not_null
+m3 | m3_pkey
+-- SELECT 4
+
+> COMMIT
+-- COMMIT
+
+> DROP SCHEMA ci CASCADE
+NOTICE 00000: drop cascades to 7 other objects
+DETAIL: drop cascades to table p
+DETAIL: drop cascades to table c
+DETAIL: drop cascades to table d
+DETAIL: drop cascades to table e
+DETAIL: drop cascades to table u
+DETAIL: drop cascades to table m1
+DETAIL: drop cascades to table m3
+-- DROP SCHEMA
+

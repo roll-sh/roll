@@ -861,7 +861,7 @@ impl Ddl<'_, '_> {
             window: false,
             trftypes: Vec::new(),
         };
-        std::sync::Arc::make_mut(&mut self.cat.functions).insert(oid, Arc::new(func));
+        self.cat.functions.insert(oid, Arc::new(func));
         self.save()?;
         Ok(TAG.into())
     }

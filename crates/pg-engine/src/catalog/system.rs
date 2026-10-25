@@ -983,9 +983,18 @@ struct RelInfo {
     owner: u32,
 }
 
-fn relations(cat: &Catalog) -> Vec<RelInfo> {
+/// A map's values, or only the one under `only`.
+fn pick<V>(m: &super::pmap::PMap<V>, only: Option<u32>) -> Box<dyn Iterator<Item = &V> + '_> {
+    match only {
+        None => Box::new(m.values()),
+        Some(o) => Box::new(m.get(&o).into_iter()),
+    }
+}
+
+/// `relations`, or (`only`) the entries of one relation, as `relations` has them.
+fn relations_of(cat: &Catalog, only: Option<u32>) -> Vec<RelInfo> {
     let mut out = Vec::new();
-    for t in cat.tables.values() {
+    for t in pick(&cat.tables, only) {
         out.push(RelInfo {
             oid: t.oid,
             name: t.name.clone(),
@@ -1009,7 +1018,7 @@ fn relations(cat: &Catalog) -> Vec<RelInfo> {
             owner: t.owner,
         });
     }
-    for v in cat.views.values() {
+    for v in pick(&cat.views, only) {
         out.push(RelInfo {
             oid: v.oid,
             name: v.name.clone(),
@@ -1033,7 +1042,7 @@ fn relations(cat: &Catalog) -> Vec<RelInfo> {
             owner: v.owner,
         });
     }
-    for s in cat.sequences.values() {
+    for s in pick(&cat.sequences, only) {
         out.push(RelInfo {
             oid: s.oid,
             name: s.name.clone(),
@@ -1060,7 +1069,7 @@ fn relations(cat: &Catalog) -> Vec<RelInfo> {
             owner: s.owner,
         });
     }
-    for i in cat.indexes.values() {
+    for i in pick(&cat.indexes, only) {
         let schema = cat
             .index_table(i.table)
             .map(|t| t.schema)
@@ -1094,7 +1103,11 @@ fn relations(cat: &Catalog) -> Vec<RelInfo> {
             owner: cat.index_table(i.table).map_or(OWNER, |t| t.owner),
         });
     }
-    for t in cat.toasted() {
+    let toasted: Box<dyn Iterator<Item = &Arc<super::Table>>> = match only {
+        None => Box::new(cat.toasted()),
+        Some(o) => Box::new(cat.toast_owner(o).map(|(t, _)| t).into_iter()),
+    };
+    for t in toasted {
         let persistence = if t.temporary {
             't'
         } else if t.unlogged {
@@ -1103,6 +1116,9 @@ fn relations(cat: &Catalog) -> Vec<RelInfo> {
             'p'
         };
         for index in [false, true] {
+            if only.is_some_and(|o| o != t.toast + index as u32) {
+                continue;
+            }
             out.push(RelInfo {
                 oid: t.toast + index as u32,
                 name: super::toast_name(t.oid, index),
@@ -1122,7 +1138,7 @@ fn relations(cat: &Catalog) -> Vec<RelInfo> {
             });
         }
     }
-    for ct in cat.composites.values() {
+    for ct in cat.composites.values().filter(|c| only.is_none_or(|o| c.relid == o)) {
         out.push(RelInfo {
             oid: ct.relid,
             name: ct.name.clone(),
@@ -1136,7 +1152,7 @@ fn relations(cat: &Catalog) -> Vec<RelInfo> {
             owner: ct.owner,
         });
     }
-    for st in SysTable::all() {
+    for st in SysTable::all().filter(|s| only.is_none_or(|o| s.oid() == o)) {
         out.push(RelInfo {
             oid: st.oid(),
             name: st.name().to_string(),
@@ -1612,6 +1628,88 @@ pub fn rows(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
     Ok(rows_shared(table, ctx)?.rows.clone())
 }
 
+/// How many rows `rows` gives of pg_class, pg_attribute or pg_attrdef, counted without
+/// generating them (what the planner's estimate of a catalog scan reads: a catalog query
+/// right after DDL needn't generate the whole catalog to plan). None: another catalog.
+pub fn row_count(table: SysTable, ctx: &ExecCtx) -> Option<usize> {
+    use SysTable::*;
+    let cat = ctx.catalog();
+    let cat = &*cat;
+    let in_schema = |r: &&Row| cat.schemas.contains_key(&super::static_rows::oid_at(r, 2));
+    let n = match table {
+        PgClass => {
+            super::static_rows::rows(PgClass).iter().filter(in_schema).count()
+                + relations_of(cat, None).iter().filter(|r| r.oid >= super::FIRST_USER_OID).count()
+        }
+        PgAttribute => {
+            let builtin: std::collections::HashSet<u32> = super::static_rows::rows(PgClass)
+                .iter()
+                .filter(in_schema)
+                .map(|r| super::static_rows::oid_at(r, 0))
+                .collect();
+            let fixed = super::static_rows::rows(PgAttribute)
+                .iter()
+                .filter(|r| builtin.contains(&super::static_rows::oid_at(r, 0)))
+                .count();
+            fixed
+                + relations_of(cat, None)
+                    .iter()
+                    .filter(|r| r.oid >= super::FIRST_USER_OID)
+                    .map(|r| {
+                        let cols = match cat.tables.get(&r.oid) {
+                            Some(t) => t.columns.len(),
+                            None => rel_columns(cat, r.oid, ctx).len(),
+                        };
+                        cols + if matches!(r.kind, 'r' | 'p' | 'm' | 'S' | 't' | 'f') { 6 } else { 0 }
+                    })
+                    .sum::<usize>()
+        }
+        PgAttrdef => {
+            cat.tables
+                .values()
+                .map(|t| {
+                    t.live_columns()
+                        .filter(|(_, c)| c.default.is_some() || c.generated.is_some())
+                        .count()
+                })
+                .sum::<usize>()
+                + cat
+                    .views
+                    .values()
+                    .map(|v| {
+                        v.defaults
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, d)| d.is_some() && v.columns.get(*i).is_some())
+                            .count()
+                    })
+                    .sum::<usize>()
+        }
+        _ => return None,
+    };
+    debug_assert_eq!(
+        Some(n),
+        rows_generated_for(table, ctx, None).ok().map(|r| r.len()),
+        "{}'s row count",
+        table.name()
+    );
+    Some(n)
+}
+
+/// `rows_shared`'s rows when they are generated already (for this catalog and the
+/// session's roles, path and settings), without generating them.
+pub fn rows_cached(table: SysTable, ctx: &ExecCtx) -> Option<Arc<SysRows>> {
+    let key = rows_key(table, ctx);
+    ctx.sess
+        .db
+        .sys_rows
+        .lock()
+        .entries
+        .iter()
+        .find(|(k, _)| k.same(&key))
+        .map(|(_, r)| r.clone())
+}
+
 /// `rows` of a cacheable catalog (`rows_cacheable`), shared: generated once per key for all
 /// the database's sessions.
 pub fn rows_shared(table: SysTable, ctx: &ExecCtx) -> Result<Arc<SysRows>> {
@@ -1640,8 +1738,53 @@ pub fn rows_shared(table: SysTable, ctx: &ExecCtx) -> Result<Arc<SysRows>> {
 }
 
 fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
-    use SysTable::*;
     GENERATED.with(|c| c.set(c.get() + 1));
+    rows_generated_for(table, ctx, None)
+}
+
+/// The catalogs `rows_of_rel` generates a relation's rows of: their column naming it.
+pub fn rel_column(table: SysTable) -> Option<usize> {
+    use SysTable::*;
+    match table {
+        PgClass | PgAttribute => Some(0),
+        PgAttrdef => Some(1),
+        _ => None,
+    }
+}
+
+/// Of the rows `rows` gives, those whose `rel_column` is `rel`, in their order, generated
+/// alone: what a scan pinning the column to a value reads (a catalog query right after DDL
+/// needn't generate the whole catalog for one relation's rows). None: not such a catalog.
+pub fn rows_of_rel(table: SysTable, ctx: &ExecCtx, rel: u32) -> Result<Option<Vec<Row>>> {
+    if rel_column(table).is_none() {
+        return Ok(None);
+    }
+    REL_GENERATED.with(|c| c.set(c.get() + 1));
+    let rows = rows_generated_for(table, ctx, Some(rel))?;
+    #[cfg(debug_assertions)]
+    {
+        let k = rel_column(table).unwrap();
+        let all: Vec<Row> = rows_generated_for(table, ctx, None)?
+            .into_iter()
+            .filter(|r| r[k] == Value::Oid(rel))
+            .collect();
+        debug_assert!(all == rows, "{}'s rows of relation {rel}", table.name());
+    }
+    Ok(Some(rows))
+}
+
+thread_local! {
+    static REL_GENERATED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times a relation's rows alone were generated on this thread (`rows_of_rel`).
+pub fn rel_rows_generated() -> u64 {
+    REL_GENERATED.with(|c| c.get())
+}
+
+/// `rows_generated`, of relation `only`'s rows alone (`rows_of_rel`).
+fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u32>) -> Result<Vec<Row>> {
+    use SysTable::*;
     let schema = if table.schema() == PGC {
         "pg_catalog"
     } else {
@@ -1697,14 +1840,14 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
         }
         PgClass => {
             // Tables with triggers, including the internal ones behind foreign keys.
-            let triggered = crate::exec::trigger::triggered_tables(cat, true);
-            // Partitioned indexes with partitions' indexes attached.
-            let index_parents: std::collections::HashSet<u32> =
-                cat.indexes.values().map(|i| i.parent).filter(|p| *p != 0).collect();
+            let triggered = |rel: u32| crate::exec::trigger::table_has_triggers(cat, rel, true);
+            // Partitioned indexes with partitions' indexes attached (`relindex::IndexIx`).
+            let index_parents = &cat.indexes.ix().parents;
             // Postgres's own relations (in schemas still there), privileges as granted here.
             let boot = role_name(OWNER);
             for r in super::static_rows::rows(table)
                 .iter()
+                .filter(|r| only.is_none_or(|o| super::static_rows::oid_at(r, 0) == o))
                 .filter(|r| cat.schemas.contains_key(&super::static_rows::oid_at(r, 2)))
             {
                 let mut r = r.clone();
@@ -1720,7 +1863,7 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                 }
                 out.push(r);
             }
-            for r in relations(cat)
+            for r in relations_of(cat, only)
                 .into_iter()
                 .filter(|r| r.oid >= super::FIRST_USER_OID)
             {
@@ -1765,12 +1908,12 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                     i2(r.natts as i64),
                     i2(r.checks as i64),
                     b(r.kind == 'v' || cat.class_has_rules.contains(&r.oid)),
-                    b(triggered.contains(&r.oid)),
+                    b(triggered(r.oid)),
                     // (Set by a first child; only ANALYZE clears it, once the children
                     // are gone.)
                     b(!cat.children(r.oid).is_empty()
                         || cat.class_has_subclass.contains(&r.oid)
-                        || index_parents.contains(&r.oid)),
+                        || index_parents.contains(r.oid)),
                     b(cat.tables.get(&r.oid).is_some_and(|t| t.rls)),
                     b(cat.tables.get(&r.oid).is_some_and(|t| t.rls_force)),
                     b(r.kind != 'm' || cat.views.get(&r.oid).is_none_or(|v| v.populated)),
@@ -1889,6 +2032,7 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
             let boot = role_name(OWNER);
             for r in super::static_rows::rows(table)
                 .iter()
+                .filter(|r| only.is_none_or(|o| super::static_rows::oid_at(r, 0) == o))
                 .filter(|r| builtin.contains(&super::static_rows::oid_at(r, 0)))
             {
                 let mut r = r.clone();
@@ -1901,7 +2045,7 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                 }
                 out.push(r);
             }
-            for r in relations(cat)
+            for r in relations_of(cat, only)
                 .into_iter()
                 .filter(|r| r.oid >= super::FIRST_USER_OID)
             {
@@ -4195,7 +4339,7 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
             }
         }
         PgAttrdef => {
-            for t in cat.tables.values() {
+            for t in pick(&cat.tables, only) {
                 for (i, col) in t.live_columns() {
                     if let Some(d) = col.default.as_ref().or(col.generated.as_ref()) {
                         out.push(vec![
@@ -4208,7 +4352,7 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                 }
             }
             // ALTER VIEW ... ALTER COLUMN ... SET DEFAULT.
-            for v in cat.views.values().filter(|v| v.defaults.iter().any(Option::is_some)) {
+            for v in pick(&cat.views, only).filter(|v| v.defaults.iter().any(Option::is_some)) {
                 let t = v.as_table();
                 for (i, d) in v.defaults.iter().enumerate() {
                     if let (Some(d), Some(col)) = (d, v.columns.get(i)) {

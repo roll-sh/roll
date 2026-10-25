@@ -1088,11 +1088,11 @@ impl Engine {
         Self::upgrade_batch(db, &mut |txn| {
             txn.delete(staged.clone())?;
             let mut c: Catalog = (*db.catalog()).clone();
-            std::sync::Arc::make_mut(&mut c.indexes).insert(pix.oid, Arc::new(pix.clone()));
+            c.indexes.insert(pix.oid, Arc::new(pix.clone()));
             for (_, moved) in &others {
-                std::sync::Arc::make_mut(&mut c.indexes).insert(moved.oid, Arc::new(moved.clone()));
+                c.indexes.insert(moved.oid, Arc::new(moved.clone()));
             }
-            std::sync::Arc::make_mut(&mut c.tables).insert(oid, Arc::new(nt.clone()));
+            c.tables.insert(oid, Arc::new(nt.clone()));
             txn.set_catalog(c)
         })?;
         // Its models were of the old keys: laid out again when next needed.

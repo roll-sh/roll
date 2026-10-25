@@ -101,6 +101,20 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   16 s); an idle session holds 0.5 MB (PostgreSQL 1.5 MB). Still slower: every DDL statement
   is O(catalog) (0.02–0.3x PostgreSQL at 10,000 tables), and the first catalog query after
   DDL regenerates the catalog's rows.
+- **Catalog and DDL at scale** (round 18, agent 49; BENCH.md "Catalog and DDL at scale"): the
+  catalog's per-relation maps are structurally shared (`catalog/pmap.rs`: a change copies one
+  chunk of 64 oids, diffs skip shared chunks) and keep secondary indexes as entries change
+  (`catalog/relindex.rs`: trigger-bearing tables, constraint names and owners, foreign-key
+  referencers, TOAST owners, row types and their users, owned sequences, ...), so DDL's
+  per-statement passes visit only what the statement changed; DROP TABLE derives only the
+  dependencies of tables that may depend on the dropped ones when that suffices
+  (`depend::drop_scope` / `closed`); catalog scans pinned to one relation generate only its
+  rows (`system::rows_of_rel`). At 10,000 tables CREATE TABLE 14.7 → 1.3 ms (PostgreSQL 3.2),
+  CREATE INDEX 14.3 → 1.0 (0.9), COMMENT 11 → 0.22 (0.26), ALTER TABLE ADD COLUMN 16 → 2.0
+  (0.36), DROP TABLE 93 → 19.5 (4.9), psql `\d` columns after DDL 249 → 39 ms (0.47);
+  restoring an 11,000-table schema dump with psql 254 s → 21 s (PostgreSQL 42 s). Still
+  slower: DROP and ALTER, catalog queries after DDL that aren't pinned to one relation,
+  information_schema, a database's first connection (BENCH.md has why).
 - **Client libraries** (round 17, agent 38): drivers' and ORMs' own test suites against the
   engine and against PostgreSQL 18.6, test by test: `tests/clients/` (runner, per-suite scripts,
   `STATUS.md` with the per-suite counts and every difference left). psycopg 3, psycopg2,
@@ -395,6 +409,11 @@ Prefix scratch objects, and drop scratch databases and roles afterwards.
   `Catalog` must be listed in `persist.rs`'s `stored_fields!` (as a map, a set or in the header;
   the macro's exhaustive destructuring doesn't compile otherwise), with a record tag never used
   before.
+- A per-object catalog map that can grow with the catalog is a `pmap::PMap` (or an
+  `IndexedMap` when DDL or lookups need it by something other than its oid: add the index to
+  `catalog/relindex.rs`, kept in `MapIndex::add` / `remove`, never by scanning). DDL passes
+  that run on every statement compare the statement's catalog with the one it started from
+  through `PMap::changes` / `diff`, not by visiting every object.
 - Every fix gets a golden recorded against PostgreSQL. Correctness (results, errors, data)
   before EXPLAIN text.
 - Commit only verified states: the whole `cargo test -p pg-engine` passes first.
@@ -446,6 +465,22 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
     empty, and its lookups scan. Static tables read per row (`type_procs`'s built-ins,
     `SysTable::by_oid`, built-in operator classes, catalog indexes) are hashed once per
     process. Golden `catalog_lookups`.
+  - The relation maps' indexes (round 18 agent 49, `catalog/relindex.rs`, `pmap::IndexedMap`):
+    part of the catalog value itself, not a cache: every insert and remove of a table, view,
+    index or sequence updates them (structurally shared like the maps), so a copy, a rollback
+    to a savepoint (an older catalog value) and a catalog loaded from records have the
+    indexes of exactly their entries. Every reader is checked against the scan it replaced in
+    debug builds (`triggered_tables`, `toast_owner`, `rel_rowtype`, `user_type_name`,
+    `rls_named`, `column_using`, constraint names, owned sequences, `Deleted`'s owners).
+    `Lookups::user_types` now holds only the types that aren't relations' row types. Tests:
+    `catalog::pmap` unit tests, golden `a49_catalog_indexes`.
+  - One relation's catalog rows (`system::rows_of_rel`, `exec::nodes::sys_rel_rows`): not
+    cached; generated per scan when the shared rows of that catalog version (and key) aren't
+    there yet. `ExecCtx::sys_rel_scans` (per statement) counts a rescan's such generations:
+    past 16 it generates the shared rows. Debug builds compare the rows with the full
+    generation's. `explain::sys_tuples`' count of pg_class / pg_attribute / pg_attrdef comes
+    from `system::row_count` (checked against the generated rows in debug builds) unless the
+    rows are generated already. Golden `a49_catalog_indexes`.
   - `sql::parse` `PARSED` (parse trees, per thread): by the text and the parser options (a
     pure function); `ast::parse_exprs` / `parse_stmt` (stored texts) under tags of their own.
   - `costs::SLOT_VALUES` (statistics slots' parsed values, per thread): by
@@ -517,6 +552,36 @@ Rules for a new cache:
    a stale entry.
 5. `golden_shuffled` (below) runs the goldens in another order on one thread; run it with
    `GOLDEN_SHUFFLE=all` after adding one.
+
+## information_schema: virtual tables, not their real definitions (round 18, agent 49)
+
+The engine serves information_schema's views as virtual catalogs: about 25 generated in
+Rust (`system.rs`, `Is*`), about 40 by running PostgreSQL's own view query apart
+(`sys_views.tsv`). PostgreSQL binds each view's definition into the query, so its EXPLAIN shows
+the view's joins and expressions, and a query without ORDER BY returns rows in its plan's
+order. The one regression unit this shows in is join 368 (a dummy Result over
+`information_schema.column_udt_usage` whose target list is the view's expressions).
+
+Assessed, not done this round (agent 49 spent it on DDL at scale). What binding the real
+definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
+- Every information_schema query becomes a 6–10-way join over catalog scans (columns:
+  pg_attribute, pg_class, pg_namespace twice, pg_type twice, pg_attrdef, pg_collation, with
+  `_pg_truetypid` / `_pg_char_max_length` per row). Plans, and so row orders where there is
+  no ORDER BY, then follow the planner's costs over catalogs, which in PostgreSQL come from
+  its catalogs' relpages / reltuples as autovacuum last left them; the engine's catalog
+  estimates are counts of generated rows (`explain::sys_tuples`), so plan choice over large
+  catalogs can differ from the reference's even with the same planner.
+- 22 regression files read information_schema (updatable_views alone 50 statements); most
+  order their rows, but each would need its plan and row order re-checked unit by unit, and
+  client tools (ORMs, psql's `\d` doesn't) read these views in volume.
+- Speed: the engine would plan a large join per query and run it over generated catalog
+  rows; with this round's one-relation catalog rows (`rows_of_rel`) the nested loops
+  PostgreSQL picks (parameterized catalog index scans) become cheap, which is the
+  prerequisite.
+- Suggested route: make `rows_of_rel` cover pg_type, pg_index, pg_constraint, pg_namespace
+  (so catalog joins are per-relation work), then bind the real definitions behind a build
+  switch, run the 22 files with it against a baseline, and fix plan differences before
+  turning it on; join 368 follows. Until then the virtual tables stay (their rows match).
 
 ## Decisions already made (don't revisit)
 

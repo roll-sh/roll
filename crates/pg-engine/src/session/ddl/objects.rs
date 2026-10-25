@@ -1679,7 +1679,7 @@ impl Ddl<'_, '_> {
     /// Drop a view and (recursively) the views built on it.
     pub(super) fn drop_view_cascade(&mut self, oid: u32) -> Result<()> {
         // Out of the catalog first: views that read each other (a cycle) end here.
-        let Some(view) = std::sync::Arc::make_mut(&mut self.cat.views).remove(&oid) else {
+        let Some(view) = self.cat.views.remove(&oid) else {
             return Ok(());
         };
         self.cat.rules.retain(|_, x| x.table != oid);
@@ -1701,14 +1701,14 @@ impl Ddl<'_, '_> {
                 crate::exec::dml::truncate(st, self.ctx)?;
                 self.ctx.sess.db.reset_seq(st.oid, None)?;
                 for i in &st.indexes {
-                    if let Some(ix) = std::sync::Arc::make_mut(&mut self.cat.indexes).remove(i) {
+                    if let Some(ix) = self.cat.indexes.remove(i) {
                         self.cat.remove_name(v.schema, &ix.name);
                         self.cat.comments.retain(|(o, _, _)| o != i);
                     }
-                    std::sync::Arc::make_mut(&mut self.cat.relstats).remove(i);
+                    self.cat.relstats.remove(i);
                     self.cat.colstats.remove(i);
                 }
-                std::sync::Arc::make_mut(&mut self.cat.relstats).remove(&oid);
+                self.cat.relstats.remove(&oid);
                 self.cat.colstats.remove(&oid);
                 let stats: Vec<u32> = self
                     .cat
@@ -1822,7 +1822,7 @@ impl Ddl<'_, '_> {
                 nq.unlogged = Some(cmd.subtype == pb::AlterTableType::AtSetUnLogged as i32);
             }
         }
-        std::sync::Arc::make_mut(&mut self.cat.sequences).insert(nq.oid, Arc::new(nq));
+        self.cat.sequences.insert(nq.oid, Arc::new(nq));
         self.save()?;
         Ok("ALTER SEQUENCE".into())
     }
@@ -4081,7 +4081,7 @@ impl Ddl<'_, '_> {
             None => self.cat.alloc_oid(),
         };
         let func = Arc::new(func);
-        std::sync::Arc::make_mut(&mut self.cat.functions).insert(func.oid, func.clone());
+        self.cat.functions.insert(func.oid, func.clone());
         self.save()?;
         if let Some(shape) = validate {
             self.validate_function(&func, false, shape)?;
@@ -4566,7 +4566,7 @@ impl Ddl<'_, '_> {
                 _ => {}
             }
         }
-        std::sync::Arc::make_mut(&mut self.cat.functions).insert(nf.oid, Arc::new(nf));
+        self.cat.functions.insert(nf.oid, Arc::new(nf));
         self.save()?;
         Ok(tag)
     }
@@ -5652,8 +5652,8 @@ impl Ddl<'_, '_> {
             let mut t = (*t).clone();
             t.indexes.retain(|i| *i != ix.oid);
             self.delete_index_rows(&t, ix)?;
-            std::sync::Arc::make_mut(&mut self.cat.indexes).remove(&ix.oid);
-            std::sync::Arc::make_mut(&mut self.cat.relstats).remove(&ix.oid);
+            self.cat.indexes.remove(&ix.oid);
+            self.cat.relstats.remove(&ix.oid);
             self.cat.colstats.remove(&ix.oid);
             self.cat.remove_name(t.schema, &ix.name);
             self.cat.put_storage(t);
@@ -5937,7 +5937,7 @@ impl Ddl<'_, '_> {
                     }
                 }
                 Dep::Function(o) => {
-                    std::sync::Arc::make_mut(&mut self.cat.functions).remove(&o);
+                    self.cat.functions.remove(&o);
                 }
             }
         }
@@ -5961,7 +5961,7 @@ impl Ddl<'_, '_> {
             }
         }
         if let Some(p) = t.pkey_index
-            && let Some(ix) = std::sync::Arc::make_mut(&mut self.cat.indexes).remove(&p)
+            && let Some(ix) = self.cat.indexes.remove(&p)
         {
             self.cat.remove_name(t.schema, &ix.name);
         }
@@ -6033,7 +6033,6 @@ impl Ddl<'_, '_> {
             c.freeze();
             Arc::new(c)
         };
-        let deps = depend::depends(self.ctx, &cat);
         let sp = self.search_path().to_vec();
         let required = |r: depend::Required| {
             let other = depend::describe(&cat, &sp, r.owner).unwrap_or_default();
@@ -6046,7 +6045,36 @@ impl Ddl<'_, '_> {
             )
             .hint(format!("You can drop {other} instead."))
         };
-        let targets = depend::find_dependents(&cat, &deps, roots).map_err(required)?;
+        let targets = {
+            // Dropping plain tables: only the tables that may depend on them are derived
+            // (`depend::drop_scope`), when every object the walk then finds belongs to them
+            // (`depend::closed`); otherwise the whole catalog's dependencies.
+            let scoped = depend::drop_scope(&cat, roots).and_then(|scope| {
+                let deps = depend::depends_in(self.ctx, &cat, &scope);
+                match depend::find_dependents(&cat, &deps, roots) {
+                    Ok(t) if depend::closed(&cat, roots, &t) => Some(Ok(t)),
+                    // (An error from the scoped walk is checked over the whole catalog.)
+                    _ => None,
+                }
+            });
+            let full = || {
+                let deps = depend::depends(self.ctx, &cat);
+                depend::find_dependents(&cat, &deps, roots)
+            };
+            #[cfg(debug_assertions)]
+            if let Some(Ok(t)) = &scoped {
+                let key = |t: &[depend::Target]| -> Vec<(depend::Addr, u16, Option<depend::Addr>)> {
+                    t.iter().map(|x| (x.obj, x.flags, x.dependee)).collect()
+                };
+                let f = full().ok().unwrap_or_default();
+                debug_assert_eq!(key(t), key(&f), "a scoped DROP's dependents");
+            }
+            match scoped {
+                Some(t) => t,
+                None => full(),
+            }
+            .map_err(required)?
+        };
         let more = |n: usize| match n {
             0 => String::new(),
             1 => "\nand 1 other object (see server log for list)".to_string(),
@@ -6092,6 +6120,7 @@ impl Ddl<'_, '_> {
                 .filter(|t| t.obj.2 == 0)
                 .map(|t| (t.obj.0, t.obj.1))
                 .collect(),
+            #[cfg(debug_assertions)]
             owners: Default::default(),
             before: cat.clone(),
         };
@@ -6145,7 +6174,7 @@ impl Ddl<'_, '_> {
                     self.drop_table_now(&t)?;
                 } else if self.cat.views.contains_key(&oid) {
                     self.drop_view_cascade(oid)?;
-                } else if let Some(q) = std::sync::Arc::make_mut(&mut self.cat.sequences).remove(&oid) {
+                } else if let Some(q) = self.cat.sequences.remove(&oid) {
                     self.cat.remove_name(q.schema, &q.name);
                     self.cat.comments.retain(|(o, _, _)| *o != oid);
                     self.ctx.sess.db.reset_seq(oid, None)?;
@@ -6171,18 +6200,18 @@ impl Ddl<'_, '_> {
                 }
             }
             PROC => {
-                if std::sync::Arc::make_mut(&mut self.cat.functions).remove(&oid).is_some() {
+                if self.cat.functions.remove(&oid).is_some() {
                     self.cat.comments.retain(|(o, _, _)| *o != oid);
                 }
             }
             CONSTRAINT => {
                 // (The table that had it when the deletion began has it still: deleting
                 // other objects doesn't move constraints.)
-                let owner = whole
-                    .owners()
-                    .0
-                    .get(&oid)
-                    .and_then(|t| self.cat.tables.get(t))
+                let owner = whole.con_owner(oid);
+                #[cfg(debug_assertions)]
+                debug_assert_eq!(owner, whole.owners().0.get(&oid).copied(), "constraint owner index");
+                let owner = owner
+                    .and_then(|t| self.cat.tables.get(&t))
                     .filter(|t| t.constraints.iter().any(|c| c.oid == oid))
                     .cloned();
                 if let Some(t) = owner {
@@ -6218,13 +6247,16 @@ impl Ddl<'_, '_> {
                 }
             }
             ATTRDEF => {
-                let tables: Vec<Arc<crate::catalog::Table>> = whole
-                    .owners()
-                    .1
-                    .get(&oid)
+                let owners = whole.def_owners(oid);
+                #[cfg(debug_assertions)]
+                debug_assert_eq!(
+                    owners,
+                    whole.owners().1.get(&oid).cloned().unwrap_or_default(),
+                    "default owner index"
+                );
+                let tables: Vec<Arc<crate::catalog::Table>> = owners
                     .into_iter()
-                    .flatten()
-                    .filter_map(|t| self.cat.tables.get(t).cloned())
+                    .filter_map(|t| self.cat.tables.get(&t).cloned())
                     .collect();
                 for t in tables {
                     if gone(REL, t.oid) {
@@ -6953,12 +6985,25 @@ fn system_class_kind(name: &str) -> Option<char> {
 /// looked up once, which tables had each constraint and default when the deletion began.
 struct Deleted {
     whole: std::collections::HashSet<(u32, u32)>,
+    #[cfg(debug_assertions)]
     owners: std::cell::OnceCell<(std::collections::HashMap<u32, u32>, std::collections::HashMap<u32, Vec<u32>>)>,
     before: Arc<crate::catalog::Catalog>,
 }
 
 impl Deleted {
-    /// (constraint → its table, default's pg_attrdef oid → the tables with a column of it).
+    /// (constraint → its table, default's pg_attrdef oid → the tables with a column of it),
+    /// from the tables map's indexes (`relindex`).
+    fn con_owner(&self, con: u32) -> Option<u32> {
+        self.before.tables.ix().con_owner.get(&con)?.keys().next()
+    }
+
+    fn def_owners(&self, def: u32) -> Vec<u32> {
+        (self.before.tables.ix().def_owner.get(&def))
+            .map(|c| c.keys().collect())
+            .unwrap_or_default()
+    }
+
+    #[cfg(debug_assertions)]
     fn owners(&self) -> &(std::collections::HashMap<u32, u32>, std::collections::HashMap<u32, Vec<u32>>) {
         self.owners.get_or_init(|| {
             let mut cons = std::collections::HashMap::new();

@@ -698,6 +698,91 @@ fn sys_equality(
     Ok(None)
 }
 
+/// How many rescans of a catalog per statement read one relation's rows alone
+/// (`sys_rel_rows`) before the whole catalog is generated.
+const REL_RESCANS: u32 = 16;
+
+/// The value conjunct `c` sets `table`'s relation column to (`system::rel_column`), as
+/// `sys_equality` reads such a conjunct: a built-in `=` between the column and a value (a
+/// constant, or of outer references) of its type. Some(None): the value is NULL.
+fn rel_pin(
+    table: crate::catalog::system::SysTable,
+    c: &Expr,
+    ctx: &ExecCtx,
+) -> Result<Option<Option<u32>>> {
+    let Some(col) = crate::catalog::system::rel_column(table) else {
+        return Ok(None);
+    };
+    let Expr::Call(d, args, _) = c else { return Ok(None) };
+    if d.name != "=" || args.len() != 2 || d.oid >= crate::catalog::FIRST_USER_OID {
+        return Ok(None);
+    }
+    let other = match (&args[0], &args[1]) {
+        (Expr::Col(k, _), o) | (o, Expr::Col(k, _)) if *k == col => o,
+        _ => return Ok(None),
+    };
+    let mut sub = false;
+    other.walk(&mut |e| sub |= matches!(e, Expr::Subquery(_)));
+    if sub || !other.columns().is_empty() || other.is_volatile() {
+        return Ok(None);
+    }
+    Ok(match crate::sql::expr::eval(other, &[], ctx)? {
+        Value::Null => Some(None),
+        Value::Oid(o) => Some(Some(o)),
+        _ => None,
+    })
+}
+
+/// The rows of the one relation a scan of a cacheable catalog reads, generated alone
+/// (`system::rows_of_rel`), when its rows aren't generated already and its index path's
+/// conditions or its filter's first conjunct pin the catalog's relation column: the rows
+/// those read of the whole catalog are among them, in the same order, so the scan reads the
+/// same rows (a catalog query right after DDL, psql's `\d`, would otherwise generate the
+/// whole catalog for one relation).
+fn sys_rel_rows(
+    table: crate::catalog::system::SysTable,
+    filter: Option<&Expr>,
+    path: Option<&crate::sql::plan::SysPath>,
+    ctx: &ExecCtx,
+) -> Result<Option<Arc<crate::catalog::system::SysRows>>> {
+    if crate::catalog::system::rel_column(table).is_none() {
+        return Ok(None);
+    }
+    let mut conds: Vec<&Expr> = Vec::new();
+    if let Some(sp) = path
+        && let crate::sql::plan::Access::Index { quals, .. } = &sp.scan.access
+    {
+        conds.extend(quals.iter().map(|q| &q.expr));
+    }
+    if let Some(f) = filter {
+        // (The first conjunct, as `sys_equality` splits the filter.)
+        let mut first = f;
+        while let Expr::And(items) = first {
+            match items.first() {
+                Some(i) => first = i,
+                None => break,
+            }
+        }
+        conds.push(first);
+    }
+    for c in conds {
+        if let Some(pin) = rel_pin(table, c, ctx)? {
+            if crate::catalog::system::rows_cached(table, ctx).is_some() {
+                return Ok(None);
+            }
+            let rows = match pin {
+                Some(rel) => match crate::catalog::system::rows_of_rel(table, ctx, rel)? {
+                    Some(r) => r,
+                    None => return Ok(None),
+                },
+                None => Vec::new(),
+            };
+            return Ok(Some(Arc::new(crate::catalog::system::SysRows::new(rows))));
+        }
+    }
+    Ok(None)
+}
+
 /// The rows of a catalog scan run once per outer row (a nested loop's parameterized inner
 /// side, a correlated sub-select): None when the scan reads no outer value, or reads a
 /// system view.
@@ -731,24 +816,44 @@ fn sys_rescan(
         .get(&table.oid())
         .filter(|e| Arc::ptr_eq(&e.cat, &cat) && e.role == role)
         .cloned();
-    let entry = match cached {
-        Some(e) => e,
+    // (The first few rescans of a catalog not generated yet read one relation's rows alone;
+    // past them, the whole catalog is generated, once.)
+    let rel_rows = match &cached {
+        None if crate::catalog::system::rows_cacheable(table)
+            && ctx.sys_rel_scans.borrow().get(&table.oid()).copied().unwrap_or(0) < REL_RESCANS =>
+        {
+            sys_rel_rows(table, Some(f), path, ctx)?
+        }
+        _ => None,
+    };
+    let all = match rel_rows {
+        Some(r) => {
+            *ctx.sys_rel_scans.borrow_mut().entry(table.oid()).or_default() += 1;
+            r
+        }
         None => {
-            let rows = if crate::catalog::system::rows_cacheable(table) {
-                Some(crate::catalog::system::rows_shared(table, ctx)?)
-            } else {
-                let rows = crate::catalog::system::rows(table, ctx)?;
-                let deferred = crate::catalog::system::deferred_errors(table, ctx, &rows);
-                deferred
-                    .is_empty()
-                    .then(|| Arc::new(crate::catalog::system::SysRows::new(rows)))
+            let entry = match cached {
+                Some(e) => e,
+                None => {
+                    let rows = if crate::catalog::system::rows_cacheable(table) {
+                        Some(crate::catalog::system::rows_shared(table, ctx)?)
+                    } else {
+                        let rows = crate::catalog::system::rows(table, ctx)?;
+                        let deferred = crate::catalog::system::deferred_errors(table, ctx, &rows);
+                        deferred
+                            .is_empty()
+                            .then(|| Arc::new(crate::catalog::system::SysRows::new(rows)))
+                    };
+                    let e = Rc::new(SysRescan { cat, role, rows });
+                    ctx.sys_rescans.borrow_mut().insert(table.oid(), e.clone());
+                    e
+                }
             };
-            let e = Rc::new(SysRescan { cat, role, rows });
-            ctx.sys_rescans.borrow_mut().insert(table.oid(), e.clone());
-            e
+            let Some(all) = &entry.rows else { return Ok(None) };
+            all.clone()
         }
     };
-    let Some(all) = &entry.rows else { return Ok(None) };
+    let all = &all;
     let found = match sys_index_equality(path, all, ctx)? {
         Some(e) => Some(e),
         None => sys_equality(f, all, false, ctx)?,
@@ -812,7 +917,10 @@ fn sys_shared_scan(
     if !crate::catalog::system::rows_cacheable(table) {
         return Ok(None);
     }
-    let rows = crate::catalog::system::rows_shared(table, ctx)?;
+    let rows = match sys_rel_rows(table, filter, path, ctx)? {
+        Some(r) => r,
+        None => crate::catalog::system::rows_shared(table, ctx)?,
+    };
     let picked = match sys_index_equality(path, &rows, ctx)? {
         Some((_, ix)) => Some(ix.unwrap_or_default()),
         None => match filter {

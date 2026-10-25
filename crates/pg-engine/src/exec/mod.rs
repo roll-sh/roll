@@ -214,6 +214,9 @@ pub struct ExecCtx<'a> {
     /// Catalogs a statement scans again and again (`nodes::sys_rescan`): each one's rows,
     /// generated once, by catalog oid.
     pub sys_rescans: RefCell<HashMap<u32, Rc<nodes::SysRescan>>>,
+    /// How many times the statement generated one relation's rows of a catalog for a rescan
+    /// (`nodes::sys_rescan`), by catalog oid: past a few, the whole catalog is generated.
+    pub sys_rel_scans: RefCell<HashMap<u32, u32>>,
     /// FROM subqueries whose join trees hold semi / anti joins, as their levels had them
     /// before planning (`paths::BoundTree`): the query above pulls such a subquery up from
     /// that (pull_up_subqueries comes before any planning), not from the planned tree,
@@ -503,6 +506,7 @@ impl<'a> ExecCtx<'a> {
             sys_cols: RefCell::default(),
             epq: RefCell::new(None),
             sys_rescans: RefCell::default(),
+            sys_rel_scans: Default::default(),
             bound_trees: RefCell::default(),
         }
     }
@@ -574,6 +578,7 @@ impl<'a> ExecCtx<'a> {
             sys_cols: RefCell::default(),
             epq: RefCell::new(None),
             sys_rescans: RefCell::default(),
+            sys_rel_scans: Default::default(),
             bound_trees: RefCell::default(),
         }
     }

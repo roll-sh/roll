@@ -375,7 +375,7 @@ fn words(before: &Catalog, c: &Change) -> Vec<String> {
 /// longer identifier), in any letter case. A one-letter table name (`t`) is in nearly every
 /// text as a letter, and each text that may name it is bound again: with many stored objects
 /// every ALTER TABLE of it rebound them all.
-fn mentions(text: &str, words: &[String]) -> bool {
+pub(crate) fn mentions(text: &str, words: &[String]) -> bool {
     // (Most texts contain none of the words at all: tell so without copying the text.)
     let contains = |w: &str| {
         let (t, w) = (text.as_bytes(), w.as_bytes());
@@ -1365,7 +1365,17 @@ impl Ddl<'_, '_> {
             }
         }
         // Tables: defaults, generation expressions, CHECK constraints, partition keys.
-        for t in before.tables.values() {
+        // (A column added or dropped changes only the column lists of FROM items, which these
+        // expressions never have: no subqueries in defaults, constraints, keys or WHEN.)
+        let exprs = if changes
+            .iter()
+            .all(|c| matches!(c, Change::AddColumn(..) | Change::DropColumn(..)))
+        {
+            0
+        } else {
+            usize::MAX
+        };
+        for t in before.tables.values().take(exprs) {
             // (Only tables with a text that may name something changed are copied.)
             let named = t.columns.iter().any(|c| {
                 c.default.as_deref().is_some_and(hit) || c.generated.as_deref().is_some_and(hit)
@@ -1430,7 +1440,7 @@ impl Ddl<'_, '_> {
             }
         }
         // Index expressions and predicates.
-        for ix in before.indexes.values() {
+        for ix in before.indexes.values().take(exprs) {
             let named = ix.predicate.as_deref().is_some_and(hit)
                 || ix
                     .columns
@@ -1470,7 +1480,7 @@ impl Ddl<'_, '_> {
             }
         }
         // Statistics objects' expressions.
-        for st in before.statistics.values() {
+        for st in before.statistics.values().take(exprs) {
             let Some(t) = before.tables.get(&st.table).cloned() else {
                 continue;
             };
@@ -1520,7 +1530,7 @@ impl Ddl<'_, '_> {
             }
         }
         // Trigger WHEN conditions.
-        for tg in before.triggers.values() {
+        for tg in before.triggers.values().take(exprs) {
             let Some(w) = tg.when.as_deref().filter(|w| hit(w)) else {
                 continue;
             };
@@ -1684,7 +1694,7 @@ impl Ddl<'_, '_> {
             {
                 let mut nf = (*cur).clone();
                 nf.body = body;
-                std::sync::Arc::make_mut(&mut self.cat.functions).insert(nf.oid, Arc::new(nf));
+                self.cat.functions.insert(nf.oid, Arc::new(nf));
             }
         }
         Ok(())
@@ -2083,11 +2093,9 @@ impl Ddl<'_, '_> {
         let ctx = self.ctx;
         let nctx = ctx.child_over(cat.clone());
         let mut tables = Vec::new();
-        for (oid, t) in cat.tables.iter() {
-            let old = before.tables.get(oid);
-            if old.is_some_and(|o| Arc::ptr_eq(o, t)) {
-                continue;
-            }
+        // (Only the tables the statement changed: the others are as they were.)
+        for (_, old, t) in before.tables.changes(&cat.tables) {
+            let Some(t) = t else { continue };
             let mut nt = (**t).clone();
             let mut changed = false;
             for (i, c) in t.columns.iter().enumerate() {
@@ -2149,11 +2157,8 @@ impl Ddl<'_, '_> {
         }
         // Index expressions and predicates.
         let mut indexes = Vec::new();
-        for (oid, ix) in cat.indexes.iter() {
-            let old = before.indexes.get(oid);
-            if old.is_some_and(|o| Arc::ptr_eq(o, ix)) {
-                continue;
-            }
+        for (_, old, ix) in before.indexes.changes(&cat.indexes) {
+            let Some(ix) = ix else { continue };
             let Some(t) = cat.index_table(ix.table) else {
                 continue;
             };

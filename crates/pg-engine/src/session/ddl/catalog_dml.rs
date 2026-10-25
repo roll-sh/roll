@@ -158,7 +158,7 @@ impl Ddl<'_, '_> {
                     } else if let Some(ix) = self.cat.indexes.get(&oid).cloned() {
                         let mut ix = (*ix).clone();
                         ix.options = opts;
-                        std::sync::Arc::make_mut(&mut self.cat.indexes).insert(oid, std::sync::Arc::new(ix));
+                        self.cat.indexes.insert(oid, std::sync::Arc::new(ix));
                     }
                     continue;
                 }
@@ -180,7 +180,7 @@ impl Ddl<'_, '_> {
                 }
             }
             if stats && oid >= crate::catalog::FIRST_USER_OID {
-                std::sync::Arc::make_mut(&mut self.cat.relstats).insert(oid, st);
+                self.cat.relstats.insert(oid, st);
             }
         }
         self.save()?;
@@ -759,7 +759,7 @@ pub(crate) fn merge_pg_class(
             }
         }
         if oid >= crate::catalog::FIRST_USER_OID {
-            std::sync::Arc::make_mut(&mut d.cat.relstats).insert(oid, st);
+            d.cat.relstats.insert(oid, st);
         }
         out.push(r[nfixed..].to_vec());
     }
