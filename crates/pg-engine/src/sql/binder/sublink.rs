@@ -30,6 +30,10 @@ pub(super) fn pull_up(
 ) -> (Plan, Option<Expr>) {
     let mut parts = Vec::new();
     conjuncts(pred, &mut parts);
+    // (The FROM subqueries' and sub-selects' join trees as bound: a sub-select's WHERE as
+    // written, `exists_join`.)
+    let bound = ctx.bound_trees.borrow().clone();
+    let bound = &bound[..];
     let parts: Vec<Expr> = parts
         .into_iter()
         .map(|e| values_to_any(e, ctx))
@@ -49,7 +53,7 @@ pub(super) fn pull_up(
             _ => return false,
         };
         match sub.kind {
-            SubqueryKind::Exists => exists_join(cat, plan, sub, anti).is_some(),
+            SubqueryKind::Exists => exists_join(cat, plan, sub, anti, bound).is_some(),
             SubqueryKind::Any if !anti => any_join(cat, plan, sub, unplanned).is_some(),
             _ => false,
         }
@@ -64,14 +68,14 @@ pub(super) fn pull_up(
         }
         Some(f) => {
             // (Kept above the joins.)
-            let (p, rest) = pull_up_parts(cat, plan, subs, unplanned);
+            let (p, rest) = pull_up_parts(cat, plan, subs, unplanned, bound);
             let mut r: Vec<Expr> = rest.into_iter().collect();
             r.push(f);
             return (p, and_all(r));
         }
         None => plan,
     };
-    let (p, rest) = pull_up_parts(cat, plan, subs, unplanned);
+    let (p, rest) = pull_up_parts(cat, plan, subs, unplanned, bound);
     plan = p;
     (plan, rest)
 }
@@ -80,7 +84,7 @@ pub(super) fn pull_up(
 pub(super) fn pull_up_only(cat: &Catalog, plan: Plan, pred: Expr) -> (Plan, Option<Expr>) {
     let mut parts = Vec::new();
     conjuncts(pred, &mut parts);
-    pull_up_parts(cat, plan, parts, &Unplanned::new())
+    pull_up_parts(cat, plan, parts, &Unplanned::new(), &[])
 }
 
 /// IN / ANY sub-selects' plans as bound, before their levels were planned, by subquery id
@@ -88,7 +92,13 @@ pub(super) fn pull_up_only(cat: &Catalog, plan: Plan, pred: Expr) -> (Plan, Opti
 pub(super) type Unplanned = std::collections::HashMap<usize, Arc<Plan>>;
 
 /// The sublinks `parts` turned into joins over `plan`, in order; the ones that weren't.
-fn pull_up_parts(cat: &Catalog, plan: Plan, parts: Vec<Expr>, unplanned: &Unplanned) -> (Plan, Option<Expr>) {
+fn pull_up_parts(
+    cat: &Catalog,
+    plan: Plan,
+    parts: Vec<Expr>,
+    unplanned: &Unplanned,
+    bound: &[crate::sql::paths::BoundTree],
+) -> (Plan, Option<Expr>) {
     let mut plan = plan;
     let mut rest = Vec::new();
     for p in parts {
@@ -107,7 +117,7 @@ fn pull_up_parts(cat: &Catalog, plan: Plan, parts: Vec<Expr>, unplanned: &Unplan
             }
         };
         let joined = match sub.kind {
-            SubqueryKind::Exists => exists_join(cat, &plan, sub, anti),
+            SubqueryKind::Exists => exists_join(cat, &plan, sub, anti, bound),
             SubqueryKind::Any if !anti => any_join(cat, &plan, sub, unplanned),
             _ => None,
         }
@@ -899,7 +909,13 @@ fn values_outer(p: &Plan) -> bool {
 }
 
 /// convert_EXISTS_sublink_to_join.
-fn exists_join(cat: &Catalog, plan: &Plan, sub: &Subquery, anti: bool) -> Option<Plan> {
+fn exists_join(
+    cat: &Catalog,
+    plan: &Plan,
+    sub: &Subquery,
+    anti: bool,
+    bound: &[crate::sql::paths::BoundTree],
+) -> Option<Plan> {
     // simplify_EXISTS_query: the select list and a positive constant LIMIT don't matter.
     let mut p: &Plan = &sub.plan;
     let mut limited = false;
@@ -976,9 +992,9 @@ fn exists_join(cat: &Catalog, plan: &Plan, sub: &Subquery, anti: bool) -> Option
             plan: left.clone(),
             ..sub.clone()
         };
-        let inner = exists_join(cat, plan, &sub_r, *k == JoinKind::Anti)?;
+        let inner = exists_join(cat, plan, &sub_r, *k == JoinKind::Anti, &[])?;
         // (The outer rows' columns are where they were: the inner join keeps them first.)
-        return exists_join(cat, &inner, &sub_l, false);
+        return exists_join(cat, &inner, &sub_l, false, &[]);
     }
     // A subquery that returns nothing: EXISTS is false (the semi join a dummy rel),
     // NOT EXISTS true.
@@ -1030,6 +1046,29 @@ fn exists_join(cat: &Catalog, plan: &Plan, sub: &Subquery, anti: bool) -> Option
         return None;
     }
     let nleft = width(plan);
+    // (The sub-select's equalities as written, its ON clauses' then its WHERE's.)
+    let written = sublink_written(&rhs, bound);
+    // An anti join's quals are the sub-select's WHERE as written (convert_EXISTS_sublink_
+    // to_join pulls up the subquery unplanned): no equivalence class takes the outer value
+    // in, so the clauses its level derived from a class with it (`t3.p = $1` of `t3.p =
+    // t2.x AND t2.x = $1`) are the written ones again, the right side's own a clause there.
+    let corr = match (&written, anti) {
+        (Some(w), false) => written_order(corr, w),
+        _ => corr,
+    };
+    let (corr, rhs) = match (&written, anti) {
+        (Some(w), true) => match anti_written(&corr, w, &rhs) {
+            Some((c, extra)) => {
+                let rhs = match and_all(extra) {
+                    Some(f) => super::optimize::add_filter(cat, rhs, f),
+                    None => rhs,
+                };
+                (c, rhs)
+            }
+            None => (corr, rhs),
+        },
+        _ => (corr, rhs),
+    };
     let cond: Vec<Expr> = corr
         .into_iter()
         .map(|e| outer_to_params(e.shift_cols(nleft as isize), &sub.params))
@@ -1037,8 +1076,18 @@ fn exists_join(cat: &Catalog, plan: &Plan, sub: &Subquery, anti: bool) -> Option
     let nright = width(&rhs);
     // (A semi join's clauses are equivalence classes: one equating an outer column with a
     // column the subquery fixes to a constant fixes the outer one too, and goes.)
+    // (The sub-select's WHERE equalities as written: convert_EXISTS_sublink_to_join makes
+    // its WHERE the semi join's quals, which process_equivalence meets in that order, after
+    // the join tree's own ON clauses.)
+    let written = match written {
+        Some(w) if !anti && w.iter().any(|e| e.has_outer_refs()) => w
+            .into_iter()
+            .map(|e| outer_to_params(e.shift_cols(nleft as isize), &sub.params))
+            .collect::<Option<Vec<_>>>(),
+        _ => None,
+    };
     let (left, rhs, cond) = if anti { (plan.clone(), rhs, cond) } else { semi_constants(cat, plan, rhs, cond, nleft) };
-    Some(super::optimize::join(
+    let mut j = super::optimize::join(
         cat,
         if anti { JoinKind::Anti } else { JoinKind::Semi },
         left,
@@ -1047,7 +1096,239 @@ fn exists_join(cat: &Catalog, plan: &Plan, sub: &Subquery, anti: bool) -> Option
         Vec::new(),
         nleft,
         nright,
-    ))
+    );
+    if let Some(w) = written
+        && let Plan::Join { kind: JoinKind::Semi, meta, right, .. } = &mut j
+    {
+        meta.ec_written = w;
+        let r = Arc::make_mut(right);
+        let r = match r {
+            Plan::Filter { input, .. } => Arc::make_mut(input),
+            r => r,
+        };
+        if let Plan::Join { meta: rm, .. } = r {
+            rm.ec_written.clear();
+        }
+    }
+    Some(j)
+}
+
+/// A sub-select's join tree's equalities as written (its ON clauses', then its WHERE's, the
+/// correlated ones too), from its level's tree before planning (`ExecCtx::bound_trees`,
+/// found by the planned join `rhs` is): over `rhs`'s row.
+fn sublink_written(rhs: &Plan, bound: &[crate::sql::paths::BoundTree]) -> Option<Vec<Expr>> {
+    let j = match rhs {
+        Plan::Filter { input, .. } => &**input,
+        j => j,
+    };
+    let Plan::Join { meta, .. } = j else { return None };
+    let b = bound.iter().find(|b| meta.bound != 0 && b.id == meta.bound)?;
+    // (The tree's row over the planned join's: the projections between them.)
+    let mut row: Vec<Expr> = (0..width(j)).map(|i| Expr::Col(i, crate::types::DataType::Unknown)).collect();
+    for g in b.glue.iter().rev() {
+        row = g
+            .iter()
+            .map(|e| {
+                e.clone()
+                    .transform(&mut |x| {
+                        Ok(match x {
+                            Expr::Col(i, t) => row.get(i).cloned().unwrap_or(Expr::Col(i, t)),
+                            x => x,
+                        })
+                    })
+                    .unwrap_or_else(|_| e.clone())
+            })
+            .collect();
+    }
+    fn gather(p: &Plan, off: usize, out: &mut Vec<Expr>) {
+        match p {
+            Plan::Join { kind: JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full, left, right, nleft, meta, .. } => {
+                gather(left, off, out);
+                gather(right, off + nleft, out);
+                out.extend(meta.ec_written.iter().map(|e| e.clone().shift_cols(off as isize)));
+            }
+            Plan::Filter { input, .. } => gather(input, off, out),
+            _ => {}
+        }
+    }
+    let mut eqs = Vec::new();
+    gather(&b.tree, 0, &mut eqs);
+    let mut out = Vec::new();
+    for e in eqs {
+        let mut ok = true;
+        let e = e
+            .transform(&mut |x| {
+                Ok(match x {
+                    Expr::Col(c, t) => match row.get(c) {
+                        Some(Expr::Col(d, _)) => Expr::Col(*d, t),
+                        _ => {
+                            ok = false;
+                            Expr::Col(c, t)
+                        }
+                    },
+                    x => x,
+                })
+            })
+            .ok()?;
+        if !ok {
+            return None;
+        }
+        out.push(e);
+    }
+    Some(out)
+}
+
+/// The classes the written equalities make (process_equivalence's merging): their operands,
+/// and for each class the first equality (by position) of it.
+struct WrittenClasses {
+    nodes: Vec<Expr>,
+    parent: Vec<usize>,
+    first: Vec<usize>,
+}
+
+impl WrittenClasses {
+    fn new(written: &[Expr]) -> Option<WrittenClasses> {
+        let mut w = WrittenClasses { nodes: Vec::new(), parent: Vec::new(), first: Vec::new() };
+        for (k, e) in written.iter().enumerate() {
+            let (a, b) = eq_sides(e)?;
+            let (x, y) = (w.id(&a, k), w.id(&b, k));
+            let (rx, ry) = (w.root(x), w.root(y));
+            if rx != ry {
+                w.parent[rx] = ry;
+                w.first[ry] = w.first[ry].min(w.first[rx]);
+            }
+        }
+        Some(w)
+    }
+
+    fn id(&mut self, e: &Expr, k: usize) -> usize {
+        match self.nodes.iter().position(|n| n.same_as(e)) {
+            Some(i) => i,
+            None => {
+                self.nodes.push(e.clone());
+                self.parent.push(self.parent.len());
+                self.first.push(k);
+                self.parent.len() - 1
+            }
+        }
+    }
+
+    fn root(&mut self, mut i: usize) -> usize {
+        while self.parent[i] != i {
+            self.parent[i] = self.parent[self.parent[i]];
+            i = self.parent[i];
+        }
+        i
+    }
+
+    /// The class of an operand, if a written equality has it.
+    fn class(&mut self, e: &Expr) -> Option<usize> {
+        let i = self.nodes.iter().position(|n| n.same_as(e))?;
+        Some(self.root(i))
+    }
+}
+
+fn eq_sides(e: &Expr) -> Option<(Expr, Expr)> {
+    match e {
+        Expr::Call(d, a, _) if d.name == "=" && a.len() == 2 => Some((a[0].clone(), a[1].clone())),
+        _ => None,
+    }
+}
+
+/// A value of the enclosing query (what a correlated equality equates a column with).
+fn outer_value(e: &Expr) -> bool {
+    e.columns().is_empty() && e.has_outer_refs() && !e.is_volatile()
+}
+
+/// A correlated clause `col = <outer value>` (either way round): the column side and the
+/// outer side.
+fn corr_sides(e: &Expr) -> Option<(Expr, Expr)> {
+    let (a, b) = eq_sides(e)?;
+    match (outer_value(&a), outer_value(&b)) {
+        (false, true) if !a.columns().is_empty() => Some((a, b)),
+        (true, false) if !b.columns().is_empty() => Some((b, a)),
+        _ => None,
+    }
+}
+
+/// A semi join's clauses (`corr`, over the right side's row) in the order of the classes the
+/// sub-select's written equalities make (generate_join_implied_equalities walks
+/// root->eq_classes in the order process_equivalence made them); others after.
+fn written_order(corr: Vec<Expr>, written: &[Expr]) -> Vec<Expr> {
+    let Some(mut w) = WrittenClasses::new(written) else { return corr };
+    let mut ranked: Vec<(usize, Expr)> = corr
+        .into_iter()
+        .map(|c| {
+            let r = corr_sides(&c).and_then(|(col, _)| w.class(&col)).map_or(usize::MAX, |r| w.first[r]);
+            (r, c)
+        })
+        .collect();
+    ranked.sort_by_key(|x| x.0);
+    ranked.into_iter().map(|x| x.1).collect()
+}
+
+/// An anti join's clauses as the sub-select wrote them (`exists_join`): `corr` (over the
+/// right side's row, `col = <outer value>` each) when the written equalities connect each of
+/// them, the written ones reading the outer query, and the right side's own written
+/// equalities between columns `corr` had equated with the outer values (gone from `rhs`).
+fn anti_written(corr: &[Expr], written: &[Expr], rhs: &Plan) -> Option<(Vec<Expr>, Vec<Expr>)> {
+    if corr.is_empty() || !written.iter().any(|e| e.has_outer_refs()) {
+        return None;
+    }
+    let mut w = WrittenClasses::new(written)?;
+    let mut equated: Vec<Expr> = Vec::new();
+    for c in corr {
+        let (col, o) = corr_sides(c)?;
+        let (x, y) = (w.class(&col)?, w.class(&o)?);
+        if x != y {
+            return None;
+        }
+        equated.push(col);
+    }
+    let sides: Vec<(Expr, Expr)> = written.iter().map(eq_sides).collect::<Option<_>>()?;
+    // (The right side's clauses already there stay as they are.)
+    let mut have: Vec<(Expr, Expr)> = Vec::new();
+    fn joins_eqs(p: &Plan, off: usize, out: &mut Vec<(Expr, Expr)>) {
+        match p {
+            Plan::Join { left, right, cond, hash, nleft, .. } => {
+                let mut parts = Vec::new();
+                if let Some(c) = cond {
+                    conjuncts(c.clone(), &mut parts);
+                }
+                for q in parts {
+                    if let Expr::Call(d, a, _) = &q
+                        && d.name == "="
+                        && a.len() == 2
+                    {
+                        out.push((a[0].clone().shift_cols(off as isize), a[1].clone().shift_cols(off as isize)));
+                    }
+                }
+                if let Some((lk, rk)) = hash {
+                    for (a, b) in lk.iter().zip(rk) {
+                        out.push((a.clone().shift_cols(off as isize), b.clone().shift_cols((off + nleft) as isize)));
+                    }
+                }
+                joins_eqs(left, off, out);
+                joins_eqs(right, off + nleft, out);
+            }
+            Plan::Filter { input, .. } => joins_eqs(input, off, out),
+            _ => {}
+        }
+    }
+    joins_eqs(rhs, 0, &mut have);
+    let mut cond = Vec::new();
+    let mut extra = Vec::new();
+    for (w, (a, b)) in written.iter().zip(&sides) {
+        if w.has_outer_refs() {
+            cond.push(w.clone());
+        } else if equated.iter().any(|e| e.same_as(a))
+            && equated.iter().any(|e| e.same_as(b))
+            && !have.iter().any(|(x, y)| x.same_as(a) && y.same_as(b) || x.same_as(b) && y.same_as(a))
+        {
+            extra.push(w.clone());
+        }
+    }
+    Some((cond, extra))
 }
 
 /// generate_base_implied_equalities_const over a semi join: `l = r` where the right side's

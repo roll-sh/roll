@@ -342,6 +342,10 @@ pub struct JoinMeta {
     /// The clauses the binder pushed into that planned tree since (`optimize::add_filter`),
     /// over this join's row: the tree as bound gets them too (`lift::bound_form`).
     pub bound_pushed: Vec<Expr>,
+    /// A nested loop whose outer side computes PlaceHolderVar parameters for it (the
+    /// projection over that side, create_nestloop_plan's change_plan_targetlist): the
+    /// outer path's width, which the plan node keeps.
+    pub phv_outer_width: Option<u32>,
     /// The FROM join of a LATERAL subquery Postgres pulls up (pull_up_simple_subquery,
     /// is_simple_subquery), the subquery left unplanned by the binder: the join group
     /// above takes its relations in (`paths::joinpath::lift`).

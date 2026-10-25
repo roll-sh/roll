@@ -1,0 +1,423 @@
+> CREATE TABLE a55_t1 (a int, b int)
+-- CREATE TABLE
+
+> CREATE TABLE a55_t2 (x int, y int)
+-- CREATE TABLE
+
+> CREATE TABLE a55_t3 (p int, q int)
+-- CREATE TABLE
+
+> INSERT INTO a55_t1 SELECT g, g % 5 FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> INSERT INTO a55_t1 VALUES (NULL, 1), (2, NULL)
+-- INSERT 0 2
+
+> INSERT INTO a55_t2 SELECT g, g % 3 FROM generate_series(1, 100, 2) g
+-- INSERT 0 50
+
+> INSERT INTO a55_t2 VALUES (NULL, 1), (4, NULL)
+-- INSERT 0 2
+
+> INSERT INTO a55_t3 SELECT g, g % 4 FROM generate_series(1, 12, 3) g
+-- INSERT 0 4
+
+> INSERT INTO a55_t3 VALUES (NULL, NULL), (4, 2)
+-- INSERT 0 2
+
+> ANALYZE a55_t1, a55_t2, a55_t3
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a55_t1 t1 WHERE EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t3.p = t2.x AND t2.x = t1.a)
+QUERY PLAN:text
+Hash Semi Join
+  Hash Cond: (t1.a = t3.p)
+  ->  Seq Scan on a55_t1 t1
+  ->  Hash
+        ->  Hash Join
+              Hash Cond: (t2.x = t3.p)
+              ->  Seq Scan on a55_t2 t2
+              ->  Hash
+                    ->  Seq Scan on a55_t3 t3
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a55_t1 t1 WHERE EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t2.x = t1.a AND t3.p = t2.x)
+QUERY PLAN:text
+Hash Semi Join
+  Hash Cond: (t1.a = t2.x)
+  ->  Seq Scan on a55_t1 t1
+  ->  Hash
+        ->  Hash Join
+              Hash Cond: (t2.x = t3.p)
+              ->  Seq Scan on a55_t2 t2
+              ->  Hash
+                    ->  Seq Scan on a55_t3 t3
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a55_t1 t1 WHERE EXISTS (SELECT 1 FROM a55_t2 t2 JOIN a55_t3 t3 ON t3.p = t2.x WHERE t2.x = t1.a)
+QUERY PLAN:text
+Hash Semi Join
+  Hash Cond: (t1.a = t3.p)
+  ->  Seq Scan on a55_t1 t1
+  ->  Hash
+        ->  Hash Join
+              Hash Cond: (t2.x = t3.p)
+              ->  Seq Scan on a55_t2 t2
+              ->  Hash
+                    ->  Seq Scan on a55_t3 t3
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a55_t1 t1 WHERE EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t3.p = t2.x AND t1.a = t2.x)
+QUERY PLAN:text
+Hash Semi Join
+  Hash Cond: (t1.a = t3.p)
+  ->  Seq Scan on a55_t1 t1
+  ->  Hash
+        ->  Hash Join
+              Hash Cond: (t2.x = t3.p)
+              ->  Seq Scan on a55_t2 t2
+              ->  Hash
+                    ->  Seq Scan on a55_t3 t3
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a55_t1 t1 WHERE EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t1.a = t3.p AND t3.p = t2.x)
+QUERY PLAN:text
+Hash Semi Join
+  Hash Cond: (t1.a = t3.p)
+  ->  Seq Scan on a55_t1 t1
+  ->  Hash
+        ->  Hash Join
+              Hash Cond: (t2.x = t3.p)
+              ->  Seq Scan on a55_t2 t2
+              ->  Hash
+                    ->  Seq Scan on a55_t3 t3
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a55_t1 t1 WHERE EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t3.p = t2.x AND t2.x = t1.a AND t2.y = t1.b)
+QUERY PLAN:text
+Hash Semi Join
+  Hash Cond: ((t1.a = t3.p) AND (t1.b = t2.y))
+  ->  Seq Scan on a55_t1 t1
+  ->  Hash
+        ->  Hash Join
+              Hash Cond: (t2.x = t3.p)
+              ->  Seq Scan on a55_t2 t2
+              ->  Hash
+                    ->  Seq Scan on a55_t3 t3
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a55_t1 t1 WHERE EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t2.y = t1.b AND t3.p = t2.x AND t1.a = t2.x)
+QUERY PLAN:text
+Hash Semi Join
+  Hash Cond: ((t1.b = t2.y) AND (t1.a = t3.p))
+  ->  Seq Scan on a55_t1 t1
+  ->  Hash
+        ->  Hash Join
+              Hash Cond: (t2.x = t3.p)
+              ->  Seq Scan on a55_t2 t2
+              ->  Hash
+                    ->  Seq Scan on a55_t3 t3
+-- EXPLAIN
+
+> SELECT * FROM a55_t1 t1 WHERE EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t3.p = t2.x AND t2.x = t1.a) ORDER BY 1, 2
+a:int4 | b:int4
+1 | 1
+4 | 4
+7 | 2
+-- SELECT 3
+
+> SELECT * FROM a55_t1 t1 WHERE EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t3.p = t2.x AND t2.x = t1.a AND t2.y = t1.b) ORDER BY 1, 2
+a:int4 | b:int4
+1 | 1
+-- SELECT 1
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a55_t1 t1 WHERE EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t3.p = t2.x AND t2.x = t1.a)
+QUERY PLAN:text
+Nested Loop Semi Join
+  Join Filter: (t1.a = t3.p)
+  ->  Seq Scan on a55_t1 t1
+  ->  Materialize
+        ->  Nested Loop
+              Join Filter: (t2.x = t3.p)
+              ->  Seq Scan on a55_t2 t2
+              ->  Materialize
+                    ->  Seq Scan on a55_t3 t3
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a55_t1 t1 WHERE EXISTS (SELECT 1 FROM a55_t2 t2 JOIN a55_t3 t3 ON t3.p = t2.x WHERE t2.x = t1.a)
+QUERY PLAN:text
+Nested Loop Semi Join
+  Join Filter: (t1.a = t3.p)
+  ->  Seq Scan on a55_t1 t1
+  ->  Materialize
+        ->  Nested Loop
+              Join Filter: (t2.x = t3.p)
+              ->  Seq Scan on a55_t2 t2
+              ->  Materialize
+                    ->  Seq Scan on a55_t3 t3
+-- EXPLAIN
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_mergejoin
+-- RESET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a55_t1 t1 WHERE NOT EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t3.p = t2.x AND t2.x = t1.a)
+QUERY PLAN:text
+Hash Anti Join
+  Hash Cond: (t1.a = t2.x)
+  ->  Seq Scan on a55_t1 t1
+  ->  Hash
+        ->  Hash Join
+              Hash Cond: (t2.x = t3.p)
+              ->  Seq Scan on a55_t2 t2
+              ->  Hash
+                    ->  Seq Scan on a55_t3 t3
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a55_t1 t1 WHERE NOT EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t2.x = t1.a AND t3.p = t1.a)
+QUERY PLAN:text
+Hash Right Anti Join
+  Hash Cond: ((t2.x = t1.a) AND (t3.p = t1.a))
+  ->  Nested Loop
+        ->  Seq Scan on a55_t2 t2
+        ->  Materialize
+              ->  Seq Scan on a55_t3 t3
+  ->  Hash
+        ->  Seq Scan on a55_t1 t1
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a55_t1 t1 WHERE NOT EXISTS (SELECT 1 FROM a55_t2 t2 JOIN a55_t3 t3 ON t3.p = t2.x WHERE t2.x = t1.a AND t3.q = t1.b)
+QUERY PLAN:text
+Hash Anti Join
+  Hash Cond: ((t1.a = t2.x) AND (t1.b = t3.q))
+  ->  Seq Scan on a55_t1 t1
+  ->  Hash
+        ->  Hash Join
+              Hash Cond: (t2.x = t3.p)
+              ->  Seq Scan on a55_t2 t2
+              ->  Hash
+                    ->  Seq Scan on a55_t3 t3
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a55_t1 t1 WHERE NOT EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t3.p = t2.x AND t2.x = t1.a AND t2.y = t1.b)
+QUERY PLAN:text
+Hash Anti Join
+  Hash Cond: ((t1.a = t2.x) AND (t1.b = t2.y))
+  ->  Seq Scan on a55_t1 t1
+  ->  Hash
+        ->  Hash Join
+              Hash Cond: (t2.x = t3.p)
+              ->  Seq Scan on a55_t2 t2
+              ->  Hash
+                    ->  Seq Scan on a55_t3 t3
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a55_t1 t1 WHERE NOT EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t3.p = t2.x AND t2.x = t1.a + 1)
+QUERY PLAN:text
+Hash Anti Join
+  Hash Cond: ((t1.a + 1) = t2.x)
+  ->  Seq Scan on a55_t1 t1
+  ->  Hash
+        ->  Hash Join
+              Hash Cond: (t2.x = t3.p)
+              ->  Seq Scan on a55_t2 t2
+              ->  Hash
+                    ->  Seq Scan on a55_t3 t3
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a55_t1 t1 WHERE NOT EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t3.p = t2.x AND t2.x = 4 AND t1.a = t3.p)
+QUERY PLAN:text
+Hash Anti Join
+  Hash Cond: (t1.a = t3.p)
+  ->  Seq Scan on a55_t1 t1
+  ->  Hash
+        ->  Nested Loop
+              ->  Seq Scan on a55_t2 t2
+                    Filter: (x = 4)
+              ->  Seq Scan on a55_t3 t3
+                    Filter: (p = 4)
+-- EXPLAIN
+
+> SELECT * FROM a55_t1 t1 WHERE NOT EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t3.p = t2.x AND t2.x = t1.a) AND t1.a < 30 OR t1.a IS NULL ORDER BY 1, 2
+a:int4 | b:int4
+2 | 2
+2 | NULL
+3 | 3
+5 | 0
+6 | 1
+8 | 3
+9 | 4
+10 | 0
+11 | 1
+12 | 2
+13 | 3
+14 | 4
+15 | 0
+16 | 1
+17 | 2
+18 | 3
+19 | 4
+20 | 0
+21 | 1
+22 | 2
+23 | 3
+24 | 4
+25 | 0
+26 | 1
+27 | 2
+28 | 3
+29 | 4
+NULL | 1
+-- SELECT 28
+
+> SELECT count(*) FROM a55_t1 t1 WHERE NOT EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t2.x = t1.a AND t3.p = t1.a)
+count:int8
+999
+-- SELECT 1
+
+> SELECT count(*) FROM a55_t1 t1 WHERE NOT EXISTS (SELECT 1 FROM a55_t2 t2 JOIN a55_t3 t3 ON t3.p = t2.x WHERE t2.x = t1.a AND t3.q = t1.b)
+count:int8
+1001
+-- SELECT 1
+
+> SELECT count(*) FROM a55_t1 t1 WHERE NOT EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t3.p = t2.x AND t2.x = t1.a + 1)
+count:int8
+1000
+-- SELECT 1
+
+> SELECT count(*) FROM a55_t1 t1 WHERE NOT EXISTS (SELECT 1 FROM a55_t2 t2, a55_t3 t3 WHERE t3.p = t2.x AND t2.x = 4 AND t1.a = t3.p)
+count:int8
+1001
+-- SELECT 1
+
+> SELECT * FROM a55_t1 t1 LEFT JOIN a55_t3 t3 ON NOT EXISTS (SELECT 1 FROM a55_t2 t2 WHERE t2.x = t3.p AND t2.x = t1.a)
+> WHERE t1.a < 8 ORDER BY 1, 2, 3, 4
+a:int4 | b:int4 | p:int4 | q:int4
+1 | 1 | 4 | 0
+1 | 1 | 4 | 2
+1 | 1 | 7 | 3
+1 | 1 | 10 | 2
+1 | 1 | NULL | NULL
+2 | 2 | 1 | 1
+2 | 2 | 4 | 0
+2 | 2 | 4 | 2
+2 | 2 | 7 | 3
+2 | 2 | 10 | 2
+2 | 2 | NULL | NULL
+2 | NULL | 1 | 1
+2 | NULL | 4 | 0
+2 | NULL | 4 | 2
+2 | NULL | 7 | 3
+2 | NULL | 10 | 2
+2 | NULL | NULL | NULL
+3 | 3 | 1 | 1
+3 | 3 | 4 | 0
+3 | 3 | 4 | 2
+3 | 3 | 7 | 3
+3 | 3 | 10 | 2
+3 | 3 | NULL | NULL
+4 | 4 | 1 | 1
+4 | 4 | 7 | 3
+4 | 4 | 10 | 2
+4 | 4 | NULL | NULL
+5 | 0 | 1 | 1
+5 | 0 | 4 | 0
+5 | 0 | 4 | 2
+5 | 0 | 7 | 3
+5 | 0 | 10 | 2
+5 | 0 | NULL | NULL
+6 | 1 | 1 | 1
+6 | 1 | 4 | 0
+6 | 1 | 4 | 2
+6 | 1 | 7 | 3
+6 | 1 | 10 | 2
+6 | 1 | NULL | NULL
+7 | 2 | 1 | 1
+7 | 2 | 4 | 0
+7 | 2 | 4 | 2
+7 | 2 | 10 | 2
+7 | 2 | NULL | NULL
+-- SELECT 44
+
+> CREATE TABLE a55_i8 (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> INSERT INTO a55_i8 VALUES (123, 456), (123, 4567890123456789), (4567890123456789, 123),
+>   (4567890123456789, 4567890123456789), (4567890123456789, -4567890123456789)
+-- INSERT 0 5
+
+> CREATE TABLE a55_i4 (f1 int4)
+-- CREATE TABLE
+
+> INSERT INTO a55_i4 VALUES (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> VACUUM ANALYZE a55_i8, a55_i4
+-- VACUUM
+
+> EXPLAIN (VERBOSE)
+> SELECT *
+> FROM a55_i8 i8
+>   INNER JOIN
+>     (SELECT (SELECT true) AS x
+>        FROM a55_i4 i4, LATERAL (SELECT i4.f1 AS y LIMIT 1) ss1
+>        WHERE i4.f1 = 0) ss2 ON true
+>   RIGHT JOIN (SELECT false AS z) ss3 ON true,
+>   LATERAL (SELECT i8.q2 AS q2l WHERE x LIMIT 1) ss4
+> WHERE i8.q2 = 123
+QUERY PLAN:text
+Nested Loop  (cost=0.02..2.20 rows=1 width=26)
+  Output: i8.q1, i8.q2, (InitPlan 1).col1, false, (i8.q2)
+  InitPlan 1
+    ->  Result  (cost=0.00..0.01 rows=1 width=1)
+          Output: true
+  InitPlan 2
+    ->  Result  (cost=0.00..0.01 rows=1 width=1)
+          Output: true
+  ->  Seq Scan on public.a55_i4 i4  (cost=0.00..1.06 rows=1 width=4)
+        Output: i4.f1
+        Filter: (i4.f1 = 0)
+  ->  Nested Loop  (cost=0.00..1.11 rows=1 width=24)
+        Output: i8.q1, i8.q2, (i8.q2)
+        ->  Subquery Scan on ss1  (cost=0.00..0.02 rows=1 width=0)
+              Output: ss1.y, (InitPlan 1).col1
+              ->  Limit  (cost=0.00..0.01 rows=1 width=4)
+                    Output: NULL::integer
+                    ->  Result  (cost=0.00..0.01 rows=1 width=4)
+                          Output: NULL::integer
+        ->  Nested Loop  (cost=0.00..1.08 rows=1 width=24)
+              Output: i8.q1, i8.q2, (i8.q2)
+              ->  Seq Scan on public.a55_i8 i8  (cost=0.00..1.06 rows=1 width=16)
+                    Output: i8.q1, i8.q2
+                    Filter: (i8.q2 = 123)
+              ->  Limit  (cost=0.00..0.01 rows=1 width=8)
+                    Output: (i8.q2)
+                    ->  Result  (cost=0.00..0.01 rows=1 width=8)
+                          Output: i8.q2
+                          One-Time Filter: ((InitPlan 1).col1)
+-- EXPLAIN
+
+> SELECT *
+> FROM a55_i8 i8
+>   INNER JOIN
+>     (SELECT (SELECT true) AS x
+>        FROM a55_i4 i4, LATERAL (SELECT i4.f1 AS y LIMIT 1) ss1
+>        WHERE i4.f1 = 0) ss2 ON true
+>   RIGHT JOIN (SELECT false AS z) ss3 ON true,
+>   LATERAL (SELECT i8.q2 AS q2l WHERE x LIMIT 1) ss4
+> WHERE i8.q2 = 123
+q1:int8 | q2:int8 | x:bool | z:bool | q2l:int8
+4567890123456789 | 123 | t | f | 123
+-- SELECT 1
+
+> DROP TABLE a55_t1, a55_t2, a55_t3, a55_i8, a55_i4
+-- DROP TABLE
+

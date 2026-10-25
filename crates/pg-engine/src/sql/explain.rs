@@ -14662,6 +14662,11 @@ impl Builder<'_, '_> {
         let outer = !matches!(kind, JoinKind::Inner | JoinKind::Semi);
         OUTER_JOIN_SIDE.with(|o| o.set(matches!(kind, JoinKind::Right | JoinKind::Full)));
         let mut l = self.node(left);
+        // (Its PlaceHolderVar parameters added to the outer plan's target list don't count in
+        // its width: change_plan_targetlist keeps the plan's, the path's reltarget width.)
+        if let Some(w) = meta.phv_outer_width {
+            l.node.width = w;
+        }
         if outer {
             OUTER_JOIN_SIDE.with(|o| o.set(true));
         }

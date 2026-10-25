@@ -1768,7 +1768,7 @@ impl Binder<'_, '_> {
             // (process_equivalence meets the WHERE's equalities after the FROM list's ON
             // clauses, in their order: `JoinMeta::ec_written` of the FROM list's top join.)
             if let Plan::Join { meta, .. } = &mut plan {
-                meta.ec_written.extend(optimize::written_equalities(&parts));
+                meta.ec_written.extend(optimize::written_equalities_with(&parts, true));
             }
             // EXISTS / IN sublinks become semi / anti joins (pull_up_sublinks); with FOR
             // UPDATE too, its rows locked above the joins (`paths::rowmarks`).

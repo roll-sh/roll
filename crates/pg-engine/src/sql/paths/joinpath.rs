@@ -3767,6 +3767,18 @@ impl Search<'_, '_, '_> {
         }
     }
 
+    /// The member of `g`'s class inside `rset` that a written equality across `rset`'s
+    /// boundary equates (a semi join's own qual as written, `ec_written`).
+    fn written_rhs(&self, g: usize, rset: u32) -> Option<usize> {
+        let e = self.m_ec(g);
+        let inside = |m: usize| (1u32 << self.m_leaf(m)) & rset != 0;
+        self.ec_written.iter().find_map(|&(x, y)| {
+            (self.m_ec(x) == e && inside(x) != inside(y))
+                .then(|| if inside(x) { x } else { y })
+                .filter(|&m| m < self.ec.len() && self.phv(m).is_none())
+        })
+    }
+
     /// The semi join's right side (a leaf, or a join of several) made unique on the
     /// columns its equality clauses compare (create_unique_path): None when the clauses
     /// aren't all such equalities, or every such column is equated to a constant.
@@ -3796,7 +3808,10 @@ impl Search<'_, '_, '_> {
             can_hash &= cl.hashable;
             // (An expression of the side's columns: unique-ified on it by sorting, a
             // Unique keeping a row per value.)
-            let Some(g) = key_col(rhs).filter(|&g| self.phv(g).is_none()) else {
+            // (compute_semijoin_info's semi_rhs_exprs are the right-hand operands of the
+            // semi join's quals as written, not the class member a clause made of them
+            // equates: `t2.x` of `t3.p = t2.x AND t2.x = t1.a`.)
+            let Some(g) = key_col(rhs).filter(|&g| self.phv(g).is_none()).map(|g| self.written_rhs(g, rset).unwrap_or(g)) else {
                 let ok = !rhs.columns().is_empty()
                     && rhs.columns().iter().all(|&g| in_side(g) && self.phv(g).is_none())
                     && !rhs.is_volatile()
@@ -6934,6 +6949,7 @@ impl Search<'_, '_, '_> {
                         explicit: false,
                         bound: 0,
                         bound_pushed: Vec::new(),
+                        phv_outer_width: (!phv_params.is_empty()).then_some(outer.width),
                         lateral_sub: false,
                         lateral_flat: false,
                         lateral_held: false,
@@ -7224,20 +7240,24 @@ fn written_eqs(p: &Plan, off: usize, virt: &mut usize, semis: bool, out: &mut Ve
                 off + nleft
             };
             written_eqs(right, roff, virt, semis, out);
-            out.extend(meta.ec_written.iter().map(|e| e.clone().shift_cols(off as isize)));
-            if *kind == JoinKind::Semi && semis {
-                let nl = *nleft;
-                let map = |e: &Expr| {
-                    e.clone()
-                        .transform(&mut |x| {
-                            Ok(match x {
-                                Expr::Col(c, t) if c < nl => Expr::Col(off + c, t),
-                                Expr::Col(c, t) => Expr::Col(roff + (c - nl), t),
-                                x => x,
-                            })
+            let nl = *nleft;
+            let map = |e: &Expr| {
+                e.clone()
+                    .transform(&mut |x| {
+                        Ok(match x {
+                            Expr::Col(c, t) if c < nl => Expr::Col(off + c, t),
+                            Expr::Col(c, t) => Expr::Col(roff + (c - nl), t),
+                            x => x,
                         })
-                        .expect("a semi join's clause over the group's row")
-                };
+                    })
+                    .expect("a join's clause over the group's row")
+            };
+            // (A semi join's: the sub-select's WHERE as written, `sublink::exists_join`, in a
+            // group of semi joins.)
+            if !semi || semis {
+                out.extend(meta.ec_written.iter().map(map));
+            }
+            if *kind == JoinKind::Semi && semis {
                 if let Some(c) = cond {
                     let mut parts = Vec::new();
                     conjuncts(c.clone(), &mut parts);

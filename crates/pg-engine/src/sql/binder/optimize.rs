@@ -354,10 +354,18 @@ fn strip_free_domains(e: Expr) -> Expr {
 /// The equalities between columns among `parts` (process_equivalence's candidates whose
 /// members are relations' values), for `JoinMeta::ec_written`.
 pub fn written_equalities(parts: &[Expr]) -> Vec<Expr> {
+    written_equalities_with(parts, false)
+}
+
+/// `written_equalities`; `outer`: also those equating a column with a value of the
+/// enclosing query (a sub-select's correlated WHERE clause, the semi join's own equality
+/// once pull_up_sublinks makes one of it).
+pub fn written_equalities_with(parts: &[Expr], outer: bool) -> Vec<Expr> {
+    let side = |e: &Expr| !e.columns().is_empty() || outer && !e.is_volatile() && e.has_outer_refs();
     parts
         .iter()
         .filter(|e| matches!(e, Expr::Call(d, a, _) if d.name == "=" && a.len() == 2
-            && !a[0].columns().is_empty() && !a[1].columns().is_empty()))
+            && side(&a[0]) && side(&a[1]) && !(a[0].columns().is_empty() && a[1].columns().is_empty())))
         .cloned()
         .collect()
 }
