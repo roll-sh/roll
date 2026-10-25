@@ -138,7 +138,10 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   (agent 45): a pseudoconstant or volatile qual of an inner join under an outer join no
   longer gates the outer join (`c LEFT JOIN (a JOIN b ON (SELECT false)) ON ...`), and a
   grouping-set query's constants equal to a constant key are pass-through values (NULL in
-  the empty set's row over no input).
+  the empty set's row over no input). Constant folding errors follow eval_const_expressions:
+  a constant that fails to fold stays unfolded and fails the statement only if it is still in
+  the plan once planned (`sql/binder/fold.rs`), so unused subquery outputs, unreferenced CTEs
+  and short-circuited arguments no longer fail.
 - **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
   PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified
   (`pg_dump_tap`, through stand-ins for its Perl test modules in `tests/pg_dump/perl`), round

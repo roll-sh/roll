@@ -250,9 +250,9 @@ impl Binder<'_, '_> {
             plans.retain(|_| *k.next().unwrap());
             let mut k = keep.iter();
             cte_names.retain(|_| *k.next().unwrap());
-            if plans.is_empty() {
-                return Ok((body_plan, cols));
-            }
+        }
+        if plans.is_empty() {
+            return Ok((body_plan, cols));
         }
         Ok((
             Plan::With {
@@ -469,14 +469,36 @@ impl Binder<'_, '_> {
                     self.ctx,
                 );
             }
-            slots.push((cte.ctename.clone(), id, plan));
+            // SS_process_ctes: a SELECT nothing references (its own recursive term aside) is
+            // never planned: no plan of the statement's (nothing it would fold fails).
+            let own = {
+                let mut n = 0usize;
+                if let Some(ne) = q.node.as_ref() {
+                    for (x, ..) in ne.nodes() {
+                        if let pg_query::NodeRef::RangeVar(rv) = x
+                            && rv.schemaname.is_empty()
+                            && rv.relname == cte.ctename
+                        {
+                            n += 1;
+                        }
+                    }
+                }
+                n
+            };
+            let unreferenced = !self.deparse
+                && !is_dml(cte)
+                && refs.as_ref().is_some_and(|r| r.get(&cte.ctename).copied().unwrap_or(0) <= own);
+            slots.push((cte.ctename.clone(), id, plan, unreferenced));
         }
         drop(pushed);
         self.future_ctes.truncate(future_mark);
         // (Kept in the order they were analyzed in, so each one's inputs open first.)
         let mut plans = Vec::new();
         let mut cte_names = Vec::new();
-        for (name, id, plan) in slots {
+        for (name, id, plan, unreferenced) in slots {
+            if unreferenced {
+                continue;
+            }
             cte_names.push(name);
             plans.push((id, Arc::new(plan)));
         }
@@ -2386,7 +2408,14 @@ impl Binder<'_, '_> {
             let empty_sets = groups.is_empty() && sets.as_ref().is_some_and(|v| v.iter().all(|x| x.is_empty()));
             let degenerate = st.aggs.is_empty() && ((!grouped && sets.is_none()) || empty_sets) && !self.deparse;
             if degenerate {
-                plan = Plan::One;
+                // (Its FROM was simplified first: a constant that failed to fold there still
+                // fails the statement.)
+                let kept = if self.folds_failed() { super::fold::candidates(&plan) } else { Vec::new() };
+                plan = if kept.is_empty() {
+                    Plan::One
+                } else {
+                    Plan::Project { input: Arc::new(Plan::One), exprs: kept }
+                };
             }
             // HAVING clauses that need no aggregation go to WHERE (subquery_planner): moved
             // when there is a GROUP BY (with grouping sets: reading only keys in every set),
@@ -2594,9 +2623,14 @@ impl Binder<'_, '_> {
             }
         }
         let const_out: Vec<usize> = (0..width(&plan)).filter(|&i| output_constant(&plan, i)).collect();
+        // (A constant that failed to fold stays a key: its select-list entry is simplified,
+        // and fails the statement.)
+        let folds_failed = self.folds_failed();
+        let ctx = self.ctx;
         let constant_key = |k: &SortKey| {
             matches!(&k.expr, Expr::Col(c, _)
                 if optimize::pseudo_constant(&proj[*c])
+                    && !(folds_failed && super::fold::fails(&proj[*c], ctx))
                     || matches!(&proj[*c], Expr::Col(i, _) if fixed.contains(i) || const_out.contains(i)))
         };
         let needed: Vec<SortKey> = sort_keys

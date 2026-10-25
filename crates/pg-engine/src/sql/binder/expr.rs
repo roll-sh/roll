@@ -1741,8 +1741,7 @@ impl Binder<'_, '_> {
                 if consts && !self.deparse {
                     match eval(&e, &[], self.ctx) {
                         Ok(v) => return Ok(Expr::Const(v, ty)),
-                        Err(_) if self.unplanned || self.defer_fold => {}
-                        Err(err) => return Err(err),
+                        Err(err) => self.fold_failed(&e, err)?,
                     }
                 }
                 Ok(e)
@@ -2230,12 +2229,15 @@ impl Binder<'_, '_> {
     fn fold_call(&mut self, e: Expr) -> Result<Expr> {
         // simplify_function: a strict function over a NULL constant is NULL, whatever its
         // other arguments.
+        // (Its arguments were simplified first: one that failed to fold fails the
+        // statement, so the call stays.)
         if let Expr::Call(def, args, ty) = &e
             && !self.deparse
             && !self.unplanned
             && def.strict
             && !def.is_srf()
             && args.iter().any(|a| matches!(a, Expr::Const(v, _) if v.is_null()))
+            && !(self.folds_failed() && args.iter().any(|a| super::fold::fails(a, self.ctx)))
         {
             return Ok(Expr::Const(crate::types::Value::Null, ty.clone()));
         }
@@ -2247,18 +2249,12 @@ impl Binder<'_, '_> {
         {
             let v = match eval(&e, &[], self.ctx) {
                 Ok(v) => v,
-                // Postgres folds when it plans: unplanned, a failing call stays a call.
-                Err(_) if self.unplanned || self.defer_fold => return Ok(e),
-                Err(err) => match &mut self.fold_err {
-                    Some(slot) => {
-                        // (With the CONTEXT of where it was folded: an inlined SQL
-                        // function's body, say.)
-                        let err = err.in_frames(&self.ctx.sess.frames.borrow());
-                        slot.get_or_insert(err);
-                        return Ok(e);
-                    }
-                    None => return Err(err),
-                },
+                // Postgres folds when it plans: a failing call stays a call, whose error
+                // is the statement's if planning still has it (`fold_failed`).
+                Err(err) => {
+                    self.fold_failed(&e, err)?;
+                    return Ok(e);
+                }
             };
             let folded = Expr::Const(v, ty.clone());
             self.note_const_coll(&e, &folded);
@@ -2911,6 +2907,30 @@ impl Binder<'_, '_> {
             let e = self.bind_expr(a)?;
             args.push(self.coerce_bool_at(e, what, a)?);
         }
+        // (A constant deciding the AND / OR after an argument that failed to fold:
+        // simplify_and_arguments simplified that argument first, so planning the level
+        // fails; the constant goes, so nothing makes a dummy relation of the clause first.)
+        // (simplify_and_arguments: the arguments after the constant deciding the clause
+        // are never simplified, so nothing folding them fails.)
+        if matches!(op, pb::BoolExprType::AndExpr | pb::BoolExprType::OrExpr)
+            && !self.deparse
+            && let Some(k) = args
+                .iter()
+                .position(|a| matches!(a, Expr::Const(Value::Bool(b), _) if *b == (op == pb::BoolExprType::OrExpr)))
+            && args[k + 1..].iter().any(|a| super::fold::candidates_in(std::slice::from_ref(a)).len() > 0)
+        {
+            args.truncate(k + 1);
+        }
+        if matches!(op, pb::BoolExprType::AndExpr | pb::BoolExprType::OrExpr) && self.folds_failed() {
+            let decides = Value::Bool(op == pb::BoolExprType::OrExpr);
+            if let Some(first) = args.iter().position(|a| super::fold::fails(a, self.ctx)) {
+                let mut i = 0;
+                args.retain(|a| {
+                    i += 1;
+                    i - 1 <= first || !matches!(a, Expr::Const(v, _) if *v == decides)
+                });
+            }
+        }
         Ok(match op {
             pb::BoolExprType::AndExpr => Expr::And(args),
             pb::BoolExprType::OrExpr => Expr::Or(args),
@@ -2937,13 +2957,16 @@ impl Binder<'_, '_> {
             return e;
         }
         // canonicalize_qual's find_duplicate_ors (not a CHECK): NULL is as good as FALSE.
-        fn drop_nulls(e: Expr) -> Expr {
+        fn drop_nulls(e: Expr, failing: &dyn Fn(&[Expr]) -> bool) -> Expr {
             let falsy = |x: &Expr| matches!(x, Expr::Const(Value::Null, _) | Expr::Const(Value::Bool(false), _));
             match e {
                 Expr::Or(xs) => {
                     let mut out = Vec::new();
-                    for x in xs.into_iter().map(drop_nulls) {
+                    for x in xs.into_iter().map(|x| drop_nulls(x, failing)) {
                         if matches!(x, Expr::Const(Value::Bool(true), _)) {
+                            if failing(&out) {
+                                break;
+                            }
                             return x;
                         }
                         if !falsy(&x) {
@@ -2958,8 +2981,11 @@ impl Binder<'_, '_> {
                 }
                 Expr::And(xs) => {
                     let mut out = Vec::new();
-                    for x in xs.into_iter().map(drop_nulls) {
+                    for x in xs.into_iter().map(|x| drop_nulls(x, failing)) {
                         if falsy(&x) {
+                            if failing(&out) {
+                                break;
+                            }
                             return Expr::Const(Value::Bool(false), DataType::Bool);
                         }
                         if !matches!(x, Expr::Const(Value::Bool(true), _)) {
@@ -2976,7 +3002,12 @@ impl Binder<'_, '_> {
                 e => e,
             }
         }
-        let e = drop_nulls(e);
+        // (Simplified before: an argument that failed to fold stays, and fails the
+        // statement.)
+        let check = self.folds_failed();
+        let ctx = self.ctx;
+        let failing = |xs: &[Expr]| check && xs.iter().any(|x| super::fold::fails(x, ctx));
+        let e = drop_nulls(e, &failing);
         let fix = |q: Expr| match q {
             Expr::Call(d, args, ty)
                 if d.name == "="
@@ -3027,6 +3058,13 @@ impl Binder<'_, '_> {
                         Expr::Or(xs) if !and => stack.extend(xs.into_iter().rev()),
                         Expr::Const(Value::Bool(b), t) => {
                             if b != and {
+                                // (The arguments before it were simplified: one that
+                                // failed to fold fails the statement if the level is
+                                // planned, so they stay, without the constant a dummy
+                                // relation would be made of.)
+                                if self.folds_failed() && out.iter().any(|x| super::fold::fails(x, self.ctx)) {
+                                    break;
+                                }
                                 return Expr::Const(Value::Bool(b), t);
                             }
                         }
@@ -3046,11 +3084,13 @@ impl Binder<'_, '_> {
                 let x = self.simplify_qual(*x);
                 self.negate_clause(x)
             }
-            // evaluate_function: a strict call with a NULL constant argument is NULL.
+            // evaluate_function: a strict call with a NULL constant argument is NULL (its
+            // arguments simplified first: one failing to fold keeps the call).
             Expr::Call(def, args, ty)
                 if def.strict
                     && !def.is_srf()
-                    && args.iter().any(|a| matches!(a, Expr::Const(Value::Null, _))) =>
+                    && args.iter().any(|a| matches!(a, Expr::Const(Value::Null, _)))
+                    && !(self.folds_failed() && args.iter().any(|a| super::fold::fails(a, self.ctx))) =>
             {
                 let _ = (def, args);
                 Expr::Const(Value::Null, ty)
@@ -3302,8 +3342,10 @@ impl Binder<'_, '_> {
                         let ty = e.ty();
                         Ok(Expr::Const(v, ty))
                     }
-                    Err(_) if self.unplanned || self.defer_fold => Ok(e),
-                    Err(err) => Err(err),
+                    Err(err) => {
+                        self.fold_failed(&e, err)?;
+                        Ok(e)
+                    }
                 }
             }
             _ => Ok(e),
@@ -3313,7 +3355,8 @@ impl Binder<'_, '_> {
     /// Raise the error a constant call kept unfolded while its CASE arm's reachability was
     /// unknown (`defer_fold`) gives, now that the arm is known to be simplified.
     fn check_deferred(&mut self, e: &Expr) -> Result<()> {
-        if self.defer_fold || self.unplanned || self.deparse {
+        // (In a statement the failures wait for its plan, `fold_failed`.)
+        if self.defer_fold || self.unplanned || self.deparse || self.fold_err.is_some() {
             return Ok(());
         }
         check_folds(e, self.ctx)
@@ -3983,12 +4026,20 @@ impl Binder<'_, '_> {
             self.sublink_nodes
                 .insert(id, (**s.subselect.as_ref().unwrap()).clone());
         }
-        // simplify_EXISTS_query: its select list doesn't matter (constants only: dropped).
+        // simplify_EXISTS_query: its select list doesn't matter (constants only: dropped;
+        // so are constants that failed to fold, never simplified).
+        let folds_failed = self.folds_failed();
         let plan = match &*plan {
             Plan::Project { input, exprs }
                 if kind == T::ExistsSublink
                     && !self.deparse
-                    && exprs.iter().all(|e| matches!(e, Expr::Const(..))) =>
+                    && exprs.iter().all(|e| {
+                        matches!(e, Expr::Const(..))
+                            || (folds_failed
+                                && super::fold::exists_simplified(input)
+                                && e.columns().is_empty()
+                                && super::fold::fails(e, self.ctx))
+                    }) =>
             {
                 Arc::new(Plan::Project { input: input.clone(), exprs: Vec::new() })
             }

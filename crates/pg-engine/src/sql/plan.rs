@@ -1118,6 +1118,10 @@ pub struct DummyInfo {
     /// false` (that constant): remove_useless_results_recurse merges it into the ON clause
     /// of an outer join above whose nullable side it is.
     pub qual_false: Option<Expr>,
+    /// Constant expressions left unfolded in what it replaced (they failed to fold):
+    /// Postgres simplified them before it found the relation empty, so one that fails still
+    /// fails the statement (`binder::fold`).
+    pub kept: Vec<Expr>,
 }
 
 #[derive(Clone, Debug)]

@@ -461,6 +461,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                         ec: Vec::new(),
                         table,
                         qual_false,
+                        kept: super::fold::candidates_in(&all),
                         ..Default::default()
                     })),
                 };

@@ -188,7 +188,34 @@ Round 18, agent 45, batch 1 (`a45_oj_pseudoconst`, `a45_groupingsets_empty`):
   and as extra input columns. A constant `ORDER BY` item names its select-list entry
   (`ORDER BY 2` sorts by c2's value, not the key's).
 
+Round 18, agent 45, batch 2 (`a45_constant_folding`):
+
+- **Errors PostgreSQL never raises (constant folding)**: the binder still folds constants as
+  it builds expressions, but a constant that fails to fold stays unfolded and its error is
+  recorded (`Binder::fold_failed`); once the statement is planned, the first such
+  expression still in the plan fails it, in eval_const_expressions' order
+  (`binder/fold.rs`: a level's CTEs first, then its target list, then its quals inputs
+  first, each expression's sub-selects after it; AND / OR stop at the deciding constant,
+  CASE skips arms with a constant false / NULL condition and everything after a constant
+  true one, COALESCE stops at its first non-NULL constant). So the unused outputs of pulled-up
+  subqueries and views, of subqueries planned apart (unless sort / group keys or
+  DISTINCT), CTEs nothing references (no longer planned at all, nor shown by EXPLAIN), the
+  select list of an EXISTS (simplify_EXISTS_query, unless it aggregates), unused column
+  defaults and `false AND 1/0 = 1` no longer fail; `1/0 = 1 AND false`, `int4pl(NULL,
+  1/0)`, `ORDER BY 1/0`, a degenerate HAVING over a FROM that fails, and relations found
+  empty (their unfolded constants kept with the dummy rel, `DummyInfo::kept`) still do.
+  Casts of typed constants (`'NaN'::numeric::int`, `2147483648::int`) and NULLIF fold the
+  same way; an unknown literal's input conversion still fails at once, as in the parser.
+  Smoke: eval_error 34 -> 11, engine_error 9 -> 6.
+
 ## Open
+
+- **Constant folding, left**: a pulled-up UNION ALL arm's unused output (PostgreSQL
+  simplifies the appendrel's translated vars and fails: `SELECT 1 FROM (SELECT 1/0 FROM t
+  UNION ALL SELECT 1) s`); a strict call over a pulled-up subquery's output whose expression
+  fails (`NULL + s.c` with `c` = `width_bucket('NaN', ...)`: PostgreSQL substitutes first);
+  a CASE arm a pulled-up constant makes unreachable. The five new smoke entries (s5 #6, s10
+  #33, s12 #52, s20 #42, s22 #62) are these.
 
 - **Wrong rows (bind-time folding)**: the grouping-key matching above compares folded
   expressions, PostgreSQL's (`substitute_grouped_columns`) the expressions as written:
@@ -202,11 +229,6 @@ Round 18, agent 45, batch 1 (`a45_oj_pseudoconst`, `a45_groupingsets_empty`):
   (`'24:00:00'` / `'1 day'`) whose input order comes from a different join order (seed 176).
 - wrong_state cases of the round 2 sweep not reduced yet (seeds 116, 179, 211, 216): DML
   after earlier statements; some are physical row order after UPDATE (below).
-- FROM sub-selects' unused outputs, unreferenced CTEs and `false AND ...` arguments: PostgreSQL
-  drops them before it folds constants (left to right in AND / OR), the engine folds while
-  binding and reports the error (`SELECT 1 FROM (SELECT 1 / 0 AS c FROM t) s`,
-  `WITH w AS (SELECT 1 / 0) SELECT 1`, `WHERE false AND 1 / 0 = 1`: PostgreSQL returns rows).
-  Most `eval_error` and `engine_error` "cannot convert NaN to integer" cases are this.
 - A locked partitioned table without partitions on the nullable side of an outer join isn't
   refused (the check finds no locked scan under it).
 - `ungrouped column` checks of sub-selects that fold away run after the level's own checks,

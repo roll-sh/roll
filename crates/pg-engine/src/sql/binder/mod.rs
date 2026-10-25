@@ -8,6 +8,7 @@
 pub mod ast;
 mod dml;
 mod expr;
+pub(crate) mod fold;
 pub(crate) use expr::{INDETERMINATE_HASH, NONDETERMINISTIC_HASH, check_merge_keys, eq_under, hash_key, hash_key_operand, indeterminate_eq, is_indeterminate};
 pub(crate) use expr::{check_sql_retval, sql_fn_frame};
 pub use expr::{check_folds, is_whole_row, nullable_whole_row};
@@ -553,9 +554,11 @@ pub struct Binder<'b, 'a> {
     /// Binding the arms of a CASE: a constant call that fails stays a call until the CASE
     /// knows which arms are reachable (eval_const_expressions never simplifies the others).
     pub(crate) defer_fold: bool,
-    /// Inside `bind_statement`: the first constant call that failed to fold (it stays a
-    /// call, and the statement fails with its error once analysed).
-    pub(crate) fold_err: Option<Option<crate::error::Error>>,
+    /// Inside `bind_statement`: the constant expressions that failed to fold, with their
+    /// errors. Each stays unfolded; the statement fails with one only if it is still in
+    /// the plan once the statement is planned (`fold::first_error`): Postgres folds in
+    /// eval_const_expressions, after pulling subqueries up and dropping unused outputs.
+    pub(crate) fold_err: Option<Vec<(Expr, crate::error::Error)>>,
     /// Binding a statement of a SQL function run statement by statement (`call_sql`): its
     /// body is the statement itself.
     pub sql_fn_statement: bool,
@@ -873,13 +876,41 @@ impl<'b, 'a> Binder<'b, 'a> {
     pub fn bind_statement(&mut self, n: &pb::Node) -> Result<BoundQuery> {
         // Postgres folds constant calls when it plans, after parse analysis: a call that
         // fails to fold fails only once the whole statement has been analysed.
-        let prev = self.fold_err.replace(None);
+        let prev = self.fold_err.replace(Vec::new());
         let r = self.bind_statement_inner(n);
-        let pending = std::mem::replace(&mut self.fold_err, prev).flatten();
-        match (r, pending) {
-            (Ok(_), Some(e)) => Err(e),
-            (r, _) => r,
+        let pending = std::mem::replace(&mut self.fold_err, prev).unwrap_or_default();
+        match r {
+            Ok(q) if !pending.is_empty() => match fold::first_error(&q.plan, &pending, self.ctx) {
+                Some(e) => Err(e),
+                None => Ok(q),
+            },
+            r => r,
         }
+    }
+
+    /// A constant expression `e` failed to fold with `err`: it stays unfolded. Inside a
+    /// statement the error waits for the plan (`fold_err`); binding a lone expression it is
+    /// raised now, unless folding is deferred (a CASE arm, a default) or nothing is planned.
+    pub(crate) fn fold_failed(&mut self, e: &Expr, err: crate::error::Error) -> Result<()> {
+        if self.unplanned {
+            return Ok(());
+        }
+        match &mut self.fold_err {
+            Some(list) => {
+                // (With the CONTEXT of where it was folded: an inlined SQL function's body,
+                // say.)
+                let err = err.in_frames(&self.ctx.sess.frames.borrow());
+                list.push((e.clone(), err));
+                Ok(())
+            }
+            None if self.defer_fold => Ok(()),
+            None => Err(err),
+        }
+    }
+
+    /// Whether some constant expression failed to fold in this statement so far.
+    pub(crate) fn folds_failed(&self) -> bool {
+        self.fold_err.as_ref().is_some_and(|l| !l.is_empty())
     }
 
     fn bind_statement_inner(&mut self, n: &pb::Node) -> Result<BoundQuery> {
@@ -1842,26 +1873,25 @@ impl<'b, 'a> Binder<'b, 'a> {
         {
             let v = match cast_value(v.clone(), &from, &to, self.ctx.fmt(), explicit) {
                 Ok(v) => v,
-                // Not simplified yet (a default being cooked, a CASE arm that may be
-                // unreachable): a literal still takes its type now, the rest (a length
-                // coercion, a cast function) stays a call that fails when it runs.
-                Err(err) if self.unplanned || self.defer_fold => {
+                // A literal takes its type now (coerce_type: the parser runs the type's input
+                // function); the rest (a length coercion, a cast function) is folded when
+                // the statement is planned, and stays a call when that fails
+                // (`fold_failed`).
+                Err(err) => {
                     if !matches!(from, DataType::Unknown) {
-                        return Ok(Expr::Cast(Box::new(e), from, to, explicit));
+                        let cast = Expr::Cast(Box::new(e), from, to, explicit);
+                        self.fold_failed(&cast, err)?;
+                        return Ok(cast);
                     }
                     let base = to.without_typmod();
                     if base == to {
                         return Err(err);
                     }
                     let v = cast_value(v.clone(), &from, &base, self.ctx.fmt(), explicit)?;
-                    return Ok(Expr::Cast(
-                        Box::new(Expr::Const(v, base.clone())),
-                        base,
-                        to,
-                        explicit,
-                    ));
+                    let cast = Expr::Cast(Box::new(Expr::Const(v, base.clone())), base, to, explicit);
+                    self.fold_failed(&cast, err)?;
+                    return Ok(cast);
                 }
-                Err(err) => return Err(err),
             };
             let folded = Expr::Const(v, to);
             self.note_const_coll(&e, &folded);

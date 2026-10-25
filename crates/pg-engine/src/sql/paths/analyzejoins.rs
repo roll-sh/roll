@@ -848,8 +848,26 @@ fn plain_cols(p: &Plan) -> Option<Vec<(String, Option<String>)>> {
 }
 
 /// A plan known to return nothing (a dummy rel): a Result with One-Time Filter false
-/// standing for it.
+/// standing for it. (The constant expressions that failed to fold in what it replaces stay
+/// with it: `DummyInfo::kept`.)
 fn dummy(p: &Plan) -> Plan {
+    let mut d = dummy_rel(p);
+    let kept = crate::sql::binder::fold::candidates(p);
+    if !kept.is_empty() {
+        let mut cur = &mut d;
+        while let Plan::Project { input, .. } = cur {
+            cur = Arc::make_mut(input);
+        }
+        if let Plan::Empty { info, .. } = cur {
+            let mut i = info.as_deref().cloned().unwrap_or_default();
+            i.kept.extend(kept);
+            *info = Some(Arc::new(i));
+        }
+    }
+    d
+}
+
+fn dummy_rel(p: &Plan) -> Plan {
     // (A projection keeps its target list over the empty input: the dummy rel's Result
     // shows it.)
     if let Plan::Project { input, exprs } = p
@@ -857,7 +875,7 @@ fn dummy(p: &Plan) -> Plan {
         && exprs.iter().any(|e| !matches!(e, Expr::Col(..)))
     {
         return Plan::Project {
-            input: Arc::new(dummy(input)),
+            input: Arc::new(dummy_rel(input)),
             exprs: exprs.clone(),
         };
     }
@@ -890,7 +908,7 @@ fn dummy(p: &Plan) -> Plan {
     let mut unplanned = Vec::new();
     unplanned_subqueries(p, &mut unplanned);
     let qual_false = pseudo_false(p);
-    Plan::Empty { ncols, cols, info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec, table: None, unplanned, qual_false })) }
+    Plan::Empty { ncols, cols, info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec, table: None, unplanned, qual_false, kept: Vec::new() })) }
 }
 
 /// The FROM subqueries (not pulled up) a plan proven empty reads, never planned: each with

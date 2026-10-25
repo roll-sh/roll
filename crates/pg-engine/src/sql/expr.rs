@@ -459,6 +459,59 @@ impl Expr {
         }
     }
 
+    /// The direct children `walk` visits (not into subquery plans), in its order.
+    pub fn children(&self) -> Vec<&Expr> {
+        let mut out: Vec<&Expr> = Vec::new();
+        match self {
+            Expr::Call(_, args, _)
+            | Expr::And(args)
+            | Expr::Or(args)
+            | Expr::Coalesce(args, _)
+            | Expr::Array(args, _)
+            | Expr::Row(args, _)
+            | Expr::MinMax(args, ..) => out.extend(args),
+            Expr::Cast(e, ..)
+            | Expr::Not(e)
+            | Expr::IsNull(e, _)
+            | Expr::BoolTest(e, _)
+            | Expr::Field(e, _, _)
+            | Expr::CoerceToDomain(e, _)
+            | Expr::Relabel(e, _)
+            | Expr::SqlSyntax(e)
+            | Expr::Collate(e, ..) => out.push(e),
+            Expr::IsDistinct(a, b, ..) | Expr::NullIf(a, b, ..) => out.extend([&**a, &**b]),
+            Expr::Case { operand, whens, else_, .. } => {
+                out.extend(operand.as_deref());
+                for (w, t) in whens {
+                    out.extend([w, t]);
+                }
+                out.extend(else_.as_deref());
+            }
+            Expr::InList(e, list, _) => {
+                out.push(e);
+                out.extend(list.iter().map(|(x, _)| x));
+            }
+            Expr::ArrayOp { left, right, .. } => out.extend([&**left, &**right]),
+            Expr::Subquery(s) => out.extend(s.left.iter().chain(&s.params)),
+            Expr::Assign { base, subs, value, .. } => {
+                out.extend([&**base, &**value]);
+                for (a, b, _) in subs {
+                    out.extend(a.iter().chain(b.iter()));
+                }
+            }
+            Expr::Subscript(e, idx, _) => {
+                out.push(e);
+                for (a, b, _) in idx {
+                    out.extend(a.iter().chain(b.iter()));
+                }
+            }
+            Expr::Xml(x) => out.extend(x.named_args.iter().chain(&x.args)),
+            Expr::RowCompare(rc) => out.extend(rc.cmps.iter().chain(&rc.eqs)),
+            _ => {}
+        }
+        out
+    }
+
     /// Apply `f` to each direct child (not descending further, not into subquery plans).
     pub fn map_children(self, f: &mut dyn FnMut(Expr) -> Result<Expr>) -> Result<Expr> {
         Ok(match self {
