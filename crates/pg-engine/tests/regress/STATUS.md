@@ -8,6 +8,20 @@ file sees the catalogs the files before it left, as `pg_regress` gives them. The
 them (HANDOFF.md, "Regression suite"): edit only the prose by hand. `REPORT.md` and
 `results.tsv` next to this file are that run's report.
 
+Round 18, agent 57 (measurement): full runs of `0201348` (f3fc889 plus this round's change)
+against private references measured **51147** in a debug build (`a57-ref1`, the generated
+blocks below) and in a release build (`a57-ref2`), identical per file, per unit and in every
+hunk. Against `242734d`'s 51142: newly matching join 362, 363, 783, 808 and partition_join 204,
+nothing newly differing. A debug full run of `8ef2f59` measured 51145 (only 783, 808 and 204
+new), and one of `242734d` on a private reference reproduced 51142. No regression in
+242734d..f3fc889: the lower numbers reported meanwhile (51141 at `85ec54f` and at agent 48's
+change) were release builds, which lost json 37/38 and jsonb 38/39: "stack depth limit
+exceeded" without its HINT, since in release frames the json parser's fixed depth cap (6400)
+comes before the stack check that adds the HINT (a release engine of 8ef2f59 printed no HINT,
+the debug one did). Every depth limit now returns the same error (`stack::depth_error`), golden
+`a57_json_depth`. 51144 (agent 34, agent 54's run of `9e1e0a7`) is right for commits before
+a319ebb fixed join 783. Runs now record the engine's build profile, and list the units that
+changed against the committed `results.tsv` (REPORT.md, "Changes against the baseline run").
 Round 18, agent 50 (measurement): full runs of `242734d` against a private reference
 (`a50-ref1`, the pinned image initialised as roll-engine-ref is) and against the shared
 `roll-engine-ref` (which had another run's `regress_tblspace` and two other runs' databases at the
@@ -36,17 +50,17 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 ## Summary
 
 <!-- generated: summary -->
-From the full run of commit `242734d` (2026-10-25 02:05 UTC, reference `a50-ref1`; cluster-global objects it had before: none), written by the harness (HANDOFF.md, "Regression suite"); don't edit these numbers by hand.
+From the full run of commit `0201348` (debug build of the engine, 2026-10-25 08:25 UTC, reference `a57-ref1`; cluster-global objects it had before: none), written by the harness (HANDOFF.md, "Regression suite"); don't edit these numbers by hand.
 
 | | |
 |---|---|
 | files | 230 |
 | units compared | 51150 |
-| units matching | 51142 (**99.98%**) |
-| units differing | 8 |
-| files fully matching | 227 of 230 |
+| units matching | 51147 (**99.99%**) |
+| units differing | 3 |
+| files fully matching | 228 of 230 |
 | reference output == expected/*.out | 203 of 230 files |
-| engine output == expected/*.out (pg_regress "ok") | 200 files |
+| engine output == expected/*.out (pg_regress "ok") | 201 files |
 | engine restarted (crash / timeout) | none |
 | engine panics logged | none |
 <!-- end generated: summary -->
@@ -56,21 +70,20 @@ From the full run of commit `242734d` (2026-10-25 02:05 UTC, reference `a50-ref1
 <!-- generated: differing units -->
 | file | differing | units (harness class) |
 |---|---:|---|
-| join | 6 | 360, 362, 363, 368, 783, 808 (wrong EXPLAIN) |
-| partition_join | 1 | 204 (wrong EXPLAIN) |
+| join | 2 | 360, 368 (wrong EXPLAIN) |
 | partition_prune | 1 | 410 (wrong result) |
 
 | harness class | units |
 |---|---:|
 | wrong result | 1 |
-| wrong EXPLAIN | 7 |
+| wrong EXPLAIN | 2 |
 <!-- end generated: differing units -->
 
 ## Remaining differences, classified
 
 | class | units | % of differing |
 |---|---:|---:|
-| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 7 | 100% |
+| EXPLAIN plan shape / EXPLAIN-derived output (group C1) | 3 | 100% |
 | plan choice showing in results (row order of joins, grouping sets, recursive CTEs; C1 area) | 0 | 0% |
 | by design | 0 | 0% |
 | name resolution: a nested join's LATERAL reference to an earlier FROM item | 0 | 0% |
@@ -78,10 +91,10 @@ From the full run of commit `242734d` (2026-10-25 02:05 UTC, reference `a50-ref1
 
 No difference is PostgreSQL nondeterminism: every remaining unit is reproducible.
 
-### EXPLAIN (group C1) — 8 units
-join (6), partition_join (1), partition_prune (1)
+### EXPLAIN (group C1) — 3 units
+join (2: 360, 368), partition_prune (1: 410)
 (join 808 and partition_join 204 match since round 16, agent 47, join 783 since round 16,
-agent 46, and join 362 / 363 since round 16, agent 52: 3 once a full run counts them.)
+agent 46, and join 362 / 363 since round 16, agent 52, counted by agent 57's full runs.)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -4872,7 +4885,7 @@ file skips itself, `\quit`, so it has no units either way).
 | subselect | 356 | 356 | 100% | yes | yes |  |
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
-| join | 925 | 919 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (6) |
+| join | 925 | 923 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (2) |
 | aggregates | 556 | 556 | 100% | yes | yes |  |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
@@ -4982,7 +4995,7 @@ file skips itself, `\quit`, so it has no units either way).
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 307 | 100% | yes | yes |  |
 | xml | 281 | 281 | 100% | yes | yes |  |
-| partition_join | 614 | 613 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| partition_join | 614 | 614 | 100% | yes | yes |  |
 | partition_prune | 771 | 770 | 99% | yes | no | wrong result `SELECT: row count differs` (1) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |

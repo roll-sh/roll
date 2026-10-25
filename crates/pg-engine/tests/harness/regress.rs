@@ -1773,6 +1773,7 @@ fn baseline_changes(cfg: &Config, results: &[FileResult]) -> Option<String> {
         Ok(p) => PathBuf::from(p),
         Err(_) => committed_report_dir().join("results.tsv"),
     };
+    let shown = path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap_or(&path).display().to_string();
     let (head, base) = read_results_tsv(&std::fs::read_to_string(&path).ok()?);
     let run = read_run_info(cfg);
     let mut rows = Vec::new();
@@ -1793,7 +1794,7 @@ fn baseline_changes(cfg: &Config, results: &[FileResult]) -> Option<String> {
     let field = |m: &BTreeMap<String, String>, k: &str| m.get(k).filter(|v| !v.is_empty()).cloned().unwrap_or("?".into());
     let mut s = format!(
         "## Changes against the baseline run\n\nBaseline: `{}` ({} run of commit `{}`, {} build, {}, reference `{}`). This run: commit `{}`, {} build. Newly differing units: {newly}; newly matching: {fixed}.\n",
-        path.display(),
+        shown,
         field(&head, "schedule"),
         field(&head, "commit"),
         field(&head, "engine_build"),
