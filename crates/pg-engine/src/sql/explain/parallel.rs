@@ -960,10 +960,11 @@ impl Builder<'_, '_> {
                 f.rows = ngroups;
                 f
             };
-            // Hashed partial groups gathered, finalized by hashing.
-            finals.push(fin_hashed(gathered(self, &ph, false)));
-            // Sorted partial groups merged, finalized in order.
-            finals.push(fin_sorted(gathered(self, &ps, true)));
+            // The partially grouped relation's partial paths (create_partial_grouping_paths
+            // through add_partial_path: the sorted ones first, then the hashed one, which
+            // goes when it is fuzzily as cheap as a sorted one, whose order is better).
+            let mut partials: Vec<ExNode> = Vec::new();
+            add_partial_path(&mut partials, ps);
             // Or grouping the other partial plans already in (a leading part of) the keys'
             // order (create_partial_grouping_paths' make_ordered_path).
             for po in others {
@@ -985,11 +986,22 @@ impl Builder<'_, '_> {
                     + in_rows * (trans + group_ops)
                     + pgroups * (costs::CPU_TUPLE_COST + gexpr);
                 ps2.output = partial_out.clone();
-                finals.push(fin_sorted(gathered(self, &ps2, true)));
+                add_partial_path(&mut partials, ps2);
             }
-            // Hashed partial groups each sorted, then merged.
-            let sph = sorted(self, ph.clone());
-            finals.push(fin_sorted(gathered(self, &sph, true)));
+            add_partial_path(&mut partials, ph);
+            // gather_grouping_paths: a Gather over the cheapest, finalized by hashing
+            // (its cheapest total path); a Gather Merge over each sorted one, and over the
+            // cheapest sorted when it isn't, finalized in order.
+            if let Some(first) = partials.first() {
+                finals.push(fin_hashed(gathered(self, first, false)));
+                if first.order.is_empty() {
+                    let sph = sorted(self, first.clone());
+                    finals.push(fin_sorted(gathered(self, &sph, true)));
+                }
+            }
+            for pa in partials.iter().filter(|pa| !pa.order.is_empty()) {
+                finals.push(fin_sorted(gathered(self, pa, true)));
+            }
         }
         // (add_path: fuzzily the same cost, the one in order stays.)
         let mut best: Option<ExNode> = None;
