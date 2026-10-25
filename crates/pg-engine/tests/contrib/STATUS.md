@@ -41,7 +41,7 @@ PGCONTRIB_ONLY=uuid-ossp,citext PGREGRESS_DIR=$D PGREGRESS_CONTAINER=a39-ref \
 
 ## Scores
 
-Last full runs: 4,147 / 4,158 units of 19 modules (99.7%), pg_stat_statements 982 / 1,013. Baseline (before any
+Last full runs: 4,149 / 4,158 units of 19 modules (99.8%; round 19, agent 53: seg security), pg_stat_statements 982 / 1,013. Baseline (before any
 extension was ported; CREATE EXTENSION was a stand-in): 2,752 / 7,733
 units (35.6%). The reference matches `expected/` for every module except postgres_fdw and
 dblink (they connect to a loopback server).
@@ -64,7 +64,7 @@ dblink (they connect to a loopback server).
 | cube | 316 | 316 | done |
 | earthdistance | 170 | 170 | done |
 | isn | 51 | 51 | done |
-| seg | 196 | 193 | see below |
+| seg | 196 | 195 | see below |
 | lo | 38 | 38 | done |
 | amcheck | 204 | 201 | applicable checks only (see below) |
 | pageinspect | 291 | — | not applicable (not available) |
@@ -80,10 +80,11 @@ dblink (they connect to a loopback server).
 - **seg** (unit 167): an Index Only Scan PostgreSQL picks on the GiST index for `@>`.
 - **seg** unit 170: `GROUP BY` of a type without a hash operator class (seg; money too) is
   planned as a HashAggregate; PostgreSQL sorts.
-- **seg security** (2 units): inside a PL/pgSQL block, `set_config('search_path', ...)` doesn't
-  change how the block's later statements resolve names. PostgreSQL re-reads the path per
-  statement; the engine binds them with the block's starting path. This is a PL/pgSQL gap
-  (and a search_path-safety one), not seg's.
+- **seg security**: done (round 19, agent 53). PL/pgSQL, SQL functions and DO blocks bind
+  each statement under the search path as it is when the statement runs (plancache's
+  search_path check); CREATE SCHEMA's elements run with `search_path` set to the schema
+  prepended, as a GUC at a nest level of its own (current_setting shows it); DDL a
+  function called by a partition bound runs stays made (`Ddl::absorb_nested`).
 - **amcheck**: the engine's storage isn't PostgreSQL's pages, so there are no nbtree, GIN or
   heap page invariants to verify; the functions check what applies (target, access method,
   validity, arguments, block ranges) and report no corruption. Units that differ: superuser

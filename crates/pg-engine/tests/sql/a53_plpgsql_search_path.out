@@ -1,0 +1,522 @@
+> DROP ROLE IF EXISTS regress_a53_sp_user
+NOTICE 00000: role "regress_a53_sp_user" does not exist, skipping
+-- DROP ROLE
+
+> DROP ROLE IF EXISTS regress_a53_sp_owner
+NOTICE 00000: role "regress_a53_sp_owner" does not exist, skipping
+-- DROP ROLE
+
+> CREATE SCHEMA s1
+-- CREATE SCHEMA
+
+> CREATE SCHEMA s2
+-- CREATE SCHEMA
+
+> CREATE TABLE s1.t(x int)
+-- CREATE TABLE
+
+> INSERT INTO s1.t VALUES (1)
+-- INSERT 0 1
+
+> CREATE TABLE s2.t(x int)
+-- CREATE TABLE
+
+> INSERT INTO s2.t VALUES (2)
+-- INSERT 0 1
+
+> CREATE FUNCTION s1.who() RETURNS text LANGUAGE sql AS 'SELECT ''s1'''
+-- CREATE FUNCTION
+
+> CREATE FUNCTION s2.who() RETURNS text LANGUAGE sql AS 'SELECT ''s2'''
+-- CREATE FUNCTION
+
+> SET search_path = s1, public
+-- SET
+
+> CREATE FUNCTION public.f1() RETURNS text LANGUAGE plpgsql AS $$
+> DECLARE r text;
+> BEGIN
+>   SELECT x::text INTO r FROM t; RAISE NOTICE 'a %', r;
+>   PERFORM set_config('search_path', 's2', true);
+>   SELECT x::text INTO r FROM t; RAISE NOTICE 'b % %', r, who();
+>   SET search_path = s1;
+>   RAISE NOTICE 'c % %', (SELECT x FROM t), who();
+>   EXECUTE 'SET search_path = s2';
+>   EXECUTE 'SELECT x::text FROM t' INTO r; RAISE NOTICE 'd %', r;
+>   RETURN current_setting('search_path');
+> END $$
+-- CREATE FUNCTION
+
+> BEGIN
+-- BEGIN
+
+> SELECT public.f1()
+NOTICE 00000: a 1
+CONTEXT: PL/pgSQL function f1() line 4 at RAISE
+NOTICE 00000: b 2 s2
+CONTEXT: PL/pgSQL function f1() line 6 at RAISE
+NOTICE 00000: c 1 s1
+CONTEXT: PL/pgSQL function f1() line 8 at RAISE
+NOTICE 00000: d 2
+CONTEXT: PL/pgSQL function f1() line 10 at RAISE
+f1:text
+s2
+-- SELECT 1
+
+> SHOW search_path
+search_path:text
+s2
+-- SHOW
+
+> ROLLBACK
+-- ROLLBACK
+
+> SHOW search_path
+search_path:text
+s1, public
+-- SHOW
+
+> CREATE FUNCTION public.f2() RETURNS void LANGUAGE plpgsql AS $$
+> DECLARE n int;
+> BEGIN
+>   FOR i IN 1..4 LOOP
+>     PERFORM set_config('search_path', CASE WHEN i % 2 = 0 THEN 's1' ELSE 's2' END, true);
+>     SELECT x INTO n FROM t;
+>     RAISE NOTICE 'i=% t=% who=% expr=%', i, n, who(), (SELECT x FROM t);
+>   END LOOP;
+> END $$
+-- CREATE FUNCTION
+
+> BEGIN
+-- BEGIN
+
+> SELECT public.f2()
+NOTICE 00000: i=1 t=2 who=s2 expr=2
+CONTEXT: PL/pgSQL function f2() line 7 at RAISE
+NOTICE 00000: i=2 t=1 who=s1 expr=1
+CONTEXT: PL/pgSQL function f2() line 7 at RAISE
+NOTICE 00000: i=3 t=2 who=s2 expr=2
+CONTEXT: PL/pgSQL function f2() line 7 at RAISE
+NOTICE 00000: i=4 t=1 who=s1 expr=1
+CONTEXT: PL/pgSQL function f2() line 7 at RAISE
+f2:void
+
+-- SELECT 1
+
+> SELECT public.f2()
+NOTICE 00000: i=1 t=2 who=s2 expr=2
+CONTEXT: PL/pgSQL function f2() line 7 at RAISE
+NOTICE 00000: i=2 t=1 who=s1 expr=1
+CONTEXT: PL/pgSQL function f2() line 7 at RAISE
+NOTICE 00000: i=3 t=2 who=s2 expr=2
+CONTEXT: PL/pgSQL function f2() line 7 at RAISE
+NOTICE 00000: i=4 t=1 who=s1 expr=1
+CONTEXT: PL/pgSQL function f2() line 7 at RAISE
+f2:void
+
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> CREATE FUNCTION public.f3() RETURNS int LANGUAGE sql AS $$
+>   SELECT set_config('search_path', 's2', true);
+>   SELECT x FROM t
+> $$
+-- CREATE FUNCTION
+
+> BEGIN
+-- BEGIN
+
+> SELECT public.f3()
+f3:int4
+2
+-- SELECT 1
+
+> SHOW search_path
+search_path:text
+s2
+-- SHOW
+
+> ROLLBACK
+-- ROLLBACK
+
+> CREATE FUNCTION public.f4(fail bool) RETURNS text LANGUAGE plpgsql SET search_path = s2 AS $$
+> BEGIN
+>   RAISE NOTICE 'in f4 % % %', (SELECT x FROM t), who(), current_setting('search_path');
+>   IF fail THEN RAISE EXCEPTION 'boom'; END IF;
+>   PERFORM set_config('search_path', 's1, public', false);
+>   RETURN who() || (SELECT x FROM t);
+> END $$
+-- CREATE FUNCTION
+
+> SELECT public.f4(true)
+NOTICE 00000: in f4 2 s2 s2
+CONTEXT: PL/pgSQL function public.f4(boolean) line 3 at RAISE
+ERROR P0001: boom
+CONTEXT: PL/pgSQL function public.f4(boolean) line 4 at RAISE
+
+> SHOW search_path
+search_path:text
+s1, public
+-- SHOW
+
+> SELECT who(), (SELECT x FROM t)
+who:text | x:int4
+s1 | 1
+-- SELECT 1
+
+> SELECT public.f4(false), who()
+NOTICE 00000: in f4 2 s2 s2
+CONTEXT: PL/pgSQL function public.f4(boolean) line 3 at RAISE
+f4:text | who:text
+s11 | s1
+-- SELECT 1
+
+> SHOW search_path
+search_path:text
+s1, public
+-- SHOW
+
+> SET search_path = s1, public
+-- SET
+
+> CREATE FUNCTION public.f4b() RETURNS text LANGUAGE plpgsql SET search_path = s2 AS $$
+> BEGIN
+>   BEGIN
+>     PERFORM set_config('search_path', 's1', true);
+>     RAISE NOTICE 'inner %', who();
+>     PERFORM 1 / 0;
+>   EXCEPTION WHEN division_by_zero THEN
+>     RAISE NOTICE 'caught % %', who(), current_setting('search_path');
+>   END;
+>   RETURN who();
+> END $$
+-- CREATE FUNCTION
+
+> SELECT public.f4b(), who()
+NOTICE 00000: inner s1
+CONTEXT: PL/pgSQL function public.f4b() line 5 at RAISE
+NOTICE 00000: caught s2 s2
+CONTEXT: PL/pgSQL function public.f4b() line 8 at RAISE
+f4b:text | who:text
+s2 | s1
+-- SELECT 1
+
+> CREATE FUNCTION public.inner_set(p text) RETURNS void LANGUAGE plpgsql AS $$
+> BEGIN PERFORM set_config('search_path', p, true); END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION public.outer_f() RETURNS text LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE NOTICE 'before %', who();
+>   PERFORM public.inner_set('s2');
+>   RAISE NOTICE 'after %', who();
+>   RETURN (SELECT x FROM t)::text || public.mid_f();
+> END $$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION public.mid_f() RETURNS text LANGUAGE plpgsql SET search_path = s1 AS $$
+> BEGIN
+>   RAISE NOTICE 'mid %', who();
+>   PERFORM public.inner_set('s2');
+>   RETURN who();
+> END $$
+-- CREATE FUNCTION
+
+> BEGIN
+-- BEGIN
+
+> SELECT public.outer_f()
+NOTICE 00000: before s1
+CONTEXT: PL/pgSQL function outer_f() line 3 at RAISE
+NOTICE 00000: after s2
+CONTEXT: PL/pgSQL function outer_f() line 5 at RAISE
+NOTICE 00000: mid s1
+CONTEXT: PL/pgSQL function public.mid_f() line 3 at RAISE
+CONTEXT: PL/pgSQL expression "(SELECT x FROM t)::text || public.mid_f()"
+CONTEXT: PL/pgSQL function outer_f() line 6 at RETURN
+outer_f:text
+2s2
+-- SELECT 1
+
+> SHOW search_path
+search_path:text
+s2
+-- SHOW
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DO $$
+> BEGIN
+>   RAISE NOTICE 'do1 %', who();
+>   PERFORM set_config('search_path', 's2', true);
+>   RAISE NOTICE 'do2 % %', who(), (SELECT x FROM t);
+> END $$
+NOTICE 00000: do1 s1
+CONTEXT: PL/pgSQL function inline_code_block line 3 at RAISE
+NOTICE 00000: do2 s2 2
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+-- DO
+
+> ROLLBACK
+-- ROLLBACK
+
+> PREPARE p AS SELECT x, who() FROM t
+-- PREPARE
+
+> EXECUTE p
+x:int4 | who:text
+1 | s1
+-- SELECT 1
+
+> SET search_path = s2
+-- SET
+
+> EXECUTE p
+x:int4 | who:text
+2 | s2
+-- SELECT 1
+
+> SET search_path = s1, public
+-- SET
+
+> EXECUTE p
+x:int4 | who:text
+1 | s1
+-- SELECT 1
+
+> DEALLOCATE p
+-- DEALLOCATE
+
+> CREATE FUNCTION public.f6() RETURNS text LANGUAGE plpgsql AS $$
+> BEGIN
+>   RAISE NOTICE '%', '2020-03-04'::date;
+>   SET LOCAL datestyle = 'German';
+>   RAISE NOTICE '%', '2020-03-04'::date;
+>   RETURN '2020-03-04'::date::text;
+> END $$
+-- CREATE FUNCTION
+
+> BEGIN
+-- BEGIN
+
+> SELECT public.f6()
+NOTICE 00000: 2020-03-04
+CONTEXT: PL/pgSQL function f6() line 3 at RAISE
+NOTICE 00000: 04.03.2020
+CONTEXT: PL/pgSQL function f6() line 5 at RAISE
+f6:text
+04.03.2020
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> CREATE FUNCTION s1.cmp(oid, regclass) RETURNS boolean LANGUAGE plpgsql AS
+> 'BEGIN RAISE EXCEPTION ''overloaded cmp() called by %'', current_user; END'
+-- CREATE FUNCTION
+
+> CREATE OPERATOR s1.= (LEFTARG = oid, RIGHTARG = regclass, PROCEDURE = s1.cmp)
+-- CREATE OPERATOR
+
+> DO $$
+> DECLARE
+>   old_path pg_catalog.text := pg_catalog.current_setting('search_path');
+>   n int;
+> BEGIN
+>   PERFORM pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true);
+>   SELECT count(*) INTO n FROM pg_catalog.pg_class WHERE oid = 'pg_catalog.pg_class'::pg_catalog.regclass;
+>   RAISE NOTICE 'safe %', n;
+>   PERFORM pg_catalog.set_config('search_path', old_path, true);
+>   SELECT count(*) INTO n FROM pg_catalog.pg_class WHERE oid = 'pg_catalog.pg_class'::pg_catalog.regclass;
+> END $$
+NOTICE 00000: safe 1
+CONTEXT: PL/pgSQL function inline_code_block line 8 at RAISE
+ERROR P0001: overloaded cmp() called by postgres
+CONTEXT: PL/pgSQL function cmp(oid,regclass) line 1 at RAISE
+CONTEXT: SQL statement "SELECT count(*)        FROM pg_catalog.pg_class WHERE oid = 'pg_catalog.pg_class'::pg_catalog.regclass"
+CONTEXT: PL/pgSQL function inline_code_block line 10 at SQL statement
+
+> SHOW search_path
+search_path:text
+s1, public
+-- SHOW
+
+> DROP OPERATOR s1.= (oid, regclass)
+-- DROP OPERATOR
+
+> CREATE ROLE regress_a53_sp_owner
+-- CREATE ROLE
+
+> CREATE ROLE regress_a53_sp_user
+-- CREATE ROLE
+
+> GRANT USAGE ON SCHEMA s1 TO regress_a53_sp_owner, regress_a53_sp_user
+-- GRANT
+
+> GRANT SELECT ON s1.t TO regress_a53_sp_owner, regress_a53_sp_user
+-- GRANT
+
+> GRANT USAGE ON SCHEMA s2 TO regress_a53_sp_owner
+-- GRANT
+
+> GRANT SELECT ON s2.t TO regress_a53_sp_owner
+-- GRANT
+
+> CREATE FUNCTION public.def_f() RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = s2, s1 AS $$
+> BEGIN
+>   RETURN current_user || ' ' || who() || ' ' || (SELECT x FROM t)::text;
+> END $$
+-- CREATE FUNCTION
+
+> ALTER FUNCTION public.def_f() OWNER TO regress_a53_sp_owner
+-- ALTER FUNCTION
+
+> CREATE FUNCTION public.inv_f() RETURNS text LANGUAGE plpgsql AS $$
+> BEGIN
+>   PERFORM set_config('search_path', 's2, s1', true);
+>   RETURN current_user || ' ' || who() || ' ' || (SELECT x FROM t)::text || ' ' || public.def_f();
+> END $$
+-- CREATE FUNCTION
+
+> SET ROLE regress_a53_sp_user
+-- SET
+
+> BEGIN
+-- BEGIN
+
+> SELECT public.inv_f()
+inv_f:text
+regress_a53_sp_user s1 1 regress_a53_sp_owner s2 2
+-- SELECT 1
+
+> SHOW search_path
+search_path:text
+s2, s1
+-- SHOW
+
+> ROLLBACK
+-- ROLLBACK
+
+> RESET ROLE
+-- RESET
+
+> CREATE FUNCTION public.showpath() RETURNS int LANGUAGE plpgsql AS $$
+> BEGIN RAISE NOTICE 'path=%', current_setting('search_path'); RETURN 10; END $$
+-- CREATE FUNCTION
+
+> CREATE SCHEMA s3
+>   CREATE TABLE p(i int) PARTITION BY RANGE (i)
+>   CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (1) TO (public.showpath())
+NOTICE 00000: path=s3, s1, public
+CONTEXT: PL/pgSQL function showpath() line 2 at RAISE
+-- CREATE SCHEMA
+
+> SHOW search_path
+search_path:text
+s1, public
+-- SHOW
+
+> SELECT relname, relnamespace::regnamespace FROM pg_class WHERE relname IN ('p', 'p1') ORDER BY 1
+relname:name | relnamespace:4089
+p | s3
+p1 | s3
+-- SELECT 2
+
+> CREATE FUNCTION public.mk() RETURNS int LANGUAGE plpgsql AS $$
+> BEGIN CREATE TABLE public.made_by_bound(i int); RETURN 5; END $$
+-- CREATE FUNCTION
+
+> CREATE TABLE public.pt(i int) PARTITION BY RANGE (i)
+-- CREATE TABLE
+
+> CREATE TABLE public.pt1 PARTITION OF public.pt FOR VALUES FROM (1) TO (public.mk())
+-- CREATE TABLE
+
+> SELECT relname FROM pg_class WHERE relname IN ('pt1', 'made_by_bound') ORDER BY 1
+relname:name
+made_by_bound
+pt1
+-- SELECT 2
+
+> DROP TABLE public.pt, public.made_by_bound
+-- DROP TABLE
+
+> CREATE FUNCTION public.setter() RETURNS bool VOLATILE LANGUAGE sql AS $$SET search_path = s1; SELECT true$$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION s2.konst() RETURNS bool IMMUTABLE LANGUAGE sql AS $$SELECT public.setter()$$
+-- CREATE FUNCTION
+
+> CREATE FUNCTION s2.ix(text, bool) RETURNS text IMMUTABLE LANGUAGE sql AS $$SELECT $1$$
+-- CREATE FUNCTION
+
+> CREATE COLLATION s1.coll (LOCALE = "C")
+-- CREATE COLLATION
+
+> CREATE TABLE s2.x (y text)
+-- CREATE TABLE
+
+> INSERT INTO s2.x VALUES ('foo'), ('bar')
+-- INSERT 0 2
+
+> RESET search_path
+-- RESET
+
+> CREATE INDEX x_y ON s2.x ((s2.ix(y, s2.konst())))
+-- CREATE INDEX
+
+> SHOW search_path
+search_path:text
+"$user", public
+-- SHOW
+
+> ALTER TABLE s2.x ADD CONSTRAINT x_excl EXCLUDE USING btree ((s2.ix(y, s2.konst())) WITH =)
+-- ALTER TABLE
+
+> SHOW search_path
+search_path:text
+"$user", public
+-- SHOW
+
+> ALTER TABLE s2.x ADD CONSTRAINT x_bad EXCLUDE USING btree ((s2.ix(y, s2.konst())) COLLATE coll WITH =)
+ERROR 42704: collation "coll" for encoding "UTF8" does not exist
+
+> SHOW search_path
+search_path:text
+"$user", public
+-- SHOW
+
+> SET search_path = s1, public
+-- SET
+
+> DROP SCHEMA s1, s2, s3 CASCADE
+NOTICE 00000: drop cascades to 10 other objects
+DETAIL: drop cascades to table s3.p
+DETAIL: drop cascades to table s2.t
+DETAIL: drop cascades to function s2.who()
+DETAIL: drop cascades to function s2.konst()
+DETAIL: drop cascades to function s2.ix(text,boolean)
+DETAIL: drop cascades to table s2.x
+DETAIL: drop cascades to table t
+DETAIL: drop cascades to function who()
+DETAIL: drop cascades to function cmp(oid,regclass)
+DETAIL: drop cascades to collation coll
+-- DROP SCHEMA
+
+> DROP FUNCTION public.f1(), public.f2(), public.f3(), public.f4(bool), public.f4b(),
+>   public.inner_set(text), public.outer_f(), public.mid_f(), public.f6(), public.def_f(),
+>   public.inv_f(), public.showpath(), public.mk(), public.setter()
+-- DROP FUNCTION
+
+> DROP ROLE regress_a53_sp_user
+-- DROP ROLE
+
+> DROP ROLE regress_a53_sp_owner
+-- DROP ROLE
+

@@ -131,6 +131,12 @@ pub fn execute(ctx: &ExecCtx, node: &NodeEnum, sql: &str) -> Result<String> {
             ));
             return Ok("UNLISTEN".into());
         }
+        // SET in a routine (EXECUTE, a SQL function's body, an extension script): the
+        // statements after it see the value.
+        NodeEnum::VariableSetStmt(s) => {
+            crate::session::routine_set(ctx, s)?;
+            return Ok("SET".into());
+        }
         _ => {}
     }
     if let Some(r) = crate::session::cursor::spi_cursor_stmt(ctx, node, sql, &[]) {
@@ -499,6 +505,19 @@ impl<'c, 'a> Ddl<'c, 'a> {
     pub(super) fn reload_catalog(&mut self) {
         self.base = self.ctx.catalog();
         self.cat = (*self.base).clone();
+    }
+
+    /// After running user code that may itself run DDL (a function a partition bound
+    /// calls): when the transaction's catalog is no longer `before`, carry this command's
+    /// edits so far onto it, so neither its changes nor the nested commands' are lost.
+    pub(super) fn absorb_nested(&mut self, before: &Arc<Catalog>) -> Result<()> {
+        let cur = self.ctx.catalog();
+        if cur.version == before.version {
+            return Ok(());
+        }
+        self.cat = crate::txn::catmerge::merge(&self.base, &self.cat, &cur)?;
+        self.base = cur;
+        Ok(())
     }
 
     /// Store the edited catalog in the transaction.

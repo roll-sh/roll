@@ -174,6 +174,9 @@ pub struct SessionState {
     pub pl_conflicts: RefCell<HashMap<String, crate::sql::binder::VarConflict>>,
     /// `plpgsql.print_strict_params` as each function body was first run in this session.
     pub pl_strict_params: RefCell<HashMap<String, bool>>,
+    /// Each PL/pgSQL function's signature as CONTEXT lines show it, formatted at its first
+    /// run in this session (by oid, with a hash of its schema, name, arguments and body).
+    pub pl_signatures: RefCell<HashMap<u32, (u64, String)>>,
     /// LISTEN (true) / UNLISTEN of a channel (None: all) in the current transaction, applied
     /// when it commits.
     pub listen_actions: RefCell<Vec<(bool, Option<String>)>>,
@@ -248,6 +251,7 @@ impl SessionState {
             cursors: RefCell::new(HashMap::new()),
             pl_conflicts: RefCell::new(HashMap::new()),
             pl_strict_params: RefCell::new(HashMap::new()),
+            pl_signatures: RefCell::new(HashMap::new()),
             listen_actions: RefCell::new(Vec::new()),
             copy_progress: RefCell::new(None),
             portal_seq: Cell::new(0),

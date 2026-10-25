@@ -3987,7 +3987,7 @@ impl Ddl<'_, '_> {
             // (A security-restricted operation: RestrictSearchPath.)
             let level = self.ctx.sess.settings.borrow_mut().restrict_search_path();
             let r = collect(&bq.plan, self.ctx, None);
-            self.ctx.sess.settings.borrow_mut().pop_nest(level);
+            self.ctx.sess.settings.borrow_mut().pop_restricted(level);
             r?
         } else {
             collect(&bq.plan, self.ctx, None)?
@@ -9239,7 +9239,7 @@ pub(super) fn index_values(ix: &BoundIndex, row: &[Value], d: &Ddl) -> Result<Op
         Ok(Some(out))
     })();
     if let Some(level) = level {
-        d.ctx.sess.settings.borrow_mut().pop_nest(level);
+        d.ctx.sess.settings.borrow_mut().pop_restricted(level);
     }
     if owner.is_some() {
         d.ctx.sess.definer.borrow_mut().pop();

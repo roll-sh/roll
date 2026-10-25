@@ -1707,7 +1707,7 @@ impl Settings {
 
     /// RestrictSearchPath: a security-restricted operation (index build, CLUSTER, REFRESH, …)
     /// sees `search_path` as `pg_catalog, pg_temp`, at a nest level of its own that
-    /// `pop_nest` ends.
+    /// `pop_restricted` ends.
     pub fn restrict_search_path(&mut self) -> usize {
         let level = self.push_nest();
         self.push_old("search_path", StackState::Save);
@@ -1715,6 +1715,13 @@ impl Settings {
         self.values
             .insert("search_path".into(), "pg_catalog, pg_temp".into());
         level
+    }
+
+    /// The security-restricted operation that `restrict_search_path` began at `level`
+    /// ends: every change made at that level goes, what a function it ran SET included
+    /// (`AtEOXact_GUC(false, level)`).
+    pub fn pop_restricted(&mut self, level: usize) {
+        self.subxact_leave(level, false);
     }
 
     /// The function that pushed `level` ends: its SET clauses' values go; what it SET

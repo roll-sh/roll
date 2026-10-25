@@ -141,6 +141,8 @@ pub struct ExecCtx<'a> {
     fmt: FormatCtx,
     pub params: &'a [Value],
     pub search_path: Vec<String>,
+    /// The role whose USAGE privileges `search_path` was filtered by.
+    path_role: u32,
     outer: RefCell<Vec<Rc<Row>>>,
     case_vals: RefCell<Vec<Value>>,
     subq_cache: RefCell<HashMap<usize, Rc<Vec<Row>>>>,
@@ -222,6 +224,28 @@ pub struct ExecCtx<'a> {
     /// that (pull_up_subqueries comes before any planning), not from the planned tree,
     /// whose semi joins may be unique-ified already.
     pub bound_trees: RefCell<Vec<crate::sql::paths::BoundTree>>,
+}
+
+/// Drop from `path` the schemas the current role may not use: name lookups skip them
+/// (recomputeNamespacePath's ACL_USAGE check); temporary schemas stay.
+fn usable_path(catalog: &Catalog, sess: &SessionState, path: &mut Vec<String>) -> u32 {
+    let me = sess.current_role(catalog);
+    if catalog.is_superuser(me) {
+        return me;
+    }
+    let db_owner = sess.db_owner(catalog);
+    path.retain(|s| match catalog.schema_by_name(s) {
+        Some(sc) => {
+            sc.name.starts_with("pg_temp")
+                || catalog
+                    .obj_mask(crate::catalog::acl::ObjKind::Schema, sc.oid, me, db_owner)
+                    .0
+                    & crate::catalog::acl::USAGE
+                    != 0
+        }
+        None => true,
+    });
+    me
 }
 
 /// EvalPlanQual's test rows (`ExecCtx::epq`): per scan, its row's key and stored data.
@@ -434,22 +458,7 @@ impl<'a> ExecCtx<'a> {
         let mut fmt = settings.format_ctx();
         drop(settings);
         let catalog = txn.borrow().catalog();
-        // Schemas the user may not use are skipped in name lookups.
-        let me = sess.current_role(&catalog);
-        if !catalog.is_superuser(me) {
-            let db_owner = sess.db_owner(&catalog);
-            search_path.retain(|s| match catalog.schema_by_name(s) {
-                Some(sc) => {
-                    sc.name.starts_with("pg_temp")
-                        || catalog
-                            .obj_mask(crate::catalog::acl::ObjKind::Schema, sc.oid, me, db_owner)
-                            .0
-                            & crate::catalog::acl::USAGE
-                            != 0
-                }
-                None => true,
-            });
-        }
+        let path_role = usable_path(&catalog, sess, &mut search_path);
         let settings = sess.settings.borrow();
         let timeout = settings.statement_timeout();
         let deadline = (timeout > 0)
@@ -475,6 +484,7 @@ impl<'a> ExecCtx<'a> {
             fmt,
             params,
             search_path,
+            path_role,
             outer: RefCell::new(Vec::new()),
             case_vals: RefCell::new(Vec::new()),
             subq_cache: RefCell::new(HashMap::default()),
@@ -509,6 +519,46 @@ impl<'a> ExecCtx<'a> {
             sys_rel_scans: Default::default(),
             bound_trees: RefCell::default(),
         }
+    }
+
+    /// The search path a statement starting now resolves names through: the session's
+    /// `search_path` setting as it is now (a function's SET clause, `SET` or `set_config`
+    /// earlier in the routine), less the schemas the current role may not use. PL/pgSQL
+    /// and SQL functions bind each statement under it, as plancache revalidates a cached
+    /// plan whose search_path no longer matches (`SearchPathMatchesCurrentEnvironment`).
+    pub fn session_path(&self) -> Vec<String> {
+        self.session_path_role().0
+    }
+
+    /// `session_path`, and the role whose privileges it was filtered by.
+    fn session_path_role(&self) -> (Vec<String>, u32) {
+        let mut path = self.sess.search_path();
+        let role = usable_path(&self.catalog(), self.sess, &mut path);
+        (path, role)
+    }
+
+    /// Whether the session's settings or current role may have changed what
+    /// `session_path` gives since this context's path was made (a statement starting now
+    /// may resolve names otherwise; `path_stale` says whether it does).
+    pub fn path_unsure(&self) -> bool {
+        self.sess.settings.borrow().generation() != self.fmt.settings
+            || self.current_user() != self.path_role
+    }
+
+    /// The session's search path (`session_path`) is no longer this context's: the
+    /// settings changed since it was made (a SET, `set_config`, a function's SET clause), or
+    /// the current role did (a SECURITY DEFINER function: schemas are filtered by USAGE).
+    pub fn path_stale(&self) -> bool {
+        self.path_unsure() && self.session_path() != self.search_path
+    }
+
+    /// A child context (as `child`, with this one's parameters and snapshot) whose names and
+    /// formatting follow the session as it is now (`session_path`, the settings' current
+    /// values): what a routine's next statements run in once a statement changed them.
+    pub fn resynced(&self) -> ExecCtx<'_> {
+        let c = self.refreshed();
+        *c.snap.borrow_mut() = self.snap.borrow().clone();
+        c
     }
 
     pub fn fmt(&self) -> &FormatCtx {
@@ -547,6 +597,7 @@ impl<'a> ExecCtx<'a> {
             fmt,
             params,
             search_path: self.search_path.clone(),
+            path_role: self.path_role,
             outer: RefCell::new(Vec::new()),
             case_vals: RefCell::new(Vec::new()),
             subq_cache: RefCell::new(HashMap::default()),
@@ -610,7 +661,7 @@ impl<'a> ExecCtx<'a> {
         fmt.clock = crate::types::datetime::Clock {
             now: self.fmt.clock.now,
         };
-        c.search_path = self.sess.search_path();
+        (c.search_path, c.path_role) = self.session_path_role();
         fmt.names = Some(Arc::new(CatalogNames::new(
             self.catalog(),
             c.search_path.clone(),

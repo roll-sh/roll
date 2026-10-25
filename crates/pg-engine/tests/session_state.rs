@@ -188,6 +188,63 @@ fn catalog_rows_follow_ddl_roles_and_settings() {
     );
 }
 
+/// A PL/pgSQL function's cached plans (`PLANS`), a SQL function's statements and a DO block's
+/// follow the search path its statements set, and its CONTEXT signature is the one its
+/// first run in the session formatted (`SessionState::pl_signatures`): `a` runs the same
+/// bodies with its tables in the other schemas, under other paths, before `b`.
+#[test]
+fn routine_plans_follow_search_path() {
+    check(
+        "CREATE SCHEMA s1; CREATE SCHEMA s2;
+         CREATE TABLE s1.t (x int); INSERT INTO s1.t VALUES (7);
+         CREATE TABLE s2.t (x int); INSERT INTO s2.t VALUES (8);
+         CREATE FUNCTION public.f() RETURNS text LANGUAGE plpgsql AS $$
+         DECLARE r text := '';
+         BEGIN
+           FOR i IN 1..3 LOOP
+             PERFORM set_config('search_path', CASE WHEN i % 2 = 0 THEN 's1' ELSE 's2' END, true);
+             r := r || (SELECT x FROM t);
+             RAISE NOTICE 'at %', r;
+           END LOOP;
+           RETURN r;
+         END $$;
+         CREATE FUNCTION public.g() RETURNS int LANGUAGE sql AS $$
+           SELECT set_config('search_path', 's1', true);
+           SELECT x FROM t
+         $$;
+         SET search_path = s2, public;
+         BEGIN; SELECT public.f(), public.g(); ROLLBACK;
+         DO $$ BEGIN PERFORM set_config('search_path', 's1', true); RAISE NOTICE '%', (SELECT x FROM t); END $$;
+         SET search_path = s1, public;
+         BEGIN; SELECT public.f(), public.g(); ROLLBACK;",
+        "CREATE SCHEMA u1; CREATE SCHEMA u2;
+         SET search_path = u1, public;
+         CREATE TABLE u1.t (x int); INSERT INTO u1.t VALUES (1);
+         CREATE TABLE u2.t (x int); INSERT INTO u2.t VALUES (2);
+         CREATE FUNCTION public.f2() RETURNS text LANGUAGE plpgsql AS $$
+         DECLARE r text := '';
+         BEGIN
+           FOR i IN 1..3 LOOP
+             PERFORM set_config('search_path', CASE WHEN i % 2 = 0 THEN 'u1' ELSE 'u2' END, true);
+             r := r || (SELECT x FROM t);
+             RAISE NOTICE 'at %', r;
+           END LOOP;
+           RETURN r;
+         END $$;
+         CREATE FUNCTION public.g2() RETURNS int LANGUAGE sql AS $$
+           SELECT set_config('search_path', 'u2', true);
+           SELECT x FROM t
+         $$;
+         BEGIN; SELECT public.f2(), public.g2(); ROLLBACK;
+         BEGIN; SELECT public.f2(); ROLLBACK;
+         DO $$ BEGIN PERFORM set_config('search_path', 'u2', true); RAISE NOTICE '%', (SELECT x FROM t); END $$;
+         SET search_path = u2;
+         SELECT public.f2();",
+        true,
+        &["212", "function f2() line"],
+    );
+}
+
 /// The system catalogs' rows a database's sessions share (`Database::sys_rows`) are one
 /// session's only for another under the same catalog, roles, login, path, temporary schema
 /// and setting values: each script of `scripts` runs in a session of its own, one after the

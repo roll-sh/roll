@@ -1,7 +1,7 @@
 //! Databases and transactions: snapshots over the MVCC store, buffered writes, row locks,
 //! savepoints, sequences, and transactional catalog changes.
 
-mod catmerge;
+pub(crate) mod catmerge;
 pub mod locks;
 pub mod ssi;
 pub mod xids;

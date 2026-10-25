@@ -501,7 +501,12 @@ impl Ddl<'_, '_> {
                 continue;
             }
             let b = binder.get_or_insert_with(|| self.binder());
-            let Ok(bixs) = b.bound_indexes_all(t) else {
+            // (A lookup of the engine's own, which Postgres doesn't make: what the
+            // functions binding folds SET goes.)
+            let level = self.ctx.sess.settings.borrow_mut().push_nest();
+            let bixs = b.bound_indexes_all(t);
+            self.ctx.sess.settings.borrow_mut().subxact_leave(level, false);
+            let Ok(bixs) = bixs else {
                 continue;
             };
             for b in bixs {

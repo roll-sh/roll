@@ -242,14 +242,15 @@ pub(super) fn index_options(method: &str, opts: &[pb::Node]) -> Result<Vec<Strin
 impl Ddl<'_, '_> {
     // ── CREATE INDEX ──
 
-    /// DefineIndex runs the index's expressions at a GUC nest level of its own (its
-    /// security-restricted operation's NewGUCNestLevel): what a function they call SETs
-    /// (search_path) doesn't outlive the command.
+    /// DefineIndex runs the index's expressions as a security-restricted operation, at a
+    /// GUC nest level of its own with search_path `pg_catalog, pg_temp`
+    /// (RestrictSearchPath): what a function they call sees and SETs (search_path) doesn't
+    /// outlive the command. (Names in the statement itself resolve as the command began.)
     pub(super) fn in_index_build<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        let level = self.ctx.sess.settings.borrow_mut().push_nest();
+        let level = self.ctx.sess.settings.borrow_mut().restrict_search_path();
         let r = f(self);
         // (AtEOXact_GUC(false, ...): every change at that level goes.)
-        self.ctx.sess.settings.borrow_mut().subxact_leave(level, false);
+        self.ctx.sess.settings.borrow_mut().pop_restricted(level);
         r
     }
 
@@ -1415,7 +1416,7 @@ impl Ddl<'_, '_> {
         let r = self.refresh_checked(s, &v, &storage, &bixs);
         let sro = &self.ctx.sess.sro;
         sro.set(sro.get() - 1);
-        self.ctx.sess.settings.borrow_mut().pop_nest(level);
+        self.ctx.sess.settings.borrow_mut().pop_restricted(level);
         if pushed {
             self.ctx.sess.definer.borrow_mut().pop();
         }
@@ -2248,22 +2249,42 @@ impl Ddl<'_, '_> {
         };
         let mut elts: Vec<&pb::Node> = s.schema_elts.iter().collect();
         elts.sort_by_key(rank);
-        // The elements run with the new schema first in the search path (CreateSchemaCommand's
-        // override path), what they call included.
-        let mut path = vec![name.clone()];
-        path.extend(self.ctx.search_path.iter().cloned());
-        for e in elts {
-            let Some(mut node) = e.node.clone() else {
-                continue;
+        // The elements run with the new schema prepended to the search path, what they call
+        // included: CreateSchemaCommand sets search_path to `<schema>, <its value>` at a GUC
+        // nest level of its own, undone at the end or on an error.
+        let level = {
+            let mut st = self.ctx.sess.settings.borrow_mut();
+            let level = st.push_nest();
+            let cur = st.get_raw("search_path").unwrap_or_default();
+            let cur = cur.trim_start();
+            let path = if cur.is_empty() {
+                crate::catalog::quote_ident(&name)
+            } else {
+                format!("{}, {cur}", crate::catalog::quote_ident(&name))
             };
-            set_creation_schema(&mut node, &name)?;
-            let node = self.qualify_in_schema(node, oid, &name)?;
-            let child = self.ctx.child_with_path(self.ctx.params, path.clone());
-            let r = super::Ddl::new(&child, self.sql).run(&node);
-            self.ctx.notices.borrow_mut().extend(child.notices.borrow_mut().drain(..));
-            r?;
-            self.cat = (*self.ctx.catalog()).clone();
-        }
+            if let Err(e) = st.set_saved("search_path", &path) {
+                st.pop_nest(level);
+                return Err(e);
+            }
+            level
+        };
+        let r = (|| -> Result<()> {
+            for e in elts {
+                let Some(mut node) = e.node.clone() else {
+                    continue;
+                };
+                set_creation_schema(&mut node, &name)?;
+                let node = self.qualify_in_schema(node, oid, &name)?;
+                let child = self.ctx.refreshed();
+                let r = super::Ddl::new(&child, self.sql).run(&node);
+                self.ctx.notices.borrow_mut().extend(child.notices.borrow_mut().drain(..));
+                r?;
+                self.cat = (*self.ctx.catalog()).clone();
+            }
+            Ok(())
+        })();
+        self.ctx.sess.settings.borrow_mut().pop_nest(level);
+        r?;
         Ok("CREATE SCHEMA".into())
     }
 

@@ -519,7 +519,11 @@ impl Ddl<'_, '_> {
                 with_pos(err, ast::location(n))
             }
         })?;
-        eval(&e, &[], self.ctx).map_err(|err| with_pos(err, ast::location(n)))
+        let before = self.ctx.catalog();
+        let v = eval(&e, &[], self.ctx).map_err(|err| with_pos(err, ast::location(n)))?;
+        // (A function the bound calls may run DDL: what it made stays.)
+        self.absorb_nested(&before)?;
+        Ok(v)
     }
 
     /// check_new_partition_bound: the new partition `name` overlaps no other.

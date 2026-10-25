@@ -932,7 +932,7 @@ impl Ddl<'_, '_> {
         }
         let level = self.ctx.sess.settings.borrow_mut().restrict_search_path();
         let r = self.cluster_rel_inner(t, ix, verbose);
-        self.ctx.sess.settings.borrow_mut().pop_nest(level);
+        self.ctx.sess.settings.borrow_mut().pop_restricted(level);
         if pushed {
             self.ctx.sess.definer.borrow_mut().pop();
         }

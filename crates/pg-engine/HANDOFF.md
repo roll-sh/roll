@@ -63,7 +63,7 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   extensions' own PostgreSQL 18.6 scripts (`src/ext/`, `session/ddl/extension.rs`), C
   functions are native code by library and symbol; the contrib modules' regression tests run
   with `pg_contrib` (`tests/pg_contrib.rs`). Per-module scores and how it works:
-  `tests/contrib/STATUS.md`. 19 modules are native (4,147 of their 4,158 contrib units):
+  `tests/contrib/STATUS.md`. 19 modules are native (4,149 of their 4,158 contrib units):
   pgcrypto, uuid-ossp, citext, hstore, pg_trgm, btree_gin, ltree, intarray, tablefunc, cube,
   earthdistance, isn, unaccent, fuzzystrmatch, lo, pg_buffercache at 100%; btree_gist, seg,
   amcheck nearly. Extension types the engine implements natively are `Value::Ext`
@@ -71,6 +71,18 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   pg_stat_statements at 982 / 1,013 (2PC, a few EXPLAIN / jumbling cases), pageinspect
   (not applicable),
   postgres_fdw / dblink (an outbound-network policy decision), see STATUS.md.
+- **search_path in routines** (round 19, agent 53): PL/pgSQL functions, DO blocks and SQL
+  functions bind each statement under the session's search path as it is when the statement
+  runs (`Interp::resync`, `ExecCtx::session_path` / `resynced` / `path_stale`), as
+  plancache revalidates a cached plan whose search_path changed: a `SET` / `set_config` /
+  nested call's SET LOCAL takes effect for the routine's next statement, a subtransaction
+  rolled back takes it back, a SECURITY DEFINER's path is filtered by its owner's USAGE.
+  `SET` runs in EXECUTE and SQL function bodies. CREATE SCHEMA's elements run with
+  `search_path` set (a GUC nest level) to the schema prepended; index builds run with
+  RestrictSearchPath (`in_index_build`) and every security-restricted operation's nest
+  level is discarded at its end (`Settings::pop_restricted`, AtEOXact_GUC(false)). A
+  PL/pgSQL function's CONTEXT signature is formatted when it is compiled (validation or first
+  call, `SessionState::pl_signatures`). Golden `a53_plpgsql_search_path`.
 - **Performance** (round 17, agent 36): measured for the first time, `tools/bench/` against a
   pinned PostgreSQL 18.6 on the same 4 cores; numbers, method and the optimisations made are
   in `BENCH.md`. Over the wire the engine beats PostgreSQL on single-client OLTP (point
@@ -442,10 +454,13 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
     role, row_security. The generic plan's cost: by a `Weak` to the binding.
   - PL/pgSQL (`plpgsql/mod.rs`): `PLANS` (body, statement, `Database::instance`, catalog
     version, search path, role, row_security, variable types, a DO block's
-    standard_conforming_strings), `LEXED` (database, function oid, body: each function is
+    standard_conforming_strings; the search path is the one `Interp::resync` found for the
+    statement, the session's as it is when the statement runs), `LEXED` (database, function oid, body: each function is
     scanned at its own first run), `PARSED` (body; a DO block's with
     standard_conforming_strings), `COMPILED` / `VALIDATED` (database, oid / schema + name, body),
-    `pl_conflicts` / `pl_strict_params` (per session, by function and body).
+    `pl_conflicts` / `pl_strict_params` (per session, by function and body),
+    `SessionState::pl_signatures` (per session, by oid with a hash of schema, name,
+    arguments and body: the signature formatted at the function's validation or first call).
   - Catalog versions are unique in the process (`Catalog::bump`, also for a rebased commit), so
     a version identifies one catalog of one database's history; rolled-back DDL's versions are
     never reused.

@@ -78,6 +78,11 @@ pub fn validate_function(ctx: &ExecCtx, f: &Function, sql: &str) -> Result<()> {
         )));
     }
     compile_checked(ctx, &f.body, &spec, sql)?;
+    // (The validator's compile is the one a call without an input collation reuses, its
+    // signature with it; a polymorphic function's calls compile for their argument types.)
+    if no_input_collation(f) && !f.args.iter().any(|(_, t)| t.is_polymorphic()) {
+        compiled_signature(ctx, f, signature_version(f));
+    }
     VALIDATED.with(|v| {
         let mut v = v.borrow_mut();
         if v.len() > 256 {
@@ -580,19 +585,40 @@ fn pl_signature(ctx: &ExecCtx, f: &Function) -> String {
     // As declared (format_procedure): a polymorphic function's call has its argument types
     // resolved.
     let f = cat.functions.get(&f.oid).map_or(f, |g| &**g);
-    // (In a security-restricted operation the search path is the restricted one.)
-    let restricted;
-    let path = if ctx.sess.security_restricted() {
-        restricted = ctx.sess.search_path();
-        &restricted
-    } else {
-        &ctx.search_path
-    };
-    format!(
+    // Postgres formats it when it compiles the function (`fn_signature`): at its validation
+    // (CREATE FUNCTION, whose compile the first call reuses) or its first call in the
+    // session, and again once the function changed. Later calls show it as the search path
+    // was then (the session's, as a SET clause or a security-restricted operation has it).
+    let version = signature_version(f);
+    if let Some((v, sig)) = ctx.sess.pl_signatures.borrow().get(&f.oid)
+        && *v == version
+    {
+        return sig.clone();
+    }
+    compiled_signature(ctx, f, version)
+}
+
+/// What a function's compiled signature depends on (its pg_proc row, as far as it shows).
+fn signature_version(f: &Function) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&(f.schema, &f.name, &f.args, &f.body), &mut h);
+    std::hash::Hasher::finish(&h)
+}
+
+/// `f`'s signature formatted now, kept as its compiled one in the session.
+fn compiled_signature(ctx: &ExecCtx, f: &Function, version: u64) -> String {
+    let cat = ctx.catalog();
+    let path = ctx.session_path();
+    let sig = format!(
         "{}({})",
-        cat.function_name(f, path),
-        cat.param_type_names(f, path).join(",")
-    )
+        cat.function_name(f, &path),
+        cat.param_type_names(f, &path).join(",")
+    );
+    ctx.sess
+        .pl_signatures
+        .borrow_mut()
+        .insert(f.oid, (version, sig.clone()));
+    sig
 }
 
 /// A SECURITY DEFINER function runs as its owner until it returns.
@@ -752,10 +778,15 @@ fn call_sql(ctx: &ExecCtx, f: &Function, args: Vec<Value>) -> Result<Vec<Row>> {
         .collect();
     let mut last: (Vec<Row>, Vec<OutCol>) = (Vec::new(), Vec::new());
     let mut result = None;
+    let caller = ctx;
     for (i, raw) in stmts.iter().enumerate() {
         let Some(node) = raw.stmt.as_deref() else {
             continue;
         };
+        // Each statement is planned when it is reached (PostgreSQL 18's functions.c), under
+        // the search path an earlier one may have set.
+        let resynced = caller.path_stale().then(|| caller.resynced());
+        let ctx = resynced.as_ref().unwrap_or(caller);
         let text = crate::sql::parse::stmt_text(&f.body, raw)
             .trim_end_matches(';')
             .to_string();
@@ -858,14 +889,17 @@ fn call_sql(ctx: &ExecCtx, f: &Function, args: Vec<Value>) -> Result<Vec<Row>> {
                 }
                 e
             })
-        })?;
-        if r.is_some() {
-            result = r;
+        });
+        if let Some(c) = &resynced {
+            caller.notices.borrow_mut().extend(c.notices.borrow_mut().drain(..));
+        }
+        if let Some(rows) = r? {
+            result = Some(rows);
         }
     }
     match result {
         Some(rows) => Ok(rows),
-        None => sql_result(ctx, f, last),
+        None => sql_result(caller, f, last),
     }
 }
 
@@ -1591,8 +1625,44 @@ struct Place {
     key: Option<(Value, crate::sql::func::FnImpl)>,
 }
 
+/// What a routine's statements' names and formatting depend on besides the caller's
+/// context: the session's settings (their generation), the catalog's version and the
+/// current role (schemas the role may not use are left out of the path).
+fn sync_key(ctx: &ExecCtx) -> (u64, u64, u32) {
+    let cat = ctx.txn.borrow().catalog();
+    (
+        ctx.sess.settings.borrow().generation(),
+        cat.version,
+        ctx.sess.current_role(&cat),
+    )
+}
+
+/// The context a routine's statements run in (`Interp::cx`): its caller's, or one seeing the
+/// session's search path and settings as a statement of the routine changed them.
+#[derive(Clone)]
+enum Cx<'c, 'a> {
+    Caller(&'c ExecCtx<'a>),
+    Resynced(Rc<ExecCtx<'c>>),
+}
+
+impl<'c> std::ops::Deref for Cx<'c, '_> {
+    type Target = ExecCtx<'c>;
+    fn deref(&self) -> &ExecCtx<'c> {
+        match self {
+            Cx::Caller(c) => c,
+            Cx::Resynced(c) => c,
+        }
+    }
+}
+
 struct Interp<'c, 'a> {
+    /// The caller's context. Statements run in `cx()`, which is this one until the session's
+    /// search path or settings change under the routine (`resync`).
     ctx: &'c ExecCtx<'a>,
+    /// Set once they changed: a context seeing them.
+    resynced: RefCell<Option<Rc<ExecCtx<'c>>>>,
+    /// What `resync` last saw (`sync_key`); None before the routine's first statement.
+    synced: Cell<Option<(u64, u64, u32)>>,
     body_key: String,
     fn_name: String,
     /// The routine's OID (PG_ROUTINE_OID); 0 for a DO block.
@@ -1645,7 +1715,63 @@ struct Interp<'c, 'a> {
     conflict: VarConflict,
 }
 
+impl Drop for Interp<'_, '_> {
+    fn drop(&mut self) {
+        self.flush_resynced();
+    }
+}
+
 impl<'c, 'a> Interp<'c, 'a> {
+    /// The context the routine's next statement binds and runs in (see `resync`).
+    fn cx(&self) -> Cx<'c, 'a> {
+        match &*self.resynced.borrow() {
+            Some(c) => Cx::Resynced(c.clone()),
+            None => Cx::Caller(self.ctx),
+        }
+    }
+
+    /// Before a statement or expression is bound or run: when the session's settings or the
+    /// catalog changed since the last one (a SET, `set_config`, a nested call's SET LOCAL,
+    /// a subtransaction rolled back), make sure it resolves names through the search path
+    /// as it is now, as plancache revalidates a cached plan whose search_path no longer
+    /// matches, and formats values under the settings as they are now.
+    fn resync(&self) {
+        let key = sync_key(self.ctx);
+        let last = self.synced.get();
+        if last == Some(key) {
+            return;
+        }
+        self.synced.set(Some(key));
+        // The routine's first statement: its caller's context is good unless the session
+        // changed under it (a SET clause, a SECURITY DEFINER's role, set_config earlier in
+        // the calling statement).
+        if last.is_none() && !self.ctx.path_unsure() {
+            return;
+        }
+        let path = self.ctx.session_path();
+        // (Only the catalog changed: the context is good while the path is the same.)
+        if last.is_some_and(|l| (l.0, l.2) == (key.0, key.2)) && path == self.cx().search_path {
+            return;
+        }
+        let next = if key.0 == self.ctx.fmt().settings && path == self.ctx.search_path {
+            None
+        } else {
+            Some(Rc::new(self.ctx.resynced()))
+        };
+        self.flush_resynced();
+        *self.resynced.borrow_mut() = next;
+    }
+
+    /// Move the notices queued in the resynced context to the caller's.
+    fn flush_resynced(&self) {
+        if let Some(c) = &*self.resynced.borrow() {
+            self.ctx
+                .notices
+                .borrow_mut()
+                .extend(c.notices.borrow_mut().drain(..));
+        }
+    }
+
     fn new(
         ctx: &'c ExecCtx<'a>,
         body: &str,
@@ -1697,6 +1823,8 @@ impl<'c, 'a> Interp<'c, 'a> {
         let (_, too_many_rows, strict_multi) = extra_checks(ctx);
         Interp {
             ctx,
+            resynced: RefCell::new(None),
+            synced: Cell::new(None),
             body_key,
             fn_name: fn_name.to_string(),
             fn_oid: 0,
@@ -1806,9 +1934,9 @@ impl<'c, 'a> Interp<'c, 'a> {
         (sig, quals, aliases)
     }
 
-    fn binder(&self) -> Binder<'c, 'a> {
+    fn binder<'x>(&self, cx: &'x ExecCtx<'c>) -> Binder<'x, 'c> {
         let (sig, quals, aliases) = self.signature();
-        let mut b = Binder::new(self.ctx, Vec::new());
+        let mut b = Binder::new(cx, Vec::new());
         let lvl = &mut b.levels[0];
         lvl.fn_args = Some(sig);
         lvl.fn_arg_colls = self.vars.iter().map(|v| v.coll.clone()).collect();
@@ -1829,10 +1957,11 @@ impl<'c, 'a> Interp<'c, 'a> {
         stmt: bool,
         targets: Option<&[DataType]>,
     ) -> Result<Rc<Compiled>> {
+        self.resync();
         let (sig, quals, aliases) = self.signature();
-        let cat = self.ctx.catalog();
+        let cat = self.cx().catalog();
         // Row-level security binds policies for the current role into plans.
-        let row_security = self.ctx.sess.settings.borrow().get_raw("row_security");
+        let row_security = self.cx().sess.settings.borrow().get_raw("row_security");
         // Transition tables bind as relations, so their shapes are part of the plan.
         let enrs: Vec<(String, Vec<(String, DataType)>)> = self
             .ctx
@@ -1851,13 +1980,13 @@ impl<'c, 'a> Interp<'c, 'a> {
             self.conflict,
             e.id,
             // (Not the database's address: one opened later may take it.)
-            self.ctx.sess.db.instance,
+            self.cx().sess.db.instance,
             cat.version,
-            self.ctx.search_path,
+            self.cx().search_path,
             sig,
             (quals, aliases),
             targets,
-            self.ctx.current_user(),
+            self.cx().current_user(),
             row_security,
             enrs,
             colls
@@ -1888,7 +2017,7 @@ impl<'c, 'a> Interp<'c, 'a> {
         // (Per function, as Postgres compiles each: another function with the same body
         // first ran under another setting.)
         let key = (self.fn_name != "inline_code_block").then(|| {
-            format!("{}#{}#{}#{id}#{text}", self.ctx.sess.db.instance, self.fn_oid, self.body_key)
+            format!("{}#{}#{}#{id}#{text}", self.cx().sess.db.instance, self.fn_oid, self.body_key)
         });
         if let Some(t) = key
             .as_ref()
@@ -1898,7 +2027,7 @@ impl<'c, 'a> Interp<'c, 'a> {
         }
         let r = crate::sql::parse::parse_live(text);
         for w in crate::sql::scs::take_warnings() {
-            self.ctx.notice(w);
+            self.cx().notice(w);
         }
         let t: Rc<str> = Rc::from(&*r?.0);
         if let Some(k) = key {
@@ -1928,10 +2057,11 @@ impl<'c, 'a> Interp<'c, 'a> {
             ));
         }
         let node = stmts.into_iter().next().unwrap().stmt.unwrap();
+        let cx = self.cx();
         let mut b = if with_vars {
-            self.binder()
+            self.binder(&cx)
         } else {
-            Binder::new(self.ctx, Vec::new())
+            Binder::new(&cx, Vec::new())
         };
         bind_node(&mut b, *node, targets)
     }
@@ -1960,9 +2090,10 @@ impl<'c, 'a> Interp<'c, 'a> {
         } else {
             &None
         };
-        crate::sql::binder::perms::check(perms, self.ctx)?;
+        crate::sql::binder::perms::check(perms, &self.cx())?;
         let values: Vec<Value> = self.vars.iter().map(|v| v.value.clone()).collect();
-        let child = self.ctx.child(&[]);
+        let cx = self.cx();
+        let child = cx.child(&[]);
         let r = child.with_outer(Rc::new(values), || {
             let rows = match simple {
                 Some(exprs) => vec![
@@ -1985,13 +2116,13 @@ impl<'c, 'a> Interp<'c, 'a> {
                 None => Ok(rows),
             }
         });
-        self.ctx
+        self.cx()
             .notices
             .borrow_mut()
             .extend(child.notices.borrow_mut().drain(..));
         let rows = r?;
         if *depend_update {
-            let n = crate::session::ddl::apply_depend_update(self.ctx, &rows)?;
+            let n = crate::session::ddl::apply_depend_update(&self.cx(), &rows)?;
             return Ok((Vec::new(), n));
         }
         Ok((rows, child.processed.get()))
@@ -2006,7 +2137,7 @@ impl<'c, 'a> Interp<'c, 'a> {
         shift: isize,
         f: impl FnOnce(&mut Self) -> Result<T>,
     ) -> Result<T> {
-        let sess = self.ctx.sess;
+        let sess = self.cx().sess;
         sess.framed(
             Frame::Query {
                 kind,
@@ -2104,7 +2235,7 @@ impl<'c, 'a> Interp<'c, 'a> {
         Ok(match v {
             Value::Null => None,
             Value::Text(t) => Some(t.to_string()),
-            v => Some(format_value(&v, &ty, self.ctx.fmt())),
+            v => Some(format_value(&v, &ty, self.cx().fmt())),
         })
     }
 
@@ -2146,6 +2277,8 @@ impl<'c, 'a> Interp<'c, 'a> {
                 ));
             }
         }
+        // (Declarations are compiled with the function, before any statement of it runs: a
+        // block's types don't follow a path its earlier statements set.)
         resolve_spec(&self.ctx.catalog(), &self.ctx.search_path, t)
     }
 
@@ -2160,7 +2293,7 @@ impl<'c, 'a> Interp<'c, 'a> {
             } => {
                 let (ty, domain) = self.resolve_type_domain(ty)?;
                 let domain = match domain {
-                    Some(d) => Binder::new(self.ctx, Vec::new()).domain_coerce(d)?,
+                    Some(d) => Binder::new(&self.cx(), Vec::new()).domain_coerce(d)?,
                     None => None,
                 };
                 let value = match default {
@@ -2168,7 +2301,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                     None => empty_value(&ty),
                 };
                 if let Some(dc) = &domain {
-                    dc.check(&value, self.ctx)?;
+                    dc.check(&value, &self.cx())?;
                 }
                 if *not_null && value.is_null() {
                     return Err(Error::new(
@@ -2182,8 +2315,8 @@ impl<'c, 'a> Interp<'c, 'a> {
                 let slot = self.push_var(&d.name, ty, value);
                 if !collate.is_empty()
                     && let Some(c) = crate::types::collation::resolve(
-                        &self.ctx.catalog(),
-                        &self.ctx.search_path,
+                        &self.cx().catalog(),
+                        &self.cx().search_path,
                         collate,
                     )
                 {
@@ -2292,7 +2425,7 @@ impl<'c, 'a> Interp<'c, 'a> {
         };
         let mut subscripts = Vec::new();
         if !t.subscripts.is_empty()
-            && let Some(ns) = crate::ext::native_subscript(&self.ctx.catalog(), &ty)
+            && let Some(ns) = crate::ext::native_subscript(&self.cx().catalog(), &ty)
         {
             if t.subscripts.len() != 1 {
                 return Err(Error::new(
@@ -2346,7 +2479,7 @@ impl<'c, 'a> Interp<'c, 'a> {
     }
 
     fn store(&mut self, p: &Place, v: Value, vty: &DataType) -> Result<()> {
-        let ctx = self.ctx;
+        let ctx = &self.cx();
         let var = &mut self.vars[p.slot];
         if p.field.is_none() && p.subscripts.is_empty() && p.key.is_none() {
             if var.not_null && v.is_null() {
@@ -2428,7 +2561,7 @@ impl<'c, 'a> Interp<'c, 'a> {
             }
             return Ok(Value::Record(Arc::new(out)));
         }
-        crate::types::cast::cast_value(v, from, to, self.ctx.fmt(), false)
+        crate::types::cast::cast_value(v, from, to, self.cx().fmt(), false)
     }
 
     /// Assign a result row to INTO / FOR targets.
@@ -2504,10 +2637,10 @@ impl<'c, 'a> Interp<'c, 'a> {
 
     fn block_inner(&mut self, b: &Block) -> Result<Flow> {
         if !b.decls.is_empty() {
-            let prev = self.ctx.sess.frame_at(self.frame);
+            let prev = self.cx().sess.frame_at(self.frame);
             for d in &b.decls {
                 // The line of the variable being initialized.
-                self.ctx.sess.set_frame(
+                self.cx().sess.set_frame(
                     self.frame,
                     PlAt::Text(
                         Some(d.line),
@@ -2516,7 +2649,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                 );
                 self.declare(d)?;
             }
-            self.ctx.sess.set_frame(self.frame, prev);
+            self.cx().sess.set_frame(self.frame, prev);
         }
         if b.handlers.is_empty() {
             return self.stmts(&b.body);
@@ -2527,20 +2660,20 @@ impl<'c, 'a> Interp<'c, 'a> {
             DEPTH.with(|d| d.get()),
             self.savepoints
         );
-        self.ctx.txn.borrow_mut().savepoint(&sp);
-        let level = self.ctx.sess.settings.borrow_mut().subxact_enter();
+        self.cx().txn.borrow_mut().savepoint(&sp);
+        let level = self.cx().sess.settings.borrow_mut().subxact_enter();
         let r = self.stmts(&b.body);
         let e = match r {
             Ok(f) => {
-                self.ctx.sess.settings.borrow_mut().subxact_leave(level, true);
-                self.ctx.txn.borrow_mut().release_savepoint(&sp)?;
+                self.cx().sess.settings.borrow_mut().subxact_leave(level, true);
+                self.cx().txn.borrow_mut().release_savepoint(&sp)?;
                 return Ok(f);
             }
             Err(e) => e,
         };
-        self.ctx.sess.settings.borrow_mut().subxact_leave(level, false);
+        self.cx().sess.settings.borrow_mut().subxact_leave(level, false);
         {
-            let mut txn = self.ctx.txn.borrow_mut();
+            let mut txn = self.cx().txn.borrow_mut();
             txn.rollback_to(&sp)?;
             txn.release_savepoint(&sp)?;
         }
@@ -2555,7 +2688,7 @@ impl<'c, 'a> Interp<'c, 'a> {
             return Err(e);
         };
         // Caught: its CONTEXT is where it was raised (as RAISE; rethrows it).
-        let e = e.in_frames(&self.ctx.sess.frames.borrow());
+        let e = e.in_frames(&self.cx().sess.frames.borrow());
         let ns = self.scope.len();
         let nv = self.vars.len();
         self.push_var("sqlstate", DataType::Text, text(e.code));
@@ -2592,20 +2725,21 @@ impl<'c, 'a> Interp<'c, 'a> {
 
     /// Run a statement; while it runs, errors and notices say it is where they come from.
     fn stmt(&mut self, s: &Stmt) -> Result<Flow> {
-        let prev = self.ctx.sess.frame_at(self.frame);
-        self.ctx
+        self.resync();
+        let prev = self.cx().sess.frame_at(self.frame);
+        self.cx()
             .sess
             .set_frame(self.frame, PlAt::Stmt(s.line, stmt_kind(&s.kind)));
         let r = self.stmt_inner(s);
         // A failed statement stays the one errors are reported at.
         if r.is_ok() {
-            self.ctx.sess.set_frame(self.frame, prev);
+            self.cx().sess.set_frame(self.frame, prev);
         }
         r
     }
 
     fn stmt_inner(&mut self, s: &Stmt) -> Result<Flow> {
-        self.ctx.check()?;
+        self.cx().check()?;
         match &s.kind {
             StmtKind::Assign {
                 target,
@@ -2665,7 +2799,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                 if let Some(f) = Self::loop_flow(f, label) {
                     return Ok(f);
                 }
-                self.ctx.check()?;
+                self.cx().check()?;
             },
             StmtKind::While { label, cond, body } => {
                 while self.eval_bool(cond)? {
@@ -2764,9 +2898,10 @@ impl<'c, 'a> Interp<'c, 'a> {
                                 let Some(NodeEnum::ExplainStmt(e)) = n.node.as_ref() else {
                                     unreachable!()
                                 };
-                                let child = self.ctx.child(&[]);
+                                let cx = self.cx();
+                                let child = cx.child(&[]);
                                 let r = crate::session::explain_spi::explain(&child, e, Vec::new());
-                                self.ctx
+                                self.cx()
                                     .notices
                                     .borrow_mut()
                                     .extend(child.notices.borrow_mut().drain(..));
@@ -2997,7 +3132,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                         };
                         let (v, _) = self.eval(e, target)?;
                         if let Some(dc) = &self.ret_check {
-                            dc.check(&v, self.ctx)?;
+                            dc.check(&v, &self.cx())?;
                         }
                         match (&ret, v) {
                             (DataType::Row(f), Value::Record(items)) if items.len() == f.len() => {
@@ -3086,6 +3221,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                             .collect(),
                         (t, true) => vec![(String::new(), t.clone(), self.ret_domain)],
                     };
+                let cx = self.cx();
                 self.spi("SQL statement", &text, 0, |_| {
                     if want.len() != cols.len() {
                         return Err(Error::new(code::DATATYPE_MISMATCH, "structure of query does not match function result type")
@@ -3097,12 +3233,12 @@ impl<'c, 'a> Interp<'c, 'a> {
                         let same = got.oid() == t.oid() && c.domain == *dom && (t.typmod() < 0 || got.typmod() == t.typmod());
                         if !same {
                             let got = match c.domain {
-                                Some(d) => self.ctx.catalog().format_type(&got, Some(d), &self.ctx.search_path),
-                                None => self.ctx.catalog().format_type(&got, None, &self.ctx.search_path),
+                                Some(d) => cx.catalog().format_type(&got, Some(d), &cx.search_path),
+                                None => cx.catalog().format_type(&got, None, &cx.search_path),
                             };
                             let want = match dom {
-                                Some(d) => self.ctx.catalog().format_type(t, Some(*d), &self.ctx.search_path),
-                                None => self.ctx.catalog().format_type(t, None, &self.ctx.search_path),
+                                Some(d) => cx.catalog().format_type(t, Some(*d), &cx.search_path),
+                                None => cx.catalog().format_type(t, None, &cx.search_path),
                             };
                             return Err(Error::new(code::DATATYPE_MISMATCH, "structure of query does not match function result type")
                                 .detail(format!("Returned type {got} does not match expected type {want} in column \"{name}\" (position {}).", i + 1)));
@@ -3203,7 +3339,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                     } else {
                         match item.as_str() {
                             "ROW_COUNT" => Value::Int8(self.row_count as i64),
-                            "PG_CONTEXT" => text(&self.ctx.sess.context_now().unwrap_or_default()),
+                            "PG_CONTEXT" => text(&self.cx().sess.context_now().unwrap_or_default()),
                             "PG_ROUTINE_OID" => Value::Oid(self.fn_oid),
                             other => {
                                 return Err(Error::new(
@@ -3270,7 +3406,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                     ));
                 }
                 let Some((rows, cols, n)) =
-                    crate::session::cursor::fetch(self.ctx, &name, dir, how, !is_move)?
+                    crate::session::cursor::fetch(&self.cx(), &name, dir, how, !is_move)?
                 else {
                     return Err(no_cursor(&name));
                 };
@@ -3282,7 +3418,7 @@ impl<'c, 'a> Interp<'c, 'a> {
             }
             StmtKind::Close(cursor) => {
                 let name = self.portal(cursor)?;
-                if self.ctx.sess.cursors.borrow_mut().remove(&name).is_none() {
+                if self.cx().sess.cursors.borrow_mut().remove(&name).is_none() {
                     return Err(no_cursor(&name));
                 }
             }
@@ -3297,7 +3433,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                     .lookup(cursor)
                     .is_some_and(|slot| self.vars[slot].value.is_null());
                 let name = self.open_cursor(cursor, None, &OpenSrc::Bound(args.clone()))?;
-                if let Some(c) = self.ctx.sess.cursors.borrow_mut().get_mut(&name) {
+                if let Some(c) = self.cx().sess.cursors.borrow_mut().get_mut(&name) {
                     c.pinned = true;
                 }
                 // The loop variable is implicitly a record of the loop's scope.
@@ -3311,7 +3447,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                     let mut any = false;
                     loop {
                         let Some((rows, cols, _)) = crate::session::cursor::fetch(
-                            self.ctx,
+                            &self.cx(),
                             &name,
                             pg_query::protobuf::FetchDirection::FetchForward,
                             1,
@@ -3335,7 +3471,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                 })();
                 self.vars.truncate(nv);
                 self.scope.truncate(ns);
-                self.ctx.sess.cursors.borrow_mut().remove(&name);
+                self.cx().sess.cursors.borrow_mut().remove(&name);
                 if unnamed && let Some(slot) = self.lookup(cursor) {
                     self.vars[slot].value = Value::Null;
                 }
@@ -3350,7 +3486,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                         "invalid transaction termination",
                     ));
                 }
-                crate::session::end_txn_in_routine(self.ctx, *commit, *chain)?;
+                crate::session::end_txn_in_routine(&self.cx(), *commit, *chain)?;
             }
             StmtKind::Call(e) => self.call(e)?,
             StmtKind::Unsupported(what) => {
@@ -3363,11 +3499,11 @@ impl<'c, 'a> Interp<'c, 'a> {
     /// A static SQL statement.
     /// pg_stat_statements: a statement this routine ran (one level down from its caller).
     fn pgss(&self, text: &str, rows: u64, started: std::time::Instant) {
-        if self.ctx.sess.cluster.statements().is_none() {
+        if self.cx().sess.cluster.statements().is_none() {
             return;
         }
         let vars: Vec<(String, i32)> = self.scope.iter().map(|(n, slot)| (n.clone(), *slot as i32 + 1)).collect();
-        crate::ext::pg_stat_statements::nested(self.ctx.sess, text, &vars, rows, started.elapsed());
+        crate::ext::pg_stat_statements::nested(self.cx().sess, text, &vars, rows, started.elapsed());
     }
 
     fn sql(&mut self, sql: &PlExpr, into: Option<&IntoClause>, shown: &str) -> Result<()> {
@@ -3459,7 +3595,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                 return Err(e);
             }
             e.severity = crate::error::Severity::Warning;
-            self.ctx.notice(e);
+            self.cx().notice(e);
         }
         if rows.is_empty() && into.strict {
             let mut e = Error::new("P0002", "query returned no rows");
@@ -3524,7 +3660,7 @@ impl<'c, 'a> Interp<'c, 'a> {
             .iter()
             .map(|&s| {
                 let v = &self.vars[s];
-                format!("{} = {}", v.name, quoted_param(&v.value, &v.ty, self.ctx))
+                format!("{} = {}", v.name, quoted_param(&v.value, &v.ty, &self.cx()))
             })
             .collect();
         Some(parts.join(", "))
@@ -3539,7 +3675,7 @@ impl<'c, 'a> Interp<'c, 'a> {
             .last_using
             .iter()
             .enumerate()
-            .map(|(i, (v, t))| format!("${} = {}", i + 1, quoted_param(v, t, self.ctx)))
+            .map(|(i, (v, t))| format!("${} = {}", i + 1, quoted_param(v, t, &self.cx())))
             .collect();
         Some(parts.join(", "))
     }
@@ -3564,7 +3700,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                 return Err(e);
             }
             e.severity = crate::error::Severity::Warning;
-            self.ctx.notice(e);
+            self.cx().notice(e);
         }
         Ok(())
     }
@@ -3580,19 +3716,19 @@ impl<'c, 'a> Interp<'c, 'a> {
             }
             NodeEnum::DoStmt(d) => {
                 let body = do_body(d)?;
-                return run_do(self.ctx, &body, self.atomic);
+                return run_do(&self.cx(), &body, self.atomic);
             }
             NodeEnum::CallStmt(c) => {
-                let (f, args) = crate::session::bind_call(self.ctx, c, params)?;
+                let (f, args) = crate::session::bind_call(&self.cx(), c, params)?;
                 let values = args
                     .iter()
-                    .map(|e| eval(e, &[], self.ctx))
+                    .map(|e| eval(e, &[], &self.cx()))
                     .collect::<Result<Vec<_>>>()?;
-                call_procedure(self.ctx, &f, values, self.atomic)?;
+                call_procedure(&self.cx(), &f, values, self.atomic)?;
                 return Ok(());
             }
             NodeEnum::VariableSetStmt(v) => {
-                return crate::session::routine_set(self.ctx, v);
+                return crate::session::routine_set(&self.cx(), v);
             }
             // SHOW returns a row, which a plain statement has nowhere to put.
             NodeEnum::VariableShowStmt(_) => {
@@ -3603,9 +3739,10 @@ impl<'c, 'a> Interp<'c, 'a> {
             }
             _ => {}
         }
-        let child = self.ctx.child(params);
+        let cx = self.cx();
+        let child = cx.child(params);
         let r = crate::session::ddl::execute(&child, n, "");
-        self.ctx
+        self.cx()
             .notices
             .borrow_mut()
             .extend(child.notices.borrow_mut().drain(..));
@@ -3639,13 +3776,13 @@ impl<'c, 'a> Interp<'c, 'a> {
             });
         }
         self.last_using = vals.iter().cloned().zip(types.iter().cloned()).collect();
-        let sess = self.ctx.sess;
+        let sess = self.cx().sess;
         let frame = || Frame::Query {
             kind: "SQL statement",
             text: sql.clone(),
             shift: 0,
         };
-        let ctx = self.ctx;
+        let ctx = &self.cx();
         // (Several commands run in turn, without parameters: SPI_execute_extended.)
         let stmts = sess.framed(frame(), |_| {
             let stmts = parse_spi(ctx, &sql)?;
@@ -3663,7 +3800,7 @@ impl<'c, 'a> Interp<'c, 'a> {
             let Some(node) = raw.stmt else { continue };
             let started = std::time::Instant::now();
             let r = self.execute_node(*node, &sql, vals.clone(), types.clone(), framed_run)?;
-            crate::ext::pg_stat_statements::nested(self.ctx.sess, &text, &[], r.2, started.elapsed());
+            crate::ext::pg_stat_statements::nested(self.cx().sess, &text, &[], r.2, started.elapsed());
             last = r;
         }
         self.row_count = last.2;
@@ -3679,7 +3816,7 @@ impl<'c, 'a> Interp<'c, 'a> {
         types: Vec<DataType>,
         framed_run: bool,
     ) -> Result<(Vec<Row>, Vec<OutCol>, u64)> {
-        let sess = self.ctx.sess;
+        let sess = self.cx().sess;
         let sql = sql.to_string();
         let frame = || Frame::Query {
             kind: "SQL statement",
@@ -3687,7 +3824,8 @@ impl<'c, 'a> Interp<'c, 'a> {
             shift: 0,
         };
         let node = Box::new(node);
-        let child = self.ctx.child(&vals);
+        let cx = self.cx();
+        let child = cx.child(&vals);
         let r = (|| -> Result<(Vec<Row>, Vec<OutCol>, u64)> {
             let mut b = Binder::new(&child, types.clone());
             let compiled = sess.framed(frame(), |_| bind_node(&mut b, *node, None))?;
@@ -3753,7 +3891,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                 run()
             }
         })();
-        self.ctx
+        self.cx()
             .notices
             .borrow_mut()
             .extend(child.notices.borrow_mut().drain(..));
@@ -3765,7 +3903,7 @@ impl<'c, 'a> Interp<'c, 'a> {
     /// `CALL proc(...)`: arguments may use variables; those passed for output parameters
     /// must be variables, and receive the values.
     fn call(&mut self, e: &PlExpr) -> Result<()> {
-        let stmts = parse_spi(self.ctx, &e.text).map_err(internal_pos)?;
+        let stmts = parse_spi(&self.cx(), &e.text).map_err(internal_pos)?;
         let node = stmts
             .into_iter()
             .next()
@@ -3792,12 +3930,13 @@ impl<'c, 'a> Interp<'c, 'a> {
                 ));
             }
         };
-        let mut b = self.binder();
+        let cx = self.cx();
+        let mut b = self.binder(&cx);
         let (f, args) = b
             .resolve_routine(schema, name, &fc.args, fc.func_variadic, fc.location, true)
             .map_err(internal_pos)?
             .expect("CALL resolves or fails");
-        crate::sql::binder::perms::check(&b.perms, self.ctx)?;
+        crate::sql::binder::perms::check(&b.perms, &self.cx())?;
         // Where each output parameter's value goes.
         let params = f.all_params();
         let mut targets = Vec::new();
@@ -3834,17 +3973,18 @@ impl<'c, 'a> Interp<'c, 'a> {
             targets.push(t);
         }
         let values: Vec<Value> = self.vars.iter().map(|v| v.value.clone()).collect();
-        let child = self.ctx.child(&[]);
+        let cx = self.cx();
+        let child = cx.child(&[]);
         let r = child.with_outer(Rc::new(values), || {
             args.iter()
                 .map(|e| eval(e, &[], &child))
                 .collect::<Result<Vec<Value>>>()
         });
-        self.ctx
+        self.cx()
             .notices
             .borrow_mut()
             .extend(child.notices.borrow_mut().drain(..));
-        let out = call_procedure(self.ctx, &f, r?, self.atomic)?;
+        let out = call_procedure(&self.cx(), &f, r?, self.atomic)?;
         if let Some(row) = out {
             let cols: Vec<OutCol> = f
                 .out_cols
@@ -3877,13 +4017,13 @@ impl<'c, 'a> Interp<'c, 'a> {
                 code::NULL_VALUE_NOT_ALLOWED,
                 format!("cursor variable \"{var}\" is null"),
             )),
-            v => Ok(format_value(v, &DataType::Text, self.ctx.fmt())),
+            v => Ok(format_value(v, &DataType::Text, self.cx().fmt())),
         }
     }
 
     fn next_portal(&self) -> String {
-        let n = self.ctx.sess.portal_seq.get() + 1;
-        self.ctx.sess.portal_seq.set(n);
+        let n = self.cx().sess.portal_seq.get() + 1;
+        self.cx().sess.portal_seq.set(n);
         format!("<unnamed portal {n}>")
     }
 
@@ -3900,10 +4040,10 @@ impl<'c, 'a> Interp<'c, 'a> {
         // A null variable gets a fresh portal name once the query is open.
         let named = match &self.vars[slot].value {
             Value::Null => None,
-            v => Some(format_value(v, &DataType::Text, self.ctx.fmt())),
+            v => Some(format_value(v, &DataType::Text, self.cx().fmt())),
         };
         if let Some(name) = &named
-            && self.ctx.sess.cursors.borrow().contains_key(name)
+            && self.cx().sess.cursors.borrow().contains_key(name)
         {
             return Err(Error::new(
                 code::DUPLICATE_CURSOR,
@@ -3980,7 +4120,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                 crate::session::cursor::Cursor::new(cols, rows, keyed, false, scroll, text, now)
             }
         };
-        self.ctx.sess.cursors.borrow_mut().insert(name.clone(), c);
+        self.cx().sess.cursors.borrow_mut().insert(name.clone(), c);
         self.vars[slot].value = Value::Text(name.as_str().into());
         Ok(name)
     }
@@ -4018,13 +4158,13 @@ impl<'c, 'a> Interp<'c, 'a> {
             });
         }
         self.last_using = vals.iter().cloned().zip(types.iter().cloned()).collect();
-        let sess = self.ctx.sess;
+        let sess = self.cx().sess;
         let frame = || Frame::Query {
             kind: "SQL statement",
             text: sql.clone(),
             shift: 0,
         };
-        let ctx = self.ctx;
+        let ctx = &self.cx();
         let stmts = sess.framed(frame(), |_| {
             let stmts = parse_spi(ctx, &sql)?;
             if stmts.len() > 1 {
@@ -4050,7 +4190,8 @@ impl<'c, 'a> Interp<'c, 'a> {
         let Some(node) = stmts.into_iter().next().and_then(|s| s.stmt) else {
             return Err(not_query(&sql));
         };
-        let child = self.ctx.child(&vals);
+        let cx = self.cx();
+        let child = cx.child(&vals);
         let r = (|| {
             let mut b = Binder::new(&child, types.clone());
             let compiled = sess.framed(frame(), |_| bind_node(&mut b, *node, None))?;
@@ -4080,17 +4221,17 @@ impl<'c, 'a> Interp<'c, 'a> {
                 None => (plan, None),
             };
             let lazy = crate::session::cursor::Lazy::new(
-                self.ctx,
+                &self.cx(),
                 run,
                 Rc::new(Vec::new()),
                 coerce,
-                self.ctx.child(&[]).keep(),
+                self.cx().child(&[]).keep(),
             )
             .with_params(vals.clone())
             .for_cursor();
             Ok((Ok(lazy), cols, table, sql.clone(), backward))
         })();
-        self.ctx
+        self.cx()
             .notices
             .borrow_mut()
             .extend(child.notices.borrow_mut().drain(..));
@@ -4150,14 +4291,14 @@ impl<'c, 'a> Interp<'c, 'a> {
         let Compiled::Query { coerce, perms, .. } = &*c else {
             unreachable!()
         };
-        crate::sql::binder::perms::check(perms, self.ctx)?;
+        crate::sql::binder::perms::check(perms, &self.cx())?;
         let values: Vec<Value> = self.vars.iter().map(|v| v.value.clone()).collect();
         let lazy = crate::session::cursor::Lazy::new(
-            self.ctx,
+            &self.cx(),
             run,
             Rc::new(values),
             coerce.clone(),
-            self.ctx.child(&[]).keep(),
+            self.cx().child(&[]).keep(),
         )
         .for_cursor();
         Ok((Ok(lazy), cols, table, q.text.clone(), backward))
@@ -4185,7 +4326,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                     args.push(if v.is_null() {
                         "<NULL>".to_string()
                     } else {
-                        format_value(&v, &ty, self.ctx.fmt())
+                        format_value(&v, &ty, self.cx().fmt())
                     });
                 }
                 Some(format_raise(fmt, &args))
@@ -4310,7 +4451,7 @@ impl<'c, 'a> Interp<'c, 'a> {
         };
         if rank >= min_rank {
             e.severity = severity;
-            self.ctx.notice(e);
+            self.cx().notice(e);
         }
         Ok(())
     }
