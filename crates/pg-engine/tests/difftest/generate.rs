@@ -181,13 +181,21 @@ pub struct Gen<'a> {
     sub_depth: u32,
     /// CTE names visible to the query being built: name, columns.
     ctes: Vec<(String, Vec<(String, Ty)>)>,
+    /// The wider grammar of round 18 (`wide_expr`, more statement kinds): seeds from
+    /// `WIDE_SEEDS` on, so the smoke seeds keep their statements.
+    pub wide: bool,
 }
+
+/// The first seed generated with the wider grammar.
+pub const WIDE_SEEDS: u64 = 1000;
 
 const TEXTS: &[&str] = &[
     "a", "b", "A", "B", "ab", "abc", "", " x", "x ", "é", "Z", "a%", "a_b", "10", "9", "ß",
     "Ab", "ba", "aa", "z", "Ä", "foo", "bar", "a,b",
 ];
 const COLLS: &[&str] = &["C", "POSIX", "und-x-icu", "en-x-icu", "default"];
+/// Time zones the wider grammar converts through (DST changes, offsets, POSIX-style names).
+const TZS: &[&str] = &["UTC", "America/New_York", "Europe/Berlin", "Asia/Kolkata", "Australia/Lord_Howe", "+03", "EST5EDT", "Pacific/Chatham"];
 
 pub fn literal(rng: &mut Rng, ty: Ty) -> String {
     match ty {
@@ -365,6 +373,7 @@ impl<'a> Gen<'a> {
             alias: 0,
             sub_depth: 0,
             ctes: Vec::new(),
+            wide: seed >= WIDE_SEEDS,
         }
     }
 
@@ -447,6 +456,11 @@ impl<'a> Gen<'a> {
                     let f = fs[self.rng.below(fs.len())].clone();
                     let args: Vec<String> = f.args.iter().map(|t| self.expr(cx, *t, d)).collect();
                     return format!("{}({})", f.name, args.join(", "));
+                }
+            }
+            9 | 10 if self.wide => {
+                if let Some(e) = self.wide_expr(cx, ty, d) {
+                    return e;
                 }
             }
             8 if ty != Bool && ty != Text && self.rng.chance(0.3) => {
@@ -571,6 +585,186 @@ impl<'a> Gen<'a> {
                 1 => format!("to_json({})", self.expr(cx, Text, d)),
                 _ => format!("({} -> 'a')", self.expr(cx, Json, d)),
             },
+        }
+    }
+
+    /// Round 18's wider grammar (agent 45): date/time and time zones, intervals, numeric and
+    /// float edge values, regular expressions and patterns, SQL/JSON and jsonpath,
+    /// multidimensional arrays and slices, ranges and multiranges. None when it has nothing
+    /// of type `ty`.
+    fn wide_expr(&mut self, cx: &Cx, ty: Ty, d: u32) -> Option<String> {
+        Some(match ty {
+            Int => match self.rng.below(14) {
+                0 => format!("extract(dow from {})::int", self.expr(cx, Date, d)),
+                1 => format!("regexp_count({}, '[a-c]')", self.expr(cx, Text, d)),
+                2 => format!("array_ndims({})", self.md_array(cx, d)),
+                3 => format!("array_upper({}, {})", self.md_array(cx, d), self.rng.range(1, 2)),
+                4 => format!("lower({})", self.range_expr(cx, d, "int4range")),
+                5 => format!("upper({})", self.range_expr(cx, d, "int4range")),
+                6 => format!("scale({})", self.expr(cx, Num, d)),
+                7 => format!("(JSON_VALUE({}, '$.a' RETURNING int DEFAULT -1 ON ERROR))", self.expr(cx, Jsonb, d)),
+                8 => format!("div({}, {})", self.expr(cx, Num, d), self.rng.pick(&["3", "0.5", "-2"])),
+                9 => format!("(regexp_instr({}, 'b'))", self.expr(cx, Text, d)),
+                10 => format!("extract(isodow from {})::int", self.expr(cx, Tstz, d)),
+                11 => format!("(jsonb_array_length(jsonb_path_query_array({}, '$.*')))", self.expr(cx, Jsonb, d)),
+                12 => format!("cardinality({})", self.md_array(cx, d)),
+                _ => format!("({})::int", self.expr(cx, Flt, d)),
+            },
+            Num => match self.rng.below(14) {
+                0 => format!("({} ^ {})", self.expr(cx, Num, d), self.rng.pick(&["2", "0.5", "-1", "3"])),
+                1 => format!("trim_scale({})", self.expr(cx, Num, d)),
+                2 => format!("round({}, {})", self.expr(cx, Num, d), self.rng.range(-2, 4)),
+                3 => format!("sqrt(abs({}))", self.expr(cx, Num, d)),
+                4 => format!("({} * 1e20::numeric)", self.expr(cx, Num, d)),
+                5 => (*self.rng.pick(&["'NaN'::numeric", "'Infinity'::numeric", "'-Infinity'::numeric", "0.000000000000000000001", "123456789012345678901234567890.5"])).to_string(),
+                6 => format!("exp(least({}, 20))", self.expr(cx, Num, d)),
+                7 => format!("ln(abs({}) + 1)", self.expr(cx, Num, d)),
+                8 => format!("extract(epoch from {})", self.expr(cx, Intv, d)),
+                9 => format!("({} / {})", self.expr(cx, Num, d), self.expr(cx, Num, d)),
+                10 => format!("({})::numeric(20, 10)", self.expr(cx, Flt, d)),
+                11 => format!("floor({})", self.expr(cx, Num, d)),
+                12 => format!("mod({}, {})", self.expr(cx, Num, d), self.rng.pick(&["'Infinity'::numeric", "0.3", "-7"])),
+                _ => format!("extract(epoch from {})", self.expr(cx, Ts, d)),
+            },
+            Flt => match self.rng.below(10) {
+                0 => (*self.rng.pick(&["'Infinity'::float8", "'-Infinity'::float8", "'NaN'::float8", "1e300::float8", "1e-300::float8", "-0::float8", "0.1::float8"])).to_string(),
+                1 => format!("power({}, {})", self.expr(cx, Flt, d), self.rng.pick(&["2", "0.5", "-1"])),
+                2 => format!("cbrt({})", self.expr(cx, Flt, d)),
+                3 => format!("({} / 3::float8)", self.expr(cx, Flt, d)),
+                4 => format!("({})::float4::float8", self.expr(cx, Flt, d)),
+                5 => format!("round({})", self.expr(cx, Flt, d)),
+                6 => format!("({})::float8", self.expr(cx, Num, d)),
+                7 => format!("degrees({})", self.expr(cx, Flt, d)),
+                8 => format!("extract(epoch from {})::float8", self.expr(cx, Tstz, d)),
+                _ => format!("({} * 1e200::float8)", self.expr(cx, Flt, d)),
+            },
+            Text => match self.rng.below(18) {
+                0 => format!("to_char({}, '{}')", self.expr(cx, Ts, d), self.rng.pick(&["YYYY-MM-DD HH24:MI:SS", "Dy DD Mon", "IYYY-IW", "FMMonth", "J", "HH12 AM", "Q WW"])),
+                1 => format!("to_char({}, '{}')", self.expr(cx, Num, d), self.rng.pick(&["999D99", "FM9.999EEEE", "S9990", "RN", "0000", "L999"])),
+                2 => format!("({})::text", self.expr(cx, Flt, d)),
+                3 => format!("substring({} from '{}')", self.expr(cx, Text, d), self.rng.pick(&["[a-z]+", "(b|c)", "^.", "x*$"])),
+                4 => format!("(regexp_match({}, '{}'))[1]", self.expr(cx, Text, d), self.rng.pick(&["(a)(b)?", "([[:alpha:]]+)", "(\\d)"])),
+                5 => format!("regexp_substr({}, '[^,]+', 1, {})", self.expr(cx, Text, d), self.rng.range(1, 2)),
+                6 => format!("translate({}, 'abc', 'xy')", self.expr(cx, Text, d)),
+                7 => format!("overlay({} placing 'zz' from {} for 1)", self.expr(cx, Text, d), self.rng.range(1, 3)),
+                8 => format!("btrim({}, ' a')", self.expr(cx, Text, d)),
+                9 => format!("({} AT TIME ZONE '{}')::text", self.expr(cx, Tstz, d), self.rng.pick(TZS)),
+                10 => {
+                    let k = *self.rng.pick(&["int4range", "numrange", "daterange"]);
+                    format!("({})::text", self.range_expr(cx, d, k))
+                }
+                11 => format!("({})::text", self.md_array(cx, d)),
+                12 => format!("JSON_QUERY({}, '{}')::text", self.expr(cx, Jsonb, d), self.rng.pick(&["$.a", "$[*]", "$.a ? (@ > 1)", "strict $.b"])),
+                13 => format!("({})::text", self.multirange_expr(cx, d)),
+                14 => format!("upper({} COLLATE \"{}\")", self.expr(cx, Text, d), self.rng.pick(&["C", "en-x-icu", "tr-x-icu", "und-x-icu"])),
+                15 => format!("array_dims({})", self.md_array(cx, d)),
+                16 => format!("justify_interval({})::text", self.expr(cx, Intv, d)),
+                _ => format!("normalize({})", self.expr(cx, Text, d)),
+            },
+            Bool => match self.rng.below(16) {
+                0 => format!("({} SIMILAR TO '{}')", self.expr(cx, Text, d), self.rng.pick(&["%(a|b)%", "_x%", "[a-c]*", "%!_%' ESCAPE '!"])),
+                1 => format!("({} ILIKE '{}')", self.expr(cx, Text, d), self.rng.pick(&["A%", "%B_", "\\%%"])),
+                2 => format!("({} LIKE '{}' ESCAPE '#')", self.expr(cx, Text, d), self.rng.pick(&["#%%", "a#_b", "%"])),
+                3 => format!("({} ~* '{}')", self.expr(cx, Text, d), self.rng.pick(&["^A", "b{1,2}", "[[:upper:]]"])),
+                4 => format!("({} @> {})", self.range_expr(cx, d, "int4range"), self.expr(cx, Int, d)),
+                5 => format!("({} && {})", self.range_expr(cx, d, "int4range"), self.range_expr(cx, d, "int4range")),
+                6 => {
+                    let k = *self.rng.pick(&["int4range", "numrange", "daterange"]);
+                    format!("isempty({})", self.range_expr(cx, d, k))
+                }
+                7 => format!("({} @? '{}')", self.expr(cx, Jsonb, d), self.rng.pick(&["$.a", "$[*] ? (@ > 1)", "$.** ? (@ == \"a\")"])),
+                8 => format!("({} @@ '{}')", self.expr(cx, Jsonb, d), self.rng.pick(&["$.a > 1", "exists($.b)", "$.a starts with \"x\""])),
+                9 => format!("JSON_EXISTS({}, '{}')", self.expr(cx, Jsonb, d), self.rng.pick(&["$.a", "strict $.a.b", "$ ? (@.k > 0)"])),
+                10 => format!("({} @> {})", self.md_array(cx, d), self.expr(cx, IntArr, d)),
+                11 => format!("({} -|- {})", self.range_expr(cx, d, "int4range"), self.range_expr(cx, d, "int4range")),
+                12 => format!("isfinite({})", self.expr(cx, Ts, d)),
+                13 => format!("({} IS JSON {})", self.expr(cx, Text, d), self.rng.pick(&["", "OBJECT", "ARRAY", "SCALAR", "WITH UNIQUE KEYS"])),
+                14 => format!("({} @> {})", self.multirange_expr(cx, d), self.expr(cx, Int, d)),
+                _ => format!("({} < {})", self.range_expr(cx, d, "numrange"), self.range_expr(cx, d, "numrange")),
+            },
+            Date => match self.rng.below(5) {
+                0 => format!("date_bin('{}', {}, '2000-01-01')::date", self.rng.pick(&["7 days", "1 day", "15 days"]), self.expr(cx, Ts, d)),
+                1 => format!("lower({})", self.range_expr(cx, d, "daterange")),
+                2 => format!("({} + make_interval(days => {}))::date", self.expr(cx, Date, d), self.rng.range(-40, 40)),
+                3 => (*self.rng.pick(&["'infinity'::date", "'-infinity'::date", "'2000-02-29'::date", "'0001-01-01 BC'::date"])).to_string(),
+                _ => format!("make_date({}, {}, {})", self.rng.range(-5, 2030), self.rng.range(1, 12), self.rng.range(1, 31)),
+            },
+            Ts => match self.rng.below(6) {
+                0 => format!("({} AT TIME ZONE '{}')", self.expr(cx, Tstz, d), self.rng.pick(TZS)),
+                1 => format!("date_bin('{}', {}, '2001-01-01')", self.rng.pick(&["15 minutes", "1 hour", "2 days"]), self.expr(cx, Ts, d)),
+                2 => format!("({} + {} * interval '1 month')", self.expr(cx, Ts, d), self.expr(cx, Int, d)),
+                3 => (*self.rng.pick(&["'infinity'::timestamp", "'2024-02-29 23:59:59.999999'::timestamp", "'epoch'::timestamp", "'1999-12-31 24:00'::timestamp"])).to_string(),
+                4 => format!("make_timestamp(2024, {}, {}, {}, 30, {})", self.rng.range(1, 12), self.rng.range(1, 28), self.rng.range(0, 23), self.rng.pick(&["0", "59.5", "1.25"])),
+                _ => format!("date_trunc('{}', {})", self.rng.pick(&["quarter", "decade", "millennium", "isoyear", "minute"]), self.expr(cx, Ts, d)),
+            },
+            Tstz => match self.rng.below(5) {
+                0 => format!("({} AT TIME ZONE '{}')", self.expr(cx, Ts, d), self.rng.pick(TZS)),
+                1 => format!("'2024-03-10 02:30:00 {}'::timestamptz", self.rng.pick(&["America/New_York", "Europe/Berlin", "+05:30", "PST8PDT", "UTC"])),
+                2 => format!("date_trunc('day', {}, '{}')", self.expr(cx, Tstz, d), self.rng.pick(TZS)),
+                3 => format!("({} + interval '{}')", self.expr(cx, Tstz, d), self.rng.pick(&["1 day", "24 hours", "1 mon -1 day", "-1.5 years"])),
+                _ => format!("make_timestamptz(2024, {}, {}, 1, 2, 3, '{}')", self.rng.range(1, 12), self.rng.range(1, 28), self.rng.pick(TZS)),
+            },
+            Intv => match self.rng.below(8) {
+                0 => format!("({} * {})", self.expr(cx, Intv, d), self.rng.pick(&["1.5", "-0.333", "1e-3"])),
+                1 => format!("({} / {})", self.expr(cx, Intv, d), self.rng.pick(&["3", "0.7", "-2"])),
+                2 => format!("justify_days({})", self.expr(cx, Intv, d)),
+                3 => format!("age({}, {})", self.expr(cx, Ts, d), self.expr(cx, Ts, d)),
+                4 => format!("make_interval(years => {}, mins => {})", self.rng.range(-2, 2), self.rng.range(-90, 90)),
+                5 => (*self.rng.pick(&["'P1Y2M3DT4H5M6S'::interval", "'-1 day +02:03'::interval", "'1.5 months'::interval", "'infinity'::interval", "'178000000 years'::interval"])).to_string(),
+                6 => format!("({} - {})", self.expr(cx, Tstz, d), self.expr(cx, Tstz, d)),
+                _ => format!("(- {})", self.expr(cx, Intv, d)),
+            },
+            IntArr => match self.rng.below(6) {
+                0 => format!("({})[{}:{}]", self.md_array(cx, d), self.rng.range(0, 2), self.rng.range(1, 3)),
+                1 => format!("array_cat({}, {})", self.expr(cx, IntArr, d), self.expr(cx, IntArr, d)),
+                2 => format!("trim_array({}, 1)", self.expr(cx, IntArr, d)),
+                3 => format!("array_fill({}, ARRAY[{}])", self.expr(cx, Int, d), self.rng.range(0, 3)),
+                4 => format!("(ARRAY(SELECT generate_series(1, {})))", self.rng.range(0, 4)),
+                _ => format!("('[0:1]={{{},{}}}'::int4[])", self.rng.range(-3, 3), self.rng.range(-3, 3)),
+            },
+            Jsonb => match self.rng.below(7) {
+                0 => format!("JSON_QUERY({}, '{}' {})", self.expr(cx, Jsonb, d), self.rng.pick(&["$.a", "$[*]", "lax $.a[1 to 2]"]), self.rng.pick(&["", "WITH WRAPPER", "WITH CONDITIONAL WRAPPER", "EMPTY ARRAY ON EMPTY"])),
+                1 => format!("jsonb_path_query_array({}, '{}')", self.expr(cx, Jsonb, d), self.rng.pick(&["$.*", "$.a.double()", "$.** ? (@.type() == \"number\")", "$.k.datetime()"])),
+                2 => format!("JSON_OBJECT('a': {}, 'b': {} {} RETURNING jsonb)", self.expr(cx, Int, d), self.expr(cx, Text, d), self.rng.pick(&["", "ABSENT ON NULL", "NULL ON NULL"])),
+                3 => format!("JSON_ARRAY({}, {} RETURNING jsonb)", self.expr(cx, Num, d), self.expr(cx, Bool, d)),
+                4 => format!("jsonb_path_query_first({}, '$.a ? (@ like_regex \"^a\" flag \"i\")')", self.expr(cx, Jsonb, d)),
+                5 => format!("to_jsonb({})", self.md_array(cx, d)),
+                _ => format!("JSON({}::text)::jsonb", self.expr(cx, Jsonb, d)),
+            },
+            _ => return None,
+        })
+    }
+
+    /// A one- or two-dimensional int4[] (literals, ARRAY[] of rows, slices).
+    fn md_array(&mut self, cx: &Cx, d: u32) -> String {
+        match self.rng.below(4) {
+            0 => format!("ARRAY[[{}, {}], [{}, {}]]", self.expr(cx, Int, d), self.rng.range(0, 5), self.rng.range(0, 5), self.expr(cx, Int, d)),
+            1 => (*self.rng.pick(&["'{{1,2},{3,4}}'::int4[]", "'{}'::int4[]", "'[2:3]={7,8}'::int4[]", "'{{NULL,1}}'::int4[]"])).to_string(),
+            2 => format!("(ARRAY[[1,2,3],[4,5,6]])[{}:{}]", self.rng.range(1, 2), self.rng.range(1, 3)),
+            _ => self.expr(cx, IntArr, d),
+        }
+    }
+
+    fn range_expr(&mut self, cx: &Cx, d: u32, kind: &str) -> String {
+        let (lo, hi) = match kind {
+            "int4range" => (self.expr(cx, Int, d), self.expr(cx, Int, d)),
+            "numrange" => (self.expr(cx, Num, d), self.expr(cx, Num, d)),
+            _ => (self.expr(cx, Date, d), self.expr(cx, Date, d)),
+        };
+        match self.rng.below(5) {
+            0 => format!("{kind}({lo}, {hi}, '{}')", self.rng.pick(&["[]", "(]", "()", "[)"])),
+            1 => format!("({kind}(LEAST({lo}, {hi}), GREATEST({lo}, {hi})) * {kind}(NULL, {hi}))"),
+            2 => format!("({kind}(LEAST({lo}, {hi}), GREATEST({lo}, {hi})) + {kind}({hi}, NULL))"),
+            3 => format!("range_merge({kind}(LEAST({lo}, {hi}), GREATEST({lo}, {hi})), 'empty'::{kind})"),
+            _ => format!("{kind}(LEAST({lo}, {hi}), GREATEST({lo}, {hi}))"),
+        }
+    }
+
+    fn multirange_expr(&mut self, cx: &Cx, d: u32) -> String {
+        match self.rng.below(3) {
+            0 => format!("int4multirange({}, {})", self.range_expr(cx, d, "int4range"), self.range_expr(cx, d, "int4range")),
+            1 => format!("({}::int4multirange - {}::int4multirange)", self.range_expr(cx, d, "int4range"), self.range_expr(cx, d, "int4range")),
+            _ => (*self.rng.pick(&["'{[1,3), [5,9)}'::int4multirange", "'{}'::int4multirange", "'{(,4], [6,)}'::int4multirange"])).to_string(),
         }
     }
 
@@ -1985,8 +2179,69 @@ pub fn schema(seed: u64) -> (Schema, Vec<String>) {
 pub fn statements(seed: u64, s: &Schema, n: usize) -> Vec<Stmt> {
     let mut g = Gen::new(seed, s);
     let mut out = Vec::new();
+    let mut serial = 0;
     while out.len() < n {
         g.alias = 0;
+        // (The wider grammar's statement kinds: prepared statements, cursors, savepoints,
+        // recursive CTEs with SEARCH / CYCLE.)
+        if g.wide && g.rng.chance(0.08) {
+            serial += 1;
+            let k = serial;
+            match g.rng.below(5) {
+                0 => {
+                    let q = g.select(&[], None, false);
+                    out.push(Stmt::Other(format!("PREPARE a45p{k}(int, text) AS SELECT * FROM ({}) s WHERE $1 IS NOT NULL OR $2 = 'x'", q.sql)));
+                    let (a, b) = (g.rng.range(-1, 3), *g.rng.pick(TEXTS));
+                    out.push(Stmt::Other(format!("EXECUTE a45p{k}({a}, '{b}')")));
+                    out.push(Stmt::Other(format!("EXECUTE a45p{k}(NULL, 'x')")));
+                    out.push(Stmt::Other(format!("DEALLOCATE a45p{k}")));
+                }
+                1 => {
+                    let q = g.select(&[], None, false);
+                    out.push(Stmt::Other("BEGIN".into()));
+                    out.push(Stmt::Other(format!("DECLARE a45c{k} CURSOR FOR {}", q.sql)));
+                    out.push(Stmt::Other(format!("FETCH ALL FROM a45c{k}")));
+                    out.push(Stmt::Other(format!("CLOSE a45c{k}")));
+                    out.push(Stmt::Other("COMMIT".into()));
+                }
+                2 => {
+                    let q1 = g.select(&[], None, false);
+                    let q2 = g.select(&[], None, false);
+                    out.push(Stmt::Other("BEGIN".into()));
+                    out.push(Stmt::Other("SAVEPOINT a45s".into()));
+                    out.push(Stmt::Other(q1.sql));
+                    out.push(Stmt::Other("ROLLBACK TO SAVEPOINT a45s".into()));
+                    out.push(Stmt::Other(q2.sql));
+                    out.push(Stmt::Other("COMMIT".into()));
+                }
+                3 => {
+                    let step = g.rng.range(1, 5);
+                    let m = g.rng.range(3, 9);
+                    let (search, cols) = match g.rng.below(3) {
+                        0 => ("SEARCH DEPTH FIRST BY n SET ord", "n, x, ord"),
+                        1 => ("SEARCH BREADTH FIRST BY n SET ord", "n, x, ord"),
+                        _ => ("CYCLE n SET is_cycle USING path", "n, x, is_cycle, path"),
+                    };
+                    out.push(Stmt::Other(format!(
+                        "WITH RECURSIVE r(n, x) AS (VALUES (0, ''::text) UNION ALL SELECT (n * 2 + {step}) % {m}, x || n::text FROM r WHERE length(x) < 4) {search} SELECT {cols} FROM r"
+                    )));
+                }
+                _ => {
+                    // A window frame over a wide expression.
+                    let q = g.select(&[], None, false);
+                    out.push(Stmt::Other(format!(
+                        "SELECT count(*) OVER (ORDER BY 1 {}) FROM ({}) s",
+                        g.rng.pick(&[
+                            "RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW EXCLUDE TIES",
+                            "GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE GROUP",
+                            "ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING EXCLUDE CURRENT ROW",
+                        ]),
+                        q.sql
+                    )));
+                }
+            }
+            continue;
+        }
         let r = g.rng.below(100);
         if r < 82 {
             let q = g.select(&[], None, false);

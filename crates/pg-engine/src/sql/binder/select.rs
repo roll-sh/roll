@@ -238,11 +238,22 @@ impl Binder<'_, '_> {
         let r = body(self);
         drop(pushed);
         let (body_plan, cols) = r?;
-        // (Those inlined are no CTEs of the plan.)
+        // (Those inlined are no CTEs of the plan; nor, SS_process_ctes, a SELECT nothing
+        // references, which is never planned: nothing it would fold fails.)
         let inlined: Vec<usize> = self
             .ctes
             .last()
-            .map(|l| l.iter().filter(|c| c.inline.is_some()).map(|c| c.id).collect())
+            .map(|l| {
+                l.iter()
+                    .filter(|c| {
+                        c.inline.is_some()
+                            || (!self.deparse
+                                && !c.used.get()
+                                && plans.iter().any(|(id, p)| *id == c.id && !p.writes()))
+                    })
+                    .map(|c| c.id)
+                    .collect()
+            })
             .unwrap_or_default();
         if !inlined.is_empty() {
             let keep: Vec<bool> = plans.iter().map(|(id, _)| !inlined.contains(id)).collect();
@@ -469,36 +480,14 @@ impl Binder<'_, '_> {
                     self.ctx,
                 );
             }
-            // SS_process_ctes: a SELECT nothing references (its own recursive term aside) is
-            // never planned: no plan of the statement's (nothing it would fold fails).
-            let own = {
-                let mut n = 0usize;
-                if let Some(ne) = q.node.as_ref() {
-                    for (x, ..) in ne.nodes() {
-                        if let pg_query::NodeRef::RangeVar(rv) = x
-                            && rv.schemaname.is_empty()
-                            && rv.relname == cte.ctename
-                        {
-                            n += 1;
-                        }
-                    }
-                }
-                n
-            };
-            let unreferenced = !self.deparse
-                && !is_dml(cte)
-                && refs.as_ref().is_some_and(|r| r.get(&cte.ctename).copied().unwrap_or(0) <= own);
-            slots.push((cte.ctename.clone(), id, plan, unreferenced));
+            slots.push((cte.ctename.clone(), id, plan));
         }
         drop(pushed);
         self.future_ctes.truncate(future_mark);
         // (Kept in the order they were analyzed in, so each one's inputs open first.)
         let mut plans = Vec::new();
         let mut cte_names = Vec::new();
-        for (name, id, plan, unreferenced) in slots {
-            if unreferenced {
-                continue;
-            }
+        for (name, id, plan) in slots {
             cte_names.push(name);
             plans.push((id, Arc::new(plan)));
         }
@@ -2627,10 +2616,11 @@ impl Binder<'_, '_> {
         // and fails the statement.)
         let folds_failed = self.folds_failed();
         let ctx = self.ctx;
+        let pending = self.fold_err.clone().unwrap_or_default();
         let constant_key = |k: &SortKey| {
             matches!(&k.expr, Expr::Col(c, _)
                 if optimize::pseudo_constant(&proj[*c])
-                    && !(folds_failed && super::fold::fails(&proj[*c], ctx))
+                    && !(folds_failed && super::fold::fails(&proj[*c], ctx, &pending))
                     || matches!(&proj[*c], Expr::Col(i, _) if fixed.contains(i) || const_out.contains(i)))
         };
         let needed: Vec<SortKey> = sort_keys
@@ -6366,7 +6356,18 @@ impl Binder<'_, '_> {
             // ON condition over the combined row.
             if let Some(q) = j.quals.as_deref() {
                 let inner_saved = std::mem::replace(&mut self.level().scope, scope.clone());
+                // (The FROM items outside the join are in the range table but not its ON
+                // clause's namespace: an invalid reference, not a missing one.)
+                let n0 = self.unreachable.len();
+                for r in &inner_saved.rels {
+                    if !r.anonymous && !scope.rels.iter().any(|x| x.alias == r.alias) {
+                        let mut r = r.clone();
+                        r.lateral = 0;
+                        self.unreachable.push(r);
+                    }
+                }
                 let r = self.in_clause(Clause::JoinOn, |b| b.bind_expr(q));
+                self.unreachable.truncate(n0);
                 self.level().scope = inner_saved;
                 let e = r?;
                 let e = self.coerce_bool_at(e, "JOIN/ON", q)?;

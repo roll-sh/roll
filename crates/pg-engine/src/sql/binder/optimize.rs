@@ -412,7 +412,17 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             // (A user function's call costs its COST; with row-level security in the
             // statement its own quals keep their security level's order.)
             let rls = QUERY_RLS.with(|f| f.get());
-            let cost = |e: &Expr| if rls { qual_cost(e) } else { full_qual_cost(cat, e) };
+            // (A pseudoconstant qual is tested once: all its cost is startup cost, none per
+            // row (cost_qual_eval_walker), so it sorts first, in the order written.)
+            let cost = |e: &Expr| {
+                if pseudo_constant(e) {
+                    0.0
+                } else if rls {
+                    qual_cost(e)
+                } else {
+                    full_qual_cost(cat, e)
+                }
+            };
             parts.sort_by(|a, b| {
                 cost(a)
                     .total_cmp(&cost(b))
@@ -430,11 +440,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 // (No security barrier: one level, all of them by cost.)
                 let mut merged = all;
                 merged.extend(parts);
-                merged.sort_by(|a, b| {
-                    full_qual_cost(cat, a)
-                        .total_cmp(&full_qual_cost(cat, b))
-                        .then(ec_clause(a).cmp(&ec_clause(b)))
-                });
+                merged.sort_by(|a, b| cost(a).total_cmp(&cost(b)).then(ec_clause(a).cmp(&ec_clause(b))));
                 merged
             };
             let mut all = all;

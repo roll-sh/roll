@@ -332,7 +332,9 @@ fn strict_items(e: &Expr, item: &dyn Fn(usize) -> u32) -> u32 {
         Expr::Call(d, args, _) if d.strict => args.iter().fold(0, |m, a| m | strict_items(a, item)),
         Expr::Cast(x, ..) | Expr::Relabel(x, _) | Expr::Not(x) => strict_items(x, item),
         Expr::IsNull(x, true) => strict_items(x, item),
-        Expr::ArrayOp { left, .. } => strict_items(left, item),
+        Expr::ArrayOp { left, right, all, op } if op.strict && (!*all || crate::sql::paths::reducejoins::saop_nonempty(right)) => {
+            strict_items(left, item)
+        }
         Expr::InList(x, ..) => strict_items(x, item),
         _ => 0,
     }

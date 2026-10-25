@@ -1578,11 +1578,13 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
         if self.needed.get(g).copied().unwrap_or(false) {
             return true;
         }
-        if self
-            .clauses
-            .iter()
-            .any(|c| c.leaves & !set != 0 && c.expr.columns().contains(&g))
-        {
+        // (An outer join's own clause over one side only, its preserved side's, is checked
+        // at the join, not below it: what it reads goes up to there.)
+        let full = (1u32 << self.leaves.len()) - 1;
+        if self.clauses.iter().any(|c| {
+            (c.leaves & !set != 0 || (c.on && (c.req & !set != 0 || (!self.general && set != full))))
+                && c.expr.columns().contains(&g)
+        }) {
             return true;
         }
         // (generate_base_implied_equalities_no_const: an equivalence class's member Vars are

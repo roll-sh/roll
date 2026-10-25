@@ -208,6 +208,47 @@ Round 18, agent 45, batch 2 (`a45_constant_folding`):
   same way; an unknown literal's input conversion still fails at once, as in the parser.
   Smoke: eval_error 34 -> 11, engine_error 9 -> 6.
 
+Round 18, agent 45, batch 3 (`a45_saop_all_empty`, `a45_oj_preserved_clause`, `a45_misc_r18`),
+found by the wider grammar (seeds from 1000 on, below):
+
+- **Wrong rows**: `x op ALL (array)` is true over an empty array whatever x is, but a WHERE
+  clause of it made a LEFT JOIN an inner one (`reducejoins.rs` / `outerjoins.rs`, as
+  is_strict_saop: ALL only over an array known to have elements): `SELECT * FROM a LEFT JOIN
+  b ON a.x = b.x WHERE b.z < ALL ('{}')` lost a's unmatched rows.
+- **Wrong rows**: an outer join's ON clause reading only its preserved side, over a subquery
+  planned apart (`(SELECT count(*) > -1 AS c FROM ...) v ... ON v.c`): the join search took the
+  clause for a restriction below the join, the subquery returned NULL for the column and
+  the clause never held (`joinpath.rs` `needed_above`).
+- **Wrong error order**: pseudoconstant quals cost nothing per row (tested once), so they
+  keep the order they were distributed in (a pulled-up subquery's WHERE before the WHERE
+  above it), which decides which of two failing quals fails the statement.
+- **Error message**: an ON clause's reference to a FROM item outside its join is "invalid
+  reference to FROM-clause entry" with PostgreSQL's DETAIL, not "missing FROM-clause entry".
+- Constant folding, follow-ups: CTEs nothing references are dropped by their bound references
+  (not the statement's name counts, which missed references inside VALUES and ON CONFLICT),
+  constants kept with empty relations are only quals and outputs something reads, an
+  immutable function call over constants that fails when the binder runs it waits for the
+  plan too, and a cursor's query folds as any other.
+
+## Wider grammar (round 18)
+
+`generate.rs` `wide_expr` and the statement kinds after it, for seeds from `WIDE_SEEDS`
+(1000) on (the smoke seeds keep their statements): date / time arithmetic, time zones and
+DST, `date_bin`, `make_*`, infinite dates and timestamps, intervals (ISO 8601, justify,
+`age`, multiplication and division), numeric NaN / Infinity / huge scales and `^`, float
+edge values and formatting, `to_char` patterns, regular expressions (`regexp_*`,
+`substring ... from`, `~*`), `SIMILAR TO`, `LIKE ... ESCAPE`, `ILIKE`, collations, SQL/JSON
+(`JSON_VALUE`, `JSON_QUERY` with wrappers, `JSON_EXISTS`, `JSON_OBJECT`, `JSON_ARRAY`, `IS
+JSON`), jsonpath (`@?`, `@@`, `jsonb_path_query_array`, `like_regex`, `.datetime()`),
+multidimensional arrays and slices, ranges and multiranges (operators, union /
+intersection, `range_merge`); prepared statements with parameters, cursors, savepoints with
+errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with EXCLUDE.
+
+| run | seeds × statements | statements | serious mismatches |
+|---|---|---|---|
+| wide, before batch 3 | 1000–1039 × 100 | 4,000 | wrong_rows 2, tlp 1 |
+| wide, before batch 3 | 1040–1139 × 100 | 9,893 | wrong_rows 2, wrong_state 3, tag 3 |
+
 ## Open
 
 - **Constant folding, left**: a pulled-up UNION ALL arm's unused output (PostgreSQL

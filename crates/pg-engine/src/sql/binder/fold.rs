@@ -105,6 +105,14 @@ impl Cx<'_, '_> {
                         return Some(x);
                     }
                 }
+                // (A function call run while planning (evaluate_function) that failed when
+                // the binder ran it.)
+                if let Expr::Subquery(s) = e
+                    && s.call.is_some()
+                    && let Some((_, err)) = self.pending.iter().find(|(x, _)| x.same_as(e))
+                {
+                    return Some(err.clone());
+                }
                 if let Expr::Subquery(s) = e {
                     subs.push((&s.plan, s.kind == SubqueryKind::Exists));
                     return None;
@@ -224,28 +232,39 @@ pub(crate) fn exists_simplified(p: &Plan) -> bool {
 /// relation, degenerate grouping): those that failed to fold, with what dropped plans
 /// already kept.
 pub(crate) fn candidates(p: &Plan) -> Vec<Expr> {
-    fn go(p: &Plan, out: &mut Vec<Expr>) {
-        if let Plan::Empty { info: Some(i), .. } = p {
-            out.extend(i.kept.iter().cloned());
-        }
-        for e in exprs(p) {
+    // (Only what Postgres would have simplified: quals, and the outputs something in the
+    // dropped plan reads; an output nothing reads was a subquery's unused one.)
+    fn go(p: &Plan, needed: &[bool], out: &mut Vec<Expr>) {
+        let push = |e: &Expr, out: &mut Vec<Expr>| {
             e.walk(&mut |x| {
                 if foldable(x) && !out.iter().any(|o| o.same_as(x)) {
                     out.push(x.clone());
                 }
             });
-        }
-        if let Plan::With { ctes, .. } = p {
-            for (_, c) in ctes {
-                go(c, out);
+        };
+        match p {
+            Plan::Empty { info: Some(i), .. } => out.extend(i.kept.iter().cloned()),
+            Plan::Project { exprs, .. } => {
+                for (k, e) in exprs.iter().enumerate() {
+                    if needed.get(k).copied().unwrap_or(false) {
+                        push(e, out);
+                    }
+                }
+            }
+            _ => {
+                for e in exprs(p) {
+                    push(e, out);
+                }
             }
         }
-        for c in crate::sql::explain::plan_inputs(p) {
-            go(c, out);
+        let needs = crate::sql::paths::child_needs(p, needed);
+        for (k, c) in crate::sql::explain::plan_inputs(p).into_iter().enumerate() {
+            let n = needs.get(k).cloned().unwrap_or_else(|| vec![true; crate::sql::binder::plan_width(c)]);
+            go(c, &n, out);
         }
     }
     let mut out = Vec::new();
-    go(p, &mut out);
+    go(p, &[], &mut out);
     out
 }
 
@@ -297,9 +316,9 @@ pub(crate) fn first_error(plan: &Plan, pending: &[(Expr, Error)], ctx: &ExecCtx)
 }
 
 /// Whether simplifying `e` fails (an inlined function's body, a sub-select planned with
-/// it, included).
-pub(crate) fn fails(e: &Expr, ctx: &ExecCtx) -> bool {
-    let cx = Cx { ctx, pending: &[] };
+/// it, a function call run while planning, `pending`, included).
+pub(crate) fn fails(e: &Expr, ctx: &ExecCtx, pending: &[(Expr, Error)]) -> bool {
+    let cx = Cx { ctx, pending };
     let mut subs = Vec::new();
     cx.expr(e, &mut subs).is_some()
         || subs.into_iter().any(|(p, exists)| if exists { cx.exists_plan(p) } else { cx.plan(p) }.is_some())

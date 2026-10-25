@@ -2237,7 +2237,7 @@ impl Binder<'_, '_> {
             && def.strict
             && !def.is_srf()
             && args.iter().any(|a| matches!(a, Expr::Const(v, _) if v.is_null()))
-            && !(self.folds_failed() && args.iter().any(|a| super::fold::fails(a, self.ctx)))
+            && !(self.folds_failed() && args.iter().any(|a| super::fold::fails(a, self.ctx, self.fold_err.as_deref().unwrap_or(&[]))))
         {
             return Ok(Expr::Const(crate::types::Value::Null, ty.clone()));
         }
@@ -2923,7 +2923,7 @@ impl Binder<'_, '_> {
         }
         if matches!(op, pb::BoolExprType::AndExpr | pb::BoolExprType::OrExpr) && self.folds_failed() {
             let decides = Value::Bool(op == pb::BoolExprType::OrExpr);
-            if let Some(first) = args.iter().position(|a| super::fold::fails(a, self.ctx)) {
+            if let Some(first) = args.iter().position(|a| super::fold::fails(a, self.ctx, self.fold_err.as_deref().unwrap_or(&[]))) {
                 let mut i = 0;
                 args.retain(|a| {
                     i += 1;
@@ -3006,7 +3006,8 @@ impl Binder<'_, '_> {
         // statement.)
         let check = self.folds_failed();
         let ctx = self.ctx;
-        let failing = |xs: &[Expr]| check && xs.iter().any(|x| super::fold::fails(x, ctx));
+        let pending = self.fold_err.clone().unwrap_or_default();
+        let failing = |xs: &[Expr]| check && xs.iter().any(|x| super::fold::fails(x, ctx, &pending));
         let e = drop_nulls(e, &failing);
         let fix = |q: Expr| match q {
             Expr::Call(d, args, ty)
@@ -3062,7 +3063,7 @@ impl Binder<'_, '_> {
                                 // failed to fold fails the statement if the level is
                                 // planned, so they stay, without the constant a dummy
                                 // relation would be made of.)
-                                if self.folds_failed() && out.iter().any(|x| super::fold::fails(x, self.ctx)) {
+                                if self.folds_failed() && out.iter().any(|x| super::fold::fails(x, self.ctx, self.fold_err.as_deref().unwrap_or(&[]))) {
                                     break;
                                 }
                                 return Expr::Const(Value::Bool(b), t);
@@ -3090,7 +3091,7 @@ impl Binder<'_, '_> {
                 if def.strict
                     && !def.is_srf()
                     && args.iter().any(|a| matches!(a, Expr::Const(Value::Null, _)))
-                    && !(self.folds_failed() && args.iter().any(|a| super::fold::fails(a, self.ctx))) =>
+                    && !(self.folds_failed() && args.iter().any(|a| super::fold::fails(a, self.ctx, self.fold_err.as_deref().unwrap_or(&[])))) =>
             {
                 let _ = (def, args);
                 Expr::Const(Value::Null, ty)
@@ -4038,7 +4039,7 @@ impl Binder<'_, '_> {
                             || (folds_failed
                                 && super::fold::exists_simplified(input)
                                 && e.columns().is_empty()
-                                && super::fold::fails(e, self.ctx))
+                                && super::fold::fails(e, self.ctx, self.fold_err.as_deref().unwrap_or(&[])))
                     }) =>
             {
                 Arc::new(Plan::Project { input: input.clone(), exprs: Vec::new() })
@@ -7820,8 +7821,12 @@ impl Binder<'_, '_> {
             if fdef.strict && s.params.iter().any(|p| matches!(p, Expr::Const(Value::Null, _))) {
                 return Ok(Expr::Const(Value::Null, ret));
             }
-            if let Ok(v) = crate::sql::expr::eval(&sub, &[], self.ctx) {
-                return Ok(Expr::Const(v, ret));
+            // (One that fails stays a call, and fails the statement if planning still has
+            // it: `fold_failed`.)
+            match crate::sql::expr::eval(&sub, &[], self.ctx) {
+                Ok(v) => return Ok(Expr::Const(v, ret)),
+                Err(err) if self.fold_err.is_some() => self.fold_failed(&sub, err)?,
+                Err(_) => {}
             }
         }
         if fdef.strict {

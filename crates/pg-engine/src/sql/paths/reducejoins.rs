@@ -51,8 +51,10 @@ fn nonnull_cols(e: &Expr, top: bool) -> Cols {
         {
             nonnull_cols(x, false)
         }
-        Expr::ArrayOp { left, right, op, .. }
-            if op.strict && matches!(&**right, Expr::Const(..) | Expr::Array(..)) =>
+        // (is_strict_saop: ALL over an empty array is true whatever the left side; so only
+        // ANY, or ALL over an array known to have elements.)
+        Expr::ArrayOp { left, right, op, all }
+            if op.strict && matches!(&**right, Expr::Const(..) | Expr::Array(..)) && (!*all || saop_nonempty(right)) =>
         {
             nonnull_cols(left, false)
         }
@@ -96,6 +98,15 @@ fn nonnull_cols(e: &Expr, top: bool) -> Cols {
             }
         }
         _ => Cols::new(),
+    }
+}
+
+/// An array operand known to have elements (is_strict_saop's test for ALL).
+pub(crate) fn saop_nonempty(e: &Expr) -> bool {
+    match e {
+        Expr::Const(crate::types::Value::Array(a), _) => !a.items.is_empty(),
+        Expr::Array(items, _) => !items.is_empty(),
+        _ => false,
     }
 }
 
