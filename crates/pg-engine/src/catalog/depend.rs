@@ -8,6 +8,7 @@ use crate::exec::ExecCtx;
 use crate::sql::binder::{Binder, Clause};
 use crate::sql::expr::Expr;
 use crate::types::{DataType, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 pub const REL: u32 = 1259;
@@ -385,22 +386,13 @@ pub fn depends(ctx: &ExecCtx, cat: &Arc<Catalog>) -> Vec<Depend> {
     depends_scoped(ctx, cat, None)
 }
 
-/// `depends`, of every object but the tables outside `scope` (and their indexes, TOAST
-/// tables, owned sequences and foreign keys' triggers): what a DROP of the tables of
-/// `drop_scope` needs, when `closed` says so.
-pub fn depends_in(
-    ctx: &ExecCtx,
-    cat: &Arc<Catalog>,
-    scope: &std::collections::HashSet<u32>,
-) -> Vec<Depend> {
+/// `depends`, of the objects of `scope` alone (and of every object of the kinds a `Scope`
+/// doesn't name): what a DROP whose dependents `scoped_dependents` finds needs.
+pub fn depends_in(ctx: &ExecCtx, cat: &Arc<Catalog>, scope: &Scope) -> Vec<Depend> {
     depends_scoped(ctx, cat, Some(scope))
 }
 
-fn depends_scoped(
-    ctx: &ExecCtx,
-    cat: &Arc<Catalog>,
-    scope: Option<&std::collections::HashSet<u32>>,
-) -> Vec<Depend> {
+fn depends_scoped(ctx: &ExecCtx, cat: &Arc<Catalog>, scope: Option<&Scope>) -> Vec<Depend> {
     // Stored expressions are read with the session's search_path (a system view's query
     // runs with pg_catalog's alone).
     let session_path = ctx.sess.search_path();
@@ -418,126 +410,423 @@ fn depends_scoped(
     rows
 }
 
-/// The tables whose dependencies dropping the plain tables `roots` can involve (the roots,
-/// the tables referencing them by foreign keys, inheriting from them or holding their row
-/// types in columns, and those whose stored expressions may name them, their sequences or
-/// indexes), when that can be told: None for other objects, partitioned tables, catalogs
-/// with pg_depend edits, or names `mentions` can't look for.
-pub fn drop_scope(cat: &Catalog, roots: &[Addr]) -> Option<std::collections::HashSet<u32>> {
-    if roots.is_empty() || !cat.depend_edits.is_empty() {
-        return None;
-    }
-    let mut scope = std::collections::HashSet::new();
-    let mut words: Vec<String> = Vec::new();
-    for &(class, oid, sub) in roots {
-        let t = cat.tables.get(&oid).filter(|_| class == REL && sub == 0)?;
-        if t.partkey.is_some() {
-            return None;
-        }
-        scope.insert(oid);
-        words.push(t.name.clone());
-        for s in cat.sequences.ix().owned.get(&oid).into_iter().flat_map(|v| v.iter()) {
-            words.push(cat.sequences.get(s)?.name.clone());
-        }
-        for i in t.indexes.iter().chain(t.pkey_index.iter()) {
-            if let Some(ix) = cat.indexes.get(i) {
-                words.push(ix.name.clone());
-            }
-        }
-        let ix = cat.tables.ix();
-        scope.extend(ix.fk_refs.get(&oid).into_iter().flat_map(|c| c.keys()));
-        scope.extend(cat.children(oid).iter().copied());
-        for ty in [t.rowtype, t.array_type()] {
-            scope.extend(ix.row_users.get(&ty).into_iter().flat_map(|c| c.keys()));
-        }
-    }
-    // (`mentions` finds plain identifiers: a name that is quoted with doubled quotes, or
-    // isn't ASCII, isn't looked for.)
-    if words
-        .iter()
-        .any(|w| w.is_empty() || !w.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$'))
-    {
-        return None;
-    }
-    let named = |s: &str| crate::session::ddl::mentions(s, &words);
-    for t in cat.tables.values() {
-        if scope.contains(&t.oid) {
-            continue;
-        }
-        let hit = t.columns.iter().any(|c| {
-            c.default.as_deref().is_some_and(named) || c.generated.as_deref().is_some_and(named)
-        }) || t.constraints.iter().any(|c| matches!(&c.kind, super::ConstraintKind::Check { expr, .. } if named(expr)))
-            || t.partkey
-                .as_ref()
-                .is_some_and(|p| p.cols.iter().any(|k| k.expr.as_deref().is_some_and(named)));
-        if hit {
-            scope.insert(t.oid);
-        }
-    }
-    for ix in cat.indexes.values() {
-        if !scope.contains(&ix.table)
-            && (ix.predicate.as_deref().is_some_and(named)
-                || ix.columns.iter().any(|c| matches!(&c.key, IndexKey::Expr(e) if named(e))))
-        {
-            scope.insert(ix.table);
-        }
-    }
-    Some(scope)
+/// The objects whose dependencies `derived_depends` derives, of the kinds whose derivation
+/// grows with the catalog (relations, functions, domains, and what hangs off tables: binding
+/// their stored expressions, or one per relation). Objects of other kinds (types other than
+/// domains and row types, operators, casts, operator classes, extensions, ...) are always
+/// all derived. Each set is in oid order, as the catalog's maps are, so the rows come in the
+/// order of the full derivation's.
+#[derive(Default, Clone, Debug)]
+pub struct Scope {
+    /// Tables, with their row types, constraints, defaults, TOAST tables and their foreign
+    /// keys' and deferrable keys' internal triggers.
+    pub tables: BTreeSet<u32>,
+    pub indexes: BTreeSet<u32>,
+    pub sequences: BTreeSet<u32>,
+    /// Views and materialized views, with their row types, rules and TOAST tables.
+    pub views: BTreeSet<u32>,
+    pub functions: BTreeSet<u32>,
+    pub domains: BTreeSet<u32>,
+    /// User triggers.
+    pub triggers: BTreeSet<u32>,
+    /// CREATE RULE rules.
+    pub rules: BTreeSet<u32>,
+    pub policies: BTreeSet<u32>,
+    pub statistics: BTreeSet<u32>,
+    /// Publications' relations (pg_publication_rel).
+    pub pubrels: BTreeSet<u32>,
 }
 
-/// Whether `targets` (what dropping `roots` deletes, found over `depends_in(scope)`) are all
-/// objects of the roots themselves (columns, constraints, defaults, indexes, TOAST tables,
-/// owned sequences, row types, triggers, policies, rules, statistics) or foreign keys
-/// referencing them: nothing outside the scope can depend on those (`drop_scope`), so the
-/// walk over the whole catalog would have found the same.
-pub fn closed(cat: &Catalog, roots: &[Addr], targets: &[Target]) -> bool {
-    let root = |o: u32| roots.iter().any(|r| r.1 == o);
-    let tables: Vec<&Arc<super::Table>> = roots.iter().filter_map(|r| cat.tables.get(&r.1)).collect();
-    targets.iter().all(|t| {
-        let (class, oid, _) = t.obj;
-        match class {
-            REL => {
-                root(oid)
-                    || tables.iter().any(|t| {
-                        t.indexes.contains(&oid)
-                            || t.pkey_index == Some(oid)
-                            || (t.toast != 0 && (t.toast == oid || t.toast + 1 == oid))
-                    })
-                    || cat.sequences.get(&oid).is_some_and(|s| s.owned_by.is_some_and(|o| root(o.0)))
-            }
-            TYPE => tables.iter().any(|t| t.rowtype == oid || t.array_type() == oid),
-            CONSTRAINT => {
-                tables.iter().any(|t| t.constraints.iter().any(|c| c.oid == oid))
-                    || cat.tables.ix().con_owner.get(&oid).and_then(|c| c.keys().next()).is_some_and(|o| {
-                        cat.tables.get(&o).is_some_and(|t| {
-                            t.constraints.iter().any(|c| {
-                                c.oid == oid
-                                    && matches!(&c.kind, super::ConstraintKind::ForeignKey { ref_table, .. } if root(*ref_table))
-                            })
-                        })
-                    })
-            }
-            ATTRDEF => tables.iter().any(|t| t.columns.iter().any(|c| c.def_oid == oid)),
-            // (Internal triggers have no entry: they are foreign keys', in the scope.)
-            TRIGGER => cat.triggers.get(&oid).is_none_or(|x| root(x.table)),
-            POLICY => cat.policies.get(&oid).is_some_and(|p| root(p.table)),
-            REWRITE => cat.rules.get(&oid).is_some_and(|r| root(r.table)),
-            STATEXT => cat.statistics.get(&oid).is_some_and(|s| root(s.table)),
-            _ => false,
+/// The scope entry whose derivation makes an object's own rows (pg_depend rows with it as
+/// `objid`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Entity {
+    Table(u32),
+    Index(u32),
+    Sequence(u32),
+    View(u32),
+    Function(u32),
+    Domain(u32),
+    Trigger(u32),
+    Rule(u32),
+    Policy(u32),
+    Statistics(u32),
+    PubRel(u32),
+    /// Of a kind always derived whole (or an internal trigger, a view's rule: made by the
+    /// derivation of the table or view the walk reached it from).
+    Always,
+}
+
+impl Scope {
+    /// Add `e`; whether it is new.
+    fn add(&mut self, e: Entity) -> bool {
+        match e {
+            Entity::Table(o) => self.tables.insert(o),
+            Entity::Index(o) => self.indexes.insert(o),
+            Entity::Sequence(o) => self.sequences.insert(o),
+            Entity::View(o) => self.views.insert(o),
+            Entity::Function(o) => self.functions.insert(o),
+            Entity::Domain(o) => self.domains.insert(o),
+            Entity::Trigger(o) => self.triggers.insert(o),
+            Entity::Rule(o) => self.rules.insert(o),
+            Entity::Policy(o) => self.policies.insert(o),
+            Entity::Statistics(o) => self.statistics.insert(o),
+            Entity::PubRel(o) => self.pubrels.insert(o),
+            Entity::Always => false,
         }
+    }
+}
+
+/// The entity deriving `a`'s rows. None: an object of a kind the scoped walk doesn't handle
+/// (schemas, functions' ranges, domain constraints, ...), or one that doesn't exist.
+fn entity_of(cat: &Catalog, (class, oid, _): Addr) -> Option<Entity> {
+    Some(match class {
+        REL => {
+            if cat.tables.contains_key(&oid) {
+                Entity::Table(oid)
+            } else if cat.indexes.contains_key(&oid) {
+                Entity::Index(oid)
+            } else if cat.sequences.contains_key(&oid) {
+                Entity::Sequence(oid)
+            } else if cat.views.contains_key(&oid) {
+                Entity::View(oid)
+            } else if let Some((t, _)) = cat.toast_owner(oid) {
+                if cat.tables.contains_key(&t.oid) {
+                    Entity::Table(t.oid)
+                } else {
+                    Entity::View(t.oid)
+                }
+            } else if cat.composite_of_rel(oid).is_some() {
+                Entity::Always
+            } else {
+                return None;
+            }
+        }
+        TYPE => {
+            if let Some((t, _)) = cat.tables.ix().rowtypes.get(&oid) {
+                Entity::Table(*t)
+            } else if let Some((v, _)) = cat.views.ix().rowtypes.get(&oid) {
+                Entity::View(*v)
+            } else if let Some(d) = cat.domains.get(&oid) {
+                Entity::Domain(d.oid)
+            } else if let Some(d) = cat.domains.values().find(|d| d.array_oid == oid) {
+                Entity::Domain(d.oid)
+            } else if cat.user_type_name(oid).is_some() {
+                Entity::Always
+            } else {
+                return None;
+            }
+        }
+        CONSTRAINT => Entity::Table(cat.tables.ix().con_owner.get(&oid)?.keys().next()?),
+        ATTRDEF => Entity::Table(cat.tables.ix().def_owner.get(&oid)?.keys().next()?),
+        TRIGGER if cat.triggers.contains_key(&oid) => Entity::Trigger(oid),
+        // (An internal trigger: its rows are its foreign key table's.)
+        TRIGGER => Entity::Always,
+        REWRITE if cat.rules.contains_key(&oid) => Entity::Rule(oid),
+        // (A view's rule: the view's.)
+        REWRITE => Entity::View(*cat.views.ix().rules.get(&oid)?),
+        POLICY if cat.policies.contains_key(&oid) => Entity::Policy(oid),
+        STATEXT if cat.statistics.contains_key(&oid) => Entity::Statistics(oid),
+        PUBLICATION_REL => Entity::PubRel(oid),
+        PROC if cat.functions.contains_key(&oid) => Entity::Function(oid),
+        _ => return None,
     })
 }
 
-/// The dependencies the catalog's objects record (of the tables in `scope` only, when
+/// Whether type `t` holds composite type `row` (directly, in an array, a range, another
+/// composite), as `DataType::contains_row` finds it.
+fn type_holds(t: &DataType, row: u32) -> bool {
+    match t {
+        DataType::Row(r) => r.oid == row || r.fields.iter().any(|(_, f)| type_holds(f, row)),
+        DataType::Array(e) => type_holds(e, row),
+        DataType::Range(rt) | DataType::Multirange(rt) => type_holds(&rt.subtype, row),
+        _ => false,
+    }
+}
+
+/// A function's types (arguments, results, transition types).
+fn function_types(f: &super::Function) -> impl Iterator<Item = &DataType> {
+    (f.args.iter().map(|(_, t)| t))
+        .chain(f.out_cols.iter().map(|(_, t)| t))
+        .chain(std::iter::once(&f.ret))
+        .chain(f.agg.iter().flat_map(|a| std::iter::once(&a.transtype).chain(a.mtranstype.as_ref())))
+}
+
+/// The stored texts `derived_depends` binds of a function (defaults, a SQL-standard body).
+fn function_texts(f: &super::Function) -> Vec<&str> {
+    let mut out: Vec<&str> = f.defaults.iter().flatten().map(String::as_str).collect();
+    if f.sql_body.is_some() {
+        out.push(&f.body);
+    }
+    out
+}
+
+/// What `scoped_dependents` collects for a batch of objects the walk reached: the entities
+/// to add, and the names that stored texts referring to the objects contain.
+#[derive(Default)]
+struct Wanted {
+    entities: Vec<Entity>,
+    words: Vec<String>,
+    /// Row types whose users (functions, domains holding them) may depend on them.
+    rowtypes: Vec<u32>,
+}
+
+impl Wanted {
+    /// A table (or materialized view) and the objects hanging off it: its indexes,
+    /// triggers, rules, policies, statistics objects and publication memberships.
+    fn with_attached(&mut self, cat: &Catalog, table: u32) {
+        self.entities.push(if cat.tables.contains_key(&table) {
+            Entity::Table(table)
+        } else {
+            Entity::View(table)
+        });
+        if let Some(t) = cat.index_table(table) {
+            for i in t.indexes.iter().chain(t.pkey_index.iter()) {
+                self.entities.push(Entity::Index(*i));
+            }
+        }
+        for tg in cat.triggers.values().filter(|tg| tg.table == table) {
+            self.entities.push(Entity::Trigger(tg.oid));
+        }
+        for r in cat.rules.values().filter(|r| r.table == table) {
+            self.entities.push(Entity::Rule(r.oid));
+        }
+        for p in cat.policies.values().filter(|p| p.table == table) {
+            self.entities.push(Entity::Policy(p.oid));
+        }
+        for s in cat.statistics.values().filter(|s| s.table == table) {
+            self.entities.push(Entity::Statistics(s.oid));
+        }
+        for p in cat.publications.values() {
+            for r in p.rels.iter().filter(|r| r.rel == table) {
+                self.entities.push(Entity::PubRel(r.oid));
+            }
+        }
+    }
+
+    /// The objects that may record a dependency on `a` (pg_depend rows with it as
+    /// `refobjid`), beyond those of the kinds always derived. None: an object the scoped
+    /// walk can't tell this of.
+    fn add(&mut self, cat: &Catalog, (class, oid, _): Addr) -> Option<()> {
+        match class {
+            REL => {
+                let name = if let Some(t) = cat.tables.get(&oid) {
+                    self.rowtypes.push(t.rowtype);
+                    t.name.clone()
+                } else if let Some(v) = cat.views.get(&oid) {
+                    self.rowtypes.push(v.rowtype);
+                    v.name.clone()
+                } else if let Some(ix) = cat.indexes.get(&oid) {
+                    // Foreign keys use it; indexes are attached to it.
+                    let fks = cat.tables.ix().fk_refs.get(&ix.table);
+                    self.entities.extend(fks.into_iter().flat_map(|c| c.keys()).map(Entity::Table));
+                    let attached = cat.indexes.ix().attached.get(&oid);
+                    self.entities.extend(attached.into_iter().flat_map(|c| c.keys()).map(Entity::Index));
+                    ix.name.clone()
+                } else if let Some(s) = cat.sequences.get(&oid) {
+                    s.name.clone()
+                } else if cat.toast_owner(oid).is_some() {
+                    // (Only its own table refers to a TOAST table.)
+                    return Some(());
+                } else {
+                    return None;
+                };
+                self.words.push(name);
+                if cat.tables.contains_key(&oid) || cat.views.contains_key(&oid) {
+                    self.with_attached(cat, oid);
+                    self.entities.extend(cat.children(oid).iter().map(|c| Entity::Table(*c)));
+                    let fks = cat.tables.ix().fk_refs.get(&oid);
+                    self.entities.extend(fks.into_iter().flat_map(|c| c.keys()).map(Entity::Table));
+                    let owned = cat.sequences.ix().owned.get(&oid);
+                    self.entities.extend(owned.into_iter().flat_map(|v| v.iter()).map(|s| Entity::Sequence(*s)));
+                }
+                let readers = cat.views.ix().rowtype_rels.get(&oid);
+                self.entities.extend(readers.into_iter().flat_map(|c| c.keys()).map(Entity::View));
+            }
+            TYPE => {
+                let (owner, _) = (cat.tables.ix().rowtypes.get(&oid))
+                    .or_else(|| cat.views.ix().rowtypes.get(&oid))
+                    .copied()?;
+                let (rowtype, name) = match (cat.tables.get(&owner), cat.views.get(&owner)) {
+                    (Some(t), _) => (t.rowtype, t.name.clone()),
+                    (_, Some(v)) => (v.rowtype, v.name.clone()),
+                    _ => return None,
+                };
+                self.entities.push(entity_of(cat, (REL, owner, 0))?);
+                self.words.push(name);
+                self.rowtypes.push(rowtype);
+                // Columns holding it, and the expressions over them.
+                for t in cat.tables.ix().row_users.get(&rowtype).into_iter().flat_map(|c| c.keys()) {
+                    self.with_attached(cat, t);
+                }
+                let views = cat.views.ix().row_users.get(&rowtype);
+                self.entities.extend(views.into_iter().flat_map(|c| c.keys()).map(Entity::View));
+            }
+            CONSTRAINT => {
+                // Its indexes, internal triggers and the constraints partitions inherit; the
+                // queries relying on a key (a view grouping by it: the texts naming its
+                // table).
+                let t = cat.tables.ix().con_owner.get(&oid)?.keys().next()?;
+                self.words.push(cat.tables.get(&t)?.name.clone());
+                self.with_attached(cat, t);
+                for c in cat.children(t) {
+                    self.with_attached(cat, *c);
+                }
+            }
+            TRIGGER => {
+                self.entities.push(entity_of(cat, (class, oid, 0))?);
+                for tg in cat.triggers.values().filter(|tg| tg.parent == oid) {
+                    self.entities.push(Entity::Trigger(tg.oid));
+                }
+            }
+            ATTRDEF | REWRITE | POLICY | STATEXT | PUBLICATION_REL => {
+                self.entities.push(entity_of(cat, (class, oid, 0))?);
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    /// The objects whose stored texts may name `words` (through the word indexes, or by
+    /// reading the texts of the kinds without one), and those using `rowtypes`, into the
+    /// entities. None: a word the indexes can't look up.
+    fn resolve(&mut self, cat: &Catalog) -> Option<()> {
+        let rowtypes = std::mem::take(&mut self.rowtypes);
+        let holds = |t: &DataType| rowtypes.iter().any(|r| *r != 0 && type_holds(t, *r));
+        if rowtypes.iter().any(|r| *r != 0) {
+            // Functions taking or returning the row types: named in the texts using them.
+            for f in cat.functions.values() {
+                if function_types(f).any(holds) {
+                    self.entities.push(Entity::Function(f.oid));
+                    self.words.push(f.name.clone());
+                }
+            }
+            for d in cat.domains.values() {
+                if holds(&d.base) {
+                    self.entities.push(Entity::Domain(d.oid));
+                }
+            }
+        }
+        let words = std::mem::take(&mut self.words);
+        if words.is_empty() {
+            return Some(());
+        }
+        let mut hits = BTreeSet::new();
+        if !super::relindex::words_lookup(&cat.tables.ix().words, &words, &mut hits) {
+            return None;
+        }
+        self.entities.extend(hits.iter().map(|t| Entity::Table(*t)));
+        hits.clear();
+        super::relindex::words_lookup(&cat.indexes.ix().words, &words, &mut hits);
+        self.entities.extend(hits.iter().map(|t| Entity::Index(*t)));
+        hits.clear();
+        super::relindex::words_lookup(&cat.views.ix().words, &words, &mut hits);
+        self.entities.extend(hits.iter().map(|t| Entity::View(*t)));
+        // (The kinds without a word index: their texts are read.)
+        let named = |s: &str| crate::session::ddl::mentions(s, &words);
+        for f in cat.functions.values() {
+            if function_texts(f).into_iter().any(named) {
+                self.entities.push(Entity::Function(f.oid));
+            }
+        }
+        for d in cat.domains.values() {
+            if d.default.as_deref().is_some_and(named) || d.checks.iter().any(|(_, c)| named(c)) {
+                self.entities.push(Entity::Domain(d.oid));
+            }
+        }
+        for tg in cat.triggers.values() {
+            if tg.when.as_deref().is_some_and(named) {
+                self.entities.push(Entity::Trigger(tg.oid));
+            }
+        }
+        for r in cat.rules.values() {
+            if r.qual.as_deref().is_some_and(named) || r.actions.iter().any(|a| named(a)) {
+                self.entities.push(Entity::Rule(r.oid));
+            }
+        }
+        for p in cat.policies.values() {
+            if p.qual.as_deref().is_some_and(named) || p.with_check.as_deref().is_some_and(named) {
+                self.entities.push(Entity::Policy(p.oid));
+            }
+        }
+        for s in cat.statistics.values() {
+            if s.exprs.iter().any(|e| named(e)) {
+                self.entities.push(Entity::Statistics(s.oid));
+            }
+        }
+        for p in cat.publications.values() {
+            for r in &p.rels {
+                if r.qual.as_deref().is_some_and(named) {
+                    self.entities.push(Entity::PubRel(r.oid));
+                }
+            }
+        }
+        Some(())
+    }
+}
+
+/// What dropping `roots` deletes (`find_dependents`), found by deriving the dependencies of
+/// only the objects that may depend on what the walk reaches, as `findDependentObjects`
+/// reads pg_depend through its index on the referenced object: the roots and, for each
+/// object the walk reaches, what may refer to it (`Wanted::add`: its sub-objects, the
+/// tables referencing it by foreign keys or inheriting from it, the objects whose stored
+/// texts name it, through `relindex`'s word indexes, those holding its row type, ...),
+/// again until the walk reaches nothing new. None when it reaches an object of a kind it
+/// can't follow (a function, a schema, a type other than a row type, ...), when the
+/// catalog has pg_depend edits, or when the walk fails (a required object): the whole
+/// catalog's dependencies are then derived, as before.
+pub fn scoped_dependents(ctx: &ExecCtx, cat: &Arc<Catalog>, roots: &[Addr]) -> Option<Vec<Target>> {
+    if roots.is_empty() || !cat.depend_edits.is_empty() {
+        return None;
+    }
+    let mut scope = Scope::default();
+    let mut seen: std::collections::HashSet<(u32, u32)> = Default::default();
+    let mut todo: Vec<Addr> = roots.to_vec();
+    // (Each round adds to the scope, which the catalog bounds.)
+    loop {
+        let mut w = Wanted::default();
+        for a in todo.drain(..) {
+            if seen.insert((a.0, a.1)) {
+                w.entities.push(entity_of(cat, a)?);
+                w.add(cat, a)?;
+            }
+        }
+        w.resolve(cat)?;
+        for e in w.entities {
+            scope.add(e);
+        }
+        let deps = depends_in(ctx, cat, &scope);
+        let targets = find_dependents_in(cat, &deps, roots, Some(&scope)).ok()?;
+        todo = (targets.iter().map(|t| t.obj))
+            .filter(|o| !seen.contains(&(o.0, o.1)))
+            .collect();
+        if todo.is_empty() {
+            return Some(targets);
+        }
+    }
+}
+
+/// The values of `map` whose oids are in `set` (all of them without one), in oid order.
+fn pick<'a, V>(map: &'a super::pmap::PMap<V>, set: Option<&'a BTreeSet<u32>>) -> Box<dyn Iterator<Item = &'a V> + 'a> {
+    match set {
+        None => Box::new(map.values()),
+        Some(s) => Box::new(s.iter().filter_map(|o| map.get(o))),
+    }
+}
+
+/// `pick` for a plain map.
+fn pick_b<'a, V>(map: &'a BTreeMap<u32, V>, set: Option<&'a BTreeSet<u32>>) -> Box<dyn Iterator<Item = &'a V> + 'a> {
+    match set {
+        None => Box::new(map.values()),
+        Some(s) => Box::new(s.iter().filter_map(|o| map.get(o))),
+    }
+}
+
+/// The dependencies the catalog's objects record (of the objects of `scope` only, when
 /// given: `depends_in`).
-fn derived_depends(
-    ctx: &ExecCtx,
-    cat: &Arc<Catalog>,
-    scope: Option<&std::collections::HashSet<u32>>,
-) -> Vec<Depend> {
-    // (A relation outside the scope is skipped; a materialized view isn't a table.)
-    let keep = |t: u32| scope.is_none_or(|s| s.contains(&t)) || !cat.tables.contains_key(&t);
-    let _types = UserTypes::set(cat);
+fn derived_depends(ctx: &ExecCtx, cat: &Arc<Catalog>, scope: Option<&Scope>) -> Vec<Depend> {
+    // (A scoped derivation reads few objects: `user_type` looks each type up instead.)
+    let _types = scope.is_none().then(|| UserTypes::set(cat));
     let mut out = Out { rows: Vec::new() };
     // plpgsql is an extension: its language and handlers are its members.
     for f in PLPGSQL_FUNCS {
@@ -564,7 +853,7 @@ fn derived_depends(
         out.add((TYPE, e.oid, 0), (NAMESPACE, e.schema, 0), 'n');
         out.add((TYPE, e.array_oid, 0), (TYPE, e.oid, 0), 'i');
     }
-    for d in cat.domains.values() {
+    for d in pick_b(&cat.domains, scope.map(|s| &s.domains)) {
         let me = (TYPE, d.oid, 0);
         out.add(me, (NAMESPACE, d.schema, 0), 'n');
         // A domain over a made base type uses its output, send and analyze functions.
@@ -697,10 +986,21 @@ fn derived_depends(
         }
     }
     // (Tables' hidden row id sequences aren't objects of their own.)
-    let rowid_seqs: std::collections::HashSet<u32> =
-        cat.tables.values().filter_map(|t| t.rowid_seq).collect();
-    for s in cat.sequences.values() {
-        if rowid_seqs.contains(&s.oid) || s.owned_by.is_some_and(|(t, _)| !keep(t)) {
+    let rowid_seqs: std::collections::HashSet<u32> = match scope {
+        None => cat.tables.values().filter_map(|t| t.rowid_seq).collect(),
+        Some(sc) => {
+            let owners: Vec<u32> = (sc.sequences.iter())
+                .filter_map(|s| cat.sequences.get(s)?.owned_by.map(|o| o.0))
+                .collect();
+            if owners.len() == sc.sequences.len() {
+                owners.iter().filter_map(|t| cat.tables.get(t)?.rowid_seq).collect()
+            } else {
+                cat.tables.values().filter_map(|t| t.rowid_seq).collect()
+            }
+        }
+    };
+    for s in pick(&cat.sequences, scope.map(|s| &s.sequences)) {
+        if rowid_seqs.contains(&s.oid) {
             continue;
         }
         out.add((REL, s.oid, 0), (NAMESPACE, s.schema, 0), 'n');
@@ -719,17 +1019,25 @@ fn derived_depends(
             );
         }
     }
-    for t in cat.tables.values().filter(|t| keep(t.oid)) {
+    for t in pick(&cat.tables, scope.map(|s| &s.tables)) {
         table_depends(ctx, cat, t, &mut out);
     }
     // TOAST tables are part of their table; their index goes with their key columns.
-    for t in cat.toasted().filter(|t| keep(t.oid)) {
+    let toasted: Box<dyn Iterator<Item = &Arc<Table>>> = match scope {
+        None => Box::new(cat.toasted()),
+        Some(sc) => Box::new(
+            pick(&cat.tables, Some(&sc.tables))
+                .chain(pick(&cat.views, Some(&sc.views)).filter_map(|v| v.storage.as_ref()))
+                .filter(|t| t.toast != 0),
+        ),
+    };
+    for t in toasted {
         out.add((REL, t.toast, 0), (REL, t.oid, 0), 'i');
         for col in 1..=2 {
             out.add((REL, t.toast + 1, 0), (REL, t.toast, col), 'a');
         }
     }
-    for ix in cat.indexes.values().filter(|ix| keep(ix.table)) {
+    for ix in pick(&cat.indexes, scope.map(|s| &s.indexes)) {
         let Some(t) = cat.index_table(ix.table) else {
             continue;
         };
@@ -798,7 +1106,7 @@ fn derived_depends(
             .collect();
         out.rel_expr(me, ix.table, &refs, 'n', 'a', false);
     }
-    for v in cat.views.values() {
+    for v in pick(&cat.views, scope.map(|s| &s.views)) {
         let me = (REL, v.oid, 0);
         out.add(me, (NAMESPACE, v.schema, 0), 'n');
         if v.rowtype != 0 {
@@ -829,7 +1137,7 @@ fn derived_depends(
         }
         out.add(rule, me, 'i');
     }
-    for f in cat.functions.values() {
+    for f in pick(&cat.functions, scope.map(|s| &s.functions)) {
         function_depends(ctx, cat, f, &mut out);
     }
     for o in cat.operators.values() {
@@ -857,13 +1165,26 @@ fn derived_depends(
     }
     // Foreign keys' and deferrable unique keys' internal triggers (their functions are
     // pinned).
-    for r in crate::exec::trigger::internal_triggers(cat)
-        .into_iter()
-        .filter(|r| keep(r.fk_table) || keep(r.trig.table) || keep(r.other))
-    {
+    let internal = match scope {
+        None => crate::exec::trigger::internal_triggers(cat),
+        Some(sc) => {
+            // (Made from the constraints of the tables that have them: the scope's, and
+            // those referencing them by foreign keys.)
+            let keep = |t: u32| sc.tables.contains(&t) || !cat.tables.contains_key(&t);
+            let mut from: BTreeSet<u32> = sc.tables.clone();
+            for t in &sc.tables {
+                from.extend(cat.tables.ix().fk_refs.get(t).into_iter().flat_map(|c| c.keys()));
+            }
+            crate::exec::trigger::internal_triggers_of(cat, &from)
+                .into_iter()
+                .filter(|r| keep(r.fk_table) || keep(r.trig.table) || keep(r.other))
+                .collect()
+        }
+    };
+    for r in internal {
         out.add((TRIGGER, r.trig.oid, 0), (CONSTRAINT, r.constraint, 0), 'i');
     }
-    for tg in cat.triggers.values() {
+    for tg in pick_b(&cat.triggers, scope.map(|s| &s.triggers)) {
         let me = (TRIGGER, tg.oid, 0);
         out.add(me, (PROC, tg.function, 0), 'n');
         if tg.parent != 0 {
@@ -898,13 +1219,13 @@ fn derived_depends(
             }
         }
     }
-    for r in cat.rules.values() {
+    for r in pick_b(&cat.rules, scope.map(|s| &s.rules)) {
         rule_depends(ctx, cat, r, &mut out);
     }
     for e in cat.event_triggers.values() {
         out.add((EVENT_TRIGGER, e.oid, 0), (PROC, e.function, 0), 'n');
     }
-    for p in cat.policies.values() {
+    for p in pick_b(&cat.policies, scope.map(|s| &s.policies)) {
         let me = (POLICY, p.oid, 0);
         out.add(me, (REL, p.table, 0), 'a');
         let Some(t) = cat.tables.get(&p.table) else {
@@ -922,7 +1243,7 @@ fn derived_depends(
             out.add(me, r, 'n');
         }
     }
-    for s in cat.statistics.values() {
+    for s in pick_b(&cat.statistics, scope.map(|s| &s.statistics)) {
         let me = (STATEXT, s.oid, 0);
         for c in &s.columns {
             out.add(me, (REL, s.table, *c as i32 + 1), 'a');
@@ -939,18 +1260,18 @@ fn derived_depends(
         out.add(me, (NAMESPACE, s.schema, 0), 'n');
     }
     ts_depends(cat, &mut out);
-    collation_depends(cat, &mut out);
-    userobj_depends(cat, &mut out);
-    publication_depends(ctx, cat, &mut out);
+    collation_depends(cat, scope, &mut out);
+    userobj_depends(cat, scope, &mut out);
+    publication_depends(ctx, cat, scope, &mut out);
     out.rows
 }
 
 /// A publication's tables and schemas depend on it and on what they name automatically; a
 /// column list's columns and what a row filter uses, normally (publication_add_relation,
 /// publication_add_schema).
-fn publication_depends(ctx: &ExecCtx, cat: &Arc<Catalog>, out: &mut Out) {
+fn publication_depends(ctx: &ExecCtx, cat: &Arc<Catalog>, scope: Option<&Scope>, out: &mut Out) {
     for p in cat.publications.values() {
-        for r in &p.rels {
+        for r in p.rels.iter().filter(|r| scope.is_none_or(|s| s.pubrels.contains(&r.oid))) {
             let me = (PUBLICATION_REL, r.oid, 0);
             out.add(me, (PUBLICATION, p.oid, 0), 'a');
             out.add(me, (REL, r.rel, 0), 'a');
@@ -1002,7 +1323,7 @@ fn rule_depends(ctx: &ExecCtx, cat: &Arc<Catalog>, r: &super::Rule, out: &mut Ou
     }
 }
 
-fn userobj_depends(cat: &Catalog, out: &mut Out) {
+fn userobj_depends(cat: &Catalog, scope: Option<&Scope>, out: &mut Out) {
     for f in cat.opfamilies.values() {
         out.add((OPFAMILY, f.oid, 0), (NAMESPACE, f.schema, 0), 'n');
         // (On a built-in access method the reference is to a pinned object: not recorded.)
@@ -1059,8 +1380,11 @@ fn userobj_depends(cat: &Catalog, out: &mut Out) {
     for a in cat.access_methods.values() {
         out.add((AM, a.oid, 0), (PROC, a.handler, 0), 'n');
     }
+    let rel_in = |rel: &u32| {
+        scope.is_none_or(|s| s.tables.contains(rel) || s.views.contains(rel) || s.sequences.contains(rel))
+    };
     for (rel, am) in &cat.rel_am {
-        if !cat.indexes.contains_key(rel) {
+        if !cat.indexes.contains_key(rel) && rel_in(rel) {
             out.add((REL, *rel, 0), (AM, *am, 0), 'n');
         }
     }
@@ -1103,14 +1427,14 @@ fn userobj_depends(cat: &Catalog, out: &mut Out) {
     if cat.opclasses.is_empty() {
         return;
     }
-    for ix in cat.indexes.values() {
+    for ix in pick(&cat.indexes, scope.map(|s| &s.indexes)) {
         for c in &ix.columns {
             if cat.opclasses.contains_key(&c.opclass) {
                 out.add((REL, ix.oid, 0), (OPCLASS, c.opclass, 0), 'n');
             }
         }
     }
-    for t in cat.tables.values() {
+    for t in pick(&cat.tables, scope.map(|s| &s.tables)) {
         let Some(key) = &t.partkey else { continue };
         let am = if key.strategy == super::PartStrategy::Hash { 405 } else { 403 };
         for k in &key.cols {
@@ -1128,7 +1452,7 @@ fn userobj_depends(cat: &Catalog, out: &mut Out) {
 
 /// Collations' own dependencies (on their schema), and those of columns, domains and index
 /// keys declared with a CREATE COLLATION collation.
-fn collation_depends(cat: &Catalog, out: &mut Out) {
+fn collation_depends(cat: &Catalog, scope: Option<&Scope>, out: &mut Out) {
     if cat.collations.is_empty() {
         return;
     }
@@ -1139,14 +1463,14 @@ fn collation_depends(cat: &Catalog, out: &mut Out) {
         let n = name.as_deref()?;
         cat.collations.values().find(|d| d.name == n).map(|d| d.oid)
     };
-    for t in cat.tables.values() {
+    for t in pick(&cat.tables, scope.map(|s| &s.tables)) {
         for (i, c) in t.live_columns() {
             if let Some(oid) = user(&c.collation) {
                 out.add((REL, t.oid, i as i32 + 1), (COLLATION, oid, 0), 'n');
             }
         }
     }
-    for d in cat.domains.values() {
+    for d in pick_b(&cat.domains, scope.map(|s| &s.domains)) {
         if let Some(oid) = user(&d.collation) {
             out.add((TYPE, d.oid, 0), (COLLATION, oid, 0), 'n');
         }
@@ -1158,14 +1482,14 @@ fn collation_depends(cat: &Catalog, out: &mut Out) {
             }
         }
     }
-    for ix in cat.indexes.values() {
+    for ix in pick(&cat.indexes, scope.map(|s| &s.indexes)) {
         for c in &ix.columns {
             if let Some(oid) = user(&c.collation) {
                 out.add((REL, ix.oid, 0), (COLLATION, oid, 0), 'n');
             }
         }
     }
-    for v in cat.views.values() {
+    for v in pick(&cat.views, scope.map(|s| &s.views)) {
         for (i, c) in v.collations.iter().enumerate() {
             if let Some(oid) = user(c) {
                 out.add((REL, v.oid, i as i32 + 1), (COLLATION, oid, 0), 'n');
@@ -1664,7 +1988,9 @@ pub fn describe(cat: &Catalog, sp: &[String], (class, oid, sub): Addr) -> Option
             quote_ident(cat.schemas.get(&oid).map(|s| s.name.as_str())?)
         )),
         CONSTRAINT => {
-            for t in cat.tables.values() {
+            // (The first table with it, by the tables map's index of constraint owners.)
+            let owners = cat.tables.ix().con_owner.get(&oid);
+            for t in owners.into_iter().flat_map(|c| c.keys()).filter_map(|t| cat.tables.get(&t)) {
                 if let Some(c) = t.constraints.iter().find(|c| c.oid == oid) {
                     return Some(format!(
                         "constraint {} on {}",
@@ -1697,7 +2023,8 @@ pub fn describe(cat: &Catalog, sp: &[String], (class, oid, sub): Addr) -> Option
             None
         }
         ATTRDEF => {
-            for t in cat.tables.values() {
+            let owners = cat.tables.ix().def_owner.get(&oid);
+            for t in owners.into_iter().flat_map(|c| c.keys()).filter_map(|t| cat.tables.get(&t)) {
                 for (_, c) in t.live_columns() {
                     if (c.default.is_some() || c.generated.is_some()) && c.def_oid == oid {
                         return Some(format!(
@@ -1722,7 +2049,11 @@ pub fn describe(cat: &Catalog, sp: &[String], (class, oid, sub): Addr) -> Option
                     relation_description(cat, r.table, sp)?
                 ));
             }
-            let v = cat.views.values().find(|v| v.rule_oid() == oid)?;
+            let v = cat.views.get(cat.views.ix().rules.get(&oid)?)?;
+            debug_assert!(
+                cat.views.values().find(|v| v.rule_oid() == oid).is_some_and(|x| x.oid == v.oid),
+                "views' rules index"
+            );
             Some(format!(
                 "rule _RETURN on {}",
                 relation_description(cat, v.oid, sp)?
@@ -2044,15 +2375,15 @@ fn deps_by(
 /// The visiting order of objects with synthetic OIDs (view rules from before those were
 /// kept, domain constraints): as if allocated when Postgres allocates theirs, just after their
 /// owner's.
-fn sort_keys(cat: &Catalog) -> std::collections::HashMap<(u32, u32), u64> {
+fn sort_keys(cat: &Catalog, scope: Option<&Scope>) -> std::collections::HashMap<(u32, u32), u64> {
     let mut keys = std::collections::HashMap::new();
-    for v in cat.views.values().filter(|v| v.rule == 0) {
+    for v in pick(&cat.views, scope.map(|s| &s.views)).filter(|v| v.rule == 0) {
         keys.insert(
             (REWRITE, v.rule_oid()),
             (u64::from(v.rowtype.max(v.oid)) + 1) << 16,
         );
     }
-    for d in cat.domains.values() {
+    for d in pick_b(&cat.domains, scope.map(|s| &s.domains)) {
         let base = (u64::from(d.oid.max(d.array_oid)) + 1) << 16;
         keys.insert((CONSTRAINT, domain_constraint_oid(d, 63)), base);
         for i in 0..d.checks.len() {
@@ -2238,11 +2569,21 @@ pub fn find_dependents(
     deps: &[Depend],
     roots: &[Addr],
 ) -> Result<Vec<Target>, Required> {
+    find_dependents_in(cat, deps, roots, None)
+}
+
+/// `find_dependents` over the rows of `scope`'s objects (`depends_in`).
+fn find_dependents_in(
+    cat: &Catalog,
+    deps: &[Depend],
+    roots: &[Addr],
+    scope: Option<&Scope>,
+) -> Result<Vec<Target>, Required> {
     let mut w = Walk {
         deps,
         pending: roots,
         targets: Vec::new(),
-        keys: sort_keys(cat),
+        keys: sort_keys(cat, scope),
         by_obj: deps_by(deps, |d| d.obj),
         by_ref: deps_by(deps, |d| d.refobj),
         target_ix: Default::default(),

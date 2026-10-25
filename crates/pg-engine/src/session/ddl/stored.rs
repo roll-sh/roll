@@ -1334,8 +1334,16 @@ impl Ddl<'_, '_> {
             return Ok(());
         }
         let hit = |s: &str| mentions(s, &words);
-        // Views and materialized views.
-        for v in before.views.values() {
+        // Views and materialized views. (Those whose query may name a word: the views map's
+        // word index, when it can look all of them up.)
+        let mut named_views = std::collections::BTreeSet::new();
+        let views: Vec<&Arc<crate::catalog::ViewDef>> =
+            if crate::catalog::relindex::words_lookup(&before.views.ix().words, &words, &mut named_views) {
+                named_views.iter().filter_map(|o| before.views.get(o)).collect()
+            } else {
+                before.views.values().collect()
+            };
+        for v in views {
             if !hit(&v.query) {
                 continue;
             }
@@ -1375,7 +1383,18 @@ impl Ddl<'_, '_> {
         } else {
             usize::MAX
         };
-        for t in before.tables.values().take(exprs) {
+        // (Only the tables and indexes whose texts may name a word: the maps' word indexes,
+        // when they can look all of them up.)
+        let indexed = |ix: &crate::catalog::pmap::PHash<String, crate::catalog::pmap::Counts>| {
+            let mut out = std::collections::BTreeSet::new();
+            crate::catalog::relindex::words_lookup(ix, &words, &mut out).then_some(out)
+        };
+        let named_tables = indexed(&before.tables.ix().words);
+        let tables: Vec<&Arc<crate::catalog::Table>> = match &named_tables {
+            Some(s) => s.iter().filter_map(|o| before.tables.get(o)).collect(),
+            None => before.tables.values().collect(),
+        };
+        for t in tables.into_iter().take(exprs) {
             // (Only tables with a text that may name something changed are copied.)
             let named = t.columns.iter().any(|c| {
                 c.default.as_deref().is_some_and(hit) || c.generated.as_deref().is_some_and(hit)
@@ -1440,7 +1459,12 @@ impl Ddl<'_, '_> {
             }
         }
         // Index expressions and predicates.
-        for ix in before.indexes.values().take(exprs) {
+        let named_indexes = indexed(&before.indexes.ix().words);
+        let indexes: Vec<&Arc<crate::catalog::Index>> = match &named_indexes {
+            Some(s) => s.iter().filter_map(|o| before.indexes.get(o)).collect(),
+            None => before.indexes.values().collect(),
+        };
+        for ix in indexes.into_iter().take(exprs) {
             let named = ix.predicate.as_deref().is_some_and(hit)
                 || ix
                     .columns

@@ -49,7 +49,10 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             if let Some(node) = sys_shared_scan(*table, filter.as_ref(), path.as_deref(), ctx)? {
                 return Ok(node);
             }
-            let rows = crate::catalog::system::rows(*table, ctx)?;
+            let rows = match is_named_rows(*table, filter.as_ref(), ctx)? {
+                Some(r) => r,
+                None => crate::catalog::system::rows(*table, ctx)?,
+            };
             let mut deferred = crate::catalog::system::deferred_errors(*table, ctx, &rows);
             // An index path a sort relies on: the rows in that index's order.
             let rows = match path.as_deref() {
@@ -781,7 +784,77 @@ fn sys_rel_rows(
             return Ok(Some(Arc::new(crate::catalog::system::SysRows::new(rows))));
         }
     }
+    // pg_class read through its name index: the relations of those names alone.
+    if let Some(bounds) = class_name_bounds(table, path, ctx)?
+        && crate::catalog::system::rows_cached(table, ctx).is_none()
+        && let Some(rows) = crate::catalog::system::class_rows_named(ctx, &bounds)?
+    {
+        return Ok(Some(Arc::new(crate::catalog::system::SysRows::new(rows))));
+    }
     Ok(None)
+}
+
+/// The bounds an index scan of pg_class puts on `relname` (`pg_class_relname_nsp_index`'s
+/// first column: `=`, or a pattern's prefix range), with built-in operators comparing bytes.
+/// Postgres's scan reads only the index entries within them.
+fn class_name_bounds(
+    table: crate::catalog::system::SysTable,
+    path: Option<&crate::sql::plan::SysPath>,
+    ctx: &ExecCtx,
+) -> Result<Option<crate::catalog::system::NameBounds>> {
+    if table != crate::catalog::system::SysTable::PgClass {
+        return Ok(None);
+    }
+    let Some(sp) = path else { return Ok(None) };
+    let crate::sql::plan::Access::Index { quals, .. } = &sp.scan.access else {
+        return Ok(None);
+    };
+    let mut bounds = crate::catalog::system::NameBounds::default();
+    let mut any = false;
+    for q in quals {
+        let Expr::Call(d, args, _) = &q.expr else { continue };
+        if args.len() != 2 || d.oid >= crate::catalog::FIRST_USER_OID {
+            continue;
+        }
+        if d.coll.as_ref().is_some_and(|c| !c.bytewise()) {
+            continue;
+        }
+        let (Expr::Col(1, _), other) = (&args[0], &args[1]) else { continue };
+        let mut sub = false;
+        other.walk(&mut |e| sub |= matches!(e, Expr::Subquery(_)));
+        if sub || !other.columns().is_empty() || other.is_volatile() {
+            continue;
+        }
+        let v = crate::sql::expr::eval(other, &[], ctx)?;
+        let Some(s) = v.as_str() else { continue };
+        let s = s.to_string();
+        let tighter_lo = |b: &Option<(String, bool)>, n: &(String, bool)| {
+            b.as_ref().is_none_or(|(x, inc)| n.0 > *x || (n.0 == *x && *inc && !n.1))
+        };
+        let tighter_hi = |b: &Option<(String, bool)>, n: &(String, bool)| {
+            b.as_ref().is_none_or(|(x, inc)| n.0 < *x || (n.0 == *x && *inc && !n.1))
+        };
+        let (lo, hi) = match d.name {
+            "=" => (Some((s.clone(), true)), Some((s, true))),
+            ">=" | "~>=~" => (Some((s, true)), None),
+            ">" | "~>~" => (Some((s, false)), None),
+            "<=" | "~<=~" => (None, Some((s, true))),
+            "<" | "~<~" => (None, Some((s, false))),
+            _ => continue,
+        };
+        if let Some(l) = lo
+            && tighter_lo(&bounds.lo, &l)
+        {
+            bounds.lo = Some(l);
+        }
+        if let Some(h) = hi
+            && tighter_hi(&bounds.hi, &h)
+        {
+            bounds.hi = Some(h);
+        }
+        any = true;
+    }
+    Ok(any.then_some(bounds))
 }
 
 /// The rows of a catalog scan run once per outer row (a nested loop's parameterized inner
@@ -862,7 +935,7 @@ fn sys_rescan(
     let picked = match found {
         Some((_, None)) => return Ok(Some(Vec::new())),
         Some((_, Some(ix))) => Some(ix),
-        None => None,
+        None => class_name_bounds(table, path, ctx)?.map(|b| sys_named(all, &b)),
     };
     let mut out = Vec::new();
     let mut check = |r: &Row| -> Result<()> {
@@ -922,8 +995,10 @@ fn sys_shared_scan(
         Some(r) => r,
         None => crate::catalog::system::rows_shared(table, ctx)?,
     };
+    let named = class_name_bounds(table, path, ctx)?.map(|b| sys_named(&rows, &b));
     let picked = match sys_index_equality(path, &rows, ctx)? {
         Some((_, ix)) => Some(ix.unwrap_or_default()),
+        None if named.is_some() => named,
         None => match filter {
             Some(f) => match sys_equality(f, &rows, true, ctx)? {
                 Some((k, ix)) => {
@@ -962,6 +1037,68 @@ fn sys_shared_scan(
         i: 0,
         filter: filter.cloned(),
     })))
+}
+
+/// The rows of pg_class's `rows` whose `relname` `bounds` admits, in row order.
+fn sys_named(rows: &crate::catalog::system::SysRows, bounds: &crate::catalog::system::NameBounds) -> Vec<u32> {
+    (0..rows.rows.len() as u32)
+        .filter(|&i| rows.rows[i as usize][1].as_str().is_some_and(|n| bounds.admits(n)))
+        .collect()
+}
+
+/// The rows of an information_schema view generated per relation
+/// (`system::is_rel_columns`) whose filter starts with equalities fixing `table_schema`
+/// and/or `table_name` (`WHERE table_schema = 's' AND table_name = 't'`): those relations'
+/// alone (`system::is_rows_named`). Only leading conjuncts are read, so the rows left out
+/// are those for which the filter stops at one of them, false, as it did over every row.
+fn is_named_rows(
+    table: crate::catalog::system::SysTable,
+    filter: Option<&Expr>,
+    ctx: &ExecCtx,
+) -> Result<Option<Vec<Row>>> {
+    let Some((sk, nk)) = crate::catalog::system::is_rel_columns(table) else {
+        return Ok(None);
+    };
+    let Some(f) = filter else { return Ok(None) };
+    fn split<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+        match e {
+            Expr::And(items) => items.iter().for_each(|i| split(i, out)),
+            e => out.push(e),
+        }
+    }
+    let mut conj = Vec::new();
+    split(f, &mut conj);
+    let (mut schema, mut name): (Option<String>, Option<String>) = (None, None);
+    for c in conj {
+        let Expr::Call(d, args, _) = c else { break };
+        if d.name != "=" || args.len() != 2 || d.oid >= crate::catalog::FIRST_USER_OID {
+            break;
+        }
+        if d.coll.as_ref().is_some_and(|c| !c.deterministic) {
+            break;
+        }
+        let (k, other) = match (&args[0], &args[1]) {
+            (Expr::Col(k, _), o) | (o, Expr::Col(k, _)) if *k == sk || *k == nk => (*k, o),
+            _ => break,
+        };
+        let mut sub = false;
+        other.walk(&mut |e| sub |= matches!(e, Expr::Subquery(_)));
+        if sub || !other.columns().is_empty() || other.is_volatile() {
+            break;
+        }
+        let v = crate::sql::expr::eval(other, &[], ctx)?;
+        let Some(s) = v.as_str() else { break };
+        let slot = if k == sk { &mut schema } else { &mut name };
+        if slot.as_deref().is_some_and(|x| x != s) {
+            // (Two different values: no row has both.)
+            return Ok(Some(Vec::new()));
+        }
+        *slot = Some(s.to_string());
+    }
+    if schema.is_none() && name.is_none() {
+        return Ok(None);
+    }
+    crate::catalog::system::is_rows_named(table, ctx, schema.as_deref(), name.as_deref())
 }
 
 /// `sys_shared_scan`'s node.

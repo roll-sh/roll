@@ -153,6 +153,24 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   restoring an 11,000-table schema dump with psql 254 s → 21 s (PostgreSQL 42 s). Still
   slower: DROP and ALTER, catalog queries after DDL that aren't pinned to one relation,
   information_schema, a database's first connection (BENCH.md has why).
+- **Catalog work kept to what a statement touches** (round 18, agent 58; BENCH.md "Catalog
+  work kept to what a statement touches"): DROP derives the dependencies of only what may
+  depend on the objects its walk reaches (`depend::scoped_dependents`, through word indexes
+  of stored texts and new relation map indexes in `relindex`), for any relation root and
+  cascades through views, partitions, constraints, triggers, policies, rules; pg_class is
+  read through its name index for psql's `\d name` patterns; pg_index has one relation's
+  rows; information_schema.columns / .tables generate only the relations a `table_schema =`
+  / `table_name =` filter names; catalog row counts for planning are kept by the maps; DDL's
+  O(catalog) lookups (internal triggers, constraint descriptions, `lock_references`, ALTER's
+  stored-text scans) are indexed. At 10,000 tables (PostgreSQL / before / after, ms): DROP
+  TABLE 4.9 / 20.3 / 1.7, ALTER TABLE ADD COLUMN 0.38 / 3.2 / 0.62, psql `\d` columns after
+  DDL 0.45 / 38.6 / 1.3, indexes after DDL 0.57 / 41.7 / 1.6, information_schema.columns of a
+  table after DDL 3.6 / 128 / 1.6. Still slower: queries reading whole catalogs right after
+  DDL, the first connection (about 150 ms, unchanged), ALTER's per-statement overhead.
+  information_schema keeps its virtual tables (BENCH.md has the decision).
+  Verified: `cargo test -p pg-engine`, clippy, difftest smoke, and the regression suite in
+  full against its base `0a8ec4e` with private references: 51,148 / 51,150 both, identical
+  per file and hunk.
 - **Client libraries** (round 17, agent 38): drivers' and ORMs' own test suites against the
   engine and against PostgreSQL 18.6, test by test: `tests/clients/` (runner, per-suite scripts,
   `STATUS.md` with the per-suite counts and every difference left). psycopg 3, psycopg2,
@@ -546,6 +564,21 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
     generation's. `explain::sys_tuples`' count of pg_class / pg_attribute / pg_attrdef comes
     from `system::row_count` (checked against the generated rows in debug builds) unless the
     rows are generated already. Golden `a49_catalog_indexes`.
+  - Round 18 agent 58's relation map indexes (`relindex`, part of the catalog value like
+    agent 49's, kept by every insert and remove; a changed table updates only the parts of
+    its entries that differ, `TableParts` / `MapIndex::replace`): `TableIx::words`,
+    `IndexIx::words`, `ViewIx::words` (identifier words of stored texts → objects,
+    `relindex::words_in`; lookups agree with `ddl::mentions`, unit test
+    `relindex::tests::words_match_mentions`), `TableIx::ri_checks`, `IndexIx::attached`,
+    `ViewIx::row_users` / `rowtype_rels` / `rules`, and each map's `RelRows` counts (checked
+    against generated rows in debug builds by `system::row_count`). Readers: the scoped DROP
+    walk (`depend::scoped_dependents`, compared with the full walk in debug builds),
+    `follow_renames`, `depend::describe`, `trigger::ri_trigger` (checked against the full
+    list). Not cached: `system::class_rows_named` (pg_class rows by name, through the
+    catalog's name index) and `system::is_rows_named` (information_schema rows of named
+    relations), generated per scan when the shared rows aren't there; both compared with the
+    full generation in debug builds. `explain::sys_tuples` now counts information_schema
+    .columns / .tables through `row_count` too. Golden `a58_catalog_scoped`.
   - `sql::parse` `PARSED` (parse trees, per thread): by the text and the parser options (a
     pure function); `ast::parse_exprs` / `parse_stmt` (stored texts) under tags of their own.
   - `costs::SLOT_VALUES` (statistics slots' parsed values, per thread): by
@@ -648,6 +681,12 @@ definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
   (so catalog joins are per-relation work), then bind the real definitions behind a build
   switch, run the 22 files with it against a baseline, and fix plan differences before
   turning it on; join 368 follows. Until then the virtual tables stay (their rows match).
+- Round 18, agent 58: not switched. Speed no longer argues for it: queries naming one
+  relation (`table_schema = ... AND table_name = ...`, what ORMs and tools send) generate
+  only that relation's rows (`system::is_rows_named`, columns and tables: about 1 ms at
+  10,000 tables, PostgreSQL 3.6–4.4 ms), and `rows_of_rel` now covers pg_index. Left for a
+  round of its own: binding `information_schema.sql`'s views (the `_pg_*` functions and the
+  domains exist) behind a switch and comparing the 22 files unit by unit, for join 368's plan.
 
 ## Decisions already made (don't revisit)
 

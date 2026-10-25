@@ -6067,17 +6067,10 @@ impl Ddl<'_, '_> {
             .hint(format!("You can drop {other} instead."))
         };
         let targets = {
-            // Dropping plain tables: only the tables that may depend on them are derived
-            // (`depend::drop_scope`), when every object the walk then finds belongs to them
-            // (`depend::closed`); otherwise the whole catalog's dependencies.
-            let scoped = depend::drop_scope(&cat, roots).and_then(|scope| {
-                let deps = depend::depends_in(self.ctx, &cat, &scope);
-                match depend::find_dependents(&cat, &deps, roots) {
-                    Ok(t) if depend::closed(&cat, roots, &t) => Some(Ok(t)),
-                    // (An error from the scoped walk is checked over the whole catalog.)
-                    _ => None,
-                }
-            });
+            // Only the dependencies of what may depend on the objects the walk reaches are
+            // derived (`depend::scoped_dependents`), when it can tell; otherwise the whole
+            // catalog's.
+            let scoped = depend::scoped_dependents(self.ctx, &cat, roots).map(Ok);
             let full = || {
                 let deps = depend::depends(self.ctx, &cat);
                 depend::find_dependents(&cat, &deps, roots)

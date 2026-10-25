@@ -319,6 +319,12 @@ impl<'de, V: Deserialize<'de> + Clone> Deserialize<'de> for PMap<V> {
 pub trait MapIndex<V>: Clone + Default {
     fn add(&mut self, k: u32, v: &V);
     fn remove(&mut self, k: u32, v: &V);
+    /// `old` under `k` replaced by `new`: as `remove` then `add` (an index may skip what
+    /// both have alike).
+    fn replace(&mut self, k: u32, old: &V, new: &V) {
+        self.remove(k, old);
+        self.add(k, new);
+    }
 }
 
 /// A `PMap` with secondary indexes (`MapIndex`): what DDL statements and catalog lookups ask
@@ -362,11 +368,13 @@ impl<V: Clone, I: MapIndex<V>> IndexedMap<V, I> {
 
     pub fn insert(&mut self, k: u32, v: V) -> Option<V> {
         // (The old entry's contributions go first: the new one may share keys with them.)
-        if let Some(o) = self.map.get(&k) {
-            let o = o.clone();
-            self.ix.remove(k, &o);
+        match self.map.get(&k) {
+            Some(o) => {
+                let o = o.clone();
+                self.ix.replace(k, &o, &v);
+            }
+            None => self.ix.add(k, &v),
         }
-        self.ix.add(k, &v);
         self.map.insert(k, v)
     }
 
@@ -528,6 +536,15 @@ impl<K: std::hash::Hash + Eq + Clone, V: Clone> PHash<K, V> {
 
     pub fn get(&self, k: &K) -> Option<&V> {
         self.buckets.get(Self::bucket(k))?.get(k)
+    }
+
+    /// The value under `k`, to change in place (its bucket made this map's own).
+    pub fn get_mut(&mut self, k: &K) -> Option<&mut V> {
+        let b = Self::bucket(k);
+        if !self.buckets.get(b).is_some_and(|m| m.contains_key(k)) {
+            return None;
+        }
+        Arc::make_mut(&mut Arc::make_mut(&mut self.buckets)[b]).get_mut(k)
     }
 
     pub fn contains_key(&self, k: &K) -> bool {

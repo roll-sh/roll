@@ -1636,10 +1636,19 @@ pub fn row_count(table: SysTable, ctx: &ExecCtx) -> Option<usize> {
     let cat = ctx.catalog();
     let cat = &*cat;
     let in_schema = |r: &&Row| cat.schemas.contains_key(&super::static_rows::oid_at(r, 2));
+    // (The relation maps keep their relations' row counts: `relindex::RelRows`.)
+    let rels = [
+        cat.tables.ix().rows,
+        cat.views.ix().rows,
+        cat.sequences.ix().rows,
+        cat.indexes.ix().rows,
+    ];
+    let sum = |f: fn(&super::relindex::RelRows) -> i64| rels.iter().map(f).sum::<i64>() as usize;
     let n = match table {
         PgClass => {
             super::static_rows::rows(PgClass).iter().filter(in_schema).count()
-                + relations_of(cat, None).iter().filter(|r| r.oid >= super::FIRST_USER_OID).count()
+                + sum(|r| r.class)
+                + cat.composites.len()
         }
         PgAttribute => {
             let builtin: std::collections::HashSet<u32> = super::static_rows::rows(PgClass)
@@ -1651,40 +1660,12 @@ pub fn row_count(table: SysTable, ctx: &ExecCtx) -> Option<usize> {
                 .iter()
                 .filter(|r| builtin.contains(&super::static_rows::oid_at(r, 0)))
                 .count();
-            fixed
-                + relations_of(cat, None)
-                    .iter()
-                    .filter(|r| r.oid >= super::FIRST_USER_OID)
-                    .map(|r| {
-                        let cols = match cat.tables.get(&r.oid) {
-                            Some(t) => t.columns.len(),
-                            None => rel_columns(cat, r.oid, ctx).len(),
-                        };
-                        cols + if matches!(r.kind, 'r' | 'p' | 'm' | 'S' | 't' | 'f') { 6 } else { 0 }
-                    })
-                    .sum::<usize>()
+            fixed + sum(|r| r.attribute) + cat.composites.values().map(|c| c.fields.len()).sum::<usize>()
         }
-        PgAttrdef => {
-            cat.tables
-                .values()
-                .map(|t| {
-                    t.live_columns()
-                        .filter(|(_, c)| c.default.is_some() || c.generated.is_some())
-                        .count()
-                })
-                .sum::<usize>()
-                + cat
-                    .views
-                    .values()
-                    .map(|v| {
-                        v.defaults
-                            .iter()
-                            .enumerate()
-                            .filter(|(i, d)| d.is_some() && v.columns.get(*i).is_some())
-                            .count()
-                    })
-                    .sum::<usize>()
-        }
+        PgAttrdef => sum(|r| r.attrdef),
+        PgIndex => super::static_rows::rows(PgIndex).len() + sum(|r| r.index),
+        IsTables => sum(|r| r.listed) + SysTable::all().count(),
+        IsColumns => sum(|r| r.live) + SysTable::all().map(|s| s.columns().len()).sum::<usize>(),
         _ => return None,
     };
     debug_assert_eq!(
@@ -1747,7 +1728,7 @@ pub fn rel_column(table: SysTable) -> Option<usize> {
     use SysTable::*;
     match table {
         PgClass | PgAttribute => Some(0),
-        PgAttrdef => Some(1),
+        PgAttrdef | PgIndex => Some(1),
         _ => None,
     }
 }
@@ -1769,6 +1750,192 @@ pub fn rows_of_rel(table: SysTable, ctx: &ExecCtx, rel: u32) -> Result<Option<Ve
             .filter(|r| r[k] == Value::Oid(rel))
             .collect();
         debug_assert!(all == rows, "{}'s rows of relation {rel}", table.name());
+    }
+    Ok(Some(rows))
+}
+
+/// Bounds on a name (byte order: the order `name` and `C`-collated text compare in), as an
+/// index scan's conditions on pg_class's `relname` give them (`relname = 't'`, or a pattern
+/// prefix's `relname >= 't' AND relname < 'u'`).
+#[derive(Default, Debug, Clone)]
+pub struct NameBounds {
+    /// (bound, inclusive)
+    pub lo: Option<(String, bool)>,
+    pub hi: Option<(String, bool)>,
+}
+
+impl NameBounds {
+    pub fn admits(&self, n: &str) -> bool {
+        self.lo.as_ref().is_none_or(|(b, inc)| if *inc { n >= b.as_str() } else { n > b.as_str() })
+            && self.hi.as_ref().is_none_or(|(b, inc)| if *inc { n <= b.as_str() } else { n < b.as_str() })
+    }
+
+    /// The one name admitted, when the bounds are an equality.
+    fn exact(&self) -> Option<&str> {
+        match (&self.lo, &self.hi) {
+            (Some((a, true)), Some((b, true))) if a == b => Some(a),
+            _ => None,
+        }
+    }
+}
+
+/// Where a relation's pg_class rows lie in the order `rows` generates them (Postgres's own
+/// relations, then tables, views, sequences, indexes, TOAST tables, composite types' rows,
+/// each by oid; `relations_of`'s order).
+fn class_position(cat: &Catalog, oid: u32) -> Option<(u8, u64)> {
+    if oid < super::FIRST_USER_OID {
+        let at = super::static_rows::rows(SysTable::PgClass)
+            .iter()
+            .position(|r| super::static_rows::oid_at(r, 0) == oid)?;
+        return Some((0, at as u64));
+    }
+    Some(if cat.tables.contains_key(&oid) {
+        (1, oid as u64)
+    } else if cat.views.contains_key(&oid) {
+        (2, oid as u64)
+    } else if cat.sequences.contains_key(&oid) {
+        (3, oid as u64)
+    } else if cat.indexes.contains_key(&oid) {
+        (4, oid as u64)
+    } else if let Some((t, index)) = cat.toast_owner(oid) {
+        let view = !cat.tables.contains_key(&t.oid);
+        (5, ((view as u64) << 40) | ((t.oid as u64) << 1) | index as u64)
+    } else {
+        (6, cat.composite_of_rel(oid)?.oid as u64)
+    })
+}
+
+/// How many relations' pg_class rows `class_rows_named` generates one by one at most (past
+/// it, the whole catalog is generated once).
+const NAMED_MAX: usize = 64;
+
+/// pg_class's rows of the relations whose name `bounds` admits, generated alone, in the
+/// order `rows` gives them: what an index scan on `pg_class_relname_nsp_index` reads (psql's
+/// `\d name`: `relname ~ '^(name)$'`, whose fixed prefix is the index condition), found
+/// through the catalog's name index instead of generating every relation's row. None: too
+/// many, or names a scan can't look up (TOAST tables').
+pub fn class_rows_named(ctx: &ExecCtx, bounds: &NameBounds) -> Result<Option<Vec<Row>>> {
+    // (TOAST tables aren't in the name index: bounds that may admit one aren't served.)
+    let toast = NameBounds {
+        lo: Some(("pg_toast_".into(), true)),
+        hi: Some(("pg_toast`".into(), false)),
+    };
+    let overlaps = |a: &NameBounds, b: &NameBounds| {
+        let lo_a = a.lo.as_ref().map(|x| x.0.as_str());
+        let hi_a = a.hi.as_ref().map(|x| x.0.as_str());
+        let lo_b = b.lo.as_ref().map(|x| x.0.as_str());
+        let hi_b = b.hi.as_ref().map(|x| x.0.as_str());
+        lo_a.is_none_or(|l| hi_b.is_none_or(|h| l <= h)) && lo_b.is_none_or(|l| hi_a.is_none_or(|h| l <= h))
+    };
+    if overlaps(bounds, &toast) {
+        return Ok(None);
+    }
+    let cat = ctx.catalog();
+    let mut rels: Vec<u32> = cat.relations_named(bounds.exact(), |n| bounds.admits(n));
+    rels.extend(cat.composites.values().filter(|c| bounds.admits(&c.name)).map(|c| c.relid));
+    rels.extend(
+        (super::static_rows::rows(SysTable::PgClass).iter())
+            .filter(|r| r[1].as_str().is_some_and(|n| bounds.admits(n)))
+            .map(|r| super::static_rows::oid_at(r, 0)),
+    );
+    if rels.len() > NAMED_MAX {
+        return Ok(None);
+    }
+    let mut keyed: Vec<((u8, u64), u32)> = Vec::with_capacity(rels.len());
+    for r in rels {
+        if let Some(k) = class_position(&cat, r) {
+            keyed.push((k, r));
+        }
+    }
+    keyed.sort_unstable();
+    keyed.dedup();
+    REL_GENERATED.with(|c| c.set(c.get() + 1));
+    let mut rows = Vec::new();
+    for (_, r) in keyed {
+        rows.extend(
+            rows_generated_for(SysTable::PgClass, ctx, Some(r))?
+                .into_iter()
+                .filter(|row| row[1].as_str().is_some_and(|n| bounds.admits(n))),
+        );
+    }
+    #[cfg(debug_assertions)]
+    {
+        let all: Vec<Row> = rows_generated_for(SysTable::PgClass, ctx, None)?
+            .into_iter()
+            .filter(|r| r[1].as_str().is_some_and(|n| bounds.admits(n)))
+            .collect();
+        debug_assert!(all == rows, "pg_class's rows named within {bounds:?}");
+    }
+    Ok(Some(rows))
+}
+
+/// The information_schema views generated relation by relation: their `table_schema` and
+/// `table_name` columns.
+pub fn is_rel_columns(table: SysTable) -> Option<(usize, usize)> {
+    match table {
+        SysTable::IsColumns | SysTable::IsTables => Some((1, 2)),
+        _ => None,
+    }
+}
+
+/// How many relations' information_schema rows `is_rows_named` generates one by one at
+/// most.
+const IS_NAMED_MAX: usize = 2048;
+
+/// The rows of information_schema view `table` (`is_rel_columns`) of the relations named
+/// `name` (when given) in the schema named `schema` (when given), generated alone, in the
+/// order `rows` gives them (tables, views, Postgres's own relations): what a query for one
+/// table's columns reads (`WHERE table_schema = 's' AND table_name = 't'`), which
+/// Postgres's view finds through pg_class's name index. None: not such a view, or too many.
+pub fn is_rows_named(
+    table: SysTable,
+    ctx: &ExecCtx,
+    schema: Option<&str>,
+    name: Option<&str>,
+) -> Result<Option<Vec<Row>>> {
+    let Some((sk, nk)) = is_rel_columns(table) else { return Ok(None) };
+    let cat = ctx.catalog();
+    let in_schema = |s: u32| schema.is_none_or(|n| cat.schema_name(s) == n);
+    let mut rels: Vec<(u8, u64, u32)> = Vec::new();
+    match name {
+        Some(n) => {
+            for o in cat.relations_named(Some(n), |_| true) {
+                if let Some(t) = cat.tables.get(&o).filter(|t| in_schema(t.schema)) {
+                    rels.push((0, t.oid as u64, t.oid));
+                } else if let Some(v) = cat.views.get(&o).filter(|v| in_schema(v.schema)) {
+                    rels.push((1, v.oid as u64, v.oid));
+                }
+            }
+        }
+        None => {
+            for t in cat.tables.values().filter(|t| in_schema(t.schema)) {
+                rels.push((0, t.oid as u64, t.oid));
+            }
+            for v in cat.views.values().filter(|v| in_schema(v.schema)) {
+                rels.push((1, v.oid as u64, v.oid));
+            }
+        }
+    }
+    for (i, st) in SysTable::all().enumerate() {
+        if name.is_none_or(|n| st.name() == n) && in_schema(st.schema()) {
+            rels.push((2, i as u64, st.oid()));
+        }
+    }
+    if rels.len() > IS_NAMED_MAX {
+        return Ok(None);
+    }
+    rels.sort_unstable();
+    let admits = |r: &Row| {
+        schema.is_none_or(|s| r[sk].as_str() == Some(s)) && name.is_none_or(|n| r[nk].as_str() == Some(n))
+    };
+    let mut rows = Vec::new();
+    for (_, _, o) in rels {
+        rows.extend(rows_generated_for(table, ctx, Some(o))?.into_iter().filter(admits));
+    }
+    #[cfg(debug_assertions)]
+    {
+        let all: Vec<Row> = rows_generated_for(table, ctx, None)?.into_iter().filter(admits).collect();
+        debug_assert!(all == rows, "{}'s rows named {schema:?}.{name:?}", table.name());
     }
     Ok(Some(rows))
 }
@@ -2788,8 +2955,26 @@ fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u32>) -> Resu
             out.extend(mine);
         }
         PgIndex => {
-            out.extend(super::static_rows::rows(table).iter().cloned());
-            for ix in cat.indexes.values() {
+            out.extend(
+                (super::static_rows::rows(table).iter())
+                    .filter(|r| only.is_none_or(|o| super::static_rows::oid_at(r, 1) == o))
+                    .cloned(),
+            );
+            // (Of one relation: its indexes, by the table's lists.)
+            let mine: Vec<u32> = match only.and_then(|o| cat.index_table(o)) {
+                Some(t) => {
+                    let mut v: Vec<u32> = t.indexes.iter().chain(t.pkey_index.iter()).copied().collect();
+                    v.sort_unstable();
+                    v.dedup();
+                    v
+                }
+                None => Vec::new(),
+            };
+            let indexes: Box<dyn Iterator<Item = &Arc<super::Index>>> = match only {
+                None => Box::new(cat.indexes.values()),
+                Some(o) => Box::new(mine.iter().filter_map(|i| cat.indexes.get(i)).filter(move |ix| ix.table == o)),
+            };
+            for ix in indexes {
                 let cols = index_cols(ix);
                 let nkey = ix.columns.len();
                 let options: Vec<Value> = ix
@@ -2895,7 +3080,11 @@ fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u32>) -> Resu
             }
             // TOAST indexes: the unique (chunk_id, chunk_seq) key, as create_toast_table
             // makes it.
-            for t in cat.toasted() {
+            let toasted: Box<dyn Iterator<Item = &Arc<super::Table>>> = match only {
+                None => Box::new(cat.toasted()),
+                Some(o) => Box::new(cat.toast_owner(o).filter(|(t, ix)| !ix && t.toast == o).map(|(t, _)| t).into_iter()),
+            };
+            for t in toasted {
                 out.push(vec![
                     o(t.toast + 1),
                     o(t.toast),
@@ -4850,7 +5039,7 @@ fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u32>) -> Resu
             }
         }
         IsTables => {
-            for t in cat.tables.values() {
+            for t in pick(&cat.tables, only) {
                 let kind = if t.temporary {
                     "LOCAL TEMPORARY"
                 } else if t.foreign.is_some() {
@@ -4873,7 +5062,7 @@ fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u32>) -> Resu
                     N,
                 ]);
             }
-            for v in cat.views.values().filter(|v| !v.materialized) {
+            for v in pick(&cat.views, only).filter(|v| !v.materialized) {
                 let (mask, _) = crate::sql::binder::views::view_updatability(ctx, v, false);
                 out.push(vec![
                     nm(&dbname),
@@ -4890,7 +5079,7 @@ fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u32>) -> Resu
                     N,
                 ]);
             }
-            for st in SysTable::all() {
+            for st in SysTable::all().filter(|s| only.is_none_or(|o| s.oid() == o)) {
                 let kind = if st.is_view() { "VIEW" } else { "BASE TABLE" };
                 out.push(vec![
                     nm(&dbname),
@@ -4909,18 +5098,13 @@ fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u32>) -> Resu
             }
         }
         IsColumns => {
-            let mut rels: Vec<(u32, u32, String, bool)> = cat
-                .tables
-                .values()
+            let mut rels: Vec<(u32, u32, String, bool)> = pick(&cat.tables, only)
                 .map(|t| (t.oid, t.schema, t.name.clone(), true))
                 .collect();
+            rels.extend(pick(&cat.views, only).map(|v| (v.oid, v.schema, v.name.clone(), false)));
             rels.extend(
-                cat.views
-                    .values()
-                    .map(|v| (v.oid, v.schema, v.name.clone(), false)),
-            );
-            rels.extend(
-                SysTable::all().map(|s| (s.oid(), s.schema(), s.name().to_string(), false)),
+                (SysTable::all().filter(|s| only.is_none_or(|o| s.oid() == o)))
+                    .map(|s| (s.oid(), s.schema(), s.name().to_string(), false)),
             );
             for (oid, schema, name, is_table) in rels {
                 // Views: pg_column_is_updatable.

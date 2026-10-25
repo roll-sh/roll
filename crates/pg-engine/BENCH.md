@@ -1007,6 +1007,162 @@ replace, and their indexes are rebuilt as records load.
   after DDL inside transactions and savepoints, DROP TABLE with and without dependents
   outside the table), and the debug cross-checks named above, which every golden and test
   statement exercises.
+
+## Catalog work kept to what a statement touches (round 18, agent 58)
+
+Same harness and catalog as agent 49's (`scale --keep 1`: 10,000 tables in 20 schemas and a
+table of 1,000 partitions; `scale-ops`, 100 new tables, catalog queries 5 times each, the
+first after the setup's DDL included). PostgreSQL in `a58-pg` (pinned image and settings),
+both servers on cores 20–23, the client on 24–27, load 20–25 from other agents' builds and
+regression runs. **pg** 3 runs, **before** agent 49's engine (`8ef2f59`) 3 runs, **after**
+this round's (rebased on `0a8ec4e`) 3 runs, interleaved; medians.
+
+| case | pg | before | after | after / pg |
+|---|---|---|---|---|
+| CREATE TABLE (key, NOT NULL, default) | 2.87 | 3.16 | 1.47 | 1.95x |
+| ALTER TABLE ADD COLUMN | 0.38 | 3.17 | 0.62 | 0.61x |
+| CREATE INDEX | 0.82 | 1.88 | 0.69 | 1.18x |
+| COMMENT ON TABLE | 0.24 | 0.86 | 0.20 | 1.22x |
+| DROP TABLE | 4.88 | 20.28 | 1.72 | 2.84x |
+| psql `\d t` lookup (5 runs) | 1.22 | 24.7 | 3.75 | 0.33x |
+| psql `\d t` columns (5 runs) | 0.77 | 11.9 | 2.45 | 0.31x |
+| psql `\d t` indexes (5 runs) | 0.84 | 9.39 | 1.53 | 0.55x |
+| psql `\d t` columns, after DDL | 0.45 | 38.6 | 1.34 | 0.34x |
+| psql `\d t` lookup, after DDL | 0.44 | 100 | 10.5 | 0.04x |
+| psql `\d t` indexes, after DDL | 0.57 | 41.7 | 1.62 | 0.35x |
+| information_schema.columns of a table | 4.39 | 81.3 | 0.92 | 4.8x |
+| information_schema.columns of a table, after DDL | 3.63 | 128 | 1.56 | 2.3x |
+| information_schema.tables count of a schema | 5.47 | 7.15 | 2.42 | 2.3x |
+| `count(*)` of pg_class (5 runs) | 7.31 | 18.0 | 34.5 | 0.21x |
+| `pg_class` × `pg_attribute` join (5 runs) | 8.15 | 43.9 | 46.9 | 0.17x |
+| ORM constraints query (5 runs) | 32.4 | 208 | 219 | 0.15x |
+
+Notes. The `\d` lookups' 5-run figures include a new connection's first statements
+(per-thread caches: 5–30 ms once); over 40 runs in one connection the lookup is 1.2 ms and
+1.4–1.6 ms after DDL. `count(*)` of pg_class and the join generate pg_class whole the first
+time a catalog version is read: before, the `\d` lookup had already done so in the same
+sequence, so its cost showed there instead; steady state is as before (agent 49's 7.6 ms
+for the join). The ORM query reads a whole schema's constraints right after other queries
+generated nothing it uses: the catalogs it joins are generated whole.
+
+First connection to a database (in-process, 10,000 tables, 3 runs each): before 134–178 ms,
+after 134–161 ms: unchanged within the noise. Profiled (timers around `Database::open`):
+reading the records from storage 25–35 ms, parsing 11,001 table records (8 threads) 27–60
+ms, inserting them into the maps with their indexes 26 ms (37–50 ms before this round's
+in-place index updates, below), index records 9–13 ms, `reindex` 10 ms.
+
+### Optimisations
+
+1. **DROP's dependents by referenced object** (`depend::scoped_dependents`): what
+   `findDependentObjects` reads through pg_depend's index on the referenced object, the
+   engine derives for a `depend::Scope` of objects only: the roots and, for every object the
+   walk reaches, what may refer to it (`Wanted::add`: its indexes, triggers, rules,
+   policies, statistics and publication memberships, partitions and inheritors, tables
+   referencing it by foreign keys, owned sequences, attached partition indexes, the views
+   reading it through FROM functions' composite results, the tables, views and functions
+   holding its row type, and the objects whose stored texts name it or the functions taking
+   or returning its row type), deriving again until the walk reaches nothing new. Any root
+   and any cascade of tables, views, indexes, sequences, constraints, defaults, triggers,
+   policies, rules and statistics stays scoped, partitioned tables and view dependents
+   included (agent 49's scope covered plain tables without such dependents); reaching a
+   function, schema, extension or a type other than a row type, or a walk error, derives the
+   whole catalog as before. `derived_depends` takes the scope and iterates its members (in
+   oid order, so rows keep the full derivation's order), internal triggers made from the
+   scope's tables' constraints only (`trigger::internal_triggers_of`). Debug builds compare
+   every scoped walk with the full one (as agent 49's did).
+2. **Word indexes of stored texts** (`relindex::words_in`, `TableIx` / `IndexIx` /
+   `ViewIx::words`): every identifier word (ASCII-lowercased, not starting with a digit) of
+   tables' defaults, generation expressions, checks and partition keys, indexes'
+   expressions and predicates, and views' queries, to the objects: `ddl::mentions` of a name
+   becomes a lookup (a unit test checks the two agree). Used by the scoped DROP and by
+   ALTER's `follow_renames` (views, tables and indexes whose texts may name what changed).
+3. **More relation map indexes** (`relindex`): views' column row types and FROM-function
+   relations, views' `_RETURN` rules, partitioned indexes' attached indexes, foreign keys'
+   `ri_check`s; pg_class / pg_attribute / pg_attrdef / pg_index / information_schema row
+   counts per map (`RelRows`), so the planner's estimate of those catalogs (`row_count`,
+   `explain::sys_tuples`, now also for information_schema.columns and .tables) never
+   generates rows.
+4. **In-place index updates**: a changed table updates only the parts of its index entries
+   that differ (`TableParts`, `MapIndex::replace`: an added column leaves its constraints'
+   entries alone), and sets are changed in place (`PHash::get_mut`) instead of copied out,
+   changed and put back (which copied their shared chunks each time).
+5. **Lookups that scanned the catalog**: a constraint's or default's description through
+   the owner indexes, a view rule's through the rules index, an internal trigger by oid from
+   the tables that can own it (`trigger::ri_trigger`), a table's foreign key triggers from
+   the table and its referencers (`ri_triggers(Some(t))`, which every DML binding of a table
+   ran over all tables), the dependency walk's sort keys from the scope; DDL's
+   `lock_references` over the maps' changes (`PMap::changes`) instead of every function and
+   table.
+6. **pg_class through its name index** (`exec::nodes::class_name_bounds`,
+   `system::class_rows_named`): an index scan on `pg_class_relname_nsp_index` (psql's `\d
+   name`: `relname ~ '^(name)$'`, whose fixed prefix the planner already made the index
+   condition, `relname = 'name'` or a `>=` / `<` range for a pattern) generates only the
+   relations of those names (found through the catalog's name index, up to 64) when the
+   catalog version's rows aren't generated, and picks them by name from the shared rows when
+   they are (it evaluated the regex on all 11,000). EXPLAIN is unchanged.
+7. **One relation's rows of pg_index** (`rows_of_rel` by `indrelid`), as agent 49's for
+   pg_class / pg_attribute / pg_attrdef.
+8. **information_schema by relation** (`system::is_rows_named`, `exec::nodes::is_named_rows`):
+   a scan of information_schema.columns or .tables whose filter starts with `table_schema =`
+   / `table_name =` constants generates the rows of those relations alone (as PostgreSQL's
+   view reads pg_class through its name index), in the full generation's order (checked in
+   debug builds).
+
+### information_schema: the real view definitions
+
+Not switched. The virtual tables now serve the per-table queries clients send (columns,
+tables) in about 1 ms at 10,000 tables, below PostgreSQL's 3.6–4.4 ms, which was the speed
+argument for binding the real definitions. What remains is the plan shape: binding
+PostgreSQL's definitions would make every information_schema query a 6–10-way join planned
+over catalog estimates that differ from the reference's (its come from autovacuum's
+relpages / reltuples), touching the 22 regression files that read information_schema to fix
+one EXPLAIN unit (join 368). Trialling it needs PostgreSQL's `information_schema.sql` bound as
+views (the `_pg_*` functions and the domains are there; the views aren't), behind a switch,
+with the 22 files compared unit by unit: a round of its own. Agent 49's assessment in
+HANDOFF stands, with its prerequisite (per-relation catalog rows) now covering pg_index too.
+
+### Upgrade implications
+
+None: the stored catalog, the WAL and the storage format are unchanged; the new indexes and
+counts are built as records load, like agent 49's.
+
+### Where it is still slower, and why
+
+- **Catalog queries that read whole catalogs after DDL** (`count(*)` of pg_class, joins over
+  a schema, ORM constraint queries): a new catalog version generates each catalog's rows
+  whole the first time a statement needs more than one relation's (100 ms for pg_class at
+  10,000 tables). PostgreSQL reads its heap. The fix is reusing the rows of objects a DDL
+  didn't change (per-object rows keyed by the object's `Arc`) or generating catalogs a
+  schema at a time; pg_constraint and pg_type have no per-relation generation yet.
+- **ALTER TABLE ADD COLUMN (0.6x)**: what is left is per-statement work around the change
+  (binding, the commit's record diff and header, the catalog copies' drops), no longer
+  O(catalog) passes.
+- **`\d` steady state (0.3–0.55x)**: a new connection's first statements (thread-local
+  caches) and the joins' per-row work; over many runs in one connection the lookup is
+  1.2 ms against PostgreSQL's 0.4–1.2 ms.
+- **First connection to a database (about 135–160 ms at 10,000 tables)**: every object's
+  record is read, parsed and indexed when the database opens. Near-constant needs loading
+  objects lazily (the catalog as an on-demand view of the records) or a binary snapshot of
+  the catalog; neither is done.
+- The regression database's dump still fails the same 8 statements on restore (agent 54's).
+
+### Verification (round 18, agent 58)
+
+See HANDOFF "Where it stands". `cargo test -p pg-engine` (every test binary) and clippy (no
+new warnings); `difftest smoke` passes. The regression suite in full, each run with a
+private reference, base `0a8ec4e` against this change rebased onto it: **51,148 / 51,150
+both, identical per file and in every differing unit's hunk**. New tests: `relindex::tests::words_match_mentions`, golden
+`a58_catalog_scoped` (recorded from PostgreSQL: DROP refused and cascaded over views on
+views, functions returning a row type, views over them, SQL-standard bodies, domains over
+row types, partitions with keys, indexes, triggers, policies, rules and statistics, a view
+relying on a key, a view's rule, sequences in defaults, inside transactions and savepoints;
+pg_class name lookups and pattern ranges after DDL and across savepoints; pg_index of one
+table; information_schema.columns / .tables of one relation, mixed case, conflicting
+equalities, system catalogs, after DDL in a rolled-back transaction), and the debug
+cross-checks: scoped walk against full, name lookups and per-relation rows against full
+generation, row counts against generated rows, internal triggers by oid against the full
+list, view rules index against a scan.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

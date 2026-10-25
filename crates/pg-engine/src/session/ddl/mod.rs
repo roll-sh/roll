@@ -556,10 +556,9 @@ impl<'c, 'a> Ddl<'c, 'a> {
             }
         };
         let ty = |t: &crate::types::DataType| crate::catalog::system::type_oid(&self.cat, t);
-        for (oid, f) in self.cat.functions.iter() {
-            if before.functions.get(oid).is_some_and(|b| Arc::ptr_eq(b, f)) {
-                continue;
-            }
+        // (Only what this command changed: the maps' differences, not every object.)
+        for (_, _, f) in before.functions.changes(&self.cat.functions) {
+            let Some(f) = f else { continue };
             add(NAMESPACE_CLASS, f.schema);
             for (i, (_, t)) in f.args.iter().enumerate() {
                 add(TYPE_CLASS, f.arg_domains.get(i).copied().flatten().unwrap_or_else(|| ty(t)));
@@ -581,12 +580,10 @@ impl<'c, 'a> Ddl<'c, 'a> {
             add(NAMESPACE_CLASS, d.schema);
             add(TYPE_CLASS, d.parent.or(d.base_domain).unwrap_or_else(|| ty(&d.base)));
         }
-        for (oid, t) in self.cat.tables.iter() {
-            if before.tables.get(oid).is_some_and(|b| Arc::ptr_eq(b, t)) || t.temporary {
-                continue;
-            }
+        for (oid, _, t) in before.tables.changes(&self.cat.tables) {
+            let Some(t) = t.filter(|t| !t.temporary) else { continue };
             // (A table's columns: only one this command made.)
-            if before.tables.contains_key(oid) {
+            if before.tables.contains_key(&oid) {
                 continue;
             }
             add(NAMESPACE_CLASS, t.schema);

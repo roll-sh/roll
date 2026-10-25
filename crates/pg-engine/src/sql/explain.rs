@@ -16433,7 +16433,11 @@ pub(crate) fn sys_tuples(table: crate::catalog::system::SysTable, ctx: &ExecCtx)
         }
         .map_or(1000.0, |n| n as f64)
     } else {
-        crate::catalog::system::rows(table, ctx).map_or(1000.0, |r| r.len() as f64)
+        // (Counted without generating the rows where it can be: `row_count`.)
+        match crate::catalog::system::row_count(table, ctx) {
+            Some(n) => n as f64,
+            None => crate::catalog::system::rows(table, ctx).map_or(1000.0, |r| r.len() as f64),
+        }
     }
     .max(1.0);
     SYS_ROWS.with(|m| {

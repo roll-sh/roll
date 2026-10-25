@@ -1113,27 +1113,55 @@ pub struct RiTrigger {
 /// constraints acting for its partitions, and one of a partitioned table is cloned to its
 /// partitions, which check their own rows; NOT ENFORCED keys have none.
 pub fn ri_triggers(cat: &crate::catalog::Catalog, only: Option<u32>) -> Vec<RiTrigger> {
+    match only {
+        None => ri_triggers_from(cat, cat.tables.values(), None),
+        // (Made from the constraints of the table itself and of the tables referencing it:
+        // the tables map's index of foreign key referencers.)
+        Some(o) => {
+            let mut from: std::collections::BTreeSet<u32> = (cat.tables.ix().fk_refs.get(&o))
+                .into_iter()
+                .flat_map(|c| c.keys())
+                .collect();
+            from.insert(o);
+            let out = ri_triggers_from(cat, from.iter().filter_map(|t| cat.tables.get(t)), only);
+            #[cfg(debug_assertions)]
+            {
+                let all = ri_triggers_from(cat, cat.tables.values(), only);
+                debug_assert!(
+                    all.iter().map(|r| (r.trig.oid, r.trig.table)).eq(out.iter().map(|r| (r.trig.oid, r.trig.table))),
+                    "a table's foreign key triggers"
+                );
+            }
+            out
+        }
+    }
+}
+
+/// `ri_triggers` made from the constraints of `tables` (in oid order).
+fn ri_triggers_from<'a>(
+    cat: &crate::catalog::Catalog,
+    tables: impl Iterator<Item = &'a Arc<crate::catalog::Table>>,
+    only: Option<u32>,
+) -> Vec<RiTrigger> {
     use crate::catalog::{Catalog, ConstraintKind, FkAction};
     let mut out = Vec::new();
-    // Constraints by oid: (ri_check of the first with it, whether one is a clone). (Built
-    // on first use: looking each key up by scanning every table was quadratic.)
-    let by_oid = std::cell::OnceCell::new();
-    let by_oid = || {
-        by_oid.get_or_init(|| {
-            let mut m: std::collections::HashMap<u32, (u32, bool)> = Default::default();
-            for t in cat.tables.values() {
-                for c in &t.constraints {
-                    let e = m.entry(c.oid).or_insert((c.ri_check, false));
-                    e.1 |= Catalog::fk_is_clone(t, c);
-                }
+    // A constraint by oid: (ri_check of the first table's with it, whether one is a clone),
+    // through the tables map's index of constraint owners.
+    let by_oid = |oid: u32| -> Option<(u32, bool)> {
+        let mut found: Option<(u32, bool)> = None;
+        for o in cat.tables.ix().con_owner.get(&oid)?.keys() {
+            let Some(t) = cat.tables.get(&o) else { continue };
+            for c in t.constraints.iter().filter(|c| c.oid == oid) {
+                let e = found.get_or_insert((c.ri_check, false));
+                e.1 |= Catalog::fk_is_clone(t, c);
             }
-            m
-        })
+        }
+        found
     };
     // A key a partitioned table's key was cloned to: its check triggers come first.
-    let is_clone = |oid: u32| by_oid().get(&oid).is_some_and(|e| e.1);
-    let check_base = |oid: u32| by_oid().get(&oid).map_or(0, |e| e.0);
-    for t in cat.tables.values() {
+    let is_clone = |oid: u32| by_oid(oid).is_some_and(|e| e.1);
+    let check_base = |oid: u32| by_oid(oid).map_or(0, |e| e.0);
+    for t in tables {
         for con in &t.constraints {
             let ConstraintKind::ForeignKey {
                 ref_table,
@@ -1259,9 +1287,13 @@ pub fn ri_triggers(cat: &crate::catalog::Catalog, only: Option<u32>) -> Vec<RiTr
 /// after INSERT and UPDATE), whose oids follow their constraint's (index_constraint_create).
 /// The index enforces the constraint here, so they're only seen in the catalogs.
 pub fn recheck_triggers(cat: &crate::catalog::Catalog) -> Vec<RiTrigger> {
+    recheck_triggers_from(cat.tables.values())
+}
+
+fn recheck_triggers_from<'a>(tables: impl Iterator<Item = &'a Arc<crate::catalog::Table>>) -> Vec<RiTrigger> {
     use crate::catalog::{ConstraintKind, trigger_type as tt};
     let mut out = Vec::new();
-    for t in cat.tables.values() {
+    for t in tables {
         for con in &t.constraints {
             let Some(index) = con.kind.index() else {
                 continue;
@@ -1314,11 +1346,37 @@ pub fn internal_triggers(cat: &crate::catalog::Catalog) -> Vec<RiTrigger> {
     out
 }
 
+/// `internal_triggers` made from the constraints of `tables` alone (in `internal_triggers`'
+/// order): those of the foreign keys and deferrable keys the tables have.
+pub fn internal_triggers_of(
+    cat: &crate::catalog::Catalog,
+    tables: &std::collections::BTreeSet<u32>,
+) -> Vec<RiTrigger> {
+    let mut out = ri_triggers_from(cat, tables.iter().filter_map(|t| cat.tables.get(t)), None);
+    out.extend(recheck_triggers_from(tables.iter().filter_map(|t| cat.tables.get(t))));
+    out
+}
+
 /// A foreign key's (or deferrable unique constraint's) internal trigger by oid.
 pub fn ri_trigger(cat: &crate::catalog::Catalog, oid: u32) -> Option<RiTrigger> {
-    internal_triggers(cat)
-        .into_iter()
-        .find(|r| r.trig.oid == oid)
+    // Its oid follows its constraint's (by 1 to 4) or the key's `ri_check` (by 1 or 2): only
+    // the tables with such a constraint can have it.
+    let ix = cat.tables.ix();
+    let mut from = std::collections::BTreeSet::new();
+    for k in 1..=4u32 {
+        let Some(c) = oid.checked_sub(k) else { break };
+        from.extend(ix.con_owner.get(&c).into_iter().flat_map(|c| c.keys()));
+        if k <= 2 {
+            from.extend(ix.ri_checks.get(&c).into_iter().flat_map(|c| c.keys()));
+        }
+    }
+    let found = internal_triggers_of(cat, &from).into_iter().find(|r| r.trig.oid == oid);
+    debug_assert_eq!(
+        found.as_ref().map(|r| (r.trig.oid, r.trig.table, r.constraint)),
+        internal_triggers(cat).into_iter().find(|r| r.trig.oid == oid).map(|r| (r.trig.oid, r.trig.table, r.constraint)),
+        "an internal trigger by oid"
+    );
+    found
 }
 
 /// A table's foreign key triggers, bound (`pk_only`: only those acting for it as the

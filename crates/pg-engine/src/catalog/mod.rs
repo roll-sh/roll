@@ -3668,6 +3668,21 @@ impl Catalog {
         (tables, barrier)
     }
 
+    /// The tables, views, sequences and indexes whose name `keep` accepts, through the name
+    /// index (one probe per schema when `exact` names the one name to look for).
+    pub fn relations_named(&self, exact: Option<&str>, keep: impl Fn(&str) -> bool) -> Vec<u32> {
+        match exact {
+            Some(n) => (self.schemas.keys())
+                .filter_map(|s| self.names.get(&(*s, n.to_string())))
+                .map(|(_, o)| *o)
+                .collect(),
+            None => (self.names.iter())
+                .filter(|((_, n), _)| keep(n))
+                .map(|(_, (_, o))| *o)
+                .collect(),
+        }
+    }
+
     /// The composite type (CREATE TYPE ... AS) whose relation is `relid`.
     pub fn composite_of_rel(&self, relid: u32) -> Option<&Arc<CompositeType>> {
         if self.lookups.frozen {
