@@ -530,8 +530,7 @@ All remaining work is planner/EXPLAIN (`src/sql/paths*`, `src/sql/binder/optimiz
 numbers refer to the regress harness's per-file unit counter; `tests/regress/STATUS.md` lists
 them all with the "Fixed in round N" sections describing what was already tried.
 
-1. **PlaceHolderVars evaluated at joins** (join 360, 362/363, 368, 783, 808;
-   partition_join 204). Round 14 (agent 8) evaluates them at joins: a pulled-up subquery's
+1. **PlaceHolderVars evaluated at joins** (join 360, 362/363, 368, 783). Round 14 (agent 8) evaluates them at joins: a pulled-up subquery's
    outputs an outer join nulls (as written) are PlaceHolderVars the join group computes at the
    lowest relation of their ph_eval_at (`lift.rs` `flatten_join_subquery`, `plan::phv_projection`,
    `joinpath.rs` `Phv` / `with_phvs`), so 328/343/388 match. Left: remove_useless_result_rtes
@@ -543,12 +542,14 @@ them all with the "Fixed in round N" sections describing what was already tried.
    PlaceHolderVars with sub-selects (362/363), a dummy Result showing a view's expressions
    (368), a LATERAL subquery over a join pulled up with PlaceHolderVars carrying ph_lateral
    (join 332 / 675 / 676 / 776, partition_join 41: done in round 16, agent 33; left 783, a
-   pulled-up subquery with a LATERAL item of its own, and 808 / partition_join 204, output
-   lists and relabelings; STATUS.md round 16, agent 33). (744, a hash join
+   pulled-up subquery with a LATERAL item of its own; 808 / partition_join 204, output lists
+   and relabelings, done in round 16, agent 47, whose section has what 360 / 362 / 363 still
+   need: the LATERAL item in the same join problem as the subquery's relations, the join
+   order of the PlaceHolderVar's copies). (744, a hash join
    parameterized by a LATERAL inner side: done in round 16, agent 17; 426, a JOIN USING alias
    as a PlaceHolderVar at its join: round 16, agent 30.)
-2. **Remaining join / partition_join / partition_prune plan shapes** (join 6, partition_join 1,
-   partition_prune 1 unit; round 14's agent 5 and round 16's agent 12 sections in STATUS.md have
+2. **Remaining join / partition_join / partition_prune plan shapes** (join 5, partition_prune 1
+   unit; round 14's agent 5 and round 16's agent 12 sections in STATUS.md have
    what changed and why the rest is open; round 16's agent 17 section has join relations
    parameterized by LATERAL references and why partition_prune 410 stays open (265 and 442 done in
    round 16, agent 27: SubPlan copies per place, reconsider_outer_join_clauses); partition_join 74/88/92 done in round 16, agent

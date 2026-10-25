@@ -1618,7 +1618,9 @@ fn needed_masks(root: &Arc<Plan>) -> HashMap<usize, Vec<bool>> {
     // (The statement's top projection only dropping the resjunk sort columns of a scan
     // read in their order: the scan's target list keeps them.)
     let scan_proj = |mut q: &Plan| {
+        let mut locked = false;
         while let Plan::Limit { input, .. } | Plan::LockRows { input, .. } = q {
+            locked |= matches!(q, Plan::LockRows { .. });
             q = input;
         }
         // (Or a grouping read in the ORDER BY's order, whose target list computes them,
@@ -1630,7 +1632,20 @@ fn needed_masks(root: &Arc<Plan>) -> HashMap<usize, Vec<bool>> {
             }
             matches!(p, Plan::Agg { sets: None, .. })
         };
+        // (Or the select list with its resjunk sort columns computed over a join and
+        // sorted: the final target list, resjunk entries included, is the Sort's and the
+        // top join's below it, apply_scanjoin_target_to_paths.)
+        let over_join = |p: &Plan| -> bool {
+            let Plan::Sort { input: p, .. } = p else { return false };
+            let Plan::Project { input, .. } = &**p else { return false };
+            let mut j: &Plan = input;
+            while let Plan::Project { input, .. } = j {
+                j = input;
+            }
+            matches!(j, Plan::Join { .. })
+        };
         matches!(q, Plan::Project { input: pi, .. } if matches!(&**pi, Plan::Scan(_)) || below(pi))
+            || !locked && over_join(q)
     };
     if let Plan::Project { input, exprs } = &**root
         && scan_proj(input)
@@ -2726,6 +2741,12 @@ fn tlist_layout_at(top: &mut ExNode, locked: bool) {
                         k.0 = usize::MAX;
                     }
                 }
+            }
+            // (The node computing the level's target list returns it in its order:
+            // apply_scanjoin_target_to_paths' final scan/join target, resjunk sort columns
+            // last.)
+            if final_tlist {
+                return;
             }
             let mut items: Vec<((usize, (usize, usize)), String)> = keys.into_iter().zip(std::mem::take(&mut n.output)).collect();
             items.sort_by_key(|x| x.0);
@@ -5510,7 +5531,14 @@ impl Builder<'_, '_> {
                     || matches!(&**p, Plan::Scan(s) if s.with_key && (UNDER_LOCK_ROWS.with(|u| u.get() > 0) || sys_read(s))));
             // (Nor one returning the system columns it reads.)
             let sys_cols = b.node.is_scan() && matches!(&**p, Plan::Scan(s) if s.sys && sys_read(s));
-            let mut mask = (b.node.is_join() || b.node.node_type == "Index Only Scan" || b.node.node_type == "WindowAgg" || dummy || member || sorted_join || srf_target || marked || sys_cols)
+            // (An inheritance tree's Append returns its appendrel's reltarget: the parent's
+            // columns needed above, set_append_rel_size's translation of them.)
+            let appendrel = b.node.node_type == "Append" && matches!(&**p, Plan::Append { inh: Some(_), .. });
+            // (So does a Sort over it.)
+            let sorted_append = matches!(b.node.node_type, "Sort" | "Incremental Sort")
+                && matches!(&**p, Plan::Sort { input, .. } if matches!(&**input, Plan::Append { inh: Some(_), .. }))
+                && b.node.children.first().is_some_and(|c| c.node_type == "Append" && c.children.iter().all(ExNode::is_scan));
+            let mut mask = (b.node.is_join() || appendrel || sorted_append || b.node.node_type == "Index Only Scan" || b.node.node_type == "WindowAgg" || dummy || member || sorted_join || srf_target || marked || sys_cols)
                 .then(|| self.needed.get(&addr(p)).cloned())
                 .flatten();
             if srf_target
@@ -5533,7 +5561,7 @@ impl Builder<'_, '_> {
             b.node.output = order
                 .into_iter()
                 .filter(|i| mask.as_ref().is_none_or(|m| m.get(*i).copied().unwrap_or(true)))
-                .map(|i| self.pick(&b.internal[i], Cx::Output))
+                .map(|i| self.pick(if appendrel { b.exported.get(i).unwrap_or(&b.internal[i]) } else { &b.internal[i] }, Cx::Output))
                 .collect();
             let out = b.node.output.clone();
             for pt in b.node.partials_mut() {
@@ -15607,6 +15635,13 @@ impl Builder<'_, '_> {
                     // (Over a join: its target list, the columns needed above it, possibly
                     // none.)
                     None if r.node.is_join() => r.node.output.iter().map(|o| refer_to(o)).collect(),
+                    // (Over an inheritance tree's Append: its appendrel's reltarget.)
+                    None if r.node.node_type == "Append"
+                        && r.node.children.iter().all(ExNode::is_scan)
+                        && !r.node.output.is_empty() =>
+                    {
+                        r.node.output.clone()
+                    }
                     None => r.internal.iter().map(|x| self.pick(x, Cx::Output)).collect(),
                 };
             }
@@ -15791,6 +15826,11 @@ impl Builder<'_, '_> {
                 // (Over a Gather: what it returns, its exact target list.)
                 if r.node.node_type == "Gather" && !r.node.output.is_empty() {
                     h.output = r.node.output.iter().map(|o| refer_to(o)).collect();
+                }
+                // (Of the parent's columns those of its appendrel's reltarget: the node's
+                // own masked list.)
+                if r.node.node_type == "Append" && r.node.children.iter().all(ExNode::is_scan) && !r.node.output.is_empty() {
+                    h.output = r.node.output.clone();
                 }
                 // (A Subquery Scan returns what the join reads of it.)
                 if r.node.node_type == "Subquery Scan" && !r.node.output.is_empty() {

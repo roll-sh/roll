@@ -1,0 +1,338 @@
+> CREATE TABLE a47_pt (a int, b int, c varchar) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE a47_pt_1 PARTITION OF a47_pt FOR VALUES FROM (0) TO (100) PARTITION BY RANGE (b)
+-- CREATE TABLE
+
+> CREATE TABLE a47_pt_1_1 PARTITION OF a47_pt_1 FOR VALUES FROM (0) TO (100)
+-- CREATE TABLE
+
+> CREATE TABLE a47_pt_2 PARTITION OF a47_pt FOR VALUES FROM (100) TO (200)
+-- CREATE TABLE
+
+> INSERT INTO a47_pt VALUES (1, 1, 'x'), (101, 101, 'y'), (102, 102, 'w')
+-- INSERT 0 3
+
+> CREATE TABLE a47_ut (a int, b int, c varchar)
+-- CREATE TABLE
+
+> INSERT INTO a47_ut VALUES (101, 101, 'y'), (2, 2, 'z'), (102, 102, 'v'), (NULL, NULL, NULL)
+-- INSERT 0 4
+
+> CREATE TABLE a47_i8 (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> INSERT INTO a47_i8 VALUES (123, 456), (123, 4567890123456789), (4567890123456789, 123)
+-- INSERT 0 3
+
+> CREATE TABLE a47_i4 (f1 int4)
+-- CREATE TABLE
+
+> INSERT INTO a47_i4 VALUES (0), (123456), (-123456)
+-- INSERT 0 3
+
+> ANALYZE a47_pt
+-- ANALYZE
+
+> ANALYZE a47_ut
+-- ANALYZE
+
+> ANALYZE a47_i8
+-- ANALYZE
+
+> ANALYZE a47_i4
+-- ANALYZE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT t1.b, ss.phv FROM a47_ut t1 LEFT JOIN LATERAL
+>   (SELECT t2.a AS t2a, t3.a t3a, least(t1.a, t2.a, t3.b) phv
+>      FROM a47_pt t2 JOIN a47_ut t3 ON t2.a = t3.b) ss
+>   ON t1.a = ss.t2a ORDER BY t1.a
+QUERY PLAN:text
+Sort
+  Output: t1.b, (LEAST(t1.a, t2.a, t3.b)), t1.a
+  Sort Key: t1.a
+  ->  Nested Loop Left Join
+        Output: t1.b, (LEAST(t1.a, t2.a, t3.b)), t1.a
+        ->  Seq Scan on public.a47_ut t1
+              Output: t1.a, t1.b, t1.c
+        ->  Hash Join
+              Output: t2.a, LEAST(t1.a, t2.a, t3.b)
+              Hash Cond: (t2.a = t3.b)
+              ->  Append
+                    ->  Seq Scan on public.a47_pt_1_1 t2_1
+                          Output: t2_1.a
+                          Filter: (t1.a = t2_1.a)
+                    ->  Seq Scan on public.a47_pt_2 t2_2
+                          Output: t2_2.a
+                          Filter: (t1.a = t2_2.a)
+              ->  Hash
+                    Output: t3.b
+                    ->  Seq Scan on public.a47_ut t3
+                          Output: t3.b
+-- EXPLAIN
+
+> SELECT t1.b, ss.phv FROM a47_ut t1 LEFT JOIN LATERAL
+>   (SELECT t2.a AS t2a, t3.a t3a, least(t1.a, t2.a, t3.b) phv
+>      FROM a47_pt t2 JOIN a47_ut t3 ON t2.a = t3.b) ss
+>   ON t1.a = ss.t2a ORDER BY t1.a
+b:int4 | phv:int4
+2 | NULL
+101 | 101
+102 | 102
+NULL | NULL
+-- SELECT 4
+
+> SELECT t1.b, ss.phv, ss.t3a FROM a47_ut t1 LEFT JOIN LATERAL
+>   (SELECT t2.a AS t2a, t3.a t3a, coalesce(t1.a, t2.a, t3.a) phv
+>      FROM a47_pt t2 JOIN a47_ut t3 ON t2.a = t3.b) ss
+>   ON t1.a = ss.t2a AND t1.c = ss.t2a::text ORDER BY t1.b NULLS FIRST
+b:int4 | phv:int4 | t3a:int4
+NULL | NULL | NULL
+2 | NULL | NULL
+101 | NULL | NULL
+102 | NULL | NULL
+-- SELECT 4
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT t1.b, ss.phv FROM a47_ut t1 LEFT JOIN LATERAL
+>   (SELECT t2.a AS t2a, t2.c AS t2c, least(t1.a, t2.a, t3.b) phv
+>      FROM a47_pt t2 JOIN a47_ut t3 ON t2.a = t3.b) ss
+>   ON t1.a = ss.t2a AND t1.c = ss.t2c ORDER BY t1.a
+QUERY PLAN:text
+Sort
+  Output: t1.b, (LEAST(t1.a, t2.a, t3.b)), t1.a
+  Sort Key: t1.a
+  ->  Nested Loop Left Join
+        Output: t1.b, (LEAST(t1.a, t2.a, t3.b)), t1.a
+        ->  Seq Scan on public.a47_ut t1
+              Output: t1.a, t1.b, t1.c
+        ->  Hash Join
+              Output: t2.a, t2.c, LEAST(t1.a, t2.a, t3.b)
+              Hash Cond: (t2.a = t3.b)
+              ->  Append
+                    ->  Seq Scan on public.a47_pt_1_1 t2_1
+                          Output: t2_1.a, t2_1.c
+                          Filter: ((t1.a = t2_1.a) AND ((t1.c)::text = (t2_1.c)::text))
+                    ->  Seq Scan on public.a47_pt_2 t2_2
+                          Output: t2_2.a, t2_2.c
+                          Filter: ((t1.a = t2_2.a) AND ((t1.c)::text = (t2_2.c)::text))
+              ->  Hash
+                    Output: t3.b
+                    ->  Seq Scan on public.a47_ut t3
+                          Output: t3.b
+-- EXPLAIN
+
+> SELECT t1.b, ss.phv FROM a47_ut t1 LEFT JOIN LATERAL
+>   (SELECT t2.a AS t2a, t2.c AS t2c, least(t1.a, t2.a, t3.b) phv
+>      FROM a47_pt t2 JOIN a47_ut t3 ON t2.a = t3.b) ss
+>   ON t1.a = ss.t2a AND t1.c = ss.t2c ORDER BY t1.a
+b:int4 | phv:int4
+2 | NULL
+101 | 101
+102 | NULL
+NULL | NULL
+-- SELECT 4
+
+> SET enable_hashjoin = off
+-- SET
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT t3.c FROM a47_ut t3 JOIN a47_pt t2 ON t3.b = t2.a
+QUERY PLAN:text
+Merge Join
+  Output: t3.c
+  Merge Cond: (t3.b = t2.a)
+  ->  Sort
+        Output: t3.c, t3.b
+        Sort Key: t3.b
+        ->  Seq Scan on public.a47_ut t3
+              Output: t3.c, t3.b
+  ->  Sort
+        Output: t2.a
+        Sort Key: t2.a
+        ->  Append
+              ->  Seq Scan on public.a47_pt_1_1 t2_1
+                    Output: t2_1.a
+              ->  Seq Scan on public.a47_pt_2 t2_2
+                    Output: t2_2.a
+-- EXPLAIN
+
+> SELECT t3.c FROM a47_ut t3 JOIN a47_pt t2 ON t3.b = t2.a ORDER BY 1
+c:varchar
+v
+y
+-- SELECT 2
+
+> RESET enable_hashjoin
+-- RESET
+
+> SET enable_mergejoin = off
+-- SET
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT t3.c FROM a47_ut t3 JOIN a47_pt t2 ON t3.b = t2.a
+QUERY PLAN:text
+Hash Join
+  Output: t3.c
+  Hash Cond: (t2.a = t3.b)
+  ->  Append
+        ->  Seq Scan on public.a47_pt_1_1 t2_1
+              Output: t2_1.a
+        ->  Seq Scan on public.a47_pt_2 t2_2
+              Output: t2_2.a
+  ->  Hash
+        Output: t3.c, t3.b
+        ->  Seq Scan on public.a47_ut t3
+              Output: t3.c, t3.b
+-- EXPLAIN
+
+> SELECT t3.c FROM a47_ut t3 JOIN a47_pt t2 ON t3.b = t2.a ORDER BY 1
+c:varchar
+v
+y
+-- SELECT 2
+
+> RESET enable_mergejoin
+-- RESET
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM (a47_i8 i8 INNER JOIN a47_i4 i4 ON true) RIGHT JOIN (SELECT false AS z) ss3 ON true
+>   WHERE i8.q2 = 123
+QUERY PLAN:text
+Nested Loop
+  Output: i8.q1, i8.q2, i4.f1, false
+  ->  Seq Scan on public.a47_i8 i8
+        Output: i8.q1, i8.q2
+        Filter: (i8.q2 = 123)
+  ->  Seq Scan on public.a47_i4 i4
+        Output: i4.f1
+-- EXPLAIN
+
+> SELECT * FROM (a47_i8 i8 INNER JOIN a47_i4 i4 ON true) RIGHT JOIN (SELECT false AS z) ss3 ON true
+>   WHERE i8.q2 = 123 ORDER BY i4.f1
+q1:int8 | q2:int8 | f1:int4 | z:bool
+4567890123456789 | 123 | -123456 | f
+4567890123456789 | 123 | 0 | f
+4567890123456789 | 123 | 123456 | f
+-- SELECT 3
+
+> SELECT * FROM (a47_i8 i8 INNER JOIN a47_i4 i4 ON true) RIGHT JOIN (SELECT false AS z) ss3 ON true
+>   WHERE i8.q2 = 1
+q1:int8 | q2:int8 | f1:int4 | z:bool
+-- SELECT 0
+
+> SELECT * FROM (a47_i8 i8 INNER JOIN a47_i4 i4 ON i4.f1 = 999) RIGHT JOIN (SELECT false AS z) ss3 ON true
+>   WHERE i8.q2 IS NULL
+q1:int8 | q2:int8 | f1:int4 | z:bool
+NULL | NULL | NULL | f
+-- SELECT 1
+
+> SELECT * FROM (a47_i8 i8 INNER JOIN a47_i4 i4 ON i4.f1 = 999) RIGHT JOIN (SELECT false AS z) ss3 ON true
+q1:int8 | q2:int8 | f1:int4 | z:bool
+NULL | NULL | NULL | f
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT * FROM (a47_i8 i8 INNER JOIN (SELECT (SELECT true) AS x FROM a47_i4 i4 WHERE i4.f1 = 0) ss2 ON true)
+>   RIGHT JOIN (SELECT false AS z) ss3 ON true WHERE i8.q2 = 123
+QUERY PLAN:text
+Nested Loop
+  Output: i8.q1, i8.q2, ((InitPlan 1).col1), false
+  InitPlan 1
+    ->  Result
+          Output: true
+  ->  Seq Scan on public.a47_i8 i8
+        Output: i8.q1, i8.q2
+        Filter: (i8.q2 = 123)
+  ->  Seq Scan on public.a47_i4 i4
+        Output: (InitPlan 1).col1
+        Filter: (i4.f1 = 0)
+-- EXPLAIN
+
+> SELECT * FROM (a47_i8 i8 INNER JOIN (SELECT (SELECT true) AS x FROM a47_i4 i4 WHERE i4.f1 = 0) ss2 ON true)
+>   RIGHT JOIN (SELECT false AS z) ss3 ON true WHERE i8.q2 = 123
+q1:int8 | q2:int8 | x:bool | z:bool
+4567890123456789 | 123 | t | f
+-- SELECT 1
+
+> SELECT * FROM (a47_i8 i8 INNER JOIN (SELECT (SELECT true) AS x FROM a47_i4 i4 WHERE i4.f1 = 1) ss2 ON true)
+>   RIGHT JOIN (SELECT false AS z) ss3 ON true WHERE i8.q2 = 123
+q1:int8 | q2:int8 | x:bool | z:bool
+-- SELECT 0
+
+> CREATE TABLE a47_k (i int PRIMARY KEY)
+-- CREATE TABLE
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM (SELECT i FROM a47_k UNION ALL SELECT 0) s JOIN (SELECT 1 AS j LIMIT 1) ON i = j
+QUERY PLAN:text
+Nested Loop
+  ->  Limit
+        ->  Result
+  ->  Append
+        ->  Index Only Scan using a47_k_pkey on a47_k
+              Index Cond: (i = (1))
+        ->  Result
+              One-Time Filter: ((1) = 0)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> SELECT * FROM (SELECT i FROM a47_k UNION ALL SELECT 0 UNION ALL SELECT 1) s JOIN (SELECT 1 AS j LIMIT 1) ON i = j
+QUERY PLAN:text
+Nested Loop
+  ->  Limit
+        ->  Result
+  ->  Append
+        ->  Index Only Scan using a47_k_pkey on a47_k
+              Index Cond: (i = (1))
+        ->  Result
+              One-Time Filter: ((1) = 0)
+        ->  Result
+              One-Time Filter: ((1) = 1)
+-- EXPLAIN
+
+> INSERT INTO a47_k VALUES (0), (1), (2)
+-- INSERT 0 3
+
+> SELECT * FROM (SELECT i FROM a47_k UNION ALL SELECT 0) s JOIN (SELECT 1 AS j LIMIT 1) ON i = j
+i:int4 | j:int4
+1 | 1
+-- SELECT 1
+
+> SELECT * FROM (SELECT i FROM a47_k UNION ALL SELECT 0) s JOIN (SELECT 0 AS j LIMIT 1) ON i = j ORDER BY 1
+i:int4 | j:int4
+0 | 0
+0 | 0
+-- SELECT 2
+
+> SELECT * FROM (SELECT i FROM a47_k UNION ALL SELECT 0 UNION ALL SELECT 1) s JOIN (SELECT 1 AS j LIMIT 1) ON i = j
+i:int4 | j:int4
+1 | 1
+1 | 1
+-- SELECT 2
+
+> SELECT * FROM (SELECT j FROM (VALUES (0), (1), (5)) v(j) LIMIT 3) v
+>   LEFT JOIN (SELECT i FROM a47_k UNION ALL SELECT 0) s ON i = j ORDER BY 1, 2
+j:int4 | i:int4
+0 | 0
+0 | 0
+1 | 1
+5 | NULL
+-- SELECT 4
+
+> DROP TABLE a47_k
+-- DROP TABLE
+
+> DROP TABLE a47_pt
+-- DROP TABLE
+
+> DROP TABLE a47_ut
+-- DROP TABLE
+
+> DROP TABLE a47_i8
+-- DROP TABLE
+
+> DROP TABLE a47_i4
+-- DROP TABLE
+

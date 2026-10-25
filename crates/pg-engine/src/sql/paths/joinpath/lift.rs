@@ -1245,14 +1245,16 @@ fn lift(
             }
             // remove_useless_result_rtes: an inner join with an empty relation (a pulled
             // up one-row VALUES) is its other side, the join's clauses checked there.
-            if matches!(l2, Plan::One) && *kind == JoinKind::Inner && wk == JoinKind::Inner && hash2.is_none() && params2.is_empty() {
+            // (By its kind after reduce_outer_joins: an outer join made inner too, the
+            // empty relation having no outputs a PlaceHolderVar could read.)
+            if matches!(l2, Plan::One) && *kind == JoinKind::Inner && hash2.is_none() && params2.is_empty() {
                 let plan = match cond2 {
                     Some(c) => Plan::Filter { input: Arc::new(r2), pred: c },
                     None => r2,
                 };
                 return (plan, map, nul);
             }
-            if matches!(r2, Plan::One) && *kind == JoinKind::Inner && wk == JoinKind::Inner && hash2.is_none() && params2.is_empty() {
+            if matches!(r2, Plan::One) && *kind == JoinKind::Inner && hash2.is_none() && params2.is_empty() {
                 let plan = match (l2, cond2) {
                     (Plan::Join { kind: JoinKind::Inner, left, right, cond, hash, params, nleft, nright, meta }, Some(c)) => {
                         let mut all = Vec::new();

@@ -80,6 +80,7 @@ No difference is PostgreSQL nondeterminism: every remaining unit is reproducible
 
 ### EXPLAIN (group C1) — 8 units
 join (6), partition_join (1), partition_prune (1)
+(join 808 and partition_join 204 match since round 16, agent 47: 6 once a full run counts them.)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -131,6 +132,92 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 47 (attr_needed target lists, resjunk sort columns, appendrel members' relabelings, FROM-less appendrel members)
+
+Measured in subset runs of the planner-heavy files and the files with LATERAL references
+(agent 33's list: test_setup, create_index, create_misc, create_view, select, union, subselect,
+join, aggregates, inherit, insert_conflict, limit, returning, updatable_views, merge, with, rules,
+rowsecurity, select_views, select_distinct, equivclass, partition_join, partition_prune,
+partition_aggregate, select_parallel, incremental_sort, memoize, join_hash, explain, stats_ext,
+groupingsets, window, tsrf, rangefuncs, sqljson_jsontable, collate, create_table,
+collate.icu.utf8, create_table_like, gin, gist, indexing, jsonpath, numeric, tablesample,
+plpgsql, stats_import, tidrangescan, arrays, json, jsonb, sqljson, xml, event_trigger; 20741
+units), unit by unit against a run of the base 948d0e8 (= b99558d's tree): 20733 -> 20735, the
+two units below, none broken; rebased onto 75986d8, against its own base run: 20733 -> 20735,
+the same two. Crate tests, clippy and the difftest smoke on the rebased state; no other agent's
+units moved. (The generated blocks above are the full run of `242734d`'s, before this batch: they
+still list join 808 and partition_join 204 until the next full run.)
+
+| file | fixed units |
+|---|---|
+| join | 808 |
+| partition_join | 204 |
+
+What changed:
+
+- **A join relation's target list keeps the Vars of the join clauses a parameterized path
+  inside it checks** (join 808; build_joinrel_tlist over attr_needed: distribute_qual_to_rels
+  marks an outer join's ON clause's Vars needed at its ojscope, an inner join clause's at its
+  relids). A nested loop whose inner side is a parameterized join (not only a parameterized
+  scan or Append) keeps the columns of the clauses enforced below that join it to the outer
+  side (`JoinMeta::kept` from `enforced_of`), so `t2.a` of `ON t1.a = ss.t2a` stays in the
+  Hash Join's list though the Append members filter on it.
+- **The final target list's resjunk sort columns** (join 808): a statement's select list
+  computed over a join and sorted returns its ORDER BY-only columns last in the Sort's and the
+  top join's lists (`explain::needed_masks`, the top projection dropping only resjunk columns;
+  apply_scanjoin_target_to_paths makes the final scan/join target the top join's), and the
+  node computing the level's target list keeps that list's order (`tlist_layout`: no
+  regrouping by relation for the final target list). Not under a LockRows (its row marks are
+  resjunk entries of their own) and not without a Sort: a merge join read in the ORDER BY's
+  order still drops them (`select t1.b ... order by t1.a` over a Merge Left Join shows
+  `Output: t1.b` for Postgres's `t1.b, t1.a`; not done).
+- **An inheritance tree's Append returns its appendrel's reltarget** (join 808): the Append
+  (and a Sort, Hash or Materialize over it) lists the parent's columns needed above, not all
+  of them (`Output: t2.a` for `t2.a, t2.b, t2.c`), the parent's names.
+- **Clauses translated onto appendrel members keep their RelabelTypes** (partition_join 204;
+  adjust_appendrel_attrs, replace_nestloop_params): a parameterized Append's member filters
+  were rebuilt from the clause's stripped operands, `(t1_4.c = c)` for a varchar comparison;
+  the clause's own operands are translated now (`joinpath::relabeled_as`), the nested loop
+  parameter the outer Var itself under the clause's relabeling: `((t1_4.c)::text = (c)::text)`.
+- **remove_useless_result_rtes by the join's kind after reduce_outer_joins** (`lift`): an
+  outer join reduce_outer_joins made inner whose side is a FROM-less relation with no outputs
+  (`... RIGHT JOIN (select false as z) ss3 ON true WHERE i8.q2 = 123`, the constant inlined) is
+  its other side; the `Result` that stayed at the top of join 362 / 363 is gone.
+- **A UNION ALL's FROM-less arm is a member of the appendrel's parameterized Append**
+  (reparameterize_path's RTE_RESULT case, create_resultscan_plan; `Leaf::fromless`,
+  `JNode::Append::fromless`): `(select i from t union all select 0) s join (... limit 1) on
+  i = j` is Postgres's Nested Loop over the Append of an Index Only Scan and a Result with
+  `One-Time Filter: ((1) = 0)` (cost_resultscan: one row, the clause once), where the engine
+  hashed the whole Append. join 360's appendrel gets that path now.
+
+Golden: `tests/sql/a47_target_lists.sql` (rows for the LATERAL subquery over a join with
+null-extended outer rows and NULL keys, the varchar comparison, Sort / Hash over an inheritance
+Append, the reduced right join of a FROM-less relation with its null-extended row when not
+reduced, and the FROM-less appendrel member with the One-Time Filter passing and failing, under
+a left join too). No wrong results were found comparing rows.
+
+Still open, and why:
+
+- join 360: the parameterized Append exists now, but the join problem isn't Postgres's: the
+  LATERAL `kl` reads the PlaceHolderVar `COALESCE(t.i, j)` of the pulled-up subquery, and the
+  engine plans the subquery's join `{t, j}` first (a planned nested loop) and the LATERAL join
+  over it after, as a two-item group, so `{t, kl}` parameterized by `j` (Postgres's inner
+  nested loop, the PlaceHolderVar computed in a Result over the Append for the parameter) is
+  never considered: the same bottom-up gathering agent 33 found for join 783. Also, a Limit
+  over a constant shows `Output: (1)` for Postgres's `1` (set_dummy_tlist_references keeps
+  Consts as Consts).
+- join 362 / 363: with the Result gone, left are the join order and the unused `InitPlan 2`.
+  Postgres evaluates the PlaceHolderVar `x` at the top join and computes a copy for the nested
+  loop parameter in `ss1`'s scan (362) or `i4`'s (363; identify_current_nestloop_params, the
+  PlaceHolderVar's ph_eval_at within the outer side plus its parameterization); the engine
+  computes it at `i4 ⋈ ss1` and passes it to `i8 ⋈ ss4`, a plan Postgres doesn't build though
+  it is cheaper (2.18 against Postgres's 2.20; not traced why it isn't among Postgres's paths).
+  `InitPlan 2` is the copy the PlaceHolderVar's ph_var has (the nestloop parameter's copy,
+  identify_current_nestloop_params' hasSubLinks case); not added.
+- Seen while probing: a hashed scan's target list in reltarget order (`Output: t3.b, t3.a`,
+  the join clause's Var before the PlaceHolderVar's: Postgres adds a PlaceHolderVar's Vars
+  after the clauses', fix_placeholder_input_needed_levels), the engine column order.
 
 ## Round 16, agent 33 (LATERAL subqueries over joins pulled up, PlaceHolderVars with ph_lateral, indirect lateral_relids)
 

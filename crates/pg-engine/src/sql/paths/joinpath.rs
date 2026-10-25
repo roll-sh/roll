@@ -41,6 +41,10 @@ struct Leaf {
     cols: Vec<(u32, Option<VarRef>, Option<f64>)>,
     /// An inheritance Append of table scans: its members (for parameterized paths).
     members: Option<Vec<Member>>,
+    /// A UNION ALL appendrel's FROM-less arms (`select 0`, RTE_RESULT members once
+    /// pulled up): their places among the Append's inputs and their values, members of
+    /// its parameterized paths too (a Result whose One-Time Filter is the join clause).
+    fromless: Vec<(usize, Vec<Expr>)>,
     /// A LATERAL item: the values (over the group row) it reads as `Outer(1, k)`, and
     /// the items they come from.
     lateral: Option<(Vec<Expr>, u32)>,
@@ -53,6 +57,20 @@ struct Leaf {
     /// A whole-row mark's width (ROW_MARK_COPY, `Planner::copy_marks`): set_rel_width's
     /// whole-row Var, part of the relation's reltarget and every join's above it.
     whole: u32,
+}
+
+/// A UNION ALL arm without FROM computing plain values (`select 0`): its values.
+fn fromless_arm(p: &Plan) -> Option<&Vec<Expr>> {
+    let Plan::Project { input, exprs } = p else { return None };
+    if !matches!(&**input, Plan::One) {
+        return None;
+    }
+    let mut plain = true;
+    for e in exprs {
+        plain &= !e.is_volatile() && !e.has_outer_refs() && e.columns().is_empty();
+        e.walk(&mut |x| plain &= !matches!(x, Expr::Subquery(_) | Expr::Param(..) | Expr::Agg(..) | Expr::Srf(..)));
+    }
+    plain.then_some(exprs)
 }
 
 /// A FROM item that is a table scan computing virtual generated columns in their slots
@@ -156,6 +174,9 @@ enum JNode {
         scans: Vec<(Path, Rc<Rel>)>,
         params: Vec<Expr>,
         enforced: Vec<usize>,
+        /// The FROM-less arms (`Leaf::fromless`): their places among the inputs and the
+        /// join clauses each checks, a Result's One-Time Filter.
+        fromless: Vec<(usize, Vec<Expr>)>,
     },
     Material(Rc<JP>),
     /// A join relation's partitionwise path (generate_partitionwise_join_paths): the
@@ -600,6 +621,23 @@ fn key_col(e: &Expr) -> Option<usize> {
         Expr::Col(i, _) => Some(*i),
         // (A COLLATE is a RelabelType to Postgres: the column, as examine_variable sees it.)
         Expr::Collate(x, ..) => key_col(x),
+        _ => None,
+    }
+}
+
+/// `arg` with its operand `core` (found through the relabelings and same-family casts
+/// `key_operand` looks through) replaced by `with`, the wrappers kept: a clause's operand
+/// translated onto an appendrel member (adjust_appendrel_attrs keeps RelabelTypes).
+fn relabeled_as(arg: &Expr, core: &dyn Fn(&Expr) -> bool, with: &Expr) -> Option<Expr> {
+    if core(arg) {
+        return Some(with.clone());
+    }
+    match arg {
+        Expr::Relabel(x, t) => Some(Expr::Relabel(Box::new(relabeled_as(x, core, with)?), t.clone())),
+        Expr::Collate(x, c, l) => Some(Expr::Collate(Box::new(relabeled_as(x, core, with)?), c.clone(), *l)),
+        Expr::Cast(x, from, to, f) if !std::ptr::eq(key_operand(arg), arg) => {
+            Some(Expr::Cast(Box::new(relabeled_as(x, core, with)?), from.clone(), to.clone(), *f))
+        }
         _ => None,
     }
 }
@@ -2981,7 +3019,13 @@ impl Search<'_, '_, '_> {
         'req: for req in reqs {
             let used: Vec<&(Expr, Expr, u32, usize)> =
                 cands.iter().filter(|c| c.2 & !req == 0).collect();
-            let params: Vec<Expr> = used.iter().map(|c| c.1.clone()).collect();
+            // (A nested loop parameter is the outer Var itself, the clause's relabeling of it
+            // over the parameter: `(t1_4.c)::text`, replace_nestloop_params.)
+            let core_of = |o: &Expr| -> Expr {
+                let k = key_operand(o).clone();
+                if relabeled_as(o, &|e| e.same_as(&k), &k).is_some() { k } else { o.clone() }
+            };
+            let params: Vec<Expr> = used.iter().map(|c| core_of(&c.1)).collect();
             let enforced: Vec<usize> = used.iter().map(|c| c.3).collect();
             let mut scans = Vec::new();
             let mut any_index = false;
@@ -3022,7 +3066,8 @@ impl Search<'_, '_, '_> {
                     let Expr::Call(def, args, ty) = &self.clauses[*ci].expr else {
                         continue 'req;
                     };
-                    let param = Expr::Outer(1, k, other.ty());
+                    let other_core = &params[k];
+                    let param = Expr::Outer(1, k, other_core.ty());
                     // (An inner join's clause from its equivalence class: the outer
                     // side's member first; an outer join's as written.)
                     let written = match mine {
@@ -3040,6 +3085,23 @@ impl Search<'_, '_, '_> {
                         false
                     } else {
                         written
+                    };
+                    // (adjust_appendrel_attrs translates the parent's clause as it is: the
+                    // operands keep their RelabelTypes, `((t1_4.c)::text = (c)::text)` of a
+                    // varchar comparison.)
+                    let (colx, param) = match (mine, &args[..]) {
+                        (Expr::Col(..), [a0, a1]) => {
+                            let (mo, oo) = if written { (a0, a1) } else { (a1, a0) };
+                            let g0 = leaf.off + pcol;
+                            let mine_w = relabeled_as(mo, &|e| matches!(e, Expr::Col(g, _) if *g == g0), &colx);
+                            let other_w = relabeled_as(oo, &|e| e.same_as(other_core), &param)
+                                .or_else(|| relabeled_as(other, &|e| e.same_as(other_core), &param));
+                            (mine_w.unwrap_or(colx), other_w.unwrap_or(param))
+                        }
+                        _ => {
+                            let other_w = relabeled_as(other, &|e| e.same_as(other_core), &param);
+                            (colx, other_w.unwrap_or(param))
+                        }
                     };
                     prel.quals.push(if mine_first {
                         Expr::Call(def.clone(), vec![colx, param], ty.clone())
@@ -3154,12 +3216,66 @@ impl Search<'_, '_, '_> {
             if !any_index && lat == 0 || scans.is_empty() {
                 continue;
             }
-            // cost_append (one member: the member's own costs).
-            let startup = scans[0].0.startup;
-            let rows: f64 = scans.iter().map(|(p, _)| p.rows).sum();
-            let mut total: f64 = scans.iter().map(|(p, _)| p.total).sum();
+            // The FROM-less arms: a RESULT relation's path reparameterized
+            // (reparameterize_path's T_Result), its clauses over the arm's values, costed
+            // by cost_resultscan (its one tuple, the clauses once; one row).
+            let mut fromless: Vec<(usize, Vec<Expr>)> = Vec::new();
+            let mut arm_costs: Vec<(usize, f64, f64)> = Vec::new();
+            for (input, vals) in &leaf.fromless {
+                let mut quals = Vec::new();
+                for (k, (mine, other, _, ci)) in used.iter().enumerate() {
+                    let Some(colx) = (match mine {
+                        Expr::Col(pcol, _) => vals.get(*pcol).cloned(),
+                        e => {
+                            let mut missing = false;
+                            let x = e
+                                .clone()
+                                .transform(&mut |x| {
+                                    Ok(match x {
+                                        Expr::Col(c, t) => vals.get(c).cloned().unwrap_or_else(|| {
+                                            missing = true;
+                                            Expr::Col(c, t)
+                                        }),
+                                        x => x,
+                                    })
+                                })
+                                .unwrap();
+                            (!missing).then_some(x)
+                        }
+                    }) else {
+                        continue 'req;
+                    };
+                    let Expr::Call(def, args, ty) = &self.clauses[*ci].expr else {
+                        continue 'req;
+                    };
+                    let other_core = &params[k];
+                    let param = Expr::Outer(1, k, other_core.ty());
+                    let param = relabeled_as(other, &|e| e.same_as(other_core), &param).unwrap_or(param);
+                    // (The class's clause with the outer member first; an outer join's as
+                    // written.)
+                    let pcol = mine.columns().first().copied().unwrap_or(0);
+                    let written = matches!(mine, Expr::Col(..)) && key_col(&args[0]).is_some_and(|g| g == leaf.off + pcol);
+                    let mine_first = !(self.kind == JoinKind::Inner && !self.clauses[*ci].on && self.clauses[*ci].eq.is_some()) && written;
+                    quals.push(if mine_first {
+                        Expr::Call(def.clone(), vec![colx, param], ty.clone())
+                    } else {
+                        Expr::Call(def.clone(), vec![param, colx], ty.clone())
+                    });
+                }
+                let qc: f64 = quals.iter().map(costs::qual_cost).sum();
+                arm_costs.push((*input, 0.0, CPU_TUPLE_COST + qc));
+                fromless.push((*input, quals));
+            }
+            // cost_append (one member: the member's own costs), its first member's startup.
+            let first_scan = members.first().map_or(usize::MAX, |m| m.input);
+            let startup = match arm_costs.iter().find(|a| a.0 < first_scan) {
+                Some(a) => a.1,
+                None => scans[0].0.startup,
+            };
+            let rows: f64 = scans.iter().map(|(p, _)| p.rows).sum::<f64>() + arm_costs.len() as f64;
+            let mut total: f64 = scans.iter().map(|(p, _)| p.total).sum::<f64>() + arm_costs.iter().map(|a| a.2).sum::<f64>();
             let disabled: u32 = scans.iter().map(|(p, _)| p.disabled).sum();
-            if scans.len() > 1 {
+            if scans.len() + arm_costs.len() > 1 {
                 total += CPU_TUPLE_COST * 0.5 * rows;
             }
             out.push(JP {
@@ -3176,6 +3292,7 @@ impl Search<'_, '_, '_> {
                     scans,
                     params,
                     enforced,
+                    fromless,
                 },
             });
         }
@@ -5953,6 +6070,7 @@ impl Search<'_, '_, '_> {
                 leaf,
                 scans,
                 params,
+                fromless,
                 ..
             } => {
                 let l = &self.leaves[*leaf];
@@ -5985,6 +6103,16 @@ impl Search<'_, '_, '_> {
                             input: Arc::new(scan),
                         },
                         _ => scan,
+                    });
+                }
+                // (A FROM-less arm: a Result gated on its clauses, create_resultscan_plan's
+                // quals as the One-Time Filter.)
+                for (i, quals) in fromless {
+                    let Plan::Project { exprs, .. } = &*inputs[*i] else { continue };
+                    let pred = if quals.len() == 1 { quals[0].clone() } else { Expr::And(quals.clone()) };
+                    inputs[*i] = Arc::new(Plan::Project {
+                        exprs: exprs.clone(),
+                        input: Arc::new(Plan::Filter { input: Arc::new(Plan::One), pred }),
                     });
                 }
                 (
@@ -6515,10 +6643,20 @@ impl Search<'_, '_, '_> {
                         }
                     }
                 }
-                if let JNode::Scan { enforced, .. } | JNode::Append { enforced, .. } =
-                    &inner.memoized().node
+                // (And those a parameterized inner join enforces below it that join it to
+                // the outer side: their Vars are needed at the clause's own relids, which
+                // the inner relation's don't cover, so its target list has them,
+                // build_joinrel_tlist over attr_needed.)
+                let inner_enforced: Vec<usize> = match &inner.memoized().node {
+                    JNode::Scan { enforced, .. } | JNode::Append { enforced, .. } => enforced.clone(),
+                    JNode::Join { .. } if inner.req & outer.set != 0 => enforced_of(inner.memoized())
+                        .into_iter()
+                        .filter(|&ci| self.clauses[ci].leaves & outer.set != 0)
+                        .collect(),
+                    _ => Vec::new(),
+                };
                 {
-                    for &ci in enforced {
+                    for &ci in &inner_enforced {
                         for g in self.clauses[ci].expr.columns() {
                             if let Some(i) = pos(&both, g)
                                 && !kept.contains(&i)
@@ -7250,6 +7388,8 @@ impl Planner<'_, '_> {
         for (i, inp) in inputs.iter().enumerate() {
             let (sp, proj) = match &**inp {
                 Plan::Empty { .. } => continue,
+                // (A FROM-less arm: `Leaf::fromless`.)
+                p if fromless_arm(p).is_some() => continue,
                 Plan::Scan(sp) => (sp, None),
                 Plan::Project { input, exprs } => match &**input {
                     Plan::Scan(sp) => (sp, Some(exprs)),
@@ -8795,6 +8935,14 @@ impl Planner<'_, '_> {
                 // (A subquery's scan, VALUES, an Append of several: no mark/restore.)
                 _ => InKind::NoMark,
             };
+            let fromless = match (&members, &plan) {
+                (Some(_), Plan::Append { inputs, inh: None, .. }) => inputs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, a)| fromless_arm(a).map(|e| (i, e.clone())))
+                    .collect(),
+                _ => Vec::new(),
+            };
             s.leaves.push(Leaf {
                 plan,
                 off,
@@ -8805,6 +8953,7 @@ impl Planner<'_, '_> {
                 total: est.total,
                 kind,
                 cols,
+                fromless,
                 members,
                 lateral: laterals
                     .iter()
