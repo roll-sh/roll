@@ -633,4 +633,14 @@ impl NameResolver for CatalogNames {
     fn enum_labels(&self, oid: u32) -> Option<Vec<String>> {
         self.catalog.enums.get(&oid).map(|e| e.labels.clone())
     }
+
+    fn field_domain(&self, rowtype: u32, i: usize) -> Option<u32> {
+        let cat = &self.catalog;
+        if let Some(ct) = cat.composites.get(&rowtype) {
+            let (name, _) = ct.fields.get(i)?;
+            return cat.composite_domains.get(&rowtype)?.get(name).copied();
+        }
+        let t = cat.tables.values().find(|t| t.rowtype == rowtype)?;
+        t.columns.iter().filter(|c| !c.dropped).nth(i)?.domain
+    }
 }

@@ -782,6 +782,15 @@ fn call_sql(ctx: &ExecCtx, f: &Function, args: Vec<Value>) -> Result<Vec<Row>> {
                         let (plan, cols) =
                             crate::sql::scs::quietly(|| b.bind_user_body(&one, &consts))?;
                         crate::sql::binder::perms::check(&b.perms, ctx)?;
+                        // check_sql_fn_retval, as the function's statements are planned.
+                        if final_stmt {
+                            crate::sql::binder::check_sql_retval(
+                                &b.cat,
+                                &ctx.search_path,
+                                f,
+                                Some(&cols),
+                            )?;
+                        }
                         let plan = Arc::new(plan);
                         let run = || {
                             ctx.with_outer(Rc::new(args.clone()), || collect(&plan, ctx, None))
@@ -4204,6 +4213,7 @@ impl<'c, 'a> Interp<'c, 'a> {
         if objects != crate::error::Objects::default() {
             e.objects = Some(Box::new(objects));
         }
+        let mut e = e.routine("exec_stmt_raise");
         if r.level == RaiseLevel::Exception {
             return Err(e);
         }

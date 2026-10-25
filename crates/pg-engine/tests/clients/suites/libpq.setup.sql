@@ -1,0 +1,2 @@
+DROP DATABASE IF EXISTS a38_pqgotest;
+CREATE DATABASE a38_pqgotest;

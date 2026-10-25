@@ -26,6 +26,11 @@ pub trait NameResolver: Send + Sync {
     fn nsp_oid(&self, name: &str) -> Result<u32>;
     fn role_name(&self, oid: u32) -> Option<String>;
     fn role_oid(&self, name: &str) -> Result<u32>;
+    /// pg_attribute.atttypid of field `i` of the row type `rowtype`, when it is a domain
+    /// (what record_send / record_recv put on the wire for it).
+    fn field_domain(&self, _rowtype: u32, _i: usize) -> Option<u32> {
+        None
+    }
     fn enum_labels(&self, _oid: u32) -> Option<Vec<String>> {
         None
     }
@@ -89,6 +94,8 @@ pub struct FormatCtx {
     /// The generation of the session settings this was made from (`Settings::generation`;
     /// 0: not made from a session's), which caches of what parsing under it gives compare.
     pub settings: u64,
+    /// client_encoding: what binary send / receive functions' text is in.
+    pub client_encoding: i32,
 }
 
 impl FormatCtx {
@@ -118,6 +125,7 @@ impl Default for FormatCtx {
             xml_binary_hex: false,
             tz_abbrevs: "Default",
             settings: 0,
+            client_encoding: super::mbconv::UTF8,
         }
     }
 }

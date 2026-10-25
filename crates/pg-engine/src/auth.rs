@@ -245,6 +245,24 @@ impl ScramServer {
     }
 }
 
+/// plain_crypt_verify: whether the cleartext `password` matches the stored `shadow`.
+pub fn verify_plain(role: &str, shadow: &str, password: &str) -> bool {
+    use md5::Md5;
+    match password_type(shadow) {
+        PasswordType::Md5 => {
+            shadow[3..] == hex(&Md5::digest(format!("{password}{role}").as_bytes()))
+        }
+        PasswordType::Scram => {
+            let Some((iter, salt, stored, _)) = parse_scram_secret(shadow) else {
+                return false;
+            };
+            let salted = hi(password.as_bytes(), &salt, iter);
+            sha256(&hmac(&salted, b"Client Key"))[..] == stored[..]
+        }
+        PasswordType::Plaintext => shadow == password,
+    }
+}
+
 /// Postgres's md5 password scheme: "md5" + md5(md5(password + user) + salt).
 pub fn md5_response(stored: &str, user: &str, salt: &[u8; 4]) -> Option<String> {
     use md5::Md5;

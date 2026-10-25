@@ -3,7 +3,7 @@
 //! `Send`, and a thread with a big stack gives deep queries room before
 //! "stack depth limit exceeded".
 
-use crate::auth::{ScramServer, hash_password, parse_verifier};
+use crate::auth::{ScramServer, hash_password, md5_response, parse_verifier, verify_plain};
 use crate::engine::Engine;
 use crate::error::{Error, Result, code};
 use crate::session::{Outcome, Prepared, QueryResult, Session, TxnStatus};
@@ -27,8 +27,36 @@ const THREAD_STACK: usize = 16 << 20;
 pub enum AuthMethod {
     /// Anyone who names an existing role gets in (local development).
     Trust,
-    /// SCRAM-SHA-256 against the role's stored verifier.
+    /// SCRAM-SHA-256 against the role's stored verifier (pg_hba's `scram-sha-256`).
     ScramSha256,
+    /// pg_hba's `md5`: an MD5 challenge for a role with an MD5 password, SCRAM for one with a
+    /// SCRAM secret.
+    Md5,
+    /// pg_hba's `password`: the password in clear, checked against either kind.
+    Password,
+}
+
+impl AuthMethod {
+    /// hba_authname: what system_user shows before the identity.
+    fn name(self) -> &'static str {
+        match self {
+            AuthMethod::Trust => "trust",
+            AuthMethod::ScramSha256 => "scram-sha-256",
+            AuthMethod::Md5 => "md5",
+            AuthMethod::Password => "password",
+        }
+    }
+
+    /// The `--auth` option's values (pg_hba method names).
+    pub fn parse(s: &str) -> Option<AuthMethod> {
+        Some(match s {
+            "trust" => AuthMethod::Trust,
+            "scram-sha-256" => AuthMethod::ScramSha256,
+            "md5" => AuthMethod::Md5,
+            "password" => AuthMethod::Password,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -141,6 +169,8 @@ struct Conn {
     partial: Option<usize>,
     /// A FATAL error went out: the session ends.
     fatal: bool,
+    /// pg_terminate_backend was called on this session.
+    terminated: Option<Arc<AtomicBool>>,
 }
 
 impl Conn {
@@ -212,6 +242,19 @@ impl Conn {
     }
 
     fn error(&mut self, e: &Error) {
+        // A statement interrupted by pg_terminate_backend ends the session (ProcessInterrupts:
+        // ProcDiePending wins over QueryCancelPending).
+        // (Or COPY FROM STDIN finding its input shut down by the termination.)
+        if (e.code == code::QUERY_CANCELED || e.code == code::CONNECTION_EXCEPTION)
+            && self.terminated.as_ref().is_some_and(|t| t.load(Ordering::Relaxed))
+        {
+            let fatal = Error::new(
+                code::ADMIN_SHUTDOWN,
+                "terminating connection due to administrator command",
+            )
+            .fatal();
+            return self.error(&fatal);
+        }
         if e.severity == crate::error::Severity::Fatal {
             self.fatal = true;
         }
@@ -355,6 +398,12 @@ fn error_fields(b: &mut BytesMut, e: &Error, severity: &str) {
             }
         }
     }
+    // FILE / LINE / ROUTINE (error_location).
+    let (file, line, routine) = crate::error_location::location(e);
+    for (t, v) in [(b'F', file), (b'L', line.as_str()), (b'R', routine)] {
+        b.put_u8(t);
+        cstr(b, v);
+    }
     b.put_u8(0);
 }
 
@@ -375,7 +424,11 @@ impl<'a> Body<'a> {
 
     fn cstr(&mut self) -> Result<&'a str> {
         let rest = &self.b[self.pos.min(self.b.len())..];
-        let n = rest.iter().position(|&c| c == 0).ok_or_else(Self::bad)?;
+        // pq_getmsgstring
+        let n = rest
+            .iter()
+            .position(|&c| c == 0)
+            .ok_or_else(|| Error::new(code::PROTOCOL_VIOLATION, "invalid string in message"))?;
         self.pos += n + 1;
         std::str::from_utf8(&rest[..n]).map_err(|_| {
             Error::new(
@@ -386,8 +439,12 @@ impl<'a> Body<'a> {
     }
 
     fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
+        // pq_getmsgbytes
         if self.pos + n > self.b.len() {
-            return Err(Self::bad());
+            return Err(Error::new(
+                code::PROTOCOL_VIOLATION,
+                "insufficient data left in message",
+            ));
         }
         let s = &self.b[self.pos..self.pos + n];
         self.pos += n;
@@ -435,6 +492,7 @@ fn handle(
         out: BytesMut::with_capacity(8 << 10),
         partial: None,
         fatal: false,
+        terminated: None,
     };
 
     // Startup: SSL / GSS negotiation and cancel requests come first.
@@ -500,6 +558,7 @@ fn handle(
         engine: &engine,
         pid,
     };
+    c.terminated = Some(terminated.clone());
     let get = |k: &str| params.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
     let Some(user) = get("user").filter(|u| !u.is_empty()) else {
         c.error(
@@ -539,8 +598,8 @@ fn handle(
             return c.flush();
         }
     };
-    if opts.auth == AuthMethod::ScramSha256 {
-        s.state.system_user = Some(format!("scram-sha-256:{user}"));
+    if opts.auth != AuthMethod::Trust {
+        s.state.system_user = Some(format!("{}:{user}", opts.auth.name()));
     }
 
     // Settings from the startup packet: plain parameters and `options=-c name=value`.
@@ -692,7 +751,37 @@ fn authenticate(
             }
             Ok(())
         }
-        AuthMethod::ScramSha256 => {
+        AuthMethod::Password | AuthMethod::Md5 if role.is_some() || method == AuthMethod::Password => {
+            let shadow = role.as_ref().and_then(|r| r.password.clone());
+            let md5_stored = shadow
+                .as_deref()
+                .is_some_and(|p| crate::auth::password_type(p) != crate::auth::PasswordType::Scram);
+            let ok = if method == AuthMethod::Password {
+                // AuthenticationCleartextPassword
+                c.auth(3, &[]);
+                c.flush()?;
+                let body = expect_password_message(c)?;
+                let given = Body::new(&body).cstr()?.to_string();
+                shadow.as_deref().is_some_and(|sh| verify_plain(user, sh, &given))
+            } else if md5_stored {
+                // AuthenticationMD5Password, with a random salt.
+                let salt = (rand_u64() as u32).to_be_bytes();
+                c.auth(5, &salt);
+                c.flush()?;
+                let body = expect_password_message(c)?;
+                let given = Body::new(&body).cstr()?.to_string();
+                shadow
+                    .as_deref()
+                    .and_then(|sh| md5_response(sh, user, &salt))
+                    .is_some_and(|want| want == given)
+            } else {
+                // A SCRAM secret under md5: the SCRAM exchange (CheckPWChallengeAuth).
+                return authenticate(c, engine, user, database, AuthMethod::ScramSha256);
+            };
+            check_login(role.as_ref(), user, ok, failed)
+        }
+        // (Password never gets here: its arm above takes every role.)
+        AuthMethod::ScramSha256 | AuthMethod::Md5 | AuthMethod::Password => {
             // Unknown roles and roles without a password still go through the exchange, with a
             // throwaway verifier, so the reply doesn't reveal which roles exist.
             let stored = role
@@ -750,6 +839,28 @@ fn authenticate(
             c.auth(12, server_final.as_bytes());
             Ok(())
         }
+    }
+}
+
+/// After a password check: an expired password fails like a wrong one; a role without LOGIN
+/// can't log in.
+fn check_login(
+    role: Option<&crate::catalog::Role>,
+    user: &str,
+    ok: bool,
+    failed: impl Fn() -> Error,
+) -> Result<()> {
+    let expired = role
+        .and_then(|r| r.valid_until)
+        .is_some_and(|t| t < crate::types::datetime::Clock::system().now);
+    match role {
+        Some(r) if ok && !expired && !r.login => Err(Error::new(
+            code::INVALID_AUTHORIZATION_SPECIFICATION,
+            format!("role \"{user}\" is not permitted to log in"),
+        )
+        .fatal()),
+        Some(_) if ok && !expired => Ok(()),
+        _ => Err(failed()),
     }
 }
 
@@ -850,14 +961,18 @@ fn message_loop(
                 ready_for_query(c, s)?;
                 continue;
             }
-            b'P' => guard(c, s, |c, s| parse_msg(c, s, &body)),
-            b'B' => guard(c, s, |c, s| bind_msg(c, s, &body)),
+            b'P' => {
+                extended_activity(engine, pid, s, t, &body);
+                guard(c, s, |c, s| parse_msg(c, s, &body))
+            }
+            b'B' => {
+                extended_activity(engine, pid, s, t, &body);
+                guard(c, s, |c, s| bind_msg(c, s, &body))
+            }
             b'D' => guard(c, s, |c, s| describe_msg(c, s, &body)),
             b'E' => {
-                engine.set_activity(pid, |a| a.state = "active".into());
-                let r = guard(c, s, |c, s| execute_msg(c, s, &body));
-                engine.set_activity(pid, |a| a.state = activity_state(s).into());
-                r
+                extended_activity(engine, pid, s, t, &body);
+                guard(c, s, |c, s| execute_msg(c, s, &body))
             }
             b'C' => guard(c, s, |c, s| close_msg(c, s, &body)),
             b'S' => {
@@ -868,6 +983,7 @@ fn message_loop(
                 }
                 send_notices(c, s);
                 send_changed(c, s);
+                engine.set_activity(pid, |a| a.state = activity_state(s).into());
                 ready_for_query(c, s)?;
                 continue;
             }
@@ -905,6 +1021,8 @@ fn message_loop(
             }
         };
         if let Err(e) = r {
+            // Any ERROR aborts the transaction (a protocol one too).
+            s.on_error();
             send_notices(c, s);
             c.error(&e);
             skipping = true;
@@ -917,6 +1035,33 @@ fn message_loop(
         }
         c.maybe_flush()?;
     }
+}
+
+/// pg_stat_activity while extended-protocol messages run (pgstat_report_activity in
+/// exec_parse_message / exec_bind_message / exec_execute_message): active, with the
+/// statement's text, until the Sync's ReadyForQuery.
+fn extended_activity(engine: &Engine, pid: i32, s: &Session, t: u8, body: &[u8]) {
+    let mut b = Body::new(body);
+    let sql = match t {
+        b'P' => b.cstr().ok().and_then(|_| b.cstr().ok()).map(str::to_string),
+        b'B' => b
+            .cstr()
+            .ok()
+            .and_then(|_| b.cstr().ok())
+            .and_then(|stmt| s.prepared.get(stmt).map(|p| p.sql.clone())),
+        _ => b
+            .cstr()
+            .ok()
+            .and_then(|portal| s.portals.get(portal).map(|p| p.stmt.sql.clone())),
+    };
+    let now = crate::types::datetime::Clock::system().now;
+    engine.set_activity(pid, |a| {
+        a.state = "active".into();
+        if let Some(q) = sql {
+            a.query = q;
+        }
+        a.query_start = Some(now);
+    });
 }
 
 /// Run one message's work so that an engine panic becomes an ERROR (XX000) for this
@@ -991,7 +1136,7 @@ fn row_description(c: &mut Conn, cols: &[OutCol], formats: &[i16]) {
             b.put_i16(col.attnum);
             b.put_u32(col.type_oid());
             b.put_i16(col.ty.typlen());
-            b.put_i32(col.ty.typmod());
+            b.put_i32(col.ty.catalog_typmod());
             b.put_i16(result_format(formats, i));
         }
     });
@@ -1086,6 +1231,12 @@ fn simple_batch(
             && matches!(out, Ok(Outcome::Done(_)))
             && let Err(e) = s.end_batch()
         {
+            // (The rows went out as the statement ran, before the commit failed.)
+            if let Ok(Outcome::Done(r)) = out
+                && r.cols.is_some()
+            {
+                s.partial_rows = Some(r);
+            }
             out = Err(e);
         }
         send_notices(c, s);
@@ -1143,6 +1294,19 @@ fn outcome(c: &mut Conn, s: &mut Session, o: Outcome, formats: &[i16]) -> Result
             for d in &out.data {
                 c.msg(b'd', |b| b.put_slice(d));
                 c.maybe_flush()?;
+                // A cancel while the rows go out stops them, as the executor's
+                // CHECK_FOR_INTERRUPTS would.
+                if s.cancel.load(Ordering::Relaxed) {
+                    s.on_error();
+                    return Err(Error::new(
+                        code::QUERY_CANCELED,
+                        "canceling statement due to user request",
+                    ));
+                }
+            }
+            if let Some(e) = out.error {
+                s.on_error();
+                return Err(e);
             }
             c.msg(b'c', |_| {});
             for n in &out.trailing {
@@ -1202,7 +1366,7 @@ fn parse_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     let mut b = Body::new(body);
     let name = b.cstr()?.to_string();
     let sql = b.cstr()?.to_string();
-    let n = b.i16()?.max(0) as usize;
+    let n = b.i16()? as u16 as usize;
     let mut oids = Vec::with_capacity(n);
     for _ in 0..n {
         oids.push(b.i32()? as u32);
@@ -1221,12 +1385,12 @@ fn bind_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     let mut b = Body::new(body);
     let portal = b.cstr()?.to_string();
     let stmt = b.cstr()?.to_string();
-    let nf = b.i16()?.max(0) as usize;
+    let nf = b.i16()? as u16 as usize;
     let mut formats = Vec::with_capacity(nf);
     for _ in 0..nf {
         formats.push(b.i16()?);
     }
-    let np = b.i16()?.max(0) as usize;
+    let np = b.i16()? as u16 as usize;
     let mut params = Vec::with_capacity(np);
     for _ in 0..np {
         let len = b.i32()?;
@@ -1236,7 +1400,7 @@ fn bind_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
             Some(b.bytes(len as usize)?.to_vec())
         });
     }
-    let nr = b.i16()?.max(0) as usize;
+    let nr = b.i16()? as u16 as usize;
     let mut result_formats = Vec::with_capacity(nr);
     for _ in 0..nr {
         result_formats.push(b.i16()?);
@@ -1261,9 +1425,10 @@ fn describe_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
             };
             let cols = s.describe(&p)?;
             c.msg(b't', |o| {
-                o.put_i16(p.param_types.len() as i16);
-                for t in &p.param_types {
-                    o.put_u32(t.oid());
+                let oids = p.param_type_oids();
+                o.put_i16(oids.len() as i16);
+                for t in oids {
+                    o.put_u32(t);
                 }
             });
             match cols {
@@ -1272,17 +1437,14 @@ fn describe_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
             }
         }
         b'P' => {
-            let Some(pt) = s.portals.get(&name) else {
+            let Some((cols, f)) = s.portal_cols(&name) else {
                 return Err(Error::new(
                     code::INVALID_CURSOR_NAME,
                     format!("portal \"{name}\" does not exist"),
                 ));
             };
-            match pt.cols.clone() {
-                Some(cols) => {
-                    let f = pt.result_formats.clone();
-                    row_description(c, &cols, &f);
-                }
+            match cols {
+                Some(cols) => row_description(c, &cols, &f),
                 None => c.msg(b'n', |_| {}),
             }
         }
@@ -1312,11 +1474,20 @@ fn execute_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
         c.msg(b'I', |_| {});
         return Ok(());
     }
+    s.partial_rows = None;
     let r = s.execute_portal(&portal, max_rows);
     if r.is_ok() {
         s.note_executed();
     }
     send_notices(c, s);
+    // The rows a SELECT made before failing went out before the error (as DataRows of the
+    // portal's formats: Execute sends no RowDescription).
+    if r.is_err()
+        && let Some(rows) = s.partial_rows.take()
+    {
+        let fmt = s.format_ctx();
+        let _ = data_rows(c, &rows, &formats, &fmt);
+    }
     let (o, more) = r.map_err(|e| e.in_chars(&sql))?;
     match o {
         Outcome::Done(r) if more => {
@@ -1356,12 +1527,12 @@ fn fastpath_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
 /// parse_fcall_arguments: the argument formats, the arguments, and the result format.
 #[allow(clippy::type_complexity)]
 fn fastpath_args(b: &mut Body) -> Result<(Vec<i16>, Vec<Option<Vec<u8>>>, i16)> {
-    let nf = b.i16()?.max(0) as usize;
+    let nf = b.i16()? as u16 as usize;
     let mut formats = Vec::with_capacity(nf);
     for _ in 0..nf {
         formats.push(b.i16()?);
     }
-    let nargs = b.i16()?.max(0);
+    let nargs = b.i16()? as u16;
     let mut args = Vec::with_capacity(nargs as usize);
     for _ in 0..nargs {
         let len = b.i32()?;

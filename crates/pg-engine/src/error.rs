@@ -149,6 +149,9 @@ pub struct Objects {
     /// A query run on the client's behalf that the error's position points into (a
     /// PL/pgSQL expression): the 1-based character position and the query.
     pub internal: Option<(u32, String)>,
+    /// The ROUTINE field, where clients read it to tell errors apart (asyncpg and pgjdbc
+    /// recognise a plan invalidated by DDL by RevalidateCachedQuery).
+    pub routine: Option<&'static str>,
 }
 
 /// How bad it is: the `S`/`V` field of an ErrorResponse or NoticeResponse.
@@ -201,6 +204,11 @@ impl Error {
     }
     fn objects_mut(&mut self) -> &mut Objects {
         self.objects.get_or_insert_with(Default::default)
+    }
+    /// The source function Postgres reports raising it (the ROUTINE field).
+    pub fn routine(mut self, r: &'static str) -> Self {
+        self.objects_mut().routine = Some(r);
+        self
     }
     /// `errtable`: the table (and its schema) it concerns.
     pub fn table(mut self, schema: &str, table: &str) -> Self {

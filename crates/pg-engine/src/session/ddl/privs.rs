@@ -593,6 +593,45 @@ impl Ddl<'_, '_> {
         let Some(set) = s.setstmt.as_ref() else {
             return Ok("ALTER ROLE".into());
         };
+        self.store_role_setting(role, db, set)?;
+        Ok("ALTER ROLE".into())
+    }
+
+    /// ALTER DATABASE ... SET / RESET (AlterDatabaseSet): the database's settings for every
+    /// role, pg_db_role_setting's (database, 0) row; its owner (or a superuser) may.
+    pub(super) fn alter_database_set(&mut self, s: &pb::AlterDatabaseSetStmt) -> Result<String> {
+        let Some((_, _, owner)) = self
+            .ctx
+            .sess
+            .cluster
+            .databases()
+            .into_iter()
+            .find(|d| d.1 == s.dbname)
+        else {
+            return Err(Error::new(
+                code::UNDEFINED_DATABASE,
+                format!("database \"{}\" does not exist", s.dbname),
+            ));
+        };
+        if !self.is_superuser() && !self.cat.has_privs_of_role(self.me(), owner, self.db_owner()) {
+            return Err(Error::new(
+                code::INSUFFICIENT_PRIVILEGE,
+                format!("must be owner of database {}", s.dbname),
+            ));
+        }
+        if let Some(set) = s.setstmt.as_ref() {
+            self.store_role_setting(0, Some(s.dbname.clone()), set)?;
+        }
+        Ok("ALTER DATABASE".into())
+    }
+
+    /// One SET / RESET / RESET ALL on a (role, database) entry of pg_db_role_setting.
+    fn store_role_setting(
+        &mut self,
+        role: u32,
+        db: Option<String>,
+        set: &pb::VariableSetStmt,
+    ) -> Result<()> {
         let entry = self
             .cat
             .role_settings
@@ -609,7 +648,10 @@ impl Ddl<'_, '_> {
                 list.retain(|(n, _)| !n.eq_ignore_ascii_case(&set.name));
                 list.push((set.name.clone(), value));
             }
-            Ok(K::VarReset) => list.retain(|(n, _)| !n.eq_ignore_ascii_case(&set.name)),
+            // (SET ... TO DEFAULT removes the entry, as RESET does.)
+            Ok(K::VarReset | K::VarSetDefault) => {
+                list.retain(|(n, _)| !n.eq_ignore_ascii_case(&set.name))
+            }
             Ok(K::VarResetAll) => list.clear(),
             _ => {}
         }
@@ -623,8 +665,7 @@ impl Ddl<'_, '_> {
                 settings: list,
             });
         }
-        self.save()?;
-        Ok("ALTER ROLE".into())
+        self.save()
     }
 
     pub(super) fn drop_role(&mut self, s: &pb::DropRoleStmt) -> Result<String> {

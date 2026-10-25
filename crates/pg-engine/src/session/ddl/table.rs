@@ -706,6 +706,19 @@ impl Ddl<'_, '_> {
                 ),
             ));
         }
+        // transformIndexConstraints: the primary key's index comes first of the indexes the
+        // constraints make (its oid is the lowest).
+        if let Some(pk) = rest
+            .iter()
+            .position(|p| matches!(p, Pending::Index { primary: true, .. }))
+            && let Some(first) = rest
+                .iter()
+                .position(|p| matches!(p, Pending::Index { .. } | Pending::Exclusion(_)))
+            && first < pk
+        {
+            let p = rest.remove(pk);
+            rest.insert(first, p);
+        }
         let not_nulls = merge_not_nulls(not_nulls, &t)?;
         let mut not_nulls = not_nulls;
         for p in &rest {
@@ -1374,6 +1387,19 @@ impl Ddl<'_, '_> {
             }
         }
         self.apply_seq_options(&mut sq, opts, true)?;
+        // generateSerialExtraStmts's DEBUG1 (CREATE TABLE's, while the table isn't in the
+        // catalog yet; else ALTER TABLE's).
+        let stmt = if self.cat.tables.contains_key(&t.oid) {
+            "ALTER TABLE"
+        } else {
+            "CREATE TABLE"
+        };
+        let mut e = crate::session::notice(format!(
+            "{stmt} will create implicit sequence \"{name}\" for serial column \"{}.{col}\"",
+            t.name
+        ));
+        e.severity = crate::error::Severity::Debug;
+        self.ctx.notice(e);
         sq.name = name;
         Ok(sq)
     }

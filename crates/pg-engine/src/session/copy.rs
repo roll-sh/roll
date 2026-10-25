@@ -434,6 +434,9 @@ pub struct CopyOut {
     /// Notices raised after the rows went out (the query's AFTER triggers, which fire at its
     /// end): they follow the data.
     pub trailing: Vec<Error>,
+    /// An error making a row's data (its output function's, or the conversion to the
+    /// client's encoding): Postgres sends it after CopyOutResponse and the rows before it.
+    pub error: Option<Error>,
 }
 
 impl Session {
@@ -776,7 +779,7 @@ impl Session {
                 .map(|b| *b)
                 .unwrap(),
         };
-        let (rows, cols, after, file) = self.with_ctx(params, |ctx| {
+        let (rows, cols, after, file, failed) = self.with_ctx(params, |ctx| {
             let bq = Binder::new(ctx, Vec::new()).bind_statement(&stmt)?;
             bq.check_perms(ctx)?;
             // BeginCopyTo opens the file once the query is planned.
@@ -800,15 +803,26 @@ impl Session {
             // (One statement around both, so the query's own doesn't run the queue.)
             let mut rows = Vec::new();
             let mut mark = 0;
-            ctx.statement(|| {
+            let run = ctx.statement(|| {
                 crate::exec::trigger::batch(ctx, || {
                     rows = collect(&bq.plan, ctx, None)?;
                     mark = ctx.notices.borrow().len();
                     Ok(())
                 })
-            })?;
-            let after = ctx.notices.borrow().len() - mark;
-            Ok((rows, bq.cols, after, file))
+            });
+            // An error running the query comes after CopyOutResponse (DoCopyTo sends it
+            // before the executor runs), to the client; one into a file is the statement's.
+            let failed = match run {
+                Ok(()) => None,
+                Err(e) if file.is_none() => Some(e),
+                Err(e) => return Err(e),
+            };
+            let after = if failed.is_some() {
+                0
+            } else {
+                ctx.notices.borrow().len() - mark
+            };
+            Ok((rows, bq.cols, after, file, failed))
         })?;
         let trailing = self.notices.split_off(self.notices.len().saturating_sub(after));
         let fmt = self.state.settings.borrow().format_ctx();
@@ -826,13 +840,25 @@ impl Session {
                 .collect();
             data.push(format!("{}\n", line.join(&format.delimiter.to_string())).into_bytes());
         }
-        if format.binary {
+        if let Some(e) = failed {
             return self.copy_out_to(file, CopyOut {
-                data: binary_copy_out(&rows, &cols, &fmt)?,
+                data,
+                ncols: cols.len(),
+                tag: String::new(),
+                binary: format.binary,
+                trailing,
+                error: Some(e),
+            });
+        }
+        if format.binary {
+            let (data, error) = binary_copy_out(&rows, &cols, &fmt)?;
+            return self.copy_out_to(file, CopyOut {
+                data,
                 ncols: cols.len(),
                 tag: format!("COPY {}", rows.len()),
                 binary: true,
                 trailing,
+                error,
             });
         }
         for r in &rows {
@@ -856,9 +882,17 @@ impl Session {
         }
         // The data goes out in the ENCODING option's encoding, else the client's.
         let enc = self.copy_encoding(&format);
+        let mut error = None;
         if enc != crate::types::mbconv::UTF8 {
-            for d in &mut data {
-                *d = crate::types::mbconv::convert(d, crate::types::mbconv::UTF8, enc)?.into_owned();
+            for i in 0..data.len() {
+                match crate::types::mbconv::convert(&data[i], crate::types::mbconv::UTF8, enc) {
+                    Ok(d) => data[i] = d.into_owned(),
+                    Err(e) => {
+                        data.truncate(i);
+                        error = Some(e);
+                        break;
+                    }
+                }
             }
         }
         self.copy_out_to(file, CopyOut {
@@ -867,6 +901,7 @@ impl Session {
             tag: format!("COPY {}", rows.len()),
             binary: false,
             trailing,
+            error,
         })
     }
 
@@ -876,6 +911,9 @@ impl Session {
         let Some((name, mut f)) = file else {
             return Ok(Outcome::CopyOut(out));
         };
+        if let Some(e) = out.error {
+            return Err(e);
+        }
         let mut w = std::io::BufWriter::new(&mut f);
         for d in &out.data {
             w.write_all(d).map_err(|e| {
@@ -1619,7 +1657,7 @@ fn binary_copy_out(
     rows: &[Vec<Value>],
     cols: &[crate::sql::plan::OutCol],
     fmt: &crate::types::text::FormatCtx,
-) -> Result<Vec<Vec<u8>>> {
+) -> Result<(Vec<Vec<u8>>, Option<Error>)> {
     use bytes::BufMut;
     for c in cols {
         if !crate::types::binary::supports_binary(&c.ty) {
@@ -1632,13 +1670,18 @@ fn binary_copy_out(
             ));
         }
     }
-    let mut data = Vec::with_capacity(rows.len() + 2);
+    // One CopyData per row, as CopySendEndOfRow sends them: the header goes out with the first
+    // row (or the trailer, without rows).
+    let mut data = Vec::with_capacity(rows.len() + 1);
     let mut head = b"PGCOPY\n\xff\r\n\0".to_vec();
     head.extend_from_slice(&0i32.to_be_bytes());
     head.extend_from_slice(&0i32.to_be_bytes());
-    data.push(head);
+    let mut head = Some(head);
     for r in rows {
         let mut b = bytes::BytesMut::new();
+        if let Some(h) = head.take() {
+            b.put_slice(&h);
+        }
         b.put_i16(r.len() as i16);
         for (v, c) in r.iter().zip(cols) {
             if v.is_null() {
@@ -1646,14 +1689,18 @@ fn binary_copy_out(
                 continue;
             }
             let mut field = bytes::BytesMut::new();
-            crate::types::binary::encode(v, &c.ty, fmt, &mut field)?;
+            if let Err(e) = crate::types::binary::encode(v, &c.ty, fmt, &mut field) {
+                return Ok((data, Some(e)));
+            }
             b.put_i32(field.len() as i32);
             b.put_slice(&field);
         }
         data.push(b.to_vec());
     }
-    data.push((-1i16).to_be_bytes().to_vec());
-    Ok(data)
+    let mut tail = head.unwrap_or_default();
+    tail.extend_from_slice(&(-1i16).to_be_bytes());
+    data.push(tail);
+    Ok((data, None))
 }
 
 /// COPY FROM in binary format: each tuple's fields through the columns' typreceive.

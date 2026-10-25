@@ -657,6 +657,11 @@ pub fn cast_value(
             to,
             explicit,
         )?),
+        // text(inet), pg_cast's function for inet / cidr to text, varchar and bpchar: always
+        // with the mask width (inet_out leaves out a full one).
+        (Value::Inet(a, m), T::Text | T::Varchar(_) | T::Bpchar(_)) => Value::Text(
+            apply_char_typmod(&super::text::format_inet(a, *m, true), to, explicit)?,
+        ),
         // I/O conversion
         (_, T::Text | T::Varchar(_) | T::Bpchar(_) | T::Name) => {
             let s = format_value(&v, from, ctx);

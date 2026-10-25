@@ -8,6 +8,7 @@ pub mod catalog;
 pub mod engine;
 pub mod ext;
 pub mod error;
+pub mod error_location;
 pub mod exec;
 pub mod largeobj;
 pub mod notify;

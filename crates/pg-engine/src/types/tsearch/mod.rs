@@ -765,7 +765,7 @@ impl<'a> QueryParser<'a> {
     /// `parse_or_operator` (websearch): a standalone OR followed by an operand.
     fn or_operator(&mut self) -> bool {
         let rest = &self.buffer[self.at..];
-        if rest.len() < 2 || !rest[..2].eq_ignore_ascii_case("or") {
+        if !rest.as_bytes().get(..2).is_some_and(|p| p.eq_ignore_ascii_case(b"or")) {
             return false;
         }
         let after = &rest[2..];

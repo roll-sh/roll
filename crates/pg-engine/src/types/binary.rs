@@ -56,8 +56,52 @@ pub fn supports_binary(ty: &DataType) -> bool {
         | T::TxidSnapshot => true,
         // Extended statistics send their bytes (bytea's send).
         T::PgNdistinct | T::PgDependencies | T::PgMcvList => true,
+        T::Timetz(_)
+        | T::Inet
+        | T::Cidr
+        | T::Macaddr
+        | T::Macaddr8
+        | T::Bit(_)
+        | T::Varbit(_)
+        | T::Money
+        | T::PgLsn
+        | T::Xid
+        | T::Cid
+        | T::Tid
+        | T::Xml
+        | T::Refcursor
+        | T::Enum(..)
+        | T::Regprocedure
+        | T::Regnamespace
+        | T::Regrole
+        | T::Regoper
+        | T::Regoperator
+        | T::Regcollation
+        | T::Int2Vector
+        | T::OidVector
+        | T::Cstring
+        | T::Void
+        | T::PgNodeTree
+        | T::Record => true,
+        T::Row(fields) => fields.iter().all(|(_, t)| supports_binary(t)),
+        T::Base(b) => b.repr.as_ref().is_some_and(supports_binary),
         _ => false,
     }
+}
+
+/// Text a send function writes (pq_sendtext): in the client's encoding.
+fn put_text(out: &mut BytesMut, s: &str, ctx: &FormatCtx) -> Result<()> {
+    out.put_slice(&super::mbconv::convert(
+        s.as_bytes(),
+        super::mbconv::UTF8,
+        ctx.client_encoding,
+    )?);
+    Ok(())
+}
+
+/// Text a receive function reads (pq_getmsgtext): from the client's encoding, checked.
+fn get_text(b: &[u8], ctx: &FormatCtx) -> Result<String> {
+    super::mbconv::to_utf8(b, ctx.client_encoding)
 }
 
 pub fn encode(v: &Value, ty: &DataType, ctx: &FormatCtx, out: &mut BytesMut) -> Result<()> {
@@ -81,19 +125,66 @@ pub fn encode(v: &Value, ty: &DataType, ctx: &FormatCtx, out: &mut BytesMut) -> 
         (Value::Float4(f), _) => out.put_f32(*f),
         (Value::Float8(f), _) => out.put_f64(*f),
         (Value::Numeric(n), _) => encode_numeric(n, out),
+        // A made base type sends as its representation's type does.
+        (_, T::Base(b)) if b.repr.is_some() => encode(v, b.repr.as_ref().unwrap(), ctx, out)?,
         // jsonpath_send: a version byte, then the text.
         (Value::Text(s), T::JsonPath) => {
             out.put_u8(1);
-            out.put_slice(s.as_bytes());
+            put_text(out, s, ctx)?;
         }
         // xml_send: the text with its declaration normalized (xml_out_internal).
-        (Value::Text(s), T::Xml) => out.put_slice(super::xml::xml_out(s).as_bytes()),
-        (Value::Text(s), _) => out.put_slice(s.as_bytes()),
-        (Value::Json(s), _) => out.put_slice(s.as_bytes()),
+        (Value::Text(s), T::Xml) => put_text(out, &super::xml::xml_out(s), ctx)?,
+        (Value::Text(_), T::Aclitem) => bail!(
+            UNDEFINED_FUNCTION,
+            "no binary output function available for type aclitem"
+        ),
+        // A composite, range or array value kept as its text: by the type's own send.
+        (Value::Text(s), T::Row(_) | T::Range(_) | T::Multirange(_) | T::Array(_)) => {
+            let v = parse_value(s, ty, ctx)?;
+            if matches!(v, Value::Text(_)) {
+                out.put_slice(s.as_bytes());
+            } else {
+                encode(&v, ty, ctx, out)?;
+            }
+        }
+        (Value::Text(s), _) => put_text(out, s, ctx)?,
+        (Value::Json(s), _) => put_text(out, s, ctx)?,
         (Value::Jsonb(j), _) => {
             out.put_u8(1);
-            out.put_slice(j.to_string().as_bytes());
+            put_text(out, &j.to_string(), ctx)?;
         }
+        // timetz_send: the time, then the zone (seconds west of UTC).
+        (Value::Timetz(t, z), _) => {
+            out.put_i64(*t);
+            out.put_i32(*z);
+        }
+        // inet_send / cidr_send: family, bits, is_cidr, address length, address.
+        (Value::Inet(a, bits), _) => {
+            out.put_u8(if a.len() == 4 {
+                PGSQL_AF_INET
+            } else {
+                PGSQL_AF_INET6
+            });
+            out.put_u8(*bits);
+            out.put_u8(matches!(ty, T::Cidr) as u8);
+            out.put_u8(a.len() as u8);
+            out.put_slice(a);
+        }
+        (Value::Macaddr(m), _) => out.put_slice(m),
+        (Value::Macaddr8(m), _) => out.put_slice(m),
+        // bit_send / varbit_send: the length in bits, then the bytes.
+        (Value::Bits(len, b), _) => {
+            out.put_i32(*len as i32);
+            out.put_slice(b);
+        }
+        (Value::Money(c), _) => out.put_i64(*c),
+        (Value::PgLsn(l), _) => out.put_u64(*l),
+        (Value::Tid(blk, off), _) => {
+            out.put_u32(*blk);
+            out.put_u16(*off);
+        }
+        // int2vectorsend / oidvectorsend are array_send's.
+        (Value::Array(a), T::Int2Vector | T::OidVector) => encode_array(a, &a.elem, ctx, out)?,
         (Value::Char(c), _) => out.put_u8(*c),
         (Value::Bytea(b), _) => out.put_slice(b),
         (Value::Date(d), _) => out.put_i32(*d),
@@ -115,7 +206,16 @@ pub fn encode(v: &Value, ty: &DataType, ctx: &FormatCtx, out: &mut BytesMut) -> 
             super::tsearch::tsquery_send(q, &mut b);
             out.put_slice(&b);
         }
-        (Value::Array(a), T::Array(_)) => encode_array(a, ctx, out)?,
+        // array_send by the column's element type (a stored array of composites may hold its
+        // elements as their text).
+        (Value::Array(a), T::Array(e)) => {
+            let elem = if matches!(**e, T::Record | T::Unknown | T::AnyElement) {
+                &a.elem
+            } else {
+                &**e
+            };
+            encode_array(a, elem, ctx, out)?
+        }
         // path_send: a closed flag and a count first; polygon_send: a count.
         (Value::Geo(g), _) => {
             use super::geo::Geo;
@@ -150,7 +250,7 @@ pub fn encode(v: &Value, ty: &DataType, ctx: &FormatCtx, out: &mut BytesMut) -> 
                     T::Row(f) if f.len() == items.len() => f[i].1.clone(),
                     _ => super::cast::value_type(v),
                 };
-                out.put_u32(ft.oid());
+                out.put_u32(field_oid(ty, i, &ft, ctx));
                 if v.is_null() {
                     out.put_i32(-1);
                     continue;
@@ -167,6 +267,111 @@ pub fn encode(v: &Value, ty: &DataType, ctx: &FormatCtx, out: &mut BytesMut) -> 
         }
     }
     Ok(())
+}
+
+/// The type oid record_send / record_recv give field `i` of a row type: its attribute's
+/// (a domain, when declared as one), else its value type's.
+fn field_oid(ty: &DataType, i: usize, ft: &DataType, ctx: &FormatCtx) -> u32 {
+    match (ty, &ctx.names) {
+        (DataType::Row(rt), Some(n)) if rt.oid != 0 => {
+            n.field_domain(rt.oid, i).unwrap_or_else(|| ft.oid())
+        }
+        _ => ft.oid(),
+    }
+}
+
+// TZDISP_LIMIT: a zone displacement's bound, in seconds.
+const TZDISP_LIMIT: i32 = 16 * 3600;
+
+// inet's address families on the wire.
+const PGSQL_AF_INET: u8 = 2;
+const PGSQL_AF_INET6: u8 = 3;
+
+/// inet_recv / cidr_recv.
+fn decode_inet(b: &[u8], cidr: bool) -> Result<Value> {
+    let tname = if cidr { "cidr" } else { "inet" };
+    let short = || err!(PROTOCOL_VIOLATION, "insufficient data left in message");
+    if b.len() < 4 {
+        return Err(short());
+    }
+    let (family, bits, nb) = (b[0], b[1], b[3]);
+    let size = match family {
+        PGSQL_AF_INET => 4,
+        PGSQL_AF_INET6 => 16,
+        _ => bail!(
+            INVALID_BINARY_REPRESENTATION,
+            "invalid address family in external \"{tname}\" value"
+        ),
+    };
+    if bits as usize > size * 8 {
+        bail!(
+            INVALID_BINARY_REPRESENTATION,
+            "invalid bits in external \"{tname}\" value"
+        );
+    }
+    if nb as usize != size {
+        bail!(
+            INVALID_BINARY_REPRESENTATION,
+            "invalid length in external \"{tname}\" value"
+        );
+    }
+    if b.len() < 4 + size {
+        return Err(short());
+    }
+    let addr = &b[4..4 + size];
+    if b.len() > 4 + size {
+        bail!(
+            INVALID_BINARY_REPRESENTATION,
+            "incorrect binary data format"
+        );
+    }
+    if cidr && super::text::inet_network(addr, bits) != addr {
+        return Err(err!(
+            INVALID_BINARY_REPRESENTATION,
+            "invalid external \"cidr\" value"
+        )
+        .detail("Value has bits set to right of mask."));
+    }
+    Ok(Value::Inet(addr.into(), bits))
+}
+
+/// bit_recv / varbit_recv.
+fn decode_bits(mut b: &[u8], ty: &DataType) -> Result<Value> {
+    if b.len() < 4 {
+        bail!(PROTOCOL_VIOLATION, "insufficient data left in message");
+    }
+    let len = b.get_i32();
+    // VARBITMAXLEN
+    if !(0..=(0x3fff_ffff - 8)).contains(&len) {
+        bail!(
+            INVALID_BINARY_REPRESENTATION,
+            "invalid length in external bit string"
+        );
+    }
+    let typmod = ty.typmod();
+    match ty {
+        DataType::Bit(_) if typmod > 0 && len != typmod => bail!(
+            STRING_DATA_LENGTH_MISMATCH,
+            "bit string length {len} does not match type bit({typmod})"
+        ),
+        DataType::Varbit(_) if typmod > 0 && len > typmod => bail!(
+            STRING_DATA_RIGHT_TRUNCATION,
+            "bit string too long for type bit varying({typmod})"
+        ),
+        _ => {}
+    }
+    let n = (len as usize).div_ceil(8);
+    if b.len() < n {
+        bail!(PROTOCOL_VIOLATION, "insufficient data left in message");
+    }
+    let mut bytes = b[..n].to_vec();
+    // VARBIT_PAD: the bits past the length are zero.
+    if len % 8 != 0
+        && let Some(last) = bytes.last_mut()
+    {
+        *last &= 0xffu8 << (8 - len % 8);
+    }
+    Ok(Value::Bits(len as u32, bytes.into()))
 }
 
 // range_send flags.
@@ -219,7 +424,7 @@ fn decode_range(
     use super::range::{Bound, Range, make};
     if b.is_empty() {
         bail!(
-            INVALID_BINARY_REPRESENTATION,
+            PROTOCOL_VIOLATION,
             "insufficient data left in message"
         );
     }
@@ -239,14 +444,14 @@ fn decode_range(
         }
         if b.len() < 4 {
             bail!(
-                INVALID_BINARY_REPRESENTATION,
+                PROTOCOL_VIOLATION,
                 "insufficient data left in message"
             );
         }
         let len = b.get_i32();
         if len < 0 || b.len() < len as usize {
             bail!(
-                INVALID_BINARY_REPRESENTATION,
+                PROTOCOL_VIOLATION,
                 "insufficient data left in message"
             );
         }
@@ -375,10 +580,15 @@ fn decode_geo(mut b: &[u8], ty: &DataType) -> Result<Value> {
     Ok(Value::Geo(Arc::new(g)))
 }
 
-fn encode_array(a: &ArrayValue, ctx: &FormatCtx, out: &mut BytesMut) -> Result<()> {
+fn encode_array(
+    a: &ArrayValue,
+    elem: &DataType,
+    ctx: &FormatCtx,
+    out: &mut BytesMut,
+) -> Result<()> {
     out.put_i32(a.dims.len() as i32);
     out.put_i32(a.has_nulls() as i32);
-    out.put_u32(a.elem.oid());
+    out.put_u32(elem.oid());
     for (len, lb) in &a.dims {
         out.put_i32(*len as i32);
         out.put_i32(*lb);
@@ -389,7 +599,7 @@ fn encode_array(a: &ArrayValue, ctx: &FormatCtx, out: &mut BytesMut) -> Result<(
             continue;
         }
         let mut buf = BytesMut::new();
-        encode(item, &a.elem, ctx, &mut buf)?;
+        encode(item, elem, ctx, &mut buf)?;
         out.put_i32(buf.len() as i32);
         out.put_slice(&buf);
     }
@@ -463,29 +673,48 @@ pub fn numeric_digits(int: &BigInt, scale: u32) -> (Vec<i16>, i16) {
 fn decode_numeric(mut b: &[u8]) -> Result<Numeric> {
     if b.len() < 8 {
         bail!(
-            INVALID_BINARY_REPRESENTATION,
+            PROTOCOL_VIOLATION,
             "insufficient data left in message"
         );
     }
-    let ndigits = b.get_i16() as usize;
+    // numeric_recv: the digit count and scale are unsigned.
+    let ndigits = b.get_u16() as usize;
     let weight = b.get_i16() as i64;
     let sign = b.get_u16();
-    let dscale = b.get_i16() as u32;
+    let dscale = b.get_u16() as u32;
     match sign {
         0xC000 => return Ok(Numeric::NaN),
         0xD000 => return Ok(Numeric::PosInf),
         0xF000 => return Ok(Numeric::NegInf),
-        _ => {}
+        0x0000 | 0x4000 => {}
+        _ => bail!(
+            INVALID_BINARY_REPRESENTATION,
+            "invalid sign in external \"numeric\" value"
+        ),
+    }
+    // NUMERIC_DSCALE_MAX
+    if dscale > 0x3FFF {
+        bail!(
+            INVALID_BINARY_REPRESENTATION,
+            "invalid scale in external \"numeric\" value"
+        );
     }
     if b.len() < ndigits * 2 {
         bail!(
-            INVALID_BINARY_REPRESENTATION,
+            PROTOCOL_VIOLATION,
             "insufficient data left in message"
         );
     }
     let mut int = BigInt::zero();
     for _ in 0..ndigits {
-        int = int * 10000 + BigInt::from(b.get_i16());
+        let d = b.get_i16();
+        if !(0..10000).contains(&d) {
+            bail!(
+                INVALID_BINARY_REPRESENTATION,
+                "invalid digit in external \"numeric\" value"
+            );
+        }
+        int = int * 10000 + BigInt::from(d);
     }
     // Value = int * 10000^(weight - ndigits + 1)
     let exp4 = weight - ndigits as i64 + 1;
@@ -500,8 +729,13 @@ fn decode_numeric(mut b: &[u8]) -> Result<Numeric> {
 
 pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
     use DataType as T;
+    // A fixed-size type's recv: too few bytes is pq_getmsg*'s error; bytes left over are
+    // exec_bind_message's (which names the parameter).
     let need = |n: usize| -> Result<()> {
-        if b.len() != n {
+        if b.len() < n {
+            bail!(PROTOCOL_VIOLATION, "insufficient data left in message");
+        }
+        if b.len() > n {
             bail!(
                 INVALID_BINARY_REPRESENTATION,
                 "incorrect binary data format in bind parameter"
@@ -527,10 +761,92 @@ pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
             need(8)?;
             Value::Int8(r.get_i64())
         }
-        T::Oid | T::Regclass | T::Regtype | T::Regproc | T::Regconfig | T::Regdictionary => {
+        T::Oid
+        | T::Regclass
+        | T::Regtype
+        | T::Regproc
+        | T::Regconfig
+        | T::Regdictionary
+        | T::Regprocedure
+        | T::Regnamespace
+        | T::Regrole
+        | T::Regoper
+        | T::Regoperator
+        | T::Regcollation
+        | T::Xid
+        | T::Cid => {
             need(4)?;
             Value::Oid(r.get_u32())
         }
+        T::Base(bt) if bt.repr.is_some() => decode(b, bt.repr.as_ref().unwrap(), ctx)?,
+        // timetz_recv: the time and zone in range, then the typmod's rounding.
+        T::Timetz(m) => {
+            need(12)?;
+            let t = r.get_i64();
+            if !(0..=super::value::USECS_PER_DAY).contains(&t) {
+                bail!(NUMERIC_VALUE_OUT_OF_RANGE, "time out of range");
+            }
+            let z = r.get_i32();
+            if z <= -TZDISP_LIMIT || z >= TZDISP_LIMIT {
+                bail!(
+                    INVALID_TIME_ZONE_DISPLACEMENT_VALUE,
+                    "time zone displacement out of range"
+                );
+            }
+            Value::Timetz(super::datetime::round_micros(t, *m), z)
+        }
+        T::Inet => decode_inet(b, false)?,
+        T::Cidr => decode_inet(b, true)?,
+        T::Macaddr => {
+            need(6)?;
+            Value::Macaddr(b.try_into().unwrap())
+        }
+        // macaddr8_recv also takes a 6-byte address (FF:FE in the middle).
+        T::Macaddr8 => match b.len() {
+            6 => Value::Macaddr8([b[0], b[1], b[2], 0xff, 0xfe, b[3], b[4], b[5]]),
+            _ => {
+                need(8)?;
+                Value::Macaddr8(b.try_into().unwrap())
+            }
+        },
+        T::Bit(_) | T::Varbit(_) => decode_bits(b, ty)?,
+        T::Money => {
+            need(8)?;
+            Value::Money(r.get_i64())
+        }
+        T::PgLsn => {
+            need(8)?;
+            Value::PgLsn(r.get_u64())
+        }
+        T::Tid => {
+            need(6)?;
+            Value::Tid(r.get_u32(), r.get_u16())
+        }
+        // int2vectorrecv / oidvectorrecv: array_recv, then one dimension from 0, no NULLs.
+        T::Int2Vector | T::OidVector => {
+            let elem = if matches!(ty, T::Int2Vector) {
+                T::Int2
+            } else {
+                T::Oid
+            };
+            let v = decode_array(b, &elem, ctx)?;
+            if let Value::Array(a) = &v
+                && (a.dims.len() > 1
+                    || a.items.iter().any(Value::is_null)
+                    || a.dims.first().is_some_and(|d| d.1 != 0))
+            {
+                bail!(
+                    INVALID_PARAMETER_VALUE,
+                    "invalid {} data",
+                    ty.typname()
+                );
+            }
+            v
+        }
+        T::Enum(..) => parse_value(&get_text(b, ctx)?, ty, ctx)?,
+        T::Cstring => Value::text(get_text(b, ctx)?),
+        // void_recv: nothing to read.
+        T::Void => Value::Null,
         T::Xid8 => {
             need(8)?;
             Value::Xid8(r.get_u64())
@@ -575,24 +891,13 @@ pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
                 super::xml::XmlOption::Content
             },
         )?),
-        T::Text | T::Varchar(_) | T::Bpchar(_) | T::Name | T::Unknown | T::Refcursor => {
-            let s = std::str::from_utf8(b).map_err(|_| {
-                err!(
-                    CHARACTER_NOT_IN_REPERTOIRE,
-                    "invalid byte sequence for encoding \"UTF8\""
-                )
-            })?;
-            parse_value(s, ty, ctx)?
-        }
-        T::Json => {
-            let s = std::str::from_utf8(b).map_err(|_| {
-                err!(
-                    CHARACTER_NOT_IN_REPERTOIRE,
-                    "invalid byte sequence for encoding \"UTF8\""
-                )
-            })?;
-            parse_value(s, ty, ctx)?
-        }
+        T::Text
+        | T::Varchar(_)
+        | T::Bpchar(_)
+        | T::Name
+        | T::Unknown
+        | T::Refcursor
+        | T::Json => parse_value(&get_text(b, ctx)?, ty, ctx)?,
         T::Jsonb => {
             if b.first() != Some(&1) {
                 bail!(
@@ -601,13 +906,7 @@ pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
                     b.first().copied().unwrap_or(0)
                 );
             }
-            let s = std::str::from_utf8(&b[1..]).map_err(|_| {
-                err!(
-                    CHARACTER_NOT_IN_REPERTOIRE,
-                    "invalid byte sequence for encoding \"UTF8\""
-                )
-            })?;
-            Value::Jsonb(Arc::new(parse_jsonb(s)?))
+            Value::Jsonb(Arc::new(parse_jsonb(&get_text(&b[1..], ctx)?)?))
         }
         T::JsonPath => {
             if b.first() != Some(&1) {
@@ -617,13 +916,7 @@ pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
                     b.first().copied().unwrap_or(0)
                 );
             }
-            let s = std::str::from_utf8(&b[1..]).map_err(|_| {
-                err!(
-                    CHARACTER_NOT_IN_REPERTOIRE,
-                    "invalid byte sequence for encoding \"UTF8\""
-                )
-            })?;
-            parse_value(s, ty, ctx)?
+            parse_value(&get_text(&b[1..], ctx)?, ty, ctx)?
         }
         T::Char => Value::Char(b.first().copied().unwrap_or(0)),
         T::Bytea => Value::bytea(b.to_vec()),
@@ -642,9 +935,14 @@ pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
             need(4)?;
             Value::Date(r.get_i32())
         }
-        T::Time(_) => {
+        // time_recv: in range, then the typmod's rounding.
+        T::Time(m) => {
             need(8)?;
-            Value::Time(r.get_i64())
+            let t = r.get_i64();
+            if !(0..=super::value::USECS_PER_DAY).contains(&t) {
+                bail!(NUMERIC_VALUE_OUT_OF_RANGE, "time out of range");
+            }
+            Value::Time(super::datetime::round_micros(t, *m))
         }
         T::Timestamp(_) => {
             need(8)?;
@@ -669,7 +967,7 @@ pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
         T::Row(fields) => {
             let short = || {
                 Error::new(
-                    code::INVALID_BINARY_REPRESENTATION,
+                    code::PROTOCOL_VIOLATION,
                     "insufficient data left in message",
                 )
             };
@@ -690,15 +988,19 @@ pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
                     return Err(short());
                 }
                 let oid = r.get_u32();
-                if oid != ft.oid() {
+                let want = field_oid(ty, i, ft, ctx);
+                if oid != want {
                     bail!(
                         DATATYPE_MISMATCH,
                         "binary data has type {oid} ({}) instead of expected {} ({}) in record column {}",
                         DataType::from_oid(oid)
                             .map(|t| t.typname())
                             .unwrap_or_else(|| oid.to_string()),
-                        ft.oid(),
-                        ft.typname(),
+                        want,
+                        ctx.names
+                            .as_ref()
+                            .and_then(|n| n.type_name(want))
+                            .unwrap_or_else(|| ft.typname()),
                         i + 1
                     );
                 }
@@ -722,7 +1024,7 @@ pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
         T::Multirange(rt) => {
             if r.len() < 4 {
                 bail!(
-                    INVALID_BINARY_REPRESENTATION,
+                    PROTOCOL_VIOLATION,
                     "insufficient data left in message"
                 );
             }
@@ -731,14 +1033,14 @@ pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
             for _ in 0..n.max(0) {
                 if r.len() < 4 {
                     bail!(
-                        INVALID_BINARY_REPRESENTATION,
+                        PROTOCOL_VIOLATION,
                         "insufficient data left in message"
                     );
                 }
                 let len = r.get_i32();
                 if len < 0 || r.len() < len as usize {
                     bail!(
-                        INVALID_BINARY_REPRESENTATION,
+                        PROTOCOL_VIOLATION,
                         "insufficient data left in message"
                     );
                 }
@@ -759,7 +1061,7 @@ pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
 fn decode_array(mut b: &[u8], elem: &DataType, ctx: &FormatCtx) -> Result<Value> {
     if b.len() < 12 {
         bail!(
-            INVALID_BINARY_REPRESENTATION,
+            PROTOCOL_VIOLATION,
             "insufficient data left in message"
         );
     }
@@ -776,7 +1078,7 @@ fn decode_array(mut b: &[u8], elem: &DataType, ctx: &FormatCtx) -> Result<Value>
     for _ in 0..ndim {
         if b.len() < 8 {
             bail!(
-                INVALID_BINARY_REPRESENTATION,
+                PROTOCOL_VIOLATION,
                 "insufficient data left in message"
             );
         }
@@ -793,7 +1095,7 @@ fn decode_array(mut b: &[u8], elem: &DataType, ctx: &FormatCtx) -> Result<Value>
     for _ in 0..total {
         if b.len() < 4 {
             bail!(
-                INVALID_BINARY_REPRESENTATION,
+                PROTOCOL_VIOLATION,
                 "insufficient data left in message"
             );
         }
@@ -805,7 +1107,7 @@ fn decode_array(mut b: &[u8], elem: &DataType, ctx: &FormatCtx) -> Result<Value>
         let len = len as usize;
         if b.len() < len {
             bail!(
-                INVALID_BINARY_REPRESENTATION,
+                PROTOCOL_VIOLATION,
                 "insufficient data left in message"
             );
         }

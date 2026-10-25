@@ -1,0 +1,245 @@
+> SELECT count(*) > 0 FROM pg_class WHERE relkind = ANY (ARRAY['r', 'p', 'f', 'v', 'm'])
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT 'r'::"char" = 'r'::text, 'r'::"char" || 'x'
+ERROR 42725: operator is not unique: "char" || unknown (at 45)
+HINT: Could not choose a best candidate operator. You might need to add explicit type casts.
+
+> SELECT pg_typeof('r'::"char" || 'x')
+ERROR 42725: operator is not unique: "char" || unknown (at 30)
+HINT: Could not choose a best candidate operator. You might need to add explicit type casts.
+
+> SELECT '10.11.12.13'::inet::text, '10.11.12.13/8'::inet::text, '::1'::inet::varchar, '10.0.0.0/8'::cidr::text
+text:text | text:text | varchar:varchar | text:text
+10.11.12.13/32 | 10.11.12.13/8 | ::1/128 | 10.0.0.0/8
+-- SELECT 1
+
+> SELECT text('10.11.12.13'::inet), host('10.11.12.13'::inet), '10.11.12.13'::inet
+text:text | host:text | inet:inet
+10.11.12.13/32 | 10.11.12.13 | 10.11.12.13
+-- SELECT 1
+
+> SELECT ARRAY['{NULL,NULL}', ARRAY[1, NULL]]::int[]
+array:int4[]
+{{NULL,NULL},{1,NULL}}
+-- SELECT 1
+
+> SELECT ARRAY['{1,2}', '{3,4}']::text[]
+array:text[]
+{"{1,2}","{3,4}"}
+-- SELECT 1
+
+> SELECT ARRAY[ARRAY[NULL, NULL], '{NULL,NULL}']::int[]
+array:int4[]
+{{NULL,NULL},{NULL,NULL}}
+-- SELECT 1
+
+> SELECT ARRAY['{NULL,NULL}', '{NULL,NULL}']::int[]
+ERROR 22P02: invalid input syntax for type integer: "{NULL,NULL}" (at 14)
+
+> SET default_transaction_read_only = on
+-- SET
+
+> SET default_transaction_deferrable = on
+-- SET
+
+> SHOW transaction_read_only
+transaction_read_only:text
+on
+-- SHOW
+
+> SHOW transaction_deferrable
+transaction_deferrable:text
+on
+-- SHOW
+
+> SELECT current_setting('transaction_read_only'), current_setting('transaction_deferrable')
+current_setting:text | current_setting:text
+on | on
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> SHOW transaction_read_only
+transaction_read_only:text
+on
+-- SHOW
+
+> SHOW transaction_deferrable
+transaction_deferrable:text
+on
+-- SHOW
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN READ WRITE NOT DEFERRABLE
+-- BEGIN
+
+> SHOW transaction_read_only
+transaction_read_only:text
+off
+-- SHOW
+
+> SHOW transaction_deferrable
+transaction_deferrable:text
+off
+-- SHOW
+
+> ROLLBACK
+-- ROLLBACK
+
+> RESET default_transaction_read_only
+-- RESET
+
+> RESET default_transaction_deferrable
+-- RESET
+
+> CREATE DOMAIN cc_u64 AS numeric(20,0)
+-- CREATE DOMAIN
+
+> CREATE TYPE cc_dt AS (a text, b int4, c cc_u64, d cc_u64[])
+-- CREATE TYPE
+
+> SELECT attname, atttypid::regtype, attnum FROM pg_attribute
+>   WHERE attrelid = (SELECT typrelid FROM pg_type WHERE typname = 'cc_dt') AND attnum > 0 ORDER BY attnum
+attname:name | atttypid:regtype | attnum:int2
+a | text | 1
+b | integer | 2
+c | cc_u64 | 3
+d | cc_u64[] | 4
+-- SELECT 4
+
+> DROP TYPE cc_dt
+-- DROP TYPE
+
+> DROP DOMAIN cc_u64
+-- DROP DOMAIN
+
+> PREPARE cc_void(void) AS SELECT now($1) IS NOT NULL
+-- PREPARE
+
+> EXECUTE cc_void('')
+?column?:bool
+t
+-- SELECT 1
+
+> DEALLOCATE cc_void
+-- DEALLOCATE
+
+> SET DateStyle = 'PostgreSQL'
+-- SET
+
+> SHOW DateStyle
+DateStyle:text
+Postgres, MDY
+-- SHOW
+
+> SET DateStyle = 'European'
+-- SET
+
+> SHOW DateStyle
+DateStyle:text
+Postgres, DMY
+-- SHOW
+
+> SET DateStyle = 'NonEuropean'
+-- SET
+
+> SHOW DateStyle
+DateStyle:text
+Postgres, MDY
+-- SHOW
+
+> SET DateStyle = 'non-european'
+ERROR 22023: invalid value for parameter "DateStyle": "non-european"
+DETAIL: Unrecognized key word: "non-european".
+
+> RESET DateStyle
+-- RESET
+
+> CREATE TABLE cc_tm (a varchar(10)[], b numeric(10,2)[], c char(3)[], d bit(3)[])
+-- CREATE TABLE
+
+> SELECT attname, atttypmod, attndims, format_type(atttypid, atttypmod) FROM pg_attribute
+>   WHERE attrelid = 'cc_tm'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | atttypmod:int4 | attndims:int2 | format_type:text
+a | 14 | 1 | character varying(10)[]
+b | 655366 | 1 | numeric(10,2)[]
+c | 7 | 1 | character(3)[]
+d | 3 | 1 | bit(3)[]
+-- SELECT 4
+
+> SELECT format_type('varchar[]'::regtype, 14), format_type('_numeric'::regtype, 655366)
+format_type:text | format_type:text
+character varying(10)[] | numeric(10,2)[]
+-- SELECT 1
+
+> INSERT INTO cc_tm (a) VALUES ('{abcdefghijk}')
+ERROR 22001: value too long for type character varying(10)
+
+> SELECT '{abcdefgh}'::varchar(10)[]::varchar(5)[]
+varchar:varchar[]
+{abcde}
+-- SELECT 1
+
+> INSERT INTO cc_tm (a) VALUES ('{abcdefgh}')
+-- INSERT 0 1
+
+> ALTER TABLE cc_tm ALTER COLUMN a TYPE varchar(5)[]
+ERROR 22001: value too long for type character varying(5)
+
+> ALTER TABLE cc_tm ALTER COLUMN a TYPE varchar(5)[] USING a::varchar(5)[]
+-- ALTER TABLE
+
+> SELECT a FROM cc_tm
+a:varchar[]
+{abcde}
+-- SELECT 1
+
+> DROP TABLE cc_tm
+-- DROP TABLE
+
+> CREATE COLLATION cc_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)
+-- CREATE COLLATION
+
+> CREATE TABLE cc_c1 (a varchar(10)[] COLLATE cc_ci, b varchar(10) COLLATE cc_ci UNIQUE, c varchar(10) COLLATE cc_ci PRIMARY KEY)
+-- CREATE TABLE
+
+> SELECT c.relname, a.attname, co.collname FROM pg_attribute a LEFT JOIN pg_collation co ON a.attcollation = co.oid
+>   JOIN pg_class c ON c.oid = a.attrelid WHERE c.relname IN ('cc_c1', 'cc_c1_b_key', 'cc_c1_pkey') AND a.attnum > 0 ORDER BY 1, 2
+relname:name | attname:name | collname:name
+cc_c1 | a | cc_ci
+cc_c1 | b | cc_ci
+cc_c1 | c | cc_ci
+cc_c1_b_key | b | cc_ci
+cc_c1_pkey | c | cc_ci
+-- SELECT 5
+
+> SELECT indexrelid::regclass, (SELECT collname FROM pg_collation WHERE oid = indcollation[0]) FROM pg_index
+>   WHERE indrelid = 'cc_c1'::regclass ORDER BY 1
+indexrelid:regclass | collname:name
+cc_c1_pkey | cc_ci
+cc_c1_b_key | cc_ci
+-- SELECT 2
+
+> DROP TABLE cc_c1
+-- DROP TABLE
+
+> DROP COLLATION cc_ci
+-- DROP COLLATION
+
+> CREATE FUNCTION cc_bad() RETURNS TABLE (i int) LANGUAGE plpgsql AS $$ BEGIN RETURN QUERY SELECT s.a FROM pg_stat_activity p; END $$
+-- CREATE FUNCTION
+
+> COPY (SELECT * FROM cc_bad()) TO STDOUT WITH (FORMAT csv)
+ERROR 42P01: missing FROM-clause entry for table "s"
+QUERY: SELECT s.a FROM pg_stat_activity p (at 8)
+CONTEXT: PL/pgSQL function cc_bad() line 1 at RETURN QUERY
+
+> DROP FUNCTION cc_bad()
+-- DROP FUNCTION
+

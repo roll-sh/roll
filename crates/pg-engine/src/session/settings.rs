@@ -778,14 +778,15 @@ fn normalize_datestyle(raw: &str, current: &str) -> Result<String> {
             )
             .detail(format!("Conflicting \"{what}\" specifications."))
         };
+        // check_datestyle: some key words match by prefix ("PostgreSQL", "European").
         let (s, o) = match part.as_str() {
             "iso" => (Some("ISO"), None),
             "sql" => (Some("SQL"), None),
-            "postgres" => (Some("Postgres"), None),
+            p if p.starts_with("postgres") => (Some("Postgres"), None),
             "german" => (Some("German"), None),
-            "mdy" | "us" | "noneuropean" | "non-european" => (None, Some("MDY")),
-            "dmy" | "euro" | "european" => (None, Some("DMY")),
             "ymd" => (None, Some("YMD")),
+            p if p == "dmy" || p.starts_with("euro") => (None, Some("DMY")),
+            p if p == "mdy" || p == "us" || p.starts_with("noneuro") => (None, Some("MDY")),
             "default" => (Some("ISO"), Some("MDY")),
             "" => continue,
             _ => {
@@ -1919,6 +1920,10 @@ impl Settings {
                 Some("India") => "India",
                 _ => "Default",
             },
+            client_encoding: self
+                .get_str("client_encoding")
+                .and_then(crate::types::encnames::encoding_id)
+                .unwrap_or(crate::types::mbconv::UTF8),
             ..FormatCtx::default()
         }
     }
@@ -2024,18 +2029,50 @@ pub fn parse_search_path(v: &str, user: &str) -> Vec<String> {
 
 /// A search_path value's schema names (None: `$user`).
 fn search_path_items(v: &str) -> Vec<Option<String>> {
+    // SplitIdentifierString: commas outside double quotes separate the names; a quoted one
+    // keeps its case (and its commas), "" in it standing for ".
     let mut out = Vec::new();
-    for part in v.split(',') {
-        let p = part.trim();
-        if p.is_empty() {
-            continue;
+    let mut chars = v.chars().peekable();
+    loop {
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
         }
-        let name = if p.starts_with('"') && p.ends_with('"') && p.len() >= 2 {
-            p[1..p.len() - 1].replace("\"\"", "\"")
+        if chars.peek().is_none() {
+            break;
+        }
+        let mut name = String::new();
+        if chars.peek() == Some(&'"') {
+            chars.next();
+            while let Some(c) = chars.next() {
+                if c == '"' {
+                    if chars.peek() == Some(&'"') {
+                        chars.next();
+                        name.push('"');
+                    } else {
+                        break;
+                    }
+                } else {
+                    name.push(c);
+                }
+            }
         } else {
-            p.to_ascii_lowercase()
-        };
-        out.push((name != "$user").then_some(name));
+            while let Some(&c) = chars.peek() {
+                if c == ',' || c.is_whitespace() {
+                    break;
+                }
+                name.push(c.to_ascii_lowercase());
+                chars.next();
+            }
+        }
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+        if chars.peek() == Some(&',') {
+            chars.next();
+        }
+        if !name.is_empty() {
+            out.push((name != "$user").then_some(name));
+        }
     }
     out
 }

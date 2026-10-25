@@ -40,7 +40,7 @@ pg-snowball = { path = "crates/pg-snowball" }
 pg-icu = { path = "crates/pg-icu" }
 
 pg_query = { git = "https://github.com/pganalyze/pg_query.rs", rev = "ad0c87ed59c84ec6b42c970bb42d7985b7b5878b" }
-prost = "0.13"
+prost = { version = "0.13", features = ["no-recursion-limit"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 chrono-tz = "0.10"
 bigdecimal = "0.4"

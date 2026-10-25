@@ -117,9 +117,33 @@ struct PlanUses {
     /// The generic plan's cost, and which binding it is of (generic_cost; None: not built).
     /// (A `Weak`, not an address: a later binding could take a dropped one's address.)
     generic_cost: Option<(std::sync::Weak<BoundQuery>, f64)>,
+    /// The type oid a ParameterDescription gives a parameter in place of its value type's: a
+    /// domain (named by the Parse message, or the type a cast gave it).
+    param_oids: Vec<(usize, u32)>,
+    /// The result row a Parse described (CompleteCachedPlan's fixed_result): a later binding
+    /// (after DDL) must give the same names and types.
+    fixed_result: Option<Vec<(String, u32, i32)>>,
+}
+
+fn result_row(cols: &[OutCol]) -> Vec<(String, u32, i32)> {
+    cols.iter()
+        .map(|c| (c.name.clone(), c.type_oid(), c.ty.typmod()))
+        .collect()
 }
 
 impl Prepared {
+    /// The parameters' type oids, as a ParameterDescription gives them.
+    pub fn param_type_oids(&self) -> Vec<u32> {
+        let over = &self.plans.lock().param_oids;
+        (0..self.param_types.len())
+            .map(|i| {
+                over.iter()
+                    .find(|(p, _)| *p == i)
+                    .map_or_else(|| self.param_types[i].oid(), |(_, o)| *o)
+            })
+            .collect()
+    }
+
     /// The statement's text placed where it is in its query string (blanks before it), so
     /// positions found in it count from the start of the string.
     pub fn placed_sql(&self) -> std::borrow::Cow<'_, str> {
@@ -365,6 +389,9 @@ impl Session {
             txn.lock_timeout = Some(std::time::Duration::from_millis(lt as u64));
         }
         txn_settings(&self.state, iso, ro);
+        if self.status == TxnStatus::Idle {
+            default_deferrable(&self.state);
+        }
         self.txn = Some(RefCell::new(txn));
     }
 
@@ -713,13 +740,18 @@ impl Session {
         pl.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
+    /// The catalog this session sees: its open transaction's, else the database's.
+    fn visible_catalog(&self) -> Arc<crate::catalog::Catalog> {
+        match &self.txn {
+            Some(t) => t.borrow().catalog(),
+            None => self.state.db.catalog(),
+        }
+    }
+
     /// How values are rendered as text for this session (settings plus catalog names).
     pub fn format_ctx(&self) -> crate::types::text::FormatCtx {
         let mut f = self.state.settings.borrow().format_ctx();
-        let cat = match &self.txn {
-            Some(t) => t.borrow().catalog(),
-            None => self.state.db.catalog(),
-        };
+        let cat = self.visible_catalog();
         f.names = Some(Arc::new(crate::catalog::names::CatalogNames::new(
             cat,
             self.state.search_path(),
@@ -771,6 +803,12 @@ impl Session {
                         return Err(e);
                     }
                 },
+                // (A row the query or its conversion failed on: the statement's error.)
+                Ok(Outcome::CopyOut(c)) if c.error.is_some() => {
+                    self.on_error();
+                    let _ = self.end_batch();
+                    return Err(c.error.unwrap().in_chars(sql));
+                }
                 Ok(Outcome::CopyOut(c)) => {
                     let mut r = QueryResult::command(c.tag.clone());
                     r.rows = c
@@ -1080,6 +1118,15 @@ impl Session {
             b.no_params = no_params;
             b.bind_statement(stmt)
         })?;
+        if let Some(fixed) = &p.plans.lock().fixed_result
+            && *fixed != result_row(&b.cols)
+        {
+            return Err(Error::new(
+                code::FEATURE_NOT_SUPPORTED,
+                "cached plan must not change result type",
+            )
+            .routine("RevalidateCachedQuery"));
+        }
         let b = Arc::new(b);
         *p.bound.lock() = Some((version, path, who, b.clone()));
         Ok(b)
@@ -1127,6 +1174,15 @@ impl Session {
             b.param_consts = true;
             b.bind_statement(stmt)
         })?;
+        if let Some(fixed) = &p.plans.lock().fixed_result
+            && *fixed != result_row(&b.cols)
+        {
+            return Err(Error::new(
+                code::FEATURE_NOT_SUPPORTED,
+                "cached plan must not change result type",
+            )
+            .routine("RevalidateCachedQuery"));
+        }
         Ok(Arc::new(b))
     }
 
@@ -1243,8 +1299,12 @@ impl Session {
         // query's when it has finished.
         let streams = !bq.plan.writes() && matches!(inner(stmt), Some(NodeEnum::SelectStmt(_)));
         let mut made = Vec::new();
+        // ExecutorRun began (past ExecutorStart's permission checks): the RowDescription went
+        // out, so an error from here on follows it.
+        let mut started = false;
         let r = self.with_ctx(params, |ctx| {
             bq.check_perms(ctx)?;
+            started = true;
             if streams && in_parallel_worker(ctx, &bq.plan) {
                 crate::exec::pgstat::count_parallel_workers(ctx, 1, 1);
                 let frame = crate::error::Frame::Text("parallel worker".into());
@@ -1261,7 +1321,7 @@ impl Session {
         let (rows, processed) = match r {
             Ok(r) => r,
             Err(e) => {
-                if !made.is_empty() {
+                if streams && started {
                     self.partial_rows = Some(QueryResult::rows(bq.cols.clone(), made, ""));
                 }
                 return Err(e);
@@ -1326,8 +1386,8 @@ impl Session {
             types.push(if *o == 0 {
                 DataType::Unknown
             } else {
-                DataType::from_oid(*o)
-                    .or_else(|| self.enum_type_by_oid(*o))
+                self.visible_catalog()
+                    .any_data_type(*o)
                     .ok_or_else(|| {
                         Error::new(
                             code::UNDEFINED_OBJECT,
@@ -1349,21 +1409,57 @@ impl Session {
             bound: Mutex::new(None),
             plans: Default::default(),
         };
+        // exec_parse_message: a failed transaction parses only its end.
+        if self.status == TxnStatus::Failed
+            && p.stmt.is_some()
+            && !ends_failed_txn(p.stmt.as_ref().and_then(inner))
+        {
+            return Err(Error::new(
+                code::IN_FAILED_SQL_TRANSACTION,
+                "current transaction is aborted, commands ignored until end of transaction block",
+            ));
+        }
         if p.is_query() {
-            if self.status == TxnStatus::Failed {
-                return Err(Error::new(
-                    code::IN_FAILED_SQL_TRANSACTION,
-                    "current transaction is aborted, commands ignored until end of transaction block",
-                ));
-            }
             let stmt = p.stmt.clone().unwrap();
             self.infer_params = true;
             let b = self.bound(&p, &stmt, &[]);
             self.infer_params = false;
             p.param_types = match b {
-                Ok(b) => b.params.clone(),
+                Ok(b) => {
+                    let cat = self.visible_catalog();
+                    let mut oids: Vec<(usize, u32)> = param_oids
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, o)| cat.domain_type(**o).is_some())
+                        .map(|(i, o)| (i, *o))
+                        .collect();
+                    for d in &b.param_domains {
+                        if !oids.iter().any(|(j, _)| *j == d.0) {
+                            oids.push(*d);
+                        }
+                    }
+                    let mut plans = p.plans.lock();
+                    plans.param_oids = oids;
+                    plans.fixed_result = Some(result_row(&b.cols));
+                    drop(plans);
+                    b.params.clone()
+                }
                 Err(e) => self.analyzed_params(&stmt, &p.param_types, e)?,
             };
+            // The query as written types its parameters, before rules rewrite it (an INSERT
+            // a DO INSTEAD NOTHING rule drops still has its $n).
+            if p.param_types.len() < max_param(&stmt) {
+                let types = p.param_types.clone();
+                if let Ok(t) = self.with_ctx(&[], |ctx| {
+                    let mut b = Binder::new(ctx, types);
+                    b.unplanned = true;
+                    b.rule_validate = true;
+                    b.bind_statement(&stmt).map(|q| q.params)
+                }) && t.len() > p.param_types.len()
+                {
+                    p.param_types = t;
+                }
+            }
             // exec_parse_message: a parameter the query never reads has no type.
             if stmt.node.is_some() {
                 // (pg_query's node walker skips some clauses: read the whole tree.)
@@ -1418,6 +1514,30 @@ impl Session {
                 })
                 .collect();
         } else if let Some(n) = p.stmt.as_ref() {
+            // EXPLAIN of a query: its parameters typed as the query types them
+            // (transformExplainStmt analyzes the query).
+            if let Some(NodeEnum::ExplainStmt(ex)) = inner(n)
+                && let Some(q) = ex.query.as_deref()
+                && matches!(
+                    inner(q),
+                    Some(
+                        NodeEnum::SelectStmt(_)
+                            | NodeEnum::InsertStmt(_)
+                            | NodeEnum::UpdateStmt(_)
+                            | NodeEnum::DeleteStmt(_)
+                            | NodeEnum::MergeStmt(_)
+                    )
+                )
+            {
+                let types = p.param_types.clone();
+                if let Ok(t) = self.with_ctx(&[], |ctx| {
+                    let mut b = Binder::new(ctx, types);
+                    b.unplanned = true;
+                    b.bind_statement(q).map(|bq| bq.params)
+                }) {
+                    p.param_types = t;
+                }
+            }
             // Utility statements: count $n so ParameterDescription is right.
             let max = max_param(n);
             while p.param_types.len() < max {
@@ -1430,11 +1550,6 @@ impl Session {
             }
         }
         Ok(Arc::new(p))
-    }
-
-    fn enum_type_by_oid(&self, oid: u32) -> Option<DataType> {
-        let cat = self.state.db.catalog();
-        cat.enums.get(&oid).map(|e| e.data_type())
     }
 
     /// Result columns of a statement, without running it.
@@ -1529,10 +1644,20 @@ impl Session {
                 format!("prepared statement \"{stmt}\" does not exist"),
             ));
         };
-        if self.status == TxnStatus::Failed {
+        if self.status == TxnStatus::Failed && !ends_failed_txn(p.stmt.as_ref().and_then(inner)) {
             return Err(Error::new(
                 code::IN_FAILED_SQL_TRANSACTION,
                 "current transaction is aborted, commands ignored until end of transaction block",
+            ));
+        }
+        if formats.len() > 1 && formats.len() != params.len() {
+            return Err(Error::new(
+                code::PROTOCOL_VIOLATION,
+                format!(
+                    "bind message has {} parameter formats but {} parameters",
+                    formats.len(),
+                    params.len()
+                ),
             ));
         }
         if params.len() != p.param_types.len() {
@@ -1546,24 +1671,30 @@ impl Session {
             ));
         }
         // An object identifier type's input (regclassin, ...) looks its name up in the
-        // transaction's catalog, through the search path.
-        use DataType as T;
-        let fmt = if p.param_types.iter().any(|t| {
-            matches!(
-                t,
+        // transaction's catalog, through the search path; an enum's checks its labels.
+        fn needs_names(t: &DataType) -> bool {
+            use DataType as T;
+            match t {
                 T::Regclass
-                    | T::Regtype
-                    | T::Regproc
-                    | T::Regprocedure
-                    | T::Regnamespace
-                    | T::Regrole
-                    | T::Regconfig
-                    | T::Regdictionary
-                    | T::Regoper
-                    | T::Regoperator
-                    | T::Regcollation
-            )
-        }) {
+                | T::Regtype
+                | T::Regproc
+                | T::Regprocedure
+                | T::Regnamespace
+                | T::Regrole
+                | T::Regconfig
+                | T::Regdictionary
+                | T::Regoper
+                | T::Regoperator
+                | T::Regcollation
+                | T::Enum(..) => true,
+                T::Array(e) => needs_names(e),
+                // (A named composite's fields may be domains, which record_recv checks.)
+                T::Row(r) => r.oid != 0 || r.fields.iter().any(|(_, t)| needs_names(t)),
+                T::Range(r) | T::Multirange(r) => needs_names(&r.subtype),
+                _ => false,
+            }
+        }
+        let fmt = if p.param_types.iter().any(needs_names) {
             self.format_ctx()
         } else {
             self.state.settings.borrow().format_ctx()
@@ -1575,33 +1706,74 @@ impl Session {
                 1 => formats[0],
                 _ => formats.get(i).copied().unwrap_or(0),
             };
+            if !matches!(f, 0 | 1) {
+                return Err(Error::new(
+                    code::INVALID_PARAMETER_VALUE,
+                    format!("unsupported format code: {f}"),
+                ));
+            }
             let ty = &p.param_types[i];
+            // bind_param_error_callback: an error names the parameter (a text one's value
+            // as log_parameter_max_length_on_error allows).
+            let param_err = |e: Error, text: Option<&str>| {
+                let mut c = match portal {
+                    "" => format!("unnamed portal parameter ${}", i + 1),
+                    p => format!("portal \"{p}\" parameter ${}", i + 1),
+                };
+                if let Some(t) = text {
+                    c.push_str(&format!(" = {}", param_log_string(t, &self.state)));
+                }
+                match e.context.as_deref().map(str::to_string) {
+                    Some(old) => e.context(format!("{old}\n{c}")),
+                    None => e.context(c),
+                }
+            };
             values.push(match raw {
                 None => Value::Null,
-                // A malformed value names its parameter; a well-formed but invalid one (a range
-                // with its bounds reversed) reports its own error, as the type's recv does.
-                Some(b) if f == 1 => {
-                    crate::types::binary::decode(&b, ty, &fmt).map_err(|e| match e.code {
-                        code::INVALID_BINARY_REPRESENTATION => Error::new(
-                            code::INVALID_BINARY_REPRESENTATION,
-                            format!("incorrect binary data format in bind parameter {}", i + 1),
-                        )
-                        .detail(e.message),
+                // Bytes the type's recv leaves over name the parameter; its own errors are its.
+                Some(b) if f == 1 => crate::types::binary::decode(&b, ty, &fmt)
+                    .map_err(|e| match e.code {
+                        code::INVALID_BINARY_REPRESENTATION
+                            if e.message.starts_with("incorrect binary data format") =>
+                        {
+                            Error::new(
+                                code::INVALID_BINARY_REPRESENTATION,
+                                format!("incorrect binary data format in bind parameter {}", i + 1),
+                            )
+                        }
                         _ => e,
-                    })?
-                }
+                    })
+                    .map_err(|e| param_err(e, None))?,
+                // Text arrives in the client's encoding (pg_client_to_server, which checks it).
                 Some(b) => {
-                    let s = std::str::from_utf8(&b).map_err(|_| {
-                        Error::new(
-                            code::CHARACTER_NOT_IN_REPERTOIRE,
-                            "invalid byte sequence for encoding \"UTF8\"",
-                        )
-                    })?;
-                    crate::types::text::parse_value(s, ty, &fmt)?
+                    let s = crate::types::mbconv::to_utf8(&b, fmt.client_encoding)
+                        .map_err(|e| param_err(e, None))?;
+                    crate::types::text::parse_value(&s, ty, &fmt)
+                        .map_err(|e| param_err(e, Some(&s)))?
                 }
             });
         }
         let cols = self.describe(&p)?;
+        // PortalSetResultFormat
+        if let Some(cols) = &cols
+            && result_formats.len() > 1
+            && result_formats.len() != cols.len()
+        {
+            return Err(Error::new(
+                code::PROTOCOL_VIOLATION,
+                format!(
+                    "bind message has {} result formats but query has {} columns",
+                    result_formats.len(),
+                    cols.len()
+                ),
+            ));
+        }
+        if let Some(f) = result_formats.iter().find(|f| !matches!(f, 0 | 1)) {
+            return Err(Error::new(
+                code::INVALID_PARAMETER_VALUE,
+                format!("unsupported format code: {f}"),
+            ));
+        }
         self.portals.insert(
             portal.to_string(),
             Portal {
@@ -1618,6 +1790,13 @@ impl Session {
 
     /// Execute message. Returns the outcome and whether the portal was suspended (more rows).
     pub fn execute_portal(&mut self, portal: &str, max_rows: usize) -> Result<(Outcome, bool)> {
+        if !self.portals.contains_key(portal) && self.state.cursors.borrow().contains_key(portal) {
+            let r = self.execute_cursor_portal(portal, max_rows);
+            if r.is_err() {
+                self.on_error();
+            }
+            return r;
+        }
         let Some(mut pt) = self.portals.remove(portal) else {
             let e = Error::new(
                 code::INVALID_CURSOR_NAME,
@@ -1633,10 +1812,13 @@ impl Session {
                 max_rows.min(rest.len())
             };
             let rows: Vec<Row> = rest.drain(..n).collect();
-            let more = !rest.is_empty();
+            // Suspended when the row count was reached, even by the last row: PortalRun
+            // doesn't look ahead (the next Execute then completes with no rows).
+            let more = !rest.is_empty() || (max_rows > 0 && rows.len() == max_rows);
             let tag = format!("{} {}", pt.tag_verb, rows.len());
             let cols = pt.cols.clone();
-            if more {
+            // (A SELECT run to its end stays there: Execute again returns no rows.)
+            if more || pt.tag_verb == "SELECT" {
                 pt.pending = Some(rest);
             }
             self.portals.insert(portal.to_string(), pt);
@@ -1655,11 +1837,17 @@ impl Session {
         let r = match out {
             Outcome::Done(mut r) => {
                 let mut more = false;
-                if max_rows > 0 && r.rows.len() > max_rows {
+                if max_rows > 0
+                    && (r.rows.len() > max_rows
+                        || r.rows.len() == max_rows && r.cols.is_some() && r.tag.starts_with("SELECT "))
+                {
                     let rest: VecDeque<Row> = r.rows.split_off(max_rows).into();
                     pt.tag_verb = r.tag.split(' ').next().unwrap_or("SELECT").to_string();
                     pt.pending = Some(rest);
                     more = true;
+                } else if r.cols.is_some() && r.tag.starts_with("SELECT ") {
+                    pt.tag_verb = "SELECT".into();
+                    pt.pending = Some(VecDeque::new());
                 }
                 (Outcome::Done(r), more)
             }
@@ -1669,13 +1857,106 @@ impl Session {
         Ok(r)
     }
 
+    /// FETCH / MOVE on a portal the protocol bound (one namespace with cursors): forward
+    /// only, as a portal made without SCROLL. None: no such portal.
+    pub(super) fn fetch_protocol_portal(
+        &mut self,
+        s: &pb::FetchStmt,
+    ) -> Result<Option<QueryResult>> {
+        use pb::FetchDirection as D;
+        if !self.portals.contains_key(&s.portalname) {
+            return Ok(None);
+        }
+        let dir = D::try_from(s.direction).unwrap_or(D::FetchForward);
+        let count = match dir {
+            D::FetchForward if s.how_many >= 0 => s.how_many,
+            D::FetchAbsolute | D::FetchRelative if s.how_many > 0 => {
+                return Err(Error::new(
+                    code::FEATURE_NOT_SUPPORTED,
+                    "cursor can only scan forward",
+                )
+                .hint("Declare it with SCROLL option to enable backward scan."));
+            }
+            _ => {
+                return Err(Error::new(
+                    code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                    "cursor can only scan forward",
+                )
+                .hint("Declare it with SCROLL option to enable backward scan."));
+            }
+        };
+        let not_started = self.portals[&s.portalname].pending.is_none();
+        if not_started {
+            // Run it, keeping every row in the portal for this FETCH and what follows.
+            let (o, _) = self.execute_portal(&s.portalname, 0)?;
+            let rows = match o {
+                Outcome::Done(r) => r.rows,
+                _ => Vec::new(),
+            };
+            let pt = self.portals.get_mut(&s.portalname).unwrap();
+            pt.tag_verb = "SELECT".into();
+            pt.pending = Some(rows.into());
+        }
+        let pt = self.portals.get_mut(&s.portalname).unwrap();
+        let rest = pt.pending.get_or_insert_with(VecDeque::new);
+        let n = (count.max(0) as u64).min(rest.len() as u64) as usize;
+        let rows: Vec<Row> = rest.drain(..n).collect();
+        let cols = pt.cols.clone().unwrap_or_default();
+        Ok(Some(if s.ismove {
+            QueryResult::command(format!("MOVE {}", rows.len()))
+        } else {
+            let tag = format!("FETCH {}", rows.len());
+            QueryResult::rows(cols, rows, tag)
+        }))
+    }
+
+    /// Execute on a cursor DECLARE made (cursors are portals, in one namespace with the
+    /// protocol's): the next `max_rows` rows (all for 0), tagged as its SELECT; suspended
+    /// unless it ran out of rows.
+    fn execute_cursor_portal(&mut self, name: &str, max_rows: usize) -> Result<(Outcome, bool)> {
+        if self.status == TxnStatus::Failed {
+            return Err(Error::new(
+                code::IN_FAILED_SQL_TRANSACTION,
+                "current transaction is aborted, commands ignored until end of transaction block",
+            ));
+        }
+        let count = if max_rows == 0 { i64::MAX } else { max_rows as i64 };
+        let got = self.with_ctx(&[], |ctx| {
+            cursor::fetch(ctx, name, pb::FetchDirection::FetchForward, count, true)
+        })?;
+        let Some((rows, cols, _)) = got else {
+            return Err(Error::new(
+                code::INVALID_CURSOR_NAME,
+                format!("portal \"{name}\" does not exist"),
+            ));
+        };
+        let more = max_rows > 0 && rows.len() == max_rows;
+        let tag = format!("SELECT {}", rows.len());
+        Ok((Outcome::Done(QueryResult::rows(cols, rows, tag)), more))
+    }
+
+    /// A portal's result columns for Describe: a bound one's, or a cursor's (in text).
+    pub fn portal_cols(&self, name: &str) -> Option<(Option<Vec<OutCol>>, Vec<i16>)> {
+        if let Some(pt) = self.portals.get(name) {
+            return Some((pt.cols.clone(), pt.result_formats.clone()));
+        }
+        self.state
+            .cursors
+            .borrow()
+            .get(name)
+            .map(|c| (Some(c.cols.clone()), Vec::new()))
+    }
+
     pub fn close_statement(&mut self, name: &str) {
         self.prepared.remove(name);
         self.prepared_meta.remove(name);
     }
 
+    /// Close message on a portal: a bound one, or a cursor.
     pub fn close_portal(&mut self, name: &str) {
-        self.portals.remove(name);
+        if self.portals.remove(name).is_none() {
+            self.state.cursors.borrow_mut().remove(name);
+        }
     }
 
     /// Sync: end an implicit transaction; the unnamed portal goes away.
@@ -1710,6 +1991,7 @@ impl Session {
                 }
                 let (mut iso, mut ro) = self.default_txn_opts();
                 apply_txn_options(&t.options, &mut iso, &mut ro)?;
+                default_deferrable(&self.state);
                 set_deferrable(&self.state, &t.options);
                 if self.implicit {
                     // Earlier statements of this batch join the block.
@@ -2199,6 +2481,35 @@ fn apply_txn_options(opts: &[Node], iso: &mut Isolation, ro: &mut bool) -> Resul
 }
 
 /// DEFERRABLE / NOT DEFERRABLE among BEGIN / SET TRANSACTION options: transaction_deferrable.
+/// BuildParamLogString: a parameter's text, quoted, cut to log_parameter_max_length_on_error
+/// bytes (whole characters; -1: all of it) with "..." after a cut.
+fn param_log_string(v: &str, state: &SessionState) -> String {
+    let max = state.settings.borrow().int("log_parameter_max_length_on_error");
+    let mut cut = v.len();
+    if max >= 0 && (max as usize) < v.len() {
+        cut = max as usize;
+        while !v.is_char_boundary(cut) {
+            cut -= 1;
+        }
+    }
+    let mut out = format!("'{}", v[..cut].replace('\'', "''"));
+    if cut < v.len() {
+        out.push_str("...");
+    }
+    out.push('\'');
+    out
+}
+
+/// StartTransaction: XactDeferrable = DefaultXactDeferrable (transaction_deferrable starts
+/// as default_transaction_deferrable; it's off unless that is on).
+fn default_deferrable(state: &SessionState) {
+    let mut st = state.settings.borrow_mut();
+    if st.bool("default_transaction_deferrable") && !st.bool("transaction_deferrable") {
+        let _ = st.set("transaction_deferrable", Some("on"), true, true);
+        st.changed.retain(|n| n != "transaction_deferrable");
+    }
+}
+
 pub(crate) fn set_deferrable(state: &SessionState, opts: &[Node]) {
     for o in opts {
         let Some(NodeEnum::DefElem(d)) = inner(o) else {

@@ -1028,7 +1028,7 @@ fn uescape(sql: &str, end: usize) -> (char, usize) {
     let rest = &sql[end..];
     let t = rest.trim_start();
     let skipped = rest.len() - t.len();
-    if t.len() >= 7 && t[..7].eq_ignore_ascii_case("uescape") {
+    if t.as_bytes().get(..7).is_some_and(|p| p.eq_ignore_ascii_case(b"uescape")) {
         let u = t[7..].trim_start();
         let at = end + skipped + 7 + (t.len() - 7 - u.len());
         let mut ch = u.chars();

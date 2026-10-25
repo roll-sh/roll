@@ -2998,6 +2998,39 @@ impl Catalog {
         out
     }
 
+    /// The value type of any type oid a client may name (a Parse message's parameter types):
+    /// built-in, user-defined, a domain's base type, or an array of any of them.
+    pub fn any_data_type(&self, oid: u32) -> Option<DataType> {
+        if let Some(t) = DataType::from_oid(oid).or_else(|| self.user_data_type(oid)) {
+            return Some(t);
+        }
+        if let Some((d, array)) = self.domain_type(oid) {
+            return Some(if array {
+                DataType::array_of(d.base.clone())
+            } else {
+                d.base.clone()
+            });
+        }
+        // An array of a user type: find its element.
+        let mut elem = None;
+        let mut check = |o: u32, a: u32| {
+            if a == oid && o != 0 && elem.is_none() {
+                elem = Some(o);
+            }
+        };
+        self.enums.values().for_each(|e| check(e.oid, e.array_oid));
+        self.composites.values().for_each(|c| check(c.oid, c.array_oid));
+        self.base_types.values().for_each(|b| check(b.ty.oid, b.ty.array_oid));
+        for r in self.ranges.values() {
+            check(r.oid, r.array_oid);
+            check(r.multi_oid, r.multi_array_oid);
+        }
+        self.tables.values().for_each(|t| check(t.rowtype, t.array_type()));
+        self.views.values().for_each(|v| check(v.rowtype, v.array_type()));
+        let elem = elem?;
+        self.user_data_type(elem).map(DataType::array_of)
+    }
+
     /// The domain a type oid names, or the domain an array type `_d` holds: (domain, array).
     pub fn domain_type(&self, oid: u32) -> Option<(&Arc<Domain>, bool)> {
         if let Some(d) = self.domains.get(&oid) {
@@ -4117,7 +4150,7 @@ pub fn quote_ident(s: &str) -> String {
             .next()
             .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
         && s.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '$')
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
         && !is_reserved_keyword(s)
         && !is_col_name_keyword(s);
     if simple {

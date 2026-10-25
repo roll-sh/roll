@@ -62,6 +62,8 @@ pub struct BoundQuery {
     /// FROM items with no scan of their own (subqueries, views): EXPLAIN counts them as range
     /// table entries.
     pub hidden_rtes: usize,
+    /// Parameters cast to a domain: (parameter, domain).
+    pub param_domains: Vec<(usize, u32)>,
 }
 
 impl BoundQuery {
@@ -457,6 +459,13 @@ pub struct Binder<'b, 'a> {
     pub ctx: &'b ExecCtx<'a>,
     pub cat: Arc<Catalog>,
     pub params: Vec<DataType>,
+    /// `$n` parameters of no type yet used where nothing gives them one (an `"any"`
+    /// argument, IS NULL, a ROW() field): Postgres leaves them unknown, which a Parse
+    /// refuses unless something else in the statement types them.
+    pub(crate) untyped_params: Vec<usize>,
+    /// `$n` parameters typed by a cast to a domain (`$1::posint`): the domain, which a
+    /// ParameterDescription names.
+    pub(crate) param_domains: Vec<(usize, u32)>,
     pub(crate) levels: Vec<Level>,
     pub(crate) ctes: Vec<Vec<CteDef>>,
     /// The query level (index into `levels`) of each `ctes` scope's WITH (the last
@@ -647,6 +656,8 @@ impl<'b, 'a> Binder<'b, 'a> {
             cat,
             ctx,
             params,
+            untyped_params: Vec::new(),
+            param_domains: Vec::new(),
             levels: vec![Level::new()],
             ctes: Vec::new(),
             cte_levels: Vec::new(),
@@ -891,10 +902,25 @@ impl<'b, 'a> Binder<'b, 'a> {
         self.bind_statement_body(n)
     }
 
+    /// exec_parse_message: a parameter still of unknown type has no type to take.
+    fn check_untyped_params(&self) -> Result<()> {
+        let first = (0..self.params.len()).find(|i| {
+            matches!(self.params[*i], DataType::Unknown) && self.untyped_params.contains(i)
+        });
+        match first {
+            Some(i) => Err(Error::new(
+                code::INDETERMINATE_DATATYPE,
+                format!("could not determine data type of parameter ${}", i + 1),
+            )),
+            None => Ok(()),
+        }
+    }
+
     fn bind_statement_body(&mut self, n: &pb::Node) -> Result<BoundQuery> {
         self.want_sys |= mentions_sys_column(n);
         // A relation with rules: the statements they make of it (planned already).
         if let Some((plan, cols)) = self.bind_rewritten(n)? {
+            self.check_untyped_params()?;
             let params = self
                 .params
                 .iter()
@@ -912,6 +938,7 @@ impl<'b, 'a> Binder<'b, 'a> {
                 params,
                 perms: Arc::new(self.perms.clone()),
                 hidden_rtes: self.hidden_rtes,
+                param_domains: self.param_domains.clone(),
             });
         }
         let (plan, cols) = match ast::inner(n) {
@@ -930,6 +957,7 @@ impl<'b, 'a> Binder<'b, 'a> {
                 check_merge_keys(self.ctx, &mut plan)?;
             }
         }
+        self.check_untyped_params()?;
         let params = self
             .params
             .iter()
@@ -947,6 +975,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             params,
             perms: Arc::new(self.perms.clone()),
             hidden_rtes: self.hidden_rtes,
+            param_domains: self.param_domains.clone(),
         })
     }
 
@@ -1009,6 +1038,9 @@ impl<'b, 'a> Binder<'b, 'a> {
         err: &dyn Fn(&DataType) -> Error,
     ) -> Result<Expr> {
         if matches!(to, DataType::Any | DataType::Unknown) || to.is_polymorphic() {
+            if let (DataType::Any, Expr::Param(i, DataType::Unknown)) = (to, &e) {
+                self.untyped_params.push(*i);
+            }
             return Ok(e);
         }
         let from = e.ty();
@@ -1153,8 +1185,17 @@ impl<'b, 'a> Binder<'b, 'a> {
         if from.same_base(to)
             && !matches!((&from, to), (DataType::Row(_), _) | (DataType::Record, _))
         {
-            if to.typmod() >= 0 && from.typmod() != to.typmod()
-                || matches!(to, DataType::Bpchar(_)) && from.typmod() != to.typmod()
+            // (An array's length coercion is its elements': array_coerce over the element
+            // type's.)
+            fn scalar(t: &DataType) -> &DataType {
+                match t {
+                    DataType::Array(e) => scalar(e),
+                    t => t,
+                }
+            }
+            let (sf, st) = (scalar(&from), scalar(to));
+            if st.typmod() >= 0 && sf.typmod() != st.typmod()
+                || matches!(st, DataType::Bpchar(_)) && sf.typmod() != st.typmod()
             {
                 return self.fold_cast(e, from, to.clone(), cc == CastContext::Explicit);
             }

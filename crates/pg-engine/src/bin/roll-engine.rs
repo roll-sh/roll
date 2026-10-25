@@ -29,6 +29,10 @@ struct Args {
     /// Superuser password (SCRAM-SHA-256). Without it, connections are trusted.
     #[arg(long, env = "ROLL_ENGINE_PASSWORD")]
     password: Option<String>,
+    /// How clients authenticate, as a pg_hba method: trust, password, md5 or scram-sha-256
+    /// (default: scram-sha-256 with --password, else trust).
+    #[arg(long, value_parser = |s: &str| AuthMethod::parse(s).ok_or("trust, password, md5 or scram-sha-256"))]
+    auth: Option<AuthMethod>,
     /// Block cache shared by all databases, in MiB.
     #[arg(long, default_value_t = 64)]
     cache_mb: usize,
@@ -54,11 +58,11 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let a = Args::parse();
-    let auth = if a.password.is_some() {
+    let auth = a.auth.unwrap_or(if a.password.is_some() {
         AuthMethod::ScramSha256
     } else {
         AuthMethod::Trust
-    };
+    });
     let engine = Engine::open(EngineOptions {
         data_dir: a.data,
         cache_bytes: a.cache_mb << 20,

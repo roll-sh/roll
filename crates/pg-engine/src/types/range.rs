@@ -833,7 +833,7 @@ fn parse_bound<'a>(input: &str, s: &'a str) -> Result<(Option<String>, &'a str)>
 /// `range_in`.
 pub fn parse(s: &str, rt: &RangeType, ctx: &FormatCtx) -> Result<Range> {
     let t = s.trim_start_matches(|c: char| c.is_ascii_whitespace());
-    if t.len() >= 5 && t[..5].eq_ignore_ascii_case("empty") {
+    if t.as_bytes().get(..5).is_some_and(|p| p.eq_ignore_ascii_case(b"empty")) {
         if !t[5..]
             .trim_matches(|c: char| c.is_ascii_whitespace())
             .is_empty()

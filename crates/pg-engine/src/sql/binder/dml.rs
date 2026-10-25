@@ -976,10 +976,18 @@ impl Binder<'_, '_> {
             }
         }
         // ON CONFLICT and RETURNING see the target table (or view) under its alias.
-        let rel = match &view {
+        let mut rel = match &view {
             Some(v) => v.scope_rel(&alias),
             None => table_rel(&t, &alias, None),
         };
+        // (Under its own name, `schema.table.col` reaches it too, as in UPDATE / DELETE.)
+        match &view {
+            Some(v) if alias == v.view.name => {
+                rel.schema = Some(self.cat.schema_name(v.view.schema).to_string())
+            }
+            None if alias == t.name => rel.schema = Some(self.cat.schema_name(t.schema).to_string()),
+            _ => {}
+        }
         let saved = std::mem::replace(
             &mut self.level().scope,
             Scope {

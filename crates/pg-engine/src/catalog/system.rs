@@ -746,6 +746,42 @@ pub fn type_collation(ty: &DataType) -> u32 {
     }
 }
 
+/// A collation's oid by name: a CREATE COLLATION one, else a built-in one.
+pub fn collation_oid_in(cat: &Catalog, name: &str) -> Option<u32> {
+    match cat.collations.values().find(|d| d.name == name) {
+        Some(d) => Some(d.oid),
+        None => collation_oid(name),
+    }
+}
+
+/// pg_attribute.attcollation of key `i` of an index (its indcollation): the key's COLLATE,
+/// else its column's collation, else its type's.
+fn index_attr_collation(cat: &Catalog, ix: &super::Index, i: usize, ty: &DataType) -> u32 {
+    if type_collation(ty) == 0 {
+        return 0;
+    }
+    let Some(c) = ix.columns.get(i) else {
+        return type_collation(ty);
+    };
+    match (&c.collation, &c.key) {
+        (Some(n), _) => collation_oid_in(cat, n).unwrap_or(100),
+        (None, IndexKey::Column(j)) => cat
+            .tables
+            .get(&ix.table)
+            .and_then(|t| t.columns.get(*j))
+            .map_or_else(|| type_collation(ty), |col| column_collation_in(cat, col)),
+        _ => type_collation(ty),
+    }
+}
+
+/// `column_collation`, a CREATE COLLATION collation included.
+pub fn column_collation_in(cat: &Catalog, col: &super::Column) -> u32 {
+    match &col.collation {
+        Some(c) if type_collation(&col.ty) != 0 => collation_oid_in(cat, c).unwrap_or(100),
+        _ => type_collation(&col.ty),
+    }
+}
+
 /// A column's collation: its `COLLATE` clause, or its type's.
 pub fn column_collation(col: &super::Column) -> u32 {
     match &col.collation {
@@ -1874,6 +1910,12 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                                     .get(&r.oid)
                                     .and_then(|v| v.domains.get(num - 1).copied().flatten())
                             })
+                            // A composite type's field declared as a domain (or an array of
+                            // one): that type.
+                            .or_else(|| {
+                                let ct = cat.composites.values().find(|ct| ct.relid == r.oid)?;
+                                cat.composite_domains.get(&ct.oid)?.get(&name).copied()
+                            })
                             .unwrap_or_else(|| type_oid(cat, &ty)),
                     };
                     // Everyone may read pg_subscription, all but the connection string.
@@ -1911,6 +1953,7 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                         o(tyoid),
                         i2(ty.typlen() as i64),
                         i2(num as i64),
+                        // (An array column's is its element type's.)
                         i4(if sys_domain.is_some() {
                             -1
                         } else {
@@ -1947,13 +1990,18 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                         b(col.as_ref().is_none_or(|c| c.islocal)),
                         i2(col.as_ref().map_or(0, |c| c.inhcount as i64)),
                         o(match (&col, sys) {
-                            (Some(c), _) => column_collation(c),
+                            (Some(c), _) => column_collation_in(cat, c),
                             (None, Some(a)) => a.1,
                             (None, None) => cat
                                 .views
                                 .get(&r.oid)
                                 .and_then(|v| v.collations.get(num - 1).cloned().flatten())
-                                .and_then(|c| collation_oid(&c))
+                                .and_then(|c| collation_oid_in(cat, &c))
+                                .or_else(|| {
+                                    cat.indexes
+                                        .get(&r.oid)
+                                        .map(|ix| index_attr_collation(cat, ix, num - 1, &ty))
+                                })
                                 .unwrap_or_else(|| type_collation(&ty)),
                         }),
                         col.as_ref()
@@ -2651,9 +2699,9 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                                 let Some(t) = t else { return o(0) };
                                 o(match (&c.collation, &c.key, table) {
                                     _ if type_collation(t) == 0 => 0,
-                                    (Some(n), _, _) => collation_oid(n).unwrap_or(100),
+                                    (Some(n), _, _) => collation_oid_in(cat, n).unwrap_or(100),
                                     (None, IndexKey::Column(i), Some(tb)) => {
-                                        column_collation(&tb.columns[*i])
+                                        column_collation_in(cat, &tb.columns[*i])
                                     }
                                     _ => type_collation(t),
                                 })
@@ -3705,10 +3753,10 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
                             .map(|k| {
                                 o(match &k.collation {
                                     _ if type_collation(&k.ty) == 0 => 0,
-                                    Some(n) => collation_oid(n).unwrap_or(0),
+                                    Some(n) => collation_oid_in(cat, n).unwrap_or(0),
                                     None => k.col.map_or_else(
                                         || type_collation(&k.ty),
-                                        |i| column_collation(&t.columns[i]),
+                                        |i| column_collation_in(cat, &t.columns[i]),
                                     ),
                                 })
                             })

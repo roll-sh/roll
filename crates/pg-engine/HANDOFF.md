@@ -99,6 +99,15 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   16 s); an idle session holds 0.5 MB (PostgreSQL 1.5 MB). Still slower: every DDL statement
   is O(catalog) (0.02–0.3x PostgreSQL at 10,000 tables), and the first catalog query after
   DDL regenerates the catalog's rows.
+- **Client libraries** (round 17, agent 38): drivers' and ORMs' own test suites against the
+  engine and against PostgreSQL 18.6, test by test: `tests/clients/` (runner, per-suite scripts,
+  `STATUS.md` with the per-suite counts and every difference left). psycopg 3, psycopg2,
+  asyncpg, pgx, lib/pq, node-postgres, postgres.js, pgjdbc, Npgsql, SQLAlchemy and Django run;
+  what's left is mostly contrib types (hstore, citext, ltree, pgcrypto: agent 39), LOCK TABLE /
+  SSI semantics (agent 34), notices sent only at statement end, COPY FROM processed only at
+  CopyDone, and DML on system catalogs. (Concurrent DDL commits through `txn/catmerge.rs`;
+  its base is now the catalog the statement started from, `Txn::stmt_catalog`: a newer one
+  made a commit drop what other DDL had committed meanwhile.)
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.

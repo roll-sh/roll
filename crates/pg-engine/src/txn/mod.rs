@@ -237,6 +237,7 @@ impl Database {
             catalog: None,
             catalog_base: None,
             catalog_base_cat: None,
+            stmt_catalog: None,
             locks_held: HashSet::new(),
             savepoints: Vec::new(),
             cancel,
@@ -609,6 +610,10 @@ pub struct Txn {
     catalog_base: Option<u64>,
     /// That catalog (what a commit after other DDL merges from: `catmerge`).
     catalog_base_cat: Option<Arc<Catalog>>,
+    /// The database's catalog as the running statement began: no newer than any catalog the
+    /// statement's DDL is made from, so it can stand as that DDL's base (a newer one would
+    /// take what other DDL committed meanwhile for this DDL's removals).
+    stmt_catalog: Option<Arc<Catalog>>,
     locks_held: HashSet<Vec<u8>>,
     savepoints: Vec<Savepoint>,
     pub cancel: Arc<AtomicBool>,
@@ -718,6 +723,9 @@ impl Txn {
 
     /// Start a statement: READ COMMITTED takes a fresh snapshot.
     pub fn begin_statement(&mut self) {
+        if self.catalog.is_none() {
+            self.stmt_catalog = Some(self.db.catalog());
+        }
         if !self.isolation.txn_snapshot() && self.db.store.visible_ts() != self.snapshot_ts {
             let pin = self.db.store.pin_visible();
             self.snapshot_ts = pin.ts;
@@ -756,7 +764,7 @@ impl Txn {
             );
         }
         if self.catalog_base.is_none() {
-            let base = self.db.catalog();
+            let base = self.stmt_catalog.take().unwrap_or_else(|| self.db.catalog());
             self.catalog_base = Some(base.version);
             self.catalog_base_cat = Some(base);
         }
@@ -782,7 +790,7 @@ impl Txn {
             );
         }
         if self.catalog_base.is_none() {
-            let base = self.db.catalog();
+            let base = self.stmt_catalog.take().unwrap_or_else(|| self.db.catalog());
             self.catalog_base = Some(base.version);
             self.catalog_base_cat = Some(base);
         }

@@ -460,6 +460,20 @@ impl Session {
                 };
                 vec![vec![Value::Text(iso.name().into())]]
             }
+            // (Of a transaction not started yet: BEGIN's options, else the default's.)
+            "transaction_read_only" => {
+                let ro = match &self.txn {
+                    Some(t) => t.borrow().read_only,
+                    None => self
+                        .txn_opts
+                        .map(|o| o.1)
+                        .unwrap_or_else(|| st.bool("default_transaction_read_only")),
+                };
+                vec![vec![Value::Text(if ro { "on" } else { "off" }.into())]]
+            }
+            "transaction_deferrable" if self.txn.is_none() && self.status == TxnStatus::Idle => {
+                vec![vec![Value::Text(st.show("default_transaction_deferrable")?.into())]]
+            }
             "session_authorization" => {
                 let cat = self.state.db.catalog();
                 vec![vec![Value::Text(
@@ -565,7 +579,8 @@ impl Session {
                 return Err(Error::new(
                     code::FEATURE_NOT_SUPPORTED,
                     "cached plan must not change result type",
-                ));
+                )
+                .routine("RevalidateCachedQuery"));
             }
         }
         self.execute_with(&p, &values, 0).map_err(strip)
@@ -949,6 +964,9 @@ impl Session {
             crate::session::cursor::fetch(ctx, &s.portalname, dir, s.how_many, !s.ismove)
         })?;
         let Some((out, cols, n)) = got else {
+            if let Some(r) = self.fetch_protocol_portal(s)? {
+                return Ok(r);
+            }
             return Err(Error::new(
                 code::INVALID_CURSOR_NAME,
                 format!("cursor \"{}\" does not exist", s.portalname),

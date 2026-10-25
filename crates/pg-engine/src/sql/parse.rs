@@ -299,13 +299,34 @@ fn parse_uncached(sql: &str, options: c_int) -> Result<Vec<RawStmt>> {
             Err(err)
         } else {
             let data = std::slice::from_raw_parts(r.parse_tree.data as *const u8, r.parse_tree.len);
-            ParseResult::decode(data)
-                .map(|p| p.stmts)
-                .map_err(|e| crate::error::internal(format!("parse tree: {e}")))
+            decode_tree(data)
         };
         pg_query_free_protobuf_parse_result(r);
         out
     }
+}
+
+/// The parse tree's protobuf form decoded. Its nesting is the grammar's (Postgres takes a
+/// UNION of hundreds of arms, a list nested as deep), so prost's recursion limit is off; the
+/// decoder recurses once per level, at most one level per two bytes, so a large tree is
+/// decoded on a thread with stack enough for its size.
+fn decode_tree(data: &[u8]) -> Result<Vec<RawStmt>> {
+    let decode = |d: &[u8]| {
+        ParseResult::decode(d)
+            .map(|p| p.stmts)
+            .map_err(|e| crate::error::internal(format!("parse tree: {e}")))
+    };
+    if data.len() <= 4096 {
+        return decode(data);
+    }
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size((16 << 20) + data.len() * 512)
+            .spawn_scoped(s, || decode(data))
+            .map_err(|e| crate::error::internal(format!("parse tree: {e}")))?
+            .join()
+            .unwrap_or_else(|_| Err(crate::error::internal("parse tree: decoder panicked")))
+    })
 }
 
 /// Where `stmt_text` starts in `sql`.

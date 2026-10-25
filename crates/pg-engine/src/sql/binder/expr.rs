@@ -94,6 +94,9 @@ impl Binder<'_, '_> {
             NodeEnum::NullTest(t) => {
                 self.whole_var_ref = false;
                 let arg = self.bind_expr(t.arg.as_deref().unwrap())?;
+                if let Expr::Param(i, DataType::Unknown) = &arg {
+                    self.untyped_params.push(*i);
+                }
                 let whole_var = std::mem::take(&mut self.whole_var_ref);
                 let not = t.nulltesttype == pb::NullTestType::IsNotNull as i32;
                 // Postgres's tree keeps `row IS NULL` as written; a whole-row reference's
@@ -253,7 +256,11 @@ impl Binder<'_, '_> {
                         }];
                         args.extend(self.bind_targets(&list)?.into_iter().map(|t| t.expr));
                     } else {
-                        args.push(self.bind_expr(a)?);
+                        let e = self.bind_expr(a)?;
+                        if let Expr::Param(i, DataType::Unknown) = &e {
+                            self.untyped_params.push(*i);
+                        }
+                        args.push(e);
                     }
                 }
                 let fields: Vec<(String, DataType)> = args
@@ -1337,8 +1344,9 @@ impl Binder<'_, '_> {
             }
             self.params.resize(i + 1, DataType::Unknown);
         }
+        // (A void parameter stays one: a function call drops it as an argument.)
         if self.param_consts
-            && self.params[i] != DataType::Unknown
+            && !matches!(self.params[i], DataType::Unknown | DataType::Void)
             && let Ok(v) = self.ctx.param(i)
         {
             return Ok(Expr::Const(v, self.params[i].clone()));
@@ -1409,6 +1417,9 @@ impl Binder<'_, '_> {
             };
         }
         let e = self.bind_expr(arg)?;
+        if let (Expr::Param(i, DataType::Unknown), Some(d)) = (&e, domain) {
+            self.param_domains.push((*i, d));
+        }
         let lit = if matches!(e, Expr::Const(Value::Text(_), DataType::Unknown)) {
             Some(e.clone())
         } else {
@@ -3403,9 +3414,18 @@ impl Binder<'_, '_> {
                 .domain_type(d)
                 .is_some_and(|(x, array)| !array && x.base.is_array())
         });
+        // transformArrayExpr: an element that is a sub-ARRAY or of an array type makes it
+        // multidimensional; then the other elements are coerced to the array type.
+        let multidims = a.elements.iter().zip(&items).any(|(n, i)| {
+            matches!(inner(n), Some(NodeEnum::AArrayExpr(_))) || i.ty().is_array()
+        });
         let (items, ty) = match elem_hint {
             Some(h) if !sub_arrays => {
-                let h = h.clone();
+                let h = if multidims {
+                    DataType::array_of(h.clone())
+                } else {
+                    h.clone()
+                };
                 let items = items
                     .into_iter()
                     .map(|i| self.cast_explicit(i, &h))
@@ -4699,6 +4719,7 @@ impl Binder<'_, '_> {
             }
         }
         check_arg_names(arg_nodes)?;
+        drop_void_params(&mut args, &mut arg_names);
         if arg_names.iter().any(Option::is_some) && !variadic {
             return self.resolve_named(name, args, arg_names, loc);
         }
@@ -6647,6 +6668,17 @@ impl Binder<'_, '_> {
             }
         }
         check_arg_names(arg_nodes)?;
+        if call {
+            // (CALL keeps a void parameter, of unknown type: it may stand for an output
+            // argument.)
+            for a in args.iter_mut() {
+                if let Expr::Param(i, DataType::Void) = a {
+                    *a = Expr::Param(*i, DataType::Unknown);
+                }
+            }
+        } else {
+            drop_void_params(&mut args, &mut arg_names);
+        }
         let types: Vec<DataType> = args.iter().map(|a| a.ty()).collect();
         // Overloads told apart only by domain parameters: keep the one whose domains the
         // arguments have (else the base-typed one).
@@ -9093,4 +9125,20 @@ pub(crate) fn native_subscript_def(imp: func::FnImpl, args: Vec<DataType>, stric
         defaults: vec![],
         coll: None,
     })
+}
+
+/// ParseFuncOrColumn: a parameter of type void is no argument at all (what clients calling a
+/// function with OUT parameters bind for them, as pgjdbc's `{? = call f(?)}` does).
+fn drop_void_params(args: &mut Vec<Expr>, names: &mut Vec<Option<String>>) {
+    if !args.iter().any(|a| matches!(a, Expr::Param(_, DataType::Void))) {
+        return;
+    }
+    let keep: Vec<bool> = args
+        .iter()
+        .map(|a| !matches!(a, Expr::Param(_, DataType::Void)))
+        .collect();
+    let mut k = keep.iter();
+    args.retain(|_| *k.next().unwrap());
+    let mut k = keep.iter();
+    names.retain(|_| *k.next().unwrap());
 }

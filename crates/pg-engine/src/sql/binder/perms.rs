@@ -127,6 +127,10 @@ impl Binder<'_, '_> {
         if self.cat.is_superuser(me) {
             return Ok(());
         }
+        // pg_namespace_aclcheck: the session's own temporary schema (`pg_temp`) is usable.
+        if schema == "pg_temp" || s.name == self.ctx.sess.temp_schema() {
+            return Ok(());
+        }
         let (p, _) = self
             .cat
             .obj_mask(ObjKind::Schema, s.oid, me, self.ctx.db_owner());

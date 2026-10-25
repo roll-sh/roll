@@ -9,6 +9,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio_postgres::{AsyncMessage, Client, NoTls, SimpleQueryMessage};
 
+#[path = "common/raw.rs"]
+mod raw;
+
 struct Server {
     engine: Arc<Engine>,
     addr: String,
@@ -1500,5 +1503,297 @@ fn idle_hook_runs_and_the_connection_goes_on() {
     let mut b = [0u8; 1];
     st.read_exact(&mut b).unwrap();
     assert_eq!(b[0], b'R');
+    s.engine.shutdown();
+}
+
+// ── what client libraries' own test suites found (tests/clients) ──
+
+/// A cursor DECLARE made is a portal too (psycopg's server-side cursors describe it; JDBC
+/// and others execute it): Describe, Execute with a row limit (suspending), Close.
+#[test]
+fn cursors_are_portals() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    c.query("CREATE TABLE cp (a int); INSERT INTO cp SELECT generate_series(1, 5)");
+    c.query("BEGIN");
+    c.query("DECLARE \"foo\" CURSOR FOR SELECT a, a::text AS b FROM cp ORDER BY a");
+    c.describe(b'P', "foo");
+    assert_eq!(c.sync(), ["T a:23/-1 b:25/-1"]);
+    c.execute("foo", 2);
+    c.execute("foo", 2);
+    c.execute("foo", 2);
+    c.execute("foo", 0);
+    c.close(b'P', "foo");
+    assert_eq!(
+        c.sync(),
+        ["D 1|1", "D 2|2", "s", "D 3|3", "D 4|4", "s", "D 5|5", "C SELECT 1", "C SELECT 0"]
+    );
+    // Closed by the Close message.
+    assert_eq!(c.query("FETCH 1 FROM foo"), ["E 34000"]);
+    c.query("ROLLBACK");
+    // An unknown portal's Describe aborts the transaction, as any error does.
+    c.query("BEGIN");
+    c.describe(b'P', "nope");
+    assert_eq!(c.sync(), ["E 34000"]);
+    assert_eq!(c.status, b'E');
+    c.query("ROLLBACK");
+    s.engine.shutdown();
+}
+
+/// exec_parse_message: a parameter nothing gives a type (an "any" argument, IS NULL, a ROW()
+/// field) is refused; the select list and operators type theirs.
+#[test]
+fn parameters_left_without_a_type() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    for (sql, want) in [
+        ("SELECT concat($1, $2)", "E 42P18"),
+        ("SELECT format($1, $2)", "E 42P18"),
+        ("SELECT $1 IS NULL", "E 42P18"),
+        ("SELECT row($1, $2)", "E 42P18"),
+        ("SELECT pg_typeof($1)", "E 42P18"),
+        ("SELECT $1", "T ?column?:25/-1"),
+        ("SELECT coalesce($1, 'x')", "T coalesce:25/-1"),
+        ("SELECT concat($1::int, 'a'), $1 IS NULL", "T concat:25/-1 ?column?:16/-1"),
+    ] {
+        c.parse("", sql);
+        c.describe(b'S', "");
+        assert_eq!(c.sync()[0], want, "{sql}");
+    }
+    // An array column's type modifier is its element's.
+    c.parse("", "SELECT NULL::varchar(3)[], NULL::numeric(10,2)[]");
+    c.describe(b'S', "");
+    assert_eq!(c.sync(), ["T varchar:1015/7 numeric:1231/655366"]);
+    s.engine.shutdown();
+}
+
+/// A failed transaction still parses and binds its end (a pipelining client's ROLLBACK), and
+/// nothing else.
+#[test]
+fn failed_transaction_parses_its_end() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    c.query("BEGIN");
+    assert_eq!(c.query("SELECT 1/0"), ["E 22012"]);
+    c.parse("", "SELECT 1");
+    assert_eq!(c.sync(), ["E 25P02"]);
+    c.parse("", "ROLLBACK");
+    c.bind("", "");
+    c.execute("", 0);
+    assert_eq!(c.sync(), ["C ROLLBACK"]);
+    assert_eq!(c.status, b'I');
+    s.engine.shutdown();
+}
+
+/// Binary send / receive of the types that fell back to text (inet, cidr, timetz, macaddr,
+/// bit, money, pg_lsn, tid, enum), parameters naming a user type's oid (composite, an array of
+/// an enum, one made in the open transaction), and binary COPY's framing (the header goes out
+/// with the first row, one CopyData per row).
+#[test]
+fn binary_formats_and_user_types() {
+    use tokio_postgres::types::Type;
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let mut c = s.connect("postgres").await;
+        let ip: std::net::IpAddr = "192.168.0.1".parse().unwrap();
+        let back: std::net::IpAddr = c.query_one("SELECT $1::inet", &[&ip]).await.unwrap().get(0);
+        assert_eq!(back, ip);
+        let v6: std::net::IpAddr = "2001:db8::1".parse().unwrap();
+        let row = c.query_one("SELECT $1::inet, host($1::inet)", &[&v6]).await.unwrap();
+        assert_eq!((row.get::<_, std::net::IpAddr>(0), row.get::<_, String>(1)), (v6, "2001:db8::1".into()));
+        // Binary results go through each type's send function: re-read through its receive.
+        c.batch_execute(
+            "CREATE TYPE mood AS ENUM ('sad', 'ok'); CREATE TYPE pair AS (a int, b text);
+             CREATE TABLE bt (i inet, n cidr, t timetz, m macaddr, m8 macaddr8, b bit(3), v varbit,
+               mo money, l pg_lsn, d tid, e mood, p pair);
+             INSERT INTO bt VALUES ('10.1.2.3/8', '10.0.0.0/8', '03:04:05.6-02:30', '08:00:2b:01:02:03',
+               '08:00:2b:01:02:03:04:05', B'101', B'11', 12.34, '16/B374D848', '(3,7)', 'ok', ROW(1, 'x'))",
+        )
+        .await
+        .unwrap();
+        let cols = "i, n, t, m, m8, b, v, mo, l, d, e, p";
+        let want: Vec<String> = c.simple_query(&format!("SELECT {cols} FROM bt")).await.unwrap().iter()
+            .filter_map(|m| match m { SimpleQueryMessage::Row(r) => Some((0..12).map(|i| r.get(i).unwrap().to_string()).collect::<Vec<_>>()), _ => None })
+            .next()
+            .unwrap();
+        let mut copy = Vec::new();
+        let stream = c.copy_out(&format!("COPY (SELECT {cols} FROM bt) TO STDOUT (FORMAT binary)")).await.unwrap();
+        futures::pin_mut!(stream);
+        while let Some(chunk) = stream.next().await {
+            copy.push(chunk.unwrap());
+        }
+        // The signature and the one row in one message, the trailer in the next.
+        assert_eq!(copy.len(), 2);
+        assert!(copy[0].starts_with(b"PGCOPY\n\xff\r\n\0"));
+        assert_eq!(&copy[1][..], b"\xff\xff");
+        c.batch_execute("CREATE TABLE bt2 (LIKE bt)").await.unwrap();
+        let sink = c.copy_in("COPY bt2 FROM STDIN (FORMAT binary)").await.unwrap();
+        futures::pin_mut!(sink);
+        for chunk in &copy {
+            sink.send(chunk.clone()).await.unwrap();
+        }
+        assert_eq!(sink.finish().await.unwrap(), 1);
+        let got: Vec<String> = c.simple_query(&format!("SELECT {cols} FROM bt2")).await.unwrap().iter()
+            .filter_map(|m| match m { SimpleQueryMessage::Row(r) => Some((0..12).map(|i| r.get(i).unwrap().to_string()).collect::<Vec<_>>()), _ => None })
+            .next()
+            .unwrap();
+        assert_eq!(got, want);
+
+        // A parameter typed by a user type's oid: Parse resolves it (also in the transaction
+        // that made it).
+        let tx = c.transaction().await.unwrap();
+        tx.batch_execute("CREATE TYPE pair2 AS (x int)").await.unwrap();
+        let oid: u32 = tx.query_one("SELECT 'pair2'::regtype::oid", &[]).await.unwrap().get(0);
+        let arr: u32 = tx.query_one("SELECT '_mood'::regtype::oid", &[]).await.unwrap().get(0);
+        for o in [oid, arr] {
+            let ty = Type::new("x".into(), o, tokio_postgres::types::Kind::Pseudo, "public".into());
+            let st = tx.prepare_typed("SELECT $1::text", &[ty]).await.unwrap();
+            assert_eq!(st.params()[0].oid(), o);
+        }
+        tx.rollback().await.unwrap();
+    });
+    s.engine.shutdown();
+}
+
+/// COPY TO's row errors come after CopyOutResponse (a row that can't be converted to the
+/// client's encoding); the transaction characteristics a new transaction starts with; text
+/// parameters arrive in the client's encoding.
+#[test]
+fn copy_errors_encodings_and_transaction_defaults() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    c.query("SET client_encoding TO latin1");
+    assert_eq!(c.query("COPY (SELECT 'a' UNION ALL SELECT chr(8364)) TO STDOUT"), ["H", "d", "E 22P05"]);
+    // é in Latin-1, as a text parameter.
+    c.send(b'P', b"\0SELECT $1::text = chr(233)\0\0\0");
+    c.send(b'B', b"\0\0\0\0\0\x01\0\0\0\x01\xe9\0\0");
+    c.execute("", 0);
+    assert_eq!(c.sync(), ["D t", "C SELECT 1"]);
+    c.query("RESET client_encoding");
+    // A NUL byte is no valid text.
+    c.send(b'P', b"\0SELECT $1::text\0\0\0");
+    c.send(b'B', b"\0\0\0\0\0\x01\0\0\0\x03a\0b\0\0");
+    assert_eq!(c.sync(), ["E 22021"]);
+
+    c.query("SET default_transaction_deferrable = on; SET default_transaction_read_only = on");
+    for (q, want) in [
+        ("SHOW transaction_deferrable", "D on"),
+        ("SHOW transaction_read_only", "D on"),
+        ("BEGIN; SHOW transaction_deferrable", "D on"),
+        ("SHOW transaction_read_only", "D on"),
+        ("ROLLBACK; BEGIN NOT DEFERRABLE; SHOW transaction_deferrable", "D off"),
+        ("ROLLBACK; SELECT current_setting('transaction_deferrable')", "D on"),
+    ] {
+        let got = c.query(q);
+        assert!(got.iter().any(|l| l == want), "{q}: {got:?}");
+    }
+    s.engine.shutdown();
+}
+
+/// Sessions changing unrelated catalog objects at once all commit (each session's CREATE
+/// TEMP TABLE, tables of their own), as in Postgres, where only the objects' locks
+/// serialize DDL (txn/catmerge.rs), and none loses what the other committed meanwhile; two
+/// objects given one name still conflict.
+#[test]
+fn concurrent_ddl_on_unrelated_objects() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        a.batch_execute("CREATE TABLE shared_t (x int)").await.unwrap();
+        for c in [&a, &b] {
+            c.batch_execute("BEGIN; CREATE TEMP TABLE foo (n int); INSERT INTO foo VALUES (1)").await.unwrap();
+        }
+        a.batch_execute("CREATE TABLE a_only (x int); COMMENT ON TABLE a_only IS 'a'").await.unwrap();
+        b.batch_execute("CREATE TABLE b_only (y serial PRIMARY KEY); COMMENT ON TABLE b_only IS 'b'").await.unwrap();
+        a.batch_execute("COMMIT").await.unwrap();
+        b.batch_execute("COMMIT").await.unwrap();
+        for c in [&a, &b] {
+            let n: i64 = c.query_one("SELECT count(*) FROM foo", &[]).await.unwrap().get(0);
+            assert_eq!(n, 1);
+            let names: Vec<String> = c
+                .query("SELECT relname::text || ':' || coalesce(obj_description(oid, 'pg_class'), '') FROM pg_class WHERE relname IN ('a_only', 'b_only', 'b_only_pkey', 'b_only_y_seq') ORDER BY 1", &[])
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.get(0))
+                .collect();
+            assert_eq!(names, ["a_only:a", "b_only:b", "b_only_pkey:", "b_only_y_seq:"]);
+        }
+        b.batch_execute("INSERT INTO b_only DEFAULT VALUES").await.unwrap();
+
+        // Two tables of one name: likewise.
+        a.batch_execute("BEGIN; CREATE TABLE twice (x int)").await.unwrap();
+        b.batch_execute("BEGIN; CREATE TABLE twice (y text)").await.unwrap();
+        a.batch_execute("COMMIT").await.unwrap();
+        assert!(b.batch_execute("COMMIT").await.is_err());
+        let cols: i64 = a
+            .query_one("SELECT count(*) FROM pg_attribute WHERE attrelid = 'twice'::regclass AND attnum > 0", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(cols, 1);
+    });
+    s.engine.shutdown();
+}
+
+/// pg_hba's md5 and password methods: an MD5 challenge for a role with an MD5 password (SCRAM
+/// for one with a SCRAM secret), the password in clear checked against either kind.
+#[test]
+fn md5_and_password_authentication() {
+    for method in [AuthMethod::Md5, AuthMethod::Password] {
+        let s = server(method);
+        runtime().block_on(async {
+            let c = s.connect("postgres").await;
+            c.batch_execute(
+                "SET password_encryption = md5; CREATE ROLE m LOGIN PASSWORD 'mpw';
+                 SET password_encryption = 'scram-sha-256'; CREATE ROLE sc LOGIN PASSWORD 'spw'",
+            )
+            .await
+            .unwrap();
+            for (user, pw) in [("m", "mpw"), ("sc", "spw")] {
+                let mut cfg = s.config("postgres", pw);
+                cfg.user(user);
+                let (u, conn) = cfg.connect(NoTls).await.expect(user);
+                tokio::spawn(conn);
+                let who: String = u.query_one("SELECT system_user", &[]).await.unwrap().get(0);
+                let want = match method {
+                    AuthMethod::Md5 => format!("md5:{user}"),
+                    _ => format!("password:{user}"),
+                };
+                assert_eq!(who, want);
+                let mut bad = s.config("postgres", "nope");
+                bad.user(user);
+                let e = bad.connect(NoTls).await.err().expect("wrong password");
+                assert_eq!(e.code().map(|c| c.code()), Some("28P01"));
+            }
+        });
+        s.engine.shutdown();
+    }
+}
+
+/// record_recv / record_send name a composite's domain field by the domain's oid (pgx's and
+/// Npgsql's composite codecs send it so).
+#[test]
+fn composite_domain_fields_in_binary() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    c.query("CREATE DOMAIN cdd AS text; CREATE TYPE cdt AS (a text, b cdd)");
+    let r = c.query("SELECT 'cdd'::regtype::oid");
+    let oid: u32 = r[1].strip_prefix("D ").unwrap().parse().unwrap();
+    let mut rec = 2i32.to_be_bytes().to_vec();
+    for (o, v) in [(25u32, b"x"), (oid, b"y")] {
+        rec.extend_from_slice(&o.to_be_bytes());
+        rec.extend_from_slice(&1i32.to_be_bytes());
+        rec.extend_from_slice(v);
+    }
+    c.send(b'P', b"\0SELECT ($1::cdt).b\0\0\0");
+    let mut b = b"\0\0\0\x01\0\x01\0\x01".to_vec();
+    b.extend_from_slice(&(rec.len() as i32).to_be_bytes());
+    b.extend_from_slice(&rec);
+    b.extend_from_slice(b"\0\0");
+    c.send(b'B', &b);
+    c.execute("", 0);
+    assert_eq!(c.sync(), ["D y", "C SELECT 1"]);
     s.engine.shutdown();
 }
