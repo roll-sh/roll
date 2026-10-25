@@ -5,11 +5,12 @@
 #   crates/pg-engine/tools/heavy.sh cargo test -p pg-engine --test golden
 #
 # Several builds running at once ran a machine out of RAM; these slots cap concurrent heavy
-# jobs (HEAVY_SLOTS, default 1) however many agents are reading and editing.
+# jobs (HEAVY_SLOTS, default 1) however many agents are reading and editing. A number in
+# $LOCK.slots overrides HEAVY_SLOTS for every agent at once, and is re-read while waiting.
 set -u
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 LOCK=${HEAVY_LOCK:-/tmp/pg-engine-heavy.lock}
-SLOTS=${HEAVY_SLOTS:-1}
+slots() { cat "$LOCK.slots" 2>/dev/null || echo "${HEAVY_SLOTS:-1}"; }
 # Full debuginfo makes every test binary ~400 MB and a worktree's target ~15 GB; line tables
 # keep backtraces and gdb stacks readable at a fraction of that. Set it to override.
 : "${CARGO_PROFILE_DEV_DEBUG:=line-tables-only}"
@@ -28,6 +29,7 @@ slot_path() { if [ "$1" -eq 1 ]; then echo "$LOCK"; else echo "$LOCK.$1"; fi; }
 HELD=
 while [ -z "$HELD" ]; do
   i=1
+  SLOTS=$(slots)
   while [ "$i" -le "$SLOTS" ]; do
     S=$(slot_path "$i")
     if mkdir "$S" 2>/dev/null; then HELD=$S; break; fi
