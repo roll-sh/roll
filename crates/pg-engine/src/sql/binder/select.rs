@@ -776,7 +776,19 @@ impl Binder<'_, '_> {
             }
         }
         // A recursive UNION (not ALL) is done by hashing (generate_recursion_path).
-        if !s.all && cols.iter().any(|c| !hashable(&c.ty)) {
+        // (makeSortGroupClauseForSetOp with require_hash: an anonymous record, or an array
+        // of them, is taken to hash; it fails at execution if a field doesn't.)
+        let anon = |t: &DataType| match t {
+            DataType::Record => true,
+            DataType::Row(rt) => rt.oid == 0,
+            _ => false,
+        };
+        let hashes = |t: &DataType| {
+            anon(t)
+                || matches!(t, DataType::Array(e) if anon(e))
+                || self.cat.type_hashable(t)
+        };
+        if !s.all && cols.iter().any(|c| !hashes(&c.ty)) {
             return Err(Error::new(
                 code::FEATURE_NOT_SUPPORTED,
                 "could not implement recursive UNION",
@@ -2202,7 +2214,7 @@ impl Binder<'_, '_> {
             && !self.deparse
         {
             let sortable = |t: &DataType| self.cat.default_opclass(403, t) != 0;
-            let hashable = |t: &DataType| self.cat.default_opclass(405, t) != 0;
+            let hashable = |t: &DataType| self.cat.type_hashable(t);
             let ordered_aggs = st.aggs.iter().any(|a| a.distinct || !a.order_by.is_empty());
             for set in ss {
                 let tys: Vec<DataType> = set.iter().map(|&i| groups[i].ty()).collect();
@@ -7262,39 +7274,6 @@ impl Binder<'_, '_> {
             }
         }
         out
-    }
-}
-
-/// Whether values of `ty` can be hashed (the type has a hash operator class).
-fn hashable(ty: &DataType) -> bool {
-    match ty {
-        DataType::Array(e) => hashable(e),
-        // An extension's native type: when its script gives it a hash operator class.
-        DataType::Base(b) if b.ext != 0 => crate::ext::types::get(b.ext).is_some_and(|x| x.hash),
-        t => {
-            let name = t.display();
-            let base = name.split('(').next().unwrap_or("").trim();
-            !matches!(
-                base,
-                "bit"
-                    | "bit varying"
-                    | "box"
-                    | "circle"
-                    | "json"
-                    | "jsonpath"
-                    | "line"
-                    | "lseg"
-                    | "money"
-                    | "path"
-                    | "point"
-                    | "polygon"
-                    | "refcursor"
-                    | "tsquery"
-                    | "tsvector"
-                    | "txid_snapshot"
-                    | "xml"
-            )
-        }
     }
 }
 

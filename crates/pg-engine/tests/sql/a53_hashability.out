@@ -1,0 +1,518 @@
+> CREATE TABLE m (a money, b int, c bit(4))
+-- CREATE TABLE
+
+> INSERT INTO m SELECT (i % 7)::money, i, (i % 5)::bit(4) FROM generate_series(1, 50) i
+-- INSERT 0 50
+
+> ANALYZE m
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT a, count(*) FROM m GROUP BY a
+QUERY PLAN:text
+GroupAggregate
+  Group Key: a
+  ->  Sort
+        Sort Key: a
+        ->  Seq Scan on m
+-- EXPLAIN
+
+> SELECT a, count(*) FROM m GROUP BY a
+a:money | count:int8
+$0.00 | 7
+$1.00 | 8
+$2.00 | 7
+$3.00 | 7
+$4.00 | 7
+$5.00 | 7
+$6.00 | 7
+-- SELECT 7
+
+> EXPLAIN (COSTS OFF) SELECT DISTINCT a FROM m
+QUERY PLAN:text
+Unique
+  ->  Sort
+        Sort Key: a
+        ->  Seq Scan on m
+-- EXPLAIN
+
+> SELECT DISTINCT a FROM m
+a:money
+$0.00
+$1.00
+$2.00
+$3.00
+$4.00
+$5.00
+$6.00
+-- SELECT 7
+
+> EXPLAIN (COSTS OFF) SELECT c, count(*) FROM m GROUP BY c
+QUERY PLAN:text
+GroupAggregate
+  Group Key: c
+  ->  Sort
+        Sort Key: c
+        ->  Seq Scan on m
+-- EXPLAIN
+
+> SELECT c, count(*) FROM m GROUP BY c
+c:bit | count:int8
+0000 | 10
+0001 | 10
+0010 | 10
+0011 | 10
+0100 | 10
+-- SELECT 5
+
+> EXPLAIN (COSTS OFF) SELECT a, b FROM m GROUP BY a, b
+QUERY PLAN:text
+Group
+  Group Key: a, b
+  ->  Sort
+        Sort Key: a, b
+        ->  Seq Scan on m
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT a FROM m UNION SELECT a FROM m
+QUERY PLAN:text
+Unique
+  ->  Merge Append
+        Sort Key: m.a
+        ->  Sort
+              Sort Key: m.a
+              ->  Seq Scan on m
+        ->  Sort
+              Sort Key: m_1.a
+              ->  Seq Scan on m m_1
+-- EXPLAIN
+
+> SELECT a FROM m UNION SELECT a FROM m
+a:money
+$0.00
+$1.00
+$2.00
+$3.00
+$4.00
+$5.00
+$6.00
+-- SELECT 7
+
+> SELECT a FROM m INTERSECT SELECT a FROM m
+a:money
+$0.00
+$1.00
+$2.00
+$3.00
+$4.00
+$5.00
+$6.00
+-- SELECT 7
+
+> SELECT a FROM m EXCEPT SELECT a FROM m WHERE b > 40
+a:money
+-- SELECT 0
+
+> EXPLAIN (COSTS OFF) SELECT b FROM m WHERE a NOT IN (SELECT a FROM m WHERE b < 3)
+QUERY PLAN:text
+Seq Scan on m
+  Filter: (NOT (ANY (a = (SubPlan 1).col1)))
+  SubPlan 1
+    ->  Materialize
+          ->  Seq Scan on m m_1
+                Filter: (b < 3)
+-- EXPLAIN
+
+> SELECT b FROM m WHERE a NOT IN (SELECT a FROM m WHERE b < 3)
+b:int4
+10
+11
+12
+13
+14
+17
+18
+19
+20
+21
+24
+25
+26
+27
+28
+3
+31
+32
+33
+34
+35
+38
+39
+4
+40
+41
+42
+45
+46
+47
+48
+49
+5
+6
+7
+-- SELECT 35
+
+> EXPLAIN (COSTS OFF) SELECT ARRAY[a] FROM m GROUP BY 1
+QUERY PLAN:text
+Group
+  Group Key: (ARRAY[a])
+  ->  Sort
+        Sort Key: (ARRAY[a])
+        ->  Seq Scan on m
+-- EXPLAIN
+
+> SELECT ARRAY[a] FROM m GROUP BY 1
+array:791
+{$0.00}
+{$1.00}
+{$2.00}
+{$3.00}
+{$4.00}
+{$5.00}
+{$6.00}
+-- SELECT 7
+
+> EXPLAIN (COSTS OFF) SELECT ROW(b % 3, b % 2) FROM m GROUP BY 1
+QUERY PLAN:text
+Group
+  Group Key: (ROW((b % 3), (b % 2)))
+  ->  Sort
+        Sort Key: (ROW((b % 3), (b % 2)))
+        ->  Seq Scan on m
+-- EXPLAIN
+
+> SELECT ROW(b % 3, b % 2) FROM m GROUP BY 1
+row:record
+(0,0)
+(0,1)
+(1,0)
+(1,1)
+(2,0)
+(2,1)
+-- SELECT 6
+
+> CREATE TYPE pt AS (p money, q int)
+-- CREATE TYPE
+
+> EXPLAIN (COSTS OFF) SELECT (a, b % 2)::pt FROM m GROUP BY 1
+QUERY PLAN:text
+Group
+  Group Key: (ROW(a, (b % 2))::pt)
+  ->  Sort
+        Sort Key: (ROW(a, (b % 2))::pt)
+        ->  Seq Scan on m
+-- EXPLAIN
+
+> SELECT count(*) FROM (SELECT (a, b % 2)::pt FROM m GROUP BY 1) s
+count:int8
+14
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT a, count(*) FROM m GROUP BY GROUPING SETS ((a), (b)) ORDER BY 1, 2 LIMIT 5
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: a, (count(*))
+        ->  MixedAggregate
+              Hash Key: b
+              Group Key: a
+              ->  Sort
+                    Sort Key: a
+                    ->  Seq Scan on m
+-- EXPLAIN
+
+> WITH RECURSIVE r(a) AS (SELECT '1'::money UNION SELECT a + '1'::money FROM r WHERE a < '5'::money) SELECT * FROM r
+ERROR 0A000: could not implement recursive UNION
+DETAIL: All column datatypes must be hashable.
+
+> CREATE TABLE n (k int)
+-- CREATE TABLE
+
+> INSERT INTO n SELECT i % 5 FROM generate_series(1, 100) i
+-- INSERT 0 100
+
+> ANALYZE n
+-- ANALYZE
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM n JOIN LATERAL (SELECT sum(b) FROM m WHERE m.a = n.k::money) s ON true
+QUERY PLAN:text
+Nested Loop
+  ->  Seq Scan on n
+  ->  Memoize
+        Cache Key: n.k
+        Cache Mode: binary
+        ->  Aggregate
+              ->  Seq Scan on m
+                    Filter: (a = (n.k)::money)
+-- EXPLAIN
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_mergejoin
+-- RESET
+
+> CREATE TABLE g (a int, b int)
+-- CREATE TABLE
+
+> INSERT INTO g SELECT (i * 7919) % 13, i FROM generate_series(1, 50) i
+-- INSERT 0 50
+
+> ANALYZE g
+-- ANALYZE
+
+> SET enable_hashagg = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT a, count(*) FROM g GROUP BY a
+QUERY PLAN:text
+GroupAggregate
+  Group Key: a
+  ->  Sort
+        Sort Key: a
+        ->  Seq Scan on g
+-- EXPLAIN
+
+> SELECT a, count(*) FROM g GROUP BY a
+a:int4 | count:int8
+0 | 3
+1 | 4
+10 | 4
+11 | 3
+12 | 4
+2 | 4
+3 | 4
+4 | 4
+5 | 4
+6 | 4
+7 | 4
+8 | 4
+9 | 4
+-- SELECT 13
+
+> RESET enable_hashagg
+-- RESET
+
+> SELECT a, count(*) FROM g GROUP BY a
+a:int4 | count:int8
+0 | 3
+1 | 4
+10 | 4
+11 | 3
+12 | 4
+2 | 4
+3 | 4
+4 | 4
+5 | 4
+6 | 4
+7 | 4
+8 | 4
+9 | 4
+-- SELECT 13
+
+> CREATE INDEX ON g (a)
+-- CREATE INDEX
+
+> SET enable_seqscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT a, count(*) FROM g GROUP BY a
+QUERY PLAN:text
+GroupAggregate
+  Group Key: a
+  ->  Index Only Scan using g_a_idx on g
+-- EXPLAIN
+
+> SELECT a, count(*) FROM g GROUP BY a
+a:int4 | count:int8
+0 | 3
+1 | 4
+10 | 4
+11 | 3
+12 | 4
+2 | 4
+3 | 4
+4 | 4
+5 | 4
+6 | 4
+7 | 4
+8 | 4
+9 | 4
+-- SELECT 13
+
+> RESET enable_seqscan
+-- RESET
+
+> CREATE TABLE h1 (i inet, c char(4), v int[], tz timetz, j jsonb, r int4range)
+-- CREATE TABLE
+
+> INSERT INTO h1 SELECT ('10.0.0.' || (x % 20))::inet, (x % 20)::text, ARRAY[x % 20],
+>   ('10:00:00+0' || (x % 5))::timetz, jsonb_build_object('a', x % 20), int4range(x % 20, x % 20 + 1)
+> FROM generate_series(1, 2000) x
+-- INSERT 0 2000
+
+> CREATE TABLE h2 AS SELECT * FROM h1 WHERE upper(r) <= 10
+-- SELECT 1000
+
+> ANALYZE h1
+-- ANALYZE
+
+> ANALYZE h2
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM h1 JOIN h2 USING (i)
+QUERY PLAN:text
+Aggregate
+  ->  Hash Join
+        Hash Cond: (h2.i = h1.i)
+        ->  Seq Scan on h2
+        ->  Hash
+              ->  Seq Scan on h1
+-- EXPLAIN
+
+> SELECT count(*) FROM h1 JOIN h2 USING (i)
+count:int8
+100000
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM h1 JOIN h2 USING (c)
+QUERY PLAN:text
+Aggregate
+  ->  Hash Join
+        Hash Cond: (h2.c = h1.c)
+        ->  Seq Scan on h2
+        ->  Hash
+              ->  Seq Scan on h1
+-- EXPLAIN
+
+> SELECT count(*) FROM h1 JOIN h2 USING (c)
+count:int8
+100000
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM h1 JOIN h2 USING (v)
+QUERY PLAN:text
+Aggregate
+  ->  Hash Join
+        Hash Cond: (h2.v = h1.v)
+        ->  Seq Scan on h2
+        ->  Hash
+              ->  Seq Scan on h1
+-- EXPLAIN
+
+> SELECT count(*) FROM h1 JOIN h2 USING (v)
+count:int8
+100000
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM h1 JOIN h2 USING (tz)
+QUERY PLAN:text
+Aggregate
+  ->  Hash Join
+        Hash Cond: (h1.tz = h2.tz)
+        ->  Seq Scan on h1
+        ->  Hash
+              ->  Seq Scan on h2
+-- EXPLAIN
+
+> SELECT count(*) FROM h1 JOIN h2 USING (tz)
+count:int8
+400000
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM h1 JOIN h2 USING (j)
+QUERY PLAN:text
+Aggregate
+  ->  Hash Join
+        Hash Cond: (h2.j = h1.j)
+        ->  Seq Scan on h2
+        ->  Hash
+              ->  Seq Scan on h1
+-- EXPLAIN
+
+> SELECT count(*) FROM h1 JOIN h2 USING (j)
+count:int8
+100000
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT count(*) FROM h1 JOIN h2 USING (r)
+QUERY PLAN:text
+Aggregate
+  ->  Hash Join
+        Hash Cond: (h1.r = h2.r)
+        ->  Seq Scan on h1
+        ->  Hash
+              ->  Seq Scan on h2
+-- EXPLAIN
+
+> SELECT count(*) FROM h1 JOIN h2 USING (r)
+count:int8
+100000
+-- SELECT 1
+
+> SELECT count(*) FROM (VALUES ('1.0'::jsonb), ('{"a": 1.0}'::jsonb)) a(j) JOIN (VALUES ('1.00'::jsonb), ('{"a": 1.000}'::jsonb)) b(j) ON a.j = b.j
+count:int8
+2
+-- SELECT 1
+
+> SELECT count(*) FROM (VALUES ('a'::char(2))) a(c) JOIN (VALUES ('a   '::char(4))) b(c) ON a.c = b.c
+count:int8
+1
+-- SELECT 1
+
+> CREATE EXTENSION seg
+-- CREATE EXTENSION
+
+> CREATE TABLE s (x seg)
+-- CREATE TABLE
+
+> INSERT INTO s SELECT (i % 4 || ' .. ' || i % 4 + 1)::seg FROM generate_series(1, 20) i
+-- INSERT 0 20
+
+> ANALYZE s
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT x, count(*) FROM s GROUP BY x
+QUERY PLAN:text
+GroupAggregate
+  Group Key: x
+  ->  Sort
+        Sort Key: x
+        ->  Seq Scan on s
+-- EXPLAIN
+
+> SELECT x, count(*) FROM s GROUP BY x
+x:user | count:int8
+0 .. 1 | 5
+1 .. 2 | 5
+2 .. 3 | 5
+3 .. 4 | 5
+-- SELECT 4
+
+> SELECT DISTINCT x FROM s
+x:user
+0 .. 1
+1 .. 2
+2 .. 3
+3 .. 4
+-- SELECT 4
+
+> DROP EXTENSION seg CASCADE
+NOTICE 00000: drop cascades to column x of table s
+-- DROP EXTENSION
+

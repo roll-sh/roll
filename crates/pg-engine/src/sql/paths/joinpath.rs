@@ -7030,35 +7030,16 @@ impl Search<'_, '_, '_> {
     }
 }
 
-/// Whether `=` on the type is hash-joinable in Postgres (oprcanhash).
+/// Whether `=` on the type is hash-joinable in Postgres (oprcanhash; arrays and composites
+/// by their elements', `catalog::userobj::type_hashable`).
 fn pg_hashjoinable(t: &DataType) -> bool {
-    match t {
-        DataType::Array(e) => pg_hashjoinable(e),
-        DataType::Money => false,
-        t => memo_hashable(t),
-    }
+    memo_hashable(t)
 }
 
-/// Whether a Memoize can hash a cache key of this type (its type has a hash function and
-/// an equality operator).
+/// Whether a Memoize can hash a cache key of this type (the type cache has a hash function
+/// and an equality operator for it: check_memoizable, paraminfo_get_equal_hashops).
 pub(super) fn memo_hashable(t: &DataType) -> bool {
-    !matches!(
-        t,
-        DataType::Json
-            | DataType::Xml
-            | DataType::Point
-            | DataType::Lseg
-            | DataType::Path
-            | DataType::GBox
-            | DataType::Polygon
-            | DataType::Line
-            | DataType::Circle
-            | DataType::TsVector
-            | DataType::TsQuery
-            | DataType::Bit(_)
-            | DataType::Varbit(_)
-            | DataType::Unknown
-    )
+    crate::catalog::userobj::type_hashable(t, &|_| false)
 }
 
 // ── entry ──
@@ -8679,7 +8660,7 @@ impl Planner<'_, '_> {
                         // (`name = text`: in the btree text_ops family too, a merge key
                         // whose class sorts under the name side's C collation.)
                         None => (
-                            (same && crate::sql::binder::optimize::hashable_type(&ta))
+                            (same && self.cat.type_hashable(&ta))
                                 || crate::sql::binder::optimize::name_text_pair(&ta, &tb),
                             (same && mergeable(&ta) && cols)
                                 || (crate::sql::binder::optimize::name_text_pair(&ta, &tb)

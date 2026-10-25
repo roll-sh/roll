@@ -5182,19 +5182,17 @@ impl Builder<'_, '_> {
                                     && a.has_outer_refs()
                                     && !b.has_outer_refs()
                                     && b.columns() == vec![0]
-                                    && hashable_key(&a.ty())
+                                    && self.ctx.catalog().type_hashable(&a.ty())
                             }
                             _ => false,
                         })
                 }
-                // (An anonymous record's equality isn't hashable: bug #17363.)
+                // (hash_ok_operator: each `=` hashes for its type; an anonymous record's
+                // equality doesn't, bug #17363.)
                 None => {
+                    let cat = self.ctx.catalog();
                     s.ops.iter().all(|o| o.name == "=")
-                        && s.left.iter().all(|l| match l.ty() {
-                            DataType::Record => false,
-                            DataType::Row(r) => r.oid != 0,
-                            _ => true,
-                        })
+                        && s.left.iter().all(|l| cat.type_hashable(&l.ty()))
                 }
             };
         if !correlated
@@ -8277,6 +8275,14 @@ impl Builder<'_, '_> {
                     return Built::passthrough(best, c.exported);
                 }
                 if let Some(u) = sorted {
+                    // (create_distinct_paths / create_unique_path: no hashed form when a
+                    // key's type doesn't hash, grouping_is_hashable.)
+                    let can_hash = {
+                        let cat = self.ctx.catalog();
+                        crate::sql::paths::analyzejoins::col_types(input)
+                            .iter()
+                            .all(|t| *t == DataType::Unknown || cat.type_hashable(t))
+                    };
                     // (create_unique_path: hashed when it is enabled where the sort isn't,
                     // or cheaper in total.)
                     let sort_wins = if semi_unique {
@@ -8285,7 +8291,9 @@ impl Builder<'_, '_> {
                     } else {
                         !parallel::unsorted_kept(&n, &u) || parallel::cheaper(&u, &n)
                     };
-                    if sort_wins {
+                    if !can_hash {
+                        n = u;
+                    } else if sort_wins {
                         let hashed = std::mem::replace(&mut n, u);
                         n.alt = Some(Box::new(hashed));
                     } else {
@@ -8335,7 +8343,7 @@ impl Builder<'_, '_> {
                 // cheaper, sorted: a Unique over the Append sorted, or over a Merge Append
                 // of the arms each in order.
                 let types = crate::sql::paths::analyzejoins::col_types(arms[0]);
-                let can_hash = types.iter().all(setop_hashable);
+                let can_hash = all_hashable(self.ctx, &types);
                 let can_sort = types.iter().all(setop_sortable);
                 let names: Vec<String> = app.exported.iter().map(|k| self.pick(k, Cx::Upper)).collect();
                 let mut best: Option<ExNode> = None;
@@ -8500,7 +8508,7 @@ impl Builder<'_, '_> {
                 // hash_mem), or both inputs sorted (create_setop_path).
                 let g = crate::sql::paths::Gucs::read(self.ctx);
                 let types = crate::sql::paths::analyzejoins::col_types(left);
-                let can_hash = types.iter().all(setop_hashable);
+                let can_hash = all_hashable(self.ctx, &types);
                 let can_sort = types.iter().all(setop_sortable);
                 let entry = ((n.width as f64 / 8.0).ceil() * 8.0) + 16.0;
                 n.disabled = !g.hashagg || entry * groups > g.work_mem * g.hash_mem_multiplier * 1024.0;
@@ -10291,7 +10299,7 @@ impl Builder<'_, '_> {
         self.sort_costs(&mut hs, &agg);
         let g = crate::sql::paths::Gucs::read(self.ctx);
         let types = crate::sql::paths::analyzejoins::col_types(arms[0]);
-        let can_hash = types.iter().all(setop_hashable);
+        let can_hash = all_hashable(self.ctx, &types);
         agg.disabled = !g.hashagg;
         agg.children.push(app.clone().child("Outer"));
         hs.details.push(Detail::List("Sort Key", list.clone()));
@@ -13317,7 +13325,7 @@ impl Builder<'_, '_> {
             let ty = |i: usize| groups[i].ty();
             (
                 (0..groups.len()).filter(|&i| cat.default_opclass(403, &ty(i)) == 0).collect(),
-                (0..groups.len()).filter(|&i| !hashable_key(&ty(i))).collect(),
+                (0..groups.len()).filter(|&i| !cat.type_hashable(&ty(i))).collect(),
             )
         };
         let must_sort = sets.is_some_and(|ss| ss.iter().any(|s| s.iter().any(|k| unhashable.contains(k))));
@@ -13914,6 +13922,16 @@ impl Builder<'_, '_> {
             physical_ios(ga);
         }
         if let Some(ga) = sorted_alt {
+            // (grouping_is_hashable: a key of a type whose `=` doesn't hash, money or seg,
+            // leaves only the sorted grouping.)
+            let can_hash = {
+                let cat = self.ctx.catalog();
+                groups
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !redundant.get(*i).copied().unwrap_or(false))
+                    .all(|(_, g)| cat.type_hashable(&g.ty()))
+            };
             // (add_path: the sorted grouping, its pathkeys better, removes the hashed one
             // unless that is fuzzily cheaper in total, or as cheap but cheaper to start;
             // both kept, the cheaper in total is the relation's cheapest path.)
@@ -13930,7 +13948,9 @@ impl Builder<'_, '_> {
                     ga.startup_cost <= n.startup_cost * FUZZ
                 }
             };
-            if removes || parallel::cheaper(&ga, &n) {
+            if !can_hash {
+                n = ga;
+            } else if removes || parallel::cheaper(&ga, &n) {
                 let mut hashed = std::mem::replace(&mut n, ga);
                 hashed.alt = n.alt.take();
                 n.alt = Some(Box::new(hashed));
@@ -18448,14 +18468,11 @@ fn scan_below(p: &Plan) -> Option<&Plan> {
     }
 }
 
-/// A set operation's column type whose values hash: an array of such, a named composite
-/// of such (an anonymous record's fields the type cache doesn't look into).
-fn setop_hashable(t: &DataType) -> bool {
-    match t {
-        DataType::Array(e) => setop_hashable(e),
-        DataType::Row(rt) => rt.oid != 0 && rt.fields.iter().all(|(_, f)| setop_hashable(f)),
-        t => hashable_key(t),
-    }
+/// Whether a set operation's columns of `types` hash (`Catalog::type_hashable`; a column
+/// whose type the plan doesn't say is taken to).
+fn all_hashable(ctx: &ExecCtx, types: &[DataType]) -> bool {
+    let cat = ctx.catalog();
+    types.iter().all(|t| *t == DataType::Unknown || cat.type_hashable(t))
 }
 
 /// A set operation's column type whose values sort (a btree operator class).

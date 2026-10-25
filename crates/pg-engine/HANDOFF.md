@@ -79,12 +79,12 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   extensions' own PostgreSQL 18.6 scripts (`src/ext/`, `session/ddl/extension.rs`), C
   functions are native code by library and symbol; the contrib modules' regression tests run
   with `pg_contrib` (`tests/pg_contrib.rs`). Per-module scores and how it works:
-  `tests/contrib/STATUS.md`. 19 modules are native (4,149 of their 4,158 contrib units):
+  `tests/contrib/STATUS.md`. 19 modules are native (4,153 of their 4,158 contrib units):
   pgcrypto, uuid-ossp, citext, hstore, pg_trgm, btree_gin, ltree, intarray, tablefunc, cube,
-  earthdistance, isn, unaccent, fuzzystrmatch, lo, pg_buffercache at 100%; btree_gist, seg,
+  earthdistance, isn, unaccent, fuzzystrmatch, lo, pg_buffercache, seg at 100%; btree_gist,
   amcheck nearly. Extension types the engine implements natively are `Value::Ext`
   (`src/ext/types.rs`); extension libraries' GUCs are `session/ext_gucs.tsv`. Left:
-  pg_stat_statements at 982 / 1,013 (2PC, a few EXPLAIN / jumbling cases), pageinspect
+  pg_stat_statements at 996 / 1,013 (2PC, nested statement listing, worker counts, squashing), pageinspect
   (not applicable),
   postgres_fdw / dblink (an outbound-network policy decision), see STATUS.md.
 - **search_path in routines** (round 19, agent 53): PL/pgSQL functions, DO blocks and SQL
@@ -99,6 +99,16 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   level is discarded at its end (`Settings::pop_restricted`, AtEOXact_GUC(false)). A
   PL/pgSQL function's CONTEXT signature is formatted when it is compiled (validation or first
   call, `SessionState::pl_signatures`). Golden `a53_plpgsql_search_path`.
+- **Hashability** (round 19, agent 53): every hashed plan (HashAggregate for GROUP BY and
+  DISTINCT, hashed set operations, hashed SubPlans, hash joins, Memoize) follows
+  PostgreSQL's hashability, `catalog::userobj::type_hashable` (`Catalog::type_hashable`
+  with made types' hash operator classes): money, bit, varbit, the geometric types,
+  tsvector / tsquery, seg and anonymous records group by sorting; inet, bpchar, arrays,
+  ranges, jsonb and timetz hash joins as in PostgreSQL (the engine's join keys compare as
+  their `=` does); a recursive UNION takes record and record[] to hash
+  (makeSortGroupClauseForSetOp). Golden `a53_hashability`. (In debug builds the explain
+  `convert` frame is about 280 kB and nests per plan level: a field added to `ExNode` grows
+  it, and a 2 MB test thread overflowed.)
 - **Performance** (round 17, agent 36): measured for the first time, `tools/bench/` against a
   pinned PostgreSQL 18.6 on the same 4 cores; numbers, method and the optimisations made are
   in `BENCH.md`. Over the wire the engine beats PostgreSQL on single-client OLTP (point

@@ -2971,7 +2971,7 @@ fn qual_cost(e: &Expr) -> f64 {
                 && s.test_op.is_none()
                 && !s.left.is_empty()
                 && s.ops.iter().all(|o| o.name == "=")
-                && s.left.iter().all(|l| hashable(&l.ty()))
+                && s.left.iter().all(|l| pg_hashable(&l.ty()))
                 && !crate::exec::reads_enclosing(&s.plan, 0) =>
         {
             cost += s.ops.len().max(1) as f64
@@ -3846,7 +3846,7 @@ fn equi_key(e: &Expr, nleft: usize) -> Option<(Expr, Expr)> {
     let (ta, tb) = (a.ty(), b.ty());
     // (integer_ops hashes int2, int4 and int8 alike: a cross-type `=` hashes too.)
     let int = |t: &DataType| matches!(t, DataType::Int2 | DataType::Int4 | DataType::Int8);
-    if !hashable(&ta)
+    if !pg_hashable(&ta)
         || (ta.without_typmod() != tb.without_typmod() && !(int(&ta) && int(&tb)) && !name_text_pair(&ta, &tb))
     {
         return None;
@@ -3884,6 +3884,14 @@ pub(crate) fn name_text_pair(a: &DataType, b: &DataType) -> bool {
 /// Types a hash join can use (hashing agrees with their `=`).
 pub(crate) fn hashable_type(t: &DataType) -> bool {
     hashable(t)
+}
+
+/// Types Postgres hashes an `=` of (`catalog::userobj::type_hashable`): hash join keys and
+/// hashed SubPlans. (The engine's keys compare and hash as `=` does for all of them:
+/// numerics by value, bpchar without trailing spaces, arrays, ranges and jsonb by their
+/// elements.)
+fn pg_hashable(t: &DataType) -> bool {
+    crate::catalog::userobj::type_hashable(t, &|_| false)
 }
 
 /// Types whose `=` is exactly equality of the stored value (so hashing agrees with it).

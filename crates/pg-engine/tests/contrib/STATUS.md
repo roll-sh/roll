@@ -41,7 +41,7 @@ PGCONTRIB_ONLY=uuid-ossp,citext PGREGRESS_DIR=$D PGREGRESS_CONTAINER=a39-ref \
 
 ## Scores
 
-Last full runs: 4,149 / 4,158 units of 19 modules (99.8%; round 19, agent 53: seg security), pg_stat_statements 982 / 1,013. Baseline (before any
+Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013. Baseline (before any
 extension was ported; CREATE EXTENSION was a stand-in): 2,752 / 7,733
 units (35.6%). The reference matches `expected/` for every module except postgres_fdw and
 dblink (they connect to a loopback server).
@@ -54,8 +54,8 @@ dblink (they connect to a loopback server).
 | hstore | 309 | 309 | done |
 | pg_trgm | 261 | 261 | done (GIN/GiST plans included) |
 | btree_gin | 297 | 297 | done |
-| btree_gist | 616 | 611 | see below |
-| pg_stat_statements | 1013 | 982 | see below |
+| btree_gist | 616 | 613 | see below |
+| pg_stat_statements | 1013 | 996 | see below |
 | unaccent | 34 | 34 | done |
 | fuzzystrmatch | 56 | 56 | done |
 | ltree | 363 | 363 | done |
@@ -64,9 +64,9 @@ dblink (they connect to a loopback server).
 | cube | 316 | 316 | done |
 | earthdistance | 170 | 170 | done |
 | isn | 51 | 51 | done |
-| seg | 196 | 195 | see below |
+| seg | 196 | 196 | done |
 | lo | 38 | 38 | done |
-| amcheck | 204 | 201 | applicable checks only (see below) |
+| amcheck | 204 | 202 | applicable checks only (see below) |
 | pageinspect | 291 | — | not applicable (not available) |
 | pg_buffercache | 38 | 38 | done (no buffer pool: every buffer unused) |
 | postgres_fdw | 2053 | — | assessed, not done |
@@ -77,9 +77,12 @@ dblink (they connect to a loopback server).
 - **btree_gist**: rows of an unordered GiST index scan come back in PostgreSQL's GiST tree
   order (macaddr, macaddr8, bytea units without ORDER BY): the engine reads the index's rows in
   its own order. A real GiST page model for these classes would be needed.
-- **seg** (unit 167): an Index Only Scan PostgreSQL picks on the GiST index for `@>`.
-- **seg** unit 170: `GROUP BY` of a type without a hash operator class (seg; money too) is
-  planned as a HashAggregate; PostgreSQL sorts.
+- **seg** (unit 167, the GiST Index Only Scan for `@>`): matches since round 18.
+- **seg** unit 170: done (round 19, agent 53). Grouping, DISTINCT, set operations, hashed
+  SubPlans, hash joins and Memoize follow PostgreSQL's hashability
+  (`catalog::userobj::type_hashable`): a type whose `=` doesn't hash (money, bit, seg, an
+  anonymous record) is sorted, and a sorted grouping returns its groups in its keys' order
+  (`PlanEstimate::group_sort`, round 19, agent 48).
 - **seg security**: done (round 19, agent 53). PL/pgSQL, SQL functions and DO blocks bind
   each statement under the search path as it is when the statement runs (plancache's
   search_path check); CREATE SCHEMA's elements run with `search_path` set to the schema
@@ -88,8 +91,10 @@ dblink (they connect to a loopback server).
 - **amcheck**: the engine's storage isn't PostgreSQL's pages, so there are no nbtree, GIN or
   heap page invariants to verify; the functions check what applies (target, access method,
   validity, arguments, block ranges) and report no corruption. Units that differ: superuser
-  `UPDATE pg_attribute` (catalog DML the engine doesn't take), and `pg_stat_io` bulk reads
-  not counted by verify_heapam.
+  `UPDATE pg_attribute` (check_btree 59: catalog DML the engine doesn't take, agent 51's
+  area), and `pg_stat_io` bulk reads not counted by verify_heapam (check_heap 27). The
+  check_gin timeout is gone: the text[] GIN build (10,000 rows) that stalled past 300 s takes
+  about a second since round 19's index-build work.
 - **pageinspect**: reads raw 8 kB PostgreSQL pages (heap, btree, GIN, GiST, BRIN, hash
   layouts, checksums). The engine's tables and indexes are key-value data, so there are no
   such pages to show; making the functions up would mislead. Not available
@@ -108,6 +113,8 @@ dblink (they connect to a loopback server).
   plans, toplevel / nested tracking, track_utility / track_planning, privileges, the info view
   and reset. The engine has no WAL or shared buffers: blocks written report table growth,
   wal_records rows written, wal_bytes 64 per row, other buffer columns 0; plan time is the
-  engine's binding and planning time. Left (31 units): two-phase commit statements (the engine
-  has 2PC off), EXPLAIN of unreferenced CTEs and nested DO-block listing in level_tracking, a
-  parallel plan's worker counts, three squashing cases.
+  engine's binding and planning time. Left (17 units): two-phase commit statements (utility
+  74-79: the engine has 2PC off) and utility 115, nested DO-block / function statement
+  listing in level_tracking (12, 104, 131, 169, 191, 228, 232), a parallel plan's worker
+  counts (parallel 8), three squashing cases (98, 99, 120). Unreferenced CTEs in EXPLAIN match
+  since round 19.

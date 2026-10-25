@@ -477,7 +477,7 @@ impl Ddl<'_, '_> {
         };
         if let (Some(st), DataType::Array(elem)) = (&mut st, &tg.ty) {
             let (eeq, elt) = type_ops(elem);
-            if eeq != 0 && elt != 0 && hashable(elem) {
+            if eeq != 0 && elt != 0 && self.cat.type_hashable(elem) {
                 array_stats(tg, elem, eeq, values, st, &raw, fmt);
             }
         }
@@ -1589,7 +1589,3 @@ pub(super) fn type_ops(ty: &DataType) -> (u32, u32) {
     }
 }
 
-/// Whether a type has a default hash opclass (array_typanalyze needs one for elements).
-fn hashable(ty: &DataType) -> bool {
-    !matches!(ty, DataType::Bit(_) | DataType::Varbit(_) | DataType::Money)
-}

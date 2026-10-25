@@ -647,6 +647,17 @@ impl Catalog {
         }) == Some(c.schema)
     }
 
+    /// Whether values of `ty` may be grouped, de-duplicated or matched by hashing on their
+    /// default equality (`type_hashable`), a made base type when it has a default hash
+    /// operator class (the type cache's hash_proc).
+    pub fn type_hashable(&self, ty: &crate::types::DataType) -> bool {
+        type_hashable(ty, &|oid| {
+            self.opclasses
+                .values()
+                .any(|c| c.method == 405 && c.default && c.intype == oid)
+        })
+    }
+
     /// GetDefaultOpClass: the default operator class of access method `am` for a key of
     /// type `ty` (0 if none): a made one for the type, else Postgres's.
     pub fn default_opclass(&self, am: u32, ty: &crate::types::DataType) -> u32 {
@@ -846,4 +857,47 @@ fn class_info(c: &std::sync::Arc<OpClass>) -> ClassInfo {
 /// Whether an object is one of Postgres's own (in pg_catalog).
 pub fn builtin_schema(schema: u32) -> bool {
     schema == PG_CATALOG_OID
+}
+
+/// Whether values of `ty` may be grouped, de-duplicated or matched by hashing on their
+/// default equality: GROUP BY / DISTINCT (`grouping_is_hashable`), set operations, hashed
+/// SubPlans (`hash_ok_operator`), hash joins (`op_hashjoinable`) and Memoize (a hash
+/// function and an equality in the type cache). Postgres requires the type's `=` to be
+/// `oprcanhash` (not so for money, bit, varbit, box, path, lseg, line, circle, tsvector,
+/// tsquery, nor seg or another extension type whose `=` lacks HASHES), and of an array,
+/// named composite, range or multirange the type cache's hash support, which needs its
+/// elements', fields' or subtype's; an anonymous record's fields are unknown to it, so it
+/// never hashes. `made`: whether a made base type (by oid) has a hashing `=`.
+pub fn type_hashable(ty: &crate::types::DataType, made: &dyn Fn(u32) -> bool) -> bool {
+    use crate::types::DataType as T;
+    match ty {
+        T::Array(e) => type_hashable(e, made),
+        T::Record => false,
+        T::Row(rt) => rt.oid != 0 && rt.fields.iter().all(|(_, f)| type_hashable(f, made)),
+        T::Range(r) | T::Multirange(r) => type_hashable(&r.subtype, made),
+        // An extension's native type: when its script gives it a hash operator class.
+        T::Base(b) if b.ext != 0 => crate::ext::types::get(b.ext).is_some_and(|x| x.hash),
+        T::Base(b) => made(b.oid),
+        // (Types with no `=` at all can't be grouped either.)
+        T::Money
+        | T::Bit(_)
+        | T::Varbit(_)
+        | T::GBox
+        | T::Path
+        | T::Lseg
+        | T::Line
+        | T::Circle
+        | T::TsVector
+        | T::TsQuery
+        | T::Json
+        | T::Xml
+        | T::Point
+        | T::Polygon
+        | T::JsonPath
+        | T::TxidSnapshot
+        | T::PgSnapshot
+        | T::Gtsvector
+        | T::Unknown => false,
+        _ => true,
+    }
 }
