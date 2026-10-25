@@ -1188,6 +1188,12 @@ pub enum Plan {
         /// Its place in the range table, as a scan's (`ScanPlan::rti`; 0: not a FROM item):
         /// the order of the level's row marks (preprocess_rowmarks) puts its whole row by it.
         rti: Rti,
+        /// A LATERAL subquery's references to PlaceHolderVars of the query above holding
+        /// sub-selects: per reference, the PlaceHolderVar's expression with copies of them
+        /// (extract_lateral_references' preprocess_phv_expression), each a SubPlan of the
+        /// query above that nothing runs or reads. EXPLAIN shows an uncorrelated one as an
+        /// InitPlan of that level; the executor ignores them.
+        copies: Vec<Expr>,
     },
     /// `input` runs inside `frame` (a SQL function's statement), which errors and notices
     /// name in their CONTEXT, once it has the privileges `perms`.

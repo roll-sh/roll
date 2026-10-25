@@ -287,6 +287,7 @@ fn sub_rel(p: &Plan) -> Option<(Vec<Expr>, Plan, Vec<crate::types::DataType>, bo
             path: None,
             sorted: *sorted,
             rti: *rti,
+            copies: Vec::new(),
         };
         return Some((corr, rhs, types, false));
     }
@@ -1180,6 +1181,7 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -
                     // truncate_useless_pathkeys.)
                     sorted: matches!(p, Plan::Sort { .. }).then_some(0),
                     rti: Default::default(),
+                    copies: Vec::new(),
                 },
             };
             (Vec::new(), rhs, types, false)
@@ -1229,6 +1231,7 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -
                 path: None,
                 sorted,
                 rti: Default::default(),
+                copies: Vec::new(),
             };
             (Vec::new(), rhs, types, false)
         }
@@ -1401,6 +1404,7 @@ fn any_join_srf(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> {
         path: None,
         sorted: None,
         rti: Default::default(),
+        copies: Vec::new(),
     };
     let nleft = width(plan);
     let types: Vec<crate::types::DataType> = sub
@@ -1476,6 +1480,7 @@ fn any_join_lateral(cat: &Catalog, plan: &Plan, sub: &Subquery) -> Option<Plan> 
         path: None,
         sorted: None,
         rti: Default::default(),
+        copies: Vec::new(),
     };
     let nleft = width(plan);
     let cond: Vec<Expr> = sub

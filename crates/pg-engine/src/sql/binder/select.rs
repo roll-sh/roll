@@ -1096,6 +1096,7 @@ impl Binder<'_, '_> {
                         path: None,
                         sorted: (!n.sort_clause.is_empty()).then_some(n.sort_clause.len()),
                         rti: Default::default(),
+                        copies: Vec::new(),
                     }
                 }
                 _ => plan,
@@ -3931,6 +3932,7 @@ impl Binder<'_, '_> {
                             _ => None,
                         },
                         rti: self.next_rti(),
+                        copies: Vec::new(),
                     }
                 } else if deferred
                     && rs.lateral
@@ -4117,6 +4119,7 @@ impl Binder<'_, '_> {
                 path: None,
                 sorted: None,
                 rti: Default::default(),
+                copies: Vec::new(),
             };
         }
         let Ok(node) = ast::parse_stmt(&v.query) else {
@@ -4135,6 +4138,7 @@ impl Binder<'_, '_> {
                 path: None,
                 sorted,
                 rti: Default::default(),
+                copies: Vec::new(),
             };
         }
         plan
@@ -4703,6 +4707,7 @@ impl Binder<'_, '_> {
                         path: None,
                         sorted: None,
                         rti: self.next_rti(),
+                        copies: Vec::new(),
                     }
                 } else if v.storage.is_none()
                     && self.deps.is_none()
@@ -4726,6 +4731,7 @@ impl Binder<'_, '_> {
                         path: None,
                         sorted,
                         rti: self.next_rti(),
+                        copies: Vec::new(),
                     }
                 } else {
                     plan

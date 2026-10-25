@@ -78,8 +78,11 @@ impl Planner<'_, '_> {
                     _ => 0,
                 };
                 for (i, e) in exprs.iter_mut().enumerate() {
+                    // (A constant too: makeNullConst replaces whatever isn't volatile or
+                    // set-returning.)
                     if !needed.get(i).copied().unwrap_or(true)
-                        && matches!(e, Expr::Col(j, _) if *j >= keys)
+                        && (matches!(e, Expr::Col(j, _) if *j >= keys)
+                            || matches!(e, Expr::Const(v, _) if !matches!(v, Value::Null)))
                     {
                         *e = Expr::Const(Value::Null, e.ty());
                     }

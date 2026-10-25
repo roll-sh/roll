@@ -1,0 +1,387 @@
+> CREATE TABLE a52_i8 (q1 int8, q2 int8)
+-- CREATE TABLE
+
+> INSERT INTO a52_i8 VALUES ('123', '456'), ('123', '4567890123456789'),
+>   ('4567890123456789', '123'), ('4567890123456789', '4567890123456789'),
+>   ('4567890123456789', '-4567890123456789')
+-- INSERT 0 5
+
+> CREATE TABLE a52_i4 (f1 int4)
+-- CREATE TABLE
+
+> INSERT INTO a52_i4 VALUES (0), (123456), (-123456), (2147483647), (-2147483647)
+-- INSERT 0 5
+
+> ANALYZE a52_i8
+-- ANALYZE
+
+> ANALYZE a52_i4
+-- ANALYZE
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT *
+> FROM a52_i8 i8
+>   INNER JOIN
+>     (SELECT (SELECT true) AS x
+>        FROM a52_i4 i4, LATERAL (SELECT i4.f1 AS y LIMIT 1) ss1
+>        WHERE i4.f1 = 0) ss2 ON true
+>   RIGHT JOIN (SELECT false AS z) ss3 ON true,
+>   LATERAL (SELECT i8.q2 AS q2l WHERE x LIMIT 1) ss4
+> WHERE i8.q2 = 123
+QUERY PLAN:text
+Nested Loop
+  Output: i8.q1, i8.q2, (InitPlan 1).col1, false, (i8.q2)
+  InitPlan 1
+    ->  Result
+          Output: true
+  InitPlan 2
+    ->  Result
+          Output: true
+  ->  Seq Scan on public.a52_i4 i4
+        Output: i4.f1
+        Filter: (i4.f1 = 0)
+  ->  Nested Loop
+        Output: i8.q1, i8.q2, (i8.q2)
+        ->  Subquery Scan on ss1
+              Output: ss1.y, (InitPlan 1).col1
+              ->  Limit
+                    Output: NULL::integer
+                    ->  Result
+                          Output: NULL::integer
+        ->  Nested Loop
+              Output: i8.q1, i8.q2, (i8.q2)
+              ->  Seq Scan on public.a52_i8 i8
+                    Output: i8.q1, i8.q2
+                    Filter: (i8.q2 = 123)
+              ->  Limit
+                    Output: (i8.q2)
+                    ->  Result
+                          Output: i8.q2
+                          One-Time Filter: ((InitPlan 1).col1)
+-- EXPLAIN
+
+> SELECT *
+> FROM a52_i8 i8
+>   INNER JOIN
+>     (SELECT (SELECT true) AS x
+>        FROM a52_i4 i4, LATERAL (SELECT i4.f1 AS y LIMIT 1) ss1
+>        WHERE i4.f1 = 0) ss2 ON true
+>   RIGHT JOIN (SELECT false AS z) ss3 ON true,
+>   LATERAL (SELECT i8.q2 AS q2l WHERE x LIMIT 1) ss4
+> WHERE i8.q2 = 123
+q1:int8 | q2:int8 | x:bool | z:bool | q2l:int8
+4567890123456789 | 123 | t | f | 123
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT *
+> FROM a52_i8 i8
+>   INNER JOIN
+>     (SELECT (SELECT true) AS x
+>        FROM a52_i4 i4, LATERAL (SELECT 1 AS y LIMIT 1) ss1
+>        WHERE i4.f1 = 0) ss2 ON true
+>   RIGHT JOIN (SELECT false AS z) ss3 ON true,
+>   LATERAL (SELECT i8.q2 AS q2l WHERE x LIMIT 1) ss4
+> WHERE i8.q2 = 123
+QUERY PLAN:text
+Nested Loop
+  Output: i8.q1, i8.q2, (InitPlan 1).col1, false, (i8.q2)
+  InitPlan 1
+    ->  Result
+          Output: true
+  InitPlan 2
+    ->  Result
+          Output: true
+  ->  Limit
+        Output: NULL::integer
+        ->  Result
+              Output: NULL::integer
+  ->  Nested Loop
+        Output: i8.q1, i8.q2, (i8.q2)
+        ->  Seq Scan on public.a52_i4 i4
+              Output: i4.f1, (InitPlan 1).col1
+              Filter: (i4.f1 = 0)
+        ->  Nested Loop
+              Output: i8.q1, i8.q2, (i8.q2)
+              ->  Seq Scan on public.a52_i8 i8
+                    Output: i8.q1, i8.q2
+                    Filter: (i8.q2 = 123)
+              ->  Limit
+                    Output: (i8.q2)
+                    ->  Result
+                          Output: i8.q2
+                          One-Time Filter: ((InitPlan 1).col1)
+-- EXPLAIN
+
+> SELECT *
+> FROM a52_i8 i8
+>   INNER JOIN
+>     (SELECT (SELECT true) AS x
+>        FROM a52_i4 i4, LATERAL (SELECT 1 AS y LIMIT 1) ss1
+>        WHERE i4.f1 = 0) ss2 ON true
+>   RIGHT JOIN (SELECT false AS z) ss3 ON true,
+>   LATERAL (SELECT i8.q2 AS q2l WHERE x LIMIT 1) ss4
+> WHERE i8.q2 = 123
+q1:int8 | q2:int8 | x:bool | z:bool | q2l:int8
+4567890123456789 | 123 | t | f | 123
+-- SELECT 1
+
+> SELECT *
+> FROM a52_i8 i8
+>   INNER JOIN
+>     (SELECT (SELECT true) AS x
+>        FROM a52_i4 i4, LATERAL (SELECT i4.f1 AS y LIMIT 1) ss1
+>        WHERE i4.f1 = 1) ss2 ON true
+>   RIGHT JOIN (SELECT false AS z) ss3 ON true,
+>   LATERAL (SELECT i8.q2 AS q2l WHERE x LIMIT 1) ss4
+q1:int8 | q2:int8 | x:bool | z:bool | q2l:int8
+-- SELECT 0
+
+> SELECT *
+> FROM a52_i8 i8
+>   INNER JOIN
+>     (SELECT (SELECT true) AS x, y
+>        FROM a52_i4 i4, LATERAL (SELECT i4.f1 AS y LIMIT 1) ss1
+>        WHERE i4.f1 = 0) ss2 ON true
+>   RIGHT JOIN (SELECT false AS z) ss3 ON true,
+>   LATERAL (SELECT i8.q2 AS q2l, x AS xx WHERE x LIMIT 1) ss4
+> ORDER BY 1, 2
+q1:int8 | q2:int8 | x:bool | y:int4 | z:bool | q2l:int8 | xx:bool
+123 | 456 | t | 0 | f | 456 | t
+123 | 4567890123456789 | t | 0 | f | 4567890123456789 | t
+4567890123456789 | -4567890123456789 | t | 0 | f | -4567890123456789 | t
+4567890123456789 | 123 | t | 0 | f | 123 | t
+4567890123456789 | 4567890123456789 | t | 0 | f | 4567890123456789 | t
+-- SELECT 5
+
+> SELECT *
+> FROM a52_i8 i8
+>   INNER JOIN
+>     (SELECT (SELECT true) AS x, y
+>        FROM a52_i4 i4, LATERAL (SELECT i4.f1 AS y LIMIT 1) ss1
+>        WHERE i4.f1 = 0) ss2 ON true
+>   RIGHT JOIN (SELECT false AS z) ss3 ON true,
+>   LATERAL (SELECT i8.q2 AS q2l WHERE x AND x LIMIT 1) ss4
+> WHERE i8.q2 = 123
+q1:int8 | q2:int8 | x:bool | y:int4 | z:bool | q2l:int8
+4567890123456789 | 123 | t | 0 | f | 123
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT *
+> FROM a52_i8 i8
+>   LEFT JOIN
+>     (SELECT (SELECT i4.f1 > 0) AS x, i4.f1
+>        FROM a52_i4 i4, LATERAL (SELECT i4.f1 AS y LIMIT 1) ss1) ss2 ON i8.q2 = ss2.f1,
+>   LATERAL (SELECT i8.q1 AS q1l WHERE x IS NOT false LIMIT 1) ss4
+QUERY PLAN:text
+Nested Loop
+  Output: i8.q1, i8.q2, ((SubPlan 1)), i4.f1, (i8.q1)
+  ->  Hash Right Join
+        Output: i8.q1, i8.q2, i4.f1, ((SubPlan 1))
+        Hash Cond: (i4.f1 = i8.q2)
+        ->  Nested Loop
+              Output: i4.f1, ((SubPlan 1))
+              ->  Seq Scan on public.a52_i4 i4
+                    Output: i4.f1, (SubPlan 1)
+                    SubPlan 1
+                      ->  Result
+                            Output: (i4.f1 > 0)
+              ->  Limit
+                    Output: NULL::integer
+                    ->  Result
+                          Output: NULL::integer
+        ->  Hash
+              Output: i8.q1, i8.q2
+              ->  Seq Scan on public.a52_i8 i8
+                    Output: i8.q1, i8.q2
+  ->  Limit
+        Output: (i8.q1)
+        ->  Result
+              Output: i8.q1
+              One-Time Filter: (((SubPlan 1)) IS NOT FALSE)
+-- EXPLAIN
+
+> SELECT *
+> FROM a52_i8 i8
+>   LEFT JOIN
+>     (SELECT (SELECT i4.f1 > 0) AS x, i4.f1
+>        FROM a52_i4 i4, LATERAL (SELECT i4.f1 AS y LIMIT 1) ss1) ss2 ON i8.q2 = ss2.f1,
+>   LATERAL (SELECT i8.q1 AS q1l WHERE x IS NOT false LIMIT 1) ss4
+> ORDER BY 1, 2
+q1:int8 | q2:int8 | x:bool | f1:int4 | q1l:int8
+123 | 456 | NULL | NULL | 123
+123 | 4567890123456789 | NULL | NULL | 123
+4567890123456789 | -4567890123456789 | NULL | NULL | 4567890123456789
+4567890123456789 | 123 | NULL | NULL | 4567890123456789
+4567890123456789 | 4567890123456789 | NULL | NULL | 4567890123456789
+-- SELECT 5
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT i8.q1, ss.x, ss.f1
+> FROM a52_i8 i8 LEFT JOIN (SELECT (SELECT max(f1) FROM a52_i4) AS x, i4.f1
+>                           FROM a52_i4 i4, a52_i4 i5 WHERE i4.f1 = i5.f1) ss ON i8.q2 = ss.f1
+QUERY PLAN:text
+Hash Right Join
+  Output: i8.q1, ((InitPlan 1).col1), i4.f1
+  Hash Cond: (i4.f1 = i8.q2)
+  InitPlan 1
+    ->  Aggregate
+          Output: max(a52_i4.f1)
+          ->  Seq Scan on public.a52_i4
+                Output: a52_i4.f1
+  ->  Hash Join
+        Output: i4.f1, (InitPlan 1).col1
+        Hash Cond: (i4.f1 = i5.f1)
+        ->  Seq Scan on public.a52_i4 i4
+              Output: i4.f1
+        ->  Hash
+              Output: i5.f1
+              ->  Seq Scan on public.a52_i4 i5
+                    Output: i5.f1
+  ->  Hash
+        Output: i8.q1, i8.q2
+        ->  Seq Scan on public.a52_i8 i8
+              Output: i8.q1, i8.q2
+-- EXPLAIN
+
+> SELECT i8.q1, ss.x, ss.f1
+> FROM a52_i8 i8 LEFT JOIN (SELECT (SELECT max(f1) FROM a52_i4) AS x, i4.f1
+>                           FROM a52_i4 i4, a52_i4 i5 WHERE i4.f1 = i5.f1) ss ON i8.q2 = ss.f1
+> ORDER BY 1, 3
+q1:int8 | x:int4 | f1:int4
+123 | NULL | NULL
+123 | NULL | NULL
+4567890123456789 | NULL | NULL
+4567890123456789 | NULL | NULL
+4567890123456789 | NULL | NULL
+-- SELECT 5
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT i4.f1 FROM a52_i4 i4, LATERAL (SELECT i4.f1 AS y LIMIT 1) s
+QUERY PLAN:text
+Nested Loop
+  Output: i4.f1
+  ->  Seq Scan on public.a52_i4 i4
+        Output: i4.f1
+  ->  Limit
+        Output: NULL::integer
+        ->  Result
+              Output: NULL::integer
+-- EXPLAIN
+
+> SELECT i4.f1 FROM a52_i4 i4, LATERAL (SELECT i4.f1 AS y LIMIT 1) s ORDER BY 1
+f1:int4
+-2147483647
+-123456
+0
+123456
+2147483647
+-- SELECT 5
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT i4.f1 FROM a52_i4 i4 LEFT JOIN LATERAL (SELECT i4.f1 AS y, 2 AS z LIMIT 1) s ON true
+QUERY PLAN:text
+Nested Loop Left Join
+  Output: i4.f1
+  ->  Seq Scan on public.a52_i4 i4
+        Output: i4.f1
+  ->  Limit
+        Output: NULL::integer, NULL::integer
+        ->  Result
+              Output: NULL::integer, NULL::integer
+-- EXPLAIN
+
+> SELECT i4.f1, s.z FROM a52_i4 i4
+>   LEFT JOIN LATERAL (SELECT i4.f1 AS y, 2 AS z WHERE i4.f1 > 0 LIMIT 1) s ON true
+> ORDER BY 1
+f1:int4 | z:int4
+-2147483647 | NULL
+-123456 | NULL
+0 | NULL
+123456 | 2
+2147483647 | 2
+-- SELECT 5
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT t.f1 FROM a52_i4 t, (SELECT 1 AS c, f1 FROM a52_i4 LIMIT 2) s WHERE s.f1 = t.f1
+QUERY PLAN:text
+Hash Join
+  Output: t.f1
+  Hash Cond: (t.f1 = s.f1)
+  ->  Seq Scan on public.a52_i4 t
+        Output: t.f1
+  ->  Hash
+        Output: s.f1
+        ->  Subquery Scan on s
+              Output: s.f1
+              ->  Limit
+                    Output: NULL::integer, a52_i4.f1
+                    ->  Seq Scan on public.a52_i4
+                          Output: NULL::integer, a52_i4.f1
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT s.f1 FROM (SELECT 'a'::text AS c, f1 FROM a52_i4 ORDER BY f1 LIMIT 2) s
+QUERY PLAN:text
+Subquery Scan on s
+  Output: s.f1
+  ->  Limit
+        Output: NULL::text, a52_i4.f1
+        ->  Sort
+              Output: NULL::text, a52_i4.f1
+              Sort Key: a52_i4.f1
+              ->  Seq Scan on public.a52_i4
+                    Output: NULL::text, a52_i4.f1
+-- EXPLAIN
+
+> SELECT s.f1 FROM (SELECT 'a'::text AS c, f1 FROM a52_i4 ORDER BY f1 LIMIT 2) s
+f1:int4
+-2147483647
+-123456
+-- SELECT 2
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT count(*) FROM (SELECT 1 AS one, f1 FROM a52_i4 OFFSET 0) s
+QUERY PLAN:text
+Aggregate
+  Output: count(*)
+  ->  Seq Scan on public.a52_i4
+        Output: NULL::integer, NULL::integer
+-- EXPLAIN
+
+> SELECT count(*) FROM (SELECT 1 AS one, f1 FROM a52_i4 OFFSET 0) s
+count:int8
+5
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF)
+> SELECT t.f1 FROM a52_i4 t JOIN (SELECT f1, f1 + 1 AS g FROM a52_i4 OFFSET 0) s ON t.f1 = s.f1
+QUERY PLAN:text
+Hash Join
+  Output: t.f1
+  Hash Cond: (a52_i4.f1 = t.f1)
+  ->  Seq Scan on public.a52_i4
+        Output: a52_i4.f1, NULL::integer
+  ->  Hash
+        Output: t.f1
+        ->  Seq Scan on public.a52_i4 t
+              Output: t.f1
+-- EXPLAIN
+
+> SELECT t.f1 FROM a52_i4 t JOIN (SELECT f1, f1 + 1 AS g FROM a52_i4 OFFSET 0) s ON t.f1 = s.f1
+> ORDER BY 1
+f1:int4
+-2147483647
+-123456
+0
+123456
+2147483647
+-- SELECT 5
+
+> DROP TABLE a52_i8
+-- DROP TABLE
+
+> DROP TABLE a52_i4
+-- DROP TABLE
+

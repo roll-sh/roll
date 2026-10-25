@@ -407,9 +407,9 @@ fn flatten_tree(p: &Plan, nulled: u32, anulled: u32, cx: &mut Cx, semi: bool) ->
         } else {
             reads_outer(input)
         }
-        || !exprs.iter().all(|e| {
+        || !exprs.iter().enumerate().all(|(i, e)| {
             matches!(e, Expr::Col(..))
-                || (movable(e) || nulled == 0 && movable_fromless(e))
+                || (movable(e) || (nulled == 0 || frame.is_none() && needs_phv_at(i, e)) && movable_fromless(e))
                     && (outer_refs(e).is_empty() || frame.is_some() && plain_frame_refs(e))
         })
         || frame.is_none() && exprs.iter().enumerate().any(|(i, e)| needs_phv_at(i, e) && e.has_outer_refs())
@@ -1125,7 +1125,14 @@ fn lift(
             };
             let (r2, params2) = if kept_held {
                 (r2, params2)
-            } else if !params.is_empty() && !reads_outer(&r2) {
+            } else if !params.is_empty()
+                && !reads_outer(&r2)
+                && !(matches!(r2, Plan::Barrier { .. }) && matches!(&**right, Plan::Barrier { .. }))
+            {
+                // (A LATERAL subquery planned apart, the LATERAL item as written, keeps its
+                // references though the outputs reading them went (remove_unused_subquery_
+                // outputs runs after find_lateral_references): its paths are still
+                // parameterized by them.)
                 (r2, Vec::new())
             } else if !params.is_empty() {
                 let (r2, params2) = prune_params(r2, params2);

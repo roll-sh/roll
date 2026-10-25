@@ -80,8 +80,8 @@ No difference is PostgreSQL nondeterminism: every remaining unit is reproducible
 
 ### EXPLAIN (group C1) — 8 units
 join (6), partition_join (1), partition_prune (1)
-(join 808 and partition_join 204 match since round 16, agent 47, and join 783 since round 16,
-agent 46: 5 once a full run counts them.)
+(join 808 and partition_join 204 match since round 16, agent 47, join 783 since round 16,
+agent 46, and join 362 / 363 since round 16, agent 52: 3 once a full run counts them.)
 
 Includes EXPLAIN-derived values: `explain_filter`/`explain_analyze_*` helpers, `check_estimated_rows`
 (stats_ext), hash-join batch counts (join_hash), `EXPLAIN (SETTINGS)`.
@@ -133,6 +133,85 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
+
+## Round 16, agent 52 (PlaceHolderVars holding sub-selects: their subqueries pulled up, PlaceHolderVar parameters by the join path's parameterization, LATERAL references' unused copies)
+
+Measured in subset runs of agent 47's 54 files (20741 units), unit by unit against a run of the
+base: on bae6c68 20735 -> 20737, on 85ec54f (rebased, a319ebb's planner changes in) 20736 ->
+20738, the same two units both times, none broken. Crate tests, clippy and the difftest smoke
+on that state; rebased onto 8ef2f59 (catalog work, no planner code), crate tests and clippy
+again. No other agent's units moved. (The generated blocks above are still the
+full run of `242734d`'s.)
+
+| file | fixed units |
+|---|---|
+| join | 362, 363 |
+
+Why Postgres's join order wasn't the engine's (agent 47's 2.18 against 2.20): the costs tie.
+Built with OPTIMIZER_DEBUG, Postgres's final relation has its first path at 2.185 (InitPlans
+apart), from the left-deep loop `i4 ⋈ {ss1, i8, ss4}`; the engine's bushy
+`{i4, ss1} ⋈ {i8, ss4}` costs exactly the same and comes later (join_search_one_level's bushy
+loop), so add_path keeps the first. The engine never had that path: `ss2` (a subquery with
+a LATERAL item, whose sub-select output `(select true)` the right join nulls as written) wasn't
+pulled up, so `{i4, ss1}` was one planned leaf. What changed:
+
+- **A pulled-up subquery's sub-select output under an outer join is a PlaceHolderVar**
+  (pull_up_simple_subquery; is_simple_subquery takes sub-selects in the target list,
+  contain_volatile_functions looks into them): `flatten_tree` takes the subquery when such an
+  output is one it makes a PlaceHolderVar of (`needs_phv_at`), computed in the projection over
+  the subquery's join as any other, so its relations are the group's.
+- **A nested loop's PlaceHolderVar parameter is evaluable over the outer side and the join
+  path's own parameterization** (create_nestloop_plan passes PATH_REQ_OUTER of the nested loop
+  to identify_current_nestloop_params, not the outer path's): `try_nestloop` and the plan
+  build take `req_all`, so `ss1 ⋈ {i8, ss4}` parameterized by `i4` exists (363's `{1,6,8}`),
+  the PlaceHolderVar computed in `ss1`'s Subquery Scan (362) or `i4`'s scan (363) for the
+  parameter.
+- **A LATERAL subquery keeps its lateral references when the outputs reading them aren't
+  read** (find_lateral_references runs before set_subquery_pathlist's
+  remove_unused_subquery_outputs): 362's `lateral (select i4.f1 as y limit 1) ss1` is still
+  parameterized by `i4` though `y` is a NULL; `lift` keeps the parameters of a LATERAL item
+  that is a subquery planned apart as written (not of a pulled-up LATERAL subquery whose
+  remaining relation is one, join 775).
+- **cost_subqueryscan's trivial_pathtarget**: a subquery's scan whose reltarget isn't its whole
+  select list (an output nothing above reads) is charged cpu_tuple_cost per row even when
+  setrefs removes the node (`ss1` 0.02, Postgres's `{7,8}` at 1.0925).
+- **The unused `InitPlan 2`** (extract_lateral_references' preprocess_phv_expression): each
+  reference a LATERAL subquery makes to a PlaceHolderVar of the level above holding sub-selects
+  gets a copy of them, a SubPlan of that level nothing uses (the nested loop parameter is
+  ph_var, identify_current_nestloop_params' hasSubLinks case). `Plan::Barrier::copies` holds
+  them (`sublinkcopy::make_copy`, one per `Outer(1, k)` reference,
+  `joinpath::lateral_refs`); EXPLAIN numbers each where the level meets the subquery, an
+  uncorrelated one an InitPlan of the level (charged to its top node, Postgres's `0.02..`), a
+  correlated one a number only; the executor never runs them.
+- **The outer side's physical target list** (use_physical_tlist, then change_plan_targetlist):
+  a plain table scan that is a parameterized nested loop's outer side computing a
+  PlaceHolderVar parameter shows all its columns, then the parameter (`Output: i4.f1,
+  (InitPlan 1).col1`); a join whose outer side computes one keeps its relation's target list
+  order once the parameter is dropped (`tlist_order`).
+- **remove_unused_subquery_outputs nulls constants too** (makeNullConst for whatever isn't
+  volatile or set-returning): 363's `(select 1 as y limit 1)` is `Output: NULL::integer`, so
+  is `(select 1 as c, f1 ... limit 2)`'s unread `c`.
+
+Golden: `tests/sql/a52_phv_sublinks.sql` (rows against Postgres for 362 / 363, the right join
+not reduced with its null-extended row, two references in the LATERAL subquery, a correlated
+sub-select in the PlaceHolderVar under a left join with null-extended rows, a pulled-up
+subquery's sub-select output under a left join, LATERAL subqueries whose only reference goes
+unread, unread constant outputs). No wrong results were found comparing rows.
+
+Seen while probing, not done (no unit of the subset differs by them):
+
+- EXPLAIN's costs over a Subquery Scan setrefs removes: the path cost has its cpu_tuple_cost
+  (above), but the engine's display adds the children's shown costs, so the node above shows
+  0.05 less for 5 rows (`Hash Join (cost=1.11..2.23)` for Postgres's `2.28`, 363's top `2.19`
+  for `2.20`).
+- The width of an outer side computing a PlaceHolderVar parameter: Postgres keeps the path's
+  reltarget width (`width=0` for `ss1` / `i4` reading nothing above), the engine counts the
+  parameter.
+- A LATERAL subquery's output that is a bare reference to the PlaceHolderVar
+  (`lateral (select i8.q2, x as xx ...)`) is ranked last in a join's target list (the engine
+  reads it as the PlaceHolderVar's column, Postgres as the subquery's Var).
+- A DISTINCT ON subquery's unread constant output stays (`(7)` for Postgres's
+  `NULL::integer`): `null_unused_level_outputs` stops at a Distinct.
 
 ## Round 16, agent 46 (LATERAL join sizes, class member order, nested LATERAL pull-up, semi join widths, collation classes)
 

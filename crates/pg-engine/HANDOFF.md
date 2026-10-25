@@ -615,7 +615,7 @@ All remaining work is planner/EXPLAIN (`src/sql/paths*`, `src/sql/binder/optimiz
 numbers refer to the regress harness's per-file unit counter; `tests/regress/STATUS.md` lists
 them all with the "Fixed in round N" sections describing what was already tried.
 
-1. **PlaceHolderVars evaluated at joins** (join 360, 362/363, 368; 783 done in round 16, agent 46). Round 14 (agent 8) evaluates them at joins: a pulled-up subquery's
+1. **PlaceHolderVars evaluated at joins** (join 360, 368; 783 done in round 16, agent 46; 362/363 in round 16, agent 52). Round 14 (agent 8) evaluates them at joins: a pulled-up subquery's
    outputs an outer join nulls (as written) are PlaceHolderVars the join group computes at the
    lowest relation of their ph_eval_at (`lift.rs` `flatten_join_subquery`, `plan::phv_projection`,
    `joinpath.rs` `Phv` / `with_phvs`), so 328/343/388 match. Left: remove_useless_result_rtes
@@ -624,7 +624,8 @@ them all with the "Fixed in round N" sections describing what was already tried.
    nested loop parameters computed by the outer side; its reltarget's column order since
    agent 28: done) or over
    a parameterized appendrel (360: a FROM-less UNION ALL arm as an appendrel member),
-   PlaceHolderVars with sub-selects (362/363), a dummy Result showing a view's expressions
+   PlaceHolderVars with sub-selects (362/363: done in round 16, agent 52, their subqueries pulled
+   up, parameters by the join path's parameterization, LATERAL references' unused copies), a dummy Result showing a view's expressions
    (368), a LATERAL subquery over a join pulled up with PlaceHolderVars carrying ph_lateral
    (join 332 / 675 / 676 / 776, partition_join 41: done in round 16, agent 33; 783, a
    pulled-up subquery with a LATERAL item of its own, done in round 16, agent 46; 808 / partition_join 204, output lists

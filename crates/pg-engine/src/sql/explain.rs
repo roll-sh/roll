@@ -1783,6 +1783,30 @@ fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
                 }
                 vec![mask]
             }
+            // (A nested loop's outer side that is a plain table scan computing the
+            // PlaceHolderVars the inner side takes as parameters: its physical target list
+            // (use_physical_tlist), which create_nestloop_plan's change_plan_targetlist
+            // extends by them. Not an index-only scan's, nor one returning its row mark.)
+            Plan::Join { left, params, .. } if !params.is_empty() => {
+                let mut needs = super::paths::child_needs(p, &needed);
+                if let Plan::Project { input, exprs } = &**left
+                    && let Plan::Scan(sc) = &**input
+                    && sc.mark.is_none()
+                    && !matches!(sc.access, super::plan::Access::Index { only: true, .. })
+                    && let Some(n) = needs.first_mut()
+                {
+                    let w = super::binder::plan_width(input);
+                    if exprs.len() > w
+                        && exprs[..w].iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i))
+                        && exprs[w..].iter().any(|e| !matches!(e, Expr::Col(..)))
+                    {
+                        for x in n.iter_mut().take(w) {
+                            *x = true;
+                        }
+                    }
+                }
+                needs
+            }
             p => super::paths::child_needs(p, &needed),
         };
         // A LATERAL subquery's scan returns the columns its clauses over the outer side
@@ -5020,6 +5044,35 @@ impl Builder<'_, '_> {
         }
     }
 
+    /// `Plan::Barrier::copies`: each sub-select numbered where the level makes it, an
+    /// uncorrelated one an InitPlan of the level (SS_attach_initplans attaches them all), a
+    /// correlated one attached nowhere, as nothing references it.
+    fn unused_copies(&mut self, copies: &[Expr]) {
+        for e in copies {
+            let mut subs: Vec<&Subquery> = Vec::new();
+            e.walk(&mut |x| {
+                if let Expr::Subquery(s) = x
+                    && s.call.is_none()
+                {
+                    subs.push(s);
+                }
+            });
+            for s in subs {
+                if self.labels.contains_key(&s.id) {
+                    continue;
+                }
+                if s.params.is_empty() {
+                    let saved = std::mem::take(&mut self.pending);
+                    self.subquery(s, &[]);
+                    self.pending = saved;
+                } else {
+                    let start = self.events.len();
+                    self.next_plan_id(Some(s), start, false);
+                }
+            }
+        }
+    }
+
     fn subquery(&mut self, s: &Subquery, cols: &[Name]) {
         let block_start = self.events.len();
         let params: Vec<String> = s
@@ -5434,6 +5487,15 @@ impl Builder<'_, '_> {
     fn node(&mut self, p: &Arc<Plan>) -> Built {
         if let Plan::Context { input, .. } = &**p {
             return self.node(input);
+        }
+        // (A LATERAL subquery's copies of this level's PlaceHolderVars' sub-selects, made by
+        // extract_lateral_references and never run: SubPlans of this level, before the
+        // subquery's own; an uncorrelated one an InitPlan of it, a correlated one shown
+        // nowhere, a number all the same.)
+        if let Plan::Barrier { copies, .. } = &**p
+            && !copies.is_empty()
+        {
+            self.unused_copies(copies);
         }
         let inits_before = self.inits.last().map_or(0, |v| v.len());
         let apart = matches!(&**p, Plan::Barrier { .. });

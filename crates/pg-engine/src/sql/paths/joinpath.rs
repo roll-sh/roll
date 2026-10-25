@@ -67,6 +67,40 @@ struct Leaf {
     moved: Vec<(u32, f64, Expr)>,
 }
 
+/// How many times a LATERAL item's plan reads its value `k` (`Outer(1, k)`, a frame further
+/// in under its own LATERAL joins and sub-selects with parameters): pull_vars_of_level's
+/// references, one per occurrence.
+fn lateral_refs(p: &Plan, k: usize) -> usize {
+    fn exprs(e: &Expr, depth: usize, k: usize, n: &mut usize) {
+        e.walk(&mut |x| match x {
+            Expr::Outer(l, j, _) if *l == depth && *j == k => *n += 1,
+            Expr::Subquery(s) => plan(&s.plan, depth + usize::from(!s.params.is_empty()), k, n),
+            _ => {}
+        });
+    }
+    fn plan(p: &Plan, depth: usize, k: usize, n: &mut usize) {
+        let mut es = Vec::new();
+        crate::sql::explain::node_exprs(p, &mut es);
+        for e in es {
+            exprs(e, depth, k, n);
+        }
+        match p {
+            Plan::Join { left, right, params, .. } if !params.is_empty() => {
+                plan(left, depth, k, n);
+                plan(right, depth + 1, k, n);
+            }
+            _ => {
+                for c in crate::sql::explain::plan_inputs(p) {
+                    plan(c, depth, k, n);
+                }
+            }
+        }
+    }
+    let mut n = 0;
+    plan(p, 1, k, &mut n);
+    n
+}
+
 /// A UNION ALL arm without FROM computing plain values (`select 0`): its values.
 fn fromless_arm(p: &Plan) -> Option<&Vec<Expr>> {
     let Plan::Project { input, exprs } = p else { return None };
@@ -1992,6 +2026,7 @@ impl Search<'_, '_, '_> {
                     sorted: *sorted,
                     path: Some(Arc::new(crate::sql::plan::SubPath { keys: sort_keys, fast })),
                     rti: *rti,
+                    copies: Vec::new(),
                 };
                 out.push(JP {
                     node: JNode::Opaque {
@@ -5090,10 +5125,12 @@ impl Search<'_, '_, '_> {
         // parameter whose relations the outer side has some of is added to the outer plan's
         // target list, computed over the outer side and the values its own parameterization
         // brings (create_nestloop_plan, identify_current_nestloop_params). One needing
-        // relations neither gives isn't planned here.)
+        // relations neither gives isn't planned here. (The parameterization is the join
+        // path's, PATH_REQ_OUTER of the nested loop: what the outer side's comes to plus what
+        // the inner side needs from outside the join.)
         if param_join
             && self.phvs.iter().any(|p| {
-                p.eval_at & !ip.req == 0 && p.eval_at & op.set != 0 && p.eval_at & !(op.set | op.req) != 0
+                p.eval_at & !ip.req == 0 && p.eval_at & op.set != 0 && p.eval_at & !(op.set | op.req | req_all) != 0
             })
         {
             return;
@@ -6396,7 +6433,8 @@ impl Search<'_, '_, '_> {
                         JNode::Join { .. } if inner.req != 0 => self.outer_params(inner.memoized()),
                         _ => Vec::new(),
                     };
-                    let avail = outer.set | outer.req;
+                    // (PATH_REQ_OUTER of the nested loop itself.)
+                    let avail = outer.set | outer.req | p.req;
                     for e in &ips {
                         for g in e.columns() {
                             if let Some(ph) = self.phv(g)
@@ -6919,7 +6957,13 @@ impl Search<'_, '_, '_> {
                 // further: the join's target list doesn't have them.)
                 if !phv_params.is_empty() {
                     let nl0 = nleft - phv_params.len();
-                    let keep: Vec<usize> = (0..layout.len()).filter(|&i| i < nl0 || i >= nleft).collect();
+                    let mut keep: Vec<usize> = (0..layout.len()).filter(|&i| i < nl0 || i >= nleft).collect();
+                    // (In the join relation's target list order, as the join's own would be.)
+                    let kept: Vec<usize> = keep.iter().map(|&i| layout[i]).collect();
+                    let order = self.tlist_order(p.set, &kept);
+                    if !order.is_empty() {
+                        keep = order.into_iter().map(|j| keep[j]).collect();
+                    }
                     let exprs = keep.iter().map(|&i| Expr::Col(i, self.col_type(layout[i]))).collect();
                     let layout = keep.iter().map(|&i| layout[i]).collect();
                     return (
@@ -9122,6 +9166,17 @@ impl Planner<'_, '_> {
                 }
                 _ => 0,
             };
+            // (cost_subqueryscan: a subquery's scan whose reltarget isn't the subquery's
+            // whole select list, an output nothing above reads, is no trivial one either
+            // (set_subquery_pathlist's trivial_pathtarget), though setrefs.c may still remove
+            // the node once it is given the physical target list.)
+            if whole == 0
+                && matches!(plan, Plan::Barrier { secure: false, ref alias, .. } if !alias.is_empty())
+                && est.node_type != "Subquery Scan"
+                && lneed.iter().any(|x| !x)
+            {
+                est.total += CPU_TUPLE_COST * rows;
+            }
             let kind = match est.node_type {
                 "Function Scan" => InKind::FunctionScan,
                 "CTE Scan" => InKind::CteScan,
@@ -9211,6 +9266,41 @@ impl Planner<'_, '_> {
                     }
                     if subquery {
                         rows = costs::clamp_rows(rel_rows * sel);
+                    }
+                }
+            }
+            // (A LATERAL subquery reading PlaceHolderVars of this level that hold sub-selects:
+            // extract_lateral_references runs preprocess_phv_expression on each reference it
+            // pulls out of the subquery, a SubPlan copy of this level per reference that the
+            // plan never uses, the nested loop parameter being the PlaceHolderVar's own
+            // ph_var, identify_current_nestloop_params.)
+            if let Plan::Barrier { input, copies, .. } = &mut plan
+                && let Some((_, ps)) = laterals.iter().find(|(li, _)| *li == i)
+            {
+                copies.clear();
+                for (k, e) in ps.iter().enumerate() {
+                    let Expr::Col(g, _) = e else { continue };
+                    let Some(ph) = s.phv(*g) else { continue };
+                    let mut holds = false;
+                    ph.expr.walk(&mut |x| holds |= matches!(x, Expr::Subquery(q) if q.call.is_none()));
+                    if !holds {
+                        continue;
+                    }
+                    for _ in 0..lateral_refs(input, k) {
+                        let copy = ph.expr.clone().transform(&mut |x| {
+                            Ok(match x {
+                                Expr::Subquery(mut q) if q.call.is_none() => {
+                                    super::sublinkcopy::make_copy(&mut q);
+                                    q.tlist = false;
+                                    q.qual = false;
+                                    Expr::Subquery(q)
+                                }
+                                x => x,
+                            })
+                        });
+                        if let Ok(c) = copy {
+                            copies.push(c);
+                        }
                     }
                 }
             }
