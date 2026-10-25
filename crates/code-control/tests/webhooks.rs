@@ -1261,10 +1261,18 @@ async fn a_claim_held_by_a_dead_node_is_retried_after_it_lapses() {
     }
     let sent_at = *rx.first_at.lock().get("dl_dead").expect("the dead node's delivery was sent");
     assert!(sent_at.duration_since(claimed) >= Duration::from_millis(390), "not while it's claimed: sent {:?} after the claim", sent_at.duration_since(claimed));
+    // Recorded once its answer is in (which can take a moment on a loaded database).
+    let mut d = a.code.db.delivery("dl_dead").unwrap().unwrap();
+    for _ in 0..3000 {
+        if d.state != "pending" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        d = a.code.db.delivery("dl_dead").unwrap().unwrap();
+    }
+    assert_eq!((d.state.as_str(), d.attempts), ("delivered", 1));
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(rx.attempts.lock().get("dl_dead"), Some(&1), "sent once");
-    let d = a.code.db.delivery("dl_dead").unwrap().unwrap();
-    assert_eq!((d.state.as_str(), d.attempts), ("delivered", 1));
 }
 
 /// A receiver slower than the claim can't get a delivery from two senders at once: the

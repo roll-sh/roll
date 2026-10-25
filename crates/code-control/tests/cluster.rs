@@ -1097,8 +1097,9 @@ async fn github_deliveries_survive_their_owner_dying() {
     }
     let n = net.owner(&repo_id).expect("a survivor owns it");
     assert_ne!(n, o);
-    let pending: i64 = net.nodes[n].code.db.sql().query_row("SELECT COUNT(*) FROM github_inbox", (), |r| r.get(0)).unwrap();
-    assert_eq!(pending, 0, "every recorded part was handled and removed");
+    // A part's row goes right after its handler is done.
+    let pending = || net.nodes[n].code.db.sql().query_row("SELECT COUNT(*) FROM github_inbox", (), |r| r.get::<_, i64>(0)).unwrap();
+    until("every recorded part is handled and removed", Duration::from_secs(20), || pending() == 0).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     for i in 1..=3 {
         assert_eq!(issue_items(&net, p, i).await, 1, "issue {i} became one work item");

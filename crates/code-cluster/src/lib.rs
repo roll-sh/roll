@@ -30,6 +30,10 @@
 //!   lease so the preferred node takes it at its next sweep (or at once, on a request). Every
 //!   `rebalance_every`, up to `handoffs_per_round` keys whose preferred node is another live
 //!   node are handed off.
+//! - **Giving keys up.** [`Cluster::retire`] (a deleted repo) and [`Cluster::release_if_idle`] (a
+//!   key unused for a while, if the caller agrees nothing is left to do) hand the key off like a
+//!   handoff but then delete the lease row, so no sweep takes it back; the next request does.
+//!   [`Cluster::idle`] lists the keys with no guard granted or dropped for a given time.
 //! - **Ownership events** ([`Cluster::subscribe`]) start and stop a repo's background work.
 //! - **Signed internal requests** ([`sign`]) and **forwarding** ([`Cluster::dispatch`],
 //!   [`Cluster::forward`], [`accept_forwarded`]).
@@ -99,7 +103,10 @@
 //! `forward_buffer` (4 MiB) are buffered so the forward can be retried once, after routing
 //! again, on a connection error or on an Unavailable answer (a 503 carrying
 //! `x-roll-code-unavailable`, from [`unavailable`]); bigger or unsized bodies stream with one
-//! attempt. Past [`MAX_HOPS`] forwards the answer is 508. The receiving side runs
+//! attempt. Past [`MAX_HOPS`] forwards the answer is 508. HTTP/1.1 upgrades (WebSockets) go over a
+//! connection of their own: once the owner switches protocols, bytes are copied both ways. A safe
+//! request (`GET`, `HEAD`, `OPTIONS`) with a buffered body whose connection breaks before an
+//! answer is sent again. The receiving side runs
 //! [`accept_forwarded`]: requests carrying `x-roll-code-*` headers must verify (else 401), and
 //! get a [`Forwarded`] extension with the sender, hop count and client address.
 //!

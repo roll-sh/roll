@@ -182,7 +182,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     `glob.rs`/`pattern.rs`. Never match `**` recursively.
   - Repo webhooks (`src/webhooks.rs`) and review apps share one delivery queue (`review_deliveries`;
     targets are `app_…` or `wh_…`): same signature, retries, SSRF guard and log. Don't add a second
-    one. Events reach webhooks through `Code::emit` over an unbounded channel; landings come from
+    one. `Code::emit` queues an event's deliveries before it returns; a state change that matters
+    promises its event in its own transaction (`webhooks::Promises`, `webhook_outbox`) and emits
+    it with `Code::emit_kept`. Landings come from
     the store's durable land log (`Store::land_log`, written in each landing's transaction) after a
     persisted cursor. Never drive anything that must not miss a landing from the broadcast
     channel: it drops under lag. Never deliver inline from a request.

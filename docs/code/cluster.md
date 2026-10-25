@@ -52,9 +52,9 @@ network.
 | internal route | what it does |
 | --- | --- |
 | `GET /internal/code/ping` | the node's id |
-| `POST /internal/code/repos/{id}/events` | events emitted on another node, for the repo's feed (`/events`) on its owner |
-| `POST /internal/code/repos/{id}/kick` | the owner resumes the repo's work (a queue to run, a GitHub repo connected or disconnected) |
-| `POST /internal/code/repos/{id}/github` | one repo's part of a GitHub delivery (`x-github-event` and the original payload) |
+| `POST /internal/code/repos/{id}/events` | events emitted on another node, for the repo's feed (`/events`) on its owner. Best effort, like the feed itself: nothing durable travels this way |
+| `POST /internal/code/repos/{id}/kick` | the owner resumes the repo's work (a queue to run, a GitHub repo connected or disconnected, GitHub delivery parts recorded for it). The work is in the database; the kick is retried for about two minutes until some node takes it, and whoever takes the repo next resumes it anyway |
+| `POST /internal/code/repos/{id}/github` | handle one recorded part of a GitHub delivery (`{part, claimed_until}`: a `github_inbox` row) |
 
 Each `repos/{id}` route is itself routed by the repo id, so it follows the repo if it moved
 while the request was on its way.
@@ -86,7 +86,11 @@ last 10 s and are renewed every 2 s with one statement per node (`UPDATE … WHE
   A name or id that doesn't exist runs where it arrived (its 404). The owner holds a guard for
   as long as the response body is being sent, so a handoff waits for a clone to finish; an event
   stream instead ends as soon as its repo starts moving, and its client reconnects to the new
-  owner (the dashboard and `roll code watch` do).
+  owner (the dashboard and `roll code watch` do). HTTP/1.1 upgrades (WebSockets to a preview) are
+  forwarded too: the owner switches protocols, and the node the client reached copies the bytes
+  both ways until either side closes. A forwarded read (`GET`, `HEAD`, `OPTIONS`) whose
+  connection drops before an answer comes (a pooled connection closed under it, the owner going
+  away) is sent again; a write never is.
 - **Acquiring.** A request for a repo nobody owns (or whose owner's lease expired) is taken by the
   node the repo's rendezvous hash picks among the live nodes; the receiving node forwards it
   there, and the winner acquires the lease with a compare-and-swap that bumps `epoch`.
@@ -107,8 +111,19 @@ last 10 s and are renewed every 2 s with one statement per node (`UPDATE … WHE
   reloads and rebases. Leases are about locality: caches, the lander's batching, the code index,
   containers.
 - **Taking over.** Each node sweeps for expired leases every second and takes the repos the
-  rendezvous hash gives it. Lease rows are never deleted (a release expires them), so every repo
-  that ever had activity always has an owner, and its background work is never stranded.
+  rendezvous hash gives it. A release (a handoff, a node leaving) expires a lease rather than
+  deleting it, so a repo with work left always gets an owner again, and its background work is
+  never stranded.
+- **Giving repos up.** A lease row is deleted, so no sweep takes the repo back, in two cases. A
+  deleted repo's owner (which runs the delete) retires its lease once the request is done: `Lost`
+  stops its work, and the row goes. And an owner gives up a repo it has served no request for and
+  run no work for in 30 minutes (`Config::repo_idle_release`; an open event stream counts as use),
+  if nothing is waiting for it: no merge-queue entries, reviewer jobs, checks queued or running,
+  running previews, promised webhook events or recorded GitHub delivery parts, and no GitHub
+  connection (its mirror). It stops granting guards while it checks, so nothing can start
+  meanwhile. The next request for the repo (or a kick) takes it again, on its preferred node,
+  and resumes its work from the database as any takeover does. So the lease table and each
+  renewal stay the size of the active repos.
 - **Joining and draining.** When a node joins, the others hand it the repos the rendezvous hash
   now gives it, a few at a time: the owner stops taking new requests for the repo (forwarders
   retry), waits for the ones in flight and for queue batches and reviews running under the
@@ -131,7 +146,7 @@ Taking a repo over (`Ownership::Acquired`) first drops everything the node cache
 | merge queue | a worker starts if entries are active; it first recovers the batch the last owner left (a batch that was landing counts as landed if its tip is on the branch; the rest is tested again) | the worker is aborted (each batch runs under the repo's guard, so a handoff waits for it first) |
 | roll's reviewer | jobs `running` under another node's claim are queued again; queued ones run here (each runs under the repo's guard) | running jobs are aborted and left `running` for the next owner |
 | GitHub | the import if it never finished, else the mirror | the mirror and import stop |
-| code index | an index this node built before catches up; a repo whose reviewer is on builds one in the background; others build on first use (search answers 503 until it's built, as on a fresh repo) | — (a stale local index catches up next time) |
+| code index | an index this node still has catches up; a repo whose reviewer is on builds one in the background; others build on first use (search answers 503 until it's built, as on a fresh repo) | removed from disk if the repo hasn't come back after two lease lengths (a node that fenced itself through a slow database usually gets it straight back); a node starting in a cluster removes every index it finds (it owns nothing yet), and a single node those of repos that no longer exist; deleting a repo removes its index on its owner at once |
 | checks (code-preview) | checks that were queued or running on open changes run again; the default branch's head is checked unless it's the last green one (which opens or closes `broken-main` items) | results of checks still running are dropped |
 | previews (code-preview) | previews stored as running are asleep (their containers were elsewhere); the next visit starts one here | the containers stop |
 
@@ -152,10 +167,11 @@ its own); instead each node re-queues, every 5 s, the jobs of the repos it owns 
 lapsed (their node died or lost the database), and a node taking a repo over re-queues the
 repo's running jobs at once. So restarting one node never runs another node's review twice.
 
-Events emitted on a node that doesn't own the repo (a global route, a
-GitHub delivery) are sent to the owner's feed over the internal events route, in order per repo,
-and dropped after a few seconds if no node can take them (like an event sent while nobody
-listens; webhooks don't depend on them).
+Events emitted on a node that doesn't own the repo (a global route) are sent to the owner's feed
+over the internal events route, in order per repo, and dropped after a few seconds if no node can
+take them (like an event sent while nobody listens). Nothing durable depends on them: webhook
+deliveries are queued before `emit` returns, queue and GitHub work is in the database (kicks only
+make it start sooner), and reviewer jobs are rows the owner's runner polls.
 
 ## Work that isn't per repo
 
@@ -163,8 +179,10 @@ Everything below is shared through the database, so it holds with any number of 
 node that dies mid-way leaves nothing behind that the others can't finish.
 
 - **Webhook and review-app deliveries** (`review_deliveries`) are sent by every node's delivery
-  worker. A worker claims a due delivery with a compare-and-swap on its `next_at`, which moves it
-  a claim's length (60 s) ahead on the database's clock, so each delivery is sent by one node at
+  worker, which starts with the node's webhooks (so deliveries a previous process queued go out
+  without waiting for a new event). A worker claims a due delivery with a compare-and-swap on its
+  `next_at`, which moves it a claim's length (20 s: a request's 10 s timeout plus a margin) ahead
+  on the database's clock, so each delivery is sent by one node at
   a time. A node that dies holding a claim leaves the delivery due again when the claim lapses,
   and any node retries it then. The claim is far longer than a request's total timeout (10 s,
   response included), and a request only starts while at least the timeout plus a margin (5 s)
@@ -174,6 +192,18 @@ node that dies mid-way leaves nothing behind that the others can't finish.
   longer than all of that ever did, nothing is overwritten and the possible second send is
   logged. Receivers still de-duplicate on `X-Roll-Delivery` (a timed-out attempt may have
   arrived).
+- **Events to webhooks.** `Code::emit` queues an event's deliveries (one write, nothing when the
+  repo has no webhook for it) before it returns, on whichever node emits it. The state changes
+  that matter most also promise their event in their own transaction: a change opened, queued,
+  closed or landed (directly or by the merge queue), a review submitted, a check or a commit
+  status recorded write a `webhook_outbox` row when the repo has an active webhook for the event,
+  and emitting the event turns the row into deliveries (deleting it, in one write). A node that
+  dies between the commit and the event leaves the row; the node running the land forwarder
+  delivers rows older than 30 s (a single node: every row, when it starts), with the change or
+  review as it is then, and deleting the row decides who delivers it, so it's delivered once.
+  Other events (threads, work items, previews, queue state, pushes, `review` updates such as a
+  dismissal, and the `change` events that accompany them) are queued when emitted, so they're
+  lost only if their node dies in the milliseconds between the state change and the `emit`.
 - **Landings to webhooks** come from the durable landing log. On Postgres, concurrent
   transactions could take sequence numbers in one order and commit in another, so `code-store`
   appends under a transaction-scoped advisory lock taken just before the append (the landing's
@@ -187,7 +217,11 @@ node that dies mid-way leaves nothing behind that the others can't finish.
   and moves the cursor past the page. A crash mid-page leaves nothing of it; a second forwarder
   racing the first queues nothing and re-reads from the new cursor. Creating a webhook reads the
   cursor in its own transaction and starts the webhook at the cursor or the log's head,
-  whichever is further, so a webhook gets exactly the landings after its `since_seq`. The
+  whichever is further, so a webhook gets exactly the landings after its `since_seq`. Every
+  landing wakes the forwarder on every node (Postgres `NOTIFY` sent in the landing's
+  transaction, so it arrives after the commit; `code_sql::Db::listen` keeps a connection
+  listening and wakes it again after a reconnect), so a landing on one node reaches webhooks
+  within milliseconds when another node forwards; a poll every 5 s remains the safety net. The
   `landed` event's `change` is known to the node that landed it; the forwarder looks it up when
   it's another node.
 - **Which webhooks an event goes to** is read from the database for each event and each page of
@@ -206,10 +240,19 @@ node that dies mid-way leaves nothing behind that the others can't finish.
 - **MCP sessions** live in `mcp_sessions`, so a session started through any node works through
   every other and survives restarts. `last_seen` is written at most every 5 s; a session idle
   for 7 days ends, and past 10,000 sessions the least recently used go.
-- **GitHub webhooks** are verified and de-duplicated by whichever node receives them. Events
-  about the App (installations) are handled there; each connected repo's part of a repository
-  event runs on that repo's owner (`/internal/code/repos/{id}/github` with the original
-  payload). A failure there fails the delivery, so GitHub's redelivery tries again.
+- **GitHub webhooks** are verified and de-duplicated by whichever node receives them, and each
+  connected repo's part is recorded (`github_inbox`, in the transaction that records the
+  delivery id) before anything runs. Events about the App (installations) are handled there;
+  each repo's part runs on the repo's owner (`/internal/code/repos/{id}/github`), under a claim on
+  its row that's renewed while it runs. GitHub gets 2xx only once every part is handled or
+  recorded: handled in time, 200; the handler failed on a live owner, the delivery's rows and its
+  id are forgotten and GitHub gets the error (its redelivery runs it all again); the owner
+  couldn't be reached or died mid-way, 202, and the parts stay; still running after 8 s, 202. The
+  owner of a repo handles its recorded parts on taking it over, when kicked, and every 5 s
+  (failures again with backoff, given up after 8 attempts). A node that dies holding a part
+  leaves it due when its claim (20 s) lapses. Parts run at least once: one handled by a node that
+  died before deleting its row runs again, and the handlers are idempotent (keyed by GitHub's
+  ids).
 - **Event-stream limits** (`--code-max-streams-per-caller`, `--code-max-streams`) are per node.
 - **The git memory budget** (`--code-git-memory-budget`) is per node.
 
@@ -250,9 +293,9 @@ rolld --code-only \
 
 ## Limits
 
-- A WebSocket upgrade to a preview only works on the node that owns the preview's repo
-  (forwarding is plain HTTP); other preview requests work through any node.
-- Deleting a repo removes its code index on the node that runs the delete (its owner); copies
-  left on nodes that owned the repo before stay on disk.
 - Events forwarded to an owner are best effort (as the feed itself is: a stream that isn't open
   misses them). Anything that must not miss a landing reads the landing log.
+- Events that aren't promised in their state change's transaction (threads, work items,
+  previews, queue state, pushes, review dismissals) are lost to webhooks if their node dies in
+  the moment between the state change and `emit` (their deliveries are durable from `emit` on).
+- A repo connected to GitHub is never given up as idle (its mirror runs on its owner).
