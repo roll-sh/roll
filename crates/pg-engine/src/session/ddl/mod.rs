@@ -526,6 +526,8 @@ impl<'c, 'a> Ddl<'c, 'a> {
     /// concurrent DROP of it waits, and checked to be there still once that lock is held.
     fn lock_references(&mut self) -> Result<()> {
         let before = self.ctx.txn.borrow().catalog();
+        // (What other transactions had committed before this waits.)
+        let committed = self.ctx.sess.db.catalog();
         let mut refs: Vec<(u32, u32)> = Vec::new();
         let mut add = |class: u32, oid: u32| {
             if oid >= crate::catalog::FIRST_USER_OID && !refs.contains(&(class, oid)) {
@@ -533,7 +535,7 @@ impl<'c, 'a> Ddl<'c, 'a> {
             }
         };
         let ty = |t: &crate::types::DataType| crate::catalog::system::type_oid(&self.cat, t);
-        for (oid, f) in &self.cat.functions {
+        for (oid, f) in self.cat.functions.iter() {
             if before.functions.get(oid).is_some_and(|b| Arc::ptr_eq(b, f)) {
                 continue;
             }
@@ -551,14 +553,14 @@ impl<'c, 'a> Ddl<'c, 'a> {
                 }
             }
         }
-        for (oid, d) in &self.cat.domains {
+        for (oid, d) in self.cat.domains.iter() {
             if before.domains.get(oid).is_some_and(|b| Arc::ptr_eq(b, d)) {
                 continue;
             }
             add(NAMESPACE_CLASS, d.schema);
             add(TYPE_CLASS, d.parent.or(d.base_domain).unwrap_or_else(|| ty(&d.base)));
         }
-        for (oid, t) in &self.cat.tables {
+        for (oid, t) in self.cat.tables.iter() {
             if before.tables.get(oid).is_some_and(|b| Arc::ptr_eq(b, t)) || t.temporary {
                 continue;
             }
@@ -571,7 +573,7 @@ impl<'c, 'a> Ddl<'c, 'a> {
                 add(TYPE_CLASS, c.domain.unwrap_or_else(|| ty(&c.ty)));
             }
         }
-        for (oid, sv) in &self.cat.servers {
+        for (oid, sv) in self.cat.servers.iter() {
             if before.servers.get(oid).is_some_and(|b| Arc::ptr_eq(b, sv)) {
                 continue;
             }
@@ -590,10 +592,9 @@ impl<'c, 'a> Ddl<'c, 'a> {
                 ROLE_CLASS => c.roles.contains_key(&oid),
                 _ => true,
             };
-            // (Made by this transaction: not dropped by another.)
-            let base = self.ctx.txn.borrow().catalog_base();
-            let ours = base.as_ref().is_some_and(|b| !exists(b));
-            if !exists(&now) && !ours {
+            // (Dropped by another transaction meanwhile: committed before the wait, gone
+            // after it. One this transaction made is in neither.)
+            if !exists(&now) && exists(&committed) {
                 return Err(match class {
                     ROLE_CLASS => Error::new(
                         code::UNDEFINED_OBJECT,

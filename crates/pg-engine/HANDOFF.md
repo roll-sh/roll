@@ -146,11 +146,14 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
 - **Isolation suite (`src/test/isolation`, 122 specs, 1,648 permutations): see
   `tests/isolation/STATUS.md`.** Harness: `tests/pg_isolation.rs` (`#[ignore]`d, a port of
   isolationtester driving both servers over the wire; `PGISOLATION_*` variables in its header).
-  Round 17 (agent 34) took it from 30 to 88 matching specs (921 to 1,378 permutations): the
-  engine now has Postgres's heavyweight lock manager (eight modes, wait queues, deadlock
-  detection with soft-deadlock reordering), relation locks taken by every statement and DDL,
-  four-strength row locks, and true SERIALIZABLE (SSI, `txn/ssi.rs`). What's left is classified
-  there (DETACH CONCURRENTLY, TOAST relations, SSI over GiST / GIN pages, statistics timing, ...).
+  Round 17 (agent 34) took it from 30 to 94 matching specs (921 to 1,452 permutations): the
+  engine now has Postgres's heavyweight lock manager (`txn/locks.rs`: eight modes, wait queues,
+  deadlock detection with soft-deadlock reordering), relation locks taken by every statement
+  and DDL (a statement that waited binds again; DDL re-resolves names), object locks of
+  dependencies, four-strength row locks, and true SERIALIZABLE (SSI, `txn/ssi.rs`, with page
+  locks for btree / hash / GiST / GIN). Transaction snapshots are taken by the first statement
+  needing one. What's left is classified there (DETACH CONCURRENTLY, TOAST relations, catalog
+  row locks, statistics timing, ...).
 
 ## Repository layout
 

@@ -1952,7 +1952,17 @@ impl Txn {
         self._pin = Some(self.db.store.pin(ts));
         self.snapshot_ts = ts;
         self.start_ts = ts;
+        // (The transaction's snapshot is this one now: SSI tracks it from here.)
+        self.snapshot_fixed = true;
+        if self.isolation == Isolation::Serializable {
+            self.register_serializable()?;
+        }
         Ok(())
+    }
+
+    /// Whether a statement took the transaction's snapshot already (FirstSnapshotSet).
+    pub fn snapshot_taken(&self) -> bool {
+        self.snapshot_fixed
     }
 
     pub fn check_cancel(&self) -> Result<()> {

@@ -551,9 +551,15 @@ fn concurrent_ddl() {
         // The same name taken by both.
         let e = both("CREATE TABLE n (a int)", "CREATE TABLE n (b text)").await.unwrap_err();
         assert_eq!(code(e).as_deref(), Some("23505"));
-        // The same object changed by both.
-        let e = both("ALTER TABLE t2 RENAME TO t3", "ALTER TABLE t2 RENAME TO t4").await.unwrap_err();
-        assert_eq!(code(e).as_deref(), Some("40001"));
+        // The same object changed by both: the second waits for the first's lock, then finds
+        // no t2 by that name any more (Postgres's RangeVarGetRelidExtended).
+        a.batch_execute("BEGIN; ALTER TABLE t2 RENAME TO t3").await.unwrap();
+        b.batch_execute("BEGIN").await.unwrap();
+        let (r, ()) = tokio::join!(b.batch_execute("ALTER TABLE t2 RENAME TO t4"), async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            a.batch_execute("COMMIT").await.unwrap();
+        });
+        assert_eq!(code(r.unwrap_err()).as_deref(), Some("42P01"));
         b.batch_execute("ROLLBACK").await.ok();
         let n: i64 = a
             .query_one("SELECT count(*) FROM pg_class WHERE relname IN ('n', 't3', 't4')", &[])

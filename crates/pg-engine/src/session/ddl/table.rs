@@ -7390,7 +7390,7 @@ impl Ddl<'_, '_> {
                     system::SysTable::lookup(Self::rv_schema(rv), &rv.relname, self.search_path())
                 {
                     self.require_rel_priv(t.oid(), lock_acl_mask(s.mode), true)?;
-                    self.note_lock(t.oid(), s.mode);
+                    self.note_lock(t.oid(), s.mode)?;
                     continue;
                 }
                 return Err(crate::catalog::no_such_relation(
@@ -7492,7 +7492,17 @@ impl Ddl<'_, '_> {
         } else {
             crate::txn::locks::WaitPolicy::Block
         };
+        let before = self.ctx.sess.db.catalog().version;
         self.ctx.txn.borrow_mut().lock_relation(oid, lm, policy, &|| rel.clone())?;
+        // RangeVarGetRelidExtended: the name looked up again once the lock is held; a
+        // relation another transaction dropped or renamed meanwhile isn't there by it.
+        let now = self.ctx.sess.db.catalog();
+        if now.version != before && oid >= crate::catalog::FIRST_USER_OID {
+            let (word, name) = crate::sql::binder::perms::rel_word(&now, oid);
+            if word == "relation" || name != rel {
+                return Err(crate::catalog::no_such_relation(None, &rel));
+            }
+        }
         Ok(())
     }
 
@@ -8759,6 +8769,13 @@ impl Ddl<'_, '_> {
                 (lockmode::SHARE, lockmode::ACCESS_EXCLUSIVE)
             };
             self.note_lock(table, heap_mode)?;
+            // (ReindexMultipleTables: a table dropped while we waited for it is skipped.)
+            if !self.ctx.sess.db.catalog().tables.contains_key(&table)
+                && self.ctx.txn.borrow().catalog_base().is_none_or(|b| b.tables.contains_key(&table))
+                && self.cat.tables.get(&table).is_some_and(|t| !t.temporary)
+            {
+                continue;
+            }
             for &i in &indexes {
                 self.note_lock(i, index_mode)?;
             }

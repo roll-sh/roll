@@ -66,6 +66,7 @@ impl Session {
                         if let Some(t) = &self.txn
                             && (t.borrow().in_savepoint()
                                 || t.borrow().has_writes()
+                                || t.borrow().snapshot_taken()
                                 || t.borrow().xid_if_assigned().is_some())
                         {
                             return Err(Error::new(

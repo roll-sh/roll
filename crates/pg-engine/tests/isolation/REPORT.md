@@ -6,13 +6,13 @@ differences is in `STATUS.md`.
 | | |
 |---|---|
 | specs | 122 |
-| specs matching | 88 (72.1%) |
+| specs matching | 94 (77.0%) |
 | permutations | 1648 |
-| permutations matching | 1378 (83.6%) |
+| permutations matching | 1452 (88.1%) |
 | steps | 12238 |
-| steps matching | 11269 (92.1%) |
+| steps matching | 11397 (93.1%) |
 | reference output == expected/*.out | 122 of 122 |
-| engine output == expected/*.out | 88 of 122 |
+| engine output == expected/*.out | 94 of 122 |
 
 | spec | permutations | steps | ref = expected |
 |---|---:|---:|:---:|
@@ -33,7 +33,7 @@ differences is in `STATUS.md`.
 | ri-trigger | 10/10 | 50/50 | yes |
 | partial-index | 20/20 | 120/120 | yes |
 | two-ids | 90/90 | 540/540 | yes |
-| multiple-row-versions ✗ | 0/1 | 10/11 | yes |
+| multiple-row-versions | 1/1 | 11/11 | yes |
 | index-only-scan | 6/6 | 24/24 | yes |
 | index-only-bitmapscan | 1/1 | 9/9 | yes |
 | predicate-lock-hot-tuple | 1/1 | 8/8 | yes |
@@ -51,17 +51,17 @@ differences is in `STATUS.md`.
 | fk-deadlock | 14/14 | 90/90 | yes |
 | fk-deadlock2 | 11/11 | 72/72 | yes |
 | fk-partitioned-1 ✗ | 8/14 | 72/90 | yes |
-| fk-partitioned-2 ✗ | 0/6 | 24/42 | yes |
-| fk-snapshot ✗ | 4/7 | 51/59 | yes |
+| fk-partitioned-2 ✗ | 4/6 | 40/42 | yes |
+| fk-snapshot ✗ | 6/7 | 57/59 | yes |
 | subxid-overflow ✗ | 0/4 | 25/31 | yes |
-| eval-plan-qual ✗ | 51/56 | 331/342 | yes |
+| eval-plan-qual ✗ | 53/56 | 334/342 | yes |
 | eval-plan-qual-trigger ✗ | 37/39 | 501/503 | yes |
 | inplace-inval | 2/2 | 9/9 | yes |
 | intra-grant-inplace ✗ | 3/10 | 39/69 | yes |
 | intra-grant-inplace-db ✗ | 0/1 | 5/8 | yes |
 | lock-update-delete | 12/12 | 84/84 | yes |
 | lock-update-traversal | 3/3 | 26/26 | yes |
-| inherit-temp ✗ | 0/9 | 52/72 | yes |
+| inherit-temp | 9/9 | 72/72 | yes |
 | temp-schema-cleanup ✗ | 0/2 | 6/9 | yes |
 | insert-conflict-do-nothing | 2/2 | 12/12 | yes |
 | insert-conflict-do-nothing-2 | 8/8 | 60/60 | yes |
@@ -118,9 +118,9 @@ differences is in `STATUS.md`.
 | stats ✗ | 31/56 | 573/604 | yes |
 | horizons ✗ | 1/5 | 44/51 | yes |
 | predicate-hash | 40/40 | 240/240 | yes |
-| predicate-gist ✗ | 22/40 | 222/240 | yes |
-| predicate-gin ✗ | 12/31 | 170/189 | yes |
-| partition-concurrent-attach ✗ | 0/3 | 12/24 | yes |
+| predicate-gist | 40/40 | 240/240 | yes |
+| predicate-gin | 31/31 | 189/189 | yes |
+| partition-concurrent-attach ✗ | 1/3 | 20/24 | yes |
 | partition-drop-index-locking | 2/2 | 20/20 | yes |
 | partition-key-update-1 ✗ | 10/13 | 92/95 | yes |
 | partition-key-update-2 ✗ | 1/2 | 11/17 | yes |
@@ -135,6 +135,6 @@ differences is in `STATUS.md`.
 | serializable-parallel-3 | 1/1 | 10/10 | yes |
 | matview-write-skew | 8/8 | 56/56 | yes |
 | lock-nowait | 1/1 | 6/6 | yes |
-| ddl-dependency-locking ✗ | 0/17 | 50/85 | yes |
-| pub-concurrent-drop ✗ | 0/1 | 2/4 | yes |
+| ddl-dependency-locking | 17/17 | 85/85 | yes |
+| pub-concurrent-drop | 1/1 | 4/4 | yes |
 | drop-owned-grant ✗ | 0/1 | 2/5 | yes |
