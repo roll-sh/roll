@@ -434,7 +434,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             parts.sort_by(|a, b| {
                 cost(a)
                     .total_cmp(&cost(b))
-                    .then(ec_clause(a).cmp(&ec_clause(b)))
+                    .then(ec_order_clause(a).cmp(&ec_order_clause(b)))
             });
             // Row-level security quals added under the statement's own; else the new quals
             // after those there (row security), cheap leakproof ones among them.
@@ -448,7 +448,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 // (No security barrier: one level, all of them by cost.)
                 let mut merged = all;
                 merged.extend(parts);
-                merged.sort_by(|a, b| cost(a).total_cmp(&cost(b)).then(ec_clause(a).cmp(&ec_clause(b))));
+                merged.sort_by(|a, b| cost(a).total_cmp(&cost(b)).then(ec_order_clause(a).cmp(&ec_order_clause(b))));
                 merged
             };
             let mut all = all;
@@ -2866,6 +2866,39 @@ fn phv_class_order(have: &[Expr], parts: Vec<Expr>) -> Vec<Expr> {
     out
 }
 
+/// A sub-select that is an InitPlan of the level reading it (SS_process_sublinks): no
+/// column of the level read, its output a Param.
+fn initplan_sublink(s: &crate::sql::expr::Subquery) -> bool {
+    s.call.is_none()
+        && matches!(
+            s.kind,
+            crate::sql::expr::SubqueryKind::Scalar | crate::sql::expr::SubqueryKind::Exists | crate::sql::expr::SubqueryKind::Array
+        )
+        && !s.params.iter().any(|p| !p.columns().is_empty())
+        && !crate::exec::reads_enclosing(&s.plan, 0)
+}
+
+/// `ec_clause` for order_qual_clauses: an equality with an InitPlan's output too (a Param
+/// by then, which process_equivalence takes as a constant member).
+fn ec_order_clause(e: &Expr) -> bool {
+    if ec_clause(e) {
+        return true;
+    }
+    let Expr::Call(def, args, _) = e else { return false };
+    if def.name != "=" || args.len() != 2 {
+        return false;
+    }
+    let mut other = false;
+    let mut subs = false;
+    e.walk(&mut |x| match x {
+        Expr::Call(d, ..) if d.volatility == 'v' => other = true,
+        Expr::Subquery(s) if initplan_sublink(s) => subs = true,
+        Expr::Subquery(s) if !matches!(s.func, Some('i' | 's')) => other = true,
+        _ => {}
+    });
+    subs && !other && (!args[0].columns().is_empty() || !args[1].columns().is_empty())
+}
+
 fn ec_clause(e: &Expr) -> bool {
     let Expr::Call(def, args, _) = e else {
         return false;
@@ -2903,7 +2936,7 @@ pub fn order_quals(parts: &mut [Expr]) {
     parts.sort_by(|a, b| {
         qual_cost(a)
             .total_cmp(&qual_cost(b))
-            .then(ec_clause(a).cmp(&ec_clause(b)))
+            .then(ec_order_clause(a).cmp(&ec_order_clause(b)))
     });
 }
 
@@ -2943,6 +2976,9 @@ fn qual_cost(e: &Expr) -> f64 {
         {
             cost += s.ops.len().max(1) as f64
         }
+        // (One reading no column of this level is an InitPlan (SS_process_sublinks): the
+        // qual reads its output Param, which costs nothing per row (order_qual_clauses).)
+        Expr::Subquery(s) if initplan_sublink(s) => {}
         Expr::Subquery(_) => cost += 1000.0,
         _ => {}
     });
