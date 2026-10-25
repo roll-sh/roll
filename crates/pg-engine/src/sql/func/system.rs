@@ -951,21 +951,33 @@ fn visible(a: &[Value], c: &FnCtx) -> Result<Value> {
             .find(|p| cat.functions.values().any(|g| g.schema == *p && same(g)));
         return Ok(Value::Bool(first == Some(f.schema)));
     }
+    let in_path = |s: u32, name: &str| {
+        // RelationIsVisible: the first schema in the path with a relation of that name
+        // (system relations and composite types share the namespace).
+        let first = path.iter().copied().find(|p| {
+            cat.relation_in(*p, name).is_some()
+                || cat
+                    .composites
+                    .values()
+                    .any(|ct| ct.schema == *p && ct.name == name)
+                || Catalog::system_relation_in(*p, name)
+        });
+        first == Some(s)
+    };
     Ok(match schema {
-        Some((s, name)) => {
-            // RelationIsVisible: the first schema in the path with a relation of that name
-            // (system relations and composite types share the namespace).
-            let first = path.into_iter().find(|p| {
-                cat.relation_in(*p, &name).is_some()
-                    || cat
-                        .composites
-                        .values()
-                        .any(|ct| ct.schema == *p && ct.name == name)
-                    || Catalog::system_relation_in(*p, &name)
-            });
-            Value::Bool(first == Some(s))
-        }
-        None => Value::Bool(crate::catalog::system::SysTable::by_oid(oid).is_some() || oid < 16384),
+        Some((s, name)) => Value::Bool(in_path(s, &name)),
+        // A system relation: by its schema too (information_schema's views are visible
+        // only with it on the path).
+        None => match crate::catalog::sys_rels::SYS_RELS.iter().find(|r| r.2 == oid) {
+            Some(&(schema, name, ..)) => {
+                let s = match schema {
+                    "information_schema" => crate::catalog::INFORMATION_SCHEMA_OID,
+                    _ => crate::catalog::PG_CATALOG_OID,
+                };
+                Value::Bool(in_path(s, name))
+            }
+            None => Value::Bool(crate::catalog::system::SysTable::by_oid(oid).is_some() || oid < 16384),
+        },
     })
 }
 
@@ -1086,7 +1098,7 @@ fn type_visible(a: &[Value], c: &FnCtx) -> Result<Value> {
     let cat = c.exec.catalog();
     let named = cat
         .user_type_name(oid)
-        .map(|(s, n, _)| (s, n.to_string()))
+        .map(|(s, n, array)| (s, if array { cat.array_typname(oid, n) } else { n.to_string() }))
         .or_else(|| cat.domains.get(&oid).map(|d| (d.schema, d.name.clone())))
         .or_else(|| {
             cat.base_types
@@ -1097,8 +1109,11 @@ fn type_visible(a: &[Value], c: &FnCtx) -> Result<Value> {
     let Some((schema, name)) = named else {
         return Ok(Value::Bool(true));
     };
+    // TypeIsVisible: the first schema in the path with a type of that typname (a
+    // relation's row type and array types count).
     let first = first_schema(c, &cat, |s| {
-        cat.type_by_name(Some(s), &name, &[]).is_some()
+        cat.type_named_in(s, &name)
+            || cat.type_by_name(Some(s), &name, &[]).is_some()
             || builtin_named(crate::catalog::system::SysTable::PgType, s, &name, |_| true)
     });
     Ok(Value::Bool(first == Some(schema)))

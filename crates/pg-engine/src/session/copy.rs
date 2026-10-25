@@ -425,6 +425,57 @@ pub struct CopyIn {
     pub file_size: Option<i64>,
 }
 
+/// COPY FROM data read so far (`Session::copy_in_feed`).
+#[derive(Default)]
+pub struct CopyInParsed {
+    rows: Vec<Vec<Expr>>,
+    /// Each row's line number and text.
+    lines: Vec<(usize, String)>,
+    /// Rows ON_ERROR ignore skipped.
+    skipped: usize,
+    /// Records (lines; binary tuples) read.
+    records: usize,
+    /// Physical lines read (a CSV record may span several).
+    phys_lines: usize,
+    /// Bytes taken.
+    bytes: usize,
+    /// The end-of-copy marker or the binary trailer came: what follows is ignored.
+    ended: bool,
+    /// Binary: the header was read.
+    header: bool,
+}
+
+/// Where the complete records at the start of COPY data end (0: none yet). A text record
+/// ends at a newline, a CSV one at a newline outside quotes.
+fn record_boundary(data: &[u8], f: &CopyFormat) -> usize {
+    if !f.csv {
+        return data.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    }
+    let (Ok(q), Ok(esc)) = (u8::try_from(f.quote), u8::try_from(f.escape)) else {
+        return 0;
+    };
+    let (mut in_quotes, mut end, mut i) = (false, 0, 0);
+    while i < data.len() {
+        let b = data[i];
+        if in_quotes {
+            // (As split_csv reads them: an escape before a quote or an escape stands for it.)
+            if b == esc && data.get(i + 1).is_some_and(|&n| n == q || n == esc) {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                in_quotes = false;
+            }
+        } else if b == q {
+            in_quotes = true;
+        } else if b == b'\n' {
+            end = i + 1;
+        }
+        i += 1;
+    }
+    end
+}
+
 /// COPY TO STDOUT output: one data message per line.
 pub struct CopyOut {
     pub data: Vec<Vec<u8>>,
@@ -783,7 +834,11 @@ impl Session {
                 .map(|b| *b)
                 .unwrap(),
         };
-        let (rows, cols, after, file, failed) = self.with_ctx(params, |ctx| {
+        // (Its notices go out with the data: the query's before CopyOutResponse, as now, the
+        // AFTER triggers' after the data, `trailing`.)
+        let held = self.state.notice_hold.get();
+        self.state.notice_hold.set(held + 1);
+        let run = self.with_ctx(params, |ctx| {
             let bq = Binder::new(ctx, Vec::new()).bind_statement(&stmt)?;
             bq.check_perms(ctx)?;
             // BeginCopyTo opens the file once the query is planned.
@@ -827,7 +882,9 @@ impl Session {
                 ctx.notices.borrow().len() - mark
             };
             Ok((rows, bq.cols, after, file, failed))
-        })?;
+        });
+        self.state.notice_hold.set(held);
+        let (rows, cols, after, file, failed) = run?;
         let trailing = self.notices.split_off(self.notices.len().saturating_sub(after));
         let fmt = self.state.settings.borrow().format_ctx();
         let mut data = Vec::new();
@@ -976,6 +1033,35 @@ impl Session {
         r
     }
 
+    /// COPY FROM STDIN as its data arrives (CopyFrom reads the lines as the client sends
+    /// them, so a bad line fails the COPY before the rest of the data has come): reads the
+    /// complete records at the start of `data` (all of it when `last`), returns how many
+    /// bytes it took. Then `copy_in_end`.
+    pub fn copy_in_feed(
+        &mut self,
+        c: &CopyIn,
+        st: &mut CopyInParsed,
+        data: &[u8],
+        last: bool,
+    ) -> Result<usize> {
+        let r = self.copy_in_parse(c, st, data, last);
+        if let Err(e) = &r {
+            self.on_error();
+            self.pgss_copy_done(&Err(e.clone()));
+        }
+        r
+    }
+
+    /// The end of COPY FROM STDIN's data (after `copy_in_feed` took all of it): the rows go in.
+    pub fn copy_in_end(&mut self, c: CopyIn, st: CopyInParsed) -> Result<QueryResult> {
+        let r = self.copy_in_insert(&c, st);
+        if r.is_err() {
+            self.on_error();
+        }
+        self.pgss_copy_done(&r);
+        r
+    }
+
     /// The client aborted COPY FROM STDIN.
     pub fn copy_in_fail(&mut self, msg: &str) -> Error {
         self.on_error();
@@ -996,19 +1082,56 @@ impl Session {
     }
 
     fn copy_in_rows(&mut self, c: &CopyIn, data: &[u8]) -> Result<QueryResult> {
-        let data_len = data.len();
-        let enc = if c.format.binary {
-            crate::types::mbconv::UTF8
+        let mut st = CopyInParsed::default();
+        self.copy_in_parse(c, &mut st, data, true)?;
+        self.copy_in_insert(c, st)
+    }
+
+    /// Read the complete records at the start of `data` (every one when `last`) into `st`;
+    /// returns the bytes taken.
+    fn copy_in_parse(
+        &mut self,
+        c: &CopyIn,
+        st: &mut CopyInParsed,
+        data: &[u8],
+        last: bool,
+    ) -> Result<usize> {
+        // (After the end-of-copy marker or the binary trailer the rest is ignored.)
+        if st.ended {
+            st.bytes += data.len();
+            return Ok(data.len());
+        }
+        let f = &c.format;
+        let fmt = self.state.settings.borrow().format_ctx();
+        if f.binary {
+            let (rows, took, ended) = binary_copy_in(data, c, &fmt, st, last)?;
+            for row in rows {
+                st.records += 1;
+                st.rows.push(row);
+                st.lines.push((st.records, String::new()));
+            }
+            st.ended = ended;
+            st.bytes += took;
+            return Ok(took);
+        }
+        let take = if last {
+            data.len()
         } else {
-            self.copy_encoding(&c.format)
+            record_boundary(data, f)
         };
+        if take == 0 {
+            return Ok(0);
+        }
+        let data = &data[..take];
+        st.bytes += take;
+        let enc = self.copy_encoding(&c.format);
         // Data in another encoding is converted line by line, errors naming the line.
         let converted;
         let data = if enc != crate::types::mbconv::UTF8 {
             let mut out = Vec::with_capacity(data.len());
             for (i, line) in data.split_inclusive(|b| *b == b'\n').enumerate() {
                 let u = crate::types::mbconv::to_utf8(line, enc).map_err(|e| {
-                    e.context(format!("COPY {}, line {}", c.table.name, i + 1))
+                    e.context(format!("COPY {}, line {}", c.table.name, st.phys_lines + i + 1))
                 })?;
                 out.extend_from_slice(u.as_bytes());
             }
@@ -1017,37 +1140,34 @@ impl Session {
         } else {
             data
         };
-        let text = if c.format.binary {
-            ""
-        } else {
-            std::str::from_utf8(data).map_err(|_| {
-                Error::new(
-                    code::CHARACTER_NOT_IN_REPERTOIRE,
-                    "invalid byte sequence for encoding \"UTF8\"",
-                )
-            })?
-        };
-        let fmt = self.state.settings.borrow().format_ctx();
+        st.phys_lines += data.iter().filter(|b| **b == b'\n').count();
+        let text = std::str::from_utf8(data).map_err(|_| {
+            Error::new(
+                code::CHARACTER_NOT_IN_REPERTOIRE,
+                "invalid byte sequence for encoding \"UTF8\"",
+            )
+        })?;
         let t = c.table.clone();
-        let f = &c.format;
-        let records = if f.binary {
-            Vec::new()
-        } else if f.csv {
+        let records = if f.csv {
             split_csv(text, f)?
         } else {
-            split_text(text, f, &t.name)?
+            let (records, ended) = split_text(text, f, &t.name, st.records)?;
+            st.ended = ended;
+            records
         };
-        let mut rows: Vec<Vec<Expr>> = Vec::with_capacity(records.len());
-        let mut lines: Vec<(usize, String)> = Vec::with_capacity(records.len());
-        if f.binary {
-            for (i, row) in binary_copy_in(data, c, &fmt)?.into_iter().enumerate() {
-                rows.push(row);
-                lines.push((i + 1, String::new()));
-            }
-        }
-        let mut skipped = 0usize;
+        let first = st.records;
+        st.records += records.len();
+        st.rows.reserve(records.len());
+        st.lines.reserve(records.len());
+        let CopyInParsed {
+            rows,
+            lines,
+            skipped,
+            ..
+        } = st;
         let ctx_line = |line: usize, raw: &str| format!("COPY {}, line {line}: \"{raw}\"", t.name);
         'records: for (lineno, (raw, rec)) in records.into_iter().enumerate() {
+            let lineno = first + lineno;
             let line = lineno + 1;
             if lineno == 0 && f.header {
                 if f.header_match {
@@ -1120,15 +1240,15 @@ impl Session {
                     Some(s) => match parse_value(&s, ty, &fmt) {
                         Ok(v) => v,
                         Err(_) if f.on_error_ignore => {
-                            skipped += 1;
+                            *skipped += 1;
                             if let Some(limit) = f.reject_limit
-                                && skipped as i64 > limit
+                                && *skipped as i64 > limit
                             {
                                 return Err(Error::new(code::INVALID_TEXT_REPRESENTATION, format!("skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility"))
                                     .context(format!("COPY {}, line {line}, column {colname}: \"{s}\"", t.name)));
                             }
                             if f.log_verbosity >= 2 {
-                                self.notices.push(
+                                self.raise_notice(
                                     super::notice(format!("skipping row due to data type incompatibility at line {line} for column \"{colname}\": \"{s}\"")).context(format!("COPY {}", t.name)),
                                 );
                             }
@@ -1155,6 +1275,21 @@ impl Session {
             rows.push(row);
             lines.push((line, raw));
         }
+        Ok(take)
+    }
+
+    /// COPY FROM's rows, read, go in.
+    fn copy_in_insert(&mut self, c: &CopyIn, st: CopyInParsed) -> Result<QueryResult> {
+        let CopyInParsed {
+            mut rows,
+            mut lines,
+            mut skipped,
+            bytes: data_len,
+            ..
+        } = st;
+        let t = c.table.clone();
+        let f = &c.format;
+        let fmt = self.state.settings.borrow().format_ctx();
         let mut ncols = c.ncols;
         let mut target = c.target.clone();
         let mut excluded = 0i64;
@@ -1503,18 +1638,20 @@ fn csv_field(s: &str, f: &CopyFormat, force: bool, single: bool) -> String {
     out
 }
 
-/// Split text-format COPY data into records: the raw line and its fields.
-fn split_text(data: &str, f: &CopyFormat, table: &str) -> Result<Records> {
+/// Split text-format COPY data into records: the raw line and its fields; and whether the
+/// end-of-copy marker came. `first`: the lines before it.
+fn split_text(data: &str, f: &CopyFormat, table: &str, first: usize) -> Result<(Records, bool)> {
     let mut out = Vec::new();
     // (An empty line is a record of one empty field; no data at all is none.)
     if data.is_empty() {
-        return Ok(out);
+        return Ok((out, false));
     }
     let data = data.strip_suffix('\n').unwrap_or(data);
     for (lineno, line) in data.split('\n').enumerate() {
+        let lineno = first + lineno;
         let line = line.strip_suffix('\r').unwrap_or(line);
         if line == "\\." {
-            break;
+            return Ok((out, true));
         }
         let mut fields = Vec::new();
         let mut raw = String::new();
@@ -1582,7 +1719,7 @@ fn split_text(data: &str, f: &CopyFormat, table: &str) -> Result<Records> {
         push(&mut cur, &mut raw, &mut fields);
         out.push((line.to_string(), fields));
     }
-    Ok(out)
+    Ok((out, false))
 }
 
 /// Split CSV data (quoted fields may span lines).
@@ -1708,49 +1845,79 @@ fn binary_copy_out(
     Ok((data, None))
 }
 
-/// COPY FROM in binary format: each tuple's fields through the columns' typreceive.
+/// COPY FROM in binary format: each tuple's fields through the columns' typreceive. Reads
+/// the header (once) and the complete tuples at the start of `data` (when not `last`, an
+/// incomplete one waits for more data); returns the rows, the bytes taken and whether the
+/// trailer came.
 fn binary_copy_in(
     data: &[u8],
     c: &CopyIn,
     fmt: &crate::types::text::FormatCtx,
-) -> Result<Vec<Vec<Expr>>> {
+    st: &mut CopyInParsed,
+    last: bool,
+) -> Result<(Vec<Vec<Expr>>, usize, bool)> {
     let t = &c.table;
     let bad = |m: &str| Error::new(code::BAD_COPY_FILE_FORMAT, m.to_string());
-    const SIG: &[u8] = b"PGCOPY\n\xff\r\n\0";
-    if data.len() < SIG.len() || &data[..SIG.len()] != SIG {
-        return Err(bad("COPY file signature not recognized"));
-    }
-    let mut p = SIG.len();
     let take = |p: &mut usize, n: usize| -> Option<&[u8]> {
         let s = data.get(*p..*p + n)?;
         *p += n;
         Some(s)
     };
     let i32_at = |s: &[u8]| i32::from_be_bytes([s[0], s[1], s[2], s[3]]);
-    let flags = take(&mut p, 4)
-        .map(i32_at)
-        .ok_or_else(|| bad("invalid COPY file header (missing flags)"))?;
-    if flags & (1 << 16) != 0 {
-        return Err(bad("invalid COPY file header (WITH OIDS)"));
-    }
-    if (flags & !(1 << 16)) >> 16 != 0 {
-        return Err(bad("unrecognized critical flags in COPY file header"));
-    }
-    let ext = take(&mut p, 4)
-        .map(i32_at)
-        .ok_or_else(|| bad("invalid COPY file header (missing length)"))?;
-    if ext < 0 || take(&mut p, ext as usize).is_none() {
-        return Err(bad("invalid COPY file header (wrong length)"));
+    let mut p = 0;
+    if !st.header {
+        const SIG: &[u8] = b"PGCOPY\n\xff\r\n\0";
+        // (Each part of the header is checked once it is all there.)
+        let have = |n: usize| last || data.len() >= n;
+        if !have(SIG.len()) {
+            return Ok((Vec::new(), 0, false));
+        }
+        if data.len() < SIG.len() || &data[..SIG.len()] != SIG {
+            return Err(bad("COPY file signature not recognized"));
+        }
+        p = SIG.len();
+        if !have(p + 4) {
+            return Ok((Vec::new(), 0, false));
+        }
+        let flags = take(&mut p, 4)
+            .map(i32_at)
+            .ok_or_else(|| bad("invalid COPY file header (missing flags)"))?;
+        if flags & (1 << 16) != 0 {
+            return Err(bad("invalid COPY file header (WITH OIDS)"));
+        }
+        if (flags & !(1 << 16)) >> 16 != 0 {
+            return Err(bad("unrecognized critical flags in COPY file header"));
+        }
+        if !have(p + 4) {
+            return Ok((Vec::new(), 0, false));
+        }
+        let ext = take(&mut p, 4)
+            .map(i32_at)
+            .ok_or_else(|| bad("invalid COPY file header (missing length)"))?;
+        if ext >= 0 && !have(p + ext as usize) {
+            return Ok((Vec::new(), 0, false));
+        }
+        if ext < 0 || take(&mut p, ext as usize).is_none() {
+            return Err(bad("invalid COPY file header (wrong length)"));
+        }
+        st.header = true;
     }
     let mut out = Vec::new();
+    let mut ended = false;
+    let mut done = p;
     loop {
-        let line = out.len() + 1;
+        let line = st.records + out.len() + 1;
         let ctx_line = || format!("COPY {}, line {line}", t.name);
         let Some(n) = take(&mut p, 2).map(|s| i16::from_be_bytes([s[0], s[1]])) else {
             // EOF without a trailer is accepted.
+            if last {
+                done = data.len();
+            }
             break;
         };
         if n == -1 {
+            ended = true;
+            done = data.len();
             break;
         }
         if n as usize != c.ncols {
@@ -1761,12 +1928,17 @@ fn binary_copy_in(
             .context(ctx_line()));
         }
         let mut row = Vec::with_capacity(c.ncols);
+        let mut incomplete = false;
         for &col in &c.target {
             let colname = &t.columns[col].name;
             let ty = &t.columns[col].ty;
-            let len = take(&mut p, 4)
-                .map(i32_at)
-                .ok_or_else(|| bad("unexpected EOF in COPY data").context(ctx_line()))?;
+            let Some(len) = take(&mut p, 4).map(i32_at) else {
+                if !last {
+                    incomplete = true;
+                    break;
+                }
+                return Err(bad("unexpected EOF in COPY data").context(ctx_line()));
+            };
             if len == -1 {
                 row.push(Expr::Const(Value::Null, ty.clone()));
                 continue;
@@ -1774,14 +1946,25 @@ fn binary_copy_in(
             if len < 0 {
                 return Err(bad("invalid field size").context(ctx_line()));
             }
-            let bytes = take(&mut p, len as usize)
-                .ok_or_else(|| bad("unexpected EOF in COPY data").context(ctx_line()))?;
+            let Some(bytes) = take(&mut p, len as usize) else {
+                if !last {
+                    incomplete = true;
+                    break;
+                }
+                return Err(bad("unexpected EOF in COPY data").context(ctx_line()));
+            };
+            // (A field is received as it is read, CopyReadBinaryAttribute: its error comes
+            // before the rest of the tuple has.)
             let v = crate::types::binary::decode(bytes, ty, fmt).map_err(|e| {
                 e.context(format!("COPY {}, line {line}, column {colname}", t.name))
             })?;
             row.push(Expr::Const(v, ty.clone()));
         }
+        if incomplete {
+            break;
+        }
         out.push(row);
+        done = p;
     }
-    Ok(out)
+    Ok((out, done, ended))
 }

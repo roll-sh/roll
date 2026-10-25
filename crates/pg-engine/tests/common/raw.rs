@@ -80,6 +80,23 @@ impl Raw {
         (h[0], b)
     }
 
+    /// The next message, if one comes within `wait` (its type and body).
+    pub fn next_within(&mut self, wait: std::time::Duration) -> Option<(u8, Vec<u8>)> {
+        self.s.set_read_timeout(Some(wait)).unwrap();
+        let mut t = [0u8; 1];
+        let got = self.s.read(&mut t);
+        self.s.set_read_timeout(None).unwrap();
+        match got {
+            Ok(1) => {}
+            _ => return None,
+        }
+        let mut n = [0u8; 4];
+        self.s.read_exact(&mut n).unwrap();
+        let mut b = vec![0u8; i32::from_be_bytes(n) as usize - 4];
+        self.s.read_exact(&mut b).unwrap();
+        Some((t[0], b))
+    }
+
     pub fn read(&mut self) -> Vec<String> {
         let mut out = Vec::new();
         loop {

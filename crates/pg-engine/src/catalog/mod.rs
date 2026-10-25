@@ -2756,6 +2756,14 @@ impl Catalog {
         found
     }
 
+    /// Whether `schema` has a user type with this typname: a type, a relation's row type,
+    /// or an array type of either (TYPENAMENSP).
+    pub fn type_named_in(&self, schema: u32, typname: &str) -> bool {
+        self.user_type_entries().any(|(o, a, s, n)| {
+            s == schema && o != 0 && (n == typname || a != 0 && self.array_typname(a, n) == typname)
+        })
+    }
+
     /// makeArrayTypeName: `_` + the name, or with `_1`, `_2`, ... appended when that is
     /// taken in the schema.
     pub fn make_array_type_name(&self, schema: u32, elem: &str, except: u32) -> String {
@@ -2932,16 +2940,23 @@ impl Catalog {
     }
 
     pub fn dodge_array_type_names(&mut self) {
-        for (arr, own_array, s, n) in self.array_name_clashes() {
+        for (arr, own_array, s, n, late) in self.array_name_clashes() {
+            if late {
+                let name = self.make_array_type_name(s, &n, arr);
+                self.array_names.insert(arr, name);
+                continue;
+            }
             let moved = self.make_array_type_name(s, &n, own_array);
             self.array_names.insert(arr, moved);
             self.rename_array_type(s, own_array, &n);
         }
     }
 
-    /// Types named as another type's array type, newer than that type: (the array type, the
-    /// type's own array type, schema, name).
-    fn array_name_clashes(&self) -> Vec<(u32, u32, u32, String)> {
+    /// Types named as another type's array type: newer than that type, (the array type,
+    /// the type's own array type, schema, name, false); older, the array type made after a
+    /// type already had its name (makeArrayTypeName gave it `_name_1`, or the next number
+    /// free, when it was made): (the array type, 0, schema, its element type's name, true).
+    fn array_name_clashes(&self) -> Vec<(u32, u32, u32, String, bool)> {
         let mut types: Vec<(u32, u32, u32, String)> = Vec::new();
         self.for_each_user_type(&mut |o, a, s, n| types.push((o, a, s, n.to_string())));
         let mut by_array: std::collections::HashMap<(u32, String), (u32, u32)> =
@@ -2951,15 +2966,20 @@ impl Catalog {
                 by_array.insert((*s, self.array_typname(*a, n)), (*a, *o));
             }
         }
-        let mut clashes: Vec<(u32, u32, u32, String)> = Vec::new();
+        let mut clashes: Vec<(u32, u32, u32, String, bool)> = Vec::new();
         for (o, a, s, n) in &types {
             if let Some(&(arr, elem)) = by_array.get(&(*s, n.clone()))
                 && elem != *o
-                && *o > elem
             {
-                clashes.push((arr, *a, *s, n.clone()));
+                if *o > elem {
+                    clashes.push((arr, *a, *s, n.clone(), false));
+                } else if let Some((_, _, _, en)) = types.iter().find(|t| t.0 == elem) {
+                    clashes.push((arr, 0, *s, en.clone(), true));
+                }
             }
         }
+        // (The late array types' names first, as they were made before.)
+        clashes.sort_by_key(|c| !c.4);
         clashes
     }
 

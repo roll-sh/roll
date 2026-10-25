@@ -263,6 +263,13 @@ impl Binder<'_, '_> {
                         args.push(e);
                     }
                 }
+                // transformRowExpr: MaxTupleAttributeNumber.
+                if args.len() > 1664 {
+                    return Err(with_pos(
+                        Error::new(code::TOO_MANY_COLUMNS, "ROW expressions can have at most 1664 entries"),
+                        r.location,
+                    ));
+                }
                 let fields: Vec<(String, DataType)> = args
                     .iter()
                     .enumerate()

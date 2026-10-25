@@ -194,6 +194,18 @@ pub struct SessionState {
     /// Tables whose triggers are running (the statement firing them has them open):
     /// CheckTableNotInUse refuses DDL on them.
     pub in_use: RefCell<Vec<u32>>,
+    /// Above 0: notices are collected, not sent as they are raised (code that looks at or
+    /// drops what a step raised: `hold_notices`).
+    pub notice_hold: Cell<u32>,
+}
+
+/// While alive, notices are collected instead of streamed (`SessionState::hold_notices`).
+pub struct NoticeHold<'a>(&'a Cell<u32>);
+
+impl Drop for NoticeHold<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get().saturating_sub(1));
+    }
 }
 
 impl SessionState {
@@ -260,7 +272,21 @@ impl SessionState {
             frames: RefCell::new(Vec::new()),
             system_user: None,
             in_use: RefCell::new(Vec::new()),
+            notice_hold: Cell::new(0),
         }
+    }
+
+    /// Send a notice to the client now, when the running statement's notices stream
+    /// (`exec::streaming_notices`; PostgreSQL sends each one at once); false: collect it.
+    pub fn stream_notice(&self, e: &crate::error::Error) -> bool {
+        self.notice_hold.get() == 0 && crate::exec::send_notice_now(e)
+    }
+
+    /// Collect the notices raised until the guard goes, instead of sending them: for code
+    /// that counts, moves or drops what a step raised.
+    pub fn hold_notices(&self) -> NoticeHold<'_> {
+        self.notice_hold.set(self.notice_hold.get() + 1);
+        NoticeHold(&self.notice_hold)
     }
 
     /// Inside a security-restricted operation.
@@ -322,6 +348,7 @@ impl SessionState {
         *self.copy_progress.borrow_mut() = None;
         self.in_vacuum.set(false);
         self.on_commit_truncating.set(false);
+        self.notice_hold.set(0);
     }
 
     /// What `clear_running` clears that isn't at rest (outside any statement). For tests.
@@ -335,6 +362,7 @@ impl SessionState {
             ("copy_progress", self.copy_progress.borrow().is_some()),
             ("in_vacuum", self.in_vacuum.get()),
             ("on_commit_truncating", self.on_commit_truncating.get()),
+            ("notice_hold", self.notice_hold.get() != 0),
         ] {
             if set {
                 out.push(name);

@@ -33,7 +33,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub use copy::{CopyIn, CopyOut};
+pub use copy::{CopyIn, CopyInParsed, CopyOut};
 
 /// Transaction status as ReadyForQuery reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,6 +178,9 @@ pub struct Portal {
     pending: Option<VecDeque<Row>>,
     tag_verb: String,
     pub cols: Option<Vec<OutCol>>,
+    /// A SELECT suspended after an Execute's row count: its executor, which the next
+    /// Execute runs on (PORTAL_ONE_SELECT runs as its rows are asked for).
+    lazy: Option<cursor::Lazy>,
 }
 
 pub struct Session {
@@ -221,6 +224,10 @@ pub struct Session {
     pgss_workers: i64,
     /// A COPY FROM STDIN waiting for its data, to be counted when it ends.
     pgss_copy: Option<pgss::Tracked>,
+    /// An Execute's row count for the portal's SELECT `run_query` runs next (0: all of it).
+    fetch_limit: usize,
+    /// The executor of the SELECT `run_query` stopped after `fetch_limit` rows.
+    suspended: Option<cursor::Lazy>,
 }
 
 impl Session {
@@ -315,6 +322,31 @@ impl Session {
             pgss_tracked: None,
             pgss_workers: 0,
             pgss_copy: None,
+            fetch_limit: 0,
+            suspended: None,
+        }
+    }
+
+    /// A notice or warning the session itself raises: to the client now when it streams
+    /// them (after what was collected before), else collected; through client_min_messages.
+    pub(crate) fn raise_notice(&mut self, e: Error) {
+        if !settings::notice_wanted(&self.state.settings.borrow(), e.severity) {
+            return;
+        }
+        if self.state.notice_hold.get() == 0 && crate::exec::notices_stream() {
+            let queued = std::mem::take(&mut self.notices);
+            let mut it = queued.into_iter();
+            while let Some(q) = it.next() {
+                if !self.state.stream_notice(&q) {
+                    self.notices.push(q);
+                    self.notices.extend(it);
+                    self.notices.push(e);
+                    return;
+                }
+            }
+        }
+        if !self.state.stream_notice(&e) {
+            self.notices.push(e);
         }
     }
 
@@ -541,7 +573,9 @@ impl Session {
                 .push(crate::catalog::BOOTSTRAP_SUPERUSER_OID);
             let before = self.notices.len();
             self.state.on_commit_truncating.set(true);
+            let held = self.state.notice_hold.replace(self.state.notice_hold.get() + 1);
             let r = self.with_ctx(&[], |ctx| ddl::execute(ctx, &node, "").map(|_| ()));
+            self.state.notice_hold.set(held);
             self.state.on_commit_truncating.set(false);
             self.notices.truncate(before);
             self.state.definer.borrow_mut().pop();
@@ -1352,6 +1386,7 @@ impl Session {
 
     fn run_query(&mut self, p: &Prepared, stmt: &Node, params: &[Value]) -> Result<QueryResult> {
         self.ensure_txn();
+        let fetch = std::mem::take(&mut self.fetch_limit);
         let planning = std::time::Instant::now();
         let mut bq = self.planned(p, stmt, params)?.0;
         self.pgss_planned(planning.elapsed());
@@ -1371,6 +1406,7 @@ impl Session {
         // A SELECT's rows go out as they're made (PORTAL_ONE_SELECT); a data-modifying
         // query's when it has finished.
         let streams = !bq.plan.writes() && matches!(inner(stmt), Some(NodeEnum::SelectStmt(_)));
+        let mut suspended = None;
         let mut made = Vec::new();
         // ExecutorRun began (past ExecutorStart's permission checks): the RowDescription went
         // out, so an error from here on follows it.
@@ -1389,6 +1425,21 @@ impl Session {
                 let r = ctx.sess.framed(frame, |_| crate::exec::collect_into(&bq.plan, ctx, &mut made));
                 ctx.txn.borrow_mut().release_locks_since(mark);
                 r?;
+                return Ok((std::mem::take(&mut made), ctx.processed.get()));
+            }
+            // An Execute with a row count: as many rows, the executor kept for the next one.
+            if streams && fetch > 0 {
+                let mut lazy = crate::session::cursor::Lazy::new(
+                    ctx,
+                    bq.plan.clone(),
+                    std::rc::Rc::new(Vec::new()),
+                    None,
+                    ctx.child(&[]).keep(),
+                )
+                .with_params(params.to_vec());
+                if !lazy.next_rows(ctx, fetch, &mut made)? {
+                    suspended = Some(lazy);
+                }
                 return Ok((std::mem::take(&mut made), ctx.processed.get()));
             }
             if streams {
@@ -1411,6 +1462,7 @@ impl Session {
             self.pgss_workers += 1;
         }
         self.pgss_measure(true);
+        self.suspended = suspended;
         let tag = query_tag(&bq.plan, stmt, rows.len(), processed);
         let returns = !bq.cols.is_empty() || matches!(inner(stmt), Some(NodeEnum::SelectStmt(_)));
         Ok(QueryResult {
@@ -1546,17 +1598,7 @@ impl Session {
             }
             // exec_parse_message: a parameter the query never reads has no type.
             if stmt.node.is_some() {
-                // (pg_query's node walker skips some clauses: read the whole tree.)
-                let dump = format!("{stmt:?}");
-                let used: std::collections::HashSet<i32> = dump
-                    .split("ParamRef { number: ")
-                    .skip(1)
-                    .filter_map(|rest| {
-                        rest.split(|c: char| !c.is_ascii_digit())
-                            .next()
-                            .and_then(|n| n.parse().ok())
-                    })
-                    .collect();
+                let used = param_numbers(&stmt);
                 for i in 0..p.param_types.len() {
                     if !used.contains(&(i as i32 + 1)) && param_oids.get(i).is_none_or(|o| *o == 0)
                     {
@@ -1867,6 +1909,7 @@ impl Session {
                 pending: None,
                 tag_verb: String::new(),
                 cols,
+                lazy: None,
             },
         );
         Ok(())
@@ -1889,6 +1932,14 @@ impl Session {
             self.on_error();
             return Err(e);
         };
+        if let Some(lazy) = pt.lazy.take() {
+            let r = self.execute_suspended(&mut pt, lazy, max_rows);
+            self.portals.insert(portal.to_string(), pt);
+            if r.is_err() {
+                self.on_error();
+            }
+            return r;
+        }
         if let Some(mut rest) = pt.pending.take() {
             let n = if max_rows == 0 {
                 rest.len()
@@ -1910,7 +1961,14 @@ impl Session {
         }
         let stmt = pt.stmt.clone();
         let params = pt.params.clone();
+        // A SELECT runs only as far as the row count (PortalRunSelect); its executor waits
+        // in the portal for the next Execute.
+        if max_rows > 0 && matches!(stmt.stmt.as_ref().and_then(inner), Some(NodeEnum::SelectStmt(_))) {
+            self.fetch_limit = max_rows;
+        }
         let out = self.execute_with(&stmt, &params, max_rows);
+        self.fetch_limit = 0;
+        pt.lazy = self.suspended.take();
         let out = match out {
             Ok(o) => o,
             Err(e) => {
@@ -1997,6 +2055,40 @@ impl Session {
     /// Execute on a cursor DECLARE made (cursors are portals, in one namespace with the
     /// protocol's): the next `max_rows` rows (all for 0), tagged as its SELECT; suspended
     /// unless it ran out of rows.
+    /// Execute on a portal whose SELECT was suspended: its next `max_rows` rows (0: the rest).
+    fn execute_suspended(
+        &mut self,
+        pt: &mut Portal,
+        mut lazy: cursor::Lazy,
+        max_rows: usize,
+    ) -> Result<(Outcome, bool)> {
+        if self.status == TxnStatus::Failed {
+            return Err(Error::new(
+                code::IN_FAILED_SQL_TRANSACTION,
+                "current transaction is aborted, commands ignored until end of transaction block",
+            ));
+        }
+        let mut rows = Vec::new();
+        let r = self.with_ctx(&pt.params.clone(), |ctx| lazy.next_rows(ctx, max_rows, &mut rows));
+        let done = match r {
+            Ok(done) => done,
+            Err(e) => {
+                // (The rows made before the error went out before it.)
+                self.partial_rows = Some(QueryResult::rows(pt.cols.clone().unwrap_or_default(), rows, ""));
+                return Err(e);
+            }
+        };
+        if done {
+            // (Run to its end, it stays there: Execute again returns no rows.)
+            pt.pending = Some(VecDeque::new());
+        } else {
+            pt.lazy = Some(lazy);
+        }
+        let more = max_rows > 0 && rows.len() == max_rows;
+        let tag = format!("SELECT {}", rows.len());
+        Ok((Outcome::Done(QueryResult { cols: pt.cols.clone(), rows, tag }), more))
+    }
+
     fn execute_cursor_portal(&mut self, name: &str, max_rows: usize) -> Result<(Outcome, bool)> {
         if self.status == TxnStatus::Failed {
             return Err(Error::new(
@@ -2067,7 +2159,7 @@ impl Session {
                     "BEGIN"
                 };
                 if self.status != TxnStatus::Idle {
-                    self.notices.push(warning(
+                    self.raise_notice(warning(
                         code::ACTIVE_SQL_TRANSACTION,
                         "there is already a transaction in progress",
                     ));
@@ -2094,7 +2186,7 @@ impl Session {
                 let failed = self.status == TxnStatus::Failed;
                 // (An implicit transaction, of a multi-statement query too, isn't one.)
                 if self.status == TxnStatus::Idle {
-                    self.notices.push(warning(
+                    self.raise_notice(warning(
                         code::NO_ACTIVE_SQL_TRANSACTION,
                         "there is no transaction in progress",
                     ));
@@ -2111,7 +2203,7 @@ impl Session {
                     return self.chain(false);
                 }
                 if self.status == TxnStatus::Idle {
-                    self.notices.push(warning(
+                    self.raise_notice(warning(
                         code::NO_ACTIVE_SQL_TRANSACTION,
                         "there is no transaction in progress",
                     ));
@@ -2258,7 +2350,7 @@ impl Session {
     /// SET CONSTRAINTS { ALL | name, ... } { DEFERRED | IMMEDIATE }.
     fn set_constraints(&mut self, s: &pb::ConstraintsSetStmt) -> Result<QueryResult> {
         if self.status == TxnStatus::Idle {
-            self.notices.push(warning(
+            self.raise_notice(warning(
                 code::NO_ACTIVE_SQL_TRANSACTION,
                 "SET CONSTRAINTS can only be used in transaction blocks",
             ));
@@ -2473,7 +2565,7 @@ impl Session {
                     }
                 }
                 if !cluster.drop_database(&d.dbname, d.missing_ok, force, &self.state.database)? {
-                    self.notices.push(notice(format!(
+                    self.raise_notice(notice(format!(
                         "database \"{}\" does not exist, skipping",
                         d.dbname
                     )));
@@ -2760,15 +2852,24 @@ fn query_tag(plan: &Plan, stmt: &Node, nrows: usize, processed: u64) -> String {
 
 /// Highest `$n` in a statement.
 fn max_param(n: &Node) -> usize {
-    let mut max = 0;
-    if let Some(ne) = n.node.as_ref() {
-        for (node, _, _, _) in ne.nodes() {
-            if let pg_query::NodeRef::ParamRef(p) = node {
-                max = max.max(p.number.max(0) as usize);
-            }
-        }
+    param_numbers(n).into_iter().max().unwrap_or(0).max(0) as usize
+}
+
+/// The `$n` a statement reads. (pg_query's node walker skips some clauses, an INSERT's
+/// VALUES lists among them: the whole tree is read.)
+fn param_numbers(n: &Node) -> std::collections::HashSet<i32> {
+    if n.node.is_none() {
+        return Default::default();
     }
-    max
+    let dump = format!("{n:?}");
+    dump.split("ParamRef { number: ")
+        .skip(1)
+        .filter_map(|rest| {
+            rest.split(|c: char| !c.is_ascii_digit())
+                .next()
+                .and_then(|n| n.parse().ok())
+        })
+        .collect()
 }
 
 /// About how many range table entries the planned statement has (relations, functions and

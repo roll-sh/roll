@@ -659,15 +659,17 @@ pub fn numeric_digits(int: &BigInt, scale: u32) -> (Vec<i16>, i16) {
         x /= &base;
     }
     groups.reverse();
-    let frac_groups = ((scale + pad) / 4) as i16;
-    let weight = groups.len() as i16 - frac_groups - 1;
+    // (In i64: the largest numerics have more groups than an i16 counts, 131072 digits
+    // before the point and 16383 after.)
+    let frac_groups = ((scale + pad) / 4) as i64;
+    let weight = groups.len() as i64 - frac_groups - 1;
     // Strip trailing zero groups.
     while groups.last() == Some(&0) {
         groups.pop();
     }
     // Strip leading zero groups (adjusting weight).
     let lead = groups.iter().take_while(|g| **g == 0).count();
-    (groups[lead..].to_vec(), weight - lead as i16)
+    (groups[lead..].to_vec(), (weight - lead as i64) as i16)
 }
 
 fn decode_numeric(mut b: &[u8]) -> Result<Numeric> {

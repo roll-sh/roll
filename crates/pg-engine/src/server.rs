@@ -225,10 +225,11 @@ impl Conn {
     }
 
     /// Run `f` (a statement) with what's buffered so far parked where a notice sent while
-    /// it waits goes out after it (`UNFLUSHED`); what's left of it comes back to the buffer.
+    /// it runs goes out after it (`UNFLUSHED`); what's left of it comes back to the buffer.
+    /// Meanwhile each notice goes out as it is raised (`exec::streaming_notices`).
     fn unflushed<T>(&mut self, f: impl FnOnce() -> T) -> T {
         UNFLUSHED.with(|u| *u.borrow_mut() = std::mem::take(&mut self.out));
-        let r = f();
+        let r = crate::exec::streaming_notices(f);
         let mut parked = UNFLUSHED.with(|u| std::mem::take(&mut *u.borrow_mut()));
         parked.extend_from_slice(&self.out);
         self.out = parked;
@@ -1271,6 +1272,9 @@ fn simple_batch(
 ) -> std::io::Result<()> {
     for (i, p) in stmts.iter().enumerate() {
         s.partial_rows = None;
+        // (What came before, the scanner's warnings say, goes before what the statement
+        // raises as it runs.)
+        send_notices(c, s);
         let mut out = c.unflushed(|| s.execute(p));
         // Like Postgres, an implicit transaction commits before the last command tag goes out,
         // so deferred constraint failures replace it.
@@ -1372,10 +1376,20 @@ fn outcome(c: &mut Conn, s: &mut Session, o: Outcome, formats: &[i16]) -> Result
                 }
             });
             c.flush()?;
+            // The data is read as it comes (CopyFrom reads lines as the client sends them):
+            // a bad line fails the COPY while the client is still sending. (Read whenever
+            // the client has nothing more queued, or enough has piled up.)
+            let mut st = crate::session::CopyInParsed::default();
             let mut data = Vec::new();
             loop {
                 match c.read_message()? {
-                    Some((b'd', body)) => data.extend_from_slice(&body),
+                    Some((b'd', body)) => {
+                        data.extend_from_slice(&body);
+                        if c.rd.buffer().is_empty() || data.len() >= 64 << 10 {
+                            let took = s.copy_in_feed(&cin, &mut st, &data, false)?;
+                            data.drain(..took);
+                        }
+                    }
                     Some((b'c', _)) => break,
                     Some((b'f', body)) => {
                         let msg = Body::new(&body).cstr().unwrap_or("").to_string();
@@ -1401,7 +1415,10 @@ fn outcome(c: &mut Conn, s: &mut Session, o: Outcome, formats: &[i16]) -> Result
                     }
                 }
             }
-            let r = s.copy_in_finish(cin, &data);
+            let r = match s.copy_in_feed(&cin, &mut st, &data, true) {
+                Ok(_) => s.copy_in_end(cin, st),
+                Err(e) => Err(e),
+            };
             send_notices(c, s);
             command_complete(c, &r?.tag);
             Ok(())
@@ -1522,6 +1539,7 @@ fn execute_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
         return Ok(());
     }
     s.partial_rows = None;
+    send_notices(c, s);
     let r = c.unflushed(|| s.execute_portal(&portal, max_rows));
     if r.is_ok() {
         s.note_executed();

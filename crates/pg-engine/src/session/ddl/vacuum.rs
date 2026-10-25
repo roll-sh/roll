@@ -612,9 +612,11 @@ impl Ddl<'_, '_> {
     /// `measure_quiet`: what the modelling's evaluations of index expressions say isn't
     /// Postgres's (it doesn't compute them there).
     fn measure(&mut self, t: &Table, vacuum: bool) -> Result<f64> {
+        let hold = self.ctx.sess.hold_notices();
         let quiet = self.ctx.notices.borrow().len();
         let r = self.measure_quiet(t, vacuum);
         self.ctx.notices.borrow_mut().truncate(quiet);
+        drop(hold);
         r
     }
 
@@ -714,9 +716,11 @@ impl Ddl<'_, '_> {
     /// A rewritten table (VACUUM FULL, CLUSTER): heap and every index measured afresh,
     /// nothing all-visible yet.
     fn measure_rewritten(&mut self, t: &Table, order: Option<&[Vec<u8>]>) -> Result<f64> {
+        let hold = self.ctx.sess.hold_notices();
         let quiet = self.ctx.notices.borrow().len();
         let r = self.measure_rewritten_quiet(t, order);
         self.ctx.notices.borrow_mut().truncate(quiet);
+        drop(hold);
         r
     }
 
@@ -1022,9 +1026,11 @@ impl Ddl<'_, '_> {
     ) -> Result<()> {
         // (Modelling the index's pages evaluates its expressions again: what they say then
         // isn't Postgres's.)
+        let hold = self.ctx.sess.hold_notices();
         let quiet = self.ctx.notices.borrow().len();
         let r = self.index_built_measured(t, index, rows);
         self.ctx.notices.borrow_mut().truncate(quiet);
+        drop(hold);
         r
     }
 

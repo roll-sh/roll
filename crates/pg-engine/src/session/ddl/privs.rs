@@ -3549,7 +3549,9 @@ impl Ddl<'_, '_> {
                 if let Some(n) = st.stmt.as_deref().and_then(|n| n.node.as_ref()) {
                     self.reload_catalog();
                     let before = self.ctx.notices.borrow().len();
+                    let hold = self.ctx.sess.hold_notices();
                     self.run(n)?;
+                    drop(hold);
                     let notices: Vec<_> = self.ctx.notices.borrow_mut().drain(before..).collect();
                     for nt in notices {
                         if !nt.message.starts_with("drop cascades to ") {

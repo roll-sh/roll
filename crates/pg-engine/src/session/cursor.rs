@@ -171,6 +171,22 @@ impl Lazy {
         self
     }
 
+    /// The query's next rows, at most `n` (0: the rest), appended to `out` as they are made
+    /// (what a protocol portal's Execute returns: PortalRunSelect); true once it has none
+    /// left.
+    pub fn next_rows(&mut self, ctx: &ExecCtx, n: usize, out: &mut Vec<Row>) -> Result<bool> {
+        let start = out.len();
+        self.within(ctx, |ex, ctx| {
+            while n == 0 || out.len() - start < n {
+                match ex.pull(ctx)? {
+                    Some(r) => out.push(ex.coerce(r, ctx)?),
+                    None => break,
+                }
+            }
+            Ok(*ex.done)
+        })
+    }
+
     /// Run `f` in the query's context: its snapshot, parameters, variables and caches.
     fn within<T>(
         &mut self,

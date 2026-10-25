@@ -119,7 +119,7 @@ impl Binder<'_, '_> {
         if s.with_clause.is_some() {
             self.count_cte_refs(NodeEnum::SelectStmt(Box::new(s.clone())));
         }
-        match &s.with_clause {
+        let r = match &s.with_clause {
             Some(w) => self.with_ctes(w, |b| {
                 b.keep_unknown = keep;
                 b.bind_select_body(s)
@@ -128,7 +128,15 @@ impl Binder<'_, '_> {
                 self.keep_unknown = keep;
                 self.bind_select_body(s)
             }
+        }?;
+        // free_parsestate: MaxTupleAttributeNumber, once the level is analyzed.
+        if r.1.len() > 1664 {
+            return Err(Error::new(
+                code::TOO_MANY_COLUMNS,
+                "target lists can have at most 1664 entries",
+            ));
         }
+        Ok(r)
     }
 
     fn bind_select_body(&mut self, s: &pb::SelectStmt) -> Result<(Plan, Vec<OutCol>)> {

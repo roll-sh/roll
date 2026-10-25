@@ -2287,3 +2287,110 @@ fn rechecks_after_concurrent_updates() {
     });
     s.engine.shutdown();
 }
+
+/// What PostgreSQL sends as it happens rather than at a statement's end: a notice as it is
+/// raised (send_message_to_frontend flushes it), a COPY FROM STDIN's bad line while the
+/// client is still sending (CopyFrom reads lines as they come), and a portal's rows up to
+/// each Execute's count, the query running no further (PortalRunSelect).
+#[test]
+fn notices_copy_lines_and_portal_rows_as_they_come() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    let wait = Duration::from_millis(1500);
+    // The first notice arrives while the DO block still sleeps.
+    let start = Instant::now();
+    c.send(b'Q', b"DO $$BEGIN RAISE NOTICE 'one'; PERFORM pg_sleep(3); END$$\0");
+    let (t, b) = c.next_within(wait).expect("the notice, before the statement ends");
+    assert_eq!(t, b'N');
+    assert!(String::from_utf8_lossy(&b).contains("one"));
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert_eq!(c.read(), ["C DO"]);
+
+    // A bad first line fails the COPY before CopyDone.
+    c.query("CREATE TABLE cl (a int)");
+    c.send(b'Q', b"COPY cl FROM STDIN\0");
+    assert_eq!(c.next_within(wait).map(|m| m.0), Some(b'G'));
+    c.send(b'd', b"1\nx\n");
+    let (t, b) = c.next_within(wait).expect("the error, before CopyDone");
+    assert_eq!(t, b'E');
+    assert!(String::from_utf8_lossy(&b).contains("22P02"));
+    assert_eq!(c.read(), Vec::<String>::new());
+    // (The rest of the client's copy data is ignored.)
+    c.send(b'd', b"2\n");
+    c.send(b'c', b"");
+    assert_eq!(c.query("SELECT count(*) FROM cl"), ["T count:20/-1", "D 0", "C SELECT 1"]);
+    // Binary: a field that fails as soon as it is there.
+    c.send(b'Q', b"COPY cl FROM STDIN (FORMAT binary)\0");
+    assert_eq!(c.next_within(wait).map(|m| m.0), Some(b'G'));
+    let mut d = b"PGCOPY\n\xff\r\n\0\0\0\0\0\0\0\0\0".to_vec();
+    d.extend_from_slice(&[0, 1, 0, 0, 0, 2, 0, 1]);
+    c.send(b'd', &d);
+    let (t, b) = c.next_within(wait).expect("the error, before CopyDone");
+    assert_eq!(t, b'E');
+    assert!(String::from_utf8_lossy(&b).contains("08P01"));
+    c.read();
+    c.send(b'c', b"");
+
+    // Rows past an Execute's count aren't made yet: the third row's error comes at the
+    // third Execute, after two suspended portals' rows.
+    c.parse("", "SELECT 10 / (3 - g) FROM generate_series(1, 5) g");
+    c.bind("", "");
+    c.execute("", 1);
+    c.execute("", 1);
+    c.execute("", 1);
+    assert_eq!(c.sync(), ["D 5", "s", "D 10", "s", "E 22012"]);
+    // Exactly the count: suspended, then complete with none.
+    c.parse("", "SELECT g FROM generate_series(1, 2) g");
+    c.bind("", "");
+    c.execute("", 2);
+    c.execute("", 2);
+    c.execute("", 2);
+    assert_eq!(c.sync(), ["D 1", "D 2", "s", "C SELECT 0", "C SELECT 0"]);
+
+    // The largest numeric in binary: 36864 base-10000 digits, weight 32767 (pgx's
+    // longestNumeric), sent and read back.
+    c.parse("", "SELECT ('1' || repeat('0', 131070) || '.' || repeat('0', 16382) || '1')::numeric");
+    c.send(b'B', b"\0\0\0\0\0\0\0\x01\0\x01");
+    c.execute("", 0);
+    c.send(b'S', b"");
+    let mut bin = None;
+    // (Making and formatting it takes a debug build a while.)
+    let wait = Duration::from_secs(60);
+    while let Some((t, b)) = c.next_within(wait) {
+        match t {
+            b'D' => bin = Some(b[6..].to_vec()),
+            b'Z' => break,
+            _ => {}
+        }
+    }
+    let bin = bin.expect("the row");
+    assert_eq!(&bin[..4], &[0x90, 0x00, 0x7f, 0xff]);
+    let mut p = b"\0SELECT $1::numeric = ('1' || repeat('0', 131070) || '.' || repeat('0', 16382) || '1')::numeric\0".to_vec();
+    p.extend_from_slice(&1i16.to_be_bytes());
+    p.extend_from_slice(&1700u32.to_be_bytes());
+    c.send(b'P', &p);
+    let mut b = b"\0\0\0\x01\0\x01\0\x01".to_vec();
+    b.extend_from_slice(&(bin.len() as i32).to_be_bytes());
+    b.extend_from_slice(&bin);
+    b.extend_from_slice(b"\0\0");
+    c.send(b'B', &b);
+    c.execute("", 0);
+    assert_eq!(c.sync(), ["D t", "C SELECT 1"]);
+
+    // An INSERT ... VALUES ($1) a DO INSTEAD NOTHING rule drops still describes its
+    // parameter (lib/pq TestIssue186): the VALUES lists' $n count.
+    c.query("CREATE TABLE rn (f1 int); CREATE RULE rn_nothing AS ON INSERT TO rn DO INSTEAD NOTHING");
+    c.parse("", "INSERT INTO rn VALUES ($1)");
+    c.describe(b'S', "");
+    c.send(b'S', b"");
+    let mut desc = None;
+    while let Some((t, b)) = c.next_within(wait) {
+        match t {
+            b't' => desc = Some(b),
+            b'Z' => break,
+            _ => {}
+        }
+    }
+    assert_eq!(desc.as_deref(), Some(&[0, 1, 0, 0, 0, 23][..]));
+    s.engine.shutdown();
+}

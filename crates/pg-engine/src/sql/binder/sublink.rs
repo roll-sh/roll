@@ -527,6 +527,12 @@ fn sub_join(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
                     None => input,
                 })
             }
+            // A nested loop over a parameterized path (an index scan reading the outer
+            // row's values): the plain join it was planned from, its clauses back in its
+            // condition, as pull_up_sublinks sees the subquery before any planning.
+            Plan::Join { params, .. } if !params.is_empty() && let Some(j) = unparameterized(p) => {
+                go(&j, off, pull, out)
+            }
             // (A LATERAL join inside: its right side reads its own parameters, values of
             // its left side, and nothing of the outer query; it goes as it is.)
             Plan::Join {
@@ -612,6 +618,177 @@ fn sub_join(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
     let mut out = Vec::new();
     let rest = go(p, 0, true, &mut out)?;
     Some((out, rest))
+}
+
+/// A planned inner / left nested loop whose parameters feed a parameterized path of
+/// relation scans (and joins of them) on its inner side: the join as it was before
+/// planning, the inner scans' clauses reading the parameters (`Outer(1, k)`) moved back into
+/// the join's condition (over the join's row, each parameter its outer-side expression), the
+/// scans' paths to be chosen again. None for anything else (a LATERAL subquery's plan, a
+/// Memoize, a deeper parameterized join).
+fn unparameterized(p: &Plan) -> Option<Plan> {
+    let Plan::Join {
+        kind: kind @ (JoinKind::Inner | JoinKind::Left),
+        left,
+        right,
+        cond,
+        hash: None,
+        params,
+        nleft,
+        nright,
+        meta,
+    } = p
+    else {
+        return None;
+    };
+    let clean_param = |e: &Expr| {
+        let mut ok = true;
+        e.walk(&mut |x| ok &= !matches!(x, Expr::Outer(..) | Expr::Subquery(_)));
+        ok && e.columns().iter().all(|&c| c < *nleft)
+    };
+    if !params.iter().all(clean_param) {
+        return None;
+    }
+    // Over the join's row: the inner side's columns after the outer side's, each parameter
+    // its expression.
+    let lift = |e: &Expr, roff: usize| -> Option<Expr> {
+        e.clone()
+            .shift_cols((nleft + roff) as isize)
+            .transform(&mut |x| {
+                Ok(match x {
+                    Expr::Outer(1, k, _) if k < params.len() => params[k].clone(),
+                    x => x,
+                })
+            })
+            .ok()
+    };
+    // Whether a clause reads a parameter (None: something further out).
+    let reads_param = |e: &Expr| -> Option<bool> {
+        let (mut reads, mut ok) = (false, true);
+        e.walk(&mut |x| match x {
+            Expr::Outer(1, k, _) if *k < params.len() => reads = true,
+            Expr::Outer(..) => ok = false,
+            _ => {}
+        });
+        ok.then_some(reads)
+    };
+    let split = |e: &Expr, roff: usize, moved: &mut Vec<Expr>| -> Option<Option<Expr>> {
+        let mut parts = Vec::new();
+        conjuncts(e.clone(), &mut parts);
+        let mut local = Vec::new();
+        for q in parts {
+            if reads_param(&q)? {
+                if q.is_volatile() || has_sublink(&q) {
+                    return None;
+                }
+                moved.push(lift(&q, roff)?);
+            } else {
+                local.push(q);
+            }
+        }
+        Some(and_all(local))
+    };
+    type Split<'a> = &'a dyn Fn(&Expr, usize, &mut Vec<Expr>) -> Option<Option<Expr>>;
+    type Reads<'a> = &'a dyn Fn(&Expr) -> Option<bool>;
+    fn strip(p: &Plan, roff: usize, split: Split, reads_param: Reads, moved: &mut Vec<Expr>) -> Option<Plan> {
+        match p {
+            Plan::Scan(_) => {
+                let s = plain_scan(p).filter(|s| s.limit.is_none())?;
+                let n = moved.len();
+                let local = match &s.filter {
+                    Some(f) => split(f, roff, moved)?,
+                    None => None,
+                };
+                Some(if moved.len() > n {
+                    rhs_scan(s, local)
+                } else {
+                    p.clone()
+                })
+            }
+            Plan::Filter { input, pred } => {
+                let local = split(pred, roff, moved)?;
+                let input = strip(input, roff, split, reads_param, moved)?;
+                Some(match local {
+                    Some(pred) => Plan::Filter {
+                        input: Arc::new(input),
+                        pred,
+                    },
+                    None => input,
+                })
+            }
+            Plan::Join {
+                kind,
+                left,
+                right,
+                cond,
+                hash,
+                params,
+                nleft,
+                nright,
+                meta,
+            } if params.is_empty() => {
+                if hash
+                    .iter()
+                    .flat_map(|(l, r)| l.iter().chain(r))
+                    .any(|e| reads_param(e) != Some(false))
+                {
+                    return None;
+                }
+                let cond = match cond {
+                    Some(c) if *kind == JoinKind::Inner => split(c, roff, moved)?,
+                    Some(c) => (!reads_param(c)?).then(|| Some(c.clone()))?,
+                    None => None,
+                };
+                let l = strip(left, roff, split, reads_param, moved)?;
+                let r = strip(right, roff + nleft, split, reads_param, moved)?;
+                Some(Plan::Join {
+                    kind: *kind,
+                    left: Arc::new(l),
+                    right: Arc::new(r),
+                    cond,
+                    hash: hash.clone(),
+                    params: Vec::new(),
+                    nleft: *nleft,
+                    nright: *nright,
+                    meta: meta.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+    let mut moved = Vec::new();
+    let r = strip(right, 0, &split, &reads_param, &mut moved)?;
+    // (Every parameter was read by a clause moved: nothing left on the inner side reads one.)
+    fn reads_any(p: &Plan, reads_param: Reads) -> bool {
+        let mut exprs = Vec::new();
+        crate::sql::explain::node_exprs(p, &mut exprs);
+        exprs.iter().any(|e| reads_param(e) != Some(false))
+            || crate::sql::explain::plan_inputs(p).iter().any(|c| reads_any(c, reads_param))
+    }
+    if moved.is_empty() || reads_any(&r, &reads_param) {
+        return None;
+    }
+    let mut parts: Vec<Expr> = Vec::new();
+    if let Some(c) = cond {
+        conjuncts(c.clone(), &mut parts);
+    }
+    parts.extend(moved);
+    Some(Plan::Join {
+        kind: *kind,
+        left: left.clone(),
+        right: Arc::new(r),
+        cond: and_all(parts),
+        hash: None,
+        params: Vec::new(),
+        nleft: *nleft,
+        nright: *nright,
+        meta: Box::new(crate::sql::plan::JoinMeta {
+            method: None,
+            memoize: None,
+            indexed: false,
+            ..(**meta).clone()
+        }),
+    })
 }
 
 /// A LATERAL item's plan of plain relational nodes reading only its `n` parameters

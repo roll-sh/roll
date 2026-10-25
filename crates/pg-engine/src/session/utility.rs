@@ -37,7 +37,7 @@ impl Session {
         if s.is_local && !in_txn {
             // Outside any transaction block (an implicit one of several statements counts).
             if !self.multi_stmt && !self.pipelining {
-                self.notices.push(warning(
+                self.raise_notice(warning(
                     code::NO_ACTIVE_SQL_TRANSACTION,
                     "SET LOCAL can only be used in transaction blocks",
                 ));
@@ -58,7 +58,7 @@ impl Session {
                             .and_then(crate::sql::binder::ast::const_str)
                             .unwrap_or_default();
                         if self.status == TxnStatus::Idle && !self.implicit && !self.multi_stmt && !self.pipelining {
-                            self.notices.push(warning(
+                            self.raise_notice(warning(
                                 code::NO_ACTIVE_SQL_TRANSACTION,
                                 "SET TRANSACTION can only be used in transaction blocks",
                             ));
@@ -373,7 +373,7 @@ impl Session {
 
     fn set_transaction(&mut self, opts: &[pb::Node]) -> Result<()> {
         if self.status == TxnStatus::Idle && !self.implicit && !self.multi_stmt && !self.pipelining {
-            self.notices.push(warning(
+            self.raise_notice(warning(
                 code::NO_ACTIVE_SQL_TRANSACTION,
                 "SET TRANSACTION can only be used in transaction blocks",
             ));
@@ -1117,10 +1117,15 @@ impl Session {
         for sql in stmts {
             // (A view's drop may have taken a sequence along: no "skipping" notices.)
             let before = self.notices.len();
-            for p in self.parse(&sql)? {
-                self.execute(&p)?;
-            }
-            self.end_batch()?;
+            let held = self.state.notice_hold.replace(self.state.notice_hold.get() + 1);
+            let r = (|| {
+                for p in self.parse(&sql)? {
+                    self.execute(&p)?;
+                }
+                self.end_batch()
+            })();
+            self.state.notice_hold.set(held);
+            r?;
             self.notices.truncate(before);
         }
         Ok(())

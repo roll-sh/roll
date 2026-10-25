@@ -1,0 +1,160 @@
+> CREATE TYPE a51_x AS (a int)
+-- CREATE TYPE
+
+> CREATE TYPE "___a51_x" AS (a int)
+-- CREATE TYPE
+
+> CREATE TYPE "__a51_x" AS (a int)
+-- CREATE TYPE
+
+> SELECT typname, typelem::regtype FROM pg_type WHERE typname LIKE '%a51_x%' ORDER BY 1
+typname:name | typelem:regtype
+____a51_x | ___a51_x
+___a51_x | -
+___a51_x_1 | __a51_x
+__a51_x | -
+_a51_x | a51_x
+a51_x | -
+-- SELECT 6
+
+> CREATE TYPE a51_custom AS (i int)
+-- CREATE TYPE
+
+> CREATE TYPE _a51_custom AS (f float8)
+-- CREATE TYPE
+
+> SELECT t.typname, e.typname AS elem, a.typname AS arr FROM pg_type t
+>   LEFT JOIN pg_type e ON e.oid = t.typelem LEFT JOIN pg_type a ON a.oid = t.typarray
+>   WHERE t.typname LIKE '%a51_custom%' ORDER BY 1
+typname:name | elem:name | arr:name
+__a51_custom | a51_custom | NULL
+__a51_custom_1 | _a51_custom | NULL
+_a51_custom | NULL | __a51_custom_1
+a51_custom | NULL | __a51_custom
+-- SELECT 4
+
+> CREATE TABLE a51_shadow (c1 a51_custom, c2 _a51_custom, c3 a51_custom[], c4 _a51_custom[])
+-- CREATE TABLE
+
+> SELECT attname, format_type(atttypid, atttypmod), (SELECT typname FROM pg_type WHERE oid = atttypid)
+>   FROM pg_attribute WHERE attrelid = 'a51_shadow'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | format_type:text | typname:name
+c1 | a51_custom | a51_custom
+c2 | _a51_custom | _a51_custom
+c3 | a51_custom[] | __a51_custom
+c4 | _a51_custom[] | __a51_custom_1
+-- SELECT 4
+
+> DROP TABLE a51_shadow
+-- DROP TABLE
+
+> DROP TYPE a51_x, "___a51_x", "__a51_x", a51_custom, _a51_custom
+-- DROP TYPE
+
+> CREATE TABLE a51_testtable (id int PRIMARY KEY, data varchar(30))
+-- CREATE TABLE
+
+> CREATE VIEW a51_regview AS SELECT data FROM a51_testtable
+-- CREATE VIEW
+
+> CREATE MATERIALIZED VIEW a51_mview AS SELECT * FROM a51_testtable
+-- SELECT 0
+
+> SELECT c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+>   WHERE pg_table_is_visible(c.oid) AND n.nspname <> 'pg_catalog' AND c.relkind IN ('v', 'm')
+>   ORDER BY 1
+relname:name | relkind:char
+a51_mview | m
+a51_regview | v
+-- SELECT 2
+
+> SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+>   WHERE n.nspname = 'information_schema' AND pg_table_is_visible(c.oid)
+count:int8
+0
+-- SELECT 1
+
+> SET search_path = public, information_schema
+-- SET
+
+> SELECT pg_table_is_visible('information_schema.tables'::regclass), pg_table_is_visible('pg_class'::regclass)
+pg_table_is_visible:bool | pg_table_is_visible:bool
+t | t
+-- SELECT 1
+
+> RESET search_path
+-- RESET
+
+> SELECT pg_table_is_visible('information_schema.tables'::regclass), pg_table_is_visible('pg_class'::regclass)
+pg_table_is_visible:bool | pg_table_is_visible:bool
+f | t
+-- SELECT 1
+
+> SELECT t.typname, pg_type_is_visible(t.oid), t.typtype FROM pg_type t
+>   WHERE t.typname IN ('a51_testtable', 'a51_regview', 'a51_mview', '_a51_mview', '_a51_testtable')
+>   ORDER BY 1
+typname:name | pg_type_is_visible:bool | typtype:char
+_a51_mview | t | b
+_a51_testtable | t | b
+a51_mview | t | c
+a51_regview | t | c
+a51_testtable | t | c
+-- SELECT 5
+
+> CREATE SCHEMA a51_s
+-- CREATE SCHEMA
+
+> CREATE TABLE a51_s.a51_testtable (x int)
+-- CREATE TABLE
+
+> SET search_path = a51_s, public
+-- SET
+
+> SELECT t.typname, n.nspname, pg_type_is_visible(t.oid) FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+>   WHERE t.typname IN ('a51_testtable', '_a51_testtable') ORDER BY 1, 2
+typname:name | nspname:name | pg_type_is_visible:bool
+_a51_testtable | a51_s | t
+_a51_testtable | public | f
+a51_testtable | a51_s | t
+a51_testtable | public | f
+-- SELECT 4
+
+> RESET search_path
+-- RESET
+
+> DROP SCHEMA a51_s CASCADE
+NOTICE 00000: drop cascades to table a51_s.a51_testtable
+-- DROP SCHEMA
+
+> DROP MATERIALIZED VIEW a51_mview
+-- DROP MATERIALIZED VIEW
+
+> DROP VIEW a51_regview
+-- DROP VIEW
+
+> DROP TABLE a51_testtable
+-- DROP TABLE
+
+> DO $$BEGIN EXECUTE format('SELECT %s FROM pg_class LIMIT 1', (SELECT string_agg('relname', ',') FROM generate_series(1, 1665))); END$$
+ERROR 54011: target lists can have at most 1664 entries
+CONTEXT: SQL statement "SELECT relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname,relname FROM pg_class LIMIT 1"
+CONTEXT: PL/pgSQL function inline_code_block line 1 at EXECUTE
+
+> DO $$BEGIN EXECUTE format('SELECT * FROM (VALUES (%s)) v', (SELECT string_agg('1', ',') FROM generate_series(1, 1665))); END$$
+ERROR 54011: target lists can have at most 1664 entries
+CONTEXT: SQL statement "SELECT * FROM (VALUES (1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1)) v"
+CONTEXT: PL/pgSQL function inline_code_block line 1 at EXECUTE
+
+> DO $$BEGIN EXECUTE format('SELECT ROW(%s)', (SELECT string_agg('1', ',') FROM generate_series(1, 1665))); END$$
+ERROR 54011: ROW expressions can have at most 1664 entries
+QUERY: SELECT ROW(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1) (at 8)
+CONTEXT: PL/pgSQL function inline_code_block line 1 at EXECUTE
+
+> DO $$BEGIN EXECUTE format('SELECT %s', (SELECT string_agg('1', ',') FROM generate_series(1, 1664))); END$$
+-- DO
+
+> SELECT md5(x::text), scale(x) FROM (SELECT ('1' || repeat('0', 131070) || '.' || repeat('0', 16382) || '1')::numeric AS x) s
+md5:text | scale:int4
+93c4871697b4c753867d0fccf9f5c7b5 | 16383
+-- SELECT 1
+

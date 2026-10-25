@@ -129,6 +129,48 @@ pub fn set_notice_sink(sink: Option<Box<dyn FnMut(&[Error])>>) {
     NOTICE_SINK.with(|s| *s.borrow_mut() = sink);
 }
 
+thread_local! {
+    /// A statement is running whose notices go out as they are raised (`streaming_notices`).
+    static STREAMING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` (a server connection's statement) with each notice it raises sent to the client
+/// at once, through the notice sink, as Postgres sends and flushes every one
+/// (send_message_to_frontend). Outside it notices are collected and go out after the
+/// statement (an embedder's session, a protocol message that isn't a statement).
+pub fn streaming_notices<T>(f: impl FnOnce() -> T) -> T {
+    struct Back(bool);
+    impl Drop for Back {
+        fn drop(&mut self) {
+            STREAMING.with(|s| s.set(self.0));
+        }
+    }
+    let _back = Back(STREAMING.with(|s| s.replace(true)));
+    f()
+}
+
+/// Whether notices go to the client as they are raised now.
+pub fn notices_stream() -> bool {
+    STREAMING.with(|s| s.get()) && has_notice_sink()
+}
+
+/// Send a notice to the client now, when notices stream (false: collect it).
+pub fn send_notice_now(e: &Error) -> bool {
+    if !STREAMING.with(|s| s.get()) {
+        return false;
+    }
+    NOTICE_SINK.with(|s| match s.try_borrow_mut() {
+        Ok(mut s) => match s.as_mut() {
+            Some(f) => {
+                f(std::slice::from_ref(e));
+                true
+            }
+            None => false,
+        },
+        Err(_) => false,
+    })
+}
+
 /// Whether notices can go out early on this thread.
 pub fn has_notice_sink() -> bool {
     NOTICE_SINK.with(|s| s.try_borrow().is_ok_and(|s| s.is_some()))
@@ -746,7 +788,28 @@ impl<'a> ExecCtx<'a> {
             return;
         }
         let e = e.in_frames(&self.sess.frames.borrow());
-        self.notices.borrow_mut().push(e);
+        self.raise_notice(e);
+    }
+
+    /// A notice goes to the client as it is raised when the session streams them (after
+    /// what this context collected before, so they keep their order); else it is collected.
+    fn raise_notice(&self, e: Error) {
+        if !self.notices.borrow().is_empty() && self.sess.notice_hold.get() == 0 {
+            let queued = std::mem::take(&mut *self.notices.borrow_mut());
+            let mut it = queued.into_iter();
+            for q in it.by_ref() {
+                if !self.sess.stream_notice(&q) {
+                    let mut n = self.notices.borrow_mut();
+                    n.push(q);
+                    n.extend(it);
+                    n.push(e);
+                    return;
+                }
+            }
+        }
+        if !self.sess.stream_notice(&e) {
+            self.notices.borrow_mut().push(e);
+        }
     }
 
     /// Whether a message of this severity reaches the client (client_min_messages; INFO
@@ -782,7 +845,7 @@ impl<'a> ExecCtx<'a> {
         let lexed = lexed.into_iter().filter(|e| self.notice_wanted(e.severity));
         for e in crate::types::tsearch::take_notices().into_iter().chain(lexed) {
             let e = e.in_frames(&self.sess.frames.borrow());
-            self.notices.borrow_mut().push(e);
+            self.raise_notice(e);
         }
     }
 
