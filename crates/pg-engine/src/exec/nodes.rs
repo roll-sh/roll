@@ -2116,6 +2116,19 @@ impl SetOpNode {
                 rows.extend(collect(a, ctx, None)?);
             }
             (rows, Vec::new())
+        } else if matches!(self.kind, SetOpKind::Intersect | SetOpKind::Except) {
+            // nodeSetOp: the first input read (EXCEPT's left; INTERSECT's with fewer groups,
+            // generate_nonunion_paths) being empty, the other one is never read (nor what
+            // evaluating it would raise).
+            let swapped = self.kind == SetOpKind::Intersect
+                && crate::sql::explain::setop_shape(&self.left, &self.right, true, ctx).0;
+            let (first, second) = if swapped { (&self.right, &self.left) } else { (&self.left, &self.right) };
+            let a = collect(first, ctx, None)?;
+            if a.is_empty() {
+                return Ok(Vec::new());
+            }
+            let b = collect(second, ctx, None)?;
+            if swapped { (b, a) } else { (a, b) }
         } else {
             (collect(&self.left, ctx, None)?, collect(&self.right, ctx, None)?)
         };

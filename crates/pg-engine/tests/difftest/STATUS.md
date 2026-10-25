@@ -250,6 +250,11 @@ pass-through value in the items that contain it as written (`CASE WHEN a > 0 THE
 ELSE abs(9) END`: NULL in the empty set's row over no input), not only literal keys; one
 the binder folds away with its surroundings (`abs(9) + 1`) still isn't.
 
+Batch 6 (`a45_setop_empty_first`): INTERSECT / EXCEPT never read their second input when
+the first one (EXCEPT's left, INTERSECT's with fewer groups) is empty, as nodeSetOp, so an
+error evaluating it doesn't happen (`SELECT 1 FROM t WHERE false EXCEPT SELECT 2147483647 * a
+FROM t`) (`exec/nodes.rs` `SetOpNode`).
+
 ## Wider grammar (round 18)
 
 `generate.rs` `wide_expr` and the statement kinds after it, for seeds from `WIDE_SEEDS`

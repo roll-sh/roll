@@ -1,0 +1,50 @@
+> CREATE TABLE so (a int)
+-- CREATE TABLE
+
+> INSERT INTO so VALUES (7)
+-- INSERT 0 1
+
+> SELECT 1 FROM so WHERE a < 0 EXCEPT SELECT 2147483647 * a FROM so
+?column?:int4
+-- SELECT 0
+
+> SELECT 1 FROM so WHERE a < 0 INTERSECT SELECT 2147483647 * a FROM so
+?column?:int4
+-- SELECT 0
+
+> SELECT 1 FROM so WHERE a < 0 EXCEPT ALL SELECT 2147483647 * a FROM so
+?column?:int4
+-- SELECT 0
+
+> SELECT 1 FROM so WHERE a < 0 INTERSECT ALL SELECT 2147483647 * a FROM so
+?column?:int4
+-- SELECT 0
+
+> SELECT 1 FROM so WHERE a < 0 UNION SELECT 2147483647 * a FROM so
+ERROR 22003: integer out of range
+
+> SELECT a FROM so EXCEPT SELECT 2147483647 * a FROM so
+ERROR 22003: integer out of range
+
+> SELECT 1 FROM so WHERE a < 0 EXCEPT SELECT 2147483647 * a FROM so ORDER BY 1
+?column?:int4
+-- SELECT 0
+
+> SELECT 2147483647 * a FROM so WHERE a < 0 EXCEPT SELECT 2147483647 * a FROM so
+?column?:int4
+-- SELECT 0
+
+> SET enable_hashagg = off
+-- SET
+
+> SELECT 1 FROM so WHERE a < 0 EXCEPT SELECT 2147483647 * a FROM so
+?column?:int4
+-- SELECT 0
+
+> SELECT 1 FROM so WHERE a < 0 INTERSECT SELECT 2147483647 * a FROM so
+?column?:int4
+-- SELECT 0
+
+> RESET enable_hashagg
+-- RESET
+
