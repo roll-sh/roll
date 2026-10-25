@@ -47,7 +47,14 @@
 //!   (`host.docker.internal`): a container of the same image with `--network host`, `PGREGRESS_DIR`
 //!   mounted at the same path, e.g.
 //!   `docker run -d --name x --network host --user $(id -u):$(id -g) -v $D:$D --entrypoint sleep <image> infinity`.
-//! - `PGREGRESS_REPORT_DIR`: where `REPORT.md` and `hunks/` go (default `tests/regress`).
+//! - `PGREGRESS_REPORT_DIR`: where `REPORT.md`, `results.tsv` and `hunks/` go (default
+//!   `tests/regress` for a full run, `$PGREGRESS_DIR/report` for a subset).
+//! - A full run also regenerates STATUS.md's numbers (its `<!-- generated: ... -->` blocks:
+//!   summary, differing units, per-file table with ref=exp / eng=exp) and writes the report to
+//!   `tests/regress`: always when that is its report directory, and with
+//!   `PGREGRESS_UPDATE_STATUS=1` when it isn't (a private run, or `PGREGRESS_REPORT_ONLY=1` over a
+//!   full run's saved outputs). A subset never does. `PGREGRESS_COMMIT`: the commit the report
+//!   names (default the checkout's HEAD, `+dirty` with uncommitted changes).
 //! - `PGREGRESS_KEEP=1`: keep the reference's database, roles and tablespaces (and the engine's
 //!   data directory, `$PGREGRESS_DIR/enginedata`) at the end, e.g. to dump the regression
 //!   database as `tests/pg_dump.rs` does.
@@ -109,6 +116,18 @@ impl Config {
             std::env::var("PGREGRESS_DIR").unwrap_or_else(|_| "/tmp/pgregress".into()),
         );
         let src = root.join("src-repo/src/test/regress");
+        let only: Option<BTreeSet<String>> = std::env::var("PGREGRESS_ONLY").ok().map(|s| {
+            s.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect()
+        });
+        // Only a full run's report belongs in `tests/regress` (STATUS.md's numbers are
+        // regenerated from it); a subset's goes next to its outputs.
+        let report_dir = std::env::var("PGREGRESS_REPORT_DIR").map_or_else(
+            |_| if only.is_some() { root.join("report") } else { committed_report_dir() },
+            PathBuf::from,
+        );
         Config {
             out: root.join("out"),
             cwd: root.join("build"),
@@ -124,17 +143,9 @@ impl Config {
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(300),
-            only: std::env::var("PGREGRESS_ONLY").ok().map(|s| {
-                s.split(',')
-                    .map(|t| t.trim().to_string())
-                    .filter(|t| !t.is_empty())
-                    .collect()
-            }),
+            only,
             report_only: std::env::var("PGREGRESS_REPORT_ONLY").is_ok_and(|v| v == "1"),
-            report_dir: std::env::var("PGREGRESS_REPORT_DIR").map_or_else(
-                |_| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/regress"),
-                PathBuf::from,
-            ),
+            report_dir,
         }
     }
 
@@ -169,6 +180,41 @@ pub fn pg_regress() {
         pct(matched, units),
         cfg.report_dir.join("REPORT.md").display()
     );
+    // A full run's numbers go into the committed report and STATUS.md's generated blocks:
+    // always when its report is `tests/regress`'s, and with `PGREGRESS_UPDATE_STATUS=1` when it
+    // went elsewhere (a private run's `PGREGRESS_REPORT_DIR`, or `PGREGRESS_REPORT_ONLY=1` over
+    // its saved outputs). A subset never touches them.
+    let committed = committed_report_dir();
+    let to_committed = cfg.report_dir == committed;
+    let forced = std::env::var("PGREGRESS_UPDATE_STATUS").is_ok_and(|v| v == "1");
+    if to_committed || forced {
+        // (Files `run_test` can't read run nothing: collate.windows.win1252.sql isn't UTF-8.)
+        let full: Vec<String> = read_schedule(&cfg.src.join("parallel_schedule"))
+            .into_iter()
+            .filter(|t| std::fs::read_to_string(cfg.src.join("sql").join(format!("{t}.sql"))).is_ok())
+            .collect();
+        if cfg.only.is_some() || results.len() != full.len() {
+            assert!(
+                !forced,
+                "PGREGRESS_UPDATE_STATUS needs a full run's outputs ({} of {} files here)",
+                results.len(),
+                full.len()
+            );
+            return;
+        }
+        if !to_committed {
+            let mut c = cfg.clone();
+            c.report_dir = committed.clone();
+            write_report(&c, &results);
+        }
+        update_status(&cfg, &committed.join("STATUS.md"), &results);
+        eprintln!("pg_regress: full run; {} regenerated", committed.join("STATUS.md").display());
+    }
+}
+
+/// `tests/regress`: the committed report and STATUS.md.
+fn committed_report_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/regress")
 }
 
 /// The contrib modules whose own regression tests `pg_contrib` runs by default.
@@ -1589,6 +1635,7 @@ fn run_all(cfg: &Config, schedule: &[String]) {
     let setup = setup_db_sql();
     eprintln!("{}", psql_cmd(cfg, &Target::Reference, "postgres", &setup));
     eprintln!("{}", psql_cmd(cfg, &eng, "postgres", &setup));
+    write_run_info(cfg, &src, &before);
 
     for test in schedule {
         run_test(cfg, &mut engine, &log, test, &before);
@@ -1599,6 +1646,55 @@ fn run_all(cfg: &Config, schedule: &[String]) {
     } else {
         cleanup_reference(cfg, &before);
     }
+}
+
+/// What a run measured, for the report: `$PGREGRESS_DIR/out/run.txt` (kept with the outputs, so
+/// `PGREGRESS_REPORT_ONLY=1` reports the run that made them). `commit` is the checkout's HEAD
+/// (`+dirty` with uncommitted changes to tracked files), or `PGREGRESS_COMMIT` when set (say,
+/// for a `PGREGRESS_ENGINE_BIN` built from another tree).
+fn write_run_info(cfg: &Config, engine_bin: &str, before: &BTreeSet<String>) {
+    let git = |args: &[&str]| -> Option<String> {
+        let o = Command::new("git").current_dir(env!("CARGO_MANIFEST_DIR")).args(args).output().ok()?;
+        o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    let commit = std::env::var("PGREGRESS_COMMIT").ok().or_else(|| {
+        let head = git(&["rev-parse", "--short=7", "HEAD"])?;
+        let dirty = git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
+        Some(if dirty { format!("{head}+dirty") } else { head })
+    });
+    let date = Command::new("date")
+        .args(["-u", "+%Y-%m-%d %H:%M UTC"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    // Leftovers of other runs (or killed ones) that the reference already had: cluster-global
+    // objects the suite makes, and other runs' databases.
+    let preexisting: Vec<&str> = before
+        .iter()
+        .map(String::as_str)
+        .filter(|g| {
+            g.strip_prefix("role:").is_some_and(|r| r.starts_with("regress"))
+                || g.strip_prefix("ts:").is_some_and(|t| t.starts_with("regress"))
+                || g.strip_prefix("db:").is_some_and(|d| d.starts_with("regress") && d != db_name())
+        })
+        .collect();
+    let s = format!(
+        "commit={}\ndate={date}\nreference={}\nengine_bin={engine_bin}\nschedule={}\ntimeout={}\nreference_preexisting={}\n",
+        commit.unwrap_or_else(|| "?".into()),
+        cfg.container,
+        if cfg.only.is_some() { "subset" } else { "full" },
+        cfg.timeout,
+        preexisting.join(" "),
+    );
+    std::fs::write(cfg.out.join("run.txt"), s).unwrap();
+}
+
+fn read_run_info(cfg: &Config) -> BTreeMap<String, String> {
+    std::fs::read_to_string(cfg.out.join("run.txt"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+        .collect()
 }
 
 /// Runs one file of the suite on both sides and saves the outputs under `cfg.out`.
@@ -1622,7 +1718,9 @@ fn run_test(cfg: &Config, engine: &mut EngineProc, log: &Path, test: &str, befor
         let t0 = Instant::now();
         let (ref_out, ref_st) = psql(cfg, &Target::Reference, db_name(), &app, p.text.as_bytes(), cfg.timeout);
         let ref_secs = t0.elapsed().as_secs_f64();
+        let raw_len = ref_out.len();
         let ref_out = shared_tablespace(test, before, ref_out);
+        let ref_edited = ref_out.len() != raw_len;
         std::fs::write(cfg.out.join("ref").join(format!("{test}.out")), &ref_out).unwrap();
 
         let log_start = std::fs::metadata(log).map(|m| m.len()).unwrap_or(0);
@@ -1640,6 +1738,9 @@ fn run_test(cfg: &Config, engine: &mut EngineProc, log: &Path, test: &str, befor
         let mut meta = format!(
             "ref_status={ref_st}\nengine_status={eng_st}\nref_secs={ref_secs:.1}\nengine_secs={eng_secs:.1}\nrestarted={restarted}\nresumes={resumes}\n"
         );
+        if ref_edited {
+            meta.push_str("ref_edited=dropped the reference's \"tablespace regress_tblspace already exists\" error\n");
+        }
         // The panic message is on the line after "panicked at".
         let lines: Vec<&str> = new_log.lines().collect();
         for (i, l) in lines.iter().enumerate() {
@@ -2148,11 +2249,31 @@ fn write_report(cfg: &Config, results: &[FileResult]) {
     let _ = writeln!(s, "# PostgreSQL regression suite: engine parity report\n");
     let _ = writeln!(
         s,
-        "Re-run (about an hour; needs the `roll-engine-ref` container):\n\n```sh\nCARGO_BUILD_JOBS=2 cargo test -p pg-engine --test pg_regress -- --ignored --nocapture\n```\n\nRebuild only this report from the saved outputs in `/tmp/pgregress/out`: add `PGREGRESS_REPORT_ONLY=1`. Run a subset (after `test_setup`): `PGREGRESS_ONLY=int4,join`. The harness is `crates/pg-engine/tests/harness/regress.rs`; its header documents the method.\n"
+        "Re-run (about an hour; needs the `roll-engine-ref` container, or a private reference: HANDOFF.md):\n\n```sh\nCARGO_BUILD_JOBS=2 cargo test -p pg-engine --test pg_regress -- --ignored --nocapture\n```\n\nRebuild only this report from the saved outputs in `$PGREGRESS_DIR/out`: add `PGREGRESS_REPORT_ONLY=1`. Run a subset (after `test_setup`): `PGREGRESS_ONLY=int4,join` (its report goes to `$PGREGRESS_DIR/report`). A full run writes this report, `results.tsv` and STATUS.md's generated blocks (`PGREGRESS_UPDATE_STATUS=1` when its report went elsewhere). The harness is `crates/pg-engine/tests/harness/regress.rs`; its header documents the method.\n"
     );
+    let run = read_run_info(cfg);
+    let info = |k: &str| run.get(k).map(String::as_str).filter(|v| !v.is_empty()).unwrap_or("?");
+    if !run.is_empty() {
+        let _ = writeln!(
+            s,
+            "Run: {} schedule, commit `{}`, {}, reference container `{}`, `PGREGRESS_TIMEOUT={}`; cluster-global objects the reference had before the run: {}.\n",
+            info("schedule"),
+            info("commit"),
+            info("date"),
+            info("reference"),
+            info("timeout"),
+            run.get("reference_preexisting").filter(|v| !v.is_empty()).map_or("none".into(), |v| format!("`{v}`")),
+        );
+    }
+    for r in results {
+        if let Some(e) = r.meta.get("ref_edited") {
+            let _ = writeln!(s, "Reference output edited: {}: {e} (another run's tablespace).\n", r.name);
+        }
+    }
     let _ = writeln!(
         s,
-        "Suite: `src/test/regress` at `{GIT_TAG}`, `parallel_schedule` run serially in one database. Reference: PostgreSQL 18.6 (`roll-engine-ref`). Both outputs come from the same `psql -X -a -q` with pg_regress's environment. A *unit* is one psql execution unit: a statement (or several on one line), a meta-command, or a COPY with its data. A unit matches when its whole psql output (rows, tags, notices, errors) is byte-identical to the reference's.\n"
+        "Suite: `src/test/regress` at `{GIT_TAG}`, `parallel_schedule` run serially in one database. Reference: PostgreSQL 18.6 (`{}`). Both outputs come from the same `psql -X -a -q` with pg_regress's environment. A *unit* is one psql execution unit: a statement (or several on one line), a meta-command, or a COPY with its data. A unit matches when its whole psql output (rows, tags, notices, errors) is byte-identical to the reference's.\n",
+        run.get("reference").map_or(cfg.container.as_str(), String::as_str)
     );
     let _ = writeln!(s, "## Summary\n");
     let _ = writeln!(s, "| | |\n|---|---|");
@@ -2317,23 +2438,6 @@ fn write_report(cfg: &Config, results: &[FileResult]) {
         "| file | units | match | rate | engine run | secs (ref/engine) | ref=exp | eng=exp | top gap |\n|---|---:|---:|---:|---|---|---|---|---|"
     );
     for r in results {
-        let mut top: HashMap<(Class, &str), usize> = HashMap::new();
-        for g in &r.gaps {
-            *top.entry((g.class, &g.key)).or_default() += 1;
-        }
-        let top = top
-            .into_iter()
-            .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
-            .map(|((c, k), n)| {
-                let k: String = k.chars().take(70).collect();
-                format!("{} `{}` ({n})", short_class(c), md_escape(&k))
-            })
-            .unwrap_or_default();
-        let yn = |b: Option<bool>| match b {
-            Some(true) => "yes",
-            Some(false) => "no",
-            None => "-",
-        };
         let mut status = r
             .meta
             .get("engine_status")
@@ -2352,11 +2456,16 @@ fn write_report(cfg: &Config, results: &[FileResult]) {
             status,
             r.meta.get("ref_secs").map(String::as_str).unwrap_or("?"),
             r.meta.get("engine_secs").map(String::as_str).unwrap_or("?"),
-            yn(r.ref_expected),
-            yn(r.engine_expected),
-            top
+            yes_no(r.ref_expected),
+            yes_no(r.engine_expected),
+            top_gap(r)
         );
     }
+    s.push('\n');
+
+    // Every differing unit (the per-file unit counter of `hunks/`, STATUS.md's unit numbers).
+    let _ = writeln!(s, "## Differing units\n");
+    s.push_str(&differing_units_table(results));
     s.push('\n');
 
     // Panics.
@@ -2383,6 +2492,7 @@ fn write_report(cfg: &Config, results: &[FileResult]) {
 - Units after a `\\quit` that the reference reached but the engine did not count as *not reached*; units neither side reached are not counted.\n"
     );
     std::fs::write(cfg.report_dir.join("REPORT.md"), s).unwrap();
+    std::fs::write(cfg.report_dir.join("results.tsv"), results_tsv(cfg, results)).unwrap();
 
     // Hunks (PGREGRESS_HUNKS: how many differing units per file, default 12).
     let hunks = std::env::var("PGREGRESS_HUNKS")
@@ -2420,6 +2530,200 @@ fn write_report(cfg: &Config, results: &[FileResult]) {
         }
         std::fs::write(hunks_dir.join(format!("{}.diff", r.name)), h).unwrap();
     }
+}
+
+/// A file's most frequent gap category, `class `key` (n)`.
+fn top_gap(r: &FileResult) -> String {
+    let mut top: HashMap<(Class, &str), usize> = HashMap::new();
+    for g in &r.gaps {
+        *top.entry((g.class, &g.key)).or_default() += 1;
+    }
+    top.into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+        .map(|((c, k), n)| {
+            let k: String = k.chars().take(70).collect();
+            format!("{} `{}` ({n})", short_class(c), md_escape(&k))
+        })
+        .unwrap_or_default()
+}
+
+fn yes_no(b: Option<bool>) -> &'static str {
+    match b {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "-",
+    }
+}
+
+/// Every differing unit by file, grouped by the harness's class.
+fn differing_units_table(results: &[FileResult]) -> String {
+    let mut s = String::from("| file | differing | units (harness class) |\n|---|---:|---|\n");
+    let mut any = false;
+    for r in results.iter().filter(|r| !r.gaps.is_empty()) {
+        any = true;
+        let mut by: BTreeMap<Class, Vec<usize>> = BTreeMap::new();
+        for g in &r.gaps {
+            by.entry(g.class).or_default().push(g.unit);
+        }
+        let parts: Vec<String> = by
+            .iter()
+            .map(|(c, u)| {
+                let u: Vec<String> = u.iter().map(usize::to_string).collect();
+                format!("{} ({})", u.join(", "), short_class(*c))
+            })
+            .collect();
+        let _ = writeln!(s, "| {} | {} | {} |", r.name, r.gaps.len(), parts.join("; "));
+    }
+    if !any {
+        s.push_str("| (none) | 0 | |\n");
+    }
+    s
+}
+
+/// `results.tsv`: the per-file numbers of the run, for scripts (STATUS.md's blocks are made from
+/// the same numbers).
+fn results_tsv(cfg: &Config, results: &[FileResult]) -> String {
+    let run = read_run_info(cfg);
+    let units: usize = results.iter().map(|r| r.units).sum();
+    let matched: usize = results.iter().map(|r| r.matched).sum();
+    let mut s = String::new();
+    for k in ["schedule", "commit", "date", "reference", "timeout", "reference_preexisting"] {
+        let _ = writeln!(s, "# {k}={}", run.get(k).map(String::as_str).unwrap_or(""));
+    }
+    let _ = writeln!(
+        s,
+        "# files={} units={units} matched={matched} differing={} files_matching={} ref_expected={} engine_expected={}",
+        results.len(),
+        units - matched,
+        results.iter().filter(|r| r.units == r.matched).count(),
+        results.iter().filter(|r| r.ref_expected == Some(true)).count(),
+        results.iter().filter(|r| r.engine_expected == Some(true)).count(),
+    );
+    s.push_str("file\tunits\tmatch\tref_exp\teng_exp\tengine_status\tpanics\tdiffering\n");
+    for r in results {
+        let diff: Vec<String> = r.gaps.iter().map(|g| format!("{}:{}", g.unit, short_class(g.class))).collect();
+        let _ = writeln!(
+            s,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            r.name,
+            r.units,
+            r.matched,
+            yes_no(r.ref_expected),
+            yes_no(r.engine_expected),
+            r.meta.get("engine_status").map(String::as_str).unwrap_or("?"),
+            r.panics.len(),
+            diff.join(",")
+        );
+    }
+    s
+}
+
+/// STATUS.md's generated blocks, from a full run: the summary table, the differing units by
+/// file, and the per-file table. Each sits between `<!-- generated: <name> -->` and
+/// `<!-- end generated: <name> -->`; everything else in the file is prose, edited by hand.
+fn status_blocks(cfg: &Config, results: &[FileResult]) -> Vec<(&'static str, String)> {
+    let run = read_run_info(cfg);
+    let info = |k: &str| run.get(k).map(String::as_str).filter(|v| !v.is_empty()).unwrap_or("?");
+    let units: usize = results.iter().map(|r| r.units).sum();
+    let matched: usize = results.iter().map(|r| r.matched).sum();
+    let with_units = results.iter().filter(|r| r.units > 0).count();
+    let empty: Vec<&str> = results.iter().filter(|r| r.units == 0).map(|r| r.name.as_str()).collect();
+    let restarted: Vec<&str> = results
+        .iter()
+        .filter(|r| r.meta.get("restarted").is_some_and(|v| v == "true"))
+        .map(|r| r.name.as_str())
+        .collect();
+    let panics: usize = results.iter().map(|r| r.panics.len()).sum();
+
+    let mut sum = String::new();
+    let _ = writeln!(
+        sum,
+        "From the full run of commit `{}` ({}, reference `{}`; cluster-global objects it had before: {}), written by the harness (HANDOFF.md, \"Regression suite\"); don't edit these numbers by hand.\n",
+        info("commit"),
+        info("date"),
+        info("reference"),
+        run.get("reference_preexisting").filter(|v| !v.is_empty()).map_or("none".into(), |v| format!("`{v}`")),
+    );
+    let _ = writeln!(sum, "| | |\n|---|---|");
+    let _ = writeln!(
+        sum,
+        "| files | {with_units}{} |",
+        if empty.is_empty() {
+            String::new()
+        } else {
+            format!(" ({} in the schedule; no units: {})", results.len(), empty.join(", "))
+        }
+    );
+    let _ = writeln!(sum, "| units compared | {units} |");
+    let _ = writeln!(sum, "| units matching | {matched} (**{:.2}%**) |", pct(matched, units));
+    let _ = writeln!(sum, "| units differing | {} |", units - matched);
+    let _ = writeln!(
+        sum,
+        "| files fully matching | {} of {with_units} |",
+        results.iter().filter(|r| r.units > 0 && r.units == r.matched).count()
+    );
+    let _ = writeln!(
+        sum,
+        "| reference output == expected/*.out | {} of {} files |",
+        results.iter().filter(|r| r.ref_expected == Some(true)).count(),
+        results.iter().filter(|r| r.ref_expected.is_some()).count()
+    );
+    let _ = writeln!(
+        sum,
+        "| engine output == expected/*.out (pg_regress \"ok\") | {} files |",
+        results.iter().filter(|r| r.engine_expected == Some(true)).count()
+    );
+    let _ = writeln!(
+        sum,
+        "| engine restarted (crash / timeout) | {} |",
+        if restarted.is_empty() { "none".to_string() } else { restarted.join(", ") }
+    );
+    let _ = writeln!(sum, "| engine panics logged | {} |", if panics == 0 { "none".to_string() } else { panics.to_string() });
+
+    let mut diff = differing_units_table(results);
+    let mut classes: BTreeMap<Class, usize> = BTreeMap::new();
+    for g in results.iter().flat_map(|r| &r.gaps) {
+        *classes.entry(g.class).or_default() += 1;
+    }
+    if !classes.is_empty() {
+        diff.push_str("\n| harness class | units |\n|---|---:|\n");
+        for (c, n) in &classes {
+            let _ = writeln!(diff, "| {} | {n} |", short_class(*c));
+        }
+    }
+
+    let mut per = String::from(
+        "| file | units | match | rate | ref=exp | eng=exp | top gap (harness class) |\n|---|---:|---:|---:|---|---|---|\n",
+    );
+    for r in results {
+        let rate = if r.units == 0 { "-".to_string() } else { format!("{:.0}%", pct(r.matched, r.units).floor()) };
+        let _ = writeln!(
+            per,
+            "| {} | {} | {} | {rate} | {} | {} | {} |",
+            r.name,
+            r.units,
+            r.matched,
+            yes_no(r.ref_expected),
+            yes_no(r.engine_expected),
+            top_gap(r)
+        );
+    }
+    vec![("summary", sum), ("differing units", diff), ("per file", per)]
+}
+
+/// Replaces STATUS.md's generated blocks with a full run's numbers.
+fn update_status(cfg: &Config, path: &Path, results: &[FileResult]) {
+    let mut text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    for (name, body) in status_blocks(cfg, results) {
+        let begin = format!("<!-- generated: {name} -->\n");
+        let end = format!("<!-- end generated: {name} -->");
+        let (Some(b), Some(e)) = (text.find(&begin), text.find(&end)) else {
+            panic!("{}: no `{begin}` ... `{end}` block to regenerate", path.display());
+        };
+        assert!(b < e, "{}: block `{name}` ends before it starts", path.display());
+        text.replace_range(b + begin.len()..e, &body);
+    }
+    std::fs::write(path, text).unwrap();
 }
 
 fn short_class(c: Class) -> &'static str {

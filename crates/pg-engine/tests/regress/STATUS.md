@@ -1,25 +1,29 @@
 # PostgreSQL regression suite: status after the sweep
 
 All 230 files of `src/test/regress/parallel_schedule` (REL_18_6) compared with PostgreSQL 18.6,
-unit by unit, with the harness in `crates/pg-engine/tests/pg_regress.rs` (see `REPORT.md` for the
-method). The numbers below come from one run of the whole schedule in one database, in schedule
-order (`PGREGRESS_TIMEOUT=400`), so every file sees the catalogs the files before it left, as
-`pg_regress` gives them (round 12's engine; that run measured 50700 matching units). Nine units of
-collate.icu.utf8 (370–394, 606, 609: a `GROUP BY x COLLATE c` key shown as `(x)`) were fixed after
-it and re-checked in a subset run of that file; they are counted as matching below. So are the
-28 units of misc_functions, largeobject and copy that server-side files fixed (see "Server-side
-files" below), re-checked in subset runs, and the units round 13 fixed (see the two "Fixed in
-round 13" sections), re-checked in subset runs.
+unit by unit, with the harness in `crates/pg-engine/tests/harness/regress.rs` (see `REPORT.md` for
+the method). The numbers in the generated blocks below (summary, differing units, per-file table)
+come from the latest full run of the whole schedule in one database, in schedule order, so every
+file sees the catalogs the files before it left, as `pg_regress` gives them. The harness writes
+them (HANDOFF.md, "Regression suite"): edit only the prose by hand. `REPORT.md` and
+`results.tsv` next to this file are that run's report.
 
-A full run of commit 286306f (2026-10-22, the whole schedule in one database,
-`PGREGRESS_TIMEOUT=600`) measured 50792. It confirms every file's count below except three:
-join 836 (its row-order unit 433 matches in that run), test_setup 78 (the shared reference
-cluster already had `regress_tblspace` from a concurrent run, so the reference errored) and
-alter_table 1745 (`ALTER TABLE tt7 DROP q` "stalled" past the 600 s psql timeout in that run and
-the 4 units after it differ). Explained and fixed in round 15 (agent 9, below): no statement
-hung; every ALTER TABLE copied the whole catalog once per table, so over the catalog a full run
-builds up each took seconds, and alter_table as a whole ran past the per-file timeout, which
-happened to fall on that statement.
+Round 18, agent 50 (measurement): full runs of `242734d` against a private reference
+(`a50-ref1`, the pinned image initialised as roll-engine-ref is) and against the shared
+`roll-engine-ref` (which had another run's `regress_tblspace` and two other runs' databases at the
+time) both measured 51142, with byte-identical reference output (but for the run directory's
+path) and identical engine output and hunks. The units and matches of every file were the
+table's; the eng=exp column was stale for 10 files (aggregates, create_table, generated_virtual,
+incremental_sort, insert_conflict, rangefuncs, rowsecurity, rowtypes, stats_ext, tuplesort:
+all `yes` now), so pg_regress "ok" is 200 files (the summary said 188, the table 190). Agent
+44's 51138 (BENCH.md, round 18) didn't reproduce: a full run of its base `44adff0` on the
+private reference measured 51142 too, every output byte-identical to `242734d`'s (that run's
+outputs are gone, so which 4 units it lost can't be told; reports now name the commit and the
+reference they measured).
+
+History: a full run of round 12's engine measured 50700, of 286306f (2026-10-22) 50792; round 15
+(agent 9, below) explains that run's alter_table "stall" (every ALTER TABLE copied the whole
+catalog once per table).
 
 Re-run one subset (example):
 
@@ -31,15 +35,36 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 
 ## Summary
 
+<!-- generated: summary -->
+From the full run of commit `242734d` (2026-10-25 02:05 UTC, reference `a50-ref1`; cluster-global objects it had before: none), written by the harness (HANDOFF.md, "Regression suite"); don't edit these numbers by hand.
+
 | | |
 |---|---|
 | files | 230 |
 | units compared | 51150 |
 | units matching | 51142 (**99.98%**) |
 | units differing | 8 |
-| files fully matching | 227 |
-| engine output == expected/*.out (pg_regress "ok") | 188 files |
-| engine crashes / panics | none |
+| files fully matching | 227 of 230 |
+| reference output == expected/*.out | 203 of 230 files |
+| engine output == expected/*.out (pg_regress "ok") | 200 files |
+| engine restarted (crash / timeout) | none |
+| engine panics logged | none |
+<!-- end generated: summary -->
+
+### Differing units by file
+
+<!-- generated: differing units -->
+| file | differing | units (harness class) |
+|---|---:|---|
+| join | 6 | 360, 362, 363, 368, 783, 808 (wrong EXPLAIN) |
+| partition_join | 1 | 204 (wrong EXPLAIN) |
+| partition_prune | 1 | 410 (wrong result) |
+
+| harness class | units |
+|---|---:|
+| wrong result | 1 |
+| wrong EXPLAIN | 7 |
+<!-- end generated: differing units -->
 
 ## Remaining differences, classified
 
@@ -4450,8 +4475,10 @@ Goldens added: `tests/sql/gsw_minmax_order.sql`, `gsw_sweep_query.sql`, `gsw_swe
 ## Per file
 
 `ref=exp` / `eng=exp`: output identical to `expected/<name>[_N].out`. `collate.windows.win1252`
-produces no units on Linux (skipped by the file itself).
+isn't in the table: its sql file is WIN1252-encoded, which the harness doesn't read (on Linux the
+file skips itself, `\quit`, so it has no units either way).
 
+<!-- generated: per file -->
 | file | units | match | rate | ref=exp | eng=exp | top gap (harness class) |
 |---|---:|---:|---:|---|---|---|
 | test_setup | 79 | 79 | 100% | no | no |  |
@@ -4516,12 +4543,12 @@ produces no units on Linux (skipped by the file itself).
 | copydml | 62 | 62 | 100% | yes | yes |  |
 | copyencoding | 22 | 22 | 100% | yes | yes |  |
 | insert | 399 | 399 | 100% | no | no |  |
-| insert_conflict | 261 | 261 | 100% | yes | no |  |
+| insert_conflict | 261 | 261 | 100% | yes | yes |  |
 | create_function_c | 10 | 10 | 100% | no | no |  |
 | create_misc | 88 | 88 | 100% | yes | yes |  |
 | create_operator | 90 | 90 | 100% | yes | yes |  |
 | create_procedure | 115 | 115 | 100% | yes | yes |  |
-| create_table | 348 | 348 | 100% | yes | no |  |
+| create_table | 348 | 348 | 100% | yes | yes |  |
 | create_type | 88 | 88 | 100% | no | no |  |
 | create_schema | 30 | 30 | 100% | yes | yes |  |
 | create_index | 708 | 708 | 100% | yes | yes |  |
@@ -4555,7 +4582,7 @@ produces no units on Linux (skipped by the file itself).
 | union | 198 | 198 | 100% | yes | yes |  |
 | case | 64 | 64 | 100% | yes | yes |  |
 | join | 925 | 919 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (6) |
-| aggregates | 556 | 556 | 100% | yes | no |  |
+| aggregates | 556 | 556 | 100% | yes | yes |  |
 | transactions | 433 | 433 | 100% | yes | yes |  |
 | random | 48 | 48 | 100% | yes | yes |  |
 | portals | 354 | 354 | 100% | yes | yes |  |
@@ -4577,7 +4604,7 @@ produces no units on Linux (skipped by the file itself).
 | matview | 189 | 189 | 100% | yes | yes |  |
 | lock | 134 | 134 | 100% | no | no |  |
 | replica_identity | 75 | 75 | 100% | yes | yes |  |
-| rowsecurity | 1226 | 1226 | 100% | yes | no |  |
+| rowsecurity | 1226 | 1226 | 100% | yes | yes |  |
 | object_address | 85 | 85 | 100% | yes | yes |  |
 | tablesample | 58 | 58 | 100% | yes | yes |  |
 | groupingsets | 217 | 217 | 100% | yes | yes |  |
@@ -4603,16 +4630,16 @@ produces no units on Linux (skipped by the file itself).
 | tidrangescan | 45 | 45 | 100% | yes | yes |  |
 | collate.utf8 | 61 | 61 | 100% | yes | yes |  |
 | collate.icu.utf8 | 681 | 681 | 100% | yes | yes |  |
-| incremental_sort | 120 | 120 | 100% | yes | no |  |
+| incremental_sort | 120 | 120 | 100% | yes | yes |  |
 | create_role | 144 | 144 | 100% | yes | yes |  |
 | without_overlaps | 674 | 674 | 100% | yes | yes |  |
-| generated_virtual | 489 | 489 | 100% | yes | no |  |
+| generated_virtual | 489 | 489 | 100% | yes | yes |  |
 | rules | 632 | 632 | 100% | yes | yes |  |
 | psql | 1264 | 1264 | 100% | no | no |  |
 | psql_crosstab | 32 | 32 | 100% | yes | yes |  |
 | psql_pipeline | 362 | 362 | 100% | yes | yes |  |
 | amutils | 10 | 10 | 100% | yes | yes |  |
-| stats_ext | 878 | 878 | 100% | yes | no |  |
+| stats_ext | 878 | 878 | 100% | yes | yes |  |
 | collate.linux.utf8 | 2 | 2 | 100% | yes | yes |  |
 | select_parallel | 250 | 250 | 100% | yes | yes |  |
 | write_parallel | 22 | 22 | 100% | yes | yes |  |
@@ -4652,26 +4679,26 @@ produces no units on Linux (skipped by the file itself).
 | copy2 | 290 | 290 | 100% | no | no |  |
 | temp | 211 | 211 | 100% | yes | yes |  |
 | domain | 486 | 486 | 100% | no | no |  |
-| rangefuncs | 428 | 428 | 100% | yes | no |  |
+| rangefuncs | 428 | 428 | 100% | yes | yes |  |
 | prepare | 33 | 33 | 100% | yes | yes |  |
 | conversion | 68 | 68 | 100% | no | no |  |
 | truncate | 193 | 193 | 100% | yes | yes |  |
 | alter_table | 1749 | 1749 | 100% | yes | yes |  |
 | sequence | 265 | 265 | 100% | no | no |  |
 | polymorphism | 426 | 426 | 100% | yes | yes |  |
-| rowtypes | 237 | 237 | 100% | yes | no |  |
+| rowtypes | 237 | 237 | 100% | yes | yes |  |
 | returning | 145 | 145 | 100% | yes | yes |  |
 | largeobject | 151 | 151 | 100% | yes | yes |  |
 | with | 307 | 307 | 100% | yes | yes |  |
 | xml | 281 | 281 | 100% | yes | yes |  |
-| partition_join | 614 | 613 | 100% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
-| partition_prune | 771 | 770 | 100% | yes | no | wrong result `SELECT: row count differs` (1) |
+| partition_join | 614 | 613 | 99% | yes | no | wrong EXPLAIN `EXPLAIN plan text differs` (1) |
+| partition_prune | 771 | 770 | 99% | yes | no | wrong result `SELECT: row count differs` (1) |
 | reloptions | 66 | 66 | 100% | yes | yes |  |
 | hash_part | 29 | 29 | 100% | yes | yes |  |
 | indexing | 645 | 645 | 100% | yes | yes |  |
 | partition_aggregate | 137 | 137 | 100% | yes | yes |  |
 | partition_info | 73 | 73 | 100% | yes | yes |  |
-| tuplesort | 108 | 108 | 100% | yes | no |  |
+| tuplesort | 108 | 108 | 100% | yes | yes |  |
 | explain | 60 | 60 | 100% | yes | yes |  |
 | memoize | 73 | 73 | 100% | yes | yes |  |
 | stats | 482 | 482 | 100% | yes | yes |  |
@@ -4684,3 +4711,4 @@ produces no units on Linux (skipped by the file itself).
 | event_trigger_login | 14 | 14 | 100% | yes | yes |  |
 | fast_default | 275 | 275 | 100% | yes | yes |  |
 | tablespace | 261 | 261 | 100% | yes | yes |  |
+<!-- end generated: per file -->

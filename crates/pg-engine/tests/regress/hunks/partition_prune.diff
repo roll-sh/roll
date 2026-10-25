@@ -1,0 +1,56 @@
+# partition_prune: 770/771 units match; first 1 differing units (- reference, + engine)
+
+@@ unit 410 (sql line 737) [wrong result] SELECT: row count differs
+  select explain_analyze('
+  update ab_a1 set b = 3 from ab where ab.a = 1 and ab.a = ab_a1.a;');
+                                         explain_analyze                                        
+  ----------------------------------------------------------------------------------------------
+   Update on ab_a1 (actual rows=0.00 loops=1)
+     Update on ab_a1_b1 ab_a1_1
+     Update on ab_a1_b2 ab_a1_2
+     Update on ab_a1_b3 ab_a1_3
+     ->  Nested Loop (actual rows=1.00 loops=1)
+           ->  Append (actual rows=1.00 loops=1)
+                 ->  Bitmap Heap Scan on ab_a1_b1 ab_a1_1 (actual rows=0.00 loops=1)
+                       Recheck Cond: (a = 1)
+                       ->  Bitmap Index Scan on ab_a1_b1_a_idx (actual rows=0.00 loops=1)
+                             Index Cond: (a = 1)
+                             Index Searches: 1
+                 ->  Bitmap Heap Scan on ab_a1_b2 ab_a1_2 (actual rows=1.00 loops=1)
+                       Recheck Cond: (a = 1)
+                       Heap Blocks: exact=1
+                       ->  Bitmap Index Scan on ab_a1_b2_a_idx (actual rows=1.00 loops=1)
+                             Index Cond: (a = 1)
+                             Index Searches: 1
+                 ->  Bitmap Heap Scan on ab_a1_b3 ab_a1_3 (actual rows=0.00 loops=1)
+                       Recheck Cond: (a = 1)
++                      ->  Bitmap Index Scan on ab_a1_b3_a_idx (actual rows=0.00 loops=1)
+-                      Heap Blocks: exact=1
+-                      ->  Bitmap Index Scan on ab_a1_b3_a_idx (actual rows=1.00 loops=1)
+                             Index Cond: (a = 1)
+                             Index Searches: 1
+           ->  Materialize (actual rows=1.00 loops=1)
+                 Storage: Memory  Maximum Storage: NkB
+                 ->  Append (actual rows=1.00 loops=1)
+                       ->  Bitmap Heap Scan on ab_a1_b1 ab_1 (actual rows=0.00 loops=1)
+                             Recheck Cond: (a = 1)
+                             ->  Bitmap Index Scan on ab_a1_b1_a_idx (actual rows=0.00 loops=1)
+                                   Index Cond: (a = 1)
+                                   Index Searches: 1
+                       ->  Bitmap Heap Scan on ab_a1_b2 ab_2 (actual rows=1.00 loops=1)
+                             Recheck Cond: (a = 1)
+                             Heap Blocks: exact=1
+                             ->  Bitmap Index Scan on ab_a1_b2_a_idx (actual rows=1.00 loops=1)
+                                   Index Cond: (a = 1)
+                                   Index Searches: 1
+                       ->  Bitmap Heap Scan on ab_a1_b3 ab_3 (actual rows=0.00 loops=1)
+                             Recheck Cond: (a = 1)
++                            ->  Bitmap Index Scan on ab_a1_b3_a_idx (actual rows=0.00 loops=1)
+-                            Heap Blocks: exact=1
+-                            ->  Bitmap Index Scan on ab_a1_b3_a_idx (actual rows=1.00 loops=1)
+                                   Index Cond: (a = 1)
+                                   Index Searches: 1
++ (41 rows)
+- (43 rows)
+  
+
