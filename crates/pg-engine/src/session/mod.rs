@@ -581,6 +581,11 @@ impl Session {
         let keep = self.state.commit_on_error.replace(false);
         if self.status == TxnStatus::InBlock || self.status == TxnStatus::Failed {
             self.status = TxnStatus::Failed;
+            if let Some(t) = &self.txn
+                && let Ok(mut t) = t.try_borrow_mut()
+            {
+                t.release_aborted_locks();
+            }
         } else {
             let _ = self.finish_txn(keep);
         }
@@ -634,7 +639,13 @@ impl Session {
         crate::scoped::reset_statement_scratch();
         let txn = self.txn.as_ref().unwrap();
         crate::sql::binder::note_catalog(&txn.borrow().catalog());
-        txn.borrow_mut().begin_statement();
+        {
+            let mut t = txn.borrow_mut();
+            if t.isolation == crate::txn::Isolation::Serializable && t.read_only {
+                t.deferrable = self.state.settings.borrow().bool("transaction_deferrable");
+            }
+            t.begin_statement(!self.state.no_snapshot.get())?;
+        }
         let search_path = search_path.unwrap_or_else(|| self.state.search_path());
         let ctx = ExecCtx::with_search_path(
             txn,
@@ -900,6 +911,7 @@ impl Session {
         self.state.db.touch();
         self.sync_lists();
         let r = self.dispatch(&p, stmt, node, params);
+        self.state.no_snapshot.set(false);
         if r.is_err() {
             self.on_error();
         }
@@ -917,6 +929,19 @@ impl Session {
             return Ok(Outcome::Done(QueryResult::command("")));
         };
         let done = |r: QueryResult| Ok(Outcome::Done(r));
+        self.state.no_snapshot.set(matches!(
+            node,
+            NodeEnum::TransactionStmt(_)
+                | NodeEnum::LockStmt(_)
+                | NodeEnum::VariableSetStmt(_)
+                | NodeEnum::VariableShowStmt(_)
+                | NodeEnum::ConstraintsSetStmt(_)
+                | NodeEnum::FetchStmt(_)
+                | NodeEnum::ListenStmt(_)
+                | NodeEnum::NotifyStmt(_)
+                | NodeEnum::UnlistenStmt(_)
+                | NodeEnum::CheckPointStmt(_)
+        ));
         // DETACH PARTITION CONCURRENTLY commits on its own.
         if let NodeEnum::AlterTableStmt(a) = node
             && a.cmds.iter().any(|c| matches!(inner(c), Some(NodeEnum::AlterTableCmd(c)) if matches!(c.def.as_deref().and_then(inner), Some(NodeEnum::PartitionCmd(pc)) if pc.concurrent)))
@@ -1069,7 +1094,12 @@ impl Session {
                         "VACUUM cannot run inside a transaction block",
                     ));
                 }
-                let tag = self.with_ctx(params, |ctx| ddl::execute(ctx, node, &p.placed_sql()))?;
+                // (Top level: VACUUM and ANALYZE outside a block take a transaction per
+                // relation, their locks with it.)
+                let in_block = self.in_block();
+                let tag = ddl::run_top_level(in_block, || {
+                    self.with_ctx(params, |ctx| ddl::execute(ctx, node, &p.placed_sql()))
+                })?;
                 done(QueryResult::command(tag))
             }
             NodeEnum::CreatedbStmt(_) | NodeEnum::DropdbStmt(_) => {
@@ -1322,8 +1352,20 @@ impl Session {
     fn run_query(&mut self, p: &Prepared, stmt: &Node, params: &[Value]) -> Result<QueryResult> {
         self.ensure_txn();
         let planning = std::time::Instant::now();
-        let bq = self.planned(p, stmt, params)?.0;
+        let mut bq = self.planned(p, stmt, params)?.0;
         self.pgss_planned(planning.elapsed());
+        // Its relations are locked before it runs; a wait for a lock may end with another
+        // transaction's DDL committed, which the statement then sees (Postgres analyzes it
+        // only once it holds them): it is bound again over the catalog it finds.
+        let version = |s: &Self| s.txn.as_ref().map_or(0, |t| t.borrow().catalog().version);
+        for _ in 0..8 {
+            let before = version(self);
+            self.with_ctx(params, |ctx| crate::sql::binder::perms::lock_named_relations(&bq.perms, ctx))?;
+            if version(self) == before {
+                break;
+            }
+            bq = self.planned(p, stmt, params)?.0;
+        }
         self.pgss_measure(false);
         // A SELECT's rows go out as they're made (PORTAL_ONE_SELECT); a data-modifying
         // query's when it has finished.
@@ -1340,7 +1382,12 @@ impl Session {
                 crate::exec::pgstat::count_parallel_workers(ctx, 1, 1);
                 parallel = true;
                 let frame = crate::error::Frame::Text("parallel worker".into());
-                ctx.sess.framed(frame, |_| crate::exec::collect_into(&bq.plan, ctx, &mut made))?;
+                // The worker's own locks (an advisory lock its functions take) go when it
+                // ends: its transaction is its own.
+                let mark = ctx.txn.borrow().lock_mark();
+                let r = ctx.sess.framed(frame, |_| crate::exec::collect_into(&bq.plan, ctx, &mut made));
+                ctx.txn.borrow_mut().release_locks_since(mark);
+                r?;
                 return Ok((std::mem::take(&mut made), ctx.processed.get()));
             }
             if streams {
@@ -2643,7 +2690,7 @@ pub(crate) fn end_txn_in_routine(ctx: &ExecCtx, commit: bool, chain: bool) -> Re
         .retain(|_, c| c.pinned || (c.hold && (commit || c.lazy.is_none())));
     ctx.sess.db.touch();
     ctx.set_txn_time(Session::now());
-    ctx.txn.borrow_mut().begin_statement();
+    ctx.txn.borrow_mut().begin_statement(true)?;
     r
 }
 

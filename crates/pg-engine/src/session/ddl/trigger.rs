@@ -77,7 +77,7 @@ impl Ddl<'_, '_> {
         };
         self.require_rel_priv(t.oid, crate::catalog::acl::TRIGGER, false)?;
         // CreateTrigger locks the table SHARE ROW EXCLUSIVE.
-        self.note_lock(t.oid, super::table::lockmode::SHARE_ROW_EXCLUSIVE);
+        self.note_lock(t.oid, super::table::lockmode::SHARE_ROW_EXCLUSIVE)?;
         if s.row && events & tt::TRUNCATE != 0 {
             return Err(Error::new(
                 code::FEATURE_NOT_SUPPORTED,

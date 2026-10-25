@@ -1854,3 +1854,106 @@ fn composite_domain_fields_in_binary() {
     assert_eq!(c.sync(), ["D y", "C SELECT 1"]);
     s.engine.shutdown();
 }
+
+/// Postgres's heavyweight lock conflicts between sessions: LOCK TABLE modes, a session's
+/// waiting reported by pg_isolation_test_session_is_blocked / pg_blocking_pids, statements
+/// taking their relations' locks (an ALTER TABLE waits for a reader's transaction), and a
+/// two-session deadlock failing one of them with Postgres's DETAIL.
+#[test]
+fn heavyweight_locks_and_deadlocks() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        let c = s.connect("postgres").await;
+        a.batch_execute("CREATE TABLE hl1 (x int); CREATE TABLE hl2 (x int)").await.unwrap();
+        let pa = lines(&a, "SELECT pg_backend_pid()").await.unwrap().remove(0);
+        let pb = lines(&b, "SELECT pg_backend_pid()").await.unwrap().remove(0);
+        // ROW EXCLUSIVE and SHARE UPDATE EXCLUSIVE don't conflict; SHARE and ROW EXCLUSIVE do.
+        a.batch_execute("BEGIN; LOCK hl1 IN ROW EXCLUSIVE MODE").await.unwrap();
+        b.batch_execute("BEGIN; LOCK hl1 IN SHARE UPDATE EXCLUSIVE MODE").await.unwrap();
+        let err = lines(&b, "LOCK hl1 IN SHARE MODE NOWAIT").await.unwrap_err();
+        assert_eq!(err.code().map(|c| c.code()), Some("55P03"));
+        a.batch_execute("ROLLBACK").await.unwrap();
+        b.batch_execute("ROLLBACK").await.unwrap();
+        // A reader's AccessShareLock holds off ALTER TABLE until its transaction ends.
+        a.batch_execute("BEGIN").await.unwrap();
+        assert!(lines(&a, "SELECT * FROM hl1").await.unwrap().is_empty());
+        let waiter = tokio::spawn(async move {
+            let r = b.batch_execute("ALTER TABLE hl1 ADD COLUMN y int").await;
+            (b, r)
+        });
+        let q = format!("SELECT pg_isolation_test_session_is_blocked({pb}, '{{{pa}}}'), pg_blocking_pids({pb})");
+        let mut seen = Vec::new();
+        for _ in 0..100 {
+            seen = lines(&c, &q).await.unwrap();
+            if seen[0].starts_with('t') {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(seen, [format!("t|{{{pa}}}")]);
+        a.batch_execute("COMMIT").await.unwrap();
+        let (b, r) = waiter.await.unwrap();
+        r.unwrap();
+        // A deadlock: the one that checks (after deadlock_timeout) fails.
+        a.batch_execute("BEGIN; SET deadlock_timeout = '10s'; LOCK hl1").await.unwrap();
+        b.batch_execute("BEGIN; SET deadlock_timeout = '10ms'; LOCK hl2").await.unwrap();
+        let waiter = tokio::spawn(async move {
+            let r = a.batch_execute("LOCK hl2").await;
+            (a, r)
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let err = b.batch_execute("LOCK hl1").await.unwrap_err();
+        let db = err.as_db_error().unwrap();
+        assert_eq!(db.code().code(), "40P01");
+        assert_eq!(db.message(), "deadlock detected");
+        let detail = db.detail().unwrap();
+        assert!(detail.starts_with(&format!("Process {pb} waits for AccessExclusiveLock on relation ")), "{detail}");
+        assert!(detail.contains(&format!("; blocked by process {pa}.\nProcess {pa} waits for AccessExclusiveLock on relation ")), "{detail}");
+        assert_eq!(db.hint(), Some("See server log for query details."));
+        b.batch_execute("ROLLBACK").await.unwrap();
+        let (a, r) = waiter.await.unwrap();
+        r.unwrap();
+        a.batch_execute("COMMIT").await.unwrap();
+    });
+    s.engine.shutdown();
+}
+
+/// SERIALIZABLE transactions: write skew (each reads what the other writes) fails one of
+/// them with Postgres's serialization failure; under REPEATABLE READ both commit.
+#[test]
+fn serializable_write_skew() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        a.batch_execute("CREATE TABLE ws (id int PRIMARY KEY, on_call bool); INSERT INTO ws VALUES (1, true), (2, true)")
+            .await
+            .unwrap();
+        for (level, fails) in [("REPEATABLE READ", false), ("SERIALIZABLE", true)] {
+            a.batch_execute("UPDATE ws SET on_call = true").await.unwrap();
+            for cl in [&a, &b] {
+                cl.batch_execute(&format!("BEGIN ISOLATION LEVEL {level}")).await.unwrap();
+                assert_eq!(lines(cl, "SELECT count(*) FROM ws WHERE on_call").await.unwrap(), ["2"]);
+            }
+            a.batch_execute("UPDATE ws SET on_call = false WHERE id = 1").await.unwrap();
+            b.batch_execute("UPDATE ws SET on_call = false WHERE id = 2").await.unwrap();
+            a.batch_execute("COMMIT").await.unwrap();
+            let r = b.batch_execute("COMMIT").await;
+            if fails {
+                let err = r.unwrap_err();
+                let db = err.as_db_error().unwrap();
+                assert_eq!(db.code().code(), "40001");
+                assert_eq!(
+                    db.message(),
+                    "could not serialize access due to read/write dependencies among transactions"
+                );
+                assert_eq!(db.hint(), Some("The transaction might succeed if retried."));
+            } else {
+                r.unwrap();
+            }
+        }
+    });
+    s.engine.shutdown();
+}

@@ -150,6 +150,7 @@ fn pg_is_in_recovery(_: &[Value], _: &FnCtx) -> Result<Value> {
     Ok(Value::Bool(false))
 }
 fn pg_sleep(a: &[Value], c: &FnCtx) -> Result<Value> {
+    crate::exec::flush_live_notices();
     let secs = a[0].as_f64().unwrap_or(0.0);
     let end = std::time::Instant::now()
         + std::time::Duration::from_secs_f64(if secs.is_nan() {
@@ -244,6 +245,47 @@ fn may_signal(pid: i32, c: &FnCtx, terminate: bool) -> Result<bool> {
     }
     Ok(true)
 }
+/// pg_blocking_pids(pid): the backends holding the heavyweight locks `pid` waits for.
+fn pg_blocking_pids(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let pid = int_arg(&a[0]) as i32;
+    let pids = c.exec.sess.db.locks.blocking_pids(pid);
+    Ok(Value::Array(Arc::new(ArrayValue::from_vec(
+        T::Int4,
+        pids.into_iter().map(Value::Int4).collect(),
+    ))))
+}
+/// pg_safe_snapshot_blocking_pids(pid): the backends whose serializable transactions a
+/// SERIALIZABLE READ ONLY DEFERRABLE transaction's snapshot waits for.
+fn pg_safe_snapshot_blocking_pids(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let pid = int_arg(&a[0]) as i32;
+    let pids = c.exec.sess.db.ssi.safe_snapshot_blockers(pid);
+    Ok(Value::Array(Arc::new(ArrayValue::from_vec(
+        T::Int4,
+        pids.into_iter().map(Value::Int4).collect(),
+    ))))
+}
+/// pg_isolation_test_session_is_blocked(pid, interesting pids): whether `pid` waits for a
+/// lock one of those backends holds.
+fn pg_isolation_test_session_is_blocked(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let pid = int_arg(&a[0]) as i32;
+    let Value::Array(arr) = &a[1] else {
+        return Ok(Value::Bool(false));
+    };
+    if arr.items.iter().any(Value::is_null) {
+        return Err(Error::new(code::INTERNAL_ERROR, "array must not contain nulls"));
+    }
+    let interesting: Vec<i32> = arr.items.iter().map(|v| int_arg(v) as i32).collect();
+    let blocked = c
+        .exec
+        .sess
+        .db
+        .locks
+        .blocking_pids(pid)
+        .iter()
+        .any(|p| interesting.contains(p));
+    // (Or waiting for a safe snapshot, whoever it waits for.)
+    Ok(Value::Bool(blocked || !c.exec.sess.db.ssi.safe_snapshot_blockers(pid).is_empty()))
+}
 fn pg_cancel_backend(a: &[Value], c: &FnCtx) -> Result<Value> {
     let pid = int_arg(&a[0]) as i32;
     if !may_signal(pid, c, false)? {
@@ -309,6 +351,30 @@ fn seq_arg(v: &Value, c: &FnCtx) -> Result<Arc<crate::catalog::Sequence>> {
         v => v.as_i64().unwrap_or(0) as u32,
     };
     seq_by_oid(&cat, oid)
+}
+
+/// nextval's lock on the sequence (lock_and_open_sequence: ROW EXCLUSIVE), and the
+/// sequence as it is once that's held (an ALTER SEQUENCE we waited for changed it).
+fn lock_sequence(
+    seq: Arc<crate::catalog::Sequence>,
+    c: &FnCtx,
+) -> Result<Arc<crate::catalog::Sequence>> {
+    let name = seq.name.clone();
+    let mut txn = c.exec.txn.borrow_mut();
+    txn.lock_relation(
+        seq.oid,
+        LockMode::RowExclusive,
+        WaitPolicy::Block,
+        &|| name.clone(),
+    )?;
+    let cat = txn.catalog();
+    drop(txn);
+    if cat.version != c.exec.catalog().version
+        && let Ok(fresh) = seq_by_oid(&cat, seq.oid)
+    {
+        return Ok(fresh);
+    }
+    Ok(seq)
 }
 
 /// A sequence privilege check: any of `privs` will do.
@@ -399,6 +465,7 @@ fn nextval(a: &[Value], c: &FnCtx) -> Result<Value> {
             "cannot execute nextval() in a read-only transaction"
         );
     }
+    let seq = lock_sequence(seq, c)?;
     let v = next_value(&seq, c)?;
     c.exec.sess.currval.borrow_mut().insert(seq.oid, v);
     c.exec.sess.lastval.set(Some(v));
@@ -415,6 +482,7 @@ fn identity_nextval(a: &[Value], c: &FnCtx) -> Result<Value> {
             "cannot execute nextval() in a read-only transaction"
         );
     }
+    let seq = lock_sequence(seq, c)?;
     let v = next_value(&seq, c)?;
     c.exec.sess.currval.borrow_mut().insert(seq.oid, v);
     c.exec.sess.lastval.set(Some(v));
@@ -551,25 +619,16 @@ fn advisory_what(a: &[Value]) -> String {
 fn session_lock(a: &[Value], c: &FnCtx, shared: bool, policy: WaitPolicy) -> Result<bool> {
     let key = advisory_key(a);
     let mode = if shared {
-        LockMode::Shared
+        LockMode::Share
     } else {
         LockMode::Exclusive
     };
-    let (cancel, txn_id) = {
-        let t = c.exec.txn.borrow();
-        (t.cancel.clone(), t.id)
-    };
     let what = advisory_what(a);
-    let got = c.exec.sess.db.locks.acquire(
-        &key,
-        c.exec.sess.lock_owner,
-        Some(txn_id),
-        mode,
-        policy,
-        &cancel,
-        None,
-        &|| what.clone(),
-    )?;
+    let owner = c.exec.sess.lock_owner;
+    let got = {
+        let t = c.exec.txn.borrow();
+        c.exec.sess.db.locks.acquire(&key, owner, owner, mode, &t.waits(policy), &|| what.clone())?
+    };
     if got {
         let mut k = key;
         k.push(shared as u8);
@@ -581,7 +640,7 @@ fn session_lock(a: &[Value], c: &FnCtx, shared: bool, policy: WaitPolicy) -> Res
 fn xact_lock(a: &[Value], c: &FnCtx, shared: bool, policy: WaitPolicy) -> Result<bool> {
     let key = advisory_key(a);
     let mode = if shared {
-        LockMode::Shared
+        LockMode::Share
     } else {
         LockMode::Exclusive
     };
@@ -641,34 +700,15 @@ fn advisory_unlock(a: &[Value], c: &FnCtx, shared: bool) -> Result<Value> {
     let key = advisory_key(a);
     let mut mk = key.clone();
     mk.push(shared as u8);
-    let mut other = key.clone();
-    other.push(!shared as u8);
     let mut held = c.exec.sess.advisory.borrow_mut();
     match held.get_mut(&mk) {
         Some(n) => {
             *n -= 1;
             if *n == 0 {
                 held.remove(&mk);
-                let locks = &c.exec.sess.db.locks;
-                let owner = c.exec.sess.lock_owner;
-                if !held.contains_key(&other) {
-                    locks.release_all(owner, vec![key]);
-                } else if !shared {
-                    // Still held shared: keep that.
-                    locks.release_all(owner, vec![key.clone()]);
-                    let cancel = std::sync::atomic::AtomicBool::new(false);
-                    let _ = locks.acquire(
-                        &key,
-                        owner,
-                        None,
-                        LockMode::Shared,
-                        WaitPolicy::NoWait,
-                        &cancel,
-                        None,
-                        &String::new,
-                    );
-                }
             }
+            let mode = if shared { LockMode::Share } else { LockMode::Exclusive };
+            c.exec.sess.db.locks.release(&key, c.exec.sess.lock_owner, mode);
             Ok(Value::Bool(true))
         }
         None => {
@@ -687,59 +727,6 @@ fn advisory_unlock(a: &[Value], c: &FnCtx, shared: bool) -> Result<Value> {
     }
 }
 
-/// pg_locks rows for this session's advisory locks (session- and transaction-level).
-pub(crate) fn advisory_lock_rows(ctx: &ExecCtx) -> Vec<Vec<Value>> {
-    let mut held: Vec<(Vec<u8>, bool)> = Vec::new();
-    for k in ctx.sess.advisory.borrow().keys() {
-        let mut key = k.clone();
-        let shared = key.pop() == Some(1);
-        held.push((key, shared));
-    }
-    let txn_id = ctx.txn.borrow().id;
-    for (key, mode) in ctx.sess.db.locks.held_by(txn_id) {
-        if key.starts_with(&[0, 0, 0, 0, 0, 0, 0, 3]) {
-            held.push((key, mode == LockMode::Shared));
-        }
-    }
-    held.sort();
-    held.dedup();
-    let db = ctx.sess.database_oid();
-    held.into_iter()
-        .filter_map(|(key, shared)| {
-            let body = key.get(8..)?;
-            let (classid, objid, sub) = match body.first() {
-                Some(1) => {
-                    let v = i64::from_be_bytes(body.get(1..9)?.try_into().ok()?);
-                    ((v >> 32) as u32, v as u32, 1)
-                }
-                Some(2) => {
-                    let a = i32::from_be_bytes(body.get(1..5)?.try_into().ok()?);
-                    let b = i32::from_be_bytes(body.get(5..9)?.try_into().ok()?);
-                    (a as u32, b as u32, 2)
-                }
-                _ => return None,
-            };
-            Some(vec![
-                text("advisory"),
-                Value::Oid(db),
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Oid(classid),
-                Value::Oid(objid),
-                Value::Int2(sub),
-                text(format!("3/{}", txn_id as u32)),
-                Value::Int4(ctx.sess.pid),
-                text(if shared { "ShareLock" } else { "ExclusiveLock" }),
-                Value::Bool(true),
-                Value::Bool(false),
-                Value::Null,
-            ])
-        })
-        .collect()
-}
 fn pg_advisory_unlock_all(_: &[Value], c: &FnCtx) -> Result<Value> {
     c.exec.sess.release_advisory();
     Ok(Value::Null)
@@ -3106,8 +3093,8 @@ fn pg_available_extensions(_: &[Value], _: &FnCtx) -> Result<super::SrfIter> {
         .collect();
     Ok(Box::new(rows.into_iter().map(Ok)))
 }
-fn pg_notification_queue_usage(_: &[Value], _: &FnCtx) -> Result<Value> {
-    Ok(Value::Float8(0.0))
+fn pg_notification_queue_usage(_: &[Value], c: &FnCtx) -> Result<Value> {
+    Ok(Value::Float8(c.exec.sess.db.notify.queue_usage()))
 }
 fn pg_listening_channels(_: &[Value], c: &FnCtx) -> Result<super::SrfIter> {
     let rows: Vec<Vec<Value>> = c
@@ -4295,6 +4282,22 @@ pub fn register(r: &mut Registry) {
     r.func("pg_sleep_until", vec![Timestamptz(-1)], Void, pg_sleep_until).volatile();
     r.func("pg_cancel_backend", vec![Int4], Bool, pg_cancel_backend)
         .volatile();
+    r.func("pg_blocking_pids", vec![Int4], T::array_of(Int4), pg_blocking_pids)
+        .volatile();
+    r.func(
+        "pg_safe_snapshot_blocking_pids",
+        vec![Int4],
+        T::array_of(Int4),
+        pg_safe_snapshot_blocking_pids,
+    )
+    .volatile();
+    r.func(
+        "pg_isolation_test_session_is_blocked",
+        vec![Int4, T::array_of(Int4)],
+        Bool,
+        pg_isolation_test_session_is_blocked,
+    )
+    .volatile();
     r.func(
         "pg_terminate_backend",
         vec![Int4],

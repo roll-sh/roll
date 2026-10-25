@@ -936,11 +936,13 @@ impl<'b, 'a> Binder<'b, 'a> {
                     }
                 })
                 .collect();
+            let mut perms = self.perms.clone();
+            perms.add_plan_locks(&plan, &self.cat);
             return Ok(BoundQuery {
                 plan: Arc::new(plan),
                 cols,
                 params,
-                perms: Arc::new(self.perms.clone()),
+                perms: Arc::new(perms),
                 hidden_rtes: self.hidden_rtes,
                 param_domains: self.param_domains.clone(),
             });
@@ -973,11 +975,13 @@ impl<'b, 'a> Binder<'b, 'a> {
                 }
             })
             .collect();
+        let mut perms = self.perms.clone();
+        perms.add_plan_locks(&plan, &self.cat);
         Ok(BoundQuery {
             plan: Arc::new(plan),
             cols,
             params,
-            perms: Arc::new(self.perms.clone()),
+            perms: Arc::new(perms),
             hidden_rtes: self.hidden_rtes,
             param_domains: self.param_domains.clone(),
         })

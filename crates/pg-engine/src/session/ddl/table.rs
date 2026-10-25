@@ -4224,7 +4224,7 @@ impl Ddl<'_, '_> {
             ));
         }
         self.not_in_use(t.oid, "ALTER TABLE", &t.name)?;
-        self.note_alter_locks(&t, &s.cmds);
+        self.note_alter_locks(&t, &s.cmds)?;
         let mut t = (*t).clone();
         let orig = t.clone();
         // Several ALTER COLUMN TYPEs: their USINGs all read the row as it was, converted
@@ -6336,7 +6336,7 @@ impl Ddl<'_, '_> {
                     } else {
                         lockmode::ACCESS_EXCLUSIVE
                     },
-                );
+                )?;
                 let before = Arc::new(self.cat.clone());
                 let renamed = (!matches!(rel, Relation::Index(_))).then(|| rel.oid());
                 match rel {
@@ -7216,6 +7216,7 @@ impl Ddl<'_, '_> {
                 }
             };
             self.require_rel_priv(t.oid, crate::catalog::acl::TRUNCATE, false)?;
+            self.note_lock(t.oid, lockmode::ACCESS_EXCLUSIVE)?;
             if !rv.inh && t.partkey.is_some() {
                 return Err(Error::new(code::WRONG_OBJECT_TYPE, "cannot truncate only a partitioned table")
                     .hint("Do not specify the ONLY keyword, or use TRUNCATE ONLY on the partitions directly."));
@@ -7234,6 +7235,7 @@ impl Ddl<'_, '_> {
                     continue;
                 }
                 // (Inherited TRUNCATE checks the parent's privileges only.)
+                self.note_lock(t.oid, lockmode::ACCESS_EXCLUSIVE)?;
                 self.not_in_use(t.oid, "TRUNCATE", &t.name)?;
                 // truncate_check_rel: a foreign table's wrapper would do it.
                 if let Some(e) = self.cat.fdw_routine_error(&t) {
@@ -7283,6 +7285,7 @@ impl Ddl<'_, '_> {
             found.sort_by_key(|t| t.oid);
             for child in found {
                 self.require_rel_priv(child.oid, crate::catalog::acl::TRUNCATE, false)?;
+                self.note_lock(child.oid, lockmode::ACCESS_EXCLUSIVE)?;
                 self.notice(format!("truncate cascades to table \"{}\"", child.name));
                 tables.push(child);
             }
@@ -7365,6 +7368,13 @@ impl Ddl<'_, '_> {
     }
 
     pub(super) fn lock(&mut self, s: &pb::LockStmt) -> Result<String> {
+        self.lock_nowait = s.nowait;
+        let r = self.lock_tables(s);
+        self.lock_nowait = false;
+        r
+    }
+
+    fn lock_tables(&mut self, s: &pb::LockStmt) -> Result<String> {
         for r in &s.relations {
             let Some(NodeEnum::RangeVar(rv)) = inner(r) else {
                 continue;
@@ -7408,12 +7418,12 @@ impl Ddl<'_, '_> {
                 )));
             }
             self.require_rel_priv(rel.oid(), lock_acl_mask(s.mode), true)?;
-            self.note_lock(rel.oid(), s.mode);
+            self.note_lock(rel.oid(), s.mode)?;
             match &rel {
                 Relation::View(v) => self.lock_view(v, s.mode, &mut vec![v.oid])?,
                 _ if rv.inh => {
                     for c in self.cat.inheritors(rel.oid()).into_iter().skip(1) {
-                        self.note_lock(c, s.mode);
+                        self.note_lock(c, s.mode)?;
                     }
                 }
                 _ => {}
@@ -7422,8 +7432,37 @@ impl Ddl<'_, '_> {
         Ok("LOCK TABLE".into())
     }
 
-    /// pg_locks shows the lock this transaction took on `oid`.
-    pub(super) fn note_lock(&self, oid: u32, mode: i32) {
+    /// Lock relation `oid` in `mode` (a lockdefs.h number) unless it isn't free (SKIP
+    /// LOCKED): Ok(false) then.
+    pub(super) fn try_lock(&self, oid: u32, mode: i32) -> Result<bool> {
+        let Some(lm) = crate::txn::locks::LockMode::from_number(mode) else {
+            return Ok(true);
+        };
+        let rel = crate::sql::binder::perms::rel_word(&self.cat, oid).1;
+        self.ctx.txn.borrow_mut().lock_relation(
+            oid,
+            lm,
+            crate::txn::locks::WaitPolicy::SkipLocked,
+            &|| rel.clone(),
+        )
+    }
+
+    /// After waiting for a lock: the catalog as other transactions left it (what Postgres
+    /// sees through the invalidations its lock acquisition accepts), while this
+    /// transaction hasn't changed it itself.
+    pub(super) fn refresh_catalog(&mut self) {
+        let txn = self.ctx.txn.borrow();
+        if txn.changed_catalog().is_none() {
+            let cur = txn.catalog();
+            if cur.version != self.cat.version {
+                self.cat = (*cur).clone();
+            }
+        }
+    }
+
+    /// Lock relation `oid` in `mode` (a lockdefs.h number) until the transaction ends;
+    /// pg_locks shows it.
+    pub(super) fn note_lock(&self, oid: u32, mode: i32) -> Result<()> {
         const MODES: [&str; 9] = [
             "",
             "AccessShareLock",
@@ -7436,12 +7475,20 @@ impl Ddl<'_, '_> {
             "AccessExclusiveLock",
         ];
         let Some(&name) = MODES.get(mode as usize).filter(|n| !n.is_empty()) else {
-            return;
+            return Ok(());
         };
-        let mut txn = self.ctx.txn.borrow_mut();
-        if !txn.rel_locks.iter().any(|(o, m)| *o == oid && *m == name) {
-            txn.rel_locks.push((oid, name));
-        }
+        let _ = name;
+        let Some(lm) = crate::txn::locks::LockMode::from_number(mode) else {
+            return Ok(());
+        };
+        let rel = crate::sql::binder::perms::rel_word(&self.cat, oid).1;
+        let policy = if self.lock_nowait {
+            crate::txn::locks::WaitPolicy::NoWait
+        } else {
+            crate::txn::locks::WaitPolicy::Block
+        };
+        self.ctx.txn.borrow_mut().lock_relation(oid, lm, policy, &|| rel.clone())?;
+        Ok(())
     }
 
     /// LockViewRecurse: the relations a view's query reads are locked too, checked as the
@@ -7497,7 +7544,7 @@ impl Ddl<'_, '_> {
                     format!("permission denied for {word} {name}"),
                 ));
             }
-            self.note_lock(oid, mode);
+            self.note_lock(oid, mode)?;
             match view {
                 Some(w) => {
                     ancestors.push(oid);
@@ -7506,7 +7553,7 @@ impl Ddl<'_, '_> {
                 }
                 None if rv.inh => {
                     for c in self.cat.inheritors(oid).into_iter().skip(1) {
-                        self.note_lock(c, mode);
+                        self.note_lock(c, mode)?;
                     }
                 }
                 None => {}
@@ -7620,7 +7667,9 @@ pub(super) mod lockmode {
     pub const ACCESS_SHARE: i32 = 1;
     pub const ROW_SHARE: i32 = 2;
     pub const SHARE_UPDATE_EXCLUSIVE: i32 = 4;
+    pub const SHARE: i32 = 5;
     pub const SHARE_ROW_EXCLUSIVE: i32 = 6;
+    pub const EXCLUSIVE: i32 = 7;
     pub const ACCESS_EXCLUSIVE: i32 = 8;
 }
 
@@ -7714,7 +7763,7 @@ impl Ddl<'_, '_> {
 
     /// The relation locks an ALTER TABLE takes (for pg_locks): the table at the strongest
     /// level its subcommands need, and what they open besides.
-    fn note_alter_locks(&self, t: &Table, cmds: &[pb::Node]) {
+    fn note_alter_locks(&self, t: &Table, cmds: &[pb::Node]) -> Result<()> {
         use pb::AlterTableType as A;
         let cmds: Vec<&pb::AlterTableCmd> = cmds
             .iter()
@@ -7724,9 +7773,9 @@ impl Ddl<'_, '_> {
             })
             .collect();
         let Some(level) = cmds.iter().map(|c| alter_cmd_lock(c)).max() else {
-            return;
+            return Ok(());
         };
-        self.note_lock(t.oid, level);
+        self.note_lock(t.oid, level)?;
         let indexes = |tb: &Table| -> Vec<u32> {
             let mut v: Vec<u32> = tb.indexes.clone();
             v.extend(tb.pkey_index);
@@ -7740,14 +7789,14 @@ impl Ddl<'_, '_> {
                         .into_iter()
                         .find(|i| self.cat.indexes.get(i).is_some_and(|x| x.name == c.name))
                     {
-                        self.note_lock(ix, lockmode::SHARE_UPDATE_EXCLUSIVE);
+                        self.note_lock(ix, lockmode::SHARE_UPDATE_EXCLUSIVE)?;
                     }
                 }
                 // ATExecSetRelOptions changes the TOAST table's too.
                 A::AtSetRelOptions | A::AtResetRelOptions | A::AtReplaceRelOptions
                     if t.toast != 0 =>
                 {
-                    self.note_lock(t.toast, alter_cmd_lock(c));
+                    self.note_lock(t.toast, alter_cmd_lock(c))?;
                 }
                 // A foreign key locks the referenced table; checking existing rows plans a
                 // query over both tables (opening their indexes).
@@ -7764,19 +7813,19 @@ impl Ddl<'_, '_> {
                     let Ok(Some(Relation::Table(r))) = self.lookup(rv) else {
                         continue;
                     };
-                    self.note_lock(r.oid, lockmode::SHARE_ROW_EXCLUSIVE);
+                    self.note_lock(r.oid, lockmode::SHARE_ROW_EXCLUSIVE)?;
                     let ref_ix: Vec<u32> = indexes(&r)
                         .into_iter()
                         .filter(|i| self.cat.indexes.get(i).is_some_and(|x| x.unique))
                         .collect();
                     if k.skip_validation {
                         if let Some(i) = ref_ix.first() {
-                            self.note_lock(*i, lockmode::ACCESS_SHARE);
+                            self.note_lock(*i, lockmode::ACCESS_SHARE)?;
                         }
                         continue;
                     }
                     for i in indexes(t).into_iter().chain(indexes(&r)) {
-                        self.note_lock(i, lockmode::ACCESS_SHARE);
+                        self.note_lock(i, lockmode::ACCESS_SHARE)?;
                     }
                 }
                 A::AtValidateConstraint => {
@@ -7791,14 +7840,15 @@ impl Ddl<'_, '_> {
                     let Some(r) = self.cat.tables.get(ref_table).cloned() else {
                         continue;
                     };
-                    self.note_lock(r.oid, lockmode::ROW_SHARE);
+                    self.note_lock(r.oid, lockmode::ROW_SHARE)?;
                     for i in indexes(t).into_iter().chain(indexes(&r)) {
-                        self.note_lock(i, lockmode::ACCESS_SHARE);
+                        self.note_lock(i, lockmode::ACCESS_SHARE)?;
                     }
                 }
                 _ => {}
             }
         }
+        Ok(())
     }
 }
 
@@ -8696,6 +8746,24 @@ impl Ddl<'_, '_> {
             _ => {}
         }
         for (table, indexes, toast) in work {
+            // reindex_index / ReindexRelationConcurrently: SHARE on the table and ACCESS
+            // EXCLUSIVE on its indexes (CONCURRENTLY: SHARE UPDATE EXCLUSIVE on both).
+            let (heap_mode, index_mode) = if concurrently {
+                (lockmode::SHARE_UPDATE_EXCLUSIVE, lockmode::SHARE_UPDATE_EXCLUSIVE)
+            } else {
+                (lockmode::SHARE, lockmode::ACCESS_EXCLUSIVE)
+            };
+            self.note_lock(table, heap_mode)?;
+            for &i in &indexes {
+                self.note_lock(i, index_mode)?;
+            }
+            // ReindexRelationConcurrently's phases: writers out (ShareLock), then every
+            // transaction using the table before the swap (AccessExclusiveLock).
+            if concurrently {
+                use crate::txn::locks::LockMode as L;
+                self.ctx.txn.borrow_mut().wait_for_lockers(table, L::Share)?;
+                self.ctx.txn.borrow_mut().wait_for_lockers(table, L::AccessExclusive)?;
+            }
             if let Some(spc) = spc {
                 self.reindex_move(&indexes, spc, concurrently)?;
             }

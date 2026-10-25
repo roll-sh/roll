@@ -716,6 +716,59 @@ impl Btree {
         self.insert_parent(pblk, rblk, high, stack);
     }
 
+    /// The leaf page where storage key `lo` is (or would go).
+    fn descend(&self, lo: Option<&[u8]>) -> Option<u32> {
+        let nkey = self.opts.nkey;
+        let mut blk = self.root?;
+        loop {
+            let p = self.pages.get(blk as usize)?.as_ref()?;
+            if p.leaf {
+                return Some(blk);
+            }
+            let i = match lo {
+                None => 0,
+                Some(lo) => p
+                    .inner
+                    .iter()
+                    .rposition(|(pv, _)| match &pv.key {
+                        None => true,
+                        Some(k) => k.key_bytes(pv.natts.min(nkey)) < lo,
+                    })
+                    .unwrap_or(0),
+            };
+            blk = p.inner[i].1;
+        }
+    }
+
+    /// The leaf page an entry with key `key` goes on (what an insertion's SSI check names).
+    pub fn leaf_for(&self, key: &Key) -> Option<u32> {
+        self.descend(Some(key.key_bytes(self.opts.nkey)))
+    }
+
+    /// The leaf pages an index scan over storage keys [lo, hi) reads (the pages its SIRead
+    /// locks go on: _bt_first's, then each _bt_readnextpage's). Empty: the index has no
+    /// pages yet.
+    pub fn leaf_pages(&self, lo: Option<&[u8]>, hi: Option<&[u8]>) -> Vec<u32> {
+        let nkey = self.opts.nkey;
+        let mut out = Vec::new();
+        let Some(mut blk) = self.descend(lo) else {
+            return out;
+        };
+        loop {
+            let Some(p) = self.pages.get(blk as usize).and_then(|p| p.as_ref()) else {
+                return out;
+            };
+            out.push(blk);
+            if hi.is_some_and(|hi| p.items.last().is_some_and(|it| it.key.key_bytes(nkey) >= hi)) {
+                return out;
+            }
+            match p.right {
+                Some(r) => blk = r,
+                None => return out,
+            }
+        }
+    }
+
     /// An index scan over storage keys [lo, hi) (key attributes' encodings; None:
     /// unbounded) met the entries there: those whose heap tuples are all dead to everyone
     /// are marked LP_DEAD (kill_prior_tuple, _bt_killitems).

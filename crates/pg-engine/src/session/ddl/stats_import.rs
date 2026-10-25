@@ -333,11 +333,14 @@ impl Ddl<'_, '_> {
             }
         };
         self.require_rel_priv(table, crate::catalog::acl::MAINTAIN, true)?;
-        let mut txn = self.ctx.txn.borrow_mut();
         for oid in [table, rel.oid()] {
-            if !txn.rel_locks.iter().any(|(o, _)| *o == oid) {
-                txn.rel_locks.push((oid, "ShareUpdateExclusiveLock"));
-            }
+            let name = crate::sql::binder::perms::rel_word(&self.cat, oid).1;
+            self.ctx.txn.borrow_mut().lock_relation(
+                oid,
+                crate::txn::locks::LockMode::ShareUpdateExclusive,
+                crate::txn::locks::WaitPolicy::Block,
+                &|| name.clone(),
+            )?;
         }
         Ok(Target {
             rel,
@@ -950,54 +953,81 @@ pub(crate) fn clear_attribute_stats(ctx: &ExecCtx, a: &[Value]) -> Result<()> {
     Ok(())
 }
 
-/// pg_locks rows of the relation locks this transaction recorded (and, once it has a
-/// transaction id, the lock it holds on that).
+/// pg_locks rows: the heavyweight locks every backend of the database holds or waits for,
+/// this transaction's virtual transaction id lock, then its SIRead predicate locks.
 pub(crate) fn relation_lock_rows(ctx: &ExecCtx) -> Vec<Vec<Value>> {
+    use crate::txn::locks::Tag;
     let txn = ctx.txn.borrow();
     let db = ctx.sess.database_oid();
-    let xid_row = txn.xid_if_assigned().map(|x| {
-        vec![
-            Value::text("transactionid"),
-            Value::Null,
-            Value::Null,
-            Value::Null,
-            Value::Null,
-            Value::Null,
-            Value::Oid(x as u32),
-            Value::Null,
-            Value::Null,
-            Value::Null,
-            Value::text(format!("3/{}", txn.id as u32)),
-            Value::Int4(ctx.sess.pid),
-            Value::text("ExclusiveLock"),
-            Value::Bool(true),
-            Value::Bool(false),
-            Value::Null,
-        ]
-    });
-    txn.rel_locks
-        .iter()
-        .map(|(oid, mode)| {
-            vec![
-                Value::text("relation"),
-                Value::Oid(db),
-                Value::Oid(*oid),
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::text(format!("3/{}", txn.id as u32)),
-                Value::Int4(ctx.sess.pid),
-                Value::text(*mode),
-                Value::Bool(true),
-                Value::Bool(false),
-                Value::Null,
-            ]
-        })
-        .chain(xid_row)
+    let me = ctx.sess.pid;
+    let mut rows: Vec<Vec<Value>> = Vec::new();
+    let n = || Value::Null;
+    let vxid = |owner: u64, pid: Option<i32>| {
+        if pid == Some(me) {
+            format!("3/{}", txn.id as u32)
+        } else {
+            format!("3/{}", owner as u32)
+        }
+    };
+    let now = crate::types::datetime::Clock::system().now;
+    for l in ctx.sess.db.locks.snapshot() {
+        let (locktype, database, relation, xid, classid, objid, objsubid) = match &l.tag {
+            Tag::Relation { db, rel } => ("relation", Value::Oid(*db), Value::Oid(*rel), n(), n(), n(), n()),
+            Tag::Tuple { db, rel, .. } => ("tuple", Value::Oid(*db), Value::Oid(*rel), n(), n(), n(), n()),
+            Tag::Transaction { xid, .. } if *xid != 0 => {
+                ("transactionid", n(), n(), Value::Oid(*xid as u32), n(), n(), n())
+            }
+            Tag::Object { db, class, obj, sub } => (
+                "object",
+                Value::Oid(*db),
+                n(),
+                n(),
+                Value::Oid(*class),
+                Value::Oid(*obj),
+                Value::Int2(*sub as i16),
+            ),
+            Tag::Advisory(key) => {
+                let body = &key[8..];
+                let (c, o, sub) = match body.first() {
+                    Some(1) => {
+                        let v = body
+                            .get(1..9)
+                            .map_or(0, |b| i64::from_be_bytes(b.try_into().unwrap()));
+                        ((v >> 32) as u32, v as u32, 1)
+                    }
+                    _ => {
+                        let a = body.get(1..5).map_or(0, |b| i32::from_be_bytes(b.try_into().unwrap()));
+                        let b = body.get(5..9).map_or(0, |b| i32::from_be_bytes(b.try_into().unwrap()));
+                        (a as u32, b as u32, 2)
+                    }
+                };
+                ("advisory", Value::Oid(db), n(), n(), Value::Oid(c), Value::Oid(o), Value::Int2(sub))
+            }
+            _ => continue,
+        };
+        let wait_start = l.wait_start.map_or(Value::Null, |w| {
+            Value::Timestamptz(now - w.elapsed().as_micros() as i64)
+        });
+        rows.push(vec![
+            Value::text(locktype),
+            database,
+            relation,
+            n(),
+            n(),
+            n(),
+            xid,
+            classid,
+            objid,
+            objsubid,
+            Value::text(vxid(l.owner, l.pid)),
+            l.pid.map_or(Value::Null, Value::Int4),
+            Value::text(l.mode.name()),
+            Value::Bool(l.granted),
+            Value::Bool(l.fastpath),
+            wait_start,
+        ]);
+    }
+    rows.into_iter()
         // Every transaction holds its virtual transaction id's lock (fast-path).
         .chain(std::iter::once(vec![
             Value::text("virtualxid"),

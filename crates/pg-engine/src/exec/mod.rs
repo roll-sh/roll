@@ -78,6 +78,62 @@ pub trait Node {
 
 pub type BoxNode = Box<dyn Node>;
 
+thread_local! {
+    /// The notice lists of the statement contexts alive on this thread, outermost first.
+    static LIVE_NOTICES: RefCell<Vec<std::rc::Weak<RefCell<Vec<Error>>>>> =
+        const { RefCell::new(Vec::new()) };
+    /// Where notices go out before the statement ends (a server connection's socket).
+    static NOTICE_SINK: RefCell<Option<Box<dyn FnMut(&[Error])>>> = const { RefCell::new(None) };
+}
+
+/// A context's notice list, registered so a lock wait can send it.
+fn live_notices() -> Rc<RefCell<Vec<Error>>> {
+    let n = Rc::new(RefCell::new(Vec::new()));
+    LIVE_NOTICES.with(|l| {
+        let mut l = l.borrow_mut();
+        l.retain(|w| w.strong_count() > 0);
+        l.push(Rc::downgrade(&n));
+    });
+    n
+}
+
+/// Send the notices raised so far, as Postgres has by the time a statement waits (it
+/// flushes every notice to the client): what a session blocked on a lock said is seen while
+/// it waits.
+pub fn flush_live_notices() {
+    if !has_notice_sink() {
+        return;
+    }
+    let pending: Vec<Error> = LIVE_NOTICES.with(|l| {
+        let mut l = l.borrow_mut();
+        l.retain(|w| w.strong_count() > 0);
+        l.iter()
+            .filter_map(|w| w.upgrade())
+            .flat_map(|n| n.try_borrow_mut().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default())
+            .collect()
+    });
+    if pending.is_empty() {
+        return;
+    }
+    NOTICE_SINK.with(|s| {
+        if let Ok(mut s) = s.try_borrow_mut()
+            && let Some(f) = s.as_mut()
+        {
+            f(&pending);
+        }
+    });
+}
+
+/// Install (or remove) this thread's notice sink.
+pub fn set_notice_sink(sink: Option<Box<dyn FnMut(&[Error])>>) {
+    NOTICE_SINK.with(|s| *s.borrow_mut() = sink);
+}
+
+/// Whether notices can go out early on this thread.
+pub fn has_notice_sink() -> bool {
+    NOTICE_SINK.with(|s| s.try_borrow().is_ok_and(|s| s.is_some()))
+}
+
 /// Everything a statement's execution needs.
 pub struct ExecCtx<'a> {
     pub txn: &'a RefCell<Txn>,
@@ -96,7 +152,9 @@ pub struct ExecCtx<'a> {
     /// Rows processed by the statement (the command tag's count).
     pub processed: Cell<u64>,
     pub deadline: Option<Instant>,
-    pub notices: RefCell<Vec<Error>>,
+    /// Notices raised and not yet sent (shared with `LIVE_NOTICES`, which a lock wait
+    /// sends them from).
+    pub notices: Rc<RefCell<Vec<Error>>>,
     ticks: Cell<u32>,
     /// Ephemeral named relations: a trigger's transition tables.
     pub enrs: RefCell<Vec<Rc<Enr>>>,
@@ -391,6 +449,16 @@ impl<'a> ExecCtx<'a> {
         }
         let settings = sess.settings.borrow();
         let timeout = settings.statement_timeout();
+        let deadline = (timeout > 0)
+            .then(|| Instant::now() + std::time::Duration::from_millis(timeout as u64));
+        // The lock waits of the statement: lock_timeout, deadlock_timeout, statement_timeout.
+        if let Ok(mut t) = txn.try_borrow_mut() {
+            let lt = settings.lock_timeout();
+            t.lock_timeout = (lt > 0).then(|| std::time::Duration::from_millis(lt as u64));
+            t.deadlock_timeout =
+                std::time::Duration::from_millis(settings.int("deadlock_timeout").max(1) as u64);
+            t.deadline = deadline;
+        }
         crate::stack::set_max_depth_kb(match settings.max_stack_depth() {
             0 => 2048,
             kb => kb,
@@ -412,12 +480,8 @@ impl<'a> ExecCtx<'a> {
             txn_time: Rc::new(Cell::new(txn_time)),
             stmt_time,
             processed: Cell::new(0),
-            deadline: if timeout > 0 {
-                Some(Instant::now() + std::time::Duration::from_millis(timeout as u64))
-            } else {
-                None
-            },
-            notices: RefCell::new(Vec::new()),
+            deadline,
+            notices: live_notices(),
             ticks: Cell::new(0),
             enrs: RefCell::new(Vec::new()),
             instr: RefCell::new(None),
@@ -488,7 +552,7 @@ impl<'a> ExecCtx<'a> {
             stmt_time: self.stmt_time,
             processed: Cell::new(0),
             deadline: self.deadline,
-            notices: RefCell::new(Vec::new()),
+            notices: live_notices(),
             ticks: Cell::new(0),
             enrs: RefCell::new(self.enrs.borrow().clone()),
             instr: RefCell::new(None),

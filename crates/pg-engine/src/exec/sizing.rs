@@ -2150,12 +2150,14 @@ pub fn loaded(
 pub fn in_heap_order<T>(t: &Table, rows: &mut Vec<(Vec<u8>, T)>, ctx: &ExecCtx) {
     let xids = ctx.sess.db.xids();
     let v = Vis::new(&xids);
+    let txn = ctx.txn.borrow();
+    let mine = |x: u64| txn.is_current_xid(x);
     let locs: Vec<Option<Tid>> = {
         let rf = ctx.sess.db.relfiles.lock();
         let Some(h) = rf.heaps.get(&t.oid) else {
             return;
         };
-        rows.iter().map(|(k, _)| h.locate(k, &v)).collect()
+        rows.iter().map(|(k, _)| h.locate_for(k, &v, &mine)).collect()
     };
     let mut tagged: Vec<(Option<Tid>, usize)> = locs.into_iter().zip(0..).collect();
     tagged.sort_by(|a, b| match (a.0, b.0) {
@@ -2545,6 +2547,63 @@ pub fn btree_height(index: u32, db: &Database) -> Option<u32> {
     db.relfiles.lock().btrees.get(&index).map(Btree::height)
 }
 
+/// The leaf pages of btree `index` an index scan over these entry ranges (with the
+/// index's key prefix) reads; None when the index isn't modelled.
+pub fn btree_leaf_pages(
+    index: u32,
+    prefix: &[u8],
+    ranges: &[(Vec<u8>, Vec<u8>)],
+    db: &Database,
+) -> Option<Vec<u32>> {
+    let rf = db.relfiles.lock();
+    let bt = rf.btrees.get(&index)?;
+    let mut out: Vec<u32> = Vec::new();
+    for (lo, hi) in ranges {
+        for p in bt.leaf_pages(lo.strip_prefix(prefix), hi.strip_prefix(prefix)) {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// The index pages a row's new entries go to: (index, leaf page; None when the index
+/// isn't modelled as pages, a non-btree one).
+pub fn entry_pages(
+    t: &Table,
+    indexes: &[BoundIndex],
+    row: &[Value],
+    ctx: &ExecCtx,
+) -> Result<Vec<(u32, Option<u32>)>> {
+    let mut out: Vec<(u32, Option<u32>)> = Vec::new();
+    let modelled = ensure(t, indexes, ctx)?;
+    let es = entries(t, indexes, row, ctx)?;
+    let table = Arc::new(t.clone());
+    for bix in indexes {
+        if bix.index.id == 0 {
+            continue;
+        }
+        let page = match bix.index.method.as_str() {
+            "hash" if modelled => match index_values(bix, row, ctx)? {
+                Some(v) if v.len() == 1 && !v[0].is_null() => {
+                    hash_bucket(&table, bix, indexes, &v[0], ctx)?
+                }
+                _ => None,
+            },
+            _ => {
+                let rf = ctx.sess.db.relfiles.lock();
+                es.iter()
+                    .find(|(ix, _)| *ix == bix.index.oid)
+                    .filter(|_| modelled)
+                    .and_then(|(ix, k)| rf.btrees.get(ix).and_then(|bt| bt.leaf_for(k).or(Some(0))))
+            }
+        };
+        out.push((bix.index.oid, page));
+    }
+    Ok(out)
+}
+
 /// A btree index's size in pages, if modelled.
 pub fn btree_blocks(index: u32, db: &Database) -> Option<u32> {
     db.relfiles.lock().btrees.get(&index).map(Btree::nblocks)
@@ -2560,12 +2619,14 @@ pub fn row_locations(
     heap_blocks(t, ctx).ok().flatten()?;
     let xids = ctx.sess.db.xids();
     let v = Vis::new(&xids);
+    let txn = ctx.txn.borrow();
+    let mine = |x: u64| txn.is_current_xid(x);
     let rf = ctx.sess.db.relfiles.lock();
     let h = rf.heaps.get(&t.oid)?;
     // (A version whose insert aborted leads back to the one it replaced.)
     Some(
         keys.iter()
-            .map(|k| h.locate(k, &v).map(|tid| (tid, h.page_all_visible(tid.0))))
+            .map(|k| h.locate_for(k, &v, &mine).map(|tid| (tid, h.page_all_visible(tid.0))))
             .collect(),
     )
 }
@@ -2599,9 +2660,11 @@ pub fn row_roots(t: &Table, keys: &[Vec<u8>], ctx: &ExecCtx) -> Option<Vec<Optio
     heap_blocks(t, ctx).ok().flatten()?;
     let xids = ctx.sess.db.xids();
     let v = Vis::new(&xids);
+    let txn = ctx.txn.borrow();
+    let mine = |x: u64| txn.is_current_xid(x);
     let rf = ctx.sess.db.relfiles.lock();
     let h = rf.heaps.get(&t.oid)?;
-    Some(keys.iter().map(|k| h.locate(k, &v).map(|tid| h.hot_root(tid))).collect())
+    Some(keys.iter().map(|k| h.locate_for(k, &v, &mine).map(|tid| h.hot_root(tid))).collect())
 }
 
 /// Whether the table's heap is modelled page by page (`row_tids` places its rows),
@@ -2956,6 +3019,30 @@ pub fn fork_blocks(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>> {
     }))
 }
 
+/// The bucket of hash index `bix` value `v` goes to (a page id for SSI: the bucket's
+/// primary page), the index as its rows left it; None when not modelled.
+pub fn hash_bucket(
+    t: &Arc<Table>,
+    bix: &BoundIndex,
+    indexes: &[BoundIndex],
+    v: &Value,
+    ctx: &ExecCtx,
+) -> Result<Option<u32>> {
+    let Some((est, ff, codes)) = hash_codes(t, bix, indexes, ctx)? else {
+        return Ok(None);
+    };
+    let code = hash_code(v, &bix.keys[0].ty());
+    Ok(Some(crate::catalog::hashidx::bucket_of_code(est, ff, codes.into_iter(), code) + 1))
+}
+
+fn hash_code(v: &Value, ty: &crate::types::DataType) -> u32 {
+    crate::catalog::hashidx::hash_value(v, ty).unwrap_or_else(|| {
+        let mut b = Vec::new();
+        encode_value(&mut b, v, false);
+        crate::catalog::hashidx::hash_bytes(&b)
+    })
+}
+
 /// A hash index's pages: its live rows' hash codes inserted in heap order into the
 /// buckets it was built with.
 fn hash_index_pages(
@@ -2964,6 +3051,20 @@ fn hash_index_pages(
     indexes: &[BoundIndex],
     ctx: &ExecCtx,
 ) -> Result<Option<u64>> {
+    let Some((est, ff, codes)) = hash_codes(t, bix, indexes, ctx)? else {
+        return Ok(None);
+    };
+    Ok(Some(crate::catalog::hashidx::index_pages(est, ff, codes.into_iter())))
+}
+
+/// A hash index's build estimate, fillfactor and its live rows' codes in heap order.
+#[allow(clippy::type_complexity)]
+fn hash_codes(
+    t: &Arc<Table>,
+    bix: &BoundIndex,
+    indexes: &[BoundIndex],
+    ctx: &ExecCtx,
+) -> Result<Option<(f64, usize, Vec<u32>)>> {
     if bix.keys.len() != 1 || !ensure(t, indexes, ctx)? {
         return Ok(None);
     }
@@ -2973,6 +3074,7 @@ fn hash_index_pages(
         ctx.txn.borrow().scan(&start, &end).collect::<Result<_>>()?;
     let ty = bix.keys[0].ty();
     let mut codes: Vec<(Option<Tid>, u32)> = Vec::new();
+    let mut keys = Vec::new();
     for (k, v) in &raw {
         let row = decode_table_row(t, v)?;
         let Some(vals) = index_values(bix, &row, ctx)? else {
@@ -2981,32 +3083,18 @@ fn hash_index_pages(
         let Some(v) = vals.first().filter(|v| !v.is_null()) else {
             continue;
         };
-        let code = crate::catalog::hashidx::hash_value(v, &ty).unwrap_or_else(|| {
-            let mut b = Vec::new();
-            encode_value(&mut b, v, false);
-            crate::catalog::hashidx::hash_bytes(&b)
-        });
-        codes.push((None, code));
-        let _ = k;
+        codes.push((None, hash_code(v, &ty)));
+        keys.push(k.clone());
     }
-    let (est, tids): (f64, Vec<Option<Tid>>) = {
+    let est = {
         let rf = ctx.sess.db.relfiles.lock();
-        let heap = rf.heaps.get(&t.oid);
-        let tids = raw
-            .iter()
-            .filter(|(_, v)| {
-                decode_table_row(t, v)
-                    .ok()
-                    .and_then(|r| index_values(bix, &r, ctx).ok().flatten())
-                    .is_some_and(|vals| vals.first().is_some_and(|v| !v.is_null()))
-            })
-            .map(|(k, _)| heap.and_then(|h| h.tid_of(k)))
-            .collect();
-        (rf.hash_est.get(&bix.index.oid).copied().unwrap_or(f64::NAN), tids)
+        if let Some(h) = rf.heaps.get(&t.oid) {
+            for (c, k) in codes.iter_mut().zip(&keys) {
+                c.0 = h.tid_of(k);
+            }
+        }
+        rf.hash_est.get(&bix.index.oid).copied().unwrap_or(f64::NAN)
     };
-    for (c, tid) in codes.iter_mut().zip(tids) {
-        c.0 = tid;
-    }
     // (Inserted in heap order.)
     codes.sort_by_key(|c| c.0.map_or((u32::MAX, u16::MAX), |t| (t.0, t.1)));
     let est = if est.is_nan() {
@@ -3017,11 +3105,7 @@ fn hash_index_pages(
     let ff = option(&bix.index.options, "fillfactor")
         .and_then(|v| v.parse().ok())
         .unwrap_or(75);
-    Ok(Some(crate::catalog::hashidx::index_pages(
-        est,
-        ff,
-        codes.into_iter().map(|c| c.1),
-    )))
+    Ok(Some((est, ff, codes.into_iter().map(|c| c.1).collect())))
 }
 
 /// All forks of a relation, in bytes (None: no such relation).

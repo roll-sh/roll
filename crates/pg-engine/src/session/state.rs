@@ -132,6 +132,10 @@ pub struct SessionState {
     pub on_commit_truncating: std::cell::Cell<bool>,
     /// A VACUUM or ANALYZE is running (no other may start inside it).
     pub in_vacuum: std::cell::Cell<bool>,
+    /// The running statement doesn't take a snapshot (transaction control, LOCK, SET,
+    /// SHOW: PlannedStmtRequiresSnapshot), so a REPEATABLE READ / SERIALIZABLE
+    /// transaction's snapshot waits for a later one.
+    pub no_snapshot: std::cell::Cell<bool>,
     /// The backend's pending cumulative statistics (`exec::pgstat`).
     pub pgstat: RefCell<crate::exec::pgstat::Pending>,
     /// The current transaction used temporary objects (XACT_FLAGS_ACCESSEDTEMPNAMESPACE).
@@ -232,6 +236,7 @@ impl SessionState {
             on_commit: RefCell::new(Vec::new()),
             on_commit_truncating: std::cell::Cell::new(false),
             in_vacuum: std::cell::Cell::new(false),
+            no_snapshot: Default::default(),
             pgstat: RefCell::new(crate::exec::pgstat::Pending::new_session()),
             temp_used: std::cell::Cell::new(false),
             commit_on_error: std::cell::Cell::new(false),

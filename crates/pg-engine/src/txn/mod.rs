@@ -3,6 +3,7 @@
 
 mod catmerge;
 pub mod locks;
+pub mod ssi;
 pub mod xids;
 
 use crate::catalog::{Catalog, Sequence, persist};
@@ -10,10 +11,10 @@ use crate::error::{Error, Result, code};
 use crate::storage::{SnapshotPin, Store};
 use crate::{bail, err};
 use bytes::Bytes;
-use locks::{LockManager, LockMode, WaitPolicy};
+use locks::{LockManager, LockMode, RowLockMode, WaitPolicy, Waits};
 use parking_lot::{Mutex, RwLock};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -83,6 +84,12 @@ pub struct Database {
     pub store: Arc<Store>,
     catalog: RwLock<Arc<Catalog>>,
     pub locks: LockManager,
+    /// Its serializable transactions' predicate locks and rw-conflicts.
+    pub ssi: ssi::Ssi,
+    /// Rows an UPDATE moved to another partition, by data key, with the commit time of the
+    /// move (the deletion that left the old partition): what a transaction waiting for one
+    /// learns (Postgres's moved-partitions ctid).
+    pub moved: Mutex<HashMap<Vec<u8>, u64>>,
     seqs: Mutex<HashMap<u32, SeqState>>,
     next_txn: AtomicU64,
     /// Open sessions; the engine closes a database once it reaches 0 and stays idle.
@@ -158,6 +165,8 @@ impl Database {
             store,
             catalog: RwLock::new(Arc::new(catalog)),
             locks: LockManager::default(),
+            ssi: Default::default(),
+            moved: Mutex::new(HashMap::new()),
             seqs: Mutex::new(HashMap::new()),
             next_txn: AtomicU64::new(1),
             sessions: AtomicUsize::new(0),
@@ -224,6 +233,7 @@ impl Database {
             read_only,
             snapshot_ts: ts,
             start_ts: ts,
+            snapshot_fixed: false,
             _pin: Some(pin),
             writes: BTreeMap::new(),
             journal: Vec::new(),
@@ -238,10 +248,15 @@ impl Database {
             catalog_base: None,
             catalog_base_cat: None,
             stmt_catalog: None,
-            locks_held: HashSet::new(),
+            locks_held: HashMap::new(),
+            lock_journal: Vec::new(),
+            row_locks: Vec::new(),
+            xact_locks: Vec::new(),
             savepoints: Vec::new(),
             cancel,
             lock_timeout: None,
+            deadlock_timeout: Duration::from_secs(1),
+            deadline: None,
             lock_peer: None,
             wrote: false,
             started: Instant::now(),
@@ -254,8 +269,10 @@ impl Database {
             lo_descs: Vec::new(),
             publish: false,
             new_storage: HashMap::new(),
-            rel_locks: Vec::new(),
             si_locks: Vec::new(),
+            sxact: false,
+            deferrable: false,
+            moved_out: Vec::new(),
             seq_undo: Vec::new(),
             pgstat: Default::default(),
             db_owner_undo: Vec::new(),
@@ -524,7 +541,12 @@ struct Savepoint {
     name: String,
     journal_len: usize,
     catalog: Option<Arc<Catalog>>,
-    locks: HashSet<Vec<u8>>,
+    /// Heavyweight locks taken before it (`Txn::lock_journal`).
+    lock_journal_len: usize,
+    /// The subtransaction's lock id (its row locks' holder, its transaction lock).
+    lock_id: u64,
+    /// Lock ids of subtransactions released into this one.
+    lock_ids: Vec<u64>,
     deferred_len: usize,
     deferred_triggers_len: usize,
     notifies_len: usize,
@@ -582,6 +604,8 @@ pub struct Txn {
     /// Snapshot of the current statement (READ COMMITTED) or of the transaction.
     snapshot_ts: u64,
     pub start_ts: u64,
+    /// A transaction snapshot (REPEATABLE READ / SERIALIZABLE) was taken.
+    snapshot_fixed: bool,
     _pin: Option<SnapshotPin>,
     /// Buffered writes: the value (None: a delete) and the command id of the latest write of
     /// the key (None: one that records none, `replace_catalog`'s).
@@ -614,10 +638,21 @@ pub struct Txn {
     /// statement's DDL is made from, so it can stand as that DDL's base (a newer one would
     /// take what other DDL committed meanwhile for this DDL's removals).
     stmt_catalog: Option<Arc<Catalog>>,
-    locks_held: HashSet<Vec<u8>>,
+    /// Heavyweight locks held, by key and mode, with the subtransaction depth that took them.
+    locks_held: HashMap<(Vec<u8>, LockMode), usize>,
+    /// The order they were taken in (released by ROLLBACK TO in reverse).
+    lock_journal: Vec<(Vec<u8>, LockMode)>,
+    /// Rows locked (or written) here, with the depth that locked them.
+    row_locks: Vec<(Vec<u8>, usize)>,
+    /// Lock ids of the (sub)transactions here holding their transaction lock.
+    xact_locks: Vec<u64>,
     savepoints: Vec<Savepoint>,
     pub cancel: Arc<AtomicBool>,
     pub lock_timeout: Option<Duration>,
+    /// deadlock_timeout: how long a lock wait lasts before checking for a deadlock.
+    pub deadlock_timeout: Duration,
+    /// When the running statement times out (statement_timeout).
+    pub deadline: Option<Instant>,
     /// The session's own lock owner (session-level advisory locks), whose locks don't
     /// conflict with this transaction's.
     pub lock_peer: Option<u64>,
@@ -644,10 +679,16 @@ pub struct Txn {
     new_storage: HashMap<u32, usize>,
     /// Heavyweight relation locks pg_locks shows this transaction holding (relation oid,
     /// mode name), for the operations that record theirs (statistics import).
-    pub rel_locks: Vec<(u32, &'static str)>,
+
     /// SSI predicate (SIRead) locks a serializable transaction's reads took, as pg_locks
     /// shows them: (relation, page, tuple); page and tuple None for a relation lock.
     pub si_locks: Vec<(u32, Option<u32>, Option<u16>)>,
+    /// SSI tracks it (`ssi::Ssi::register`, when its snapshot is taken).
+    sxact: bool,
+    /// SERIALIZABLE READ ONLY DEFERRABLE: its snapshot waits to be safe.
+    pub deferrable: bool,
+    /// Rows it moved out of their partition (`Database::moved` once it commits).
+    pub moved_out: Vec<Vec<u8>>,
     /// Sequences given a new file here (TRUNCATE ... RESTART IDENTITY), with the state of
     /// the old one, which a rollback makes current again.
     pub seq_undo: Vec<(u32, (i64, bool, i64, i64))>,
@@ -661,10 +702,15 @@ pub struct Txn {
 }
 
 impl Txn {
-    /// Whether this transaction's reads take SIRead predicate locks (a serializable one
-    /// that may write: a read-only one is treated as running on a safe snapshot).
+    /// Whether this transaction's reads take SIRead predicate locks: a serializable one SSI
+    /// tracks (not a read-only one on a safe snapshot: `ssi::Ssi::register`).
     pub fn takes_predicate_locks(&self) -> bool {
-        self.isolation == Isolation::Serializable && !self.read_only
+        self.sxact && self.db.ssi.needed_for_read(self.id)
+    }
+
+    /// Whether SSI tracks this transaction (its writes are checked for conflicts).
+    pub fn serializable_tracked(&self) -> bool {
+        self.sxact
     }
 
     /// PredicateLockRelation / PredicateLockTID: record an SIRead lock on a relation, or on
@@ -679,6 +725,7 @@ impl Txn {
         let Some((page, tuple)) = tid else {
             locks.retain(|l| l.0 != rel);
             locks.push((rel, None, None));
+            self.db.ssi.set_locks(self.id, &self.si_locks);
             return;
         };
         if locks
@@ -697,10 +744,78 @@ impl Txn {
             locks.retain(|l| !(l.0 == rel && l.1 == Some(page)));
             locks.push((rel, Some(page), None));
         }
+        Self::coarsen_relation(locks, rel);
+        self.db.ssi.set_locks(self.id, &self.si_locks);
+    }
+
+    /// PredicateLockPage: an SIRead lock on page `page` of `rel` (an index page a scan
+    /// read), covering its tuple locks.
+    pub fn predicate_lock_page(&mut self, rel: u32, page: u32) {
+        let locks = &mut self.si_locks;
+        if locks.iter().any(|l| l.0 == rel && (l.1.is_none() || *l == (rel, Some(page), None))) {
+            return;
+        }
+        locks.retain(|l| !(l.0 == rel && l.1 == Some(page)));
+        locks.push((rel, Some(page), None));
+        Self::coarsen_relation(locks, rel);
+        self.db.ssi.set_locks(self.id, &self.si_locks);
+    }
+
+    fn coarsen_relation(locks: &mut Vec<(u32, Option<u32>, Option<u16>)>, rel: u32) {
         if locks.iter().filter(|l| l.0 == rel).count() > 32 {
             locks.retain(|l| l.0 != rel);
             locks.push((rel, None, None));
         }
+    }
+
+    /// CheckForSerializableConflictIn for a write of row `key` of `rel` (None: a new row,
+    /// checked at the relation; Some((page, tuple)): the version it replaces) and of the
+    /// index pages its entries go to (index, page: None when not modelled).
+    pub fn ssi_write(
+        &mut self,
+        rel: u32,
+        key: &[u8],
+        old: Option<(u32, u16)>,
+        index_pages: &[(u32, Option<u32>)],
+    ) -> Result<()> {
+        self.ssi_write_version(rel, key, old, index_pages, None)
+    }
+
+    /// `ssi_write`, for a row (of a table without modelled tuple ids) whose replaced
+    /// version committed at `version`.
+    pub fn ssi_write_version(
+        &mut self,
+        rel: u32,
+        key: &[u8],
+        old: Option<(u32, u16)>,
+        index_pages: &[(u32, Option<u32>)],
+        version: Option<u64>,
+    ) -> Result<()> {
+        if !self.sxact {
+            return Ok(());
+        }
+        let mut targets = Vec::new();
+        if let Some((p, t)) = old {
+            targets.push((rel, Some(p), Some(t)));
+            targets.push((rel, Some(p), None));
+        }
+        targets.push((rel, None, None));
+        for (ix, page) in index_pages {
+            if let Some(p) = page {
+                targets.push((*ix, Some(*p), None));
+            }
+            targets.push((*ix, None, None));
+        }
+        self.db.ssi.write(self.id, Some((rel, key)), &targets, version)?;
+        // (Its own tuple lock on a row it now changes isn't needed any more.)
+        if let Some((p, t)) = old
+            && self.savepoints.is_empty()
+            && let Some(i) = self.si_locks.iter().position(|l| *l == (rel, Some(p), Some(t)))
+        {
+            self.si_locks.remove(i);
+            self.db.ssi.set_locks(self.id, &self.si_locks);
+        }
+        Ok(())
     }
 
     /// Queue a NOTIFY; an identical one already queued is not repeated.
@@ -722,14 +837,53 @@ impl Txn {
     }
 
     /// Start a statement: READ COMMITTED takes a fresh snapshot.
-    pub fn begin_statement(&mut self) {
+    pub fn begin_statement(&mut self, needs_snapshot: bool) -> Result<()> {
         if self.catalog.is_none() {
             self.stmt_catalog = Some(self.db.catalog());
         }
-        if !self.isolation.txn_snapshot() && self.db.store.visible_ts() != self.snapshot_ts {
+        // A transaction snapshot is taken by the first statement that needs one.
+        if self.isolation.txn_snapshot() {
+            if needs_snapshot && !self.snapshot_fixed {
+                self.snapshot_fixed = true;
+                self.take_snapshot();
+                if self.isolation == Isolation::Serializable {
+                    self.register_serializable()?;
+                }
+            }
+        } else if self.db.store.visible_ts() != self.snapshot_ts {
             let pin = self.db.store.pin_visible();
             self.snapshot_ts = pin.ts;
             self._pin = Some(pin);
+        }
+        Ok(())
+    }
+
+    /// (Pinned atomically with the timestamp it reads: `Store::pin_visible`.)
+    fn take_snapshot(&mut self) {
+        if self.db.store.visible_ts() != self.snapshot_ts && !self.wrote {
+            let pin = self.db.store.pin_visible();
+            self.snapshot_ts = pin.ts;
+            self.start_ts = pin.ts;
+            self._pin = Some(pin);
+        }
+    }
+
+    /// GetSerializableTransactionSnapshot: SSI tracks it from its snapshot on (a DEFERRABLE
+    /// read-only one waits for a safe snapshot first: GetSafeSnapshot).
+    fn register_serializable(&mut self) -> Result<()> {
+        let pid = locks::proc_of(self.id, self.lock_peer) as u32 as i32;
+        loop {
+            self.sxact = self.db.ssi.register(self.id, pid, self.read_only, self.snapshot_ts);
+            if !(self.sxact && self.read_only && self.deferrable) {
+                return Ok(());
+            }
+            crate::exec::flush_live_notices();
+            let safe = self.db.ssi.wait_safe(self.id, &self.cancel)?;
+            self.sxact = false;
+            if safe {
+                return Ok(());
+            }
+            self.take_snapshot();
         }
     }
 
@@ -899,6 +1053,14 @@ impl Txn {
     pub fn xid(&mut self) -> u64 {
         if self.xid == 0 {
             self.xid = self.db.xids().assign();
+            // Its transaction lock, held until it ends (what waiting for it waits on).
+            self.db.locks.hold_xact_lock(self.id, self.id, self.lock_proc(), self.xid);
+            if self.sxact {
+                self.db.ssi.set_xid(self.id, self.xid);
+            }
+            if !self.xact_locks.contains(&self.id) {
+                self.xact_locks.push(self.id);
+            }
         }
         self.xid
     }
@@ -1194,12 +1356,29 @@ impl Txn {
         }
     }
 
-    /// Whether this transaction holds a lock on `key`.
+    /// Whether this transaction holds heavyweight lock `key` (in any mode).
     pub fn holds_lock(&self, key: &[u8]) -> bool {
-        self.locks_held.contains(key)
+        self.locks_held.keys().any(|(k, _)| k == key)
     }
 
-    /// Lock a row (or any key) until the transaction ends.
+    /// The backend this transaction's locks belong to.
+    pub fn lock_proc(&self) -> u64 {
+        locks::proc_of(self.id, self.lock_peer)
+    }
+
+    /// The waits a lock request of this transaction allows.
+    pub fn waits(&self, policy: WaitPolicy) -> Waits<'_> {
+        Waits {
+            policy,
+            cancel: &self.cancel,
+            lock_timeout: self.lock_timeout,
+            deadline: self.deadline,
+            deadlock_timeout: self.deadlock_timeout,
+        }
+    }
+
+    /// Take heavyweight lock `key` in `mode` until the transaction ends (or the
+    /// subtransaction taking it aborts). Ok(false) only for SKIP LOCKED.
     pub fn lock(
         &mut self,
         key: &[u8],
@@ -1207,23 +1386,111 @@ impl Txn {
         policy: WaitPolicy,
         what: &dyn Fn() -> String,
     ) -> Result<bool> {
-        if self.locks_held.contains(key) {
+        let k = (key.to_vec(), mode);
+        if self.locks_held.contains_key(&k) {
             return Ok(true);
         }
         let got = self.db.locks.acquire(
             key,
             self.id,
-            self.lock_peer,
+            self.lock_proc(),
             mode,
-            policy,
-            &self.cancel,
-            self.lock_timeout,
+            &self.waits(policy),
             what,
         )?;
         if got {
-            self.locks_held.insert(key.to_vec());
+            self.lock_journal.push(k.clone());
+            self.locks_held.insert(k, self.savepoints.len());
+            // Its own lock (the virtual transaction id's), which waiting for it waits on.
+            if !self.xact_locks.contains(&self.id) {
+                self.db.locks.hold_xact_lock(self.id, self.id, self.lock_proc(), self.xid);
+                self.xact_locks.push(self.id);
+            }
         }
         Ok(got)
+    }
+
+    /// WaitForLockers: wait until every transaction holding relation `rel`'s lock in a mode
+    /// conflicting with `mode` has ended (the CONCURRENTLY commands' phases).
+    pub fn wait_for_lockers(&mut self, rel: u32, mode: LockMode) -> Result<()> {
+        let key = locks::relation_key(self.db.oid, rel);
+        let proc = self.lock_proc();
+        for owner in self.db.locks.conflicting_owners(&key, mode, proc) {
+            let k = locks::xact_key(owner);
+            self.db.locks.acquire(&k, self.id, proc, LockMode::Share, &self.waits(WaitPolicy::Block), &String::new)?;
+            self.db.locks.release(&k, self.id, LockMode::Share);
+        }
+        Ok(())
+    }
+
+    /// Where the heavyweight locks taken so far end (`release_locks_since`).
+    pub fn lock_mark(&self) -> usize {
+        self.lock_journal.len()
+    }
+
+    /// Release the heavyweight locks taken since `mark` (a utility statement's own
+    /// transaction for each relation it processes, as VACUUM / ANALYZE commit after each).
+    pub fn release_locks_since(&mut self, mark: usize) {
+        while self.lock_journal.len() > mark {
+            let k = self.lock_journal.pop().unwrap();
+            self.locks_held.remove(&k);
+            self.db.locks.release(&k.0, self.id, k.1);
+        }
+    }
+
+    /// Lock relation `rel` in `mode` (LockRelationOid) until the transaction ends.
+    pub fn lock_relation(&mut self, rel: u32, mode: LockMode, policy: WaitPolicy, name: &dyn Fn() -> String) -> Result<bool> {
+        let key = locks::relation_key(self.db.oid, rel);
+        self.lock(&key, mode, policy, &|| format!("relation \"{}\"", name()))
+    }
+
+    /// The lock id of the running (sub)transaction (whose transaction lock its row locks
+    /// are waited for through).
+    fn holder(&self) -> u64 {
+        self.savepoints.last().map_or(self.id, |sp| sp.lock_id)
+    }
+
+    /// Lock row `key` of relation `rel` in `mode` (heap_lock_tuple's wait for conflicting
+    /// lockers); `what` names the relation. Ok(false) only for SKIP LOCKED.
+    pub fn lock_row(
+        &mut self,
+        rel: u32,
+        key: &[u8],
+        mode: RowLockMode,
+        policy: WaitPolicy,
+        what: &dyn Fn() -> String,
+    ) -> Result<bool> {
+        let holder = self.holder();
+        let xid = self.cur_xid();
+        let tuple = locks::tuple_key(self.db.oid, rel, key);
+        let got = self.db.locks.lock_row(
+            key,
+            &tuple,
+            holder,
+            self.id,
+            self.lock_proc(),
+            xid,
+            mode,
+            &self.waits(policy),
+            what,
+        )?;
+        if got {
+            if !self.xact_locks.contains(&holder) {
+                self.xact_locks.push(holder);
+            }
+            self.row_locks.push((key.to_vec(), self.savepoints.len()));
+        }
+        Ok(got)
+    }
+
+    /// The strongest row lock this transaction holds on `key`.
+    pub fn row_lock_held(&self, key: &[u8]) -> Option<RowLockMode> {
+        self.db.locks.row_held(key, self.id)
+    }
+
+    /// Whether `key`'s latest change (committed at `ts`) moved it to another partition.
+    pub fn moved_at(&self, key: &[u8], ts: u64) -> bool {
+        self.db.moved.lock().get(key) == Some(&ts)
     }
 
     /// Whether `key` changed after our snapshot (a concurrent committed write).
@@ -1253,7 +1520,9 @@ impl Txn {
             name: name.to_string(),
             journal_len: self.journal.len(),
             catalog: self.catalog.clone(),
-            locks: self.locks_held.clone(),
+            lock_journal_len: self.lock_journal.len(),
+            lock_id: self.db.next_txn.fetch_add(1, Ordering::Relaxed),
+            lock_ids: Vec::new(),
             deferred_len: self.deferred.len(),
             deferred_triggers_len: self.deferred_triggers.len(),
             notifies_len: self.notifies.len(),
@@ -1282,7 +1551,7 @@ impl Txn {
         let sp = &self.savepoints[i];
         let target = sp.journal_len;
         let catalog = sp.catalog.clone();
-        let keep_locks = sp.locks.clone();
+        let journal_len = sp.lock_journal_len;
         self.deferred.truncate(sp.deferred_len);
         self.deferred_triggers.truncate(sp.deferred_triggers_len);
         self.notifies.truncate(sp.notifies_len);
@@ -1310,13 +1579,7 @@ impl Txn {
             self.catalog_base_cat = None;
         }
         // Locks taken after the savepoint are released, as Postgres does for subtransactions.
-        let release: Vec<Vec<u8>> = self.locks_held.difference(&keep_locks).cloned().collect();
-        if !release.is_empty() {
-            self.db.locks.release_all(self.id, release.clone());
-            for k in release {
-                self.locks_held.remove(&k);
-            }
-        }
+        self.release_locks_above(i, journal_len);
         // The aborted subtransactions' statistics counts (levels i+2 and deeper).
         for nest in (i + 2..=self.savepoints.len() + 1).rev() {
             self.pgstat.end_subxact(nest, false);
@@ -1332,6 +1595,8 @@ impl Txn {
             xids.finish(x, false);
         }
         self.savepoints[i].xid = 0;
+        self.savepoints[i].lock_id = self.db.next_txn.fetch_add(1, Ordering::Relaxed);
+        self.savepoints[i].lock_ids.clear();
         self.savepoints.truncate(i + 1);
         let renewed: Vec<u32> = self
             .new_storage
@@ -1366,6 +1631,20 @@ impl Txn {
         match i.checked_sub(1) {
             Some(p) => self.savepoints[p].committed.extend(ended),
             None => self.sub_committed.extend(ended),
+        }
+        // Their locks become the parent's: a later abort of it releases them.
+        let ids: Vec<u64> = self.savepoints[i..]
+            .iter()
+            .flat_map(|sp| sp.lock_ids.iter().copied().chain([sp.lock_id]))
+            .collect();
+        if let Some(p) = i.checked_sub(1) {
+            self.savepoints[p].lock_ids.extend(ids);
+        }
+        for d in self.locks_held.values_mut() {
+            *d = (*d).min(i);
+        }
+        for (_, d) in &mut self.row_locks {
+            *d = (*d).min(i);
         }
         self.savepoints.truncate(i);
         for d in self.lo_descs.iter_mut().flatten() {
@@ -1427,6 +1706,12 @@ impl Txn {
     }
 
     pub fn commit(mut self) -> Result<u64> {
+        if self.sxact
+            && let Err(e) = self.db.ssi.pre_commit(self.id)
+        {
+            self.ssi_finish(false, 0);
+            return Err(e);
+        }
         let mut writes: Vec<(Vec<u8>, Option<Bytes>)> = Vec::with_capacity(self.writes.len());
         let mut new_catalog = false;
         for (k, (v, _)) in std::mem::take(&mut self.writes) {
@@ -1515,7 +1800,23 @@ impl Txn {
             self.db.store.commit(writes, |s| check(s, &mut Vec::new()))
         };
         self.finish_xid(result.is_ok());
+        if let Ok(ts) = &result
+            && !self.moved_out.is_empty()
+        {
+            let mut m = self.db.moved.lock();
+            // (Kept bounded: what's waited on is recent.)
+            if m.len() > 100_000 {
+                m.clear();
+            }
+            for k in self.moved_out.drain(..) {
+                m.insert(k, *ts);
+            }
+        }
         self.release_locks();
+        match &result {
+            Ok(ts) => self.ssi_finish(true, *ts),
+            Err(_) => self.ssi_finish(false, 0),
+        }
         result
     }
 
@@ -1529,13 +1830,63 @@ impl Txn {
     pub fn rollback(mut self) {
         self.finish_xid(false);
         self.release_locks();
+        self.ssi_finish(false, 0);
+    }
+
+    /// ReleasePredicateLocks, once.
+    fn ssi_finish(&mut self, commit: bool, ts: u64) {
+        if std::mem::take(&mut self.sxact) {
+            self.db.ssi.finish(self.id, commit, ts);
+        }
+    }
+
+    /// Release the locks of the subtransactions from savepoint `i` on (taken after the
+    /// journal held `journal_len`): heavyweight ones, then their row locks and transaction
+    /// locks.
+    fn release_locks_above(&mut self, i: usize, journal_len: usize) {
+        while self.lock_journal.len() > journal_len {
+            let k = self.lock_journal.pop().unwrap();
+            self.locks_held.remove(&k);
+            self.db.locks.release(&k.0, self.id, k.1);
+        }
+        let holders: Vec<u64> = self.savepoints[i..]
+            .iter()
+            .flat_map(|sp| sp.lock_ids.iter().copied().chain([sp.lock_id]))
+            .collect();
+        let rows: Vec<Vec<u8>> = self
+            .row_locks
+            .iter()
+            .filter(|(_, d)| *d > i)
+            .map(|(k, _)| k.clone())
+            .collect();
+        self.row_locks.retain(|(_, d)| *d <= i);
+        self.db.locks.release_subxact(self.id, &holders, &rows);
+        self.xact_locks.retain(|h| !holders.contains(h));
+    }
+
+    /// An error aborted the running (sub)transaction (AbortTransaction /
+    /// AbortSubTransaction): its locks go now, not when the block is rolled back.
+    pub fn release_aborted_locks(&mut self) {
+        match self.savepoints.len().checked_sub(1) {
+            Some(i) => {
+                let journal_len = self.savepoints[i].lock_journal_len;
+                self.release_locks_above(i, journal_len);
+            }
+            None => self.release_locks(),
+        }
     }
 
     fn release_locks(&mut self) {
-        if !self.locks_held.is_empty() {
-            let keys: Vec<Vec<u8>> = self.locks_held.drain().collect();
-            self.db.locks.release_all(self.id, keys);
+        if self.locks_held.is_empty() && self.row_locks.is_empty() && self.xact_locks.is_empty() {
+            return;
         }
+        let mut keys: Vec<Vec<u8>> = self.locks_held.drain().map(|((k, _), _)| k).collect();
+        keys.sort();
+        keys.dedup();
+        keys.extend(self.xact_locks.drain(..).map(locks::xact_key));
+        self.lock_journal.clear();
+        let rows: Vec<Vec<u8>> = self.row_locks.drain(..).map(|(k, _)| k).collect();
+        self.db.locks.release_with_rows(self.id, keys, rows);
     }
 
     /// pg_export_snapshot(): export this transaction's current snapshot under a new
@@ -1612,6 +1963,7 @@ impl Txn {
 
 impl Drop for Txn {
     fn drop(&mut self) {
+        self.ssi_finish(false, 0);
         self.finish_xid(false);
         self.release_locks();
         if std::mem::take(&mut self.exported) {

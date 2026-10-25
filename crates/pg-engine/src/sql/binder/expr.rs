@@ -7507,6 +7507,7 @@ impl Binder<'_, '_> {
             ));
         };
         let mut d = (*def).clone();
+        let void = matches!(d.ret, func::Ret::Fixed(DataType::Void));
         // (A parameter of an extension's native type keeps the built-in's own type: the call
         // passes the built-in value, `crate::ext::types::wants_builtin`.)
         d.args = fdef
@@ -7524,7 +7525,33 @@ impl Binder<'_, '_> {
         d.strict = fdef.strict;
         d.volatility = fdef.volatility;
         d.min_args = d.args.len();
-        Ok(Expr::Call(Arc::new(d), coerced, fdef.ret.clone()))
+        // A void built-in declared to return an integer gives its (Datum) 0 as that.
+        let zero = match &fdef.ret {
+            DataType::Int2 if void => Some(Value::Int2(0)),
+            DataType::Int4 if void => Some(Value::Int4(0)),
+            DataType::Int8 if void => Some(Value::Int8(0)),
+            _ => None,
+        };
+        let call = Expr::Call(Arc::new(d), coerced.clone(), fdef.ret.clone());
+        Ok(match zero {
+            Some(z) => {
+                let value = Expr::Coalesce(vec![call, Expr::Const(z, fdef.ret.clone())], fdef.ret.clone());
+                if fdef.strict && !coerced.is_empty() {
+                    let any_null = Expr::Or(
+                        coerced.into_iter().map(|a| Expr::IsNull(Box::new(a), false)).collect(),
+                    );
+                    Expr::Case {
+                        operand: None,
+                        whens: vec![(any_null, Expr::Const(Value::Null, fdef.ret.clone()))],
+                        else_: Some(Box::new(value)),
+                        ty: fdef.ret.clone(),
+                    }
+                } else {
+                    value
+                }
+            }
+            None => call,
+        })
     }
 
     /// A call of a user function with bound arguments (already coerced).

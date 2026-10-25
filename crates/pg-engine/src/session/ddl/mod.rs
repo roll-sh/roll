@@ -176,6 +176,8 @@ pub fn ctas_rel_exists(ctx: &ExecCtx, s: &pb::CreateTableAsStmt) -> Result<bool>
 
 pub(crate) struct Ddl<'c, 'a> {
     pub ctx: &'c ExecCtx<'a>,
+    /// LOCK TABLE ... NOWAIT: the relation locks it takes don't wait.
+    pub lock_nowait: bool,
     pub cat: Catalog,
     /// The catalog `cat` was copied from (the base of the transaction's catalog change).
     base: Arc<Catalog>,
@@ -245,6 +247,7 @@ impl<'c, 'a> Ddl<'c, 'a> {
             merge_notices: Vec::new(),
             combined_types: None,
             attaching: false,
+            lock_nowait: false,
         }
     }
 

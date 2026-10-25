@@ -563,6 +563,8 @@ impl Session {
                 }],
                 funcs: Vec::new(),
                 gen_funcs: Vec::new(),
+                locks: vec![(t.oid, crate::txn::locks::LockMode::RowExclusive)],
+                named_locks: 1,
             };
             let filter = self.with_ctx(params, |ctx| {
                 crate::sql::binder::perms::check(&perms, ctx)?;
@@ -749,6 +751,8 @@ impl Session {
                     }],
                     funcs: Vec::new(),
                     gen_funcs: Vec::new(),
+                    locks: vec![(t.oid, crate::txn::locks::LockMode::AccessShare)],
+                    named_locks: 1,
                 };
                 self.with_ctx(params, |ctx| crate::sql::binder::perms::check(&perms, ctx))?;
                 let rel = if rv.schemaname.is_empty() {

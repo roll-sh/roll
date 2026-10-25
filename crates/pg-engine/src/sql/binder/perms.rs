@@ -5,6 +5,8 @@ use super::Binder;
 use crate::catalog::acl::{self, ObjKind};
 use crate::error::{Error, Result, code};
 use crate::exec::ExecCtx;
+use crate::sql::plan::Plan;
+use crate::txn::locks::{LockMode, WaitPolicy};
 use std::collections::BTreeSet;
 
 /// What one relation reference needs.
@@ -26,17 +28,122 @@ pub struct Perms {
     pub funcs: Vec<u32>,
     /// While binding a table's rules: the functions its generated columns call.
     pub gen_funcs: Vec<u32>,
+    /// The relations the statement locks before it runs, in order, with their modes
+    /// (rellockmode: AccessShare to read, RowShare to lock rows, RowExclusive to change),
+    /// then the members its plan scans and their indexes (the planner's and executor's).
+    pub locks: Vec<(u32, LockMode)>,
+    /// How many of `locks` the statement names (taken before it is analyzed; a wait for
+    /// them can change what it means); the rest the planner and executor take.
+    pub named_locks: usize,
 }
 
 impl Perms {
     pub fn is_empty(&self) -> bool {
-        self.rels.is_empty() && self.funcs.is_empty()
+        self.rels.is_empty() && self.funcs.is_empty() && self.locks.is_empty()
+    }
+
+    /// Note relation `oid` is locked in `mode` (the stronger, when it already is).
+    pub fn note_lock(&mut self, oid: u32, mode: LockMode) {
+        match self.locks.iter_mut().find(|(o, _)| *o == oid) {
+            Some((_, m)) => *m = (*m).max(mode),
+            None => self.locks.push((oid, mode)),
+        }
+    }
+
+    /// The tables `plan` scans or changes that the binding didn't note (inheritance members,
+    /// partitions), then the indexes of every table locked, in the table's mode.
+    pub fn add_plan_locks(&mut self, plan: &Plan, cat: &crate::catalog::Catalog) {
+        self.named_locks = self.locks.len();
+        plan_locks(plan, &mut |oid, mode| self.note_lock(oid, mode));
+        let tables: Vec<(u32, LockMode)> = self.locks.clone();
+        for (oid, mode) in tables {
+            if let Some(t) = cat.table(oid) {
+                for ix in t.pkey_index.iter().chain(t.indexes.iter()) {
+                    self.note_lock(*ix, mode);
+                }
+            }
+        }
+    }
+}
+
+/// Relations a plan scans (AccessShare, RowShare under a row mark) and changes (RowExclusive).
+fn plan_locks(plan: &Plan, note: &mut dyn FnMut(u32, LockMode)) {
+    match plan {
+        Plan::Scan(s) => note(
+            s.table.oid,
+            if s.mark.is_some() { LockMode::RowShare } else { LockMode::AccessShare },
+        ),
+        Plan::Insert(i) => {
+            note(i.rules.table.oid, LockMode::RowExclusive);
+            plan_locks(&i.source, note);
+        }
+        Plan::Update(u) => {
+            note(u.rules.table.oid, LockMode::RowExclusive);
+            for m in &u.members {
+                note(m.rules.table.oid, LockMode::RowExclusive);
+            }
+            plan_locks(&u.source, note);
+        }
+        Plan::Delete(d) => {
+            note(d.table.oid, LockMode::RowExclusive);
+            for m in &d.members {
+                note(m.table.oid, LockMode::RowExclusive);
+            }
+            plan_locks(&d.source, note);
+        }
+        Plan::Merge(m) => {
+            note(m.rules.table.oid, LockMode::RowExclusive);
+            plan_locks(&m.source, note);
+        }
+        Plan::Filter { input, .. }
+        | Plan::Project { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Agg { input, .. }
+        | Plan::Window { input, .. }
+        | Plan::Sort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Distinct { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Barrier { input, .. }
+        | Plan::Context { input, .. } => plan_locks(input, note),
+        Plan::SetOp { left, right, .. } | Plan::Join { left, right, .. } => {
+            plan_locks(left, note);
+            plan_locks(right, note);
+        }
+        Plan::Append { inputs, .. } => {
+            for p in inputs.iter() {
+                plan_locks(p, note);
+            }
+        }
+        Plan::With { ctes, body, .. } => {
+            for (_, p) in ctes.iter() {
+                plan_locks(p, note);
+            }
+            plan_locks(body, note);
+        }
+        Plan::Recursive { base, recursive, .. } => {
+            plan_locks(base, note);
+            plan_locks(recursive, note);
+        }
+        _ => {}
     }
 }
 
 impl Binder<'_, '_> {
     /// Note that the statement needs `privs` on relation `oid` (as the current check-as role).
     pub(crate) fn require_rel(&mut self, oid: u32, privs: u32) -> usize {
+        // Its rellockmode: a target of INSERT / UPDATE / DELETE changes it, a FROM item
+        // locked FOR UPDATE / SHARE (UPDATE with SELECT) locks rows of it.
+        let mode = if privs & (acl::INSERT | acl::DELETE) != 0
+            || (privs & acl::UPDATE != 0 && privs & acl::SELECT == 0)
+        {
+            LockMode::RowExclusive
+        } else if privs & acl::UPDATE != 0 {
+            LockMode::RowShare
+        } else {
+            LockMode::AccessShare
+        };
+        self.perms.note_lock(oid, mode);
         if self.cat.table(oid).is_some_and(|t| t.temporary) {
             self.ctx.sess.temp_used.set(true);
             self.ctx.sess.temp_ever.set(true);
@@ -228,6 +335,7 @@ pub fn check(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
     if perms.is_empty() {
         return Ok(());
     }
+    lock_relations(perms, ctx)?;
     // The system views' columns read (see `ExecCtx::sys_cols`).
     for p in &perms.rels {
         if !p.select_cols.is_empty() && crate::catalog::system::SysTable::by_oid(p.oid).is_some() {
@@ -345,6 +453,31 @@ pub fn check(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
                 format!("permission denied for {word} {name}"),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Take the locks the statement's relations need (AcquireExecutorLocks), until the
+/// transaction ends.
+pub fn lock_relations(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
+    lock_some(perms, ctx, perms.locks.len())
+}
+
+/// Take the locks of the relations the statement names (what parse analysis locks).
+pub fn lock_named_relations(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
+    lock_some(perms, ctx, perms.named_locks)
+}
+
+fn lock_some(perms: &Perms, ctx: &ExecCtx, n: usize) -> Result<()> {
+    if perms.locks.is_empty() {
+        return Ok(());
+    }
+    let cat = ctx.catalog();
+    for (oid, mode) in &perms.locks[..n.min(perms.locks.len())] {
+        let name = || rel_word(&cat, *oid).1;
+        ctx.txn
+            .borrow_mut()
+            .lock_relation(*oid, *mode, WaitPolicy::Block, &name)?;
     }
     Ok(())
 }

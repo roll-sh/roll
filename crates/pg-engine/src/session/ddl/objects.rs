@@ -292,6 +292,23 @@ impl Ddl<'_, '_> {
             }
         };
         self.require_owner(t.owner, word, &t.name)?;
+        // DefineIndex: SHARE (CONCURRENTLY: SHARE UPDATE EXCLUSIVE) on the table.
+        self.note_lock(
+            t.oid,
+            if s.concurrent {
+                super::table::lockmode::SHARE_UPDATE_EXCLUSIVE
+            } else {
+                super::table::lockmode::SHARE
+            },
+        )?;
+        // DefineIndex's concurrent build waits for the table's writers (WaitForLockers
+        // with ShareLock) before it builds and validates.
+        if s.concurrent {
+            self.ctx
+                .txn
+                .borrow_mut()
+                .wait_for_lockers(t.oid, crate::txn::locks::LockMode::Share)?;
+        }
         self.not_in_use(t.oid, "CREATE INDEX", &t.name)?;
         let spc = self.choose_tablespace(&s.table_space, t.partkey.is_some(), t.temporary, None)?;
         // ProcessUtilitySlow checks the whole partition tree first.
@@ -1169,7 +1186,7 @@ impl Ddl<'_, '_> {
                     })
                     .max()
                 {
-                    self.note_lock(v.oid, level);
+                    self.note_lock(v.oid, level)?;
                 }
                 let mut nv = (*v).clone();
                 for c in &s.cmds {
@@ -1361,6 +1378,15 @@ impl Ddl<'_, '_> {
             }
         };
         self.require_rel_priv(v.oid, crate::catalog::acl::MAINTAIN, false)?;
+        // ExecRefreshMatView: ACCESS EXCLUSIVE (CONCURRENTLY: EXCLUSIVE).
+        self.note_lock(
+            v.oid,
+            if s.concurrent {
+                super::table::lockmode::EXCLUSIVE
+            } else {
+                super::table::lockmode::ACCESS_EXCLUSIVE
+            },
+        )?;
         let storage = v
             .storage
             .clone()
@@ -1636,6 +1662,8 @@ impl Ddl<'_, '_> {
                 }
                 let id = self.ctx.sess.db.nextval(&seq)?;
                 let k = crate::exec::scan::data_key(t, &r, Some(id));
+                // (heap_insert's SSI check, at the relation.)
+                self.ctx.txn.borrow_mut().ssi_write(t.oid, &k, None, &[])?;
                 let tid = crate::exec::sizing::inserted(t, bixs, &k, &r, self.ctx)?;
                 let xid = self.ctx.txn.borrow_mut().cur_xid();
                 self.ctx
@@ -1835,6 +1863,8 @@ impl Ddl<'_, '_> {
             }
         };
         self.require_owner(sq.owner, "sequence", &sq.name)?;
+        // AlterSequence: SHARE ROW EXCLUSIVE (nextval's ROW EXCLUSIVE waits for it).
+        self.note_lock(sq.oid, super::table::lockmode::SHARE_ROW_EXCLUSIVE)?;
         // An identity column's sequence (owned internally) can't be given another owner.
         let identity_of = sq.owned_by.and_then(|(t, c)| {
             self.cat
@@ -5193,6 +5223,53 @@ impl Ddl<'_, '_> {
                             code::FEATURE_NOT_SUPPORTED,
                             format!("cannot drop partitioned index \"{}\" concurrently", ix.name),
                         ));
+                    }
+                    // RangeVarCallbackForDropRelation: an index's table first, then the
+                    // relation itself; ACCESS EXCLUSIVE (CONCURRENTLY: SHARE UPDATE EXCLUSIVE).
+                    if let Some(oid) = r {
+                        let mode = if s.concurrent {
+                            super::table::lockmode::SHARE_UPDATE_EXCLUSIVE
+                        } else {
+                            super::table::lockmode::ACCESS_EXCLUSIVE
+                        };
+                        let heap = self.cat.indexes.get(&oid).map(|ix| ix.table);
+                        if let Some(heap) = heap {
+                            self.note_lock(heap, mode)?;
+                        }
+                        self.note_lock(oid, mode)?;
+                        // index_drop's concurrent phases wait out every transaction using
+                        // the table (WaitForLockers with AccessExclusiveLock).
+                        if s.concurrent
+                            && let Some(heap) = heap
+                        {
+                            self.ctx.txn.borrow_mut().wait_for_lockers(
+                                heap,
+                                crate::txn::locks::LockMode::AccessExclusive,
+                            )?;
+                        }
+                        // A partitioned index: every partition's table, then (as its
+                        // dependents) the partitions' indexes attached to it.
+                        if let Some(heap) = heap
+                            && self.cat.tables.get(&heap).is_some_and(|t| t.partkey.is_some())
+                        {
+                            for child in self.cat.inheritors(heap).into_iter().skip(1) {
+                                self.note_lock(child, mode)?;
+                            }
+                            let mut todo = vec![oid];
+                            while let Some(p) = todo.pop() {
+                                let kids: Vec<u32> = self
+                                    .cat
+                                    .indexes
+                                    .values()
+                                    .filter(|i| i.parent == p)
+                                    .map(|i| i.oid)
+                                    .collect();
+                                for k in kids {
+                                    self.note_lock(k, mode)?;
+                                    todo.push(k);
+                                }
+                            }
+                        }
                     }
                     r.map(|oid| (REL, oid, 0))
                 }

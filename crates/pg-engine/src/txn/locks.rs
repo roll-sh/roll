@@ -1,4 +1,20 @@
-//! Row and object locks with blocking waits, deadlock detection, cancellation and timeouts.
+//! Heavyweight locks and row locks, as Postgres's lock manager and heap_lock_tuple behave.
+//!
+//! - Heavyweight locks (`acquire`): Postgres's eight modes and conflict table, per-backend
+//!   holds (a backend's session and transaction never conflict with each other), FIFO wait
+//!   queues with JoinWaitQueue's rules (a request conflicting with an earlier waiter queues
+//!   behind it; one already holding what a waiter wants goes ahead of that waiter, or fails at
+//!   once when the two block each other), ProcLockWakeup's grants on release, and
+//!   DeadLockCheck after the waiter's `deadlock_timeout`: a hard cycle fails the waiter that
+//!   checks ("deadlock detected" with its DETAIL), a soft one is broken by reordering wait
+//!   queues (deadlock.c's search, ported).
+//! - Row locks (`lock_row`): the four strengths (FOR KEY SHARE … FOR UPDATE; an UPDATE holds
+//!   NO KEY UPDATE or UPDATE, a DELETE UPDATE) held by (sub)transactions. A request
+//!   conflicting with other transactions' holds takes the heavyweight tuple lock (its place in
+//!   line), then waits for each conflicting holder's transaction lock, as heap_lock_tuple
+//!   does; one not conflicting is granted whoever waits.
+//! - Every (sub)transaction that locks rows holds its transaction lock (ExclusiveLock on
+//!   `xact_key`) until it ends; waiting for a transaction is a ShareLock request on it.
 
 use crate::error::{Error, Result, code};
 use parking_lot::{Condvar, Mutex};
@@ -6,43 +22,373 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A heavyweight lock mode (lockdefs.h), in Postgres's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LockMode {
-    /// FOR KEY SHARE / FOR SHARE: many holders.
-    Shared,
-    /// Writes, FOR UPDATE, FOR NO KEY UPDATE.
-    Exclusive,
+    AccessShare = 1,
+    RowShare = 2,
+    RowExclusive = 3,
+    ShareUpdateExclusive = 4,
+    Share = 5,
+    ShareRowExclusive = 6,
+    Exclusive = 7,
+    AccessExclusive = 8,
+}
+
+const fn bits(modes: &[u8]) -> u16 {
+    let mut m = 0;
+    let mut i = 0;
+    while i < modes.len() {
+        m |= 1 << modes[i];
+        i += 1;
+    }
+    m
+}
+
+/// lock.c's LockConflicts.
+const CONFLICTS: [u16; 9] = [
+    0,
+    bits(&[8]),
+    bits(&[7, 8]),
+    bits(&[5, 6, 7, 8]),
+    bits(&[4, 5, 6, 7, 8]),
+    bits(&[3, 4, 6, 7, 8]),
+    bits(&[3, 4, 5, 6, 7, 8]),
+    bits(&[2, 3, 4, 5, 6, 7, 8]),
+    bits(&[1, 2, 3, 4, 5, 6, 7, 8]),
+];
+
+impl LockMode {
+    const ALL: [LockMode; 8] = [
+        LockMode::AccessShare,
+        LockMode::RowShare,
+        LockMode::RowExclusive,
+        LockMode::ShareUpdateExclusive,
+        LockMode::Share,
+        LockMode::ShareRowExclusive,
+        LockMode::Exclusive,
+        LockMode::AccessExclusive,
+    ];
+
+    /// The mode numbered as in lockdefs.h (LOCK TABLE's `mode`).
+    pub fn from_number(n: i32) -> Option<LockMode> {
+        Self::ALL.get((n as usize).checked_sub(1)?).copied()
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            LockMode::AccessShare => "AccessShareLock",
+            LockMode::RowShare => "RowShareLock",
+            LockMode::RowExclusive => "RowExclusiveLock",
+            LockMode::ShareUpdateExclusive => "ShareUpdateExclusiveLock",
+            LockMode::Share => "ShareLock",
+            LockMode::ShareRowExclusive => "ShareRowExclusiveLock",
+            LockMode::Exclusive => "ExclusiveLock",
+            LockMode::AccessExclusive => "AccessExclusiveLock",
+        }
+    }
+
+    fn bit(self) -> u16 {
+        1 << self as u8
+    }
+
+    fn conflicts(self) -> u16 {
+        CONFLICTS[self as usize]
+    }
+
+    pub fn conflicts_with(self, other: LockMode) -> bool {
+        self.conflicts() & other.bit() != 0
+    }
+}
+
+/// A row lock's strength (LockTupleMode).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RowLockMode {
+    KeyShare,
+    Share,
+    NoKeyUpdate,
+    Update,
+}
+
+impl RowLockMode {
+    /// The heavyweight mode of its tuple lock (tupleLockExtraInfo); the strengths conflict
+    /// as these do.
+    pub fn heavy(self) -> LockMode {
+        match self {
+            RowLockMode::KeyShare => LockMode::AccessShare,
+            RowLockMode::Share => LockMode::RowShare,
+            RowLockMode::NoKeyUpdate => LockMode::Exclusive,
+            RowLockMode::Update => LockMode::AccessExclusive,
+        }
+    }
+
+    pub fn conflicts_with(self, other: RowLockMode) -> bool {
+        self.heavy().conflicts_with(other.heavy())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitPolicy {
+    Block,
+    NoWait,
+    SkipLocked,
+}
+
+/// How a wait may end other than by the lock being granted.
+pub struct Waits<'a> {
+    pub policy: WaitPolicy,
+    pub cancel: &'a AtomicBool,
+    pub lock_timeout: Option<Duration>,
+    /// When the statement times out (statement_timeout).
+    pub deadline: Option<Instant>,
+    pub deadlock_timeout: Duration,
+}
+
+impl<'a> Waits<'a> {
+    pub fn new(policy: WaitPolicy, cancel: &'a AtomicBool) -> Self {
+        Waits {
+            policy,
+            cancel,
+            lock_timeout: None,
+            deadline: None,
+            deadlock_timeout: Duration::from_secs(1),
+        }
+    }
+
+    fn with_policy(&self, policy: WaitPolicy) -> Waits<'a> {
+        Waits {
+            policy,
+            cancel: self.cancel,
+            lock_timeout: self.lock_timeout,
+            deadline: self.deadline,
+            deadlock_timeout: self.deadlock_timeout,
+        }
+    }
+}
+
+/// The 8-byte prefixes of lock keys that aren't data keys.
+pub const ADVISORY: u8 = 3;
+pub const RELATION: u8 = 6;
+pub const TUPLE: u8 = 7;
+pub const TRANSACTION: u8 = 8;
+pub const OBJECT: u8 = 9;
+
+fn prefixed(kind: u8) -> Vec<u8> {
+    vec![0, 0, 0, 0, 0, 0, 0, kind]
+}
+
+/// The lock on relation `rel` of database `db` (LOCKTAG_RELATION).
+pub fn relation_key(db: u32, rel: u32) -> Vec<u8> {
+    let mut k = prefixed(RELATION);
+    k.extend_from_slice(&db.to_be_bytes());
+    k.extend_from_slice(&rel.to_be_bytes());
+    k
+}
+
+/// The heavyweight lock of a row (LOCKTAG_TUPLE), by its data key.
+pub fn tuple_key(db: u32, rel: u32, row: &[u8]) -> Vec<u8> {
+    let mut k = prefixed(TUPLE);
+    k.extend_from_slice(&db.to_be_bytes());
+    k.extend_from_slice(&rel.to_be_bytes());
+    k.extend_from_slice(row);
+    k
+}
+
+/// A (sub)transaction's own lock (LOCKTAG_TRANSACTION), by its lock id.
+pub fn xact_key(id: u64) -> Vec<u8> {
+    let mut k = prefixed(TRANSACTION);
+    k.extend_from_slice(&id.to_be_bytes());
+    k
+}
+
+/// A lock on a database object (LOCKTAG_OBJECT).
+pub fn object_key(db: u32, class: u32, obj: u32, sub: u16) -> Vec<u8> {
+    let mut k = prefixed(OBJECT);
+    k.extend_from_slice(&db.to_be_bytes());
+    k.extend_from_slice(&class.to_be_bytes());
+    k.extend_from_slice(&obj.to_be_bytes());
+    k.extend_from_slice(&sub.to_be_bytes());
+    k
+}
+
+/// What a lock key names, for pg_locks and deadlock reports.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Tag {
+    Relation { db: u32, rel: u32 },
+    Tuple { db: u32, rel: u32, row: Vec<u8> },
+    /// A transaction's lock, with the transaction id it shows (0: none assigned).
+    Transaction { id: u64, xid: u64 },
+    Object { db: u32, class: u32, obj: u32, sub: u16 },
+    Advisory(Vec<u8>),
+    /// The engine's own locks (unique keys, exclusion constraints, large objects).
+    Other(Vec<u8>),
+}
+
+fn be32(b: &[u8], at: usize) -> u32 {
+    b.get(at..at + 4).map_or(0, |s| u32::from_be_bytes(s.try_into().unwrap()))
+}
+
+pub fn tag_of(key: &[u8], xid: u64) -> Tag {
+    if key.len() < 8 || key[..7] != [0; 7] {
+        return Tag::Other(key.to_vec());
+    }
+    let b = &key[8..];
+    match key[7] {
+        RELATION => Tag::Relation { db: be32(b, 0), rel: be32(b, 4) },
+        TUPLE => Tag::Tuple {
+            db: be32(b, 0),
+            rel: be32(b, 4),
+            row: b.get(8..).unwrap_or_default().to_vec(),
+        },
+        TRANSACTION => Tag::Transaction {
+            id: b.get(..8).map_or(0, |s| u64::from_be_bytes(s.try_into().unwrap())),
+            xid,
+        },
+        OBJECT => Tag::Object {
+            db: be32(b, 0),
+            class: be32(b, 4),
+            obj: be32(b, 8),
+            sub: b.get(12..14).map_or(0, |s| u16::from_be_bytes(s.try_into().unwrap())),
+        },
+        ADVISORY => Tag::Advisory(key.to_vec()),
+        _ => Tag::Other(key.to_vec()),
+    }
+}
+
+/// A lock on a relation of a database (not a shared catalog): what the fast path takes.
+fn is_local_relation(key: &[u8]) -> bool {
+    key.len() >= 16 && key[..7] == [0; 7] && key[7] == RELATION && be32(&key[8..], 0) != 0
+}
+
+/// DescribeLockTag.
+fn describe(tag: &Tag, db: u32) -> String {
+    match tag {
+        Tag::Relation { db, rel } => format!("relation {rel} of database {db}"),
+        Tag::Tuple { db, rel, .. } => format!("tuple of relation {rel} of database {db}"),
+        Tag::Transaction { xid, .. } => format!("transaction {xid}"),
+        Tag::Object { db, class, obj, .. } => {
+            format!("object {obj} of class {class} of database {db}")
+        }
+        Tag::Advisory(k) => {
+            let b = &k[8..];
+            let (f2, f3, f4) = match b.first() {
+                Some(1) => {
+                    let v = b.get(1..9).map_or(0, |s| i64::from_be_bytes(s.try_into().unwrap()));
+                    ((v >> 32) as u32, v as u32, 1)
+                }
+                _ => (be32(b, 1), be32(b, 5), 2),
+            };
+            format!("advisory lock [{db},{f2},{f3},{f4}]")
+        }
+        Tag::Other(_) => "a row".to_string(),
+    }
+}
+
+/// A granted hold: one owner's (a transaction's or a session's) hold of one mode.
+#[derive(Clone, Debug)]
+struct Hold {
+    owner: u64,
+    proc: u64,
+    mode: LockMode,
+    count: u32,
+    /// Taken through the fast path (a weak relation lock while no strong one was held or
+    /// asked for), as pg_locks shows.
+    fastpath: bool,
 }
 
 #[derive(Default)]
 struct Entry {
-    /// Exclusive holders: one, or several owners of the same backend (its session and its
-    /// transaction, whose locks never conflict with each other).
-    exclusive: Vec<u64>,
-    shared: Vec<u64>,
+    holds: Vec<Hold>,
+    /// Waiting backends, in queue order.
+    queue: Vec<u64>,
+    /// A transaction lock's transaction id (pg_locks, deadlock reports).
+    xid: u64,
 }
 
 impl Entry {
-    fn is_free(&self) -> bool {
-        self.exclusive.is_empty() && self.shared.is_empty()
+    /// The modes held by backends other than `proc`.
+    fn others_mask(&self, proc: u64) -> u16 {
+        self.holds
+            .iter()
+            .filter(|h| h.proc != proc)
+            .fold(0, |m, h| m | h.mode.bit())
     }
 
-    /// Transactions that block `txn` (or its backend's `peer` owner) from taking `mode`.
-    fn blockers(&self, txn: u64, peer: Option<u64>, mode: LockMode) -> Vec<u64> {
-        let mine = |t: &u64| *t == txn || Some(*t) == peer;
-        let mut b: Vec<u64> = self.exclusive.iter().copied().filter(|t| !mine(t)).collect();
-        if mode == LockMode::Exclusive {
-            b.extend(self.shared.iter().copied().filter(|t| !mine(t)));
-        }
-        b
+    fn held_mask(&self, proc: u64) -> u16 {
+        self.holds
+            .iter()
+            .filter(|h| h.proc == proc)
+            .fold(0, |m, h| m | h.mode.bit())
     }
+
+    /// LockCheckConflicts.
+    fn conflicts(&self, proc: u64, mode: LockMode) -> bool {
+        mode.conflicts() & self.others_mask(proc) != 0
+    }
+
+    fn grant(&mut self, owner: u64, proc: u64, mode: LockMode, key: &[u8]) {
+        match self
+            .holds
+            .iter_mut()
+            .find(|h| h.owner == owner && h.proc == proc && h.mode == mode)
+        {
+            Some(h) => h.count += 1,
+            None => {
+                let fastpath = mode <= LockMode::RowExclusive
+                    && is_local_relation(key)
+                    && !self.holds.iter().any(|h| h.mode > LockMode::ShareUpdateExclusive);
+                self.holds.push(Hold { owner, proc, mode, count: 1, fastpath })
+            }
+        }
+    }
+
+    /// The backends holding it, in the order they first took it.
+    fn holder_procs(&self) -> Vec<u64> {
+        let mut v: Vec<u64> = Vec::new();
+        for h in &self.holds {
+            if !v.contains(&h.proc) {
+                v.push(h.proc);
+            }
+        }
+        v
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Status {
+    Waiting,
+    Granted,
+}
+
+struct Waiter {
+    key: Vec<u8>,
+    owner: u64,
+    mode: LockMode,
+    /// What the backend held of the lock when it joined the queue (PGPROC.heldLocks).
+    held: u16,
+    status: Status,
+    since: Instant,
+}
+
+/// A row lock held by a (sub)transaction.
+#[derive(Clone, Debug)]
+struct RowHold {
+    /// The lock id of the (sub)transaction holding it (its transaction lock).
+    holder: u64,
+    /// The top-level transaction.
+    owner: u64,
+    proc: u64,
+    mode: RowLockMode,
 }
 
 #[derive(Default)]
 struct State {
     locks: HashMap<Vec<u8>, Entry>,
-    /// waiter → the transactions it waits for
-    waits: HashMap<u64, Vec<u64>>,
+    /// Waiting backends' requests (a backend waits for one lock at a time).
+    waiters: HashMap<u64, Waiter>,
+    /// The process id of each backend.
+    pids: HashMap<u64, i32>,
+    rows: HashMap<Vec<u8>, Vec<RowHold>>,
 }
 
 #[derive(Default)]
@@ -51,131 +397,837 @@ pub struct LockManager {
     cv: Condvar,
 }
 
-pub enum WaitPolicy {
-    Block,
-    NoWait,
-    SkipLocked,
+/// One heavyweight lock as pg_locks shows it.
+#[derive(Clone, Debug)]
+pub struct LockInfo {
+    pub tag: Tag,
+    pub pid: Option<i32>,
+    pub owner: u64,
+    pub mode: LockMode,
+    pub granted: bool,
+    pub fastpath: bool,
+    pub wait_start: Option<Instant>,
+}
+
+/// The backend of a lock owner: a session's own owner carries its pid (`SessionState::
+/// lock_owner`); a transaction's is its session's (`peer`), or itself without one.
+pub fn proc_of(owner: u64, peer: Option<u64>) -> u64 {
+    if owner >> 63 == 1 { owner } else { peer.unwrap_or(owner) }
+}
+
+fn pid_of(proc: u64) -> Option<i32> {
+    (proc >> 63 == 1).then_some(proc as u32 as i32)
+}
+
+enum Deadlock {
+    None,
+    Soft,
+    /// The cycle: (backend, lock key, mode it waits for).
+    Hard(Vec<(u64, Vec<u8>, LockMode)>),
 }
 
 impl LockManager {
-    /// Acquire `key` for `txn`; what `peer` (the same backend's other owner) holds doesn't
-    /// conflict. Returns Ok(false) only for SKIP LOCKED when the lock is taken.
-    #[allow(clippy::too_many_arguments)]
+    /// Acquire heavyweight lock `key` in `mode` for `owner`, of backend `proc`. Ok(false)
+    /// only for SKIP LOCKED when it isn't free; NOWAIT errors with "could not obtain lock on
+    /// {what}".
     pub fn acquire(
         &self,
         key: &[u8],
-        txn: u64,
-        peer: Option<u64>,
+        owner: u64,
+        proc: u64,
         mode: LockMode,
-        policy: WaitPolicy,
-        cancel: &AtomicBool,
-        timeout: Option<Duration>,
+        w: &Waits<'_>,
         what: &dyn Fn() -> String,
     ) -> Result<bool> {
-        let start = Instant::now();
         let mut s = self.state.lock();
-        loop {
-            let entry = s.locks.entry(key.to_vec()).or_default();
-            let blockers = entry.blockers(txn, peer, mode);
-            if blockers.is_empty() {
-                match mode {
-                    LockMode::Exclusive => {
-                        if !entry.exclusive.contains(&txn) {
-                            entry.exclusive.push(txn);
-                        }
-                        entry.shared.retain(|t| *t != txn);
+        if let Some(pid) = pid_of(proc) {
+            s.pids.insert(proc, pid);
+        }
+        let wait_mask = {
+            let e = s.locks.get(key);
+            e.map_or(0, |e| {
+                e.queue
+                    .iter()
+                    .filter_map(|p| s.waiters.get(p))
+                    .fold(0, |m, w| m | w.mode.bit())
+            })
+        };
+        let e = s.locks.entry(key.to_vec()).or_default();
+        // A strong relation lock moves the fast-path holds into the main table.
+        if mode > LockMode::ShareUpdateExclusive {
+            for h in &mut e.holds {
+                h.fastpath = false;
+            }
+        }
+        // Held in this mode already (by this owner or another of the backend's): granted.
+        if e.holds.iter().any(|h| h.proc == proc && h.mode == mode) {
+            e.grant(owner, proc, mode, key);
+            return Ok(true);
+        }
+        if mode.conflicts() & wait_mask == 0 && !e.conflicts(proc, mode) {
+            e.grant(owner, proc, mode, key);
+            return Ok(true);
+        }
+        // JoinWaitQueue.
+        let my_held = e.held_mask(proc);
+        let mut insert_at = None;
+        if my_held != 0 {
+            let mut ahead = 0u16;
+            let queue = e.queue.clone();
+            for (i, wp) in queue.iter().enumerate() {
+                let Some(other) = s.waiters.get(wp) else { continue };
+                if other.mode.conflicts() & my_held != 0 {
+                    if mode.conflicts() & other.held != 0 {
+                        // RememberSimpleDeadLock: each waits for the other.
+                        let cycle = vec![
+                            (proc, key.to_vec(), mode),
+                            (*wp, other.key.clone(), other.mode),
+                        ];
+                        let msg = self.report(&s, &cycle);
+                        Self::drop_empty(&mut s, key);
+                        return Err(msg);
                     }
-                    LockMode::Shared => {
-                        if !entry.exclusive.contains(&txn) && !entry.shared.contains(&txn) {
-                            entry.shared.push(txn);
-                        }
+                    let e = s.locks.get_mut(key).unwrap();
+                    if mode.conflicts() & ahead == 0 && !e.conflicts(proc, mode) {
+                        e.grant(owner, proc, mode, key);
+                        return Ok(true);
                     }
+                    insert_at = Some(i);
+                    break;
                 }
-                s.waits.remove(&txn);
-                return Ok(true);
+                ahead |= other.mode.bit();
             }
-            match policy {
-                WaitPolicy::NoWait => {
-                    return Err(Error::new(
-                        code::LOCK_NOT_AVAILABLE,
-                        format!("could not obtain lock on {}", what()),
-                    ));
-                }
-                WaitPolicy::SkipLocked => return Ok(false),
-                WaitPolicy::Block => {}
-            }
-            // Deadlock check: does any blocker (transitively) wait for us?
-            let mut stack = blockers.clone();
-            let mut seen = std::collections::HashSet::new();
-            while let Some(t) = stack.pop() {
-                if t == txn {
-                    s.waits.remove(&txn);
-                    return Err(Error::new(code::DEADLOCK_DETECTED, "deadlock detected")
-                        .detail(format!("Process {txn} waits for ShareLock on transaction {}; blocked by process {}.", blockers[0], blockers[0]))
-                        .hint("See server log for query details."));
-                }
-                if seen.insert(t)
-                    && let Some(w) = s.waits.get(&t)
-                {
-                    stack.extend(w.iter().copied());
-                }
-            }
-            s.waits.insert(txn, blockers);
-            if cancel.load(Ordering::Relaxed) {
-                s.waits.remove(&txn);
-                return Err(Error::new(
-                    code::QUERY_CANCELED,
-                    "canceling statement due to user request",
-                ));
-            }
-            if let Some(t) = timeout
-                && start.elapsed() >= t
-            {
-                s.waits.remove(&txn);
+        }
+        match w.policy {
+            WaitPolicy::NoWait => {
+                Self::drop_empty(&mut s, key);
                 return Err(Error::new(
                     code::LOCK_NOT_AVAILABLE,
-                    "canceling statement due to lock timeout",
+                    format!("could not obtain lock on {}", what()),
                 ));
             }
-            self.cv.wait_for(&mut s, Duration::from_millis(50));
+            WaitPolicy::SkipLocked => {
+                Self::drop_empty(&mut s, key);
+                return Ok(false);
+            }
+            WaitPolicy::Block => {}
+        }
+        let e = s.locks.get_mut(key).unwrap();
+        match insert_at {
+            Some(i) => e.queue.insert(i, proc),
+            None => e.queue.push(proc),
+        }
+        let start = Instant::now();
+        s.waiters.insert(
+            proc,
+            Waiter {
+                key: key.to_vec(),
+                owner,
+                mode,
+                held: my_held,
+                status: Status::Waiting,
+                since: start,
+            },
+        );
+        // What the statement said so far reaches the client before it waits.
+        drop(s);
+        crate::exec::flush_live_notices();
+        let mut s = self.state.lock();
+        let mut checked = false;
+        loop {
+            if s.waiters.get(&proc).is_some_and(|w| w.status == Status::Granted) {
+                s.waiters.remove(&proc);
+                return Ok(true);
+            }
+            let now = Instant::now();
+            let fail = if w.cancel.load(Ordering::Relaxed) {
+                Some(Error::new(
+                    code::QUERY_CANCELED,
+                    "canceling statement due to user request",
+                ))
+            } else if w.lock_timeout.is_some_and(|t| now >= start + t) {
+                Some(Error::new(
+                    code::LOCK_NOT_AVAILABLE,
+                    "canceling statement due to lock timeout",
+                ))
+            } else if w.deadline.is_some_and(|d| now >= d) {
+                Some(Error::new(
+                    code::QUERY_CANCELED,
+                    "canceling statement due to statement timeout",
+                ))
+            } else if !checked && now >= start + w.deadlock_timeout {
+                checked = true;
+                match self.deadlock_check(&mut s, proc) {
+                    Deadlock::Hard(cycle) => Some(self.report(&s, &cycle)),
+                    Deadlock::Soft => {
+                        self.cv.notify_all();
+                        continue;
+                    }
+                    Deadlock::None => None,
+                }
+            } else {
+                None
+            };
+            if let Some(e) = fail {
+                self.remove_waiter(&mut s, proc);
+                drop(s);
+                self.cv.notify_all();
+                return Err(e);
+            }
+            let mut wake = now + Duration::from_millis(50);
+            if !checked {
+                wake = wake.min(start + w.deadlock_timeout);
+            }
+            if let Some(t) = w.lock_timeout {
+                wake = wake.min(start + t);
+            }
+            if let Some(d) = w.deadline {
+                wake = wake.min(d);
+            }
+            self.cv.wait_until(&mut s, wake.max(now + Duration::from_millis(1)));
         }
     }
 
-    pub fn release_all(&self, txn: u64, keys: impl IntoIterator<Item = Vec<u8>>) {
-        let mut s = self.state.lock();
-        for k in keys {
-            if let Some(e) = s.locks.get_mut(&k) {
-                e.exclusive.retain(|t| *t != txn);
-                e.shared.retain(|t| *t != txn);
-                if e.is_free() {
-                    s.locks.remove(&k);
-                }
+    fn drop_empty(s: &mut State, key: &[u8]) {
+        if s.locks.get(key).is_some_and(|e| e.holds.is_empty() && e.queue.is_empty()) {
+            s.locks.remove(key);
+        }
+    }
+
+    /// RemoveFromWaitQueue, and the wakeups it may allow.
+    fn remove_waiter(&self, s: &mut State, proc: u64) {
+        let Some(w) = s.waiters.remove(&proc) else { return };
+        if let Some(e) = s.locks.get_mut(&w.key) {
+            e.queue.retain(|p| *p != proc);
+        }
+        Self::wakeup(s, &w.key);
+        Self::drop_empty(s, &w.key);
+    }
+
+    /// ProcLockWakeup: grant waiters in queue order while they conflict neither with what
+    /// is held nor with the waiters still ahead of them.
+    fn wakeup(s: &mut State, key: &[u8]) {
+        let Some(e) = s.locks.get_mut(key) else { return };
+        let mut ahead = 0u16;
+        let mut i = 0;
+        while i < e.queue.len() {
+            let p = e.queue[i];
+            let Some(w) = s.waiters.get_mut(&p) else {
+                e.queue.remove(i);
+                continue;
+            };
+            if w.mode.conflicts() & ahead == 0 && !e.conflicts(p, w.mode) {
+                e.grant(w.owner, p, w.mode, key);
+                w.status = Status::Granted;
+                e.queue.remove(i);
+            } else {
+                ahead |= w.mode.bit();
+                i += 1;
             }
         }
-        s.waits.remove(&txn);
+    }
+
+    /// Release one count of `owner`'s hold of `mode`.
+    pub fn release(&self, key: &[u8], owner: u64, mode: LockMode) {
+        let mut s = self.state.lock();
+        if let Some(e) = s.locks.get_mut(key)
+            && let Some(i) = e.holds.iter().position(|h| h.owner == owner && h.mode == mode)
+        {
+            e.holds[i].count -= 1;
+            if e.holds[i].count == 0 {
+                e.holds.remove(i);
+            }
+            Self::wakeup(&mut s, key);
+            Self::drop_empty(&mut s, key);
+        }
         drop(s);
         self.cv.notify_all();
     }
 
-    /// The keys `owner` holds, with the mode (pg_locks).
+    /// Release everything `owner` holds of these heavyweight locks.
+    pub fn release_all(&self, owner: u64, keys: impl IntoIterator<Item = Vec<u8>>) {
+        self.release_with_rows(owner, keys, std::iter::empty());
+    }
+
+    /// A transaction ending: its row locks on `rows`, then its heavyweight locks (its
+    /// transaction locks among them, so waiters see the rows free when they wake).
+    pub fn release_with_rows(
+        &self,
+        owner: u64,
+        keys: impl IntoIterator<Item = Vec<u8>>,
+        rows: impl IntoIterator<Item = Vec<u8>>,
+    ) {
+        let mut s = self.state.lock();
+        for r in rows {
+            if let Some(holds) = s.rows.get_mut(&r) {
+                holds.retain(|h| h.owner != owner);
+                if holds.is_empty() {
+                    s.rows.remove(&r);
+                }
+            }
+        }
+        for k in keys {
+            if let Some(e) = s.locks.get_mut(&k) {
+                e.holds.retain(|h| h.owner != owner);
+                Self::wakeup(&mut s, &k);
+                Self::drop_empty(&mut s, &k);
+            }
+        }
+        drop(s);
+        self.cv.notify_all();
+    }
+
+    /// Subtransactions aborting: their row locks on `rows` go, then their transaction locks.
+    pub fn release_subxact(&self, owner: u64, holders: &[u64], rows: &[Vec<u8>]) {
+        let mut s = self.state.lock();
+        for r in rows {
+            if let Some(holds) = s.rows.get_mut(r) {
+                holds.retain(|h| !(h.owner == owner && holders.contains(&h.holder)));
+                if holds.is_empty() {
+                    s.rows.remove(r);
+                }
+            }
+        }
+        for id in holders {
+            let k = xact_key(*id);
+            if let Some(e) = s.locks.get_mut(&k) {
+                e.holds.retain(|h| h.owner != owner);
+                Self::wakeup(&mut s, &k);
+                Self::drop_empty(&mut s, &k);
+            }
+        }
+        drop(s);
+        self.cv.notify_all();
+    }
+
+    /// Hold (sub)transaction `holder`'s own lock from when it gets a transaction id
+    /// (`xid`), so others can wait for it to end.
+    pub fn hold_xact_lock(&self, holder: u64, owner: u64, proc: u64, xid: u64) {
+        let mut s = self.state.lock();
+        if let Some(pid) = pid_of(proc) {
+            s.pids.insert(proc, pid);
+        }
+        Self::hold_xact(&mut s, holder, owner, proc, xid);
+    }
+
+    /// Hold (sub)transaction `holder`'s own lock, so others can wait for it to end.
+    fn hold_xact(s: &mut State, holder: u64, owner: u64, proc: u64, xid: u64) {
+        let e = s.locks.entry(xact_key(holder)).or_default();
+        if xid != 0 {
+            e.xid = xid;
+        }
+        if !e.holds.iter().any(|h| h.owner == owner) {
+            e.holds.push(Hold { owner, proc, mode: LockMode::Exclusive, count: 1, fastpath: false });
+        }
+    }
+
+    /// Lock row `row` (its data key) in `mode` for (sub)transaction `holder` of top-level
+    /// transaction `owner`, as heap_lock_tuple does: Ok(false) only for SKIP LOCKED. `tuple`
+    /// is the row's heavyweight tuple lock key; `xid` the holder's transaction id. The
+    /// holder's transaction lock (`xact_key(holder)`) is held from here on.
+    #[allow(clippy::too_many_arguments)]
+    pub fn lock_row(
+        &self,
+        row: &[u8],
+        tuple: &[u8],
+        holder: u64,
+        owner: u64,
+        proc: u64,
+        xid: u64,
+        mode: RowLockMode,
+        w: &Waits<'_>,
+        what: &dyn Fn() -> String,
+    ) -> Result<bool> {
+        let mut have_tuple_lock = false;
+        let mut first = true;
+        let mut skip_tuple_lock = false;
+        let release_tuple = |this: &Self, have: bool| {
+            if have {
+                this.release(tuple, owner, mode.heavy());
+            }
+        };
+        loop {
+            let mut s = self.state.lock();
+            if let Some(pid) = pid_of(proc) {
+                s.pids.insert(proc, pid);
+            }
+            let holds = s.rows.get(row).cloned().unwrap_or_default();
+            if first {
+                first = false;
+                let mine: Vec<&RowHold> = holds.iter().filter(|h| h.owner == owner).collect();
+                if mine.iter().any(|h| h.mode >= mode) {
+                    // Held at least this strongly by this transaction already.
+                    return Ok(true);
+                }
+                // Promoting a weaker lock: no tuple lock, or we'd deadlock with a waiter
+                // holding it and waiting for us.
+                skip_tuple_lock = !mine.is_empty();
+            }
+            let conflicting: Vec<u64> = holds
+                .iter()
+                .filter(|h| h.owner != owner && h.mode.conflicts_with(mode))
+                .map(|h| h.holder)
+                .collect();
+            if conflicting.is_empty() {
+                Self::hold_xact(&mut s, holder, owner, proc, xid);
+                let holds = s.rows.entry(row.to_vec()).or_default();
+                match holds.iter_mut().find(|h| h.holder == holder) {
+                    Some(h) => h.mode = h.mode.max(mode),
+                    None => holds.push(RowHold { holder, owner, proc, mode }),
+                }
+                drop(s);
+                release_tuple(self, have_tuple_lock);
+                return Ok(true);
+            }
+            drop(s);
+            match w.policy {
+                WaitPolicy::NoWait if !have_tuple_lock && !skip_tuple_lock => {}
+                WaitPolicy::NoWait => {
+                    release_tuple(self, have_tuple_lock);
+                    return Err(Error::new(
+                        code::LOCK_NOT_AVAILABLE,
+                        format!("could not obtain lock on row in relation \"{}\"", what()),
+                    ));
+                }
+                WaitPolicy::SkipLocked if have_tuple_lock || skip_tuple_lock => {
+                    release_tuple(self, have_tuple_lock);
+                    return Ok(false);
+                }
+                _ => {}
+            }
+            if !have_tuple_lock && !skip_tuple_lock {
+                let got = match self.acquire(tuple, owner, proc, mode.heavy(), w, &|| {
+                    format!("row in relation \"{}\"", what())
+                }) {
+                    Ok(g) => g,
+                    Err(e) if e.code == code::LOCK_NOT_AVAILABLE && w.policy == WaitPolicy::NoWait => {
+                        return Err(Error::new(
+                            code::LOCK_NOT_AVAILABLE,
+                            format!("could not obtain lock on row in relation \"{}\"", what()),
+                        ));
+                    }
+                    Err(e) => return Err(e),
+                };
+                if !got {
+                    return Ok(false);
+                }
+                have_tuple_lock = true;
+                continue;
+            }
+            // Wait for the conflicting (sub)transactions to end.
+            for h in conflicting {
+                let k = xact_key(h);
+                let wait = w.with_policy(match w.policy {
+                    WaitPolicy::Block => WaitPolicy::Block,
+                    _ => WaitPolicy::NoWait,
+                });
+                match self.acquire(&k, owner, proc, LockMode::Share, &wait, &String::new) {
+                    Ok(_) => self.release(&k, owner, LockMode::Share),
+                    Err(e) if e.code == code::LOCK_NOT_AVAILABLE && w.policy != WaitPolicy::Block => {
+                        release_tuple(self, have_tuple_lock);
+                        if w.policy == WaitPolicy::SkipLocked {
+                            return Ok(false);
+                        }
+                        return Err(Error::new(
+                            code::LOCK_NOT_AVAILABLE,
+                            format!("could not obtain lock on row in relation \"{}\"", what()),
+                        ));
+                    }
+                    Err(e) => {
+                        release_tuple(self, have_tuple_lock);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// GetLockConflicts: the transactions (owners) of other backends than `proc` holding
+    /// heavyweight lock `key` in a mode conflicting with `mode`.
+    pub fn conflicting_owners(&self, key: &[u8], mode: LockMode, proc: u64) -> Vec<u64> {
+        let s = self.state.lock();
+        let mut out = Vec::new();
+        if let Some(e) = s.locks.get(key) {
+            for h in &e.holds {
+                if h.proc != proc && h.owner >> 63 == 0 && mode.conflicts_with(h.mode) && !out.contains(&h.owner) {
+                    out.push(h.owner);
+                }
+            }
+        }
+        out
+    }
+
+    /// The row locks on `row` other transactions than `owner` hold: (mode, pid).
+    pub fn row_holders(&self, row: &[u8], owner: u64) -> Vec<(RowLockMode, Option<i32>)> {
+        let s = self.state.lock();
+        s.rows
+            .get(row)
+            .map(|v| {
+                v.iter()
+                    .filter(|h| h.owner != owner)
+                    .map(|h| (h.mode, pid_of(h.proc)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The strongest row lock `owner` holds on `row`.
+    pub fn row_held(&self, row: &[u8], owner: u64) -> Option<RowLockMode> {
+        let s = self.state.lock();
+        s.rows
+            .get(row)
+            .and_then(|v| v.iter().filter(|h| h.owner == owner).map(|h| h.mode).max())
+    }
+
+    /// pg_blocking_pids: the backends whose holds of the lock backend `pid` waits for
+    /// conflict with its request, and those ahead of it in the queue wanting a conflicting
+    /// mode.
+    pub fn blocking_pids(&self, pid: i32) -> Vec<i32> {
+        let s = self.state.lock();
+        let mut out = Vec::new();
+        for (proc, w) in &s.waiters {
+            if s.pids.get(proc) != Some(&pid) || w.status != Status::Waiting {
+                continue;
+            }
+            let Some(e) = s.locks.get(&w.key) else { continue };
+            for h in &e.holds {
+                if h.proc != *proc
+                    && w.mode.conflicts_with(h.mode)
+                    && let Some(p) = s.pids.get(&h.proc).copied().or_else(|| pid_of(h.proc))
+                    && !out.contains(&p)
+                {
+                    out.push(p);
+                }
+            }
+            for q in &e.queue {
+                if q == proc {
+                    break;
+                }
+                if let Some(other) = s.waiters.get(q)
+                    && w.mode.conflicts_with(other.mode)
+                    && let Some(p) = s.pids.get(q).copied().or_else(|| pid_of(*q))
+                    && !out.contains(&p)
+                {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    /// Every heavyweight lock held or awaited (pg_locks).
+    pub fn snapshot(&self) -> Vec<LockInfo> {
+        let s = self.state.lock();
+        let mut out = Vec::new();
+        for (k, e) in &s.locks {
+            let tag = tag_of(k, e.xid);
+            for h in &e.holds {
+                if out.iter().any(|i: &LockInfo| {
+                    i.tag == tag && i.owner == h.owner && i.mode == h.mode && i.granted
+                }) {
+                    continue;
+                }
+                out.push(LockInfo {
+                    tag: tag.clone(),
+                    pid: s.pids.get(&h.proc).copied().or_else(|| pid_of(h.proc)),
+                    owner: h.owner,
+                    mode: h.mode,
+                    granted: true,
+                    fastpath: h.fastpath,
+                    wait_start: None,
+                });
+            }
+            for p in &e.queue {
+                if let Some(w) = s.waiters.get(p) {
+                    out.push(LockInfo {
+                        tag: tag.clone(),
+                        pid: s.pids.get(p).copied().or_else(|| pid_of(*p)),
+                        owner: w.owner,
+                        mode: w.mode,
+                        granted: false,
+                        fastpath: false,
+                        wait_start: Some(w.since),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// The keys `owner` holds, with the modes (pg_locks).
     pub fn held_by(&self, owner: u64) -> Vec<(Vec<u8>, LockMode)> {
         let s = self.state.lock();
-        s.locks
-            .iter()
-            .filter_map(|(k, e)| {
-                if e.exclusive.contains(&owner) {
-                    Some((k.clone(), LockMode::Exclusive))
-                } else if e.shared.contains(&owner) {
-                    Some((k.clone(), LockMode::Shared))
-                } else {
-                    None
-                }
-            })
-            .collect()
+        let mut v = Vec::new();
+        for (k, e) in &s.locks {
+            for h in e.holds.iter().filter(|h| h.owner == owner) {
+                v.push((k.clone(), h.mode));
+            }
+        }
+        v
     }
 
     /// Whether anyone holds a lock (for idle detection and tests).
     pub fn held_count(&self) -> usize {
-        self.state.lock().locks.len()
+        let s = self.state.lock();
+        s.locks.len() + s.rows.len()
+    }
+
+    /// The DETAIL of a deadlock error for this cycle (DeadLockReport).
+    fn report(&self, s: &State, cycle: &[(u64, Vec<u8>, LockMode)]) -> Error {
+        let pid = |p: u64| s.pids.get(&p).copied().or_else(|| pid_of(p)).unwrap_or(0);
+        let mut detail = String::new();
+        for (i, (p, key, mode)) in cycle.iter().enumerate() {
+            let next = cycle.get(i + 1).unwrap_or(&cycle[0]).0;
+            let xid = s.locks.get(key).map_or(0, |e| e.xid);
+            let db = match tag_of(key, xid) {
+                Tag::Relation { db, .. } | Tag::Tuple { db, .. } | Tag::Object { db, .. } => db,
+                _ => 0,
+            };
+            if i > 0 {
+                detail.push('\n');
+            }
+            detail.push_str(&format!(
+                "Process {} waits for {} on {}; blocked by process {}.",
+                pid(*p),
+                mode.name(),
+                describe(&tag_of(key, xid), db),
+                pid(next)
+            ));
+        }
+        Error::new(code::DEADLOCK_DETECTED, "deadlock detected")
+            .detail(detail)
+            .hint("See server log for query details.")
+    }
+
+    /// DeadLockCheck for waiting backend `proc`: a hard deadlock is reported (and `proc`
+    /// left for the caller to remove from its queue); a soft one is resolved by reordering
+    /// wait queues, granting what that allows.
+    fn deadlock_check(&self, s: &mut State, proc: u64) -> Deadlock {
+        let mut d = Dl {
+            s,
+            visited: Vec::new(),
+            details: Vec::new(),
+            wait_orders: Vec::new(),
+            cur: Vec::new(),
+        };
+        if d.check_recurse(proc) {
+            d.wait_orders.clear();
+            let mut soft = Vec::new();
+            d.find_cycle(proc, &mut soft);
+            let cycle: Vec<(u64, Vec<u8>, LockMode)> = d.details.iter().flatten().cloned().collect();
+            return Deadlock::Hard(cycle);
+        }
+        let orders = std::mem::take(&mut d.wait_orders);
+        if orders.is_empty() {
+            return Deadlock::None;
+        }
+        for (key, procs) in orders {
+            if let Some(e) = s.locks.get_mut(&key) {
+                e.queue = procs;
+            }
+            Self::wakeup(s, &key);
+        }
+        Deadlock::Soft
+    }
+}
+
+/// A waits-for edge of a soft cycle: `waiter` is queued behind `blocker` on `lock`.
+#[derive(Clone, Debug)]
+struct Edge {
+    waiter: u64,
+    blocker: u64,
+    lock: Vec<u8>,
+}
+
+/// deadlock.c's search state.
+struct Dl<'s> {
+    s: &'s mut State,
+    visited: Vec<u64>,
+    details: Vec<Option<(u64, Vec<u8>, LockMode)>>,
+    /// Wait queues reordered (by ExpandConstraints): (lock, its queue).
+    wait_orders: Vec<(Vec<u8>, Vec<u64>)>,
+    cur: Vec<Edge>,
+}
+
+enum Config {
+    Hard,
+    Edges(Vec<Edge>),
+}
+
+impl Dl<'_> {
+    /// DeadLockCheckRecurse: true if no deadlock-free ordering exists.
+    fn check_recurse(&mut self, proc: u64) -> bool {
+        let edges = match self.test_configuration(proc) {
+            Config::Hard => return true,
+            Config::Edges(e) if e.is_empty() => return false,
+            Config::Edges(e) => e,
+        };
+        if self.cur.len() >= 64 {
+            return true;
+        }
+        for e in edges {
+            self.cur.push(e);
+            if !self.check_recurse(proc) {
+                return false;
+            }
+            self.cur.pop();
+        }
+        true
+    }
+
+    fn test_configuration(&mut self, start: u64) -> Config {
+        let cur = self.cur.clone();
+        if !self.expand_constraints(&cur) {
+            return Config::Hard;
+        }
+        let mut found = Vec::new();
+        let mut soft = Vec::new();
+        for c in &cur {
+            for p in [c.waiter, c.blocker] {
+                if self.find_cycle(p, &mut soft) {
+                    if soft.is_empty() {
+                        return Config::Hard;
+                    }
+                    found = soft.clone();
+                }
+            }
+        }
+        if self.find_cycle(start, &mut soft) {
+            if soft.is_empty() {
+                return Config::Hard;
+            }
+            found = soft.clone();
+        }
+        Config::Edges(found)
+    }
+
+    fn find_cycle(&mut self, proc: u64, soft: &mut Vec<Edge>) -> bool {
+        self.visited.clear();
+        self.details.clear();
+        soft.clear();
+        self.find_cycle_recurse(proc, 0, soft)
+    }
+
+    fn find_cycle_recurse(&mut self, proc: u64, depth: usize, soft: &mut Vec<Edge>) -> bool {
+        if let Some(i) = self.visited.iter().position(|p| *p == proc) {
+            if i == 0 {
+                self.details.clear();
+                self.details.resize(depth, None);
+                return true;
+            }
+            return false;
+        }
+        self.visited.push(proc);
+        if self
+            .s
+            .waiters
+            .get(&proc)
+            .is_some_and(|w| w.status == Status::Waiting)
+        {
+            return self.find_cycle_member(proc, depth, soft);
+        }
+        false
+    }
+
+    fn find_cycle_member(&mut self, proc: u64, depth: usize, soft: &mut Vec<Edge>) -> bool {
+        let (key, mode) = {
+            let w = &self.s.waiters[&proc];
+            (w.key.clone(), w.mode)
+        };
+        let Some(e) = self.s.locks.get(&key) else { return false };
+        let conflict = mode.conflicts();
+        // Hard edges: holders of a conflicting mode.
+        let holders: Vec<u64> = e
+            .holder_procs()
+            .into_iter()
+            .filter(|p| *p != proc && e.held_mask(*p) & conflict != 0)
+            .collect();
+        let real_queue = e.queue.clone();
+        for p in holders {
+            if self.find_cycle_recurse(p, depth + 1, soft) {
+                self.details[depth] = Some((proc, key.clone(), mode));
+                return true;
+            }
+        }
+        // Soft edges: waiters ahead of us wanting a conflicting mode.
+        let queue = match self.wait_orders.iter().find(|(k, _)| *k == key) {
+            Some((_, q)) => q.clone(),
+            None => real_queue,
+        };
+        for p in queue {
+            if p == proc {
+                break;
+            }
+            let Some(m) = self.s.waiters.get(&p).map(|w| w.mode) else { continue };
+            if m.bit() & conflict != 0 && self.find_cycle_recurse(p, depth + 1, soft) {
+                self.details[depth] = Some((proc, key.clone(), mode));
+                soft.push(Edge { waiter: proc, blocker: p, lock: key.clone() });
+                return true;
+            }
+        }
+        false
+    }
+
+    /// ExpandConstraints: the wait queue orders the constraints call for.
+    fn expand_constraints(&mut self, constraints: &[Edge]) -> bool {
+        self.wait_orders.clear();
+        for i in (0..constraints.len()).rev() {
+            let lock = &constraints[i].lock;
+            if self.wait_orders.iter().any(|(k, _)| k == lock) {
+                continue;
+            }
+            match self.topo_sort(lock, &constraints[..=i]) {
+                Some(order) => self.wait_orders.push((lock.clone(), order)),
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// TopoSort: an order of `lock`'s queue putting each constraint's waiter before its
+    /// blocker, otherwise keeping the queue's order as far as possible.
+    fn topo_sort(&self, lock: &[u8], constraints: &[Edge]) -> Option<Vec<u64>> {
+        let queue = self.s.locks.get(lock).map(|e| e.queue.clone()).unwrap_or_default();
+        let n = queue.len();
+        let mut topo: Vec<Option<u64>> = queue.iter().copied().map(Some).collect();
+        let mut before = vec![0i32; n];
+        let mut after = vec![0usize; n];
+        let mut pred = vec![0usize; constraints.len()];
+        let mut link = vec![0usize; constraints.len()];
+        for (i, c) in constraints.iter().enumerate() {
+            if c.lock != lock {
+                continue;
+            }
+            let Some(jj) = queue.iter().rposition(|p| *p == c.waiter) else { continue };
+            let Some(kk) = queue.iter().rposition(|p| *p == c.blocker) else { continue };
+            before[jj] += 1;
+            pred[i] = jj;
+            link[i] = after[kk];
+            after[kk] = i + 1;
+        }
+        let mut ordering = vec![0u64; n];
+        let mut last = n as isize - 1;
+        let mut i = n as isize - 1;
+        while i >= 0 {
+            while topo[last as usize].is_none() {
+                last -= 1;
+            }
+            let mut j = last;
+            while j >= 0 && !(topo[j as usize].is_some() && before[j as usize] == 0) {
+                j -= 1;
+            }
+            if j < 0 {
+                return None;
+            }
+            let j = j as usize;
+            ordering[i as usize] = topo[j].take().unwrap();
+            i -= 1;
+            let mut k = after[j];
+            while k > 0 {
+                before[pred[k - 1]] -= 1;
+                k = link[k - 1];
+            }
+        }
+        Some(ordering)
     }
 }

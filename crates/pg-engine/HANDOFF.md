@@ -143,6 +143,14 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   options (CONNECTION LIMIT, ALLOW_CONNECTIONS, IS_TEMPLATE, invalid databases) aren't kept,
   and every engine database reports the builtin C.UTF-8 locale where the reference has libc
   C (a decision about the default collation).
+- **Isolation suite (`src/test/isolation`, 122 specs, 1,648 permutations): see
+  `tests/isolation/STATUS.md`.** Harness: `tests/pg_isolation.rs` (`#[ignore]`d, a port of
+  isolationtester driving both servers over the wire; `PGISOLATION_*` variables in its header).
+  Round 17 (agent 34) took it from 30 to 88 matching specs (921 to 1,378 permutations): the
+  engine now has Postgres's heavyweight lock manager (eight modes, wait queues, deadlock
+  detection with soft-deadlock reordering), relation locks taken by every statement and DDL,
+  four-strength row locks, and true SERIALIZABLE (SSI, `txn/ssi.rs`). What's left is classified
+  there (DETACH CONCURRENTLY, TOAST relations, SSI over GiST / GIN pages, statistics timing, ...).
 
 ## Repository layout
 

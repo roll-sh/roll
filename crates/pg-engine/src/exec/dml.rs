@@ -4,7 +4,7 @@
 
 use super::scan::{
     Locked, NUM_SYS_COLS, data_key, decode_table_row, encode_table_row_at, index_entry_key,
-    index_value_prefix, lock_row, sys_values,
+    index_value_prefix, lock_row, lock_row_mode, sys_values,
 };
 use super::trigger::{self, AfterRow};
 use super::{BoxNode, ExecCtx, Node, Row, eval_all};
@@ -18,7 +18,7 @@ use crate::sql::plan::{
 };
 use crate::storage::keys::{encode_value, index_prefix, prefix_end};
 use crate::txn::DeferredFk;
-use crate::txn::locks::{LockMode, WaitPolicy};
+use crate::txn::locks::{LockMode, RowLockMode, WaitPolicy};
 use crate::types::text::format_value;
 use crate::types::{DataType, Value};
 use std::collections::HashSet;
@@ -739,6 +739,9 @@ fn find_conflict(
     Ok(None)
 }
 
+/// An ON CONFLICT DO UPDATE starting its row over (never reaches a client).
+const RETRY_INSERT: &str = "XXRTY";
+
 /// pg_opclass oid of record_image_ops.
 const RECORD_IMAGE_OPS: u32 = 10036;
 
@@ -1003,6 +1006,11 @@ pub fn put_index_entries(
         }
         if let Some(vals) = index_values(bix, row, ctx)? {
             let k = index_entry_key(t, &bix.index, &vals, dkey);
+            let tracked = ctx.txn.borrow().serializable_tracked();
+            if tracked {
+                let me = ctx.txn.borrow().id;
+                ctx.sess.db.ssi.wrote_entry(me, bix.index.oid, &k);
+            }
             ctx.txn.borrow_mut().put(k, dkey.to_vec())?;
         }
     }
@@ -1358,8 +1366,8 @@ fn period_agg(
             let got = ctx
                 .txn
                 .borrow_mut()
-                .lock(&dkey, LockMode::Shared, WaitPolicy::Block, &|| {
-                    format!("row in \"{}\"", leaf.name)
+                .lock_row(leaf.oid, &dkey, RowLockMode::KeyShare, WaitPolicy::Block, &|| {
+                    leaf.name.clone()
                 })?;
             if !got {
                 continue;
@@ -1630,8 +1638,8 @@ fn find_parent(parent: &Table, cols: &[usize], vals: &[Value], ctx: &ExecCtx) ->
         let got = ctx
             .txn
             .borrow_mut()
-            .lock(dkey, LockMode::Shared, WaitPolicy::Block, &|| {
-                format!("row in \"{}\"", parent.name)
+            .lock_row(parent.oid, dkey, RowLockMode::KeyShare, WaitPolicy::Block, &|| {
+                parent.name.clone()
             })?;
         if !got {
             return Ok(false);
@@ -2158,6 +2166,7 @@ pub fn delete_row(
     old: &[Value],
     ctx: &ExecCtx,
 ) -> Result<()> {
+    ssi_change(t, indexes, dkey, old, None, ctx)?;
     super::sizing::deleted(t, indexes, dkey, ctx)?;
     super::pgstat::count_delete(ctx, t.oid);
     ctx.txn.borrow_mut().delete(dkey.to_vec())?;
@@ -2195,6 +2204,64 @@ fn generated_value(rules: &TableRules, i: usize, e: &crate::sql::expr::Expr, row
     }
 }
 
+/// CheckForSerializableConflictIn for a new row: the relation, and its entries' index pages.
+fn ssi_insert(t: &Table, indexes: &[BoundIndex], dkey: &[u8], row: &[Value], ctx: &ExecCtx) -> Result<()> {
+    if t.temporary || !ctx.txn.borrow().serializable_tracked() {
+        return Ok(());
+    }
+    let pages = super::sizing::entry_pages(t, indexes, row, ctx)?;
+    ctx.txn.borrow_mut().ssi_write(t.oid, dkey, None, &pages)
+}
+
+/// CheckForSerializableConflictIn for a row about to be updated or deleted: its tuple,
+/// page and relation (and, for an update, the index pages its new entries go to).
+fn ssi_change(
+    t: &Table,
+    indexes: &[BoundIndex],
+    dkey: &[u8],
+    old: &[Value],
+    new: Option<&[Value]>,
+    ctx: &ExecCtx,
+) -> Result<()> {
+    if t.temporary || !ctx.txn.borrow().serializable_tracked() {
+        return Ok(());
+    }
+    let bytes = ctx.txn.borrow().get(dkey)?;
+    let tid = bytes.as_deref().and_then(super::scan::stored_tid);
+    // (Without tuple ids, the version it replaces: the latest committed one.)
+    let version = match tid {
+        Some(_) => None,
+        None => ctx.txn.borrow().get_latest(dkey)?.map(|(ts, _)| ts),
+    };
+    // A HOT update (no indexed column changed) adds no index entries.
+    let pages = match new {
+        Some(r) if !hot_update(indexes, old, r, ctx)? => {
+            super::sizing::entry_pages(t, indexes, r, ctx)?
+        }
+        _ => Vec::new(),
+    };
+    ctx.txn.borrow_mut().ssi_write_version(t.oid, dkey, tid, &pages, version)
+}
+
+/// Whether an update keeps every index's values (heap_update's HOT test).
+fn hot_update(indexes: &[BoundIndex], old: &[Value], new: &[Value], ctx: &ExecCtx) -> Result<bool> {
+    for bix in indexes {
+        if bix.index.id == 0 {
+            continue;
+        }
+        let (a, b) = (index_values(bix, old, ctx)?, index_values(bix, new, ctx)?);
+        let same = match (&a, &b) {
+            (Some(a), Some(b)) => super::agg::cmp_rows(a, b) == std::cmp::Ordering::Equal,
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Compute generated columns, validate, and write a new version of a row (already locked).
 /// Returns the row as stored.
 pub fn update_row(
@@ -2224,6 +2291,7 @@ pub fn update_row_rls(
     }
     check_partition(rules, &new, ctx)?;
     check_row_rls(rules, rls, &new, ctx)?;
+    ssi_change(t, &rules.indexes, dkey, old, Some(&new), ctx)?;
     let new_key = if t.storage_pkey().is_some() {
         data_key(t, &new, None)
     } else {
@@ -2248,6 +2316,7 @@ pub fn update_row_rls(
             continue;
         }
         if let Some((_, other)) = index_conflict(t, bix, &nv, Some(dkey), ctx)? {
+            ssi_change(t, &rules.indexes, dkey, old, Some(&new), ctx)?;
             // The new version went into the heap before its index entries found the
             // clash: it stays, dead, where it was put.
             if new_key == dkey {
@@ -2377,6 +2446,12 @@ pub fn insert_new(
         None
     };
     let dkey = data_key(t, &row, rowid);
+    // SSI: heap_insert's check at the relation, then each btree entry's at its leaf page
+    // (before a unique check fails: _bt_check_unique). ON CONFLICT checks its arbiters
+    // first (ExecCheckIndexConstraints).
+    if on_conflict.is_none() {
+        ssi_insert(t, &rules.indexes, &dkey, &row, ctx)?;
+    }
     // Unique and exclusion checks (primary key first), the ON CONFLICT arbiters' before
     // the others' (the speculative insertion's pre-check).
     let arbiter_of = |bix: &BoundIndex| {
@@ -2410,6 +2485,8 @@ pub fn insert_new(
             continue;
         };
         if !arbiter {
+            // _bt_check_unique checks for SSI conflicts before it reports the clash.
+            ssi_insert(t, &rules.indexes, &dkey, &row, ctx)?;
             // The heap tuple went in before its index entries found the clash
             // (ExecInsertIndexTuples): it stays, dead, where it was put.
             if t.has_rowid() {
@@ -2425,6 +2502,9 @@ pub fn insert_new(
                 values: vals,
             },
         ));
+    }
+    if on_conflict.is_some() {
+        ssi_insert(t, &rules.indexes, &dkey, &row, ctx)?;
     }
     let tid = super::sizing::inserted(t, &rules.indexes, &dkey, &row, ctx)?;
     super::pgstat::count_insert(ctx, t.oid, 1);
@@ -2537,6 +2617,16 @@ impl InsertNode {
     /// Insert one source row. Returns the final row (for RETURNING) with its key and the
     /// existing row ON CONFLICT updated, or None if skipped.
     fn insert(&mut self, src: Row, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
+        // ON CONFLICT DO UPDATE found its row changed while it waited for it: start over.
+        loop {
+            match self.insert_once(src.clone(), ctx) {
+                Err(e) if e.code == RETRY_INSERT => continue,
+                r => return r,
+            }
+        }
+    }
+
+    fn insert_once(&mut self, src: Row, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
         let rules = &self.plan.rules;
         if let Some(routing) = self.plan.route.clone() {
             let row = new_row(rules, &self.plan.target, src, ctx)?;
@@ -2637,7 +2727,21 @@ impl InsertNode {
         let t = &rules.table;
         let oc = self.plan.on_conflict.as_ref().unwrap();
         match &oc.action {
-            ConflictAction::Nothing => Ok(None),
+            // ExecCheckTIDVisible: a snapshot transaction can't skip a row its snapshot
+            // doesn't see.
+            ConflictAction::Nothing => {
+                let txn = ctx.txn.borrow();
+                if txn.isolation.txn_snapshot()
+                    && !self.touched.contains(&c.existing)
+                    && txn.changed_since_snapshot(&c.existing)?
+                {
+                    return Err(Error::new(
+                        code::SERIALIZATION_FAILURE,
+                        "could not serialize access due to concurrent update",
+                    ));
+                }
+                Ok(None)
+            }
             ConflictAction::Update {
                 sets,
                 filter,
@@ -2652,23 +2756,47 @@ impl InsertNode {
                         .hint("Ensure that no rows proposed for insertion within the same command have duplicate constrained values."));
                 }
                 let name = t.name.clone();
-                ctx.txn.borrow_mut().lock(
+                // ExecUpdateLockMode: FOR UPDATE when the SET names a key column.
+                // (`sets` are the named table's columns.)
+                let keys = crate::exec::scan::key_columns(&self.plan.rules.table, &ctx.catalog());
+                let mode = if sets.iter().any(|(c, _)| keys.contains(c)) {
+                    RowLockMode::Update
+                } else {
+                    RowLockMode::NoKeyUpdate
+                };
+                // The version the conflict was found with: changed or gone once the lock is
+                // ours (TM_Updated / TM_Deleted), the insertion starts over in READ
+                // COMMITTED; a snapshot transaction fails.
+                let found = ctx.txn.borrow().get_latest(&c.existing)?.map(|(ts, _)| ts);
+                ctx.txn.borrow_mut().lock_row(
+                    t.oid,
                     &c.existing,
-                    LockMode::Exclusive,
+                    mode,
                     WaitPolicy::Block,
-                    &|| format!("row in \"{name}\""),
+                    &|| name.clone(),
                 )?;
                 let latest = ctx.txn.borrow().get_latest(&c.existing)?;
-                let Some((_, Some(bytes))) = latest else {
-                    // Deleted concurrently: retry as a plain insert.
-                    return Err(Error::new(
-                        code::SERIALIZATION_FAILURE,
-                        "could not serialize access due to concurrent delete",
-                    ));
+                let snapshot = ctx.txn.borrow().isolation.txn_snapshot();
+                let Some((ts, Some(bytes))) = latest else {
+                    if snapshot {
+                        return Err(Error::new(
+                            code::SERIALIZATION_FAILURE,
+                            "could not serialize access due to concurrent delete",
+                        ));
+                    }
+                    return Err(Error::new(RETRY_INSERT, "retry"));
                 };
-                if ctx.txn.borrow().isolation.txn_snapshot()
-                    && ctx.txn.borrow().changed_since_snapshot(&c.existing)?
-                {
+                if Some(ts) != found {
+                    if snapshot {
+                        return Err(Error::new(
+                            code::SERIALIZATION_FAILURE,
+                            "could not serialize access due to concurrent update",
+                        ));
+                    }
+                    return Err(Error::new(RETRY_INSERT, "retry"));
+                }
+                // ExecCheckTupleVisible.
+                if snapshot && ctx.txn.borrow().changed_since_snapshot(&c.existing)? {
                     return Err(Error::new(
                         code::SERIALIZATION_FAILURE,
                         "could not serialize access due to concurrent update",
@@ -3282,6 +3410,7 @@ pub(super) fn move_row(
         }
     }
     ctx.moved.borrow_mut().insert(key.clone());
+    ctx.txn.borrow_mut().moved_out.push(dkey.to_vec());
     let mut out = vec![Value::Null; t.columns.len()];
     for (i, m) in me.map.iter().enumerate() {
         if let Some(j) = m {
@@ -3488,6 +3617,12 @@ impl Node for UpdateNode {
                 SelfModified::No => {}
                 SelfModified::ByThis => continue,
                 SelfModified::ByLater => return Err(triggered_change("updated")),
+            }
+            // heap_update: changing a key column takes the row FOR UPDATE (what FOR KEY
+            // SHARE lockers, foreign key checks among them, conflict with).
+            let keys = crate::exec::scan::key_columns(&t, &ctx.catalog());
+            if keys.iter().any(|&i| old.get(i) != new.get(i)) {
+                lock_row_mode(&t, &dkey, RowLockMode::Update, Wait::Block, ctx)?;
             }
             // A row leaving its partition moves through the partitioned table updated.
             if let Some(routing) = &self.plan.route {

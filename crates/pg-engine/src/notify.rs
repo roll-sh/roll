@@ -108,6 +108,27 @@ impl Hub {
         }
     }
 
+    /// pg_notification_queue_usage: the share of the queue (max_notify_queue_pages of
+    /// 8 kB) the notifications not yet read by the slowest listener take, in whole pages
+    /// beyond the one the queue's tail is on (AsyncQueueEntry: a 16-byte header, the
+    /// channel and payload with their terminators, 4-aligned).
+    pub fn queue_usage(&self) -> f64 {
+        let listeners: Vec<Arc<Mutex<Listener>>> =
+            self.listeners.lock().values().cloned().collect();
+        let bytes = listeners
+            .iter()
+            .map(|l| {
+                l.lock()
+                    .pending
+                    .iter()
+                    .map(|n| (16 + n.channel.len() + 1 + n.payload.len() + 1).div_ceil(4) * 4)
+                    .sum::<usize>()
+            })
+            .max()
+            .unwrap_or(0);
+        (bytes / 8192) as f64 / 1_048_576.0
+    }
+
     /// Notifications waiting for `pid` (the session sends them itself).
     pub fn take(&self, pid: i32) -> Vec<Notification> {
         self.get(pid)

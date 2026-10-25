@@ -3945,7 +3945,6 @@ fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
         }
         PgLocks => {
             out.extend(crate::session::ddl::stats_import::relation_lock_rows(ctx));
-            out.extend(crate::sql::func::system::advisory_lock_rows(ctx));
         }
         IsSqlFeatures | IsSqlImplementationInfo | IsSqlParts | IsSqlSizing => {
             out.extend(super::static_rows::rows(table).iter().cloned())

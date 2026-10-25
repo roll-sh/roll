@@ -733,6 +733,25 @@ impl Heap {
         Some((tid, prev))
     }
 
+    /// The version of the row a reader sees: past versions still being written by other
+    /// transactions (`mine`: the reader's own transaction ids) to the one they replace.
+    pub fn locate_for(&self, key: &[u8], v: &Vis, mine: &dyn Fn(u64) -> bool) -> Option<Tid> {
+        let mut tid = *self.keys.get(key)?;
+        loop {
+            let t = self.pages.get(tid.0 as usize)?.tup(tid.1)?;
+            match v.state(t.xmin) {
+                Xs::Aborted => {}
+                Xs::Running if !mine(t.xmin) => {}
+                _ => return Some(tid),
+            }
+            match t.prev {
+                Some(p) => tid = p,
+                // (A row another transaction is inserting: where it is.)
+                None => return Some(tid),
+            }
+        }
+    }
+
     pub fn locate(&self, key: &[u8], v: &Vis) -> Option<Tid> {
         let mut tid = *self.keys.get(key)?;
         loop {

@@ -196,6 +196,26 @@ fn totalbuckets(phase: u32) -> u32 {
 /// The pages of a hash index built expecting `est_tuples` (estimate_rel_size's) with
 /// `fillfactor`, after the codes `codes` went in, in order.
 pub fn index_pages(est_tuples: f64, fillfactor: usize, codes: impl Iterator<Item = u32>) -> u64 {
+    simulate(est_tuples, fillfactor, codes, None).0
+}
+
+/// The bucket hash code `code` goes to once `codes` went in (what its SIRead locks and
+/// insertions' conflict checks name: the bucket's primary page).
+pub fn bucket_of_code(
+    est_tuples: f64,
+    fillfactor: usize,
+    codes: impl Iterator<Item = u32>,
+    code: u32,
+) -> u32 {
+    simulate(est_tuples, fillfactor, codes, Some(code)).1
+}
+
+fn simulate(
+    est_tuples: f64,
+    fillfactor: usize,
+    codes: impl Iterator<Item = u32>,
+    probe: Option<u32>,
+) -> (u64, u32) {
     // _hash_init: the split threshold per bucket, and the initial buckets.
     let item_width = 8 + 8 + 4;
     let ffactor = ((8192 * fillfactor / 100) / item_width).max(10) as f64;
@@ -264,7 +284,8 @@ pub fn index_pages(est_tuples: f64, fillfactor: usize, codes: impl Iterator<Item
             buckets.push(moved);
         }
     }
-    1 + bucket_pages as u64 + ovfl_alloc as u64
+    let probed = probe.map_or(0, |h| bucket_of(h, maxbucket, highmask, lowmask));
+    (1 + bucket_pages as u64 + ovfl_alloc as u64, probed)
 }
 
 #[cfg(test)]

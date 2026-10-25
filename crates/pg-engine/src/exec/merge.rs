@@ -242,7 +242,18 @@ impl MergeNode {
                     },
                     Wait::Block,
                     ctx,
-                )? {
+                )
+                .map_err(|e| {
+                    // (ExecMergeMatched's own words for a row moved away.)
+                    if e.message == super::scan::MOVED_TO_PARTITION {
+                        Error::new(
+                            code::SERIALIZATION_FAILURE,
+                            "tuple to be merged was already moved to another partition due to concurrent update",
+                        )
+                    } else {
+                        e
+                    }
+                })? {
                     Locked::Same => {
                         if member.is_some() {
                             let bytes = ctx.txn.borrow().get_latest(&dkey)?.and_then(|(_, b)| b);

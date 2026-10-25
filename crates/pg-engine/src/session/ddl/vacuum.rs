@@ -37,6 +37,7 @@ impl Ddl<'_, '_> {
         let mut analyze = !s.is_vacuumcmd;
         let (mut full, mut skip_pages, mut only_db, mut verbose) = (false, false, false, false);
         let mut freeze = false;
+        let mut skip_locked = false;
         let (mut process_main, mut process_toast) = (true, true);
         let mut truncate: Option<bool> = None;
         let (mut ring_size, mut nworkers) = (None::<i64>, 0i64);
@@ -44,9 +45,7 @@ impl Ddl<'_, '_> {
             let flag = || bool_option(d);
             match (s.is_vacuumcmd, d.defname.as_str()) {
                 (_, "verbose") => verbose = flag()?,
-                (_, "skip_locked") => {
-                    flag()?;
-                }
+                (_, "skip_locked") => skip_locked = flag()?,
                 (_, "buffer_usage_limit") => {
                     let Some(v) = def_arg_str(d) else {
                         return Err(Error::new(
@@ -300,6 +299,9 @@ impl Ddl<'_, '_> {
         }
         let _ = verbose;
         let mut analyzed = Vec::new();
+        let own_xacts =
+            vacuum || super::TOP_LEVEL.with(|t| t.get()) == Some(false);
+        let mut mark: Option<usize> = None;
         for (t, cols, recurse) in targets {
             if vacuum && !recurse && t.partkey.is_some() && !rels.is_empty() {
                 self.ctx.notice(crate::session::warning(
@@ -321,6 +323,13 @@ impl Ddl<'_, '_> {
                 vec![t.clone()]
             };
             for r in tree {
+                // Each relation in a transaction of its own (vacuum's use_own_xacts: VACUUM,
+                // and ANALYZE outside a transaction block): the locks one took are gone
+                // before the next is processed.
+                if own_xacts && let Some(m) = mark.take() {
+                    self.ctx.txn.borrow_mut().release_locks_since(m);
+                }
+                mark = Some(self.ctx.txn.borrow().lock_mark());
                 // A foreign child is sampled by its wrapper.
                 if r.is_foreign() {
                     if analyze && let Some(e) = self.cat.fdw_routine_error(&r) {
@@ -336,6 +345,50 @@ impl Ddl<'_, '_> {
                     ));
                     continue;
                 }
+                // vacuum_open_relation: SHARE UPDATE EXCLUSIVE (VACUUM FULL: ACCESS
+                // EXCLUSIVE), or skipped when SKIP_LOCKED finds it taken; a relation named in
+                // the command and dropped while we waited is skipped with a warning.
+                let named = r.oid == t.oid && !rels.is_empty();
+                let verb = if vacuum { "vacuum" } else { "analyze" };
+                let mode = if vacuum && full {
+                    super::table::lockmode::ACCESS_EXCLUSIVE
+                } else {
+                    super::table::lockmode::SHARE_UPDATE_EXCLUSIVE
+                };
+                if skip_locked {
+                    if !self.try_lock(r.oid, mode)? {
+                        if named {
+                            self.ctx.notice(crate::session::warning(
+                                code::LOCK_NOT_AVAILABLE,
+                                format!("skipping {verb} of \"{}\" --- lock not available", r.name),
+                            ));
+                        }
+                        continue;
+                    }
+                } else {
+                    self.note_lock(r.oid, mode)?;
+                }
+                // ANALYZE of a parent samples its children (acquire_inherited_sample_rows,
+                // their locks taken without SKIP_LOCKED).
+                if analyze && (r.partkey.is_some() || !self.cat.children(r.oid).is_empty()) {
+                    for c in self.cat.inheritors(r.oid).into_iter().skip(1) {
+                        self.note_lock(c, super::table::lockmode::ACCESS_SHARE)?;
+                    }
+                }
+                self.refresh_catalog();
+                let r = match self.cat.tables.get(&r.oid).cloned() {
+                    Some(r) => r,
+                    None if self.cat.views.values().any(|v| v.storage.as_ref().is_some_and(|s| s.oid == r.oid)) => r,
+                    None => {
+                        if named {
+                            self.ctx.notice(crate::session::warning(
+                                code::UNDEFINED_TABLE,
+                                format!("skipping {verb} of \"{}\" --- relation no longer exists", r.name),
+                            ));
+                        }
+                        continue;
+                    }
+                };
                 if r.partkey.is_none() {
                     // (dead_items_alloc: a temporary table with two indexes or more isn't
                     // vacuumed in parallel.)
@@ -750,6 +803,7 @@ impl Ddl<'_, '_> {
             }
         };
         self.require_rel_priv(t.oid, crate::catalog::acl::MAINTAIN, false)?;
+        self.note_lock(t.oid, super::table::lockmode::ACCESS_EXCLUSIVE)?;
         let ix = if s.indexname.is_empty() {
             self.clustered_index(&t).ok_or_else(|| {
                 Error::new(
@@ -783,6 +837,7 @@ impl Ddl<'_, '_> {
                     ));
                     continue;
                 }
+                self.note_lock(leaf.oid, super::table::lockmode::ACCESS_EXCLUSIVE)?;
                 self.cluster_rel(&leaf, &lix, verbose)?;
             }
         } else {

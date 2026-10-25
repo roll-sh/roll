@@ -8,7 +8,7 @@ use crate::sql::plan::{Access, BitmapQual, IndexBounds, RowMark, ScanPlan, Wait}
 use crate::storage::keys::{encode_index_value, encode_value, index_prefix, prefix_end};
 use crate::storage::row::decode_row;
 use crate::txn::TxnScan;
-use crate::txn::locks::{LockMode, WaitPolicy};
+use crate::txn::locks::{RowLockMode, WaitPolicy};
 use crate::types::Value;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -179,11 +179,37 @@ pub fn index_value_prefix(t: &Table, ix: &Index, keyvals: &[Value]) -> Vec<u8> {
     k
 }
 
-pub fn lock_mode(m: RowMark) -> LockMode {
+pub fn lock_mode(m: RowMark) -> RowLockMode {
     match m {
-        RowMark::Update | RowMark::NoKeyUpdate => LockMode::Exclusive,
-        RowMark::Share | RowMark::KeyShare => LockMode::Shared,
+        RowMark::Update => RowLockMode::Update,
+        RowMark::NoKeyUpdate => RowLockMode::NoKeyUpdate,
+        RowMark::Share => RowLockMode::Share,
+        RowMark::KeyShare => RowLockMode::KeyShare,
     }
+}
+
+/// The table's key columns (RelationGetIndexAttrBitmap's INDEX_ATTR_BITMAP_KEY): those of
+/// unique indexes without expressions or a predicate, as a foreign key could reference.
+/// An UPDATE changing one locks its row FOR UPDATE, else FOR NO KEY UPDATE.
+pub fn key_columns(t: &Table, cat: &crate::catalog::Catalog) -> Vec<usize> {
+    let mut v: Vec<usize> = t.pkey.clone().unwrap_or_default();
+    for oid in t.indexes.iter().chain(t.pkey_index.iter()) {
+        let Some(ix) = cat.index(*oid) else { continue };
+        if !ix.unique
+            || ix.predicate.is_some()
+            || ix.columns.iter().any(|c| !matches!(c.key, crate::catalog::IndexKey::Column(_)))
+        {
+            continue;
+        }
+        for c in &ix.columns {
+            if let crate::catalog::IndexKey::Column(i) = c.key
+                && !v.contains(&i)
+            {
+                v.push(i);
+            }
+        }
+    }
+    v
 }
 
 pub fn wait_policy(w: Wait) -> WaitPolicy {
@@ -571,14 +597,41 @@ fn open_scan_as(
             }
         }
     };
-    // SSI: a sequential scan predicate-locks the whole relation as it starts (a TID scan,
-    // the tuples it reads).
+    // SSI: a sequential scan predicate-locks the whole relation as it starts, and meets
+    // every tuple concurrent transactions wrote there; an index scan locks the index pages
+    // it reads (the relation, for an index without pages modelled) and meets the entries
+    // concurrent transactions added in its ranges; the tuples it fetches are locked as it
+    // fetches them (`ssi_fetched`; a TID scan's too).
     if only.is_none()
-        && s.index.is_none()
         && !matches!(s.access, Access::Tid { .. } | Access::TidRange(_))
         && predicate_locked(&s.table, ctx)
     {
-        ctx.txn.borrow_mut().predicate_lock(s.table.oid, None);
+        let me = ctx.txn.borrow().id;
+        let ssi = &ctx.sess.db.ssi;
+        match &s.index {
+            None => {
+                ctx.txn.borrow_mut().predicate_lock(s.table.oid, None);
+                ssi.read_relation(me, s.table.oid)?;
+            }
+            Some((ix, _)) if ix.id != 0 => {
+                let prefix = index_prefix(s.table.oid, ix.id);
+                let pages = match ix.method.as_str() {
+                    "btree" => super::sizing::btree_leaf_pages(ix.oid, &prefix, &ranges, &ctx.sess.db),
+                    "hash" => hash_scan_buckets(s, ix, ctx)?,
+                    _ => None,
+                };
+                match pages {
+                    Some(ps) if !ps.is_empty() => {
+                        for p in ps {
+                            ctx.txn.borrow_mut().predicate_lock_page(ix.oid, p);
+                        }
+                    }
+                    _ => ctx.txn.borrow_mut().predicate_lock(ix.oid, None),
+                }
+                ssi.read_entries(me, ix.oid, &ranges)?;
+            }
+            Some(_) => {}
+        }
     }
     Ok(Box::new(ScanNode {
         stat,
@@ -607,6 +660,59 @@ fn open_scan_as(
         last_block: None,
         one_run: collation_equal_run(s),
     }))
+}
+
+/// An index or bitmap heap scan fetched row `key` (stored as `bytes`): PredicateLockTID on
+/// its tuple (not one this transaction wrote), and the conflicts out to the concurrent
+/// transactions that changed it.
+pub fn ssi_fetched(t: &Table, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<()> {
+    let mine = ctx.txn.borrow().written_by(key).is_some();
+    let me = ctx.txn.borrow().id;
+    if !mine {
+        match stored_tid(bytes) {
+            Some(tid) => ctx.txn.borrow_mut().predicate_lock(t.oid, Some(tid)),
+            // (No tuple ids: the version read, when it is the latest one; an older one
+            // no writer can replace any more.)
+            None => {
+                let txn = ctx.txn.borrow();
+                if let Some((ts, _)) = txn.get_latest(key)?
+                    && ts <= txn.snapshot_ts()
+                {
+                    ctx.sess.db.ssi.lock_row_version(me, t.oid, key, ts);
+                }
+            }
+        }
+    }
+    ctx.sess.db.ssi.read_row(me, t.oid, key)
+}
+
+/// The buckets a hash index scan reads (_hash_first locks each one's primary page): one
+/// per value its `=` (or `= ANY`) condition looks up. None: not modelled.
+fn hash_scan_buckets(s: &ScanPlan, ix: &Index, ctx: &ExecCtx) -> Result<Option<Vec<u32>>> {
+    let Some((_, b)) = &s.index else { return Ok(None) };
+    let mut vals = Vec::new();
+    match (&b.eq[..], &b.any) {
+        ([e], None) => vals.push(eval(e, &[], ctx)?),
+        ([], Some(a)) => {
+            if let Value::Array(arr) = eval(a, &[], ctx)? {
+                vals.extend(arr.items.iter().cloned());
+            }
+        }
+        _ => return Ok(None),
+    }
+    let indexes = crate::sql::binder::bound_indexes(&s.table, ctx)?;
+    let Some(bix) = indexes.iter().find(|b| b.index.oid == ix.oid) else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    for v in vals.iter().filter(|v| !v.is_null()) {
+        match super::sizing::hash_bucket(&s.table, bix, &indexes, v, ctx)? {
+            Some(p) if !out.contains(&p) => out.push(p),
+            Some(_) => {}
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(out))
 }
 
 /// Whether reads of `t` take SIRead locks: a serializable transaction's, of a relation
@@ -1626,6 +1732,12 @@ impl Node for ScanNode {
                 }
             }
             let mut row = self.full_row(&key, &bytes, ctx)?;
+            if (self.plan.index.is_some() || self.keys.is_some())
+                && self.only.is_none()
+                && predicate_locked(&self.plan.table, ctx)
+            {
+                ssi_fetched(&self.plan.table, &key, &bytes, ctx)?;
+            }
             // SSI: a TID scan locks each tuple it fetches (before its other quals are
             // checked): here, the rows its TID conditions select.
             let fetched = |row: &Row| match &self.plan.access {
@@ -1651,6 +1763,8 @@ impl Node for ScanNode {
                 ctx.txn
                     .borrow_mut()
                     .predicate_lock(self.plan.table.oid, Some(tid));
+                let me = ctx.txn.borrow().id;
+                ctx.sess.db.ssi.read_row(me, self.plan.table.oid, &key)?;
             }
             if let Some(f) = &self.plan.filter
                 && !eval_bool(f, &row, ctx)?
@@ -1688,16 +1802,29 @@ pub enum Locked {
     Newer(bytes::Bytes),
 }
 
+/// heap_lock_tuple finding the row moved to another partition by a concurrent UPDATE.
+pub const MOVED_TO_PARTITION: &str =
+    "tuple to be locked was already moved to another partition due to concurrent update";
+
 /// Lock a row, then check whether it changed after our snapshot.
 pub fn lock_row(t: &Table, key: &[u8], mark: RowMark, wait: Wait, ctx: &ExecCtx) -> Result<Locked> {
+    lock_row_mode(t, key, lock_mode(mark), wait, ctx)
+}
+
+/// `lock_row` in a row lock strength.
+pub fn lock_row_mode(
+    t: &Table,
+    key: &[u8],
+    mode: RowLockMode,
+    wait: Wait,
+    ctx: &ExecCtx,
+) -> Result<Locked> {
     ctx.txn.borrow_mut().output_cid();
     let name = t.name.clone();
     let got = ctx
         .txn
         .borrow_mut()
-        .lock(key, lock_mode(mark), wait_policy(wait), &|| {
-            format!("row in relation \"{name}\"")
-        })?;
+        .lock_row(t.oid, key, mode, wait_policy(wait), &|| name.clone())?;
     if !got {
         return Ok(Locked::Skip);
     }
@@ -1711,13 +1838,35 @@ pub fn lock_row(t: &Table, key: &[u8], mark: RowMark, wait: Wait, ctx: &ExecCtx)
     if !txn.changed_since_snapshot(key)? {
         return Ok(Locked::Same);
     }
+    let latest = txn.get_latest(key)?;
+    // FOR KEY SHARE doesn't conflict with an update that left the key alone: the row stays
+    // the version our snapshot saw (heap_lock_tuple, HEAP_KEYS_UPDATED unset).
+    if mode == RowLockMode::KeyShare
+        && let Some((_, Some(new))) = &latest
+        && let Some(old) = txn.get(key)?
+    {
+        let cat = txn.catalog();
+        let keys = key_columns(t, &cat);
+        let (old, new) = (decode_table_row(t, &old)?, decode_table_row(t, new)?);
+        if keys.iter().all(|&i| old.get(i) == new.get(i)) {
+            return Ok(Locked::Same);
+        }
+    }
+    let moved = matches!(latest, Some((ts, None)) if txn.moved_at(key, ts));
     if txn.isolation.txn_snapshot() {
         return Err(Error::new(
             code::SERIALIZATION_FAILURE,
-            "could not serialize access due to concurrent update",
+            if moved || matches!(latest, Some((_, Some(_)))) {
+                "could not serialize access due to concurrent update"
+            } else {
+                "could not serialize access due to concurrent delete"
+            },
         ));
     }
-    match txn.get_latest(key)? {
+    if moved {
+        return Err(Error::new(code::SERIALIZATION_FAILURE, MOVED_TO_PARTITION));
+    }
+    match latest {
         Some((_, Some(b))) => Ok(Locked::Newer(b)),
         _ => Ok(Locked::Skip),
     }

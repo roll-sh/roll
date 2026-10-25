@@ -224,6 +224,17 @@ impl Conn {
         }
     }
 
+    /// Run `f` (a statement) with what's buffered so far parked where a notice sent while
+    /// it waits goes out after it (`UNFLUSHED`); what's left of it comes back to the buffer.
+    fn unflushed<T>(&mut self, f: impl FnOnce() -> T) -> T {
+        UNFLUSHED.with(|u| *u.borrow_mut() = std::mem::take(&mut self.out));
+        let r = f();
+        let mut parked = UNFLUSHED.with(|u| std::mem::take(&mut *u.borrow_mut()));
+        parked.extend_from_slice(&self.out);
+        self.out = parked;
+        r
+    }
+
     fn flush(&mut self) -> std::io::Result<()> {
         if !self.out.is_empty() {
             self.wr.write_all(&self.out)?;
@@ -286,6 +297,8 @@ impl Conn {
 }
 
 thread_local! {
+    /// Messages buffered for the client while a statement runs (`Conn::unflushed`).
+    static UNFLUSHED: std::cell::RefCell<BytesMut> = std::cell::RefCell::new(BytesMut::new());
     /// The session's client_encoding (sessions run on threads of their own): text goes out
     /// in it and query text comes in in it.
     static CLIENT_ENC: std::cell::Cell<i32> = const { std::cell::Cell::new(crate::types::mbconv::UTF8) };
@@ -494,6 +507,28 @@ fn handle(
         fatal: false,
         terminated: None,
     };
+    // Notices a statement raises before it waits for a lock go out then, as Postgres
+    // flushes each notice: after what the connection had buffered (`Conn::unflushed`).
+    let mut live = stream.try_clone()?;
+    crate::exec::set_notice_sink(Some(Box::new(move |ns: &[Error]| {
+        let mut b = UNFLUSHED.with(|u| std::mem::take(&mut *u.borrow_mut()));
+        for e in ns {
+            b.put_u8(b'N');
+            let at = b.len();
+            b.put_i32(0);
+            error_fields(&mut b, e, e.severity.as_str());
+            let len = (b.len() - at) as i32;
+            b[at..at + 4].copy_from_slice(&len.to_be_bytes());
+        }
+        let _ = live.write_all(&b);
+    })));
+    struct NoSink;
+    impl Drop for NoSink {
+        fn drop(&mut self) {
+            crate::exec::set_notice_sink(None);
+        }
+    }
+    let _no_sink = NoSink;
 
     // Startup: SSL / GSS negotiation and cancel requests come first.
     let params = loop {
@@ -1224,7 +1259,7 @@ fn simple_batch(
 ) -> std::io::Result<()> {
     for (i, p) in stmts.iter().enumerate() {
         s.partial_rows = None;
-        let mut out = s.execute(p);
+        let mut out = c.unflushed(|| s.execute(p));
         // Like Postgres, an implicit transaction commits before the last command tag goes out,
         // so deferred constraint failures replace it.
         if i + 1 == stmts.len()
@@ -1475,7 +1510,7 @@ fn execute_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
         return Ok(());
     }
     s.partial_rows = None;
-    let r = s.execute_portal(&portal, max_rows);
+    let r = c.unflushed(|| s.execute_portal(&portal, max_rows));
     if r.is_ok() {
         s.note_executed();
     }
