@@ -113,6 +113,10 @@ async fn mock() -> Mock {
             if s.path.ends_with("/count_tokens") {
                 return axum::Json(json!({"input_tokens": 500})).into_response();
             }
+            // `u32::MAX`: held until the test sets another delay.
+            while delay.load(Ordering::SeqCst) == u32::MAX {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
             let d = delay.load(Ordering::SeqCst);
             if d > 0 {
                 tokio::time::sleep(Duration::from_millis(d as u64)).await;
@@ -1030,8 +1034,8 @@ async fn concurrent_reviews_and_chats_never_overrun_the_cap() {
     let t = setup(|c, _| c.review.concurrency = 4).await;
     enable(&t, json!({ "mode": "standard" })).await;
     ok(&t.a, "PUT", "/v1/code/owners/acme/billing", Some(json!({ "monthly_cap_usd": 0.5, "on_cap": "pause" }))).await;
-    // The model answers slowly, so all four jobs decide while two are still running.
-    t.m.delay_ms.store(2_000, Ordering::SeqCst);
+    // The model doesn't answer until told to, so all four jobs decide while two are running.
+    t.m.delay_ms.store(u32::MAX, Ordering::SeqCst);
     let mut ids = Vec::new();
     for n in 0..4 {
         let c = change(&t, &format!("c{n}"), json!({ format!("src/c{n}.rs"): { "content": format!("pub fn c{n}() {{}}\n") } })).await;
@@ -1056,6 +1060,7 @@ async fn concurrent_reviews_and_chats_never_overrun_the_cap() {
     let u = ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await;
     assert_eq!(u["totals"]["price_usd"], 0.0, "nothing metered yet: {u}");
     assert_eq!(t.a.code.reserved_usd(&owner), 0.5, "the running two hold the cap");
+    t.m.delay_ms.store(0, Ordering::SeqCst);
     let mut reviewed = Vec::new();
     for id in &ids {
         let r = roll_reviews(&t, id, 1).await;
@@ -1108,7 +1113,7 @@ async fn concurrent_reviews_and_chats_never_overrun_the_cap() {
     // A chat while a review runs: room for the review ($0.25) only, so the review's reservation
     // refuses the chat before either is metered.
     ok(&t.a, "PUT", "/v1/code/owners/acme/billing", Some(json!({ "monthly_cap_usd": 0.8 }))).await;
-    t.m.delay_ms.store(2_000, Ordering::SeqCst);
+    t.m.delay_ms.store(u32::MAX, Ordering::SeqCst);
     let c = change(&t, "c4", json!({ "src/c4.rs": { "content": "pub fn c4() {}\n" } })).await;
     for _ in 0..200 {
         if t.a.code.reserved_usd(&owner) > 0.0 {
@@ -1127,6 +1132,7 @@ async fn concurrent_reviews_and_chats_never_overrun_the_cap() {
     }
     assert!(last["comments"][6]["body"].as_str().unwrap_or_default().contains("reached"), "{last}");
     assert_eq!(ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await["totals"]["price_usd"], 0.55, "refused while the review held its share");
+    t.m.delay_ms.store(0, Ordering::SeqCst);
     assert!(!roll_reviews(&t, c["id"].as_str().unwrap(), 1).await[0]["ai"].is_null(), "the review ran");
     t.m.delay_ms.store(0, Ordering::SeqCst);
     let u = ok(&t.a, "GET", "/v1/code/owners/acme/usage", None).await;

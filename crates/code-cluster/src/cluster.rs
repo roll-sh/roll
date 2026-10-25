@@ -623,7 +623,8 @@ impl Inner {
             true
         };
         let _ops = self.ops.lock();
-        let (rows, retired): (Vec<(String, i64)>, Vec<(String, i64)>) = {
+        type Rows = Vec<(String, i64)>;
+        let (rows, retired): (Rows, Rows) = {
             let mut st = self.state.lock();
             let rows = ready(&st);
             let mut retired = Vec::new();

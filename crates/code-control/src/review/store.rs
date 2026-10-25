@@ -320,7 +320,7 @@ impl Db {
     /// transaction (see [`crate::webhooks::Promises`]).
     pub fn insert_review(&self, n: &NewReview) -> Result<crate::webhooks::Promises> {
         let t = now();
-        Ok(self.write(|c| {
+        self.write(|c| {
             c.execute(
                 "INSERT INTO reviews (id, change_id, repo_id, revision, head, reviewer_kind, reviewer_name, reviewer_app, verdict, body, \
                  source, external_id, url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -345,7 +345,7 @@ impl Db {
             let mut p = crate::webhooks::Promises::default();
             p.promise(c, n.repo_id, "review", n.id, None)?;
             Ok(p)
-        })?)
+        })
     }
 
     pub fn review(&self, id: &str) -> Result<Option<Review>> {

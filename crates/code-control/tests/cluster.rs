@@ -856,8 +856,12 @@ async fn landings_on_one_node_wake_the_forwarder_on_another() {
         took.push(got.lock()[&cs].duration_since(at));
     }
     assert_eq!(net.nodes.iter().position(holder), Some(f), "the forwarder stayed put");
-    let slowest = took.iter().max().unwrap();
-    assert!(*slowest < Duration::from_millis(2500), "deliveries took {took:?}");
+    // Without the wake-up each one waits for the next 5 s poll (about 4 s here); with it, the
+    // typical one takes a fraction of a second (a loaded machine may slow one or two down).
+    let mut sorted = took.clone();
+    sorted.sort();
+    assert!(sorted[2] < Duration::from_millis(1500), "median delivery {:?}: {took:?}", sorted[2]);
+    assert!(sorted[1] < Duration::from_millis(1000), "deliveries took {took:?}");
 }
 
 // ── leases and indexes ──
