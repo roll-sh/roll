@@ -6228,25 +6228,32 @@ pub(crate) fn join_tree_key(p: &Plan) -> Option<(Vec<usize>, usize)> {
     Some((rtis, crate::sql::binder::plan_width(p)))
 }
 
-/// A FROM subquery's join tree with semi / anti joins (pull_up_sublinks' EXISTS / IN) as
-/// its level had it before planning, kept for the query above (`ExecCtx::bound_trees`):
-/// pull_up_simple_subquery pulls the subquery's join tree up before anything is planned.
+/// A FROM subquery's join tree as its level had it before planning, kept for the query
+/// above (`ExecCtx::bound_trees`): pull_up_simple_subquery pulls the subquery's join tree up
+/// before anything is planned. Used for trees with semi / anti joins (pull_up_sublinks'
+/// EXISTS / IN), and for any tree a LATERAL item of the query above reads the outputs of
+/// (the planned tree's parameterized nested loops would be LATERAL items of the query's
+/// join problem, not its relations).
 /// The planned tree that took its place is its top join marked `JoinMeta::bound` (`id`),
-/// under the projection `glue` (the planned row put back in the tree's order), if any.
+/// under the projections `glue` (the planned row put back in the tree's order), if any.
 #[derive(Clone, Debug)]
 pub struct BoundTree {
     pub id: u64,
     pub tree: Arc<Plan>,
-    pub glue: Option<Vec<Expr>>,
+    pub glue: Vec<Vec<Expr>>,
     /// The relations (`join_tree_key`) both trees have.
     pub key: (Vec<usize>, usize),
+    /// The tree has semi / anti joins; else it is pulled up as bound only under a LATERAL
+    /// item reading it (`lift`'s `Cx::unbind`).
+    pub semi: bool,
 }
 
 static BOUND_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// A level's plan before planning: the projections of its select list over a join tree
-/// with a semi or anti join among its inner and outer joins. The projections, and the tree.
-type LevelTree = (Vec<Vec<Expr>>, Plan);
+/// A level's plan before planning: the projections of its select list over a join tree.
+/// The projections, the tree, and whether it has a semi or anti join among its inner and
+/// outer joins.
+type LevelTree = (Vec<Vec<Expr>>, Plan, bool);
 
 fn bound_join_tree(p: &Plan) -> Option<LevelTree> {
     fn has_semi(p: &Plan) -> bool {
@@ -6268,13 +6275,13 @@ fn bound_join_tree(p: &Plan) -> Option<LevelTree> {
         Plan::Filter { input, .. } => &**input,
         j => j,
     };
-    (!projs.is_empty() && matches!(j, Plan::Join { .. }) && has_semi(j)).then(|| (projs, cur.clone()))
+    (!projs.is_empty() && matches!(j, Plan::Join { .. })).then(|| (projs, cur.clone(), has_semi(j)))
 }
 
 /// Keep a level's join tree as it was before planning (`bound_join_tree`) for the query
 /// above, marking the planned tree that took its place: under the same projections, a
 /// join (perhaps under a projection) of the same relations, of the same width.
-fn note_bound_join_tree(ctx: &ExecCtx, plan: &mut Plan, (projs, tree): LevelTree) {
+fn note_bound_join_tree(ctx: &ExecCtx, plan: &mut Plan, (projs, tree, semi): LevelTree) {
     let mut cur = plan;
     for exprs in &projs {
         match cur {
@@ -6288,22 +6295,23 @@ fn note_bound_join_tree(ctx: &ExecCtx, plan: &mut Plan, (projs, tree): LevelTree
     if join_tree_key(cur).as_ref() != Some(&key) {
         return;
     }
-    let (join, glue) = match cur {
-        Plan::Project { input, exprs } if matches!(&**input, Plan::Join { .. }) => {
-            let glue = exprs.clone();
-            (Arc::make_mut(input), Some(glue))
-        }
-        j @ Plan::Join { .. } => (j, None),
-        _ => return,
-    };
-    let Plan::Join { meta, .. } = join else { return };
+    // (The planned row put back in the tree's order: projections down to the planned join,
+    // a removed join's columns constants.)
+    let mut glue = Vec::new();
+    while let Plan::Project { input, exprs } = cur {
+        glue.push(exprs.clone());
+        cur = Arc::make_mut(input);
+    }
+    let Plan::Join { meta, .. } = cur else { return };
     let id = BOUND_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     meta.bound = id;
+    meta.bound_pushed.clear();
     ctx.bound_trees.borrow_mut().push(BoundTree {
         id,
         tree: Arc::new(tree),
         glue,
         key,
+        semi,
     });
 }
 

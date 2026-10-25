@@ -233,9 +233,9 @@ fn flatten_join_subquery(p: &Plan, nulled: u32, anulled: u32, cx: &mut Cx) -> Op
     // pull_up_sublinks runs before pull_up_subqueries, and a pulled-up subquery's semi
     // joins join the query's join tree: a subquery whose join tree has them is pulled up
     // as its level had it before planning (which may have unique-ified them already).
-    if let Some(b) = bound_form(p, &cx.bound) {
-        let saved = std::mem::replace(&mut cx.semi, true);
-        let r = flatten_tree(&b, nulled, anulled, cx, true);
+    if let Some((b, semi)) = bound_form(p, &cx.bound, cx.unbind) {
+        let saved = std::mem::replace(&mut cx.semi, semi);
+        let r = flatten_tree(&b, nulled, anulled, cx, semi);
         cx.semi = saved;
         if r.is_some() {
             return r;
@@ -280,46 +280,100 @@ fn semi_written_dropped(p: &Plan) -> Plan {
 }
 
 /// A FROM subquery (`p`, perhaps under a clause pushed down onto it) with the join tree its
-/// level had before planning in place of the planned one (`ExecCtx::bound_trees`).
-fn bound_form(p: &Plan, bound: &[crate::sql::paths::BoundTree]) -> Option<Plan> {
-    fn tree_of(p: &Plan, bound: &[crate::sql::paths::BoundTree]) -> Option<Arc<Plan>> {
-        let (join, glue) = match p {
-            Plan::Project { input, exprs } => (&**input, Some(exprs)),
-            j => (j, None),
-        };
+/// level had before planning in place of the planned one (`ExecCtx::bound_trees`); whether
+/// that tree has semi / anti joins. Trees without them only when `unbind`.
+fn bound_form(p: &Plan, bound: &[crate::sql::paths::BoundTree], unbind: bool) -> Option<(Plan, bool)> {
+    fn tree_of(p: &Plan, bound: &[crate::sql::paths::BoundTree], unbind: bool) -> Option<(Arc<Plan>, bool)> {
+        let mut glue: Vec<&Vec<Expr>> = Vec::new();
+        let mut join = p;
+        while let Plan::Project { input, exprs } = join {
+            glue.push(exprs);
+            join = input;
+        }
         let Plan::Join { meta, .. } = join else {
             return None;
         };
-        let b = bound.iter().find(|b| meta.bound != 0 && b.id == meta.bound)?;
-        let glue_ok = match (glue, &b.glue) {
-            (None, None) => true,
-            (Some(a), Some(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.same_as(y)),
-            _ => false,
+        let b = bound.iter().find(|b| meta.bound != 0 && b.id == meta.bound && (b.semi || unbind))?;
+        let glue_ok = glue.len() == b.glue.len()
+            && glue
+                .iter()
+                .zip(&b.glue)
+                .all(|(a, b)| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.same_as(y)));
+        if !glue_ok || crate::sql::paths::join_tree_key(p).as_ref() != Some(&b.key) {
+            return None;
+        }
+        if meta.bound_pushed.is_empty() {
+            return Some((b.tree.clone(), b.semi));
+        }
+        // (The clauses pushed into the planned join since: over the tree's row, each column
+        // of the join's one the projections pass through.)
+        let mut row: Vec<Expr> = (0..crate::sql::binder::plan_width(join)).map(|i| Expr::Col(i, DataType::Unknown)).collect();
+        for g in glue.iter().rev() {
+            row = g.iter().map(|e| subst(e, &row)).collect();
+        }
+        let mut preds = Vec::new();
+        for q in &meta.bound_pushed {
+            let mut ok = true;
+            let q = q
+                .clone()
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(c, t) => match row.iter().position(|e| matches!(e, Expr::Col(d, _) if *d == c)) {
+                            Some(i) => Expr::Col(i, t),
+                            None => {
+                                ok = false;
+                                Expr::Col(c, t)
+                            }
+                        },
+                        x => x,
+                    })
+                })
+                .unwrap();
+            if !ok {
+                return None;
+            }
+            preds.push(q);
+        }
+        let tree = Plan::Filter {
+            input: b.tree.clone(),
+            pred: and_all(preds)?,
         };
-        (glue_ok && crate::sql::paths::join_tree_key(p).as_ref() == Some(&b.key)).then(|| b.tree.clone())
+        Some((Arc::new(tree), b.semi))
     }
-    fn go(p: &Plan, bound: &[crate::sql::paths::BoundTree]) -> Option<Plan> {
+    fn go(p: &Plan, bound: &[crate::sql::paths::BoundTree], unbind: bool) -> Option<(Plan, bool)> {
         let Plan::Project { input, exprs } = p else {
             return None;
         };
-        let input = match tree_of(input, bound) {
+        let (input, semi) = match tree_of(input, bound, unbind) {
             Some(tree) => tree,
-            None => Arc::new(go(input, bound)?),
+            None => {
+                let (q, semi) = go(input, bound, unbind)?;
+                (Arc::new(q), semi)
+            }
         };
-        Some(Plan::Project {
-            input,
-            exprs: exprs.clone(),
-        })
+        Some((
+            Plan::Project {
+                input,
+                exprs: exprs.clone(),
+            },
+            semi,
+        ))
     }
     if bound.is_empty() {
         return None;
     }
     match p {
-        Plan::Filter { input, pred } => Some(Plan::Filter {
-            input: Arc::new(go(input, bound)?),
-            pred: pred.clone(),
-        }),
-        p => go(p, bound),
+        Plan::Filter { input, pred } => {
+            let (q, semi) = go(input, bound, unbind)?;
+            Some((
+                Plan::Filter {
+                    input: Arc::new(q),
+                    pred: pred.clone(),
+                },
+                semi,
+            ))
+        }
+        p => go(p, bound, unbind),
     }
 }
 
@@ -604,6 +658,10 @@ struct Cx {
     bound: Vec<crate::sql::paths::BoundTree>,
     /// Pulling up such a tree: its semi / anti joins are the group's.
     semi: bool,
+    /// Lifting a LATERAL join's left side: its FROM subqueries are pulled up as their levels
+    /// had them before planning (`ExecCtx::bound_trees`), the LATERAL item reading their
+    /// outputs then part of their join problem, as pull_up_subqueries has it.
+    unbind: bool,
     /// Lifting inside a LATERAL subquery pulled up (`JoinMeta::lateral_sub`): per value of
     /// its join (its `Outer(1, k)`), the outer joins nulling the relation it reads and that
     /// relation, as `lift`'s `lateral` has them. Its values are lateral references then,
@@ -897,7 +955,10 @@ fn lift(
             let rnull = nulled | if matches!(wk, JoinKind::Left | JoinKind::Full) { bit } else { 0 };
             let alnull = anulled | if matches!(kind, JoinKind::Right | JoinKind::Full) { bit } else { 0 };
             let arnull = anulled | if matches!(kind, JoinKind::Left | JoinKind::Full) { bit } else { 0 };
+            let unbind = cx.unbind;
+            cx.unbind |= !params.is_empty();
             let (l2, ml, nl) = lift(left, lnull, alnull, None, cx);
+            cx.unbind = unbind;
             let lmerged = std::mem::take(&mut cx.merged);
             let nleft2 = crate::sql::binder::plan_width(&l2);
             let params2: Vec<Expr> = params.iter().map(|e| subst(e, &ml)).collect();
@@ -2425,6 +2486,7 @@ pub(super) fn lift_group(p: &Plan, bound: &[crate::sql::paths::BoundTree]) -> Op
         moved: Vec::new(),
         bound: bound.to_vec(),
         semi: false,
+        unbind: false,
         frame: None,
     };
     let (mut plan, map, _) = lift(p, 0, 0, None, &mut cx);

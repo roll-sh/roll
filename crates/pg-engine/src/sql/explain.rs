@@ -6450,8 +6450,14 @@ impl Builder<'_, '_> {
                 // (Nor an Append: a projection computing values over it.)
                 // (A UNION ALL pulled up as an append relation too: what the query
                 // computes of its columns is a Result's.)
+                // (Also one over a parameterized Append a one-row join passes its values to:
+                // a nested loop's PlaceHolderVar parameters, change_plan_targetlist's
+                // inject_projection_plan.)
+                let param_append = matches!(&**input, Plan::Join { kind: JoinKind::Inner, left, right, params, nleft: 0, cond: None, hash: None, .. }
+                    if matches!(&**left, Plan::One) && !params.is_empty() && matches!(&**right, Plan::Append { .. }));
                 let append_above = (self.o.verbose && matches!(&**input, Plan::Append { inh: Some(_), .. })
-                    || matches!(&**input, Plan::Append { inh: None, .. }))
+                    || matches!(&**input, Plan::Append { inh: None, .. })
+                    || param_append)
                     && c.node.node_type == "Append"
                     && exprs.iter().any(|e| !matches!(e, Expr::Col(..)));
                 // A set operation's FROM subquery (not pulled up) that the query reads
@@ -6519,6 +6525,8 @@ impl Builder<'_, '_> {
                         let cat = self.ctx.catalog();
                         exprs.iter().all(|e| super::paths::parallel::hazard(e, &cat) == 's')
                     };
+                // (inject_projection_plan copies the subplan's costs and width.)
+                let injected = (append_above && param_append).then_some((c.node.startup_cost, c.node.total_cost, c.node.width));
                 if sort_above
                     || append_above
                     || matches!(&**input, Plan::ProjectSet { .. })
@@ -6751,6 +6759,9 @@ impl Builder<'_, '_> {
                 let (sp_startup, sp_per) = subplan_costs(exprs, self.ctx);
                 c.node.startup_cost += sp_startup;
                 c.node.total_cost += sp_startup + c.node.rows * sp_per;
+                if let Some((st, tot, w)) = injected {
+                    (c.node.startup_cost, c.node.total_cost, c.node.width) = (st, tot, w);
+                }
                 if self.o.verbose {
                     // (The Result over a Sort computes the whole target list, its resjunk
                     // sort columns too.)
@@ -7735,7 +7746,38 @@ impl Builder<'_, '_> {
                         n = Some(m);
                     }
                 }
-                let n = n.expect("a plan");
+                let mut n = n.expect("a plan");
+                // set_dummy_tlist_references keeps Consts as Consts: the Limit (and the
+                // sorts and LockRows of its level under it, which copy their input's target
+                // list too) shows a constant of its level's select list itself, not as a
+                // reference to it (`1`, not `(1)`); a node above refers to it as before.
+                // (Its own output only: what it returns is referred to as before, a Hash
+                // over it showing `(1)`.)
+                let consts = level_select_consts(input);
+                if self.o.verbose && consts.iter().any(Option::is_some) && consts.len() == c.exported.len() {
+                    let mut own = c.exported.clone();
+                    let mut swaps = Vec::new();
+                    for (j, k) in consts.iter().enumerate() {
+                        if let Some(k) = k {
+                            let bare = self.name(k, &[], &[]);
+                            swaps.push((self.pick(&own[j], Cx::Output), self.pick(&bare, Cx::Output)));
+                            own[j] = bare;
+                        }
+                    }
+                    n.output = own.iter().map(|x| self.pick(x, Cx::Output)).collect();
+                    let mut t = n.children.first_mut();
+                    while let Some(ch) = t {
+                        if !matches!(ch.node_type, "Sort" | "Incremental Sort" | "LockRows") {
+                            break;
+                        }
+                        for o in ch.output.iter_mut() {
+                            if let Some((_, b)) = swaps.iter().find(|(w, _)| w == o) {
+                                *o = b.clone();
+                            }
+                        }
+                        t = ch.children.first_mut();
+                    }
+                }
                 Built::passthrough(n, c.exported)
             }
             Plan::Distinct { input, on, hashed: by_hash, .. } => {
@@ -19328,6 +19370,19 @@ fn may_hold_phvs(p: &Plan) -> bool {
     }
 }
 
+/// A Limit's input down to its level's select list (through the level's ORDER BY sort and
+/// LockRows): the constants that select list computes, per column.
+fn level_select_consts(p: &Plan) -> Vec<Option<Expr>> {
+    match p {
+        Plan::Sort { input, .. } | Plan::LockRows { input, .. } | Plan::Context { input, .. } => level_select_consts(input),
+        Plan::Project { exprs, .. } => exprs
+            .iter()
+            .map(|e| matches!(e, Expr::Const(..)).then(|| e.clone()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// The subquery levels' select-list projections under `p` (`UNREAD_NULLS`).
 fn select_lists(p: &Plan, out: &mut std::collections::HashSet<usize>) {
     if let Plan::Barrier { input, secure: false, .. } = p {
@@ -19393,6 +19448,13 @@ pub fn dump_plan(p: &Plan, depth: usize) {
         Plan::Scan(s) => format!("{} {:?} filter={:?}", s.table.name, s.access, s.filter).chars().take(400).collect(),
         Plan::Filter { pred, .. } => format!("{pred:?}"),
         Plan::Append { inh, alias, .. } => format!("inh={inh:?} alias={alias:?}"),
+        Plan::Join { kind, cond, hash, params, nleft, meta, .. } => format!(
+            "{kind:?} nleft={nleft} cond={cond:?} hash={hash:?} params={params:?} bound={} lateral_held={} ec_written={:?}",
+            meta.bound, meta.lateral_held, meta.ec_written
+        )
+        .chars()
+        .take(600)
+        .collect(),
         Plan::Barrier { alias, .. } => format!("alias={alias:?}"),
         Plan::Sort { keys, .. } => keys
             .iter()

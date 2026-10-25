@@ -336,9 +336,12 @@ pub struct JoinMeta {
     /// deconstruct_recurse folds its sides into one join problem only within
     /// join_collapse_limit.
     pub explicit: bool,
-    /// A FROM subquery's planned join tree whose level had semi / anti joins before
-    /// planning: the `ExecCtx::bound_trees` entry with that tree (0: none).
+    /// A FROM subquery's planned join tree: the `ExecCtx::bound_trees` entry with the tree
+    /// its level had before planning (0: none).
     pub bound: u64,
+    /// The clauses the binder pushed into that planned tree since (`optimize::add_filter`),
+    /// over this join's row: the tree as bound gets them too (`lift::bound_form`).
+    pub bound_pushed: Vec<Expr>,
     /// The FROM join of a LATERAL subquery Postgres pulls up (pull_up_simple_subquery,
     /// is_simple_subquery), the subquery left unplanned by the binder: the join group
     /// above takes its relations in (`paths::joinpath::lift`).

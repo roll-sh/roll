@@ -539,6 +539,10 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 conjuncts(c, &mut cond_parts);
             }
             let mut parts = parts;
+            // (A FROM subquery's planned join kept as bound: the clauses go to the tree as
+            // bound too, `JoinMeta::bound_pushed`.)
+            let (old_bound, mut bound_pushed) = (meta.bound, meta.bound_pushed);
+            let pushed_in = if old_bound != 0 { parts.clone() } else { Vec::new() };
             let places = if kind == JoinKind::Inner { ec_const_order(&mut parts, nleft) } else { Vec::new() };
             // (A left join's: the WHERE's conjuncts in their order, for the classes above it.)
             let all_parts = if kind == JoinKind::Left { parts.clone() } else { Vec::new() };
@@ -636,6 +640,8 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             let saved = BROKEN_DUPS.with(|b| b.replace(broken));
             let mut l = Arc::try_unwrap(left).unwrap_or_else(|a| (*a).clone());
             let mut r = Arc::try_unwrap(right).unwrap_or_else(|a| (*a).clone());
+            // (A restriction replaced inside: the tree as bound is no longer the planned one.)
+            let rewritten = !rewrites.is_empty();
             for (on_right, old, new) in rewrites {
                 replace_restriction(cat, if on_right { &mut r } else { &mut l }, &old, &new);
             }
@@ -654,6 +660,11 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 meta.ec_written = old_written;
                 (meta.phv_eval, meta.phv_join) = old_phv;
                 (meta.lateral_sub, meta.lateral_held, meta.lateral_flat) = old_lat;
+                if old_bound != 0 && !rewritten {
+                    bound_pushed.extend(pushed_in.into_iter().filter(|q| !above.iter().any(|a| a.same_as(q))));
+                    meta.bound = old_bound;
+                    meta.bound_pushed = bound_pushed;
+                }
                 for c in old_pushed.into_iter().chain(const_keyed) {
                     if !meta.pushed.contains(&c) {
                         meta.pushed.push(c);
@@ -2127,8 +2138,11 @@ fn replace_restriction(cat: &Catalog, p: &mut Plan, old: &Expr, new: &Expr) -> b
             left,
             right,
             nleft,
+            meta,
             ..
         } => {
+            // (A planned join kept as bound: the tree as bound doesn't have the new one.)
+            meta.bound = 0;
             let n = *nleft;
             if old.columns().iter().all(|&c| c < n) {
                 replace_restriction(cat, Arc::make_mut(left), old, new)

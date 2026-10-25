@@ -6931,6 +6931,7 @@ impl Search<'_, '_, '_> {
                         tlist: self.tlist_order(p.set, &both),
                         explicit: false,
                         bound: 0,
+                        bound_pushed: Vec::new(),
                         lateral_sub: false,
                         lateral_flat: false,
                         lateral_held: false,
