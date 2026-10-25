@@ -866,6 +866,9 @@ Defects found by the phase-3 coverage audit, each with the test that failed befo
 
 | Defect fixed | Test |
 | --- | --- |
+| a finished change's preview was removed twice when a late check report re-sent its landed state | `code-preview/tests/service.rs::previews_follow_their_change` |
+| a stopped process's delivery worker kept its `Code` alive (and its forwarder running) for up to a minute | `webhooks.rs::landings_while_the_daemon_was_down_are_delivered_after_a_restart` |
+| deliveries left queued by a stopped process waited for a new event before anything sent them | `webhooks.rs::deliveries_left_queued_are_sent_after_a_restart` |
 | concurrent public reviews both priced free against the last free review, then one was charged past `monthly_cap_usd` | `reviewer.rs::concurrent_public_reviews_never_share_the_last_free_one` |
 | a failing review ran four times instead of three | `reviewer.rs::a_failing_review_runs_three_times` |
 | a failed `@roll` chat left the thread without an answer | `reviewer.rs::a_chat_with_a_bad_key_fails_without_retrying` |
