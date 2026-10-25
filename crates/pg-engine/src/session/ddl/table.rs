@@ -3568,7 +3568,7 @@ impl Ddl<'_, '_> {
             }
             if ix.id != 0 {
                 let k = index_entry_key(t, ix, &vals, &dkey);
-                self.ctx.txn.borrow_mut().put(k, dkey)?;
+                self.ctx.txn.borrow_mut().put_new_index_entry(k, dkey)?;
             }
         }
         drop(seen);

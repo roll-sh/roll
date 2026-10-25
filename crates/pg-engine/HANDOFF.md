@@ -220,7 +220,7 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   as SSTs instead of WAL records and memtable copies (`Store::ingest_locked`, with crash
   recovery replaying the WAL around them), partial L0 → L1 compaction, COPY FROM read a line
   at a time (`session/copy/feed.rs`), CREATE INDEX / VACUUM / ANALYZE / ALTER TABLE's checks
-  streaming the table. TPC-H SF1 load peak 18 GB → 5.3 GB, 1M-row bulk steps 1.2–2.4x
+  streaming the table. TPC-H SF1 load peak 18 GB → 4.8 GB, 1M-row bulk steps 1.2–2.4x
   faster (ANALYZE and the count after unchanged), index scans 1.2–1.4x in-process; the first
   `count(*)` of lineitem 37–51 s → 11–18 s. Downgrades are supported after a clean shutdown
   only (BENCH.md's agent 43 section: "Durability"). Big transactions still buffer their

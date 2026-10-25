@@ -1269,6 +1269,26 @@ impl Txn {
         Ok(())
     }
 
+    /// `put` of an entry of an index this statement is building, which nothing can need to
+    /// see past: no snapshot taken before could read an index that didn't exist, and with no
+    /// savepoint open nothing can roll back to before it (a rollback of the whole
+    /// transaction drops the buffer). So, unless a savepoint is open or the key was written
+    /// already, it goes in without an undo record (an index build's entries otherwise doubled
+    /// in memory by the journal).
+    pub fn put_new_index_entry(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+        if self.read_only
+            || !self.savepoints.is_empty()
+            || self.writes.contains_key(key.as_slice())
+        {
+            return self.put(key, value);
+        }
+        self.writes
+            .insert(key, (Some(Bytes::from(value)), Some(self.write_cid)));
+        self.wrote = true;
+        self.cur_xid();
+        Ok(())
+    }
+
     pub fn delete(&mut self, key: Vec<u8>) -> Result<()> {
         if self.read_only && !self.temp_key(&key) {
             bail!(
@@ -1953,6 +1973,8 @@ impl Txn {
             self.ssi_finish(false, 0);
             return Err(e);
         }
+        // (The undo log is done with: freed before the commit copies anything.)
+        drop(std::mem::take(&mut self.journal));
         let mut writes: Vec<(Vec<u8>, Option<Bytes>)> = Vec::with_capacity(self.writes.len());
         let mut new_catalog = false;
         for (k, (v, _)) in std::mem::take(&mut self.writes) {

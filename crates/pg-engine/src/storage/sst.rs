@@ -502,6 +502,13 @@ impl SstReader {
     }
 
     pub fn block(&self, i: usize) -> Result<CachedBlock> {
+        self.block_with(i, true)
+    }
+
+    /// Block `i`, from the cache or the file; one read from the file goes into the cache
+    /// when `fill` (compaction's reads don't: nobody asks for an input's blocks again, and
+    /// they would push out what readers use).
+    pub fn block_with(&self, i: usize, fill: bool) -> Result<CachedBlock> {
         if let Some(b) = self.cache.get(self.cache_id, i as u32) {
             return Ok(b);
         }
@@ -531,8 +538,10 @@ impl SstReader {
             _ => return Err(internal("unknown block compression")),
         };
         let block = Arc::new(Block::decode(raw)?);
-        let size = block.mem_bytes();
-        self.cache.insert(self.cache_id, i as u32, block.clone(), size);
+        if fill {
+            let size = block.mem_bytes();
+            self.cache.insert(self.cache_id, i as u32, block.clone(), size);
+        }
         Ok(block)
     }
 }

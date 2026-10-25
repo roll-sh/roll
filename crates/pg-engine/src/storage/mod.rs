@@ -899,9 +899,9 @@ impl Store {
         let horizon = self.gc_horizon();
         let mut sources: Vec<Cursor> = inputs_l0
             .iter()
-            .map(|s| Cursor::level(vec![s.clone()], &[], &[]))
+            .map(|s| Cursor::level_uncached(vec![s.clone()]))
             .collect();
-        sources.push(Cursor::level(inputs_l1.clone(), &[], &[]));
+        sources.push(Cursor::level_uncached(inputs_l1.clone()));
         let mut merge = Merge::new(sources, Vec::new());
         let mut outputs: Vec<SstMeta> = Vec::new();
         let mut writer: Option<SstWriter> = None;
@@ -1124,6 +1124,8 @@ enum Cursor {
         end: Vec<u8>,
         start: Vec<u8>,
         started: bool,
+        /// Blocks read from the files go into the block cache (not for compaction).
+        fill: bool,
     },
 }
 
@@ -1150,7 +1152,17 @@ impl Cursor {
             end: end.to_vec(),
             start: start.to_vec(),
             started: false,
+            fill: true,
         }
+    }
+
+    /// `level` over every key, its blocks kept out of the cache (compaction's inputs).
+    fn level_uncached(ssts: Vec<Arc<SstReader>>) -> Cursor {
+        let mut c = Cursor::level(ssts, &[], &[]);
+        if let Cursor::Level { fill, .. } = &mut c {
+            *fill = false;
+        }
+        c
     }
 
     /// Position on the next entry (reading a batch or a block when needed); `head` then
@@ -1198,6 +1210,7 @@ impl Cursor {
                 end: _,
                 start,
                 started,
+                fill,
             } => loop {
                 if *file >= ssts.len() {
                     return Ok(());
@@ -1214,7 +1227,7 @@ impl Cursor {
                         let sst = &ssts[*file];
                         *block_idx = sst.find_block(start);
                         if *block_idx < sst.block_count() {
-                            let b = sst.block(*block_idx)?;
+                            let b = sst.block_with(*block_idx, *fill)?;
                             *pos = b.seek(start);
                             *block = Some(b);
                         }
@@ -1228,7 +1241,7 @@ impl Cursor {
                         *pos = 0;
                         continue;
                     }
-                    *block = Some(sst.block(*block_idx)?);
+                    *block = Some(sst.block_with(*block_idx, *fill)?);
                     *pos = 0;
                 }
                 if *pos >= block.as_ref().unwrap().len() {
