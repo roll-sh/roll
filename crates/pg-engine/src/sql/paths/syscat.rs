@@ -62,6 +62,7 @@ pub fn sys_table(t: SysTable) -> Arc<Table> {
         options: Vec::new(),
         replident: None,
         foreign: None,
+        detach_pending: false,
     });
     TABLES.with(|m| m.borrow_mut().insert(t.oid(), table.clone()));
     table

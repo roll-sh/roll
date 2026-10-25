@@ -18,9 +18,9 @@ run is a faithful isolationtester.
 
 | | before (round 17 start) | round 18 start | now |
 |---|---:|---:|---:|
-| specs matching | 30 of 122 (24.6%) | 94 of 122 (77.0%) | 105 of 122 (86.1%) |
-| permutations matching | 921 of 1648 (55.9%) | 1452 of 1648 (88.1%) | 1565 of 1648 (95.0%) |
-| steps matching | 10146 of 12238 (82.9%) | 11397 of 12238 (93.1%) | 11871 of 12238 (97.0%) |
+| specs matching | 30 of 122 (24.6%) | 94 of 122 (77.0%) | 109 of 122 (89.3%) |
+| permutations matching | 921 of 1648 (55.9%) | 1452 of 1648 (88.1%) | 1616 of 1648 (98.1%) |
+| steps matching | 10146 of 12238 (82.9%) | 11397 of 12238 (93.1%) | 12154 of 12238 (99.3%) |
 
 A *step* is one `step ...` line of isolationtester's output with what follows it (its rows,
 errors, notices, `<waiting ...>` and `<... completed>`); a permutation matches when all of its
@@ -32,7 +32,6 @@ it implemented over the old lock manager.
 
 | class | specs | permutations differing |
 |---|---|---:|
-| D1 | detach-partition-concurrently-1, detach-partition-concurrently-2, detach-partition-concurrently-3, detach-partition-concurrently-4 | 51 |
 | L3 | fk-partitioned-1, fk-partitioned-2, partition-concurrent-attach | 10 |
 | L2 | intra-grant-inplace, intra-grant-inplace-db | 8 |
 | T2 | subxid-overflow | 4 |
@@ -43,7 +42,8 @@ it implemented over the old lock manager.
 | L4 | deadlock-parallel | 1 |
 | L1 | drop-owned-grant | 1 |
 
-- **D1**: DETACH PARTITION ... CONCURRENTLY runs as one transaction: Postgres's two transactions (the partition marked detach-pending, a wait for every older locker of the parent, then the detach), the pending state other sessions plan around and FINALIZE after a cancel aren't there.
+- **D1** (done, round 18, agent 56: all 56 permutations of detach-partition-concurrently-1..4
+  match; see "DETACH PARTITION CONCURRENTLY" below).
 - (D2, reindex-concurrently-toast, matches since round 18, agent 56: a table's TOAST table and
   index are relations a statement can name. `pg_toast.pg_toast_N[_index]` (or the names an
   `ALTER TABLE / INDEX ... RENAME` under allow_system_table_mods gave them, `Table::
@@ -99,10 +99,10 @@ it implemented over the old lock manager.
 | deadlock-soft | 1/1 | 14/14 |
 | deadlock-soft-2 | 1/1 | 14/14 |
 | deadlock-parallel ✗ | 0/1 | 12/14 |
-| detach-partition-concurrently-1 ✗ | 0/13 | 57/105 |
-| detach-partition-concurrently-2 ✗ | 1/5 | 23/32 |
-| detach-partition-concurrently-3 ✗ | 0/18 | 55/204 |
-| detach-partition-concurrently-4 ✗ | 4/20 | 106/183 |
+| detach-partition-concurrently-1 | 13/13 | 105/105 |
+| detach-partition-concurrently-2 | 5/5 | 32/32 |
+| detach-partition-concurrently-3 | 18/18 | 204/204 |
+| detach-partition-concurrently-4 | 20/20 | 183/183 |
 | fk-contention | 3/3 | 9/9 |
 | fk-deadlock | 14/14 | 90/90 |
 | fk-deadlock2 | 11/11 | 72/72 |
@@ -351,3 +351,45 @@ deadlocked), pgx's TestTxCommitSerializationFailure (write skew between two SERI
 transactions committed) and pgjdbc's closeInProgressStatement (a waiting statement's notice).
 All three pass against this engine; `tests/wire.rs` heavyweight_locks_and_deadlocks and
 serializable_write_skew keep the first two.
+
+## DETACH PARTITION CONCURRENTLY (round 18, agent 56)
+
+detach-partition-concurrently-1..4 went from 5 to 56 of 56 permutations. What changed:
+
+- **Two transactions.** `ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY`
+  (`session/ddl/partition.rs` `detach_partition`) runs ATExecDetachPartition's: the first
+  locks the parent and the partition ShareUpdateExclusive, marks the partition detach pending
+  (`Table::detach_pending`, pg_inherits.inhdetachpending), checks foreign keys referencing it
+  (ATDetachCheckNoForeignKeyRefs, ShareLock on the referencing tables, a fresh READ COMMITTED
+  snapshot once that lock is held), adds the CHECK constraint standing for the partition
+  constraint (as eval_const_expressions leaves it: a list bound's values one array constant)
+  and commits (`session::end_txn_midway`); the second waits for every transaction holding a
+  lock on the parent (WaitForLockersMultiple), locks the parent ShareUpdateExclusive and the
+  partition AccessExclusive again ("... was removed concurrently") and finishes
+  (DetachPartitionFinalize: dropping the derived foreign keys locks their tables
+  AccessExclusive, as RemoveConstraintById does).
+- **The pending state.** A query whose snapshot sees the mark's commit leaves the partition
+  out of its parent (find_inheritance_children_extended's omit_detached): `Txn::catalog`
+  hands such a statement a view of the catalog without it (`Catalog::detach_view`, cached per
+  catalog version in `Database::detach_views`; the mark's commit time is in
+  `Database::detach_marks`), with a version of its own, so prepared statements and other
+  caches keyed by the version tell the two apart. A REPEATABLE READ snapshot older than the
+  mark keeps the partition; insert routing in a snapshot transaction keeps it always
+  (`Catalog::routing_partitions`); a foreign key check against a partitioned table plans with
+  a fresh snapshot's view (`Txn::catalog_latest`, ri_PerformCheck's detectNewRows); statements
+  without a snapshot and DROP (dependencies) see everything. DDL storing a catalog stores the
+  full one (`Catalog::unview`).
+- **After a cancel**: the mark stays; another DETACH CONCURRENTLY of the parent fails
+  ("partition ... already pending detach"), a plain DETACH of the partition fails ("cannot
+  detach partition"), any other ALTER TABLE of it fails ("cannot alter partition ... with an
+  incomplete detach"), pg_partition_tree / pg_partition_ancestors stop at it
+  (get_partition_ancestors), and `ALTER TABLE ... DETACH PARTITION ... FINALIZE` finishes it
+  (it used to always fail "no pending concurrent detach").
+- Also: PREPARE locks the relations its statement names (parse analysis), and DROP of a
+  partition locks its parent AccessExclusive first (RangeVarCallbackForDropRelation), so
+  queries planned with the partition wait for the drop.
+- Not modelled: FINALIZE's WaitForOlderSnapshots (transactions holding a snapshot but no lock
+  on the partition; no spec observes it, see L6).
+
+Tests: `tests/wire.rs` `detach_partition_concurrently`, golden `detach_concurrently`.
+

@@ -472,6 +472,7 @@ impl Ddl<'_, '_> {
             options: Vec::new(),
             replident: None,
             foreign: self.creating_foreign.take(),
+            detach_pending: false,
         };
         t.options = heap_options(&s.options, &[], false)?;
         if s.partspec.is_some() && partitioned_refuses(&t.options) {
@@ -3964,6 +3965,7 @@ impl Ddl<'_, '_> {
             options: heap_options(&into.options, &[], false)?,
             replident: None,
             foreign: None,
+            detach_pending: false,
         };
         if matview && names_pk_clustered(&t.options) {
             return Err(pk_clustered_unusable(&t, "is a materialized view"));
@@ -4279,6 +4281,16 @@ impl Ddl<'_, '_> {
             let Some(NodeEnum::AlterTableCmd(cmd)) = inner(c) else {
                 continue;
             };
+            // ATPrepCmd: a partition pending detach takes nothing but FINALIZE.
+            if t.detach_pending
+                && t.partbound.is_some()
+                && cmd.subtype != pb::AlterTableType::AtDetachPartitionFinalize as i32
+            {
+                return Err(super::partition::pending_detach_error(
+                    format!("cannot alter partition \"{}\" with an incomplete detach", t.name),
+                    None,
+                ));
+            }
             self.foreign_alter_check(&t, cmd)?;
             self.inh_precheck(&t, cmd, rv.inh)?;
             // What ALTER COLUMN TYPE re-creates comes back before the later passes' work.
@@ -5435,20 +5447,10 @@ impl Ddl<'_, '_> {
                 };
             }
             A::AtDetachPartitionFinalize => {
-                // Detaching never stops halfway here.
                 let Some(NodeEnum::PartitionCmd(pc)) = cmd.def.as_deref().and_then(inner) else {
                     return Ok(t);
                 };
-                let name = pc
-                    .name
-                    .as_ref()
-                    .map(|r| r.relname.clone())
-                    .unwrap_or_default();
-                return Err(Error::new(
-                    code::OBJECT_NOT_IN_PREREQUISITE_STATE,
-                    format!("cannot complete detaching partition \"{name}\""),
-                )
-                .detail("There's no pending concurrent detach."));
+                t = self.detach_partition_finalize(t, pc)?;
             }
             A::AtAddInherit | A::AtDropInherit => {
                 let Some(NodeEnum::RangeVar(prv)) = cmd.def.as_deref().and_then(inner) else {

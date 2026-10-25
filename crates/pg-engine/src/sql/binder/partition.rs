@@ -275,7 +275,7 @@ impl Binder<'_, '_> {
             })
             .collect();
         let mut parts = Vec::new();
-        for oid in self.cat.partitions(p.oid) {
+        for oid in self.cat.routing_partitions(p.oid) {
             let Some(c) = self.cat.table(oid).cloned() else {
                 continue;
             };

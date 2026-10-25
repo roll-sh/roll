@@ -1,0 +1,128 @@
+> CREATE TABLE dc (a int, b text) PARTITION BY LIST (a)
+-- CREATE TABLE
+
+> CREATE TABLE dc1 PARTITION OF dc FOR VALUES IN (1, 2)
+-- CREATE TABLE
+
+> CREATE TABLE dc2 PARTITION OF dc FOR VALUES IN (3)
+-- CREATE TABLE
+
+> CREATE TABLE dcr (a int PRIMARY KEY) PARTITION BY RANGE (a)
+-- CREATE TABLE
+
+> CREATE TABLE dcr1 PARTITION OF dcr FOR VALUES FROM (0) TO (10)
+-- CREATE TABLE
+
+> CREATE TABLE dcr2 PARTITION OF dcr FOR VALUES FROM (10) TO (20)
+-- CREATE TABLE
+
+> CREATE TABLE dcref (a int REFERENCES dcr)
+-- CREATE TABLE
+
+> INSERT INTO dc VALUES (1, 'x'), (3, 'y')
+-- INSERT 0 2
+
+> INSERT INTO dcr VALUES (1), (15)
+-- INSERT 0 2
+
+> INSERT INTO dcref VALUES (15)
+-- INSERT 0 1
+
+> BEGIN
+-- BEGIN
+
+> ALTER TABLE dc DETACH PARTITION dc1 CONCURRENTLY
+ERROR 25001: ALTER TABLE ... DETACH CONCURRENTLY cannot run inside a transaction block
+
+> ROLLBACK
+-- ROLLBACK
+
+> ALTER TABLE dc DETACH PARTITION dc1 FINALIZE
+ERROR 55000: cannot complete detaching partition "dc1"
+DETAIL: There's no pending concurrent detach.
+
+> ALTER TABLE dc DETACH PARTITION dcr1 CONCURRENTLY
+ERROR 42P01: relation "dcr1" is not a partition of relation "dc"
+
+> ALTER TABLE dc DETACH PARTITION dc1 CONCURRENTLY
+-- ALTER TABLE
+
+> SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'dc1'::regclass ORDER BY 1
+conname:name | pg_get_constraintdef:text
+dc1_a_check | CHECK (((a IS NOT NULL) AND (a = ANY ('{1,2}'::integer[]))))
+-- SELECT 1
+
+> SELECT relname, relispartition, relpartbound IS NULL FROM pg_class WHERE relname LIKE 'dc_' ORDER BY 1
+relname:name | relispartition:bool | ?column?:bool
+dc1 | f | t
+dc2 | t | f
+dcr | f | t
+-- SELECT 3
+
+> SELECT inhrelid::regclass, inhparent::regclass, inhdetachpending FROM pg_inherits WHERE inhparent = 'dc'::regclass
+inhrelid:regclass | inhparent:regclass | inhdetachpending:bool
+dc2 | dc | f
+-- SELECT 1
+
+> SELECT * FROM dc ORDER BY a
+a:int4 | b:text
+3 | y
+-- SELECT 1
+
+> SELECT * FROM dc1 ORDER BY a
+a:int4 | b:text
+1 | x
+-- SELECT 1
+
+> ALTER TABLE dcr DETACH PARTITION dcr2 CONCURRENTLY
+ERROR 23503: removing partition "dcr2" violates foreign key constraint "dcref_a_fkey_2"
+DETAIL: Key (a)=(15) is still referenced from table "dcref".
+OBJECTS: schema=public table=dcref constraint=dcref_a_fkey_2
+
+> SELECT inhrelid::regclass, inhdetachpending FROM pg_inherits WHERE inhparent = 'dcr'::regclass ORDER BY 1
+inhrelid:regclass | inhdetachpending:bool
+dcr1 | f
+dcr2 | f
+-- SELECT 2
+
+> ALTER TABLE dcr DETACH PARTITION dcr1 CONCURRENTLY
+-- ALTER TABLE
+
+> SELECT conname, conrelid::regclass, confrelid::regclass FROM pg_constraint WHERE contype = 'f' ORDER BY 1, 2
+conname:name | conrelid:regclass | confrelid:regclass
+dcref_a_fkey | dcref | dcr
+dcref_a_fkey_2 | dcref | dcr2
+-- SELECT 2
+
+> CREATE TABLE dcd PARTITION OF dc DEFAULT
+-- CREATE TABLE
+
+> ALTER TABLE dc DETACH PARTITION dc2 CONCURRENTLY
+ERROR 55000: cannot detach partitions concurrently when a default partition exists
+
+> ALTER TABLE dc DETACH PARTITION dc2
+-- ALTER TABLE
+
+> SELECT * FROM pg_partition_tree('dc') ORDER BY relid::text
+relid:regclass | parentrelid:regclass | isleaf:bool | level:int4
+dc | NULL | f | 0
+dcd | dc | t | 1
+-- SELECT 2
+
+> CREATE TABLE dct (t text) PARTITION BY LIST (t)
+-- CREATE TABLE
+
+> CREATE TABLE dct1 PARTITION OF dct FOR VALUES IN ('a b', 'x', 'it''s', NULL)
+-- CREATE TABLE
+
+> ALTER TABLE dct DETACH PARTITION dct1 CONCURRENTLY
+-- ALTER TABLE
+
+> SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'dct1'::regclass
+pg_get_constraintdef:text
+CHECK (((t IS NULL) OR (t = ANY ('{"a b",x,it''s}'::text[]))))
+-- SELECT 1
+
+> DROP TABLE dc, dc1, dc2, dcref, dcr, dcr1, dct, dct1
+-- DROP TABLE
+

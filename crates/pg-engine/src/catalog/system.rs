@@ -4126,7 +4126,7 @@ fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u32>) -> Resu
         PgInherits => {
             for t in cat.tables.values() {
                 for (i, p) in t.inherits.iter().enumerate() {
-                    out.push(vec![o(t.oid), o(*p), i4(i as i64 + 1), b(false)]);
+                    out.push(vec![o(t.oid), o(*p), i4(i as i64 + 1), b(i == 0 && t.detach_pending)]);
                 }
             }
             for ix in cat.indexes.values().filter(|ix| ix.parent != 0) {

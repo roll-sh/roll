@@ -5196,6 +5196,8 @@ impl Ddl<'_, '_> {
         use crate::catalog::depend::{
             NAMESPACE, OPERATOR, POLICY, PROC, REL, REWRITE, STATEXT, TRIGGER, TYPE,
         };
+        // (Dependencies reach a partition whose detach is pending too.)
+        self.cat.unview();
         use pb::ObjectType as O;
         let kind = O::try_from(s.remove_type).unwrap_or(O::ObjectTable);
         let cascade = s.behavior == pb::DropBehavior::DropCascade as i32;
@@ -5256,6 +5258,16 @@ impl Ddl<'_, '_> {
                         let heap = self.cat.indexes.get(&oid).map(|ix| ix.table);
                         if let Some(heap) = heap {
                             self.note_lock(heap, mode)?;
+                        }
+                        // A partition's parent before it (queries lock the parent first),
+                        // AccessExclusive: queries planned with the partition in wait.
+                        let part_parent = match self.cat.tables.get(&oid) {
+                            Some(t) if t.partbound.is_some() => t.inherits.first().copied(),
+                            Some(_) => None,
+                            None => self.cat.indexes.get(&oid).map(|ix| ix.parent).filter(|p| *p != 0),
+                        };
+                        if let Some(pp) = part_parent {
+                            self.note_lock(pp, super::table::lockmode::ACCESS_EXCLUSIVE)?;
                         }
                         self.note_lock(oid, mode)?;
                         // index_drop's concurrent phases wait out every transaction using

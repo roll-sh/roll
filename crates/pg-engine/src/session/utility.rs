@@ -546,6 +546,11 @@ impl Session {
             self.infer_params = false;
             p.param_types = match b {
                 Ok(b) => {
+                    // Parse analysis locks the relations the statement names (as it will
+                    // run them), until the transaction ends.
+                    self.with_ctx(&[], |ctx| {
+                        crate::sql::binder::perms::lock_named_relations(&b.perms, ctx)
+                    })?;
                     // The result's types are known once it is analyzed (result_types).
                     if !is_select_into && !b.cols.is_empty() {
                         p.plans.lock().cols = Some(b.cols.iter().map(|c| c.ty.clone()).collect());

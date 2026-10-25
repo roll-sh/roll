@@ -348,8 +348,9 @@ stored_fields! {
         class_tick,
     ],
     // Not stored: rebuilt on load (`reindex`), the process's oid counter, the format read,
-    // the database's locale (the cluster's registry keeps it; `Database::set_locale`).
-    derived: [oids, names, children, copies, catalog_format, lookups, db_locale],
+    // the database's locale (the cluster's registry keeps it; `Database::set_locale`), a
+    // detach view's left-out partitions (`Catalog::detach_view`).
+    derived: [oids, names, children, copies, catalog_format, lookups, db_locale, view],
 }
 
 thread_local! {

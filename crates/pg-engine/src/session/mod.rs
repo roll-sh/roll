@@ -2790,6 +2790,11 @@ fn txn_settings(state: &SessionState, iso: Isolation, ro: bool) {
 /// COMMIT / ROLLBACK [AND CHAIN] inside a procedure or DO block run non-atomically: end the
 /// transaction and carry on in a new one (with the same characteristics when chained).
 pub(crate) fn end_txn_in_routine(ctx: &ExecCtx, commit: bool, chain: bool) -> Result<()> {
+    end_txn_midway(ctx, commit, chain).map(|_| ())
+}
+
+/// `end_txn_in_routine`, with the commit's timestamp (None: rolled back).
+pub(crate) fn end_txn_midway(ctx: &ExecCtx, commit: bool, chain: bool) -> Result<Option<u64>> {
     if ctx.txn.borrow().in_savepoint() {
         let what = if commit { "commit" } else { "roll back" };
         return Err(Error::new(
@@ -2826,7 +2831,7 @@ pub(crate) fn end_txn_in_routine(ctx: &ExecCtx, commit: bool, chain: bool) -> Re
     let stats = std::mem::take(&mut old.pgstat);
     let r = if commit {
         let notes = std::mem::take(&mut old.notifies);
-        let r = ctx.sess.cluster.commit(old).map(|_| ());
+        let r = ctx.sess.cluster.commit(old).map(Some);
         committed_notify(ctx.sess, r.is_ok(), &notes);
         r
     } else {
@@ -2835,7 +2840,7 @@ pub(crate) fn end_txn_in_routine(ctx: &ExecCtx, commit: bool, chain: bool) -> Re
         }
         old.rollback();
         committed_notify(ctx.sess, false, &[]);
-        Ok(())
+        Ok(None)
     };
     crate::exec::pgstat::end_xact(ctx.sess, stats, commit && r.is_ok(), &ctx.sess.db.catalog());
     ctx.sess

@@ -3234,7 +3234,12 @@ fn pg_partition_tree(a: &[Value], c: &FnCtx) -> Result<super::SrfIter> {
         let Some(tab) = cat.tables.get(&t) else {
             continue;
         };
-        let parent = tab.partbound.as_ref().and(tab.inherits.first().copied());
+        // (get_partition_ancestors: none for a partition whose detach is pending.)
+        let parent = tab
+            .partbound
+            .as_ref()
+            .filter(|_| !tab.detach_pending)
+            .and(tab.inherits.first().copied());
         let l = if t == oid {
             0
         } else {

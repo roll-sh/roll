@@ -991,12 +991,22 @@ impl Ddl<'_, '_> {
         Ok(None)
     }
 
-    /// ALTER TABLE parent DETACH PARTITION t
+    /// ALTER TABLE parent DETACH PARTITION t [CONCURRENTLY] (ATExecDetachPartition).
+    ///
+    /// CONCURRENTLY runs as Postgres's two transactions: the first marks the partition
+    /// detach pending (pg_inherits.inhdetachpending), adds the CHECK constraint standing for
+    /// the partition constraint and commits, holding only ShareUpdateExclusive locks; from
+    /// then on queries whose snapshot sees the mark leave the partition out (`Txn::catalog`'s
+    /// views). The second waits for every transaction holding a lock on the parent (those
+    /// that may have planned with the partition in), then locks the partition
+    /// AccessExclusive and finishes (`detach_finish`). Canceled in between, the mark stays:
+    /// ALTER TABLE ... DETACH PARTITION ... FINALIZE finishes it.
     pub(super) fn detach_partition(
         &mut self,
-        mut parent: Table,
+        parent: Table,
         cmd: &pb::PartitionCmd,
     ) -> Result<Table> {
+        use super::table::lockmode;
         let rv = cmd.name.as_ref().unwrap();
         if parent.partkey.is_none() {
             return Err(Error::new(
@@ -1008,7 +1018,30 @@ impl Ddl<'_, '_> {
             )
             .detail("This operation is not supported for tables."));
         }
+        // (A default partition: Postgres looks at the descriptor before the partition.)
+        let has_default = self.cat.partitions(parent.oid).iter().any(|p| {
+            self.cat
+                .tables
+                .get(p)
+                .is_some_and(|x| x.partbound.as_ref().is_some_and(|b| b.is_default()))
+        });
+        if cmd.concurrent && has_default {
+            return Err(Error::new(
+                code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "cannot detach partitions concurrently when a default partition exists",
+            ));
+        }
         let t = self.table(rv)?;
+        self.note_lock(
+            t.oid,
+            if cmd.concurrent {
+                lockmode::SHARE_UPDATE_EXCLUSIVE
+            } else {
+                lockmode::ACCESS_EXCLUSIVE
+            },
+        )?;
+        self.refresh_catalog();
+        let t = self.cat.tables.get(&t.oid).cloned().unwrap_or(t);
         if t.partbound.is_none() || t.inherits.first() != Some(&parent.oid) {
             return Err(Error::new(
                 code::UNDEFINED_TABLE,
@@ -1018,28 +1051,177 @@ impl Ddl<'_, '_> {
                 ),
             ));
         }
-        if cmd.concurrent
-            && self.cat.partitions(parent.oid).iter().any(|p| {
-                self.cat
-                    .tables
-                    .get(p)
-                    .is_some_and(|x| x.partbound.as_ref().is_some_and(|b| b.is_default()))
-            })
+        if !cmd.concurrent {
+            // RemoveInheritance's DeleteInheritsTuple: not one pending detach.
+            if t.detach_pending {
+                return Err(pending_detach_error(
+                    format!("cannot detach partition \"{}\"", t.name),
+                    Some("The partition is being detached concurrently or has an unfinished detach."),
+                ));
+            }
+            return self.detach_finish(parent, &t, false);
+        }
+        // MarkInheritDetached: no partition of the parent may be pending detach already.
+        if let Some((_, other)) = self
+            .cat
+            .detach_pending()
+            .into_iter()
+            .find(|(p, _)| *p == parent.oid)
         {
-            return Err(Error::new(
-                code::OBJECT_NOT_IN_PREREQUISITE_STATE,
-                "cannot detach partitions concurrently when a default partition exists",
+            let name = self.cat.tables.get(&other).map_or(String::new(), |x| x.name.clone());
+            return Err(pending_detach_error(
+                format!(
+                    "partition \"{name}\" already pending detach in partitioned table \"{}.{}\"",
+                    self.cat.schema_name(parent.schema),
+                    parent.name
+                ),
+                None,
             ));
         }
-        // DETACH CONCURRENTLY: a CHECK constraint takes the partition constraint's place,
-        // unless one the table has implies it (not for hash: it would name the parent).
-        let replace_qual = (cmd.concurrent
-            && parent.partkey.as_ref().is_some_and(|k| k.strategy != PartStrategy::Hash))
-        .then(|| crate::catalog::partition::constraint_sql(&self.cat, t.oid))
-        .flatten();
-        self.fk_ref_detach(&mut parent, &t)?;
+        // DetachAddConstraintIfNeeded's constraint, from the partition constraint as it is
+        // (not for hash: it would name the parent).
+        let replace_qual = parent
+            .partkey
+            .as_ref()
+            .is_some_and(|k| k.strategy != PartStrategy::Hash)
+            .then(|| crate::catalog::partition::constraint_sql_folded(&self.cat, t.oid))
+            .flatten();
+        let mut marked = (*t).clone();
+        marked.detach_pending = true;
+        self.cat.put_table(marked);
+        // ATDetachCheckNoForeignKeyRefs.
+        self.fk_ref_detach_check(&parent, &t)?;
+        let mut marked = (*self.cat.tables[&t.oid]).clone();
+        if let Some(sql) = replace_qual
+            && !qual_implied(&marked, &sql)
+        {
+            self.add_detach_check(&mut marked, sql);
+        }
+        self.cat.put_table(marked);
+        self.cat.put_table(parent.clone());
+        self.save()?;
+        // The first transaction commits: the mark is visible to snapshots taken from here on.
+        let (parent_oid, part_oid) = (parent.oid, t.oid);
+        let (parent_name, part_name) = (parent.name.clone(), t.name.clone());
+        let db = self.ctx.sess.db.clone();
+        db.detach_marks.lock().insert(part_oid, u64::MAX);
+        match crate::session::end_txn_midway(self.ctx, true, false) {
+            Ok(Some(ts)) => {
+                db.detach_marks.lock().insert(part_oid, ts);
+            }
+            Ok(None) => {
+                db.detach_marks.lock().remove(&part_oid);
+            }
+            Err(e) => {
+                db.detach_marks.lock().remove(&part_oid);
+                return Err(e);
+            }
+        }
+        self.reload_catalog();
+        // WaitForLockersMultiple on the parent: every transaction that may have planned with
+        // the partition in has ended.
+        self.ctx
+            .txn
+            .borrow_mut()
+            .wait_for_lockers(parent_oid, crate::txn::locks::LockMode::AccessExclusive)?;
+        // The two relations locked again; they may have gone meanwhile.
+        let gone = |what: String| Error::new(code::OBJECT_NOT_IN_PREREQUISITE_STATE, what);
+        if self.ctx.sess.db.catalog().tables.contains_key(&parent_oid) {
+            self.lock_relation_oid(parent_oid, lockmode::SHARE_UPDATE_EXCLUSIVE)?;
+        }
+        if self.ctx.sess.db.catalog().tables.contains_key(&part_oid) {
+            self.lock_relation_oid(part_oid, lockmode::ACCESS_EXCLUSIVE)?;
+        }
+        self.reload_catalog();
+        let Some(parent) = self.cat.tables.get(&parent_oid).cloned() else {
+            return Err(gone(format!(
+                "partitioned table \"{parent_name}\" was removed concurrently"
+            )));
+        };
+        let Some(t) = self.cat.tables.get(&part_oid).cloned() else {
+            return Err(gone(format!("partition \"{part_name}\" was removed concurrently")));
+        };
+        self.detach_finish((*parent).clone(), &t, true)
+    }
+
+    /// ALTER TABLE parent DETACH PARTITION t FINALIZE (ATExecDetachPartitionFinalize): the
+    /// second half of a DETACH ... CONCURRENTLY that didn't run to its end.
+    pub(super) fn detach_partition_finalize(
+        &mut self,
+        parent: Table,
+        cmd: &pb::PartitionCmd,
+    ) -> Result<Table> {
+        let rv = cmd.name.as_ref().unwrap();
+        let t = self.table(rv)?;
+        self.note_lock(t.oid, super::table::lockmode::ACCESS_EXCLUSIVE)?;
+        self.refresh_catalog();
         let t = self.cat.tables.get(&t.oid).cloned().unwrap_or(t);
+        if t.inherits.first() != Some(&parent.oid) || t.partbound.is_none() {
+            return Err(Error::new(
+                code::UNDEFINED_TABLE,
+                format!(
+                    "relation \"{}\" is not a partition of relation \"{}\"",
+                    t.name, parent.name
+                ),
+            ));
+        }
+        self.detach_finish(parent, &t, true)
+    }
+
+    /// Lock relation `oid` (a lockdefs.h mode) until the transaction ends, by oid.
+    fn lock_relation_oid(&self, oid: u32, mode: i32) -> Result<()> {
+        let Some(lm) = crate::txn::locks::LockMode::from_number(mode) else {
+            return Ok(());
+        };
+        let name = crate::sql::binder::perms::rel_word(&self.ctx.sess.db.catalog(), oid).1;
+        self.ctx.txn.borrow_mut().lock_relation(
+            oid,
+            lm,
+            crate::txn::locks::WaitPolicy::Block,
+            &|| name.clone(),
+        )?;
+        Ok(())
+    }
+
+    /// The CHECK constraint DETACH CONCURRENTLY puts in the partition constraint's place.
+    fn add_detach_check(&mut self, nt: &mut Table, sql: String) {
+        let vars = conjunct_vars(&sql);
+        let refs: Vec<&str> = match vars.as_slice() {
+            [v] => vec![v.as_str()],
+            _ => Vec::new(),
+        };
+        let name = self.constraint_name(nt, &refs, "check");
+        let mut c = Constraint::new(
+            self.cat.alloc_oid(),
+            name,
+            ConstraintKind::Check {
+                expr: sql,
+                no_inherit: false,
+            },
+            true,
+        );
+        c.enforced = true;
+        nt.constraints.push(c);
+    }
+
+    /// The detach proper (RemoveInheritance and DetachPartitionFinalize): `pending`, the
+    /// second half of a concurrent detach (the partition must be marked).
+    fn detach_finish(&mut self, mut parent: Table, t: &Arc<Table>, pending: bool) -> Result<Table> {
+        if pending && !t.detach_pending {
+            return Err(Error::new(
+                code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                format!("cannot complete detaching partition \"{}\"", t.name),
+            )
+            .detail("There's no pending concurrent detach."));
+        }
+        if pending {
+            self.fk_ref_detach_remove(&mut parent, t)?;
+        } else {
+            self.fk_ref_detach(&mut parent, t)?;
+        }
+        let t = self.cat.tables.get(&t.oid).cloned().unwrap_or(t.clone());
         let mut nt = self.drop_inherit((*t).clone(), &parent)?;
+        nt.detach_pending = false;
         // What the partition inherited becomes its own.
         for c in nt.columns.iter_mut() {
             if !c.dropped {
@@ -1088,30 +1270,19 @@ impl Ddl<'_, '_> {
         for oid in cloned {
             self.drop_trigger_tree(oid);
         }
-        if let Some(sql) = replace_qual
-            && !qual_implied(&nt, &sql)
-        {
-            let vars = conjunct_vars(&sql);
-            let refs: Vec<&str> = match vars.as_slice() {
-                [v] => vec![v.as_str()],
-                _ => Vec::new(),
-            };
-            let name = self.constraint_name(&nt, &refs, "check");
-            let mut c = Constraint::new(
-                self.cat.alloc_oid(),
-                name,
-                ConstraintKind::Check {
-                    expr: sql,
-                    no_inherit: false,
-                },
-                true,
-            );
-            c.enforced = true;
-            nt.constraints.push(c);
-        }
         self.cat.put_table(nt);
         Ok(parent)
     }
+}
+
+/// An error about a partition pending detach, with Postgres's hint.
+pub(super) fn pending_detach_error(msg: String, detail: Option<&str>) -> Error {
+    let e = Error::new(code::OBJECT_NOT_IN_PREREQUISITE_STATE, msg);
+    let e = match detail {
+        Some(d) => e.detail(d),
+        None => e,
+    };
+    e.hint("Use ALTER TABLE ... DETACH PARTITION ... FINALIZE to complete the pending detach operation.")
 }
 
 /// An AND list's items (`a AND (b AND c)` gives a, b, c).
@@ -2454,6 +2625,15 @@ impl Ddl<'_, '_> {
     /// DETACH of a referenced partition: no row may still be referenced through the
     /// partitioned table's keys, whose derived constraints for it go.
     pub(super) fn fk_ref_detach(&mut self, parent: &mut Table, part: &Table) -> Result<()> {
+        self.fk_ref_detach_check(parent, part)?;
+        self.fk_ref_detach_remove(parent, part)
+    }
+
+    /// ATDetachCheckNoForeignKeyRefs: no row of a table whose foreign key references the
+    /// partitioned table (through the partition) refers to one of the partition's rows; the
+    /// referencing tables are locked ShareLock until the transaction ends (no new rows
+    /// referring to it).
+    pub(super) fn fk_ref_detach_check(&mut self, parent: &Table, part: &Table) -> Result<()> {
         for (ft, con) in self.cat.referencing_fks(part.oid) {
             let Some(pc) = ft.constraints.iter().find(|c| c.oid == con.parent) else {
                 continue;
@@ -2462,13 +2642,55 @@ impl Ddl<'_, '_> {
             {
                 continue;
             }
+            if ft.oid != parent.oid {
+                self.note_lock(ft.oid, super::table::lockmode::SHARE)?;
+            }
+            self.ctx.txn.borrow_mut().refresh_read_committed_snapshot();
+            self.fk_ref_detach_one(part, &ft, &con)?;
+        }
+        Ok(())
+    }
+
+    /// The part of DetachPartitionFinalize that drops what the partition's keys contributed
+    /// to foreign keys referencing the partitioned table.
+    pub(super) fn fk_ref_detach_remove(&mut self, parent: &mut Table, part: &Table) -> Result<()> {
+        for (ft, con) in self.cat.referencing_fks(part.oid) {
+            let Some(pc) = ft.constraints.iter().find(|c| c.oid == con.parent) else {
+                continue;
+            };
+            if !matches!(&pc.kind, ConstraintKind::ForeignKey { ref_table, .. } if *ref_table == parent.oid)
+            {
+                continue;
+            }
+            // RemoveConstraintById locks the constrained table AccessExclusive.
+            self.note_lock(ft.oid, super::table::lockmode::ACCESS_EXCLUSIVE)?;
+            // (A self-referencing key's derived constraint is on the table being altered.)
+            if ft.oid == parent.oid {
+                drop_constraint_family(parent, con.oid);
+                continue;
+            }
+            let mut ftt = self
+                .cat
+                .tables
+                .get(&ft.oid)
+                .map(|t| (**t).clone())
+                .unwrap_or_else(|| (*ft).clone());
+            drop_constraint_family(&mut ftt, con.oid);
+            self.cat.put_table(ftt);
+        }
+        Ok(())
+    }
+
+    /// One referencing foreign key's check for `fk_ref_detach_check`.
+    fn fk_ref_detach_one(&mut self, part: &Table, ft: &Arc<Table>, con: &Constraint) -> Result<()> {
+        {
             let ConstraintKind::ForeignKey {
                 columns,
                 ref_columns,
                 ..
             } = &con.kind
             else {
-                continue;
+                return Ok(());
             };
             let referenced: Vec<Vec<Value>> = self
                 .tree_rows(part)?
@@ -2477,7 +2699,7 @@ impl Ddl<'_, '_> {
                 .collect();
             if !referenced.is_empty() {
                 let refs: Vec<Vec<Value>> = self
-                    .tree_rows(&ft)?
+                    .tree_rows(ft)?
                     .into_iter()
                     .map(|r| columns.iter().map(|c| r[*c].clone()).collect())
                     .collect();
@@ -2523,19 +2745,6 @@ impl Ddl<'_, '_> {
                     }
                 }
             }
-            // (A self-referencing key's derived constraint is on the table being altered.)
-            if ft.oid == parent.oid {
-                drop_constraint_family(parent, con.oid);
-                continue;
-            }
-            let mut ftt = self
-                .cat
-                .tables
-                .get(&ft.oid)
-                .map(|t| (**t).clone())
-                .unwrap_or_else(|| (*ft).clone());
-            drop_constraint_family(&mut ftt, con.oid);
-            self.cat.put_table(ftt);
         }
         Ok(())
     }

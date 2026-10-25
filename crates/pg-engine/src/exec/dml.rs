@@ -1741,8 +1741,11 @@ fn fk_leaves(t: &Arc<Table>, cols: &[usize], ctx: &ExecCtx) -> Vec<(Arc<Table>, 
     if t.partkey.is_none() {
         return vec![(t.clone(), cols.to_vec())];
     }
-    ctx.catalog()
-        .leaves(t.oid)
+    // (ri_PerformCheck plans with a fresh snapshot when the referenced table is
+    // partitioned: a partition whose detach is pending is out even for a snapshot
+    // transaction that began before.)
+    let cat = ctx.txn.borrow().catalog_latest();
+    cat.leaves(t.oid)
         .into_iter()
         .filter_map(|l| {
             let m: Option<Vec<usize>> = cols

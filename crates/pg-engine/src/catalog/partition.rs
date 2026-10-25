@@ -492,6 +492,31 @@ fn typed_literal(v: &Value, ty: &DataType) -> String {
     format!("'{}'::{}", s.replace('\'', "''"), ty.display())
 }
 
+/// Bound values as one typed array constant (`'{1,2}'::integer[]`), as array_out writes
+/// its elements.
+fn array_literal(vals: &[&Value], ty: &DataType) -> String {
+    let fmt = crate::types::text::FormatCtx::default();
+    let items: Vec<String> = vals
+        .iter()
+        .map(|v| {
+            if v.is_null() {
+                return "NULL".to_string();
+            }
+            let s = crate::types::text::format_value(v, ty, &fmt);
+            let quote = s.is_empty()
+                || s.eq_ignore_ascii_case("null")
+                || s.chars().any(|c| matches!(c, '{' | '}' | ',' | '"' | '\\') || c.is_ascii_whitespace());
+            if quote {
+                format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+            } else {
+                s
+            }
+        })
+        .collect();
+    let text = format!("{{{}}}", items.join(","));
+    format!("'{}'::{}[]", text.replace('\'', "''"), ty.display())
+}
+
 /// The key of a partitioned table as SQL over its rows.
 fn key_sql(t: &super::Table, key: &PartKey, leaf: Option<(&str, &str)>) -> Vec<String> {
     let me = super::quote_ident(&t.name);
@@ -537,6 +562,7 @@ fn level_items(
     bound: &PartBound,
     siblings: &[PartBound],
     leaf: Option<(&str, &str)>,
+    folded: bool,
 ) -> Vec<String> {
     let ks = key_sql(parent, key, leaf);
     let types = key.types();
@@ -553,6 +579,8 @@ fn level_items(
                     .collect::<Vec<_>>()
                     .join(" OR ")
             )),
+            // (Folded by eval_const_expressions: an array constant.)
+            vs if folded => Some(format!("({k} = ANY ({}))", array_literal(vs, &types[0]))),
             vs => Some(format!(
                 "({k} = ANY (ARRAY[{}]))",
                 vs.iter()
@@ -702,6 +730,16 @@ fn level_items(
 /// A partition's whole partition constraint (its own level and every ancestor's) as SQL
 /// over its rows, or None when it has none (pg_get_partition_constraintdef).
 pub fn constraint_sql(cat: &super::Catalog, oid: u32) -> Option<String> {
+    constraint_sql_with(cat, oid, false)
+}
+
+/// `constraint_sql` as eval_const_expressions leaves it (a list bound's values one array
+/// constant): DETACH CONCURRENTLY's CHECK constraint (DetachAddConstraintIfNeeded).
+pub fn constraint_sql_folded(cat: &super::Catalog, oid: u32) -> Option<String> {
+    constraint_sql_with(cat, oid, true)
+}
+
+fn constraint_sql_with(cat: &super::Catalog, oid: u32, folded: bool) -> Option<String> {
     let mut levels = Vec::new();
     let leaf = cat
         .tables
@@ -720,7 +758,7 @@ pub fn constraint_sql(cat: &super::Catalog, oid: u32) -> Option<String> {
             .filter(|c| **c != cur)
             .filter_map(|c| cat.tables.get(c).and_then(|s| s.partbound.clone()))
             .collect();
-        levels.push(level_items(parent, key, bound, &siblings, leaf));
+        levels.push(level_items(parent, key, bound, &siblings, leaf, folded));
         cur = parent.oid;
     }
     let items: Vec<String> = levels.into_iter().rev().flatten().collect();

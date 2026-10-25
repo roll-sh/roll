@@ -114,7 +114,16 @@ pub struct Database {
     /// System catalogs' rows generated for its sessions' statements, for the next ones that
     /// read them under the same catalog, roles, path and settings (`catalog::system::rows`).
     pub sys_rows: Mutex<crate::catalog::system::SysRowsCache>,
+    /// When DETACH PARTITION ... CONCURRENTLY's first transaction committed, by partition
+    /// (a marked partition missing here was marked before this process opened the
+    /// database: every snapshot sees it). `u64::MAX` while that commit is under way.
+    pub detach_marks: Mutex<HashMap<u32, u64>>,
+    /// Catalog views leaving out partitions pending detach (`Catalog::detach_view`) made for
+    /// the current catalog: (its version, what they leave out, routing_full, the view).
+    detach_views: Mutex<Vec<DetachViewEntry>>,
 }
+
+type DetachViewEntry = (u64, Vec<(u32, u32)>, bool, Arc<Catalog>);
 
 impl Database {
     pub fn open(name: &str, oid: u32, store: Arc<Store>, owner: &str) -> Result<Arc<Database>> {
@@ -179,7 +188,35 @@ impl Database {
             relfiles: Mutex::new(Default::default()),
             pgstat: Mutex::new(Default::default()),
             sys_rows: Mutex::new(Default::default()),
+            detach_marks: Mutex::new(HashMap::new()),
+            detach_views: Mutex::new(Vec::new()),
         }))
+    }
+
+    /// `base` without the partitions pending detach whose marks a snapshot taken at
+    /// `snapshot_ts` sees. `routing_full`: insert routing keeps them all (a snapshot
+    /// transaction's).
+    fn detach_view(&self, base: Arc<Catalog>, snapshot_ts: u64, routing_full: bool) -> Arc<Catalog> {
+        let omitted: Vec<(u32, u32)> = {
+            let marks = self.detach_marks.lock();
+            base.detach_pending()
+                .into_iter()
+                .filter(|(_, p)| marks.get(p).is_none_or(|ts| *ts <= snapshot_ts))
+                .collect()
+        };
+        if omitted.is_empty() {
+            return base;
+        }
+        let mut views = self.detach_views.lock();
+        views.retain(|v| v.0 == base.version);
+        if let Some(v) = views.iter().find(|v| v.1 == omitted && v.2 == routing_full) {
+            return v.3.clone();
+        }
+        let mut c = base.detach_view(omitted.clone(), routing_full);
+        c.freeze();
+        let c = Arc::new(c);
+        views.push((base.version, omitted, routing_full, c.clone()));
+        c
     }
 
     /// Allocate oids from the cluster's counter.
@@ -243,6 +280,7 @@ impl Database {
             snapshot_ts: ts,
             start_ts: ts,
             snapshot_fixed: false,
+            stmt_snapshot: false,
             _pin: Some(pin),
             xmin: None,
             writes: BTreeMap::new(),
@@ -617,6 +655,9 @@ pub struct Txn {
     pub start_ts: u64,
     /// A transaction snapshot (REPEATABLE READ / SERIALIZABLE) was taken.
     snapshot_fixed: bool,
+    /// The running statement has a snapshot (Postgres's ActiveSnapshotSet): queries then
+    /// leave out partitions whose pending detach it sees.
+    stmt_snapshot: bool,
     _pin: Option<SnapshotPin>,
     /// The xmin of the snapshot held (the statement's in READ COMMITTED, the
     /// transaction's), as pruning and VACUUM see it held back.
@@ -857,6 +898,7 @@ impl Txn {
         if self.catalog.is_none() {
             self.stmt_catalog = Some(self.db.catalog());
         }
+        self.stmt_snapshot = needs_snapshot;
         // A transaction snapshot is taken by the first statement that needs one.
         if self.isolation.txn_snapshot() {
             if needs_snapshot && !self.snapshot_fixed {
@@ -877,6 +919,17 @@ impl Txn {
             self.xmin = needs_snapshot.then(|| self.db.xids().register_snapshot());
         }
         Ok(())
+    }
+
+    /// READ COMMITTED: a fresh snapshot for the rest of the statement, as the queries SPI
+    /// runs for a utility command take (RI_PartitionRemove_Check after waiting for its
+    /// lock on the referencing table sees what the transaction it waited for committed).
+    pub fn refresh_read_committed_snapshot(&mut self) {
+        if !self.isolation.txn_snapshot() && self.db.store.visible_ts() != self.snapshot_ts {
+            let pin = self.db.store.pin_visible();
+            self.snapshot_ts = pin.ts;
+            self._pin = Some(pin);
+        }
     }
 
     /// (Pinned atomically with the timestamp it reads: `Store::pin_visible`.)
@@ -912,7 +965,29 @@ impl Txn {
     pub fn catalog(&self) -> Arc<Catalog> {
         match &self.catalog {
             Some(c) => c.clone(),
-            None => self.db.catalog(),
+            None => {
+                let base = self.db.catalog();
+                if !self.stmt_snapshot || !base.has_detach_pending() {
+                    return base;
+                }
+                self.db.detach_view(base, self.snapshot_ts, self.isolation.txn_snapshot())
+            }
+        }
+    }
+
+    /// The catalog as a fresh snapshot sees it: what a REPEATABLE READ foreign key check
+    /// against a partitioned table plans with (ri_PerformCheck's latest snapshot, under
+    /// which a partition whose detach is pending is left out).
+    pub fn catalog_latest(&self) -> Arc<Catalog> {
+        match &self.catalog {
+            Some(c) => c.clone(),
+            None => {
+                let base = self.db.catalog();
+                if !base.has_detach_pending() {
+                    return base;
+                }
+                self.db.detach_view(base, u64::MAX - 1, false)
+            }
         }
     }
 
@@ -924,6 +999,7 @@ impl Txn {
     /// a first change records it as the base a commit merges from when other DDL committed
     /// meanwhile (which may have happened while the command ran).
     pub fn set_catalog_from(&mut self, c: Catalog, from: &Arc<Catalog>) -> Result<()> {
+        let from = &from.with_detached();
         if self.catalog_base.is_none() && self.catalog.is_none() {
             self.catalog_base = Some(from.version);
             self.catalog_base_cat = Some(from.clone());
@@ -944,6 +1020,7 @@ impl Txn {
             self.catalog_base = Some(base.version);
             self.catalog_base_cat = Some(base);
         }
+        c.unview();
         c.bump();
         // (A stand-in: the commit writes the records of what changed, `catalog_writes`.)
         self.buffer(CATALOG_KEY.to_vec(), Some(Bytes::new()));
@@ -955,6 +1032,8 @@ impl Txn {
     /// Replace the catalog by in-place updates (plain VACUUM's statistics), which give the
     /// transaction no id.
     pub fn set_catalog_inplace(&mut self, mut c: Catalog, from: &Arc<Catalog>) -> Result<()> {
+        let from = &from.with_detached();
+        c.unview();
         if self.catalog_base.is_none() && self.catalog.is_none() {
             self.catalog_base = Some(from.version);
             self.catalog_base_cat = Some(from.clone());
@@ -1006,6 +1085,7 @@ impl Txn {
             c.version = cur;
             c.bump();
         }
+        c.unview();
         let cid = self.writes.get(CATALOG_KEY).and_then(|w| w.1);
         self.writes.insert(CATALOG_KEY.to_vec(), (Some(Bytes::new()), cid));
         c.freeze();

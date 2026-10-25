@@ -293,8 +293,10 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   snapshot does (an INSERT of a key whose row is being deleted waited for nothing and failed),
   ON CONFLICT is Postgres's speculative insertion (`exec/dml.rs` `insert_prepared`, spectoken
   locks), MERGE's NOT MATCHED BY SOURCE recheck, RI checks over the transaction snapshot in
-  REPEATABLE READ. What's left is classified there (DETACH CONCURRENTLY, TOAST relations,
-  catalog row locks, ...).
+  REPEATABLE READ; and DETACH PARTITION ... CONCURRENTLY runs as Postgres's two transactions
+  with the detach-pending state queries plan around by snapshot (catalog views without the
+  partition, `Catalog::detach_view`) and FINALIZE (detach-partition-concurrently-1..4: 56 of
+  56). What's left is classified there (TOAST relations, catalog row locks, ...).
 
 ## Repository layout
 

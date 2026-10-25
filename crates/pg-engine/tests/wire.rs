@@ -2589,3 +2589,107 @@ fn described_types_startup_options_and_copy_not_null() {
     });
     s.engine.shutdown();
 }
+
+/// ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY: its first transaction commits the
+/// partition's "detach pending" mark, after which other sessions' new snapshots leave the
+/// partition out (a REPEATABLE READ snapshot taken before still has it), and its second
+/// waits for every transaction holding a lock on the parent. Canceled there, the mark stays
+/// (inserts aren't routed to the partition, another concurrent detach fails, ALTER TABLE on
+/// the partition fails) until DETACH ... FINALIZE.
+#[test]
+fn detach_partition_concurrently() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        let c = s.connect("postgres").await;
+        a.batch_execute(
+            "CREATE TABLE dp (a int) PARTITION BY LIST (a);
+             CREATE TABLE dp1 PARTITION OF dp FOR VALUES IN (1);
+             CREATE TABLE dp2 PARTITION OF dp FOR VALUES IN (2);
+             INSERT INTO dp VALUES (1), (2)",
+        )
+        .await
+        .unwrap();
+        let pa = lines(&a, "SELECT pg_backend_pid()").await.unwrap().remove(0);
+        let pb = lines(&b, "SELECT pg_backend_pid()").await.unwrap().remove(0);
+        // A's REPEATABLE READ snapshot and its lock on the parent predate the detach.
+        a.batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ").await.unwrap();
+        assert_eq!(lines(&a, "SELECT a FROM dp ORDER BY a").await.unwrap(), ["1", "2"]);
+        let detach = tokio::spawn(async move {
+            let r = b.batch_execute("ALTER TABLE dp DETACH PARTITION dp2 CONCURRENTLY").await;
+            (b, r)
+        });
+        let q = format!("SELECT pg_isolation_test_session_is_blocked({pb}, '{{{pa}}}')");
+        let mut blocked = false;
+        for _ in 0..200 {
+            if lines(&c, &q).await.unwrap() == ["t"] {
+                blocked = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(blocked, "the detach waits for the reader");
+        // The mark is committed: new snapshots leave dp2 out, A's still has it.
+        assert_eq!(lines(&c, "SELECT a FROM dp ORDER BY a").await.unwrap(), ["1"]);
+        assert_eq!(
+            lines(&c, "SELECT inhdetachpending FROM pg_inherits WHERE inhrelid = 'dp2'::regclass")
+                .await
+                .unwrap(),
+            ["t"]
+        );
+        let err = c.batch_execute("INSERT INTO dp VALUES (2)").await.unwrap_err();
+        assert_eq!(err.as_db_error().unwrap().message(), "no partition of relation \"dp\" found for row");
+        assert_eq!(lines(&a, "SELECT a FROM dp ORDER BY a").await.unwrap(), ["1", "2"]);
+        // Canceled while it waits: the partition stays pending detach.
+        assert_eq!(lines(&c, &format!("SELECT pg_cancel_backend({pb})")).await.unwrap(), ["t"]);
+        let (b, r) = detach.await.unwrap();
+        assert_eq!(r.unwrap_err().code().map(|c| c.code()), Some("57014"));
+        a.batch_execute("COMMIT").await.unwrap();
+        let err = b
+            .batch_execute("ALTER TABLE dp DETACH PARTITION dp1 CONCURRENTLY")
+            .await
+            .unwrap_err();
+        let db = err.as_db_error().unwrap();
+        assert_eq!(
+            db.message(),
+            "partition \"dp2\" already pending detach in partitioned table \"public.dp\""
+        );
+        assert_eq!(
+            db.hint(),
+            Some("Use ALTER TABLE ... DETACH PARTITION ... FINALIZE to complete the pending detach operation.")
+        );
+        let err = b.batch_execute("ALTER TABLE dp2 ADD COLUMN z int").await.unwrap_err();
+        assert_eq!(
+            err.as_db_error().unwrap().message(),
+            "cannot alter partition \"dp2\" with an incomplete detach"
+        );
+        // FINALIZE completes it.
+        b.batch_execute("ALTER TABLE dp DETACH PARTITION dp2 FINALIZE").await.unwrap();
+        assert_eq!(
+            lines(&b, "SELECT count(*) FROM pg_inherits WHERE inhrelid = 'dp2'::regclass")
+                .await
+                .unwrap(),
+            ["0"]
+        );
+        assert_eq!(lines(&b, "SELECT a FROM dp2").await.unwrap(), ["2"]);
+        let err = b
+            .batch_execute("ALTER TABLE dp DETACH PARTITION dp1 FINALIZE")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.as_db_error().unwrap().message(),
+            "cannot complete detaching partition \"dp1\""
+        );
+        // Uncontended, both transactions run straight through.
+        b.batch_execute("ALTER TABLE dp DETACH PARTITION dp1 CONCURRENTLY").await.unwrap();
+        assert!(lines(&c, "SELECT a FROM dp").await.unwrap().is_empty());
+        assert_eq!(
+            lines(&c, "SELECT relname, relispartition FROM pg_class WHERE relname IN ('dp1', 'dp2') ORDER BY 1")
+                .await
+                .unwrap(),
+            ["dp1|f", "dp2|f"]
+        );
+    });
+    s.engine.shutdown();
+}

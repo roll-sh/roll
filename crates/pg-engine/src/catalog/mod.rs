@@ -512,6 +512,11 @@ pub struct Table {
     /// CREATE FOREIGN TABLE: a foreign table (relkind 'f'), which has no storage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreign: Option<ForeignTableDef>,
+    /// DETACH PARTITION ... CONCURRENTLY marked it (pg_inherits.inhdetachpending): its first
+    /// transaction committed, the second hasn't (yet). Queries whose snapshot sees the mark
+    /// leave it out of the parent (`DetachView`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detach_pending: bool,
 }
 
 /// A foreign table's pg_foreign_table row and its columns' attfdwoptions.
@@ -872,6 +877,7 @@ impl ViewDef {
             options: Vec::new(),
             replident: None,
             foreign: None,
+            detach_pending: false,
         })
     }
 
@@ -1981,6 +1987,24 @@ pub struct Catalog {
     /// (`freeze`).
     #[serde(skip)]
     lookups: Lookups,
+    /// A view of a catalog leaving out partitions pending detach (`detach_view`); None for
+    /// the catalog itself.
+    #[serde(skip)]
+    pub view: Option<Arc<DetachView>>,
+}
+
+/// What a catalog derived by `Catalog::detach_view` leaves out: Postgres's partition
+/// descriptors built with omit_detached (find_inheritance_children_extended skips a
+/// partition marked detach pending whose marking transaction the active snapshot sees).
+#[derive(Debug)]
+pub struct DetachView {
+    /// The catalog itself, every partition in.
+    pub full: Arc<Catalog>,
+    /// (parent, partition) pairs left out.
+    pub omitted: Vec<(u32, u32)>,
+    /// Insert routing leaves nothing out (ExecSetupPartitionTupleRouting's directory in a
+    /// REPEATABLE READ / SERIALIZABLE transaction).
+    pub routing_full: bool,
 }
 
 /// `Catalog::lookups`: hashes built on first use, only for a frozen catalog (one published
@@ -1997,6 +2021,8 @@ struct Lookups {
     acls: std::sync::OnceLock<HashMap<(u32, u32, i32), usize>>,
     /// `user_type_name`'s answers.
     user_types: std::sync::OnceLock<HashMap<u32, (u32, String, bool)>>,
+    /// Partitions pending detach: (parent, partition).
+    detach_pending: std::sync::OnceLock<Vec<(u32, u32)>>,
 }
 
 impl Clone for Lookups {
@@ -3645,6 +3671,92 @@ impl Catalog {
         self.lookups.frozen = true;
     }
 
+    /// The partitions pending detach (DETACH PARTITION ... CONCURRENTLY's first transaction
+    /// committed, its second not): (parent, partition).
+    pub fn detach_pending(&self) -> Vec<(u32, u32)> {
+        if self.lookups.frozen {
+            self.lookups
+                .detach_pending
+                .get_or_init(|| self.scan_detach_pending())
+                .clone()
+        } else {
+            self.scan_detach_pending()
+        }
+    }
+
+    fn scan_detach_pending(&self) -> Vec<(u32, u32)> {
+        self.tables
+            .values()
+            .filter(|t| t.detach_pending)
+            .filter_map(|t| t.inherits.first().map(|p| (*p, t.oid)))
+            .collect()
+    }
+
+    /// Whether a partition is pending detach (a cheap check for a frozen catalog).
+    pub fn has_detach_pending(&self) -> bool {
+        if self.lookups.frozen {
+            !self
+                .lookups
+                .detach_pending
+                .get_or_init(|| self.scan_detach_pending())
+                .is_empty()
+        } else {
+            self.tables.values().any(|t| t.detach_pending)
+        }
+    }
+
+    /// This catalog without the partitions `omitted` ((parent, partition) pairs) in their
+    /// parents: what a query whose snapshot sees their detach marks plans with. Its version
+    /// is a new one (caches keyed by the version tell it from the catalog itself).
+    pub fn detach_view(self: &Arc<Self>, omitted: Vec<(u32, u32)>, routing_full: bool) -> Catalog {
+        let mut c = (**self).clone();
+        for (p, child) in &omitted {
+            if let Some(v) = Arc::make_mut(&mut c.children).get_mut(p) {
+                v.retain(|x| x != child);
+            }
+        }
+        c.view = Some(Arc::new(DetachView {
+            full: self.clone(),
+            omitted,
+            routing_full,
+        }));
+        c.bump();
+        c
+    }
+
+    /// A catalog to edit and store: a view's left-out partitions back in their parents
+    /// (those still partitions of them).
+    pub fn unview(&mut self) {
+        let Some(v) = self.view.take() else {
+            return;
+        };
+        for (p, child) in &v.omitted {
+            if self.tables.get(child).is_some_and(|t| t.inherits.contains(p)) {
+                let list = Arc::make_mut(&mut self.children).entry(*p).or_default();
+                if let Err(i) = list.binary_search(child) {
+                    list.insert(i, *child);
+                }
+            }
+        }
+    }
+
+    /// The catalog without any partition left out (a view's `full`, or this one).
+    pub fn with_detached(self: &Arc<Self>) -> Arc<Catalog> {
+        match &self.view {
+            Some(v) => v.full.clone(),
+            None => self.clone(),
+        }
+    }
+
+    /// A partitioned table's partitions an insert routes to: those a REPEATABLE READ view
+    /// left out too (ExecSetupPartitionTupleRouting includes detached partitions there).
+    pub fn routing_partitions(&self, oid: u32) -> Vec<u32> {
+        match &self.view {
+            Some(v) if v.routing_full => v.full.partitions(oid),
+            _ => self.partitions(oid),
+        }
+    }
+
     /// `acls` by object, for a frozen catalog (`Catalog::acl`).
     fn acl_lookup(&self) -> Option<&HashMap<(u32, u32, i32), usize>> {
         if !self.lookups.frozen {
@@ -3830,8 +3942,10 @@ impl Catalog {
     pub fn partition_ancestors(&self, oid: u32) -> Vec<u32> {
         let mut out = Vec::new();
         let mut cur = oid;
+        // (get_partition_ancestors stops at a partition whose detach is pending.)
         while let Some(t) = self.tables.get(&cur)
             && t.partbound.is_some()
+            && !t.detach_pending
             && let Some(p) = t.inherits.first()
             && !out.contains(p)
         {
