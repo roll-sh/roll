@@ -2879,6 +2879,7 @@ pub fn insert_prepared(
     let t = &rules.table;
     // A postgres_fdw foreign table: the row goes to the remote server.
     if t.foreign.is_some() && crate::ext::postgres_fdw::scan::is_postgres_fdw(&ctx.catalog(), t) {
+        crate::ext::postgres_fdw::modify::check_routed_capture()?;
         // (A row routed here from a partitioned table: what this leaf's AFTER ROW triggers
         // and the views' check options read comes back.)
         let _back = (!crate::ext::postgres_fdw::modify::has_back()).then(|| {
@@ -3230,6 +3231,8 @@ impl InsertNode {
     ) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
         let rules = &self.plan.rules;
         if let Some(routing) = self.plan.route.clone() {
+            // (A foreign partition can't give its rows to the transition tables.)
+            let _capture = crate::ext::postgres_fdw::modify::routed_capture(trigger::has_transition(&self.plan.rules.triggers, tt::INSERT));
             let r = match resume {
                 Some((Some(leaf), p)) => resume_routed(
                     &routing,
@@ -3856,6 +3859,11 @@ fn take_capture(after: &mut Vec<AfterRow>) -> Vec<AfterRow> {
 
 impl UpdateNode {
     pub fn new(plan: Box<UpdatePlan>, ctx: &ExecCtx) -> Result<Self> {
+        // (ExecInitModifyTable: a foreign member can't give its rows to the transition
+        // tables.)
+        if plan.inh && reads_transition(&plan.rules.triggers, tt::UPDATE) && plan.members.iter().any(|m| m.rules.table.foreign.is_some()) {
+            return Err(crate::ext::postgres_fdw::modify::transition_error());
+        }
         ctx.txn.borrow_mut().output_cid();
         if !plan.rules.view {
             check_replica_identity(&plan.rules.table, crate::catalog::pubsub::RiCmd::Update, ctx)?;
@@ -4482,6 +4490,9 @@ pub struct DeleteNode {
 
 impl DeleteNode {
     pub fn new(plan: Box<DeletePlan>, ctx: &ExecCtx) -> Result<Self> {
+        if plan.inh && reads_transition(&plan.triggers, tt::DELETE) && plan.members.iter().any(|m| m.table.foreign.is_some()) {
+            return Err(crate::ext::postgres_fdw::modify::transition_error());
+        }
         ctx.txn.borrow_mut().output_cid();
         if !plan.view {
             check_replica_identity(&plan.table, crate::catalog::pubsub::RiCmd::Delete, ctx)?;

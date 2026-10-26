@@ -20,6 +20,29 @@ thread_local! {
     static BACK: std::cell::RefCell<Option<Back>> = const { std::cell::RefCell::new(None) };
     /// The remote ctid of the row the last INSERT / UPDATE stored, when it came back.
     static LAST_CTID: std::cell::Cell<Option<(u32, u16)>> = const { std::cell::Cell::new(None) };
+    /// The running INSERT routes rows into partitions while capturing transition tables.
+    static ROUTED_CAPTURE: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
+}
+
+/// While the guard lives, rows routed to partitions are captured for transition tables.
+pub(crate) fn routed_capture(on: bool) -> Option<crate::scoped::RefGuard<bool>> {
+    on.then(|| crate::scoped::set_ref(&ROUTED_CAPTURE, true, "postgres_fdw::ROUTED_CAPTURE"))
+}
+
+/// ExecInitRoutingInfo: a foreign partition can't give a routed row to transition tables.
+pub(crate) fn check_routed_capture() -> Result<()> {
+    if ROUTED_CAPTURE.with_borrow(|c| *c) {
+        return Err(transition_error());
+    }
+    Ok(())
+}
+
+/// "cannot collect transition tuples from child foreign tables".
+pub fn transition_error() -> crate::error::Error {
+    crate::error::Error::new(
+        crate::error::code::FEATURE_NOT_SUPPORTED,
+        "cannot collect transition tuples from child foreign tables",
+    )
 }
 
 /// The trigger types (tgtype) of a table's triggers (the trigger descriptor's flags).
@@ -141,6 +164,9 @@ pub(crate) fn unsettled(out: &mut Vec<&'static str>) {
     }
     if BACK.with_borrow(|r| r.is_some()) {
         out.push("postgres_fdw::BACK");
+    }
+    if ROUTED_CAPTURE.with_borrow(|c| *c) {
+        out.push("postgres_fdw::ROUTED_CAPTURE");
     }
 }
 
