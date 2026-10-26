@@ -286,7 +286,15 @@ What changed:
   instead and kept the hashed one. q12 at SF0.1 gets Postgres's Partial GroupAggregate over a
   Sort.
 
-Goldens: `tests/sql/a55_lateral_bound.sql`, `a55_sublink_written.sql`, `a55_partial_agg.sql`
+- **An InitPlan's Param costs nothing in qual order** (TPC-H q22; `optimize::qual_cost`,
+  `ec_order_clause`): order_qual_clauses sees a sub-select reading no column of the level as
+  the InitPlan's output Param, free per row, and its equality a class clause (a constant
+  member): `c_acctbal > (InitPlan 1).col1` before `SUBSTRING(...) = ANY (...)`, `a = $1`
+  before `b = (InitPlan 1).col1` in written order. The engine charged every sub-select as a
+  SubPlan run per row. (Subset runs identical to the base, 36e828bd.)
+
+Goldens: `tests/sql/a55_lateral_bound.sql`, `a55_sublink_written.sql`, `a55_partial_agg.sql`,
+`a55_initplan_quals.sql`
 (recorded from PostgreSQL 18.6; rows of the right join's null-extended row, NULL keys in semi /
 anti joins, under a left join's ON). No wrong results were found comparing rows.
 
@@ -308,9 +316,7 @@ Looked at and left (why):
 - TPC-H at SF0.1 (`tools/bench` against a private 18.6): of the 22 plans without costs 12 differ
   in shape (q04 among them now flips the other way: its hashed partial aggregation is 1.03%
   cheaper than the sorted one in Postgres and 0.97% in the engine, whose join estimate is 2962
-  rows for 3068, the storage model's statistics); q22's filter lists `c_acctbal > (InitPlan
-  1).col1` second where Postgres orders it first (an InitPlan's Param costs nothing in
-  order_qual_clauses; `optimize::qual_cost` charges a sub-select 1000).
+  rows for 3068, the storage model's statistics).
 - `select * from (select i, k from (... union all select 0) a left join (select 1 as j, 7 as k
   limit 1) b on i = j) ss, lateral (select k as kl limit 1)`: Postgres keeps `Subquery Scan on
   b` (its target list `b.k, b.j` isn't the Limit's `1, 7` order) and refers to `b.k`; the
