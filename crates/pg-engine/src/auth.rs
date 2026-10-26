@@ -130,20 +130,55 @@ pub fn encrypt_password(md5: bool, role: &str, password: &str, iterations: u32) 
 
 /// plain_crypt_verify(role, shadow, ""): whether `shadow` is a hash of the empty password.
 pub fn is_empty_password(role: &str, shadow: &str) -> bool {
+    crypt_verify(role, shadow, "")
+}
+
+/// plain_crypt_verify(role, shadow, password) for an encrypted `shadow`: whether it is a
+/// hash of `password`.
+pub fn crypt_verify(role: &str, shadow: &str, password: &str) -> bool {
     use md5::Md5;
     match password_type(shadow) {
         PasswordType::Md5 => {
-            shadow[3..] == hex(&Md5::digest(role.as_bytes()))
+            let mut input = password.as_bytes().to_vec();
+            input.extend_from_slice(role.as_bytes());
+            shadow[3..] == hex(&Md5::digest(&input))
         }
         PasswordType::Scram => {
             let Some((iter, salt, _, server)) = parse_scram_secret(shadow) else {
                 return false;
             };
-            let salted = hi(b"", &salt, iter);
+            let salted = hi(password.as_bytes(), &salt, iter);
             hmac(&salted, b"Server Key")[..] == server[..]
         }
         PasswordType::Plaintext => false,
     }
+}
+
+/// passwordcheck's check_password hook (a session that loaded the library): what it refuses
+/// of `password` for role `role`, `min_len` its passwordcheck.min_password_length.
+pub fn passwordcheck(role: &str, password: &str, min_len: i64) -> crate::Result<()> {
+    use crate::error::{Error, code};
+    let refuse = |m: &str| Error::new(code::INVALID_PARAMETER_VALUE, m.to_string());
+    if password_type(password) != PasswordType::Plaintext {
+        if crypt_verify(role, password, role) {
+            return Err(refuse("password must not equal user name"));
+        }
+        return Ok(());
+    }
+    if (password.len() as i64) < min_len {
+        return Err(refuse("password is too short").detail(format!(
+            "password must be at least \"passwordcheck.min_password_length\" ({min_len}) bytes long"
+        )));
+    }
+    if password.contains(role) {
+        return Err(refuse("password must not contain user name"));
+    }
+    // (isalpha over bytes: non-ASCII bytes are non-letters.)
+    let letters = password.bytes().filter(u8::is_ascii_alphabetic).count();
+    if letters == 0 || letters == password.len() {
+        return Err(refuse("password must contain both letters and nonletters"));
+    }
+    Ok(())
 }
 
 pub struct Verifier {

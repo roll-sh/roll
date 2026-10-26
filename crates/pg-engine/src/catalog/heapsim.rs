@@ -696,6 +696,12 @@ impl Heap {
         self.fsm.blocks
     }
 
+    /// GetRecordedFreeSpace: the free space the FSM records for page `blk`, in bytes (its
+    /// category's lower bound; 0 where it has no page).
+    pub fn recorded_free(&mut self, blk: u32) -> usize {
+        self.fsm.recorded(blk) as usize * 32
+    }
+
     /// The free space of the last page (PageGetHeapFreeSpace; 0 without pages).
     pub fn last_page_free(&self) -> usize {
         self.pages.last().map_or(0, Page::heap_free)
@@ -724,6 +730,55 @@ impl Heap {
     /// Whether the visibility map marks page `blk` all-visible.
     pub fn page_all_visible(&self, blk: u32) -> bool {
         self.pages.get(blk as usize).is_some_and(|p| p.all_visible)
+    }
+
+    /// Whether the visibility map marks page `blk` all-frozen: all-visible with every
+    /// tuple frozen (its inserter older than any transaction: COPY FREEZE's, frozen ones').
+    pub fn page_all_frozen(&self, blk: u32) -> bool {
+        self.pages.get(blk as usize).is_some_and(|p| {
+            p.all_visible
+                && p.lps.iter().all(|l| match l {
+                    Lp::Normal(t) => t.xmin < crate::txn::xids::FIRST_NORMAL_XID,
+                    _ => true,
+                })
+        })
+    }
+
+    /// pg_truncate_visibility_map: the map's file goes; no page is marked any more.
+    pub fn truncate_vm(&mut self) {
+        for p in &mut self.pages {
+            p.all_visible = false;
+        }
+        self.vm_blocks = 0;
+    }
+
+    /// pgstat_heap's counts over every page: (live tuples, their bytes, dead tuples, their
+    /// bytes, free bytes). A tuple is live as SnapshotDirty sees it (its insert committed or
+    /// in progress, its delete not committed), dead otherwise; free space is
+    /// PageGetExactFreeSpace's.
+    pub fn tuple_stats(&self, v: &Vis) -> (u64, u64, u64, u64, u64) {
+        let mut s = (0, 0, 0, 0, 0);
+        for p in &self.pages {
+            for l in &p.lps {
+                if let Lp::Normal(t) = l {
+                    match t.status(v) {
+                        Htsv::Live | Htsv::InsertInProgress | Htsv::DeleteInProgress => {
+                            s.0 += 1;
+                            s.1 += t.len as u64;
+                        }
+                        Htsv::Dead | Htsv::RecentlyDead => {
+                            s.2 += 1;
+                            s.3 += t.len as u64;
+                        }
+                    }
+                }
+            }
+            if !p.new {
+                let lower = PAGE_HEADER + ITEM_ID * p.lps.len();
+                s.4 += (BLCKSZ - p.used).saturating_sub(lower) as u64;
+            }
+        }
+        s
     }
 
     /// A relcache invalidation: the cached insertion targets are forgotten.
@@ -1038,7 +1093,9 @@ impl Heap {
                 if n > 0 && self.pages[blk as usize].heap_free() < maxalign(len) + save {
                     break;
                 }
-                out.push(self.put(blk, Self::new_tup(len, xmin), mode.frozen));
+                // (HEAP_INSERT_FROZEN: the tuple is frozen as it goes in.)
+                let x = if mode.frozen { 0 } else { xmin };
+                out.push(self.put(blk, Self::new_tup(len, x), mode.frozen));
                 n += 1;
             }
             done += n;

@@ -3160,7 +3160,7 @@ impl InsertNode {
         let last_table = plan.rules.table.oid;
         let copy_load = match &plan.copy {
             Some(c) if !rules.view && rules.table.partkey.is_none() => {
-                Some(super::sizing::CopyLoad::start(&rules.table, c.multi, ctx))
+                Some(super::sizing::CopyLoad::start(&rules.table, c.multi, c.freeze, ctx))
             }
             _ => None,
         };

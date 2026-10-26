@@ -88,6 +88,15 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   (`src/ext/types.rs`); extension libraries' GUCs are `session/ext_gucs.tsv`.
   pg_stat_statements 1,013 / 1,013 since round 19 (agent 71). Left: pageinspect (not
   applicable), see STATUS.md.
+- **Contrib round 3** (round 19, agent 71): tsm_system_rows, tsm_system_time, pg_prewarm,
+  pg_freespacemap, pg_visibility, pgstattuple, pgrowlocks, dict_int, dict_xsyn,
+  passwordcheck, auto_explain's and auth_delay's parameters, sslinfo, tcn, intagg; the
+  inspection modules report the engine's size model (heap FSM, visibility map, tuple and
+  btree page counts), consistent with pg_relation_size. Not applicable: pg_surgery,
+  pg_walinspect, basic_archive, pg_logicalinspect (PostgreSQL heap tuples, WAL and logical
+  decoding files). Not done: test_decoding (no logical decoding), bloom (pluggable index AMs),
+  xml2 (XSLT), pg_overexplain, spi. Scores and the per-module notes: contrib STATUS.md.
+  amcheck's verify_heapam counts its pages in pg_stat_io's bulkread context.
 - **Two-phase commit** (round 19, agent 71): PREPARE TRANSACTION, COMMIT / ROLLBACK
   PREPARED, pg_prepared_xacts (`txn/twophase.rs`, `session/prepared.rs`).
   max_prepared_transactions is a server option (`roll-engine --max-prepared-transactions N`,

@@ -1551,10 +1551,42 @@ struct Sampler {
     /// SYSTEM samples whole groups of rows, as Postgres samples whole pages.
     system: bool,
     row: u64,
+    /// tsm_system_rows / tsm_system_time: every row until the limit.
+    limit: Option<SampleLimit>,
+}
+
+/// What ends an extension method's sample: a row count (system_rows), or a time
+/// (system_time: the milliseconds since the scan's first row was asked for).
+enum SampleLimit {
+    Rows(u64),
+    Time(Option<std::time::Instant>, f64),
 }
 
 impl Sampler {
     fn new(ts: &crate::sql::plan::TableSample, ctx: &ExecCtx) -> Result<Self> {
+        if matches!(ts.method, "system_rows" | "system_time") {
+            let v = eval(&ts.percent, &[], ctx)?;
+            if v.is_null() {
+                return Err(Error::new(code::INVALID_TABLESAMPLE_ARGUMENT, "TABLESAMPLE parameter cannot be null"));
+            }
+            let limit = if ts.method == "system_rows" {
+                let n = v.as_i64().unwrap_or(0);
+                if n < 0 {
+                    return Err(Error::new(code::INVALID_TABLESAMPLE_ARGUMENT, "sample size must not be negative"));
+                }
+                SampleLimit::Rows(n as u64)
+            } else {
+                let ms = v.as_f64().unwrap_or(f64::NAN);
+                if ms.is_nan() || ms < 0.0 {
+                    return Err(Error::new(
+                        code::INVALID_TABLESAMPLE_ARGUMENT,
+                        "sample collection time must not be negative",
+                    ));
+                }
+                SampleLimit::Time(None, ms)
+            };
+            return Ok(Sampler { cutoff: 0, seed: 0, system: true, row: 0, limit: Some(limit) });
+        }
         let percent = match eval(&ts.percent, &[], ctx)? {
             Value::Null => {
                 return Err(Error::new(
@@ -1596,10 +1628,29 @@ impl Sampler {
             seed,
             system: ts.method == "system",
             row: 0,
+            limit: None,
         })
     }
 
     fn keep(&mut self, key: &[u8], bytes: &[u8]) -> bool {
+        match &mut self.limit {
+            Some(SampleLimit::Rows(n)) => {
+                return match n.checked_sub(1) {
+                    Some(left) => {
+                        *n = left;
+                        true
+                    }
+                    None => false,
+                };
+            }
+            // (system_time_nextsampleblock: the clock starts at the first block; past the
+            // time, no more.)
+            Some(SampleLimit::Time(start, ms)) => {
+                let start = *start.get_or_insert_with(std::time::Instant::now);
+                return start.elapsed().as_secs_f64() * 1000.0 < *ms;
+            }
+            None => {}
+        }
         // system_samplenextblock / bernoulli_nextsampletuple: hash_any of the block number
         // (and the tuple's offset) with the seed, against the cutoff.
         if let Some((block, off)) = stored_tid(bytes) {

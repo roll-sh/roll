@@ -39,7 +39,7 @@ pub fn library(probin: &str) -> &str {
 /// as `dlsym` failing is).
 pub fn has_library(lib: &str) -> bool {
     matches!(lib, "_int" | "amcheck" | "btree_gin" | "btree_gist" | "citext" | "cube" | "dblink" | "earthdistance" | "file_fdw" | "fuzzystrmatch" | "hstore" | "isn" | "lo" | "ltree" | "pgcrypto"
-            | "pg_buffercache" | "pg_stat_statements" | "pg_trgm" | "postgres_fdw" | "seg" | "tablefunc" | "unaccent" | "uuid-ossp")
+            | "pg_buffercache" | "pg_stat_statements" | "pg_trgm" | "postgres_fdw" | "seg" | "tablefunc" | "pg_prewarm" | "pg_freespacemap" | "pg_visibility" | "pgstattuple" | "tcn" | "sslinfo" | "dict_int" | "dict_xsyn" | "pgrowlocks" | "tsm_system_rows" | "tsm_system_time" | "unaccent" | "uuid-ossp")
 }
 
 /// A made operator class's support function `number` (for its input type), when it is a C
@@ -137,6 +137,15 @@ pub fn lookup(probin: &str, symbol: &str) -> Option<Native> {
         "pg_stat_statements" => super::pg_stat_statements::symbol(symbol),
         "postgres_fdw" => super::postgres_fdw::symbol(symbol),
         "uuid-ossp" => super::uuid_ossp::symbol(symbol),
+        "tsm_system_rows" | "tsm_system_time" => super::tsm::symbol(symbol),
+        "pgrowlocks" => super::pgrowlocks::symbol(symbol),
+        "sslinfo" => super::sslinfo::symbol(symbol),
+        "tcn" => super::tcn::symbol(symbol),
+        "dict_int" | "dict_xsyn" => super::dicts::symbol(symbol),
+        "pgstattuple" => super::pgstattuple::symbol(symbol),
+        "pg_visibility" => super::pg_visibility::symbol(symbol),
+        "pg_freespacemap" => super::pg_freespacemap::symbol(symbol),
+        "pg_prewarm" => super::pg_prewarm::symbol(symbol),
         _ => None,
     }
 }
@@ -184,6 +193,7 @@ pub type TriggerImpl = fn(TriggerData, &crate::exec::ExecCtx) -> crate::Result<O
 pub fn trigger(probin: &str, symbol: &str) -> Option<TriggerImpl> {
     match library(probin) {
         "lo" => super::lo::trigger(symbol),
+        "tcn" => super::tcn::trigger(symbol),
         _ => None,
     }
 }
@@ -196,6 +206,8 @@ pub fn ts_dict(
 ) -> crate::Result<Option<Box<dyn crate::types::tsearch::config::ExtDict>>> {
     match (lib, init) {
         ("unaccent", "unaccent_init") => super::unaccent::init(options).map(Some),
+        ("dict_int", "dintdict_init") => super::dicts::int_init(options).map(Some),
+        ("dict_xsyn", "dxsyn_init") => super::dicts::xsyn_init(options).map(Some),
         _ => Ok(None),
     }
 }

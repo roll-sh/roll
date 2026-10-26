@@ -286,6 +286,14 @@ impl Ddl<'_, '_> {
             role.password = None;
             return Ok(());
         };
+        // check_password_hook: passwordcheck, once loaded.
+        let check = {
+            let st = self.ctx.sess.settings.borrow();
+            st.module_loaded("passwordcheck").then(|| st.int("passwordcheck.min_password_length"))
+        };
+        if let Some(min) = check {
+            crate::auth::passwordcheck(&role.name, &p, min)?;
+        }
         if p.is_empty() || crate::auth::is_empty_password(&role.name, &p) {
             self.notice("empty string is not a valid password, clearing password");
             role.password = None;
@@ -645,6 +653,9 @@ impl Ddl<'_, '_> {
             Ok(K::VarSetValue) => {
                 let value = super::super::utility::set_value(&set.name, &set.args)?;
                 crate::session::settings::check_setting(&set.name, &value)?;
+                // (validate_option_array_item finds the parameter creating placeholders: a
+                // custom one now exists in this session, as LOAD's reservation sees.)
+                self.ctx.sess.settings.borrow_mut().add_placeholder(&set.name);
                 list.retain(|(n, _)| !n.eq_ignore_ascii_case(&set.name));
                 list.push((set.name.clone(), value));
             }

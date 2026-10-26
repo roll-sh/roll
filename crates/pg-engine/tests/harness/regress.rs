@@ -249,6 +249,16 @@ const CONTRIB_MODULES: &[&str] = &[
     "file_fdw",
     "postgres_fdw",
     "dblink",
+    "tsm_system_rows",
+    "tsm_system_time",
+    "pg_prewarm",
+    "pg_freespacemap",
+    "pg_visibility",
+    "pgstattuple",
+    "dict_int",
+    "dict_xsyn",
+    "auto_explain",
+    "passwordcheck",
 ];
 
 /// The contrib modules' own regression tests (`contrib/<module>/sql` and `expected` at

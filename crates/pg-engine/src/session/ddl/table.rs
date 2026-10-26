@@ -5580,7 +5580,12 @@ impl Ddl<'_, '_> {
                 }
             }
             A::AtSetTableSpace => {
+                let before = self.cat.rel_tablespace.get(&t.oid).copied();
                 self.move_to_tablespace(t.oid, &cmd.name)?;
+                // (ATExecSetTableSpace: a new relfilenode, RelationAssumeNewRelfilelocator.)
+                if t.partkey.is_none() && self.cat.rel_tablespace.get(&t.oid).copied() != before {
+                    self.ctx.txn.borrow_mut().mark_new_storage(t.oid);
+                }
                 crate::exec::pgstat::io_rewrite(self.ctx, t.oid);
             }
             A::AtAlterConstraint => {

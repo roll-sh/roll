@@ -7814,6 +7814,24 @@ impl Binder<'_, '_> {
         loc: i32,
     ) -> Result<Expr> {
         let builtin = crate::catalog::system::builtin_by_prosrc(&fdef.body);
+        // A set-returning one (`AS 'array_unnest'`): the built-in set-returning function, its
+        // rows typed as declared.
+        if fdef.returns_set
+            && let Some(def) = builtin.and_then(|b| {
+                func::registry().funcs.values().flatten().find(|d| d.oid == b && d.srf.is_some()).cloned()
+            })
+        {
+            self.check_srf_placement(loc)?;
+            let ty = if fdef.out_cols.len() > 1 { DataType::row(fdef.out_cols.clone()) } else { fdef.ret.clone() };
+            let i = self.push_srf(SrfCall {
+                func: def,
+                args: coerced,
+                ty: ty.clone(),
+                ncols: fdef.out_cols.len().max(1),
+                body: None,
+            });
+            return Ok(Expr::Srf(i, ty));
+        }
         let mut def = builtin.and_then(|b| {
             func::registry()
                 .funcs

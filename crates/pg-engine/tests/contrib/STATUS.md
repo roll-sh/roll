@@ -41,7 +41,7 @@ PGCONTRIB_ONLY=uuid-ossp,citext PGREGRESS_DIR=$D PGREGRESS_CONTAINER=a39-ref \
 
 ## Scores
 
-Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013 (1,013 / 1,013 since round 19, agent 71: a run of that module). Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053 (81.1%). Round 19 (agent 66): file_fdw 187 / 187. Baseline (before any
+Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013 (1,013 / 1,013 since round 19, agent 71: a run of that module). Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053 (81.1%). Round 19 (agent 66): file_fdw 187 / 187. Round 19 (agent 71), a full run of every module: 7,683 / 8,270 units of 34 modules (pageinspect not applicable, postgres_fdw 1,664); the 10 modules with tests added this round 346 / 350 (tsm_system_time 14 / 16, auto_explain 10 / 12, the rest whole); amcheck 203 / 204 in a run after it. Baseline (before any
 extension was ported; CREATE EXTENSION was a stand-in): 2,752 / 7,733
 units (35.6%). The reference matches `expected/` for every module except dblink (the reference
 has no `regress.so`, whose functions dblink's test creates).
@@ -66,18 +66,73 @@ has no `regress.so`, whose functions dblink's test creates).
 | isn | 51 | 51 | done |
 | seg | 196 | 196 | done |
 | lo | 38 | 38 | done |
-| amcheck | 204 | 202 | applicable checks only (see below) |
+| amcheck | 204 | 203 | applicable checks only (see below) |
 | pageinspect | 291 | — | not applicable (not available) |
 | pg_buffercache | 38 | 38 | done (no buffer pool: every buffer unused) |
 | postgres_fdw | 2053 | 1664 | see below |
 | file_fdw | 187 | 187 | done (files are the server files of `--allow-server-files`; programs refused) |
+| tsm_system_rows | 16 | 16 | done (round 19, agent 71) |
+| tsm_system_time | 16 | 14 | see below |
+| pg_prewarm | 5 | 5 | done (no buffer pool: nothing is read; the range's blocks are reported) |
+| pg_freespacemap | 15 | 15 | done (the heap model's FSM) |
+| pg_visibility | 99 | 99 | done (the heap model's visibility map) |
+| pgstattuple | 83 | 83 | done (counts from the size model) |
+| dict_int | 63 | 63 | done |
+| dict_xsyn | 29 | 29 | done |
+| passwordcheck | 12 | 12 | done |
+| auto_explain | 12 | 10 | see below |
 | dblink | 218 | 218 | done |
 
 ### What is left, per module
 
-- **btree_gist**: rows of an unordered GiST index scan come back in PostgreSQL's GiST tree
-  order (macaddr, macaddr8, bytea units without ORDER BY): the engine reads the index's rows in
-  its own order. A real GiST page model for these classes would be needed.
+- **Round 19 (agent 71), the modules added** (`src/ext/`): the TABLESAMPLE methods resolve to
+  the extension's handler function (`binder::select` `tsm_method`; system_rows takes a row
+  count, system_time milliseconds, neither REPEATABLE; `exec::scan::Sampler`). The inspection
+  modules read the engine's size model (`exec::sizing`): pg_freespacemap the heap's simulated
+  FSM and BRIN's regular pages (`recorded_free_space`); pg_visibility the heap model's
+  visibility map (`visibility`; COPY FREEZE inserts frozen tuples, its new pages all-visible
+  and all-frozen; pg_check_frozen / pg_check_visible find nothing, the model marking only
+  pages none would break); pgstattuple its tuple and page counts (`heap_tuple_stats`,
+  `Btree::page_stats`; hash indexes' bucket / bitmap split and GIN's pending list aren't
+  modelled page by page: the shape an index of that size has); pg_prewarm reads nothing (no
+  buffer pool) and reports the range's blocks; pgrowlocks the lock manager's row locks
+  (`LockManager::row_lockers`, one member per locking (sub)transaction; no MultiXactIds: a
+  multi's `locker` is its first member's xid), its isolation spec matching (12 / 12
+  permutations, run from a private copy with CREATE EXTENSION in its setup). dict_int and
+  dict_xsyn are extension text search templates (`ext/dicts.rs`). passwordcheck's hook runs
+  in CREATE / ALTER ROLE ... PASSWORD once the library is loaded (`auth::passwordcheck`).
+  LOAD of auto_explain, passwordcheck and auth_delay defines their parameters
+  (`session/ext_gucs.tsv`, from the reference's pg_settings). sslinfo answers for a connection
+  without SSL (the server declines SSLRequest). tcn is a native trigger (its spec matches);
+  intagg installs, int_array_enum runs (an internal-language set-returning function runs its
+  built-in), int_array_aggregate doesn't (below). Golden `a71_contrib_round3`.
+- **tsm_system_time** (units 9, 11): PostgreSQL puts a Materialize over a sample scan whose
+  method isn't repeatable across scans when the query level isn't one relation
+  (set_tablesample_rel_pathlist); the engine's EXPLAIN doesn't (rows match).
+- **auto_explain** (units 5, 10): ALTER SYSTEM is refused (the engine has no
+  postgresql.auto.conf). Logging plans (the module's purpose) isn't done: the engine has no
+  server log a client sees, and the plans would go there at LOG level.
+- **intagg**: int_array_aggregate's transition function is the internal
+  `array_agg_transfn` over an `internal` state, which the engine's aggregates don't take
+  (no contrib units; the module has no regression test).
+- **Not applicable**: pageinspect (above); pg_surgery (heap_force_kill / heap_force_freeze
+  repair corrupted heap tuples by TID outside transactions: the engine's rows aren't
+  PostgreSQL heap tuples, and a row is removed with DELETE ... WHERE ctid); pg_walinspect,
+  basic_archive (PostgreSQL WAL records and segments; the engine's WAL is its own store's);
+  pg_logicalinspect (logical decoding's snapshot files); sepgsql (SELinux).
+- **Not done**: test_decoding (the engine has no logical decoding: no replication slots or
+  change stream, which CDC tools such as Debezium need; a project of its own); bloom (an
+  index access method: waits for the pluggable index AMs agent 70 is adding); xml2 (its
+  xslt_process needs an XSLT processor; the xpath_* functions could use the engine's XPath);
+  pg_overexplain, spi (refint, autoinc, insert_username, moddatetime), auth_delay's delay
+  (its parameter only).
+
+- **btree_gist** (3 units): rows of an unordered GiST index scan come back in PostgreSQL's
+  GiST tree order (macaddr, macaddr8, bytea units without ORDER BY): the engine reads the
+  index's rows in its own order. Accepted as an internal difference (round 19, agent 71):
+  matching it needs a model of GiST's page splits for these classes (picksplit's order of the
+  keys over the pages), and a query without ORDER BY has no defined order; the rows are the
+  same.
 - **seg** (unit 167, the GiST Index Only Scan for `@>`): matches since round 18.
 - **seg** unit 170: done (round 19, agent 53). Grouping, DISTINCT, set operations, hashed
   SubPlans, hash joins and Memoize follow PostgreSQL's hashability
@@ -93,7 +148,10 @@ has no `regress.so`, whose functions dblink's test creates).
   heap page invariants to verify; the functions check what applies (target, access method,
   validity, arguments, block ranges) and report no corruption. Units that differ: superuser
   `UPDATE pg_attribute` (check_btree 59: catalog DML the engine doesn't take, agent 51's
-  area), and `pg_stat_io` bulk reads not counted by verify_heapam (check_heap 27). The
+  area). verify_heapam counts its pages in pg_stat_io's bulkread context (check_heap 27
+  matches since round 19, agent 71: reads when SET TABLESPACE, a TRUNCATE or the table's
+  creation gave it new storage in this transaction, which SET TABLESPACE now marks as
+  ATExecSetTableSpace's RelationAssumeNewRelfilelocator does; hits otherwise). The
   check_gin timeout is gone: the text[] GIN build (10,000 rows) that stalled past 300 s takes
   about a second since round 19's index-build work.
 - **pageinspect**: reads raw 8 kB PostgreSQL pages (heap, btree, GIN, GiST, BRIN, hash

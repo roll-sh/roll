@@ -1440,7 +1440,12 @@ impl Session {
                 let w = self.state.settings.borrow_mut().reserve_prefix("plpgsql");
                 self.notices.extend(w);
             }
-            "auto_explain" | "plugins/auto_explain" | "passwordcheck" => {}
+            // Libraries whose effect is their parameters (and, passwordcheck, its hook).
+            "auto_explain" | "plugins/auto_explain" | "passwordcheck" | "auth_delay" => {
+                let l = lib.trim_start_matches("plugins/");
+                let w = self.state.settings.borrow_mut().load_module(l);
+                self.notices.extend(w);
+            }
             // An extension library the engine implements natively: its parameters.
             l if crate::ext::native::has_library(l) || l == "pg_stat_statements" => {
                 let w = self.state.settings.borrow_mut().load_module(l);

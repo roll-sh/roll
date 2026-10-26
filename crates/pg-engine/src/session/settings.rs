@@ -1423,6 +1423,20 @@ impl Settings {
 
     /// An extension library is loaded (its `_PG_init`): its parameters are defined and its
     /// prefix reserved. Returns the WARNINGs that raises.
+    /// A custom parameter `name` (one with a dot, no definition) exists from now on, empty
+    /// until set (find_option's placeholder).
+    pub fn add_placeholder(&mut self, name: &str) {
+        let canon = canonical_name(name);
+        if canon.contains('.') && self.def(&canon).is_none() && !self.values.contains_key(&canon) && !self.defaults.contains_key(&canon) {
+            self.values.insert(canon, String::new());
+        }
+    }
+
+    /// Whether library `prefix` was loaded (its prefix reserved).
+    pub fn module_loaded(&self, prefix: &str) -> bool {
+        self.reserved.iter().any(|r| r.eq_ignore_ascii_case(prefix))
+    }
+
     pub fn load_module(&mut self, lib: &str) -> Vec<Error> {
         match find_module_prefix(lib) {
             Some(prefix) => self.reserve_prefix(prefix),

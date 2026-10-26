@@ -11,3 +11,18 @@ pg_stat_statements.track_utility	bool		superuser	Customized Options	Selects whet
 pg_trgm.similarity_threshold	real		user	Customized Options	Sets the threshold used by the % operator.	Valid range is 0.0 .. 1.0.	0	1		0.3	0.3		default
 pg_trgm.strict_word_similarity_threshold	real		user	Customized Options	Sets the threshold used by the <<% operator.	Valid range is 0.0 .. 1.0.	0	1		0.5	0.5		default
 pg_trgm.word_similarity_threshold	real		user	Customized Options	Sets the threshold used by the <% operator.	Valid range is 0.0 .. 1.0.	0	1		0.6	0.6		default
+auth_delay.milliseconds	integer	ms	sighup	Customized Options	Milliseconds to delay before reporting authentication failure		0	2147483		0	0		default
+auto_explain.log_analyze	bool		superuser	Customized Options	Use EXPLAIN ANALYZE for plan logging.					off	off		default
+auto_explain.log_buffers	bool		superuser	Customized Options	Log buffers usage.					off	off		default
+auto_explain.log_format	enum		superuser	Customized Options	EXPLAIN format to be used for plan logging.				text,xml,json,yaml	text	text		default
+auto_explain.log_level	enum		superuser	Customized Options	Log level for the plan.				debug5,debug4,debug3,debug2,debug1,info,notice,warning,log	log	log		default
+auto_explain.log_min_duration	integer	ms	superuser	Customized Options	Sets the minimum execution time above which plans will be logged.	-1 disables logging plans. 0 means log all plans.	-1	2147483647		-1	-1		default
+auto_explain.log_nested_statements	bool		superuser	Customized Options	Log nested statements.					off	off		default
+auto_explain.log_parameter_max_length	integer	B	superuser	Customized Options	Sets the maximum length of query parameter values to log.	-1 means log values in full.	-1	2147483647		-1	-1		default
+auto_explain.log_settings	bool		superuser	Customized Options	Log modified configuration parameters affecting query planning.					off	off		default
+auto_explain.log_timing	bool		superuser	Customized Options	Collect timing data, not just row counts.					on	on		default
+auto_explain.log_triggers	bool		superuser	Customized Options	Include trigger statistics in plans.	This has no effect unless log_analyze is also set.				off	off		default
+auto_explain.log_verbose	bool		superuser	Customized Options	Use EXPLAIN VERBOSE for plan logging.					off	off		default
+auto_explain.log_wal	bool		superuser	Customized Options	Log WAL usage.					off	off		default
+auto_explain.sample_rate	real		superuser	Customized Options	Fraction of queries to process.		0	1		1	1		default
+passwordcheck.min_password_length	integer	B	superuser	Customized Options	Minimum allowed password length.		0	2147483647		8	8		default

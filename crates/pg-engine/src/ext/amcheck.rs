@@ -151,6 +151,11 @@ fn verify_heapam(a: &[Value], c: &FnCtx) -> Result<crate::sql::func::SrfIter> {
             ));
         }
     }
+    // (verify_heapam reads through a BAS_BULKREAD strategy: pg_stat_io's bulkread context.
+    // A table given new storage in this transaction, as SET TABLESPACE gives it, has none of
+    // its pages in shared buffers; otherwise they are all hits.)
+    let fresh = c.exec.txn.borrow().storage_new_in_txn(oid);
+    crate::exec::pgstat::count_io(c.exec, "relation", "bulkread", if fresh { "reads" } else { "hits" }, nblocks);
     Ok(Box::new(std::iter::empty()))
 }
 

@@ -1125,6 +1125,24 @@ impl LockManager {
         })
     }
 
+    /// The row locks on `row` (pgrowlocks), in the order they were taken: (mode, whether an
+    /// update's or delete's, the holder's transaction id, its backend's pid).
+    pub fn row_lockers(&self, row: &[u8]) -> Vec<(RowLockMode, bool, u64, Option<i32>)> {
+        let s = self.state.lock();
+        s.rows
+            .get(row)
+            .map(|v| {
+                v.iter()
+                    .map(|h| {
+                        let xid = s.locks.get(&xact_key(h.holder)).map_or(0, |e| e.xid);
+                        let pid = s.pids.get(&h.proc).copied().or_else(|| pid_of(h.proc));
+                        (h.mode, h.modifies, xid, pid)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The row locks `owner` holds: (row, strongest mode, whether an update's or delete's).
     pub fn rows_of(&self, owner: u64) -> Vec<(Vec<u8>, RowLockMode, bool)> {
         let s = self.state.lock();

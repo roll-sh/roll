@@ -201,6 +201,23 @@ pub struct InsertHint<'a> {
     pub dead: &'a dyn Fn(Tid) -> bool,
 }
 
+/// What `Btree::page_stats` counts.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BtPageStats {
+    pub root: u32,
+    pub internal: u64,
+    pub leaf: u64,
+    pub empty: u64,
+    pub leaf_free: u64,
+    pub fragments: u64,
+    pub items: u64,
+    pub item_bytes: u64,
+    pub free: u64,
+}
+
+/// The usable bytes of a btree page (pgstatindex's max_avail per leaf page).
+pub const BT_PAGE_SPACE: usize = PAGE_SPACE;
+
 #[derive(Clone, Debug)]
 pub struct Btree {
     pub opts: BtreeOpts,
@@ -223,6 +240,33 @@ impl Btree {
 
     pub fn nblocks(&self) -> u32 {
         self.pages.len() as u32
+    }
+
+    /// pgstatindex's walk over the pages after the metapage: (root block, internal pages,
+    /// leaf pages, empty leaf pages, leaf free bytes (PageGetExactFreeSpace), leaf
+    /// fragments: leaves whose right sibling comes before them) and pgstattuple's over all
+    /// of them: (items, their bytes, free bytes).
+    pub fn page_stats(&self) -> BtPageStats {
+        let mut s = BtPageStats { root: self.root.unwrap_or(0), ..Default::default() };
+        for (b, p) in self.pages.iter().enumerate().skip(1) {
+            let Some(p) = p else { continue };
+            let free = p.free() + ITEM_ID;
+            s.free += free as u64;
+            s.items += p.nitems() as u64;
+            s.item_bytes += (p.used + ITEM_ID * p.nitems()) as u64;
+            if !p.leaf {
+                s.internal += 1;
+            } else if p.items.is_empty() {
+                s.empty += 1;
+            } else {
+                s.leaf += 1;
+                s.leaf_free += free as u64;
+                if p.right.is_some_and(|r| (r as usize) < b) {
+                    s.fragments += 1;
+                }
+            }
+        }
+        s
     }
 
     /// The root's level (0: the root is a leaf, or there is none).

@@ -3064,7 +3064,7 @@ pub struct CopyLoad {
 }
 
 impl CopyLoad {
-    pub fn start(t: &Table, multi: bool, ctx: &ExecCtx) -> CopyLoad {
+    pub fn start(t: &Table, multi: bool, freeze: bool, ctx: &ExecCtx) -> CopyLoad {
         let txn = ctx.txn.borrow();
         let key = (t.oid, txn.id);
         // A table new in this transaction isn't worth looking up free space in.
@@ -3075,6 +3075,7 @@ impl CopyLoad {
             Bulk {
                 mode: InsertMode {
                     use_fsm,
+                    frozen: freeze,
                     ..InsertMode::bulk()
                 },
                 batch: multi.then(Batch::default),
@@ -3396,6 +3397,95 @@ pub fn fork_blocks(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>> {
             }
         }
     }))
+}
+
+/// The visibility map of table (or TOAST table, materialized view) `oid`, per block of its
+/// main fork: (all-visible, all-frozen, the page's PD_ALL_VISIBLE), from the heap model;
+/// None for a relation without one.
+pub fn visibility(oid: u32, ctx: &ExecCtx) -> Result<Option<Vec<(bool, bool, bool)>>> {
+    let main = fork_blocks(oid, Fork::Main, ctx)?.unwrap_or(0) as u32;
+    let cat = ctx.catalog();
+    let heap = match rel_of(&cat, oid) {
+        Some(Rel::Heap(t)) => t.oid,
+        Some(Rel::Toast(t, false)) => t.toast,
+        _ => return Ok(None),
+    };
+    let rf = ctx.sess.db.relfiles.lock();
+    Ok(Some(
+        (0..main)
+            .map(|b| match rf.heaps.get(&heap) {
+                Some(h) => (h.page_all_visible(b), h.page_all_frozen(b), h.page_all_visible(b)),
+                None => (false, false, false),
+            })
+            .collect(),
+    ))
+}
+
+/// pgstattuple's heap counts of table (TOAST table, materialized view) `oid` from the heap
+/// model: (live tuples, bytes, dead tuples, bytes, free bytes); None without a model (a
+/// table too big for it).
+pub fn heap_tuple_stats(oid: u32, ctx: &ExecCtx) -> Result<Option<(u64, u64, u64, u64, u64)>> {
+    fork_blocks(oid, Fork::Main, ctx)?;
+    let cat = ctx.catalog();
+    let heap = match rel_of(&cat, oid) {
+        Some(Rel::Heap(t)) => t.oid,
+        Some(Rel::Toast(t, false)) => t.toast,
+        _ => return Ok(None),
+    };
+    let xids = ctx.sess.db.xids();
+    let v = heapsim::Vis::new(&xids);
+    let rf = ctx.sess.db.relfiles.lock();
+    Ok(match rf.heaps.get(&heap) {
+        Some(h) => Some(h.tuple_stats(&v)),
+        None if rf.untracked.contains(&heap) => None,
+        None => Some((0, 0, 0, 0, 0)),
+    })
+}
+
+/// pgstatindex's counts of btree `ix` (the model's), its pages; None when not modelled.
+pub fn btree_page_stats(ix: u32, ctx: &ExecCtx) -> Result<Option<(crate::catalog::btsim::BtPageStats, u32, u32)>> {
+    let blocks = fork_blocks(ix, Fork::Main, ctx)?.unwrap_or(0) as u32;
+    let rf = ctx.sess.db.relfiles.lock();
+    Ok(rf.btrees.get(&ix).map(|b| (b.page_stats(), b.height(), blocks)))
+}
+
+/// pg_truncate_visibility_map of table `oid`.
+pub fn truncate_vm(oid: u32, ctx: &ExecCtx) -> Result<()> {
+    fork_blocks(oid, Fork::Main, ctx)?;
+    let cat = ctx.catalog();
+    let heap = match rel_of(&cat, oid) {
+        Some(Rel::Heap(t)) => t.oid,
+        Some(Rel::Toast(t, false)) => t.toast,
+        _ => return Ok(()),
+    };
+    if let Some(h) = ctx.sess.db.relfiles.lock().heaps.get_mut(&heap) {
+        h.truncate_vm();
+    }
+    Ok(())
+}
+
+/// GetRecordedFreeSpace of block `blk` of relation `oid` (pg_freespacemap), from the size
+/// model: a heap's simulated FSM; a BRIN index's regular pages (its build records the free
+/// space of the page it fills); nothing for the other access methods, whose FSM records
+/// only recyclable deleted pages, which the model doesn't make.
+pub fn recorded_free_space(oid: u32, blk: u64, ctx: &ExecCtx) -> Result<i64> {
+    // (Brings the relation's model up to date.)
+    let main = fork_blocks(oid, Fork::Main, ctx)?.unwrap_or(0);
+    let cat = ctx.catalog();
+    let heap = |h: u32| -> i64 {
+        let mut rf = ctx.sess.db.relfiles.lock();
+        rf.heaps.get_mut(&h).map_or(0, |h| h.recorded_free(blk.min(u32::MAX as u64) as u32)) as i64
+    };
+    Ok(match rel_of(&cat, oid) {
+        Some(Rel::Heap(t)) => heap(t.oid),
+        Some(Rel::Toast(t, false)) => heap(t.toast),
+        Some(Rel::Index(_, ix)) => {
+            let brin = cat.indexes.get(&ix).is_some_and(|i| i.method == "brin");
+            // (Past the metapage and the revmap: the regular pages, nearly empty.)
+            if brin && blk >= 2 && blk < main { 8160 } else { 0 }
+        }
+        _ => 0,
+    })
 }
 
 /// The bucket of hash index `bix` value `v` goes to (a page id for SSI: the bucket's

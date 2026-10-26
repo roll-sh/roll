@@ -4100,9 +4100,11 @@ impl Binder<'_, '_> {
             ));
         }
         let method = names(&ts.method).last().cloned().unwrap_or_default();
+        let ext = self.tsm_method(&method);
         let method: &'static str = match method.as_str() {
             "bernoulli" => "bernoulli",
             "system" => "system",
+            _ if ext.is_some() => ext.unwrap(),
             _ => {
                 return Err(with_pos(
                     Error::new(
@@ -4145,7 +4147,23 @@ impl Binder<'_, '_> {
                 )
             })
         };
-        let percent = arg(self, &ts.args[0], DataType::Float4)?;
+        // (system_rows takes a row count, system_time milliseconds.)
+        let arg_ty = match method {
+            "system_rows" => DataType::Int8,
+            "system_time" => DataType::Float8,
+            _ => DataType::Float4,
+        };
+        let percent = arg(self, &ts.args[0], arg_ty)?;
+        // (tsm_system_rows / tsm_system_time: repeatable_across_queries is false.)
+        if ts.repeatable.is_some() && matches!(method, "system_rows" | "system_time") {
+            return Err(with_pos(
+                Error::new(
+                    code::FEATURE_NOT_SUPPORTED,
+                    format!("tablesample method {method} does not support REPEATABLE"),
+                ),
+                ts.location,
+            ));
+        }
         let repeatable = match ts.repeatable.as_deref() {
             Some(n) => Some(arg(self, n, DataType::Float8)?),
             None => None,
@@ -4159,6 +4177,34 @@ impl Binder<'_, '_> {
         // per member.
         super::optimize::scans_mut(&mut plan, &mut |s| s.sample = sample.clone());
         Ok((plan, Scope { rels: vec![rel] }, vec![]))
+    }
+
+    /// A TABLESAMPLE method of an extension (tsm_system_rows, tsm_system_time): the handler
+    /// function `name(internal) RETURNS tsm_handler` on the search path, which the query then
+    /// depends on.
+    fn tsm_method(&mut self, name: &str) -> Option<&'static str> {
+        if matches!(name, "bernoulli" | "system") {
+            return None;
+        }
+        let path = self.cat.routine_path(&self.ctx.search_path);
+        let f = path.iter().find_map(|sc| {
+            self.cat.functions.values().find(|f| {
+                f.schema == *sc
+                    && f.name == name
+                    && f.args.len() == 1
+                    && f.args[0].1.typname() == "internal"
+                    && f.ret.typname() == "tsm_handler"
+            })
+        })?;
+        let lib = crate::ext::native::library(f.probin.as_deref()?);
+        let method = crate::ext::tsm::method(lib, &f.body)?;
+        let oid = f.oid;
+        if let Some(deps) = &mut self.deps
+            && !deps.contains(&(1255, oid))
+        {
+            deps.push((1255, oid));
+        }
+        Some(method)
     }
 
     /// `restrict_nonsystem_relation_kind` with `view`: a query that is planned can't expand

@@ -1076,6 +1076,7 @@ impl Session {
             let copy = Arc::new(crate::sql::plan::CopyLines {
                 table: t.name.as_str().into(),
                 multi,
+                freeze: f.freeze,
                 feed: Default::default(),
             });
             let plan = Arc::new(Plan::Insert(Box::new(InsertPlan {
