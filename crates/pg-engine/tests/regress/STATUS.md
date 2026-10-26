@@ -168,6 +168,28 @@ de_DE / en_US / sv_SE / tr_TR libc collations, which musl's `locale -a` doesn't 
 collate.windows.win1252 isn't in the schedule's results (it needs a WIN1252 database on
 Windows). The generated blocks are left to the next full run.
 
+## Round 19, agent 67 (collation-aware comparisons and btree keys)
+
+Agent 60 left collatable values compared by bytes in places and every index in byte order.
+Now btree and hash entries on keys under an ICU or nondeterministic collation are keyed by
+the collation's sort keys (index key format 2, byte-order indexes rebuilt when a database
+is first opened), and the planner matches index conditions and pathkeys by collation as
+PostgreSQL does (IndexCollMatchesExprColl), so ICU-default databases and ICU columns in a C
+database get PostgreSQL's index scans for ranges, ORDER BY, min / max and Merge Append. The
+LIKE prefix stays a range only in byte order. Selectivity compares statistics under the
+operator's collation and uses no histogram sorted under another one (the stacoll check).
+Wrong rows fixed: text range types (constructors, operators, order, multiranges) and range
+partition bounds under an ICU default compared bytes; citext's order under an ICU default;
+`roll_pk_clustered` adding its key missed duplicates equal only under a nondeterministic
+collation. Unique checks under a nondeterministic collation probe the key's entries
+instead of scanning the table. Golden: `tests/locale/collated.sql` (three ICU-default
+databases and a C one, recorded from PostgreSQL 18.6).
+
+Measured by a full debug run against a private reference, compared with the committed
+`results.tsv`: 51148 / 51150, no unit changed (collate.icu.utf8 681 / 681). The generated
+blocks are left to the next full run. Contrib: citext 544 / 544, btree_gin 297 / 297,
+pg_trgm 261 / 261, btree_gist 613 / 616 (as before).
+
 ## Round 19, agent 61 (partition_prune 410: an accepted internal difference)
 
 partition_prune 410 is `EXPLAIN ANALYZE update ab_a1 set b = 3 from ab where ab.a = 1 and

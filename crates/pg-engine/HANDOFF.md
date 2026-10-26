@@ -389,6 +389,10 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   nondeterministic collation (btvarstrequalimage). Tests: `tests/locale/collated.sql`
   (ICU-default and C databases, recorded from PostgreSQL), `tests/index_key_format.rs`
   `collated_index_keys_are_upgraded`, `tests/pk_clustered.rs` `nondeterministic_duplicates`.
+  Index-only scans read such keys' strings from the rows (`scan::index_only_columns`: a
+  sort key doesn't give its string back). The C-locale default path keeps its speed
+  (in-process release builds alternated on a loaded machine: OLTP point / secondary
+  lookups, inserts and upserts within noise, TPC-H SF0.2 total within 1-3%).
   Left: a `roll_pk_clustered` table's rows under an ICU key are stored in the key's byte
   order (its physical order only; no plan reads it as sorted); records of text in an index
   are keyed by bytes (record_cmp's per-field collations).
