@@ -321,7 +321,11 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   side's one-sided ON clause keeps its subquery column, INTERSECT / EXCEPT skip the second
   input when the first is empty, array_remove keeps the lower bound, FULL JOIN clause kinds,
   strict SQL functions with non-strict bodies aren't inlined, and a RefCell panic in the join
-  search. Open: tests/difftest/STATUS.md.
+  search. Round 18, agent 68 (difftest round 2): a LATERAL subquery's clause that reads only
+  the left side (its WHERE over a join) is the LATERAL join's own clause, as
+  distribute_qual_to_rels postpones it, not a restriction of the left side that dropped the
+  rows a LEFT JOIN LATERAL should null-extend (`outerjoins.rs` `postpone_lateral_clauses`).
+  Open: tests/difftest/STATUS.md.
 - **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
   PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified
   (`pg_dump_tap`, through stand-ins for its Perl test modules in `tests/pg_dump/perl`), round
@@ -568,8 +572,15 @@ max_prepared_transactions=5`): use a private container of the pinned image, not 
   section, and leave the generated blocks to the next full run.
 - A subset run without `PGREGRESS_REPORT_DIR` writes its report to `$PGREGRESS_DIR/report`
   (subsets never write into `tests/regress`).
-- `PGREGRESS_DB` must start with `regression` or `regress_`: the harness cleanup only drops
-  those names, so parallel runs don't destroy each other.
+- The cleanup at the end of a run drops, besides its own `PGREGRESS_DB`, only the databases
+  its own statements created (`CREATE DATABASE x` and `ALTER DATABASE ... RENAME TO x` in the
+  files it ran: the suite's `regression_tbd` / `regression_utf8`, `regress_nosuch_db`), so
+  other runs' databases on a shared reference survive whatever their names. (It used to drop
+  every `regress_*` database that appeared during the run, which killed parallel runs:
+  "connection lost".) The suite's database names stay as pg_regress has them, since expected
+  output shows them; two runs of the `database` file at once on one cluster still collide.
+  Name `PGREGRESS_DB` `regression*` or `regress_*` anyway: while one such database of another
+  run is on the reference, a run ending leaves its roles and tablespaces alone.
 - If the container can't reach the engine through `host.docker.internal` (a host firewall
   dropping the docker bridge's traffic, as on Linux servers that only allow a tailnet), run the
   engine side's psql in a helper container on the host network instead: `docker run -d --name

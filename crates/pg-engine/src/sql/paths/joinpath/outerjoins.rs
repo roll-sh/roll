@@ -40,6 +40,9 @@ struct RawJoin {
     /// Per condition: a semi join's equality rebuilt from a hash key the other way round
     /// from how it was written (`JoinMeta::hash_swapped`).
     swapped: Vec<bool>,
+    /// Inside a LATERAL subquery pulled up: its clauses may read the left side's items
+    /// (the lateral references), outside their syntactic scope.
+    framed: bool,
 }
 
 /// What `gather_group` makes of a join tree.
@@ -265,6 +268,7 @@ fn walk(
             pushed: meta.pushed.iter().map(|&c| map(c)).collect(),
             kept: meta.kept.iter().map(|&c| map(c)).collect(),
             swapped,
+            framed: !frame.is_empty(),
         });
         return (l | r, inner);
     }
@@ -293,6 +297,7 @@ fn walk(
             pushed: Vec::new(),
             kept: Vec::new(),
             swapped: Vec::new(),
+            framed: !frame.is_empty(),
         });
         return (m, inner);
     }
@@ -305,6 +310,45 @@ fn walk(
         laterals.push((i, frame.to_vec()));
     }
     (1u32 << i.min(31), 0)
+}
+
+/// distribute_qual_to_rels: a clause of a LATERAL subquery pulled up that reads items
+/// outside its syntactic scope (the left side's, through its lateral references) belongs to
+/// the nearest join level above whose scope has them all, ahead of that level's own clauses
+/// (deconstruct_recurse's lateral_clauses). Under a LEFT JOIN LATERAL that is the outer join
+/// itself: the clause is its ON clause, never a restriction of the left side (which would
+/// lose the null-extended rows).
+fn postpone_lateral_clauses(joins: &mut [RawJoin], items: &dyn Fn(&Expr) -> u32) {
+    let mut moved: Vec<Vec<Expr>> = vec![Vec::new(); joins.len()];
+    for ji in 0..joins.len() {
+        let (scope, framed, kind) = (joins[ji].scope, joins[ji].framed, joins[ji].kind);
+        if !framed || kind != JoinKind::Inner || scope == 0 {
+            continue;
+        }
+        let conds = std::mem::take(&mut joins[ji].conds);
+        let mut keep = Vec::new();
+        for e in conds {
+            let it = items(&e);
+            let to = (it & !scope != 0)
+                .then(|| (ji + 1..joins.len()).find(|&o| joins[o].scope & scope == scope && it & !joins[o].scope == 0))
+                .flatten();
+            match to {
+                Some(o) => moved[o].push(e),
+                None => keep.push(e),
+            }
+        }
+        // (An inner join's `swapped` flags are only read for semi joins.)
+        joins[ji].swapped.truncate(keep.len());
+        joins[ji].conds = keep;
+    }
+    for (j, m) in joins.iter_mut().zip(moved) {
+        if m.is_empty() {
+            continue;
+        }
+        let n = m.len();
+        j.conds.splice(0..0, m);
+        j.swapped.splice(0..0, std::iter::repeat_n(false, n));
+    }
 }
 
 /// A filter whose clauses can move into a join group: no volatile function, no sublink.
@@ -404,6 +448,7 @@ pub(super) fn gather_group(p: &Plan, extra: &[Expr]) -> Option<Group> {
         _ => phv_at.iter().find(|(c, _)| *c == g).map_or(0, |x| x.1),
     };
     let items = |e: &Expr| e.columns().into_iter().fold(0u32, |m, g| m | item(g));
+    postpone_lateral_clauses(&mut joins, &items);
     let mut sjs: Vec<Sj> = Vec::new();
     let mut clauses = Vec::new();
     let mut meta = Vec::new();

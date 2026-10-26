@@ -1476,17 +1476,61 @@ fn globals(cfg: &Config) -> BTreeSet<String> {
         .collect()
 }
 
+/// The databases this run's own statements create (`CREATE DATABASE x`, `ALTER DATABASE ...
+/// RENAME TO x`; names from psql variables or format strings aren't creations): the only
+/// databases besides `PGREGRESS_DB` its cleanup drops. Other runs sharing the reference keep
+/// theirs, whatever their names (the cleanup used to drop every `regress_*` database that
+/// appeared during the run, other runs' `PGREGRESS_DB`s too: "connection lost" there).
+static CREATED_DBS: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
+
+fn created_databases(sql: &str, out: &mut BTreeSet<String>) {
+    let toks: Vec<&str> = sql
+        .split(|c: char| c.is_whitespace() || c == ';' || c == '(' || c == ',')
+        .filter(|t| !t.is_empty())
+        .collect();
+    let name = |t: &str| -> Option<String> {
+        if let Some(q) = t.strip_prefix('"').and_then(|q| q.strip_suffix('"')) {
+            return (!q.is_empty()).then(|| q.to_string());
+        }
+        t.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            .then(|| t.to_ascii_lowercase())
+    };
+    for (i, w) in toks.windows(3).enumerate() {
+        let renamed = w[0].eq_ignore_ascii_case("rename")
+            && w[1].eq_ignore_ascii_case("to")
+            && i >= 2
+            && toks[i - 2].eq_ignore_ascii_case("database");
+        if (w[0].eq_ignore_ascii_case("create") && w[1].eq_ignore_ascii_case("database")) || renamed {
+            out.extend(name(w[2]));
+        }
+    }
+}
+
+#[test]
+fn created_database_names() {
+    let mut s = BTreeSet::new();
+    created_databases(
+        "CREATE DATABASE regression_tbd\n\tENCODING utf8;\nALTER DATABASE regression_tbd RENAME TO regression_utf8;\n\
+         ALTER DATABASE :\"datname\" SET x = 1;\ncreate database \"OddName\";\nCREATE DATABASE regress_nosuch_db(x);\n\
+         SELECT 'create database is';",
+        &mut s,
+    );
+    let want = ["OddName", "regress_nosuch_db", "regression_tbd", "regression_utf8"];
+    assert_eq!(s, want.iter().map(|n| n.to_string()).collect::<BTreeSet<_>>());
+}
+
 fn cleanup_reference(cfg: &Config, before: &BTreeSet<String>) {
     let after = globals(cfg);
     let mut sql = String::from("SET client_min_messages = warning;\n");
     let db = db_name();
     let _ = writeln!(sql, "DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE);");
-    // Only the suite's own databases (pg_regress makes tests name them regress*): other
-    // runs sharing the container (their `PGREGRESS_DB` such as `regression_gb`, probe
-    // databases) stay. The suite's databases are `regress_*` and `regression_tbd`.
+    // Only the databases this run's statements created (`CREATED_DBS`): other runs sharing
+    // the container (their `PGREGRESS_DB`, probe databases) stay.
+    let created = CREATED_DBS.lock().unwrap().clone();
     for g in after.difference(before) {
         if let Some(d) = g.strip_prefix("db:")
-            && (d == "regression_tbd" || d.starts_with("regress_"))
+            && created.contains(d)
         {
             let _ = writeln!(sql, "DROP DATABASE IF EXISTS \"{d}\" WITH (FORCE);");
         }
@@ -1497,7 +1541,11 @@ fn cleanup_reference(cfg: &Config, before: &BTreeSet<String>) {
     // drops them.
     let others = after.iter().any(|g| {
         g.strip_prefix("db:")
-            .is_some_and(|d| d != db && d != "regression_tbd" && (d.starts_with("regression") || d.starts_with("contrib_regression")))
+            .is_some_and(|d| {
+                d != db
+                    && !created.contains(d)
+                    && (d.starts_with("regression") || d.starts_with("regress_") || d.starts_with("contrib_regression"))
+            })
     });
     if others {
         eprintln!("cleanup: another run is using the reference; its tablespaces and roles stay");
@@ -1853,6 +1901,7 @@ fn run_test(cfg: &Config, engine: &mut EngineProc, log: &Path, test: &str, befor
             return;
         };
         let p = prepare(&src, &regress_env(cfg));
+        created_databases(&p.text, &mut CREATED_DBS.lock().unwrap());
         std::fs::write(cfg.out.join("prepared").join(format!("{test}.sql")), &p.text).unwrap();
         let rw: String = p
             .rewrites

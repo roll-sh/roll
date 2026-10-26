@@ -290,17 +290,29 @@ errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with E
 | wide, batch 3 engine | 1140–1339 × 100 | 19,995 | wrong_rows 1, wrong_order 1, wrong_state 1, tag 6 |
 | wide, batch 5 engine | 1340–1539 × 100 | 19,868 | wrong_rows 6, wrong_state 3, tag 9 |
 | wide, batch 6 engine | 1540–1739 × 100 | 19,943 | crash 2, wrong_rows 6, wrong_state 3, tag 3 |
+| round 2 (agent 68), before and after batch 1 | 1740–1889 × 100 | 14,895 | wrong_rows 3, wrong_state 3, tag 6 (the same both) |
+
+## Round 2 (agent 68)
+
+Batch 1 (`a68_lateral_postpone`):
+
+- **Wrong rows**: a clause of a LATERAL subquery pulled up whose FROM is a join (its WHERE, or
+  an inner join's ON inside it) that reads only the left side's columns was distributed as a
+  restriction of the left side: `SELECT * FROM a LEFT JOIN LATERAL (SELECT 1 FROM b, d WHERE
+  a.x > 7) s ON true` lost a's rows failing it, where they should be null-extended (seed 1604
+  #73: 6 rows, PostgreSQL 30; the clause read the nullable side of a lower outer join, so it
+  became that join's Filter). PostgreSQL postpones a clause with Vars outside its syntactic
+  scope to the nearest join level above whose scope has them all (distribute_qual_to_rels'
+  lateral_clauses), which under a LEFT JOIN LATERAL is that outer join: its Join Filter.
+  `outerjoins.rs` `postpone_lateral_clauses` does that for the clauses of inner joins and
+  filters inside a pulled-up LATERAL subquery (`RawJoin::framed`), before the group
+  distributes them. EXPLAIN still differs in one detail: under `ON false` PostgreSQL also
+  gates the nullable side with `One-Time Filter: false`.
+- Harness: the regress cleanup drops only the databases its own run's statements created
+  (HANDOFF, "How to test").
 
 ## Open
 
-- **Wrong rows (planner, LATERAL pull-up; agents 33 / 41's area)**: a LATERAL subquery's WHERE
-  reading only a column of the left side's nullable relation is checked as a filter on that
-  relation's outer join below, so the null-extended rows go: the reduced case is
-  `difftest seed 1604 #73` (`(s1 LEFT JOIN unnest(...) WITH ORDINALITY s4(u, o) ON ...) LEFT JOIN
-  LATERAL (SELECT ... FROM (s6 JOIN (VALUES ...) ON 1 <= s1.c1) WHERE 1 BETWEEN 1 AND s4.o) s5
-  ON '2025-07-22' = NULL`: 6 rows, PostgreSQL 30; EXPLAIN shows `Filter: (1 <= s4.o)` on the
-  lower Nested Loop Left Join, PostgreSQL a Join Filter of the upper one). Simpler forms don't
-  show it.
 - **Wrong rows (bind-time folding, grouping sets)**: a HAVING or select-list expression with a
   subexpression equal to a grouping key that folding merges with its surroundings (`HAVING 1
   > (10.00 - ('2025-06-19' - '1999-11-11'::date))` with a key `('2025-06-19'::date)`, `abs(9) +
