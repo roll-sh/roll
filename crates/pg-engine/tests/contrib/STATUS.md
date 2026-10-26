@@ -41,7 +41,7 @@ PGCONTRIB_ONLY=uuid-ossp,citext PGREGRESS_DIR=$D PGREGRESS_CONTAINER=a39-ref \
 
 ## Scores
 
-Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013. Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053 (81.1%). Round 19 (agent 66): file_fdw 187 / 187. Baseline (before any
+Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013 (1,013 / 1,013 since round 19, agent 71: a run of that module). Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053 (81.1%). Round 19 (agent 66): file_fdw 187 / 187. Baseline (before any
 extension was ported; CREATE EXTENSION was a stand-in): 2,752 / 7,733
 units (35.6%). The reference matches `expected/` for every module except dblink (the reference
 has no `regress.so`, whose functions dblink's test creates).
@@ -55,7 +55,7 @@ has no `regress.so`, whose functions dblink's test creates).
 | pg_trgm | 261 | 261 | done (GIN/GiST plans included) |
 | btree_gin | 297 | 297 | done |
 | btree_gist | 616 | 613 | see below |
-| pg_stat_statements | 1013 | 996 | see below |
+| pg_stat_statements | 1013 | 1013 | done (round 19, agent 71; see below) |
 | unaccent | 34 | 34 | done |
 | fuzzystrmatch | 56 | 56 | done |
 | ltree | 363 | 363 | done |
@@ -155,8 +155,16 @@ has no `regress.so`, whose functions dblink's test creates).
   plans, toplevel / nested tracking, track_utility / track_planning, privileges, the info view
   and reset. The engine has no WAL or shared buffers: blocks written report table growth,
   wal_records rows written, wal_bytes 64 per row, other buffer columns 0; plan time is the
-  engine's binding and planning time. Left (17 units): two-phase commit statements (utility
-  74-79: the engine has 2PC off) and utility 115, nested DO-block / function statement
-  listing in level_tracking (12, 104, 131, 169, 191, 228, 232), a parallel plan's worker
-  counts (parallel 8), three squashing cases (98, 99, 120). Unreferenced CTEs in EXPLAIN match
-  since round 19.
+  engine's binding and planning time. Unreferenced CTEs in EXPLAIN match since round 19.
+  Round 19 (agent 71) took the last 17 units: two-phase commit runs (the contrib servers,
+  both, have `max_prepared_transactions = 5`, the harness passing
+  `--max-prepared-transactions 5`); nested statements are counted where they run (PL/pgSQL
+  PERFORM, a SQL function's statement run as a subquery, `FnShow::pgss`, set only with the
+  library preloaded), EXPLAIN of DECLARE nests the cursor's query, CREATE TABLE AS EXECUTE the
+  prepared one under its PREPARE entry, COPY's query takes the statement's location (no
+  trailing `;`); CALL's constants take the procedure's parameter types (`jumble::Procs`: a
+  NULL argument jumbles as the others do); an IN list's common type prefers oid over
+  integers (select_common_type); a plan's Gather workers count as parallel_workers_to_launch
+  / launched (`explain::gather_workers`, computed only for a tracked statement); an operator
+  whose function is a user SQL function works over `= ANY (ARRAY[...])` (each element's
+  comparison ORed, ALL ANDed: there is no function to call per element).

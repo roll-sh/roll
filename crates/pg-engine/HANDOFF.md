@@ -85,9 +85,54 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   pgcrypto, uuid-ossp, citext, hstore, pg_trgm, btree_gin, ltree, intarray, tablefunc, cube,
   earthdistance, isn, unaccent, fuzzystrmatch, lo, pg_buffercache, seg at 100%; btree_gist,
   amcheck nearly. Extension types the engine implements natively are `Value::Ext`
-  (`src/ext/types.rs`); extension libraries' GUCs are `session/ext_gucs.tsv`. Left:
-  pg_stat_statements at 996 / 1,013 (2PC, nested statement listing, worker counts, squashing), pageinspect
-  (not applicable), see STATUS.md.
+  (`src/ext/types.rs`); extension libraries' GUCs are `session/ext_gucs.tsv`.
+  pg_stat_statements 1,013 / 1,013 since round 19 (agent 71). Left: pageinspect (not
+  applicable), see STATUS.md.
+- **Two-phase commit** (round 19, agent 71): PREPARE TRANSACTION, COMMIT / ROLLBACK
+  PREPARED, pg_prepared_xacts (`txn/twophase.rs`, `session/prepared.rs`).
+  max_prepared_transactions is a server option (`roll-engine --max-prepared-transactions N`,
+  `EngineOptions::max_prepared_transactions`), 0 by default as in PostgreSQL, and what
+  SHOW / pg_settings report. The registry is the cluster's (`TwoPhase`, in PostgreSQL's array
+  order: a finished entry's slot takes the last one), shared by every database like `Xids`.
+  - PREPARE runs PrepareTransaction's steps in its order: deferred triggers, postgres_fdw's
+    refusal, PreCommit_CheckForSerializationFailure (and the engine's REPEATABLE READ /
+    SERIALIZABLE write check, so COMMIT PREPARED can't fail on them), temporary objects,
+    exported snapshots, MarkAsPreparing (too long, disabled, gid in use, maximum reached),
+    LISTEN / NOTIFY, session- and transaction-level locks on one object. A failed block's
+    PREPARE rolls it back (IsTransactionExitStmt has PREPARE, not ROLLBACK PREPARED);
+    outside a block it warns and does nothing. UNLISTEN in a session that never listened
+    queues nothing (Async_Unlisten), so it doesn't stop a PREPARE.
+  - The prepared `Txn` leaves the session (`Txn::detach_prepared`): its xid and
+    subtransactions' stay running, its locks move to a dummy backend without a pid
+    (`LockManager::transfer`: they conflict with every session, the preparing one too;
+    pg_blocking_pids reports 0; pg_locks keeps the preparing backend's virtual xid, as
+    MarkAsPreparingGuts clones it), SSI keeps tracking it (prepared, pid 0), its snapshot
+    goes. Its buffered writes and catalog changes stay in it.
+  - Its state record (`Txn::prepared_record`: writes, catalog record changes with both
+    header records, heavyweight / row / unique-key locks, SIRead locks and SSI writes) is
+    stored under `twophase::PREFIX` before PREPARE returns; COMMIT PREPARED deletes it in the
+    same store commit as the writes, ROLLBACK PREPARED on its own. The registry file lists the
+    databases that may hold records (`prepared_dbs`); they open at engine start and
+    `Database::recover_prepared` rebuilds each transaction before any session connects
+    (`twophase::recover`; its catalog changes go onto the current catalog,
+    `catmerge::reapply`; SSI gets its locks and writes back but not its conflicts). Shutdown
+    drops the in-memory ones (`TwoPhase::clear`; they hold their databases).
+  - DROP DATABASE / CREATE DATABASE ... TEMPLATE refuse a database with prepared transactions
+    with errdetail_busy_db's detail.
+  - Tests: golden `a71_twophase` (recorded from a reference with max_prepared_transactions=5:
+    a golden file's `-- max_prepared_transactions: N` line, `tests/common` and `golden_wire`
+    run it with that setting), `tests/twophase.rs` (restart). Crash: verified by hand with
+    `kill -9` (writes, DDL, row and unique-key locks back after restart). The regress suite's
+    prepared_xacts matches the enabled reference except stderr interleaving. Isolation: with
+    `PGISOLATION_MAX_PREPARED=5` against a reference started with the setting,
+    prepared-transactions (1,432 SSI permutations), prepared-transactions-cic, stats and
+    two-ids match: 1,579 / 1,579. `PGISOLATION_ONLY` now runs specs outside the schedule.
+  - Not done: XactLockTableWait's CONTEXT ("while updating tuple (0,1) in relation ...") is
+    missing on every lock wait that times out, not only a prepared transaction's (lock code);
+    transactional statistics of a prepared transaction are lost by a crash (PostgreSQL loses
+    all statistics then); a recovered transaction's TRUNCATE ... RESTART IDENTITY undo isn't
+    kept; a prepared transaction that changed cluster-wide catalogs (roles) can't commit
+    after a restart (the shared catalog's history isn't kept across one).
 - **dblink and postgres_fdw** (round 19, agent 59): native, over the engine's own client
   (`src/remote/`: libpq's connection strings, a blocking wire client on `postgres-protocol`
   with SCRAM / md5 / cleartext, asynchronous queries, notifications, cancel requests; no libpq,

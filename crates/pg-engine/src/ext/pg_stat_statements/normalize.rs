@@ -84,7 +84,7 @@ mod tests {
     fn norm(sql: &str) -> (i64, String) {
         let parsed = pg_query::parse(sql, 0).unwrap();
         let node = parsed.protobuf.stmts[0].stmt.as_ref().unwrap().node.as_ref().unwrap();
-        let (id, j) = jumble(node, &columns, &[]);
+        let (id, j) = jumble(node, &columns, &|_, _, _| None, &[]);
         (id, super::normalize(sql, 0, &j))
     }
 

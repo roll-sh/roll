@@ -209,6 +209,11 @@ it implemented over the old lock manager.
   - `COMMIT PREPARED` / `ROLLBACK PREPARED` of a name never prepared fail as Postgres's
     LockGXact does ("prepared transaction with identifier ... does not exist"), not with
     "prepared transactions are disabled".
+  - Two-phase commit (round 19, agent 71): with `PGISOLATION_MAX_PREPARED=5` and a reference
+    started with `-c max_prepared_transactions=5`, the 2PC specs' prepared paths run:
+    prepared-transactions (1,432 permutations), prepared-transactions-cic (outside the
+    schedule; `PGISOLATION_ONLY` names them), stats and two-ids match, 1,579 / 1,579. The
+    schedule's runs keep the default (2PC off) on both sides.
   - *Pruning horizons* (`txn/xids.rs` `horizon`, `catalog/heapsim.rs` `Vis`): a transaction's
     snapshot registers its xmin (PGPROC.xmin; READ COMMITTED: the statement's, kept until the
     next statement), and what pruning, index-entry killing (kill_prior_tuple) and VACUUM may
