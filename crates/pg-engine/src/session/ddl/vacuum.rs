@@ -1090,6 +1090,9 @@ impl Ddl<'_, '_> {
             tuples: usize,
             /// (sort key, index tuple size), when its pages aren't modelled.
             keys: Vec<(Vec<u8>, usize)>,
+            /// A btree's keys as its model has them, when its pages aren't modelled: sized
+            /// by the model's sorted build (`sizing::btree_build_blocks`).
+            btree_keys: Option<Vec<Arc<crate::catalog::btsim::Key>>>,
         }
         let mut ixs: Vec<Ix> = Vec::new();
         if let Some(only) = indexes {
@@ -1100,12 +1103,19 @@ impl Ddl<'_, '_> {
                 let mut types: Vec<DataType> = bix.keys.iter().map(|k| k.ty()).collect();
                 types.extend(bix.index.include.iter().map(|&i| t.columns[i].ty.clone()));
                 let modelled = crate::exec::sizing::btree_blocks(bix.index.oid, db);
+                // (By the model's sorted build only for a table small enough to model: for a
+                // bigger one, a key object per row costs more than its pages are worth.)
+                let btree_keys = (modelled.is_none()
+                    && bix.index.method == "btree"
+                    && crate::exec::sizing::within_model(t.oid, db))
+                    .then(Vec::new);
                 ixs.push(Ix {
                     bix,
                     types,
                     modelled,
                     tuples: 0,
                     keys: Vec::new(),
+                    btree_keys,
                 });
             }
         }
@@ -1120,7 +1130,9 @@ impl Ddl<'_, '_> {
                     continue;
                 };
                 ix.tuples += 1;
-                if ix.modelled.is_none() {
+                if let Some(keys) = &mut ix.btree_keys {
+                    keys.push(crate::exec::sizing::btree_key(t, &ix.bix, vals, &row, self.ctx));
+                } else if ix.modelled.is_none() {
                     let sort = super::table::key_bytes(&vals);
                     vals.extend(ix.bix.index.include.iter().map(|&i| row[i].clone()));
                     ix.keys.push((sort, relsize::index_tuple(&ix.types, &vals, &text)));
@@ -1141,7 +1153,11 @@ impl Ddl<'_, '_> {
         };
         let mut measured = Vec::with_capacity(ixs.len());
         for mut ix in ixs {
-            let pages = match ix.modelled {
+            let built = ix
+                .btree_keys
+                .take()
+                .and_then(|keys| crate::exec::sizing::btree_build_blocks(&ix.bix, keys));
+            let pages = match ix.modelled.or(built) {
                 Some(n) => n as i32,
                 None => {
                     ix.keys.sort();

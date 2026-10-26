@@ -149,6 +149,13 @@ pub fn is_estimated(t: u32, db: &Database) -> bool {
     db.relfiles.lock().untracked.contains(&t)
 }
 
+/// Whether table `t` is modelled and within the model's size (a bulk load can leave a
+/// bigger table modelled until something checks it).
+pub fn within_model(t: u32, db: &Database) -> bool {
+    let rf = db.relfiles.lock();
+    !rf.untracked.contains(&t) && rf.heaps.get(&t).is_some_and(|h| h.versions() <= max_versions())
+}
+
 /// VACUUM, ANALYZE or CREATE INDEX measured an untracked table's live rows at `live` pages
 /// packed afresh: the space beyond them is free for new row versions. Its estimated pages
 /// (the file doesn't shrink), None when it is modelled.
@@ -1015,6 +1022,26 @@ fn index_key(
         sizes.push(relsize::index_tuple(&types[..=n], &vals[..=n], &text));
     }
     Arc::new(Key::new(&atts, &sizes))
+}
+
+/// `row`'s key in btree index `bix` as the model holds it (`index_key`), for measuring an
+/// index the model doesn't hold (`btree_build_blocks`).
+pub fn btree_key(t: &Table, bix: &BoundIndex, vals: Vec<Value>, row: &[Value], ctx: &ExecCtx) -> Arc<Key> {
+    index_key(t, bix, vals, row, ctx)
+}
+
+/// The pages a sorted build (CREATE INDEX, REINDEX) of btree index `bix` over these keys
+/// gives, in the rows' order (their TIDs only order equal keys): `Btree::build`'s layout,
+/// with the index's fillfactor and deduplication, as the model has it for the indexes it
+/// holds. None for an index that isn't a btree.
+pub fn btree_build_blocks(bix: &BoundIndex, keys: Vec<Arc<Key>>) -> Option<u32> {
+    let opts = btree_opts(bix)?;
+    let entries = keys
+        .into_iter()
+        .enumerate()
+        .map(|(i, k)| (k, ((i / 291) as u32, (i % 291) as u16 + 1)))
+        .collect();
+    Some(Btree::build(opts, entries).nblocks())
 }
 
 /// `row`'s entries in the table's btree indexes.
@@ -3279,7 +3306,10 @@ pub fn fork_blocks(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>> {
                 Fork::Main => {}
             }
             if !ensure(&t, &indexes, ctx)? {
-                return Ok(Some(1));
+                // A table too big to model: its index as last measured (CREATE INDEX,
+                // VACUUM, ANALYZE: `btree_build_blocks`).
+                let pages = ctx.catalog().relstats.get(&ix).map_or(1, |s| s.pages.max(1) as u64);
+                return Ok(Some(pages));
             }
             let rf = ctx.sess.db.relfiles.lock();
             rf.btrees.get(&ix).map_or(1, |b| b.nblocks()) as u64
