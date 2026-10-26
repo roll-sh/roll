@@ -41,7 +41,7 @@ PGCONTRIB_ONLY=uuid-ossp,citext PGREGRESS_DIR=$D PGREGRESS_CONTAINER=a39-ref \
 
 ## Scores
 
-Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013 (1,013 / 1,013 since round 19, agent 71: a run of that module). Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053; agent 72: postgres_fdw 1,739 / 2,053 (84.7%). Round 19 (agent 66): file_fdw 187 / 187. Round 19 (agent 71), a full run of every module: 7,683 / 8,270 units of 34 modules (pageinspect not applicable, postgres_fdw 1,664); the 10 modules with tests added this round 346 / 350 (tsm_system_time 14 / 16, auto_explain 10 / 12, the rest whole); amcheck 203 / 204 in a run after it. Baseline (before any
+Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013 (1,013 / 1,013 since round 19, agent 71: a run of that module). Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053; agent 72: postgres_fdw 1,802 / 2,053 (87.8%). Round 19 (agent 66): file_fdw 187 / 187. Round 19 (agent 71), a full run of every module: 7,683 / 8,270 units of 34 modules (pageinspect not applicable, postgres_fdw 1,664 then); the 10 modules with tests added this round 346 / 350 (tsm_system_time 14 / 16, auto_explain 10 / 12, the rest whole); amcheck 203 / 204 in a run after it. Baseline (before any
 extension was ported; CREATE EXTENSION was a stand-in): 2,752 / 7,733
 units (35.6%). The reference matches `expected/` for every module except dblink (the reference
 has no `regress.so`, whose functions dblink's test creates).
@@ -69,7 +69,7 @@ has no `regress.so`, whose functions dblink's test creates).
 | amcheck | 204 | 203 | applicable checks only (see below) |
 | pageinspect | 291 | — | not applicable (not available) |
 | pg_buffercache | 38 | 38 | done (no buffer pool: every buffer unused) |
-| postgres_fdw | 2053 | 1739 | see below |
+| postgres_fdw | 2053 | 1802 | see below |
 | file_fdw | 187 | 187 | done (files are the server files of `--allow-server-files`; programs refused) |
 | tsm_system_rows | 16 | 16 | done (round 19, agent 71) |
 | tsm_system_time | 16 | 14 | see below |
@@ -193,10 +193,20 @@ has no `regress.so`, whose functions dblink's test creates).
   DELETEs under row triggers) read the target's whole row; direct modification runs with a
   WHERE, statement triggers and RETURNING tableoid; inheritance members' "Foreign Update" /
   "Foreign Delete" lines with their Remote SQL; a foreign row's key names its table, so an
-  inheritance UPDATE / DELETE finds its foreign member. Left: join, aggregate, ORDER BY /
-  LIMIT and FOR UPDATE
-  pushdown (Foreign Scans of joins and upper relations: the planner's foreign paths and
-  postgres_fdw's costs), use_remote_estimate, batch inserts, async append, TRUNCATE.
+  inheritance UPDATE / DELETE finds its foreign member. Also agent 72: TRUNCATE of foreign
+  tables, a server's in one remote TRUNCATE (`truncatable`, restrict_nonsystem_relation_kind);
+  SELECT ... FOR UPDATE / SHARE of foreign tables only is locked by the remote query, with
+  no LockRows (ROW_MARK_COPY, `pushdown::remote_lock`); EXPLAIN's Async Foreign Scan under an
+  Append (`async_capable`; the executor still reads members in turn), Batch Size from
+  `batch_size` (rows still go one statement each); a scan of a table with a dropped column
+  returns no physical target list (build_physical_tlist punts); rows routed or inherited into
+  foreign tables under transition-table triggers fail as PostgreSQL fails them. Left (251
+  units): join,
+  aggregate and upper-relation pushdown (Foreign Scans of joins and upper relations: the
+  planner's foreign paths, postgres_fdw's costs and use_remote_estimate, about 110 EXPLAIN
+  units and the row orders their plans give), ORDER BY / LIMIT with FOR UPDATE, batched
+  remote INSERTs, COPY into foreign tables, parallel_commit / parallel_abort,
+  analyze_sampling, query_cancel's timeout unit.
 - **file_fdw** (round 19, agent 66; `src/ext/file_fdw.rs`): done. The validator (options by
   catalog with getClosestMatch's hint, the filename / program privileges, COPY's own option
   checks through `CopyFormat::parse`), scans read by COPY FROM's parser

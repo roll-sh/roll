@@ -165,6 +165,18 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   2 MB test thread when an ExNode moved into a call in `convert` and a `?` on a
   Result<Option<BoxNode>> in `open_node` added under 2 kB per level; keep FDW branches in
   `#[inline(never)]` helpers taking references (`foreign_delete_child`, `nodes::open_update`).
+  Agent 72's second round (postgres_fdw 1,802 / 2,053): TRUNCATE hands a server's foreign
+  tables to `modify::truncate` in one remote statement after the local ones;
+  SELECT ... FOR UPDATE / SHARE of postgres_fdw tables alone drops its LockRows in
+  `pushdown::remote_lock` (the scans send the locking clause, `FdwPushdown::copy_mark`, and
+  EXPLAIN shows the whole-row junk, `copy_mark_rows`); EXPLAIN marks Async Foreign Scans
+  (`mark_async_in`) and shows `batch_size` (both labels only: members are read in turn and
+  rows inserted one statement each); routed or inherited changes of foreign tables under
+  transition-table triggers fail as ExecInitRoutingInfo / ExecInitModifyTable do. Still
+  open, biggest first: join and upper-relation pushdown (needs a Plan for a Foreign Scan of a
+  join or an aggregate, foreign paths in the join search with postgres_fdw's costs, and PG's
+  range-table indexes for the `rN` aliases, which the binder doesn't record), batched
+  INSERTs, COPY into foreign tables, parallel_commit / parallel_abort, analyze_sampling.
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a
