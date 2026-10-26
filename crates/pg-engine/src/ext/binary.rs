@@ -3,7 +3,7 @@
 //! cube_send / cube_recv, citext as text. The others have no send or receive function:
 //! asking for their binary format fails as in PostgreSQL.
 
-use super::types::{self, CITEXT, CUBE, HSTORE, LQUERY, LTREE, LTXTQUERY};
+use super::types::{self, CITEXT, CUBE, HALFVEC, HSTORE, LQUERY, LTREE, LTXTQUERY, SPARSEVEC, VECTOR};
 use crate::error::{Error, Result, code};
 use crate::types::binary::{get_text, put_text};
 use crate::types::text::FormatCtx;
@@ -11,7 +11,7 @@ use bytes::{Buf, BufMut, BytesMut};
 
 /// Whether native type `kind` has send and receive functions.
 pub fn has_binary(kind: u16) -> bool {
-    matches!(kind, CITEXT | HSTORE | LTREE | LQUERY | LTXTQUERY | CUBE)
+    matches!(kind, CITEXT | HSTORE | LTREE | LQUERY | LTXTQUERY | CUBE | VECTOR | HALFVEC | SPARSEVEC)
 }
 
 fn no_function(kind: u16, dir: &str) -> Error {
@@ -48,6 +48,7 @@ pub fn send(kind: u16, b: &[u8], ctx: &FormatCtx, out: &mut BytesMut) -> Result<
             out.put_u8(1);
             put_text(out, &text(b), ctx)
         }
+        VECTOR | HALFVEC | SPARSEVEC => super::vector::send(kind, b, out),
         CUBE => {
             // The header, then every stored coordinate (cube_send, big-endian).
             let mut r = b;
@@ -83,6 +84,8 @@ pub fn recv(kind: u16, b: &[u8], ctx: &FormatCtx) -> Result<Vec<u8>> {
             input(&get_text(rest, ctx)?)
         }
         CUBE => cube_recv(b),
+        // (pgvector's receive functions check the typmod: -1 here, a bound parameter's.)
+        VECTOR | HALFVEC | SPARSEVEC => super::vector::recv(kind, b, -1),
         _ => Err(no_function(kind, "input")),
     }
 }

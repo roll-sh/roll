@@ -20,6 +20,7 @@ pub mod dblink;
 pub mod file_fdw;
 mod fuzzystrmatch;
 mod hstore;
+pub mod index_am;
 mod intarray;
 mod isn;
 mod lo;
@@ -44,6 +45,7 @@ pub mod tsm;
 pub mod types;
 mod unaccent;
 mod uuid_ossp;
+pub(crate) mod vector;
 
 use std::collections::HashMap;
 use std::sync::OnceLock;

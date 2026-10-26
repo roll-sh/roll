@@ -23,6 +23,10 @@ pub const QUERY_INT: u16 = 7;
 pub const INTBIG_GKEY: u16 = 8;
 pub const CUBE: u16 = 9;
 pub const SEG: u16 = 10;
+/// pgvector's (`vector`): 20 and up, clear of other extensions' next kinds.
+pub const VECTOR: u16 = 20;
+pub const HALFVEC: u16 = 21;
+pub const SPARSEVEC: u16 = 22;
 
 /// What the engine knows of one native type.
 pub struct ExtType {
@@ -67,6 +71,9 @@ static TYPES: &[ExtType] = &[
     super::isn::TYPE_UPC,
     super::cube::TYPE,
     super::seg::TYPE,
+    super::vector::VECTOR_TYPE,
+    super::vector::HALFVEC_TYPE,
+    super::vector::SPARSEVEC_TYPE,
 ];
 
 /// The native type `kind`.
@@ -150,6 +157,24 @@ pub fn from_builtin(kind: u16, v: Value) -> Value {
     match get(kind).and_then(|t| t.from_builtin).and_then(|f| f(&v)) {
         Some(b) => Value::Ext(kind, b.into()),
         None => v,
+    }
+}
+
+/// Whether native type `kind` takes type modifiers (its script gives it a TYPMOD_IN).
+pub fn has_typmod_in(kind: u16) -> bool {
+    matches!(kind, VECTOR | HALFVEC | SPARSEVEC)
+}
+
+/// The type's typmod_in over the modifiers of a type name (`vector(3)`).
+pub fn typmod_in(kind: u16, mods: &[i64]) -> Result<i32> {
+    super::vector::typmod_in(kind, mods).unwrap_or_else(|| Err(crate::error::internal("type has no typmod_in")))
+}
+
+/// The type's length coercion to typmod `typmod` (>= 0): its error when the value doesn't fit.
+pub fn check_typmod(kind: u16, b: &[u8], typmod: i32) -> Result<()> {
+    match kind {
+        VECTOR | HALFVEC | SPARSEVEC => super::vector::check_typmod(kind, b, typmod),
+        _ => Ok(()),
     }
 }
 

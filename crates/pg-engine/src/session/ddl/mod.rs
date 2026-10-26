@@ -1,6 +1,7 @@
 //! DDL: schema changes run inside the transaction. Each statement edits a copy of the catalog
 //! and stores it in the transaction, so DDL commits or rolls back with everything else.
 
+mod am_index;
 mod composite;
 mod inherit;
 mod objects;
@@ -155,7 +156,8 @@ pub fn execute(ctx: &ExecCtx, node: &NodeEnum, sql: &str) -> Result<String> {
     // Event triggers fire around the command (ddl_command_start, sql_drop, ddl_command_end).
     let evt = event_trigger::begin(ctx, node)?;
     let mut d = Ddl::new(ctx, sql);
-    let tag = match d.run(node) {
+    let am_before = d.am_index_storage();
+    let tag = match d.run(node).and_then(|t| d.rebuild_renewed_am_indexes(&am_before).map(|_| t)) {
         Ok(t) => t,
         Err(e) => {
             if let Some(b) = evt {

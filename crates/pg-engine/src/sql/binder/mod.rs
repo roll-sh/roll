@@ -1229,7 +1229,8 @@ impl<'b, 'a> Binder<'b, 'a> {
                         for n in crate::types::tsearch::take_notices() {
                             self.ctx.notice(ast::with_pos(n, loc));
                         }
-                        if base != *to {
+                        // (A base type's typmod isn't part of its equality.)
+                        if base != *to || base.catalog_typmod() != to.catalog_typmod() {
                             return self.fold_cast(
                                 Expr::Const(v, base.clone()),
                                 base,

@@ -207,6 +207,9 @@ pub struct SessionState {
     pub settings: RefCell<Settings>,
     /// pg_prng's xoroshiro128** state (s0, s1) for random() and friends.
     rng: Cell<(u64, u64)>,
+    /// pg_global_prng_state: the backend's own generator (what C code draws from: pgvector's
+    /// k-means sampling and HNSW levels), seeded at random when the session starts.
+    global_rng: Cell<(u64, u64)>,
     pub lastval: Cell<Option<i64>>,
     /// The sequence lastval() reports (0: none).
     pub lastval_seq: Cell<u32>,
@@ -353,6 +356,7 @@ impl SessionState {
             lock_owner: (1u64 << 63) | pid as u32 as u64,
             settings: RefCell::new(settings),
             rng: Cell::new(prng_seeded(u64::from_le_bytes(seed))),
+            global_rng: Cell::new(prng_seeded(u64::from_le_bytes(seed).rotate_left(29) ^ 0x6A09_E667_F3BC_C908)),
             lastval: Cell::new(None),
             lastval_seq: Cell::new(0),
             seq_cache: RefCell::new(HashMap::new()),
@@ -556,6 +560,31 @@ impl SessionState {
         self.rng
             .set((s0.rotate_left(24) ^ sx ^ (sx << 16), sx.rotate_left(37)));
         val
+    }
+
+    /// pg_prng_uint64 over pg_global_prng_state.
+    pub fn global_random_u64(&self) -> u64 {
+        let (s0, s1) = self.global_rng.get();
+        let sx = s1 ^ s0;
+        let val = s0.wrapping_mul(5).rotate_left(7).wrapping_mul(9);
+        self.global_rng
+            .set((s0.rotate_left(24) ^ sx ^ (sx << 16), sx.rotate_left(37)));
+        val
+    }
+
+    /// pg_prng_uint32 over pg_global_prng_state.
+    pub fn global_random_u32(&self) -> u32 {
+        (self.global_random_u64() >> 32) as u32
+    }
+
+    /// pg_prng_double over pg_global_prng_state.
+    pub fn global_random_double(&self) -> f64 {
+        (self.global_random_u64() >> 12) as f64 * (2f64).powi(-52)
+    }
+
+    /// pg_prng_seed of pg_global_prng_state.
+    pub fn global_seed(&self, seed: u64) {
+        self.global_rng.set(prng_seeded(seed));
     }
 
     /// pg_prng_uint64_range: uniform in [rmin, rmax] (bitmask rejection).

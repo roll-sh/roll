@@ -214,8 +214,18 @@ pub struct AmTraits {
 }
 
 /// The traits of an index access method by its handler (a made access method behaves as
-/// its handler's).
-pub fn am_traits(handler: u32) -> Option<AmTraits> {
+/// its handler's; a native one's are its routine's).
+pub fn am_traits(cat: &super::Catalog, handler: u32) -> Option<AmTraits> {
+    if let Some(r) = crate::ext::index_am::routine_of(cat, handler) {
+        let p = r.props;
+        return Some(AmTraits {
+            strategies: p.strategies,
+            support: p.support,
+            opts_proc: p.opts_proc,
+            can_order_by_op: p.can_order_by_op,
+            storage: p.storage,
+        });
+    }
     let t = |strategies, support, opts_proc, can_order_by_op, storage| AmTraits {
         strategies,
         support,

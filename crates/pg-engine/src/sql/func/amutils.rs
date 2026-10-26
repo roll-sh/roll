@@ -55,6 +55,39 @@ fn am_caps(am: u32) -> Option<AmCaps> {
     })
 }
 
+/// A made access method's flags: its handler's (a built-in one's, or a native routine's).
+fn made_am_caps(c: &FnCtx, am: u32) -> Option<AmCaps> {
+    let cat = c.exec.catalog();
+    let a = cat.access_method(am)?;
+    if let Some(r) = crate::ext::index_am::routine_of(&cat, a.handler) {
+        let p = r.props;
+        return Some(AmCaps {
+            canorder: p.can_order,
+            canorderbyop: p.can_order_by_op,
+            canbackward: p.can_backward,
+            canunique: p.can_unique,
+            canmulticol: p.can_multicol,
+            searcharray: p.search_array,
+            searchnulls: p.search_nulls,
+            clusterable: p.clusterable,
+            caninclude: p.can_include,
+            gettuple: true,
+            getbitmap: false,
+            canreturn: false,
+        });
+    }
+    let builtin = match a.handler {
+        330 => 403,
+        331 => 405,
+        332 => 783,
+        333 => 2742,
+        334 => 4000,
+        335 => 3580,
+        _ => return None,
+    };
+    am_caps(builtin)
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Prop {
     Asc,
@@ -259,7 +292,7 @@ fn indexam_property(
     if attno < 0 || attno > natts {
         return Ok(Value::Null);
     }
-    let Some(caps) = am_caps(am) else {
+    let Some(caps) = am_caps(am).or_else(|| made_am_caps(c, am)) else {
         return Ok(Value::Null);
     };
     let b = |x: Option<bool>| x.map_or(Value::Null, Value::Bool);

@@ -261,6 +261,20 @@ const CONTRIB_MODULES: &[&str] = &[
     "passwordcheck",
 ];
 
+/// Extensions outside contrib whose own regression tests run the same way: (module, git
+/// repository, tag, extension). Each is cloned at its tag next to the contrib sources; its tests
+/// are `test/sql/*.sql` with `test/expected` (`REGRESS_OPTS = --inputdir=test
+/// --load-extension=<extension>`), psql running in the repository's root (scripts write
+/// `results/`). The reference needs the extension installed (pgvector: its pinned release built
+/// from source into the pinned image, `tests/contrib/STATUS.md`); a default run leaves a module
+/// out when the reference doesn't have it.
+const EXTERNAL_MODULES: &[(&str, &str, &str, &str)] =
+    &[("pgvector", "https://github.com/pgvector/pgvector.git", "v0.8.7", "vector")];
+
+fn external(m: &str) -> Option<&'static (&'static str, &'static str, &'static str, &'static str)> {
+    EXTERNAL_MODULES.iter().find(|e| e.0 == m)
+}
+
 /// The contrib modules' own regression tests (`contrib/<module>/sql` and `expected` at
 /// REL_18_6), run like `make installcheck` runs them: each module in a fresh
 /// `contrib_regression` database (template0, pg_regress's settings), its `REGRESS_OPTS`
@@ -288,14 +302,33 @@ pub fn pg_contrib() {
     let modules: Vec<String> = std::env::var("PGCONTRIB_ONLY")
         .ok()
         .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
-        .unwrap_or_else(|| CONTRIB_MODULES.iter().map(|m| m.to_string()).collect());
+        .unwrap_or_else(|| {
+            let mut v: Vec<String> = CONTRIB_MODULES.iter().map(|m| m.to_string()).collect();
+            for e in EXTERNAL_MODULES {
+                let has = psql_cmd(&base, &Target::Reference, "postgres", &format!("SELECT count(*) FROM pg_available_extensions WHERE name = '{}';", e.3));
+                if has.lines().any(|l| l.trim() == "1") {
+                    v.push(e.0.to_string());
+                } else {
+                    eprintln!("pg_contrib: {} left out: the reference has no {} extension", e.0, e.3);
+                }
+            }
+            v
+        });
     if !base.report_only {
         ensure_contrib(&base, &modules);
     }
     let module_cfg = |m: &str| {
         let mut cfg = base.clone();
-        cfg.src = base.root.join("src-repo/contrib").join(m);
-        cfg.cwd = cfg.src.clone();
+        match external(m) {
+            Some(e) => {
+                cfg.cwd = base.root.join(format!("{}-repo", e.0));
+                cfg.src = cfg.cwd.join("test");
+            }
+            None => {
+                cfg.src = base.root.join("src-repo/contrib").join(m);
+                cfg.cwd = cfg.src.clone();
+            }
+        }
         cfg.out = base.root.join("contrib-out").join(m);
         cfg.report_dir = base.root.join("contrib-report").join(m);
         cfg
@@ -303,7 +336,10 @@ pub fn pg_contrib() {
     let schedules: Vec<(String, Vec<String>, Vec<String>)> = modules
         .iter()
         .map(|m| {
-            let (mut tests, load) = contrib_schedule(&module_cfg(m).src.join("Makefile"));
+            let (mut tests, load) = match external(m) {
+                Some(e) => (external_tests(&module_cfg(m).src), vec![e.3.to_string()]),
+                None => contrib_schedule(&module_cfg(m).src.join("Makefile")),
+            };
             if let Some(only) = &base.only {
                 tests.retain(|t| only.contains(t));
             }
@@ -413,7 +449,21 @@ fn ensure_contrib(cfg: &Config, modules: &[String]) {
         "exec", "-u", "root", &cfg.container, "mkdir", "-p", build.to_str().unwrap(),
     ]));
     for m in modules {
-        let dir = repo.join("contrib").join(m);
+        let dir = match external(m) {
+            Some(e) => {
+                let dir = cfg.root.join(format!("{}-repo", e.0));
+                if !dir.join("test").exists() {
+                    assert!(
+                        sh(Command::new("git").args(["clone", "-q", "--depth", "1", "--branch", e.2, e.1, dir.to_str().unwrap()])),
+                        "could not fetch {}",
+                        e.0
+                    );
+                }
+                std::fs::create_dir_all(dir.join("results")).unwrap();
+                dir
+            }
+            None => repo.join("contrib").join(m),
+        };
         let d = dir.to_str().unwrap();
         let there = sh(Command::new("docker").args(["exec", &cfg.container, "test", "-f", &format!("{d}/Makefile")]));
         if !there {
@@ -426,7 +476,26 @@ fn ensure_contrib(cfg: &Config, modules: &[String]) {
                 &format!("{}:{d}", cfg.container),
             ])));
         }
+        // (An external module's scripts write `results/` from psql's directory.)
+        if external(m).is_some() {
+            let _ = sh(Command::new("docker").args([
+                "exec", "-u", "root", &cfg.container, "sh", "-c", &format!("mkdir -p {d}/results && chmod -R a+rwX {d}/results"),
+            ]));
+        }
     }
+}
+
+/// An external module's tests: `sql/*.sql` under its test directory, in name order (its
+/// Makefile's `$(wildcard test/sql/*.sql)`).
+fn external_tests(src: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(src.join("sql"))
+        .map(|d| {
+            d.filter_map(|e| e.ok()?.file_name().to_str()?.strip_suffix(".sql").map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
 }
 
 /// A module's `REGRESS` files and `--load-extension`s, from its Makefile: `NAME = ...` /

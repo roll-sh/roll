@@ -162,10 +162,14 @@ pub(super) struct IndexParts {
 }
 
 /// An index's WITH (storage parameters), validated for its access method.
-pub(super) fn index_options(method: &str, opts: &[pb::Node]) -> Result<Vec<String>> {
+pub(super) fn index_options(cat: &crate::catalog::Catalog, method: &str, opts: &[pb::Node]) -> Result<Vec<String>> {
     let mut out = Vec::new();
+    // (A native access method's are its routine's add_int_reloption ones.)
+    let native = crate::ext::index_am::routine_by_name(cat, method);
+    let native_names: Vec<&str> = native.map_or_else(Vec::new, |r| r.int_options.iter().map(|o| o.0).collect());
     for d in def_elems(opts) {
         let known: &[&str] = match method {
+            _ if native.is_some() => &native_names,
             "btree" => &["fillfactor", "deduplicate_items"],
             "hash" => &["fillfactor"],
             "gist" => &["fillfactor", "buffering"],
@@ -190,6 +194,7 @@ pub(super) fn index_options(method: &str, opts: &[pb::Node]) -> Result<Vec<Strin
         let name = d.defname.as_str();
         // (reloptions.c's bounds for the index options.)
         let int_range = match name {
+            _ if native.is_some() => native.and_then(|r| r.int_options.iter().find(|o| o.0 == name)).map(|o| (o.2, o.3)),
             "fillfactor" => Some((10i64, 100i64)),
             "gin_pending_list_limit" => Some((64, i32::MAX as i64)),
             "pages_per_range" => Some((1, 131072)),
@@ -419,7 +424,7 @@ impl Ddl<'_, '_> {
                 .collect();
             self.check_unique_partkey(&t, &cols, "UNIQUE")?;
         }
-        let options = index_options(&method, &s.options)?;
+        let options = index_options(&self.cat, &method, &s.options)?;
         let name_parts = parts.name_parts;
         let name = if s.idxname.is_empty() {
             let refs: Vec<&str> = name_parts.iter().map(String::as_str).collect();
@@ -933,7 +938,7 @@ impl Ddl<'_, '_> {
                                     });
                                 }
                             } else {
-                                for o in index_options(&ix.method, &items)? {
+                                for o in index_options(&self.cat, &ix.method, &items)? {
                                     let k = o
                                         .split_once('=')
                                         .map_or(o.as_str(), |(k, _)| k)
@@ -3801,9 +3806,13 @@ impl Ddl<'_, '_> {
                 // A bare name (or `$libdir/name`) is looked for in the package library
                 // directory: the reference server's libraries are the ones there.
                 let bare = body.strip_prefix("$libdir/").unwrap_or(&body);
+                // (Libraries the engine has native code for beyond contrib's, pgvector's
+                // `vector`, are installed too.)
+                let bare_lib = bare.strip_suffix(".so").unwrap_or(bare);
                 let missing_lib = !body.starts_with('/')
                     && !bare.contains('/')
-                    && !PKGLIBS.contains(&bare.strip_suffix(".so").unwrap_or(bare));
+                    && !PKGLIBS.contains(&bare_lib)
+                    && !crate::ext::native::has_library(bare_lib);
                 if missing_lib
                     || body.starts_with('/')
                     && !std::path::Path::new(&body).exists()
@@ -6106,23 +6115,7 @@ impl Ddl<'_, '_> {
     }
 
     fn delete_index_rows(&self, t: &Table, ix: &Index) -> Result<()> {
-        if ix.id == 0 {
-            return Ok(());
-        }
-        let start = crate::storage::keys::index_prefix(t.oid, ix.id);
-        let end = crate::storage::keys::prefix_end(&start);
-        let keys: Vec<Vec<u8>> = self
-            .ctx
-            .txn
-            .borrow()
-            .scan(&start, &end)
-            .map(|e| e.map(|(k, _)| k))
-            .collect::<Result<_>>()?;
-        let mut txn = self.ctx.txn.borrow_mut();
-        for k in keys {
-            txn.delete(k)?;
-        }
-        Ok(())
+        self.delete_index_storage(t, ix)
     }
 
     /// The schema a DROP SCHEMA names, checked droppable by the current user. None: missing,

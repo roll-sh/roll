@@ -188,6 +188,26 @@ enum Am {
     Spgist,
     Gin,
     Brin,
+    /// An access method of native code (`ext::index_am`): pgvector's ivfflat and hnsw.
+    Native(NativeAm),
+}
+
+/// A native access method's routine, compared by identity.
+#[derive(Clone, Copy)]
+pub(crate) struct NativeAm(&'static crate::ext::index_am::AmRoutine);
+
+impl PartialEq for NativeAm {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.0, other.0)
+    }
+}
+
+impl Eq for NativeAm {}
+
+impl std::fmt::Debug for NativeAm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.handler)
+    }
 }
 
 impl Am {
@@ -198,18 +218,32 @@ impl Am {
 
     /// amoptionalkey: a scan without a condition on the first column.
     fn optionalkey(self) -> bool {
-        self != Am::Hash
+        match self {
+            Am::Native(n) => n.0.props.optional_key,
+            _ => self != Am::Hash,
+        }
     }
 
     /// amsearchnulls: IS NULL / IS NOT NULL as index conditions.
     fn searchnulls(self) -> bool {
-        matches!(self, Am::Btree | Am::Gist | Am::Spgist | Am::Brin)
+        match self {
+            Am::Native(n) => n.0.props.search_nulls,
+            _ => matches!(self, Am::Btree | Am::Gist | Am::Spgist | Am::Brin),
+        }
     }
 
     /// The operators an index column supports are its operator family's (GiST, SP-GiST,
-    /// GIN, BRIN).
+    /// GIN, BRIN, a native method's).
     fn by_family(self) -> bool {
-        matches!(self, Am::Gist | Am::Spgist | Am::Gin | Am::Brin)
+        matches!(self, Am::Gist | Am::Spgist | Am::Gin | Am::Brin | Am::Native(_))
+    }
+
+    /// amcanorderbyop: ORDER BY `key op value` from the index (nearest-neighbour scans).
+    fn orders_by_op(self) -> bool {
+        match self {
+            Am::Native(n) => n.0.props.can_order_by_op,
+            _ => matches!(self, Am::Gist | Am::Spgist),
+        }
     }
 }
 
@@ -446,7 +480,10 @@ fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo>
             "spgist" => Am::Spgist,
             "gin" => Am::Gin,
             "brin" => Am::Brin,
-            _ => continue,
+            m => match crate::ext::index_am::routine_by_name(&cat, m) {
+                Some(r) => Am::Native(NativeAm(r)),
+                None => continue,
+            },
         };
         let pages = crate::exec::sizing::fork_blocks(ix.oid, crate::exec::sizing::Fork::Main, ctx)
             .ok()
@@ -2049,6 +2086,8 @@ struct AmCost {
     correlation: f64,
     /// The index pages a scan reads (genericcostestimate's numIndexPages).
     pages: f64,
+    /// The disabled_nodes amcostestimate set (pgvector's, for a scan without ORDER BY).
+    disabled: Option<u32>,
 }
 
 impl Planner<'_, '_> {
@@ -2208,6 +2247,7 @@ impl Planner<'_, '_> {
                 sel,
                 correlation: 0.0,
                 pages: num_pages,
+                disabled: None,
             },
             num_sa_scans,
         )
@@ -2405,6 +2445,7 @@ impl Planner<'_, '_> {
             sel,
             correlation: corr,
             pages: ii.pages,
+            disabled: None,
         }
     }
 
@@ -2421,6 +2462,48 @@ impl Planner<'_, '_> {
             Am::Hash | Am::Gin => self.generic(rel, ii, quals, 0.0, 0.0, loop_count, 0).0,
             Am::Gist | Am::Spgist => self.gistcost(rel, ii, quals, loop_count, orderbys),
             Am::Brin => self.brincost(rel, ii, quals, loop_count),
+            Am::Native(n) => self.native_cost(n.0, rel, ii, quals, loop_count, orderbys),
+        }
+    }
+
+    /// A native method's amcostestimate, given genericcostestimate's results.
+    fn native_cost(
+        &self,
+        r: &'static crate::ext::index_am::AmRoutine,
+        rel: &Rel,
+        ii: &IndexInfo,
+        quals: &[IClause],
+        loop_count: f64,
+        orderbys: usize,
+    ) -> AmCost {
+        let (c, _) = self.generic(rel, ii, quals, 0.0, 0.0, loop_count, orderbys);
+        let input = crate::ext::index_am::CostInput {
+            has_orderbys: orderbys > 0,
+            startup: c.startup,
+            total: c.total,
+            selectivity: c.sel,
+            correlation: c.correlation,
+            num_index_pages: c.pages,
+            num_index_tuples: 0.0,
+            spc_random_page_cost: self.g.random_page_cost,
+            spc_seq_page_cost: self.g.seq_page_cost,
+            index_tuples: ii.tuples,
+            rel_pages: rel.size.pages,
+        };
+        let Some(t) = self.ctx.catalog().index_table(ii.ix.table) else {
+            return c;
+        };
+        let keys: Vec<Expr> = ii.keys.clone();
+        let am = crate::ext::index_am::AmIndex::of(&self.ctx.catalog(), &t, &ii.ix, &keys, self.ctx);
+        r.load(self.ctx);
+        let o = r.am.cost(&am, &input, self.ctx);
+        AmCost {
+            startup: o.startup,
+            total: o.total,
+            sel: o.selectivity,
+            correlation: o.correlation,
+            pages: o.pages,
+            disabled: o.disabled.then_some(2),
         }
     }
 
@@ -2542,7 +2625,7 @@ impl Planner<'_, '_> {
             index_total: am.total,
             index_sel: am.sel,
             rows: rel.rows,
-            disabled: (!self.g.indexscan) as u32,
+            disabled: am.disabled.unwrap_or((!self.g.indexscan) as u32),
         }
     }
 
@@ -3021,7 +3104,7 @@ fn index_pathkeys(rel: &Rel, ii: &IndexInfo, backward: bool, w: &Want) -> Vec<Pa
 /// index computes them (the key on the left).
 fn order_by_ops(ii: &IndexInfo, w: &Want) -> (Vec<PathKey>, Vec<Expr>) {
     let (mut keys, mut exprs) = (Vec::new(), Vec::new());
-    if !matches!(ii.am, Am::Gist | Am::Spgist) {
+    if !ii.am.orders_by_op() {
         return (keys, exprs);
     }
     'keys: for pk in &w.keys {

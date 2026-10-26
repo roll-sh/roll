@@ -3351,6 +3351,15 @@ pub fn fork_blocks(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>> {
             {
                 return Ok(Some(n));
             }
+            // An index of a native access method: its own size.
+            if let Some(r) = crate::ext::index_am::routine_by_name(&ctx.catalog(), &bix.index.method) {
+                let am = crate::ext::index_am::AmIndex::of(&ctx.catalog(), &t, &bix.index, &bix.keys, ctx);
+                return Ok(Some(match fork {
+                    Fork::Main => r.am.blocks(&am, ctx)?,
+                    Fork::Init if unlogged => 1,
+                    _ => 0,
+                }));
+            }
             if btree_opts(bix).is_none() {
                 // Other access methods aren't modelled: the size they have empty.
                 let empty = match bix.index.method.as_str() {

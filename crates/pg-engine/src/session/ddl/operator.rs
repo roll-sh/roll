@@ -272,6 +272,8 @@ impl Ddl<'_, '_> {
                             ..e
                         })?;
                     self.require_type_usage(&ty, dom)?;
+                    // (typenameTypeId: an argument type has no modifier; `bit` isn't bit(1).)
+                    let ty = ty.without_typmod();
                     if d.defname == "leftarg" {
                         left = Some(ty)
                     } else {

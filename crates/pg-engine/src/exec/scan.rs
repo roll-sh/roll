@@ -469,6 +469,7 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             fetched: Default::default(),
             batch: FETCH_BATCH_MIN,
             ios_cols: None,
+            am: None,
         }));
     }
     // A GiST point_ops index scan: the rows the index's consistent and distance functions
@@ -519,6 +520,67 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             fetched: Default::default(),
             batch: FETCH_BATCH_MIN,
             ios_cols: None,
+            am: None,
+        }));
+    }
+    // An index of a native access method (pgvector's ivfflat and hnsw): the rows its scan
+    // returns, in its order (approximate: the scan's, not the distances' own).
+    if s.current_of.is_none()
+        && let (Access::Index { .. }, Some((ix, b))) = (&s.access, &s.index)
+        && let Some(r) = crate::ext::index_am::routine_by_name(&ctx.catalog(), &ix.method)
+    {
+        let bix = crate::sql::binder::bound_indexes(&s.table, ctx)?
+            .into_iter()
+            .find(|b| b.index.oid == ix.oid)
+            .ok_or_else(|| crate::error::internal("index not found"))?;
+        let mut orderbys = Vec::with_capacity(b.order.len());
+        for k in &b.order {
+            orderbys.push(match &k.expr {
+                crate::sql::expr::Expr::Call(_, args, _) if args.len() == 2 => eval(&args[1], &[], ctx)?,
+                _ => Value::Null,
+            });
+        }
+        let state = crate::ext::index_am::ScanState::open(r, &s.table, ix, &bix.keys, &orderbys, ctx)?;
+        let mut plan = s.clone();
+        plan.access = Access::Seq;
+        plan.index = None;
+        let stat = if super::pgstat::scan_counts(ctx) {
+            super::pgstat::count_index_scan(ctx, ix.oid);
+            StatTarget::Index(ix.oid)
+        } else {
+            StatTarget::Off
+        };
+        return Ok(Box::new(ScanNode {
+            stat,
+            sample: None,
+            only: None,
+            key: s as *const ScanPlan as usize,
+            need: None,
+            plan,
+            ranges: Vec::new(),
+            cur_range: 0,
+            iter: None,
+            secondary: false,
+            emitted: 0,
+            keys: None,
+            ios: false,
+            ios_entries: None,
+            tid_order: false,
+            sorted: None,
+            streamed: false,
+            par: None,
+            par_tried: false,
+            run: Default::default(),
+            pending: None,
+            one_run: false,
+            blocks: Default::default(),
+            prune_next: 0,
+            nblocks: None,
+            last_block: None,
+            fetched: Default::default(),
+            batch: FETCH_BATCH_MIN,
+            ios_cols: None,
+            am: Some(Box::new(state)),
         }));
     }
     if s.index.is_none() && s.current_of.is_none() && s.sample.is_some() {
@@ -701,6 +763,7 @@ fn open_scan_as(
         fetched: Default::default(),
         batch: FETCH_BATCH_MIN,
         ios_cols,
+        am: None,
         one_run: collation_equal_run(s),
     }))
 }
@@ -1326,6 +1389,7 @@ fn dense_bitmap_scan(
         fetched: Default::default(),
         batch: FETCH_BATCH_MIN,
         ios_cols: None,
+        am: None,
     })))
 }
 
@@ -1468,6 +1532,9 @@ struct ScanNode {
     /// column's table column, type and direction. The rows aren't fetched; the entry key
     /// stands in for the row's bytes.
     ios_cols: Option<Vec<(usize, crate::types::DataType, bool)>>,
+    /// An ordered scan of an index of a native access method (`ext::index_am`): the rows in
+    /// its order.
+    am: Option<Box<crate::ext::index_am::ScanState>>,
 }
 
 /// Rows index-only scans made from index entries alone (`ScanNode::index_row`), for tests.
@@ -1861,6 +1928,33 @@ impl ScanNode {
 
     /// Next (data key, stored row bytes) in storage order.
     fn next_stored(&mut self, ctx: &ExecCtx) -> Result<Option<(Vec<u8>, bytes::Bytes)>> {
+        if let Some(am) = &mut self.am {
+            loop {
+                while let Some((check, k, row)) = am.pending.pop_front() {
+                    let Some(row) = row else { continue };
+                    if check.is_some() {
+                        let cols = decode_table_row(&self.plan.table, &row)?;
+                        if !am.keep(&k, check.as_ref(), &cols, ctx)? {
+                            continue;
+                        }
+                    }
+                    return Ok(Some((k, row)));
+                }
+                let want = if ctx.snapshot().is_some() { self.batch } else { 1 };
+                let (mut batch, mut checks) = (Vec::new(), Vec::new());
+                while batch.len() < want {
+                    let Some((k, c)) = am.next(ctx)? else { break };
+                    batch.push(k);
+                    checks.push(c);
+                }
+                if batch.is_empty() {
+                    return Ok(None);
+                }
+                self.batch = (self.batch * 2).min(FETCH_BATCH_MAX);
+                let rows = fetch_rows(&batch, ctx)?;
+                am.pending.extend(checks.into_iter().zip(batch).zip(rows).map(|((c, k), r)| (c, k, r)));
+            }
+        }
         if let Some(keys) = &mut self.keys {
             loop {
                 while let Some((_, k, row)) = self.fetched.pop_front() {

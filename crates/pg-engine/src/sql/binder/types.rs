@@ -106,9 +106,17 @@ fn resolve_inner(
             ty = DataType::Interval(interval_typmod(&tn.typmods)?);
         } else {
             let mut mods = Vec::new();
+            // (A native extension type's typmodin gets each modifier as a cstring and reads
+            // integers from them: ArrayGetIntegerTypmods.)
+            let native = matches!(&ty, DataType::Base(b) if b.ext != 0 && crate::ext::types::has_typmod_in(b.ext));
             for m in &tn.typmods {
                 match ival(m) {
                     Some(v) => mods.push(v),
+                    None if native && super::ast::const_str(m).is_some() => {
+                        let s = super::ast::const_str(m).unwrap_or_default();
+                        let v = crate::types::text::parse_value(&s, &DataType::Int4, &crate::types::text::FormatCtx::default()).map_err(|e| super::ast::with_pos(e, tn.location))?;
+                        mods.push(v.as_i64().unwrap_or(0));
+                    }
                     None => {
                         return Err(Error::new(
                             code::SYNTAX_ERROR,

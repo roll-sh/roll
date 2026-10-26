@@ -378,7 +378,7 @@ impl Ddl<'_, '_> {
             return Err(invalid("index operators must be binary"));
         }
         if m.sortfamily != 0 {
-            if !am_traits(am.handler).is_some_and(|t| t.can_order_by_op) {
+            if !am_traits(&self.cat, am.handler).is_some_and(|t| t.can_order_by_op) {
                 return Err(invalid(format!(
                     "access method \"{}\" does not support ordering operators",
                     am.name
@@ -715,7 +715,7 @@ impl Ddl<'_, '_> {
         ops: &mut Vec<Member>,
         procs: &mut Vec<Member>,
     ) -> Result<()> {
-        let t = am_traits(am.handler).unwrap_or(crate::catalog::userobj::AmTraits {
+        let t = am_traits(&self.cat, am.handler).unwrap_or(crate::catalog::userobj::AmTraits {
             strategies: 0,
             support: 0,
             opts_proc: 0,
@@ -847,7 +847,7 @@ impl Ddl<'_, '_> {
         if storage != 0 {
             if storage == typeoid {
                 storage = 0;
-            } else if !am_traits(am.handler).is_some_and(|t| t.storage) {
+            } else if !am_traits(&self.cat, am.handler).is_some_and(|t| t.storage) {
                 return Err(invalid(format!(
                     "storage type cannot be different from data type for access method \"{}\"",
                     am.name
@@ -927,7 +927,7 @@ impl Ddl<'_, '_> {
         }
         let fname = parts.join(".");
         if s.is_drop {
-            let t = am_traits(am.handler).unwrap_or(crate::catalog::userobj::AmTraits {
+            let t = am_traits(&self.cat, am.handler).unwrap_or(crate::catalog::userobj::AmTraits {
                 strategies: 0,
                 support: 0,
                 opts_proc: 0,

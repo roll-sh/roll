@@ -1262,6 +1262,9 @@ fn put_index_entries_with(
         if bix.index.id == 0 {
             continue;
         }
+        if am_insert(t, bix, vals.as_deref(), dkey, false, ctx)? {
+            continue;
+        }
         if let Some(vals) = vals {
             let k = index_entry_key(t, &bix.index, vals, dkey, &bix.colls);
             let tracked = ctx.txn.borrow().serializable_tracked();
@@ -1275,6 +1278,29 @@ fn put_index_entries_with(
     Ok(())
 }
 
+/// aminsert for an index of a native access method (`ext::index_am`): whether `bix` is one.
+/// Its entries are the method's own; a deleted row's stay until VACUUM, as in PostgreSQL.
+/// (`update`: an UPDATE gave the row's key a new value: its older entries no longer hold it.)
+fn am_insert(t: &Table, bix: &BoundIndex, vals: Option<&[Value]>, dkey: &[u8], update: bool, ctx: &ExecCtx) -> Result<bool> {
+    if crate::ext::index_am::builtin_method(&bix.index.method) {
+        return Ok(false);
+    }
+    let cat = ctx.catalog();
+    let Some(r) = crate::ext::index_am::routine_by_name(&cat, &bix.index.method) else {
+        return Ok(false);
+    };
+    let am = crate::ext::index_am::AmIndex::of(&cat, t, &bix.index, &bix.keys, ctx);
+    if update {
+        am.store.mark_updated(dkey)?;
+    }
+    if let Some(vals) = vals {
+        let xid = ctx.txn.borrow_mut().cur_xid();
+        crate::ext::index_am::note_insert(&am.store, dkey, xid, ctx.sess.db.xids().horizon());
+        r.am.insert(&am, dkey, vals, ctx)?;
+    }
+    Ok(true)
+}
+
 fn delete_index_entries(
     t: &Table,
     indexes: &[BoundIndex],
@@ -1284,6 +1310,11 @@ fn delete_index_entries(
 ) -> Result<()> {
     for bix in indexes {
         if bix.index.id == 0 {
+            continue;
+        }
+        if !crate::ext::index_am::builtin_method(&bix.index.method)
+            && crate::ext::index_am::routine_by_name(&ctx.catalog(), &bix.index.method).is_some()
+        {
             continue;
         }
         if let Some(vals) = index_values(bix, row, ctx)? {
@@ -2732,6 +2763,10 @@ pub fn update_row_rls(
         let same = new_key == dkey
             && matches!((&ov, &nv), (Some(a), Some(b)) if super::agg::cmp_rows(a, b) == std::cmp::Ordering::Equal);
         if same {
+            continue;
+        }
+        // (A native method's index: the new version's entry; the old one's stays.)
+        if am_insert(t, bix, nv.as_deref(), &new_key, new_key == dkey, ctx)? {
             continue;
         }
         if let Some(ov) = ov {

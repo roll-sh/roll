@@ -810,6 +810,8 @@ pub fn format_type_oid(
 ) -> Option<String> {
     if let Some((schema, name, array)) = cat.user_type_name(oid) {
         let n = cat.qualified_name(schema, name, search_path);
+        // printTypmod without a typmod_out function: `(typmod)` after the name.
+        let n = if typmod >= 0 { format!("{n}({typmod})") } else { n };
         return Some(if array { format!("{n}[]") } else { n });
     }
     let Some(t) = T::from_oid(oid) else {

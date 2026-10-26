@@ -1750,7 +1750,14 @@ pub fn parse_value_ex(s: &str, ty: &DataType, ctx: &FormatCtx, explicit: bool) -
         T::Trigger => Value::text(s),
         // A made base type reads its values as its input function's built-in type does; a
         // shell's input function (shell_in) refuses them.
-        T::Base(b) if b.ext != 0 => crate::ext::types::input(b.ext, s)?,
+        // (The input function gets the typmod: `vector_in` checks the dimensions.)
+        T::Base(b) if b.ext != 0 => match crate::ext::types::input(b.ext, s)? {
+            Value::Ext(k, v) if b.typmod >= 0 => {
+                crate::ext::types::check_typmod(k, &v, b.typmod)?;
+                Value::Ext(k, v)
+            }
+            v => v,
+        },
         T::Base(b) => match &b.repr {
             Some(r) => parse_value_ex(s, r, ctx, explicit)?,
             None => bail!(

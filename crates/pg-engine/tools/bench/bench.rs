@@ -6,7 +6,7 @@
 //!
 //! Workloads: oltp-load, oltp, analytic-load, analytic, tpch-load, tpch, bulk, stream-load, stream,
 //! ddl, scale, idle,
-//! startup, startup-catalog. Results are printed as `RESULT\t<label>\t<workload>\t<case>\t<k=v>...` lines.
+//! startup, startup-catalog, vector (pgvector). Results are printed as `RESULT\t<label>\t<workload>\t<case>\t<k=v>...` lines.
 
 mod tpch;
 
@@ -1355,6 +1355,7 @@ fn main() {
             "bulk" => bulk(&cx),
             "stream-load" => stream_load(&cx),
             "stream" => stream(&cx),
+            "vector" => vector_bench(&cx),
             "ddl" => ddl(&cx),
             "scale" => scale(&cx),
             "scale-ops" => scale_ops(&cx),
@@ -1378,4 +1379,106 @@ fn main() {
     if let Target::InProc { engine } = &cx.target {
         engine.shutdown();
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// pgvector
+
+/// A deterministic vector of `dim` floats in [-1, 1) (xorshift64*, seeded by `seed`), as
+/// pgvector's text input.
+fn vector_text(seed: u64, dim: usize) -> String {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut s = String::with_capacity(dim * 10);
+    s.push('[');
+    for i in 0..dim {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        let v = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40) as f64 / (1u64 << 24) as f64 * 2.0 - 1.0;
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!("{:.5}", v));
+    }
+    s.push(']');
+    s
+}
+
+/// pgvector: load `rows` vectors of `dim` dimensions, then per index type (hnsw, ivfflat)
+/// the build and `queries` nearest-neighbour queries (LIMIT `k`), then inserts into the
+/// indexed table, an exact scan and the distance functions over every row. Each query case
+/// reports a hash of its results: with seeded builds on both sides (the engine's
+/// ROLL_VECTOR_BUILD_SEED=42, pgvector built with -DIVFFLAT_BENCH -DHNSW_MEMORY) equal hashes
+/// mean the same rows in the same order.
+fn vector_bench(cx: &Ctx) {
+    let rows: u64 = cx.opt("rows", 100_000);
+    let dim: usize = cx.opt("dim", 128);
+    let queries: u64 = cx.opt("queries", 200);
+    let k: usize = cx.opt("k", 10);
+    let lists: usize = cx.opt("lists", 100);
+    let probes: usize = cx.opt("probes", 10);
+    let m: usize = cx.opt("m", 16);
+    let efc: usize = cx.opt("ef_construction", 64);
+    let efs: usize = cx.opt("ef_search", 40);
+    let mut c = cx.conn();
+    run_script(c.as_mut(), "CREATE EXTENSION IF NOT EXISTS vector; SET max_parallel_maintenance_workers = 0; DROP TABLE IF EXISTS items");
+    run_script(c.as_mut(), &format!("CREATE TABLE items (id int PRIMARY KEY, embedding vector({dim}))"));
+    let mut data = String::new();
+    for i in 1..=rows {
+        data.push_str(&format!("{i}\t{}\n", vector_text(i, dim)));
+    }
+    let (r, s) = timed(|| c.copy_in("COPY items FROM STDIN", data.as_bytes()));
+    must(r, "copy");
+    cx.report("vector", "copy_in", &[("rows", rows.to_string()), ("dim", dim.to_string()), ("secs", format!("{s:.3}"))]);
+    let qs: Vec<String> = (0..queries).map(|q| vector_text(1_000_000_007 + q, dim)).collect();
+    let run_queries = |c: &mut dyn Conn, case: &str| {
+        let mut lat = Vec::with_capacity(qs.len());
+        let mut hash = 0u64;
+        let start = Instant::now();
+        for q in &qs {
+            let t = Instant::now();
+            let (_, h) = must(c.simple(&format!("SELECT id FROM items ORDER BY embedding <-> '{q}' LIMIT {k}")), case);
+            lat.push((t.elapsed().as_micros() as u32).max(1));
+            hash = hash.rotate_left(5) ^ h;
+        }
+        let secs = start.elapsed().as_secs_f64();
+        lat.sort_unstable();
+        cx.report("vector", case, &[
+            ("queries", qs.len().to_string()),
+            ("qps", format!("{:.1}", qs.len() as f64 / secs)),
+            ("p50_ms", format!("{:.3}", pct(&lat, 0.5))),
+            ("p99_ms", format!("{:.3}", pct(&lat, 0.99))),
+            ("hash", format!("{hash:016x}")),
+        ]);
+    };
+    let build = |c: &mut dyn Conn, case: &str, sql: &str| {
+        let (r, s) = timed(|| c.simple(sql));
+        must(r, case);
+        cx.report("vector", case, &[("secs", format!("{s:.3}"))]);
+    };
+    build(c.as_mut(), "build_hnsw", &format!("CREATE INDEX items_hnsw ON items USING hnsw (embedding vector_l2_ops) WITH (m = {m}, ef_construction = {efc})"));
+    run_script(c.as_mut(), &format!("SET hnsw.ef_search = {efs}"));
+    run_queries(c.as_mut(), "query_hnsw");
+    let extra: String = (rows + 1..=rows + rows / 10).map(|i| format!("{i}\t{}\n", vector_text(i, dim))).collect();
+    let (r, s) = timed(|| c.copy_in("COPY items FROM STDIN", extra.as_bytes()));
+    must(r, "insert_hnsw");
+    cx.report("vector", "insert_hnsw", &[("rows", (rows / 10).to_string()), ("secs", format!("{s:.3}"))]);
+    run_queries(c.as_mut(), "query_hnsw_after_insert");
+    run_script(c.as_mut(), &format!("DROP INDEX items_hnsw; DELETE FROM items WHERE id > {rows}"));
+    build(c.as_mut(), "build_ivfflat", &format!("CREATE INDEX items_ivf ON items USING ivfflat (embedding vector_l2_ops) WITH (lists = {lists})"));
+    run_script(c.as_mut(), &format!("SET ivfflat.probes = {probes}"));
+    run_queries(c.as_mut(), "query_ivfflat");
+    run_script(c.as_mut(), "DROP INDEX items_ivf");
+    let q0 = &qs[0];
+    for (case, sql) in [
+        ("exact_knn", format!("SELECT id FROM items ORDER BY embedding <-> '{q0}' LIMIT {k}")),
+        ("l2_distance_all", format!("SELECT sum(embedding <-> '{q0}') FROM items")),
+        ("cosine_distance_all", format!("SELECT sum(embedding <=> '{q0}') FROM items")),
+        ("inner_product_all", format!("SELECT sum(embedding <#> '{q0}') FROM items")),
+    ] {
+        let (r, s) = timed(|| c.simple(&sql));
+        let (_, h) = must(r, case);
+        cx.report("vector", case, &[("secs", format!("{s:.4}")), ("hash", format!("{h:016x}"))]);
+    }
+    run_script(c.as_mut(), "DROP TABLE items");
 }

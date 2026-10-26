@@ -306,9 +306,15 @@ fn find(name: &str) -> Option<&'static Def> {
     find_any(name).filter(|d| d.module.is_none())
 }
 
-/// The prefix library `lib` reserves when it defines parameters (`ext_gucs.tsv`).
-fn find_module_prefix(lib: &str) -> Option<&'static str> {
-    table().defs.iter().filter_map(|d| d.module).find(|m| *m == lib)
+/// The prefixes library `lib` reserves when it defines parameters (`ext_gucs.tsv`): its
+/// name, or (pgvector's `vector`, whose _PG_init defines hnsw's then ivfflat's) others.
+fn module_prefixes(lib: &str) -> Vec<&'static str> {
+    let one = [lib];
+    let names: &[&str] = if lib == "vector" { &["hnsw", "ivfflat"] } else { &one };
+    names
+        .iter()
+        .filter_map(|n| table().defs.iter().filter_map(|d| d.module).find(|m| m == n))
+        .collect()
 }
 
 /// The parameter `name` (any case), an extension library's too, without allocating.
@@ -1452,10 +1458,7 @@ impl Settings {
     }
 
     pub fn load_module(&mut self, lib: &str) -> Vec<Error> {
-        match find_module_prefix(lib) {
-            Some(prefix) => self.reserve_prefix(prefix),
-            None => Vec::new(),
-        }
+        module_prefixes(lib).into_iter().flat_map(|p| self.reserve_prefix(p)).collect()
     }
 
     /// Current raw (normalised, unit-less) value.

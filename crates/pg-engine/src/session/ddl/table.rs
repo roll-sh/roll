@@ -1107,7 +1107,7 @@ impl Ddl<'_, '_> {
                         loc: c.location,
                         deferrable: c.deferrable,
                         initially_deferred: c.initdeferred,
-                        options: super::objects::index_options("btree", &c.options)?,
+                        options: super::objects::index_options(&self.cat, "btree", &c.options)?,
                         space: c.indexspace.clone(),
                     });
                 }
@@ -1652,7 +1652,7 @@ impl Ddl<'_, '_> {
                     loc: c.location,
                     deferrable: c.deferrable,
                     initially_deferred: c.initdeferred,
-                    options: super::objects::index_options("btree", &c.options)?,
+                    options: super::objects::index_options(&self.cat, "btree", &c.options)?,
                     space: c.indexspace.clone(),
                 }
             }
@@ -2699,7 +2699,7 @@ impl Ddl<'_, '_> {
                 }
             }
         }
-        let options = super::objects::index_options(method, &x.options)?;
+        let options = super::objects::index_options(&self.cat, method, &x.options)?;
         let ix_oid = self.cat.alloc_oid();
         let index = Index {
             oid: ix_oid,
@@ -3573,23 +3573,7 @@ impl Ddl<'_, '_> {
 
     /// Remove an index's entries (before it is built again).
     pub(super) fn clear_index_entries(&mut self, t: &Table, ix: &Index) -> Result<()> {
-        if ix.id == 0 {
-            return Ok(());
-        }
-        let start = crate::storage::keys::index_prefix(t.oid, ix.id);
-        let end = crate::storage::keys::prefix_end(&start);
-        let keys: Vec<Vec<u8>> = self
-            .ctx
-            .txn
-            .borrow()
-            .scan(&start, &end)
-            .map(|e| e.map(|(k, _)| k))
-            .collect::<Result<_>>()?;
-        let mut txn = self.ctx.txn.borrow_mut();
-        for k in keys {
-            txn.delete(k)?;
-        }
-        Ok(())
+        self.delete_index_storage(t, ix)
     }
 
     /// Fill a new index from the table's rows, checking uniqueness.
@@ -3609,6 +3593,9 @@ impl Ddl<'_, '_> {
                     .ok_or_else(|| crate::error::internal("index not found"))?
             }
         };
+        if let Some(r) = crate::ext::index_am::routine_by_name(&self.cat, &ix.method) {
+            return self.build_am_index(r, t, ix, &bix);
+        }
         // Unique keys seen so far, with the data key of the row that had each first (its
         // values are read again for the error).
         let mut seen = UniqueKeys::default();
@@ -3780,7 +3767,8 @@ impl Ddl<'_, '_> {
                 {
                     return Err(self.duplicate_key(new, bix, &vals, &bix.index.name));
                 }
-                if bix.index.id != 0 {
+                // (A native method's index is built again after the statement.)
+                if bix.index.id != 0 && !crate::ext::index_am::is_native(&self.cat, &bix.index.method) {
                     self.ctx
                         .txn
                         .borrow_mut()
@@ -3871,7 +3859,7 @@ impl Ddl<'_, '_> {
                 }
                 dkey
             };
-            for bix in bixs.iter().filter(|b| b.index.id != 0) {
+            for bix in bixs.iter().filter(|b| b.index.id != 0 && !crate::ext::index_am::is_native(&self.cat, &b.index.method)) {
                 if let Some(vals) = index_values(bix, &row, self)? {
                     self.ctx
                         .txn
@@ -5898,23 +5886,7 @@ impl Ddl<'_, '_> {
     }
 
     fn delete_index_entries(&self, t: &Table, ix: &Index) -> Result<()> {
-        if ix.id == 0 {
-            return Ok(());
-        }
-        let start = crate::storage::keys::index_prefix(t.oid, ix.id);
-        let end = crate::storage::keys::prefix_end(&start);
-        let keys: Vec<Vec<u8>> = self
-            .ctx
-            .txn
-            .borrow()
-            .scan(&start, &end)
-            .map(|e| e.map(|(k, _)| k))
-            .collect::<Result<_>>()?;
-        let mut txn = self.ctx.txn.borrow_mut();
-        for k in keys {
-            txn.delete(k)?;
-        }
-        Ok(())
+        self.delete_index_storage(t, ix)
     }
 
     pub(super) fn alter_column_type(

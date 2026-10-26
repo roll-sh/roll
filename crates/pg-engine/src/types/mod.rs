@@ -331,10 +331,22 @@ pub struct BaseType {
     /// none): its values are `Value::Ext` of that kind.
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub ext: u16,
+    /// The type modifier (`vector(3)`: 3; -1: none), as the variants of the built-in types
+    /// with modifiers carry theirs. Not part of the type's identity (`eq` is by oid).
+    #[serde(default = "no_typmod", skip_serializing_if = "is_no_typmod")]
+    pub typmod: i32,
 }
 
 fn is_zero_u16(v: &u16) -> bool {
     *v == 0
+}
+
+fn no_typmod() -> i32 {
+    -1
+}
+
+fn is_no_typmod(v: &i32) -> bool {
+    *v == -1
 }
 
 impl PartialEq for BaseType {
@@ -374,6 +386,7 @@ impl BaseType {
             collatable: false,
             pseudo: true,
             ext: 0,
+            typmod: -1,
         })))
     }
 }
@@ -807,8 +820,17 @@ impl DataType {
         match self {
             Numeric(m) | Varchar(m) | Bpchar(m) | Time(m) | Timetz(m) | Timestamp(m)
             | Timestamptz(m) | Interval(m) | Bit(m) | Varbit(m) => *m,
+            Base(b) => b.typmod,
             _ => -1,
         }
+    }
+
+    /// A base type with type modifier `m` (-1: none).
+    pub fn base_with_typmod(b: &Arc<BaseType>, m: i32) -> DataType {
+        if b.typmod == m {
+            return DataType::Base(b.clone());
+        }
+        DataType::Base(Arc::new(BaseType { typmod: m, ..(**b).clone() }))
     }
 
     /// The type modifier as the catalogs show it (atttypmod, typtypmod): an array's is its
@@ -834,6 +856,7 @@ impl DataType {
             Interval(_) => Interval(-1),
             Bit(_) => Bit(-1),
             Varbit(_) => Varbit(-1),
+            Base(b) if b.typmod != -1 => DataType::base_with_typmod(b, -1),
             Array(e) => Array(Box::new(e.without_typmod())),
             t => t.clone(),
         }
@@ -1263,6 +1286,7 @@ impl DataType {
             Timestamp(_) if m >= 0 => format!("timestamp({m}) without time zone"),
             Timestamptz(_) if m >= 0 => format!("timestamp({m}) with time zone"),
             Interval(_) if m >= 0 => interval_typmod_display(m),
+            Base(_) if m >= 0 => format!("{}({m})", self.sql_name()),
             Array(e) => format!("{}[]", e.display()),
             t => t.sql_name(),
         }
@@ -1486,6 +1510,10 @@ impl DataType {
                     );
                 }
                 if p <= 24 { Float4 } else { Float8 }
+            }
+            Base(b) if b.ext != 0 && crate::ext::types::has_typmod_in(b.ext) => {
+                let m = crate::ext::types::typmod_in(b.ext, mods)?;
+                DataType::base_with_typmod(&b, m)
             }
             t => {
                 return Err(err!(

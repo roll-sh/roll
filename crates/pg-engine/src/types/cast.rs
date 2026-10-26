@@ -322,6 +322,10 @@ pub fn apply_typmod(v: Value, ty: &DataType, explicit: bool) -> Result<Value> {
                 );
             }
         }
+        (Value::Ext(k, b), T::Base(bt)) if bt.typmod >= 0 => {
+            crate::ext::types::check_typmod(k, &b, bt.typmod)?;
+            Value::Ext(k, b)
+        }
         (Value::Array(a), T::Array(elem))
             if elem.typmod() >= 0 || matches!(**elem, T::Bpchar(_)) =>
         {

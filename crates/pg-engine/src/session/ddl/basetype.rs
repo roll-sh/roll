@@ -83,6 +83,7 @@ impl Ddl<'_, '_> {
                 collatable: false,
                 pseudo: false,
                 ext: 0,
+                typmod: -1,
             }),
             owner: self.me(),
             input: 2398,
@@ -499,6 +500,7 @@ impl Ddl<'_, '_> {
             preferred,
             collatable,
             pseudo: false,
+            typmod: -1,
         });
         let def = BaseTypeDef {
             ty: ty.clone(),

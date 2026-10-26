@@ -26,3 +26,10 @@ auto_explain.log_verbose	bool		superuser	Customized Options	Use EXPLAIN VERBOSE 
 auto_explain.log_wal	bool		superuser	Customized Options	Log WAL usage.					off	off		default
 auto_explain.sample_rate	real		superuser	Customized Options	Fraction of queries to process.		0	1		1	1		default
 passwordcheck.min_password_length	integer	B	superuser	Customized Options	Minimum allowed password length.		0	2147483647		8	8		default
+hnsw.ef_search	integer		user	Customized Options	Sets the size of the dynamic candidate list for search	Valid range is 1..1000.	1	1000		40	40		default
+hnsw.iterative_scan	enum		user	Customized Options	Sets the mode for iterative scans				off,relaxed_order,strict_order	off	off		default
+hnsw.max_scan_tuples	integer		user	Customized Options	Sets the max number of tuples to visit for iterative scans		1	2147483647		20000	20000		default
+hnsw.scan_mem_multiplier	real		user	Customized Options	Sets the multiple of work_mem to use for iterative scans		1	1000		1	1		default
+ivfflat.iterative_scan	enum		user	Customized Options	Sets the mode for iterative scans				off,relaxed_order	off	off		default
+ivfflat.max_probes	integer		user	Customized Options	Sets the max number of probes for iterative scans		1	32768		32768	32768		default
+ivfflat.probes	integer		user	Customized Options	Sets the number of probes	Valid range is 1..lists.	1	32768		1	1		default

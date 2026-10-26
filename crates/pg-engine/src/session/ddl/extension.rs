@@ -52,6 +52,9 @@ pub(crate) fn member_candidates(cat: &Catalog) -> BTreeSet<(u32, u32)> {
     ] {
         out.extend(set.into_iter().filter(user).map(|o| (TYPE, o)));
     }
+    // (A base type's implicit array type is a member too: GenerateTypeDependencies records
+    // dependent types' membership.)
+    out.extend(cat.base_types.values().map(|d| d.ty.array_oid).filter(|o| user(o)).map(|o| (TYPE, o)));
     out.extend(cat.tables.keys().filter(|o| user(o)).map(|o| (REL, *o)));
     out.extend(cat.views.keys().filter(|o| user(o)).map(|o| (REL, *o)));
     out.extend(cat.sequences.keys().filter(|o| user(o)).map(|o| (REL, *o)));
