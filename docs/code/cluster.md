@@ -299,3 +299,8 @@ rolld --code-only \
   previews, queue state, pushes, review dismissals) are lost to webhooks if their node dies in
   the moment between the state change and `emit` (their deliveries are durable from `emit` on).
 - A repo connected to GitHub is never given up as idle (its mirror runs on its owner).
+- The landing log's advisory lock is one lock for the whole cluster: every landing's last
+  statements and its commit run under it. It's held for one insert and the commit, so it bounds
+  cluster-wide landings at roughly one commit round trip each (the store's throughput test on
+  Postgres stays above 1,200 merges/s on one node); past that, the log needs a sequence per repo
+  or per shard.
