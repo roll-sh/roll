@@ -101,7 +101,8 @@ pub fn rewrite(sql: &str, enc: i32, standard_strings: bool) -> Result<Option<(St
             match unicode_body(&body, esc, enc) {
                 Ok(Some(v)) => edits.push((i, end, literal(&v, sql[i..end].chars().count()))),
                 Ok(None) => {}
-                Err((e, off)) => {
+                Err(b) => {
+                    let (e, off) = *b;
                     // (Positioned at the escape: str_udeescape's scanner_errposition.)
                     let at = i + 3 + body_offset(&sql[i + 3..], off);
                     return Err(e.position(char_pos(at)));
@@ -318,7 +319,7 @@ fn uescape(sql: &str, close: usize) -> (char, usize) {
 
 /// A U&'..' body's value when it has escapes past ASCII (`Err`: an error and the body
 /// offset of its escape); malformed escapes are left to the parser.
-fn unicode_body(body: &str, esc: char, enc: i32) -> std::result::Result<Option<String>, (Error, usize)> {
+fn unicode_body(body: &str, esc: char, enc: i32) -> std::result::Result<Option<String>, Box<(Error, usize)>> {
     let mut out = String::with_capacity(body.len());
     let mut changed = false;
     let mut first: Option<(u32, usize)> = None;
@@ -364,7 +365,7 @@ fn unicode_body(body: &str, esc: char, enc: i32) -> std::result::Result<Option<S
         };
         if cp >= 0x80 {
             changed = true;
-            let s = server::from_unicode(enc, ch.encode_utf8(&mut [0; 4])).map_err(|e| (e, at))?;
+            let s = server::from_unicode(enc, ch.encode_utf8(&mut [0; 4])).map_err(|e| Box::new((e, at)))?;
             out.push_str(&s);
         } else {
             out.push(ch);
