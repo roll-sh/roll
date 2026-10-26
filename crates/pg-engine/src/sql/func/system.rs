@@ -964,6 +964,38 @@ fn visible(a: &[Value], c: &FnCtx) -> Result<Value> {
             .find(|p| cat.functions.values().any(|g| g.schema == *p && same(g)));
         return Ok(Value::Bool(first == Some(f.schema)));
     }
+    // A range type's constructors (and its multirange's): visible if no schema earlier in
+    // the path has a routine of that name taking as many arguments.
+    if let Some((r, i)) = cat
+        .ranges
+        .values()
+        .find_map(|r| r.fn_oids.iter().take(5).position(|x| *x == oid).map(|i| (r, i)))
+    {
+        let ctors = |r: &crate::catalog::RangeDef| {
+            if r.ctors.0.is_empty() {
+                (r.name.clone(), r.multi_name.clone())
+            } else {
+                r.ctors.clone()
+            }
+        };
+        const NARGS: [usize; 5] = [2, 3, 0, 1, 1];
+        let pick = |r: &crate::catalog::RangeDef, i: usize| {
+            let c = ctors(r);
+            if i < 2 { c.0 } else { c.1 }
+        };
+        let name = pick(r, i);
+        let first = path.iter().copied().find(|p| {
+            cat.functions
+                .values()
+                .any(|g| g.schema == *p && g.name == name && g.args.len() == NARGS[i])
+                || cat.ranges.values().any(|q| {
+                    q.schema == *p
+                        && q.fn_oids.len() >= 5
+                        && (0..5).any(|j| NARGS[j] == NARGS[i] && pick(q, j) == name)
+                })
+        });
+        return Ok(Value::Bool(first == Some(r.schema)));
+    }
     let in_path = |s: u32, name: &str| {
         // RelationIsVisible: the first schema in the path with a relation of that name
         // (system relations and composite types share the namespace).

@@ -286,9 +286,17 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   working only under the search_path they were made in), snapshot export
   (`pg_export_snapshot`, `SET TRANSACTION SNAPSHOT`), `roll-engine` shuts down cleanly on
   SIGTERM keeping sequence positions, and CREATE INDEX over keys bigger than a btree page no
-  longer loops forever (the page-count model, `relsize::btree_pages`). Open: databases' own
-  options (CONNECTION LIMIT, ALLOW_CONNECTIONS, IS_TEMPLATE, invalid databases) aren't kept.
-  (Databases' locales are, since round 19: below.)
+  longer loops forever (the page-count model, `relsize::btree_pages`). Round 19 (agent 54):
+  002 passes 14,609 of 14,609 (with agent 60's locales); dumps restore both ways in
+  every format and with `pg_restore -j 4` without errors (PostgreSQL's dump into the engine
+  had 15); psql's commands 140 of 146. Databases' own options (IS_TEMPLATE,
+  ALLOW_CONNECTIONS, CONNECTION LIMIT, invalid databases) are kept and enforced
+  (`session/ddl/database.rs`). Concurrent DDL: two transactions' indexes of one table got one
+  storage id and read each other's entries (an index's id is its oid now), and the catalog
+  merge is record by record (`txn/catmerge.rs`, it serialized whole catalogs: `pg_restore -j`
+  was 20x a serial restore). At scale (3,000 tables, 20 M rows: STATUS.md) pg_dump takes
+  1.5-2x PostgreSQL's time, restores 3-11x.
+  (Databases' locales are kept since round 19: below.)
 - **Database locales and collations** (round 19, agent 60): every database has its own
   locale, as pg_database has it (`types/collation/dblocale.rs` `DbLocale`: encoding,
   provider, datcollate, datctype, datlocale, daticurules, datcollversion), kept in the
@@ -321,6 +329,7 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   pa-Arab, `-u-kr` reordering), 440 of 14,400 case mappings differ (titlecasing around
   Thai / CJK word breaks), tailoring rules aren't applied, and sorting was about 27x
   slower (debug builds of both); versions and language tags matched.
+
 - **Isolation suite (`src/test/isolation`, 122 specs, 1,648 permutations): see
   `tests/isolation/STATUS.md`.** Harness: `tests/pg_isolation.rs` (`#[ignore]`d, a port of
   isolationtester driving both servers over the wire; `PGISOLATION_*` variables in its header).

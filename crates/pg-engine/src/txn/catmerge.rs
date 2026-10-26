@@ -13,9 +13,11 @@
 //! (one value both changed differently, a name both took) fails as a serialization failure,
 //! which is what the transaction got before.
 
-use crate::catalog::Catalog;
+use crate::catalog::{Catalog, persist};
 use crate::error::{Error, Result, code};
+use bytes::Bytes;
 use serde_json::{Map, Value};
+use std::collections::{BTreeSet, HashMap};
 
 fn conflict() -> Error {
     Error::new(
@@ -24,40 +26,84 @@ fn conflict() -> Error {
     )
 }
 
-/// `mine` (made from `base`) carried onto `cur` (also made from `base`).
+/// `mine` (made from `base`) carried onto `cur` (also made from `base`). The catalogs are
+/// compared record by record as a commit stores them (`persist::record_changes`, whose cost
+/// follows the objects changed, not the catalog's size): `cur` with the records only this
+/// transaction changed, those both changed merged; the header record's fields merged as
+/// values. (It serialized all three catalogs whole, which `pg_restore -j` over thousands of
+/// tables paid for every index and constraint: 20x a serial restore.)
 pub fn merge(base: &Catalog, mine: &Catalog, cur: &Catalog) -> Result<Catalog> {
-    let to = |c: &Catalog| serde_json::to_value(c).map_err(|e| crate::error::internal(e.to_string()));
-    let (b, m, c) = (to(base)?, to(mine)?, to(cur)?);
-    let (Value::Object(b), Value::Object(m), Value::Object(c)) = (b, m, c) else {
-        return Err(conflict());
-    };
-    let mut out = Map::new();
-    let keys: std::collections::BTreeSet<&String> = b.keys().chain(m.keys()).chain(c.keys()).collect();
+    let internal = |e: serde_json::Error| crate::error::internal(e.to_string());
+    let mut out = cur.clone();
+    // The header: scalars and lists (comments, ACLs, memberships, ...).
+    let (hb, hm, hc) = (
+        persist::header_fields(base)?,
+        persist::header_fields(mine)?,
+        persist::header_fields(cur)?,
+    );
+    let mut head = Map::new();
+    let keys: BTreeSet<&String> = hb.keys().chain(hm.keys()).chain(hc.keys()).collect();
     for k in keys {
-        let (bv, mv, cv) = (b.get(k), m.get(k), c.get(k));
+        let (bv, mv, cv) = (hb.get(k), hm.get(k), hc.get(k));
         let v = match k.as_str() {
-            // (Bumped by the caller.)
-            "version" => cv.cloned(),
+            // (Bumped by the caller; the format is `cur`'s.)
+            "version" | "catalog_format" => continue,
             // Counters: the larger.
             "next_oid" => Some(max_num(mv, cv)),
-            // pg_class's heap order: this transaction's new positions go after the current
-            // catalog's.
-            "class_order" | "class_tick" => continue,
+            // pg_class's heap order: below.
+            "class_tick" => continue,
             _ => merge_opt(bv, mv, cv)?,
         };
         if let Some(v) = v {
-            out.insert(k.clone(), v);
+            head.insert(k.clone(), v);
         }
     }
-    class_order(&b, &m, &c, &mut out);
-    let mut merged: Catalog =
-        serde_json::from_value(Value::Object(out)).map_err(|_| conflict())?;
-    merged.oids = mine.oids.clone();
-    // (Not serialized: as stored, `cur`'s.)
-    merged.catalog_format = cur.catalog_format;
-    merged.reindex();
-    unique_names(&merged)?;
-    Ok(merged)
+    persist::set_header(&mut out, &head)?;
+    // The records: this transaction's changes, merged with the current catalog's where they
+    // changed the same ones.
+    type Records = HashMap<(u8, u32), Option<Bytes>>;
+    let theirs: Records = persist::record_changes(base, cur)?
+        .into_iter()
+        .map(|(t, o, v)| ((t, o), v))
+        .collect();
+    let changes = persist::record_changes(base, mine)?;
+    let before: Records = if changes.iter().any(|(t, o, _)| theirs.contains_key(&(*t, *o))) {
+        persist::record_changes(mine, base)?
+            .into_iter()
+            .map(|(t, o, v)| ((t, o), v))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    let mut moved = Vec::new();
+    for (tag, oid, v) in changes {
+        if tag == persist::CLASS_ORDER_TAG {
+            moved.push((oid, v));
+            continue;
+        }
+        let v = match theirs.get(&(tag, oid)) {
+            None => v,
+            Some(c) if *c == v => continue,
+            Some(c) => {
+                let parse = |b: &Option<Bytes>| -> Result<Option<Value>> {
+                    b.as_ref()
+                        .map(|b| serde_json::from_slice(b).map_err(internal))
+                        .transpose()
+                };
+                let b = parse(before.get(&(tag, oid)).unwrap_or(&None))?;
+                merge_opt(b.as_ref(), parse(&v)?.as_ref(), parse(c)?.as_ref())?
+                    .map(|m| serde_json::to_vec(&m).map(Bytes::from).map_err(internal))
+                    .transpose()?
+            }
+        };
+        persist::apply_record(&mut out, tag, oid, v.as_deref()).map_err(|_| conflict())?;
+    }
+    class_order(mine, moved, &mut out);
+    out.oids = mine.oids.clone();
+    out.catalog_format = cur.catalog_format;
+    out.reindex();
+    unique_names(&out)?;
+    Ok(out)
 }
 
 fn max_num(a: Option<&Value>, b: Option<&Value>) -> Value {
@@ -100,7 +146,13 @@ fn merge_value(b: &Value, m: &Value, c: &Value) -> Result<Value> {
             let keys: std::collections::BTreeSet<&String> =
                 b.keys().chain(m.keys()).chain(c.keys()).collect();
             for k in keys {
-                if let Some(v) = merge_opt(b.get(k), m.get(k), c.get(k))? {
+                // (A table's index counter: both counted on; ids are oids now.)
+                let v = if k == "next_index_id" {
+                    Some(max_num(m.get(k), c.get(k)))
+                } else {
+                    merge_opt(b.get(k), m.get(k), c.get(k))?
+                };
+                if let Some(v) = v {
                     out.insert(k.clone(), v);
                 }
             }
@@ -121,27 +173,26 @@ fn merge_value(b: &Value, m: &Value, c: &Value) -> Result<Value> {
 }
 
 /// `class_order` / `class_tick`: the current catalog's, plus the relations whose position
-/// this transaction set (new rows, rows updated other than in place), after them.
-fn class_order(b: &Map<String, Value>, m: &Map<String, Value>, c: &Map<String, Value>, out: &mut Map<String, Value>) {
-    let obj = |v: Option<&Value>| v.and_then(Value::as_object).cloned().unwrap_or_default();
-    let (bo, mo, mut co) = (obj(b.get("class_order")), obj(m.get("class_order")), obj(c.get("class_order")));
-    let mut tick = c.get("class_tick").and_then(Value::as_u64).unwrap_or(0);
-    // Removed here (the relation dropped).
-    for k in bo.keys().filter(|k| !mo.contains_key(*k)) {
-        co.remove(k);
+/// this transaction set (new rows, rows updated other than in place), after them in the
+/// order it set them; those it removed (dropped relations) gone. `moved`: its class_order
+/// records that differ from the base's.
+fn class_order(mine: &Catalog, moved: Vec<(u32, Option<Bytes>)>, out: &mut Catalog) {
+    let mut tick = out.class_tick;
+    let mut set = Vec::new();
+    for (oid, v) in moved {
+        match v {
+            None => {
+                out.class_order.remove(&oid);
+            }
+            Some(_) => set.push((mine.class_order.get(&oid).copied().unwrap_or(0), oid)),
+        }
     }
-    let mut moved: Vec<(u64, &String)> = mo
-        .iter()
-        .filter(|(k, v)| bo.get(*k) != Some(*v))
-        .map(|(k, v)| (v.as_u64().unwrap_or(0), k))
-        .collect();
-    moved.sort();
-    for (_, k) in moved {
+    set.sort();
+    for (_, oid) in set {
         tick += 1;
-        co.insert(k.clone(), Value::from(tick));
+        out.class_order.insert(oid, tick);
     }
-    out.insert("class_order".into(), Value::Object(co));
-    out.insert("class_tick".into(), Value::from(tick));
+    out.class_tick = tick;
 }
 
 /// pg_class_relname_nsp_index / pg_type_typname_nsp_index: two transactions may not both

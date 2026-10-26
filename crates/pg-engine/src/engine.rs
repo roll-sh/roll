@@ -6,7 +6,7 @@ use crate::catalog::Catalog;
 use crate::catalog::shared::{OidGen, SharedCatalog};
 use crate::error::{Error, Result, code, internal};
 use crate::session::Session;
-use crate::session::state::{Activity, Cluster, SessionState};
+use crate::session::state::{Activity, Cluster, DATCONNLIMIT_UNLIMITED, DbOptions, SessionState};
 use crate::storage::cache::BlockCache;
 use crate::storage::{Store, StoreOptions};
 use crate::txn::{Database, Isolation, Txn};
@@ -92,6 +92,13 @@ struct DbEntry {
     /// Its encoding and locale (None: a registry from before they were kept, libc C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     locale: Option<DbLocale>,
+    /// datistemplate (None: a registry from before it was kept, where template0 and
+    /// template1 are the templates; `Engine::open` fills it in).
+    #[serde(default)]
+    is_template: Option<bool>,
+    /// datconnlimit: DATCONNLIMIT_UNLIMITED, a limit, or DATCONNLIMIT_INVALID_DB.
+    #[serde(default = "unlimited")]
+    conn_limit: i32,
 }
 
 impl DbEntry {
@@ -102,6 +109,26 @@ impl DbEntry {
 
 fn yes() -> bool {
     true
+}
+
+fn unlimited() -> i32 {
+    DATCONNLIMIT_UNLIMITED
+}
+
+impl DbEntry {
+    fn options(&self) -> DbOptions {
+        DbOptions {
+            is_template: self.is_template.unwrap_or(false),
+            allow_connections: self.allow_connections,
+            conn_limit: self.conn_limit,
+        }
+    }
+
+    fn set_options(&mut self, o: DbOptions) {
+        self.is_template = Some(o.is_template);
+        self.allow_connections = o.allow_connections;
+        self.conn_limit = o.conn_limit;
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -216,7 +243,7 @@ impl Engine {
         };
         std::fs::create_dir_all(opts.data_dir.join("base"))?;
         let path = opts.data_dir.join(REGISTRY_FILE);
-        let registry = match std::fs::read(&path) {
+        let mut registry: Registry = match std::fs::read(&path) {
             Ok(b) => serde_json::from_slice(&b)
                 .map_err(|e| internal(format!("bad {REGISTRY_FILE}: {e}")))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -242,6 +269,8 @@ impl Engine {
                         collversion: init.db.collversion.clone().filter(|_| oid != 4),
                         ..init.db.clone()
                     }),
+                    is_template: Some(name != "postgres"),
+                    conn_limit: DATCONNLIMIT_UNLIMITED,
                 };
                 let r = Registry {
                     next_oid: 16384,
@@ -260,6 +289,10 @@ impl Engine {
             }
             Err(e) => return Err(e.into()),
         };
+        // A registry from before datistemplate was kept: initdb's templates are.
+        for d in registry.databases.iter_mut().filter(|d| d.is_template.is_none()) {
+            d.is_template = Some(d.name == "template0" || d.name == "template1");
+        }
         let cache = BlockCache::new(opts.cache_bytes);
         let statements = opts
             .shared_preload_libraries
@@ -560,7 +593,7 @@ impl Engine {
     pub fn auth_catalog(&self, dbname: &str) -> Result<Arc<Catalog>> {
         let entry = self
             .entry(dbname)
-            .filter(|e| e.allow_connections)
+            .filter(|e| e.allow_connections && !e.options().is_invalid())
             .or_else(|| self.entry("postgres"))
             .ok_or_else(|| internal("no postgres database"))?;
         loop {
@@ -625,6 +658,15 @@ impl Engine {
             )
             .fatal()
         })?;
+        // InitPostgres, then CheckMyDatabase.
+        if entry.options().is_invalid() {
+            return Err(Error::new(
+                code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                format!("cannot connect to invalid database \"{dbname}\""),
+            )
+            .hint("Use DROP DATABASE to drop invalid databases.")
+            .fatal());
+        }
         if !entry.allow_connections {
             return Err(Error::new(
                 code::OBJECT_NOT_IN_PREREQUISITE_STATE,
@@ -650,13 +692,19 @@ impl Engine {
             ready?;
             break Session::new(SessionState::new(db, self.arc(), user, pid));
         };
-        let others = self
-            .backends
-            .lock()
-            .iter()
-            .filter(|(p, b)| **p != pid && b.activity.user == user)
-            .count();
-        session.login(dbname, others)?;
+        let (others, db_others) = {
+            let b = self.backends.lock();
+            let others = b
+                .iter()
+                .filter(|(p, b)| **p != pid && b.activity.user == user)
+                .count();
+            let db_others = b
+                .iter()
+                .filter(|(p, b)| **p != pid && b.database == entry.oid)
+                .count();
+            (others, db_others)
+        };
+        session.login(dbname, others, Some((entry.conn_limit, db_others)))?;
         // CheckMyDatabase: a collation version other than the provider's.
         let mut session = session;
         if let Some(w) = entry.locale().version_warning(dbname) {
@@ -1428,6 +1476,23 @@ impl Cluster for Engine {
         self.save(&r)
     }
 
+    fn database_options(&self, oid: u32) -> DbOptions {
+        self.registry
+            .lock()
+            .databases
+            .iter()
+            .find(|d| d.oid == oid)
+            .map_or_else(DbOptions::default, DbEntry::options)
+    }
+
+    fn set_database_options(&self, name: &str, options: DbOptions) -> Result<()> {
+        let mut r = self.registry.lock();
+        if let Some(d) = r.databases.iter_mut().find(|d| d.name == name) {
+            d.set_options(options);
+        }
+        self.save(&r)
+    }
+
     fn databases(&self) -> Vec<(u32, String, u32)> {
         let r = self.registry.lock();
         let owner = |name: &str| {
@@ -1482,6 +1547,7 @@ impl Cluster for Engine {
         owner: &str,
         template: Option<&str>,
         locale: &DbLocale,
+        options: DbOptions,
     ) -> Result<()> {
         if self.entry(name).is_some() {
             return Err(Error::new(
@@ -1520,13 +1586,17 @@ impl Cluster for Engine {
             db.store.close()?;
         }
         let mut r = self.registry.lock();
-        r.databases.push(DbEntry {
+        let mut entry = DbEntry {
             name: name.into(),
             oid,
             owner: owner.into(),
             allow_connections: true,
             locale: Some(locale.clone()),
-        });
+            is_template: None,
+            conn_limit: DATCONNLIMIT_UNLIMITED,
+        };
+        entry.set_options(options);
+        r.databases.push(entry);
         self.save(&r)
     }
 
@@ -1556,12 +1626,6 @@ impl Cluster for Engine {
         force: bool,
         current: &str,
     ) -> Result<bool> {
-        if name == current {
-            return Err(Error::new(
-                code::OBJECT_IN_USE,
-                "cannot drop the currently open database",
-            ));
-        }
         let Some(entry) = self.entry(name) else {
             if if_exists {
                 return Ok(false);
@@ -1571,10 +1635,17 @@ impl Cluster for Engine {
                 format!("database \"{name}\" does not exist"),
             ));
         };
-        if entry.name == "template0" || entry.name == "template1" {
+        // (dropdb: a template is dropped only once it is no longer marked one.)
+        if entry.options().is_template {
             return Err(Error::new(
-                code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                code::WRONG_OBJECT_TYPE,
                 "cannot drop a template database",
+            ));
+        }
+        if name == current {
+            return Err(Error::new(
+                code::OBJECT_IN_USE,
+                "cannot drop the currently open database",
             ));
         }
         let users = self.sessions_on(entry.oid, None);

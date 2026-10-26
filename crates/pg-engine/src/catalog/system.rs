@@ -696,13 +696,53 @@ pub fn partition_bound_text(
     Some(super::partition::bound_text(bound, &types, fmt))
 }
 
-/// The default operator class of `method` for a column of type `ty` (0 if none).
+/// The default operator class of `method` for a column of type `ty` (0 if none)
+/// (GetDefaultOpClass: an exact match, else the one default class whose input type the type
+/// is binary-coercible to, a preferred type's breaking a tie: cidr's is inet's).
 pub fn default_opclass(method: u32, ty: &DataType) -> u32 {
     let input = opclass_input(ty);
-    OPCLASSES
-        .iter()
-        .find(|(_, m, _, _, i, _, d)| *d && *m == method && *i == input)
-        .map_or(0, |c| c.0)
+    let defaults = || {
+        OPCLASSES
+            .iter()
+            .filter(move |(_, m, _, _, _, _, d)| *d && *m == method)
+    };
+    if let Some(c) = defaults().find(|c| c.4 == input) {
+        return c.0;
+    }
+    let (mut preferred, mut compatible) = (Vec::new(), Vec::new());
+    for c in defaults().filter(|c| binary_implicit_cast(input, c.4)) {
+        if DataType::from_oid(c.4).is_some_and(|t| t.is_preferred()) {
+            preferred.push(c.0);
+        } else {
+            compatible.push(c.0);
+        }
+    }
+    match (preferred.as_slice(), compatible.as_slice()) {
+        ([one], _) | ([], [one]) => *one,
+        _ => 0,
+    }
+}
+
+/// Whether pg_cast has a binary-coercible implicit cast from `source` to `target`
+/// (IsBinaryCoercible over the built-in casts).
+fn binary_implicit_cast(source: u32, target: u32) -> bool {
+    static CASTS: OnceLock<std::collections::HashSet<(u32, u32)>> = OnceLock::new();
+    CASTS
+        .get_or_init(|| {
+            super::static_rows::rows(SysTable::PgCast)
+                .iter()
+                .filter(|r| {
+                    matches!(r[4], Value::Char(b'i')) && matches!(r[5], Value::Char(b'b'))
+                })
+                .map(|r| {
+                    (
+                        super::static_rows::oid_at(r, 1),
+                        super::static_rows::oid_at(r, 2),
+                    )
+                })
+                .collect()
+        })
+        .contains(&(source, target))
 }
 
 /// Whether an opclass taking `intype` can index a key of type `ty` (binary-coercibly).
@@ -3546,6 +3586,9 @@ fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u32>) -> Resu
                     .cloned()
                     .or_else(|| acl::builtin_proc_acl(oid));
                 row[29] = acl_value(cat, stored.as_ref());
+                if let Some(owner) = cat.builtin_proc_owners.get(&oid) {
+                    row[3] = o(*owner);
+                }
                 out.push(row);
             }
             // The constructors of user range types and their multiranges.
@@ -3726,16 +3769,17 @@ fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u32>) -> Resu
                     && cat.event_triggers.values().any(|e| e.event == "login");
                 let l = ctx.sess.cluster.database_locale(&name).unwrap_or_default();
                 let topt = |v: &Option<String>| v.as_deref().map_or(N, nm);
+                let opts = ctx.sess.cluster.database_options(oid);
                 out.push(vec![
                     o(oid),
                     nm(name),
                     o(owner),
                     i4(l.encoding as i64),
                     c(l.provider),
-                    b(false),
-                    b(true),
+                    b(opts.is_template),
+                    b(opts.allow_connections),
                     b(login),
-                    i4(-1),
+                    i4(opts.conn_limit as i64),
                     Value::Oid(0),
                     Value::Oid(0),
                     o(1663),

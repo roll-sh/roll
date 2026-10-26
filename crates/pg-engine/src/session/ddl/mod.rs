@@ -15,6 +15,7 @@ pub(crate) use catalog_dml::{
     might_merge_pg_class, pg_depend_dml,
 };
 mod collation;
+pub(crate) mod database;
 mod analyze;
 mod domain;
 mod basetype;
@@ -412,7 +413,7 @@ impl<'c, 'a> Ddl<'c, 'a> {
             N::ReassignOwnedStmt(s) => self.reassign_owned(s)?,
             N::DropOwnedStmt(s) => self.drop_owned(s)?,
             N::AlterDatabaseSetStmt(s) => self.alter_database_set(s)?,
-            N::AlterDatabaseStmt(_) => "ALTER DATABASE".into(),
+            N::AlterDatabaseStmt(s) => self.alter_database(s)?,
             N::AlterRoleSetStmt(s) => self.alter_role_set(s)?,
             N::VacuumStmt(s) => self.vacuum(s)?,
             N::ClusterStmt(s) => self.cluster(s)?,

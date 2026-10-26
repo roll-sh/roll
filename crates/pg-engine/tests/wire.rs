@@ -530,6 +530,29 @@ fn concurrent_ddl() {
             .await
             .unwrap();
         both("CREATE INDEX t1_y ON t1 (y)", "CREATE INDEX t1_xy ON t1 (x, y)").await.unwrap();
+        // Over rows (pg_restore -j's indexes): both set the table's pg_class statistics, an
+        // in-place update in Postgres, which no concurrent index build conflicts with.
+        a.batch_execute("INSERT INTO t1 SELECT g, g FROM generate_series(1, 2000) g").await.unwrap();
+        both(
+            "CREATE INDEX t1_h ON t1 USING hash (x) WITH (fillfactor = 60)",
+            "CREATE UNIQUE INDEX t1_e ON t1 ((x + y))",
+        )
+        .await
+        .unwrap();
+        // Indexes made at once have storage of their own (their ids were a per-table
+        // counter both took the same value of).
+        a.batch_execute("SET enable_seqscan = off; SET enable_bitmapscan = off").await.unwrap();
+        for q in [
+            "SELECT count(*) FROM t1 WHERE y = 7",
+            "SELECT count(*) FROM t1 WHERE x = 7 AND y = 7",
+            "SELECT count(*) FROM t1 WHERE x + y = 14",
+            "SELECT count(*) FROM t1 WHERE x = 7",
+        ] {
+            let n: i64 = a.query_one(q, &[]).await.unwrap().get(0);
+            assert_eq!(n, 1, "{q}");
+        }
+        a.batch_execute("RESET enable_seqscan; RESET enable_bitmapscan").await.unwrap();
+        a.batch_execute("DROP INDEX t1_h, t1_e").await.unwrap();
         both(
             "ALTER TABLE ONLY p ADD CONSTRAINT p_key UNIQUE (k, v)",
             "ALTER TABLE ONLY p1 ADD CONSTRAINT p1_key UNIQUE (k, v)",
@@ -659,6 +682,116 @@ fn database_settings() {
             .unwrap()
             .get(0);
         assert_eq!(n, 0);
+    });
+    s.engine.shutdown();
+}
+
+/// A database's own options (pg_database's datistemplate, datallowconn, datconnlimit): kept,
+/// shown, put back by a rollback, and enforced as PostgreSQL 18 does (messages and codes
+/// recorded from it): refused connections, connection limits, template copies and drops,
+/// invalid databases (datconnlimit -2).
+#[test]
+fn database_options() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let opts = |name: &'static str| {
+            let a = &a;
+            async move {
+                let r = a
+                    .query_one(
+                        "SELECT datistemplate, datallowconn, datconnlimit FROM pg_database WHERE datname = $1",
+                        &[&name],
+                    )
+                    .await
+                    .unwrap();
+                (r.get::<_, bool>(0), r.get::<_, bool>(1), r.get::<_, i32>(2))
+            }
+        };
+        let fails = |sql: &'static str, code: &'static str, msg: &'static str| {
+            let a = &a;
+            async move {
+                let e = a.batch_execute(sql).await.unwrap_err();
+                let d = e.as_db_error().expect("db error");
+                assert_eq!((d.code().code(), d.message()), (code, msg), "{sql}");
+            }
+        };
+        assert_eq!(opts("template0").await, (true, false, -1));
+        assert_eq!(opts("template1").await, (true, true, -1));
+        assert_eq!(opts("postgres").await, (false, true, -1));
+        a.batch_execute(
+            "CREATE ROLE dbo LOGIN PASSWORD 'pw'; CREATE ROLE other LOGIN PASSWORD 'pw' CREATEDB",
+        )
+        .await
+        .unwrap();
+        a.batch_execute(
+            "CREATE DATABASE optdb OWNER dbo CONNECTION LIMIT 1 IS_TEMPLATE true ALLOW_CONNECTIONS true",
+        )
+        .await
+        .unwrap();
+        assert_eq!(opts("optdb").await, (true, true, 1));
+        fails("CREATE DATABASE bad CONNECTION LIMIT -3", "22023", "invalid connection limit: -3").await;
+        fails("CREATE DATABASE bad IS_TEMPLATE maybe", "42601", "is_template requires a Boolean value").await;
+        fails("CREATE DATABASE bad IS_TEMPLATE 2", "42601", "is_template requires a Boolean value").await;
+        fails("CREATE DATABASE bad CONNECTION LIMIT 'x'", "42601", "connection_limit requires an integer value").await;
+        fails("CREATE DATABASE bad CONNECTION LIMIT 1 CONNECTION LIMIT 2", "42601", "conflicting or redundant options").await;
+        fails("ALTER DATABASE optdb CONNECTION LIMIT -3", "22023", "invalid connection limit: -3").await;
+        fails("ALTER DATABASE optdb WITH foo 1", "42601", "option \"foo\" not recognized").await;
+        fails("ALTER DATABASE nope CONNECTION LIMIT 3", "3D000", "database \"nope\" does not exist").await;
+        fails("ALTER DATABASE postgres ALLOW_CONNECTIONS false", "22023", "cannot disallow connections for current database").await;
+        fails("DROP DATABASE optdb", "42809", "cannot drop a template database").await;
+
+        // A connection limit counts the database's sessions (a superuser's aren't limited).
+        let mut dbo = s.config("optdb", "pw");
+        dbo.user("dbo");
+        let (c1, conn) = dbo.connect(NoTls).await.unwrap();
+        tokio::spawn(conn);
+        let e = dbo.connect(NoTls).await.err().unwrap();
+        assert_eq!(e.as_db_error().map(|d| (d.code().code(), d.message())), Some(("53300", "too many connections for database \"optdb\"")));
+        drop(s.connect("optdb").await);
+        drop(c1);
+        // (Their sessions end on their own threads; a template copy needs them gone.)
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Rolled back, the options are back.
+        a.batch_execute("ALTER DATABASE optdb CONNECTION LIMIT 5 IS_TEMPLATE false").await.unwrap();
+        assert_eq!(opts("optdb").await, (false, true, 5));
+        a.batch_execute("BEGIN; ALTER DATABASE optdb ALLOW_CONNECTIONS false CONNECTION LIMIT DEFAULT").await.unwrap();
+        assert_eq!(opts("optdb").await, (false, false, -1));
+        a.batch_execute("ROLLBACK").await.unwrap();
+        assert_eq!(opts("optdb").await, (false, true, 5));
+        a.batch_execute("ALTER DATABASE optdb ALLOW_CONNECTIONS false").await.unwrap();
+        let e = s.config("optdb", "secret").connect(NoTls).await.err().unwrap();
+        assert_eq!(e.as_db_error().map(|d| (d.code().code(), d.message())), Some(("55000", "database \"optdb\" is not currently accepting connections")));
+        a.batch_execute("ALTER DATABASE optdb ALLOW_CONNECTIONS true").await.unwrap();
+
+        // Only a template, or one's own database, may be copied.
+        let mut oc = s.config("postgres", "pw");
+        oc.user("other");
+        let (o, conn) = oc.connect(NoTls).await.unwrap();
+        tokio::spawn(conn);
+        let e = o.batch_execute("CREATE DATABASE copy1 TEMPLATE optdb").await.unwrap_err();
+        assert_eq!(e.as_db_error().map(|d| (d.code().code(), d.message())), Some(("42501", "permission denied to copy database \"optdb\"")));
+        let e = o.batch_execute("ALTER DATABASE optdb CONNECTION LIMIT 3").await.unwrap_err();
+        assert_eq!(e.as_db_error().map(|d| (d.code().code(), d.message())), Some(("42501", "must be owner of database optdb")));
+        a.batch_execute("ALTER DATABASE optdb IS_TEMPLATE true").await.unwrap();
+        o.batch_execute("CREATE DATABASE copy1 TEMPLATE optdb").await.unwrap();
+        a.batch_execute("DROP DATABASE copy1").await.unwrap();
+
+        // pg_dump --clean's way to drop a template; an invalid database (datconnlimit -2)
+        // takes no connections, can't be a template or be altered, only dropped.
+        a.batch_execute("UPDATE pg_database SET datistemplate = false WHERE datname = 'optdb'").await.unwrap();
+        a.batch_execute("UPDATE pg_database SET datconnlimit = -2 WHERE datname = 'optdb'").await.unwrap();
+        assert_eq!(opts("optdb").await, (false, true, -2));
+        fails("CREATE DATABASE copy2 TEMPLATE optdb", "55000", "cannot use invalid database \"optdb\" as template").await;
+        let e = s.config("optdb", "secret").connect(NoTls).await.err().unwrap();
+        let d = e.as_db_error().unwrap();
+        assert_eq!((d.code().code(), d.message(), d.hint()), ("55000", "cannot connect to invalid database \"optdb\"", Some("Use DROP DATABASE to drop invalid databases.")));
+        let e = a.batch_execute("ALTER DATABASE optdb CONNECTION LIMIT 3").await.unwrap_err();
+        assert_eq!(e.as_db_error().map(|d| (d.severity(), d.message())), Some(("FATAL", "cannot alter invalid database \"optdb\"")));
+        let a = s.connect("postgres").await;
+        a.batch_execute("DROP DATABASE optdb").await.unwrap();
+        a.batch_execute("DROP ROLE dbo; DROP ROLE other").await.unwrap();
     });
     s.engine.shutdown();
 }

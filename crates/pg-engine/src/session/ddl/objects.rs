@@ -446,7 +446,7 @@ impl Ddl<'_, '_> {
             oid,
             name,
             table: t.oid,
-            id: t.next_index_id,
+            id: t.new_index_id(oid),
             columns: parts.columns,
             include: parts.include,
             unique: s.unique,
@@ -465,7 +465,6 @@ impl Ddl<'_, '_> {
             self.cat.rel_am.insert(oid, a.oid);
         }
         self.cat.set_rel_tablespace(oid, spc);
-        t.next_index_id += 1;
         t.indexes.push(oid);
         self.cat.put_storage(t.clone());
         self.cat.put_index(ix.clone());
@@ -3179,6 +3178,9 @@ impl Ddl<'_, '_> {
                 self.ctx.notice(with_pos(n, tn.location));
             }
             self.pct_type_notice(tn, &ty);
+            // (interpret_function_parameter_list: a parameter's type modifier is dropped;
+            // `character` is bpchar, not character(1).)
+            let ty = ty.without_typmod();
             use pb::FunctionParameterMode as M;
             let name = if fp.name.is_empty() {
                 None
@@ -3383,7 +3385,8 @@ impl Ddl<'_, '_> {
                 };
                 self.pct_type_notice(tn, &ty);
                 ret_domain = domain;
-                (ty, tn.setof)
+                // (compute_return_type: the result's type modifier is dropped too.)
+                (ty.without_typmod(), tn.setof)
             }
             // A procedure's output parameters come back as one record.
             None if s.is_procedure => (
@@ -4140,7 +4143,7 @@ impl Ddl<'_, '_> {
         let mut types = Vec::new();
         for a in &owa.objargs {
             if let Some(NodeEnum::TypeName(tn)) = inner(a) {
-                types.push(resolve_type_name(&self.cat, self.search_path(), tn)?);
+                types.push(crate::sql::binder::resolve_type_name_shell(&self.cat, self.search_path(), tn)?);
             }
         }
         // (A signature's types without their typmods: `character` names bpchar.)
@@ -4165,7 +4168,7 @@ impl Ddl<'_, '_> {
                 moded |= mode != M::FuncParamDefault;
                 out |= mode == M::FuncParamOut;
                 if let Some(tn) = &fp.arg_type {
-                    let t = resolve_type_name(&self.cat, self.search_path(), tn)?.0;
+                    let t = crate::sql::binder::resolve_type_name_shell(&self.cat, self.search_path(), tn)?.0;
                     full.push((t, mode == M::FuncParamOut));
                 }
             }
@@ -4312,7 +4315,7 @@ impl Ddl<'_, '_> {
             let mut types = Vec::new();
             for a in &owa.objargs {
                 if let Some(NodeEnum::TypeName(tn)) = inner(a) {
-                    types.push(resolve_type_name(&self.cat, self.search_path(), tn)?.0);
+                    types.push(crate::sql::binder::resolve_type_name_shell(&self.cat, self.search_path(), tn)?.0);
                 }
             }
             found = self

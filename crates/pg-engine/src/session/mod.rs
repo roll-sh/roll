@@ -232,9 +232,10 @@ pub struct Session {
 }
 
 impl Session {
-    /// Login checks (CONNECT, connection limit, VALID UNTIL) and the role's/database's default
-    /// settings. `others` is how many other sessions the role has open.
-    pub fn login(&self, dbname: &str, others: usize) -> Result<()> {
+    /// Login checks (CONNECT, connection limits, VALID UNTIL) and the role's/database's default
+    /// settings. `others` is how many other sessions the role has open; `db_limit` the
+    /// database's datconnlimit and how many other sessions it has.
+    pub fn login(&self, dbname: &str, others: usize, db_limit: Option<(i32, usize)>) -> Result<()> {
         // Sessions that just ended may still be dropping their temporary objects.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while self.state.db.temp_cleanups.load(Ordering::SeqCst) > 0
@@ -270,6 +271,17 @@ impl Session {
                     .detail("User does not have CONNECT privilege.")
                     .fatal());
                 }
+            }
+            // CheckMyDatabase: CountDBConnections (this one included) > datconnlimit.
+            if let Some((limit, n)) = db_limit
+                && limit >= 0
+                && n >= limit as usize
+            {
+                return Err(Error::new(
+                    code::TOO_MANY_CONNECTIONS,
+                    format!("too many connections for database \"{dbname}\""),
+                )
+                .fatal());
             }
             if role.conn_limit >= 0 && others >= role.conn_limit as usize {
                 return Err(Error::new(
@@ -509,6 +521,9 @@ impl Session {
                 stats = std::mem::take(&mut t.pgstat);
                 for (name, owner) in std::mem::take(&mut t.db_owner_undo).into_iter().rev() {
                     let _ = self.state.cluster.set_database_owner(&name, &owner);
+                }
+                for (name, o) in std::mem::take(&mut t.db_options_undo).into_iter().rev() {
+                    let _ = self.state.cluster.set_database_options(&name, o);
                 }
                 t.rollback();
                 committed_notify(&self.state, false, &[]);
@@ -2573,6 +2588,33 @@ impl Session {
             NodeEnum::CreatedbStmt(c) => {
                 let cat = self.state.db.catalog();
                 let me = self.state.current_role(&cat);
+                let mut owner = cat
+                    .roles
+                    .get(&me)
+                    .map(|r| r.name.clone())
+                    .unwrap_or_else(|| self.state.user.clone());
+                let mut template = None;
+                let mut opts = createdb::Options::default();
+                let mut db_opts = crate::session::ddl::database::DbOptionElems::default();
+                for o in &c.options {
+                    if let Some(NodeEnum::DefElem(d)) = inner(o) {
+                        opts.read(d)?;
+                        if db_opts.take(d)? {
+                            continue;
+                        }
+                        match d.defname.as_str() {
+                            "owner" => {
+                                owner = crate::sql::binder::ast::def_arg_str(d).unwrap_or(owner)
+                            }
+                            "template" => template = crate::sql::binder::ast::def_arg_str(d),
+                            _ => {}
+                        }
+                    }
+                }
+                let options = crate::session::ddl::database::apply_values(
+                    crate::session::state::DbOptions::default(),
+                    db_opts.values()?,
+                );
                 if !cat
                     .roles
                     .get(&me)
@@ -2583,25 +2625,6 @@ impl Session {
                         "permission denied to create database",
                     ));
                 }
-                let mut owner = cat
-                    .roles
-                    .get(&me)
-                    .map(|r| r.name.clone())
-                    .unwrap_or_else(|| self.state.user.clone());
-                let mut template = None;
-                let mut opts = createdb::Options::default();
-                for o in &c.options {
-                    if let Some(NodeEnum::DefElem(d)) = inner(o) {
-                        opts.read(d)?;
-                        match d.defname.as_str() {
-                            "owner" => {
-                                owner = crate::sql::binder::ast::def_arg_str(d).unwrap_or(owner)
-                            }
-                            "template" => template = crate::sql::binder::ast::def_arg_str(d),
-                            _ => {}
-                        }
-                    }
-                }
                 // The template's locale is the default (createdb's get_db_info).
                 let tname = template.as_deref().unwrap_or("template1");
                 let src = cluster.database_locale(tname).ok_or_else(|| {
@@ -2610,10 +2633,38 @@ impl Session {
                         format!("template database \"{tname}\" does not exist"),
                     )
                 })?;
+                // It must be valid, and one not marked datistemplate may be copied only by
+                // its owner.
+                if let Some((src_oid, _, src_owner)) =
+                    cluster.databases().into_iter().find(|d| d.1 == tname)
+                {
+                    let src_options = cluster.database_options(src_oid);
+                    if src_options.is_invalid() {
+                        return Err(Error::new(
+                            code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                            format!("cannot use invalid database \"{tname}\" as template"),
+                        )
+                        .hint("Use DROP DATABASE to drop invalid databases."));
+                    }
+                    if !src_options.is_template
+                        && !cat.has_privs_of_role(me, src_owner, self.state.db_owner(&cat))
+                    {
+                        return Err(Error::new(
+                            code::INSUFFICIENT_PRIVILEGE,
+                            format!("permission denied to copy database \"{tname}\""),
+                        ));
+                    }
+                }
                 opts.check_strategy()?;
                 let superuser = cat.roles.get(&me).is_some_and(|r| r.superuser);
                 let locale = self.createdb_locale(&opts, tname, &src, superuser)?;
-                cluster.create_database(&c.dbname, &owner, template.as_deref(), &locale)?;
+                cluster.create_database(
+                    &c.dbname,
+                    &owner,
+                    template.as_deref(),
+                    &locale,
+                    options,
+                )?;
                 Ok(QueryResult::command("CREATE DATABASE"))
             }
             NodeEnum::DropdbStmt(d) => {
@@ -2856,6 +2907,9 @@ pub(crate) fn end_txn_midway(ctx: &ExecCtx, commit: bool, chain: bool) -> Result
     } else {
         for (name, owner) in std::mem::take(&mut old.db_owner_undo).into_iter().rev() {
             let _ = ctx.sess.cluster.set_database_owner(&name, &owner);
+        }
+        for (name, o) in std::mem::take(&mut old.db_options_undo).into_iter().rev() {
+            let _ = ctx.sess.cluster.set_database_options(&name, o);
         }
         old.rollback();
         committed_notify(ctx.sess, false, &[]);

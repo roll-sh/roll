@@ -19,13 +19,15 @@ pub trait Cluster: Send + Sync {
     fn cancel_backend(&self, pid: i32) -> bool;
     fn terminate_backend(&self, pid: i32) -> bool;
     /// Create database `name` from `template` (None: template1) with `locale` (what
-    /// CREATE DATABASE settled from its options and the template's).
+    /// CREATE DATABASE settled from its options and the template's) and `options`
+    /// (IS_TEMPLATE, ALLOW_CONNECTIONS, CONNECTION LIMIT).
     fn create_database(
         &self,
         name: &str,
         owner: &str,
         template: Option<&str>,
         locale: &DbLocale,
+        options: DbOptions,
     ) -> Result<()>;
     /// A database's encoding and locale (its pg_database row's); None: no such database.
     fn database_locale(&self, _name: &str) -> Option<DbLocale> {
@@ -57,6 +59,13 @@ pub trait Cluster: Send + Sync {
     fn set_database_owner(&self, _name: &str, _owner: &str) -> Result<()> {
         Err(crate::error::unsupported("ALTER DATABASE OWNER"))
     }
+    /// pg_database's datistemplate / datallowconn / datconnlimit of database `oid`.
+    fn database_options(&self, _oid: u32) -> DbOptions {
+        DbOptions::default()
+    }
+    fn set_database_options(&self, _name: &str, _options: DbOptions) -> Result<()> {
+        Err(crate::error::unsupported("ALTER DATABASE"))
+    }
     /// Commit `txn`; the engine also takes changes to the cluster-wide catalogs (roles,
     /// memberships, …) to every other database.
     fn commit(&self, txn: crate::txn::Txn) -> Result<u64> {
@@ -86,6 +95,37 @@ pub trait Cluster: Send + Sync {
     /// connections, as libpq's is the operating system user the server runs as).
     fn bootstrap_superuser(&self) -> String {
         "postgres".into()
+    }
+}
+
+/// A database's own options (pg_database's datistemplate, datallowconn, datconnlimit).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DbOptions {
+    pub is_template: bool,
+    pub allow_connections: bool,
+    /// DATCONNLIMIT_UNLIMITED, a limit, or DATCONNLIMIT_INVALID_DB.
+    pub conn_limit: i32,
+}
+
+/// datconnlimit's "no limit".
+pub const DATCONNLIMIT_UNLIMITED: i32 = -1;
+/// datconnlimit of an invalid database (one a DROP DATABASE didn't finish, or a superuser
+/// marked so): it takes no connections and is good only for DROP DATABASE.
+pub const DATCONNLIMIT_INVALID_DB: i32 = -2;
+
+impl Default for DbOptions {
+    fn default() -> DbOptions {
+        DbOptions {
+            is_template: false,
+            allow_connections: true,
+            conn_limit: DATCONNLIMIT_UNLIMITED,
+        }
+    }
+}
+
+impl DbOptions {
+    pub fn is_invalid(&self) -> bool {
+        self.conn_limit == DATCONNLIMIT_INVALID_DB
     }
 }
 
@@ -127,7 +167,14 @@ impl Cluster for SingleCluster {
     fn terminate_backend(&self, _: i32) -> bool {
         false
     }
-    fn create_database(&self, _: &str, _: &str, _: Option<&str>, _: &DbLocale) -> Result<()> {
+    fn create_database(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: &DbLocale,
+        _: DbOptions,
+    ) -> Result<()> {
         Err(crate::error::unsupported("CREATE DATABASE"))
     }
     fn drop_database(&self, _: &str, _: bool, _: bool, _: &str) -> Result<bool> {

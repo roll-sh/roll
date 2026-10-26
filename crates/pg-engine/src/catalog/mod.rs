@@ -647,6 +647,16 @@ impl Table {
         given.clone().unwrap_or_else(|| toast_name(self.oid, index))
     }
 
+    /// The storage id (key prefix) of new index `oid` of this table: its oid, which no other
+    /// transaction's index can have. (Ids were `next_index_id`, a per-table counter: two
+    /// transactions making indexes of one table at once, as `pg_restore -j` does, took the
+    /// same id, and the merged catalog had both indexes' entries under one prefix. The
+    /// counter still counts, for the catalogs that have it.)
+    pub fn new_index_id(&mut self, oid: u32) -> u32 {
+        self.next_index_id += 1;
+        oid
+    }
+
     /// The row type's array type (0: no row type yet).
     pub fn array_type(&self) -> u32 {
         array_of(self.rowtype, self.rowarray)
@@ -1921,6 +1931,10 @@ pub struct Catalog {
     /// REINDEX, ...), where it no longer equals the oid.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub filenodes: BTreeMap<u32, u32>,
+    /// pg_proc.proowner of built-in routines given another owner (ALTER FUNCTION ... OWNER
+    /// TO); the others are the bootstrap superuser's.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub builtin_proc_owners: BTreeMap<u32, u32>,
     /// Tables whose triggers were all dropped: pg_class.relhastriggers stays set until
     /// VACUUM clears it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
@@ -2179,6 +2193,29 @@ impl Catalog {
                 },
             ]),
         );
+        // initdb: the templates take connections but no CREATE / TEMPORARY from PUBLIC
+        // (template1 = 1, template0 = 4: `=c/postgres`, `postgres=CTc/postgres`).
+        for db in [1, 4] {
+            c.set_acl(
+                acl::ObjKind::Database,
+                db,
+                0,
+                Some(vec![
+                    acl::AclItem {
+                        grantee: 0,
+                        grantor: BOOTSTRAP_SUPERUSER_OID,
+                        privs: acl::CONNECT,
+                        goptions: 0,
+                    },
+                    acl::AclItem {
+                        grantee: BOOTSTRAP_SUPERUSER_OID,
+                        grantor: BOOTSTRAP_SUPERUSER_OID,
+                        privs: acl::CREATE | acl::TEMPORARY | acl::CONNECT,
+                        goptions: 0,
+                    },
+                ]),
+            );
+        }
         c.reindex();
         c
     }

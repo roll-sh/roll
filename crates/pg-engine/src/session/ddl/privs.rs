@@ -1838,7 +1838,7 @@ impl Ddl<'_, '_> {
                                 kind: ObjKind::Function,
                                 oid,
                                 name,
-                                owner: BOOTSTRAP_SUPERUSER_OID,
+                                owner: self.cat.builtin_proc_owners.get(&oid).copied().unwrap_or(BOOTSTRAP_SUPERUSER_OID),
                                 relkind: ' ',
                                 what: "function",
                             });
@@ -2072,8 +2072,10 @@ impl Ddl<'_, '_> {
         }
     }
 
+    /// The type a GRANT or an ALTER TYPE ... OWNER names (LookupTypeName: a shell type too).
     fn grant_type_target(&self, tn: &pb::TypeName, domain: bool) -> Result<Target> {
-        let (ty, dom) = resolve_type_name(&self.cat, self.search_path(), tn)?;
+        let (ty, dom) =
+            crate::sql::binder::resolve_type_name_shell(&self.cat, self.search_path(), tn)?;
         let shown = names(&tn.names).join(".");
         if let Some(d) = dom.and_then(|d| self.cat.domains.get(&d)) {
             return Ok(Target {
@@ -2820,16 +2822,46 @@ impl Ddl<'_, '_> {
                 let Some(NodeEnum::ObjectWithArgs(owa)) = obj.and_then(inner) else {
                     return Ok(tag);
                 };
-                let f = self.find_routine(owa, kind)?.ok_or_else(|| {
-                    Error::new(
-                        code::UNDEFINED_FUNCTION,
-                        format!(
-                            "{} {} does not exist",
-                            super::object_type_word(kind).to_lowercase(),
-                            self.function_sig(owa)
-                        ),
-                    )
-                })?;
+                let Some(f) = self.find_routine(owa, kind)? else {
+                    // A built-in one (AlterFunctionOwner works on initdb's routines too):
+                    // pg_proc.proowner, and its ACL's owner entries.
+                    let def = match self.builtin_function(owa)? {
+                        Some(d) => Some((d.oid, d.name.to_string())),
+                        None => self.builtin_proc(owa)?,
+                    };
+                    let Some((oid, name)) = def else {
+                        return Err(Error::new(
+                            code::UNDEFINED_FUNCTION,
+                            format!(
+                                "{} {} does not exist",
+                                super::object_type_word(kind).to_lowercase(),
+                                self.function_sig(owa)
+                            ),
+                        ));
+                    };
+                    let old = self
+                        .cat
+                        .builtin_proc_owners
+                        .get(&oid)
+                        .copied()
+                        .unwrap_or(BOOTSTRAP_SUPERUSER_OID);
+                    if old != new {
+                        self.require_owner(old, "function", &name)?;
+                        self.check_new_owner(new, Some(crate::catalog::PG_CATALOG_OID))?;
+                        let stored = self.cat.acl(ObjKind::Function, oid, 0).cloned();
+                        if let Some(acl) = stored.or_else(|| acl::builtin_proc_acl(oid)) {
+                            let acl = new_owner_acl(&acl, old, new);
+                            self.cat.set_acl(ObjKind::Function, oid, 0, Some(acl));
+                        }
+                        if new == BOOTSTRAP_SUPERUSER_OID {
+                            self.cat.builtin_proc_owners.remove(&oid);
+                        } else {
+                            self.cat.builtin_proc_owners.insert(oid, new);
+                        }
+                    }
+                    self.save()?;
+                    return Ok(tag);
+                };
                 if f.owner != new {
                     self.require_owner(
                         f.owner,

@@ -935,7 +935,12 @@ impl Catalog {
             ObjKind::Schema => self.schemas.get(&oid).map(|s| s.owner),
             ObjKind::Function => match self.functions.get(&oid) {
                 Some(f) => Some(f.owner),
-                None => Some(BOOTSTRAP_SUPERUSER_OID),
+                None => Some(
+                    self.builtin_proc_owners
+                        .get(&oid)
+                        .copied()
+                        .unwrap_or(BOOTSTRAP_SUPERUSER_OID),
+                ),
             },
             ObjKind::Type => self
                 .enums

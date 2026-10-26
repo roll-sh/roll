@@ -150,6 +150,7 @@ trait StoredMap<V> {
     fn diff_into(&self, tag: u8, new: &Self, same: fn(&V, &V) -> bool, out: &mut Writes) -> Result<()>;
     fn put_all(&self, tag: u8, out: &mut Writes) -> Result<()>;
     fn load_one(&mut self, oid: u32, v: V);
+    fn remove_one(&mut self, oid: u32);
 }
 
 impl<V: Serialize> StoredMap<V> for BTreeMap<u32, V> {
@@ -164,6 +165,9 @@ impl<V: Serialize> StoredMap<V> for BTreeMap<u32, V> {
     }
     fn load_one(&mut self, oid: u32, v: V) {
         self.insert(oid, v);
+    }
+    fn remove_one(&mut self, oid: u32) {
+        self.remove(&oid);
     }
 }
 
@@ -186,6 +190,9 @@ impl<V: Serialize + Clone> StoredMap<V> for PMap<V> {
     fn load_one(&mut self, oid: u32, v: V) {
         self.insert(oid, v);
     }
+    fn remove_one(&mut self, oid: u32) {
+        self.remove(&oid);
+    }
 }
 
 impl<V: Serialize + Clone, I: super::pmap::MapIndex<V>> StoredMap<V> for super::pmap::IndexedMap<V, I> {
@@ -199,6 +206,9 @@ impl<V: Serialize + Clone, I: super::pmap::MapIndex<V>> StoredMap<V> for super::
     }
     fn load_one(&mut self, oid: u32, v: V) {
         self.insert(oid, v);
+    }
+    fn remove_one(&mut self, oid: u32) {
+        self.remove(&oid);
     }
 }
 
@@ -260,13 +270,51 @@ macro_rules! stored_fields {
         }
 
         fn header(c: &Catalog) -> Result<Bytes> {
+            json(&header_map(c)?)
+        }
+
+        /// The header's fields as JSON (with `catalog_format`).
+        fn header_map(c: &Catalog) -> Result<serde_json::Map<String, serde_json::Value>> {
             let mut m = serde_json::Map::new();
             m.insert("catalog_format".into(), CATALOG_FORMAT.into());
             $(m.insert(
                 stringify!($h).into(),
                 serde_json::to_value(&c.$h).map_err(|e| internal(e.to_string()))?,
             );)*
-            json(&m)
+            Ok(m)
+        }
+
+        /// The header fields `m` has, set in `c`.
+        fn set_header_fields(c: &mut Catalog, m: &serde_json::Map<String, serde_json::Value>) -> Result<()> {
+            $(if let Some(v) = m.get(stringify!($h)) {
+                c.$h = serde_json::from_value(v.clone()).map_err(|e| internal(e.to_string()))?;
+            })*
+            Ok(())
+        }
+
+        /// One record (None: its entry removed) applied to `c`.
+        fn apply_one(c: &mut Catalog, tag: u8, oid: u32, v: Option<&[u8]>) -> Result<()> {
+            match tag {
+                $($mtag => {
+                    match v {
+                        Some(v) => c.$m.load_one(oid, parse(v)?),
+                        None => c.$m.remove_one(oid),
+                    }
+                    Ok(())
+                })*
+                $($stag => {
+                    match v {
+                        Some(_) => {
+                            c.$s.insert(oid);
+                        }
+                        None => {
+                            c.$s.remove(&oid);
+                        }
+                    }
+                    Ok(())
+                })*
+                _ => Err(internal(format!("corrupt catalog: unknown record tag {tag}"))),
+            }
         }
     };
 }
@@ -322,6 +370,7 @@ stored_fields! {
         class_order = 46 by_value,
         rules = 47 by_ptr,
         event_triggers = 48 by_ptr,
+        builtin_proc_owners = 49 by_value,
     ],
     sets: [
         opmembers_removed = 100,
@@ -392,6 +441,39 @@ pub fn changed(old: &Catalog, new: &Catalog) -> Result<Writes> {
     out.insert(0, (crate::txn::CATALOG_KEY.to_vec(), Some(head)));
     Ok(out)
 }
+
+/// For a merge of concurrent DDL (`txn::catmerge`): the per-object records that differ
+/// between `a` and `b`, as (tag, oid, `b`'s record or None where `b` has none), found by
+/// comparing the maps as a commit does (cost follows what changed).
+pub fn record_changes(a: &Catalog, b: &Catalog) -> Result<Vec<(u8, u32, Option<Bytes>)>> {
+    let mut out = Vec::new();
+    diff_records(a, b, &mut out)?;
+    Ok(out
+        .into_iter()
+        .map(|(k, v)| {
+            let r = &k[RECORD_PREFIX.len()..];
+            (r[0], u32::from_be_bytes([r[1], r[2], r[3], r[4]]), v)
+        })
+        .collect())
+}
+
+/// One record applied to `c` (None: its entry removed).
+pub fn apply_record(c: &mut Catalog, tag: u8, oid: u32, v: Option<&[u8]>) -> Result<()> {
+    apply_one(c, tag, oid, v)
+}
+
+/// The header record's fields as JSON.
+pub fn header_fields(c: &Catalog) -> Result<serde_json::Map<String, serde_json::Value>> {
+    header_map(c)
+}
+
+/// Header fields set from JSON (those `m` has).
+pub fn set_header(c: &mut Catalog, m: &serde_json::Map<String, serde_json::Value>) -> Result<()> {
+    set_header_fields(c, m)
+}
+
+/// The record tag of `class_order` (pg_class's heap order, merged apart).
+pub const CLASS_ORDER_TAG: u8 = 46;
 
 /// The writes that store `c` in a store holding no records yet.
 pub fn writes_new(c: &Catalog) -> Result<Writes> {

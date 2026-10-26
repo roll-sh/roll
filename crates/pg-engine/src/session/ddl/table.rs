@@ -1003,6 +1003,12 @@ impl Ddl<'_, '_> {
                         Some(v) => v.push((colname.clone(), e.clone(), ty.clone())),
                         None => self.check_default(e, &ty, &colname)?,
                     }
+                    // (AddRelationNewConstraints: a NULL constant isn't stored, as the
+                    // column's default is NULL anyway; over a domain it is a CoerceToDomain.)
+                    if col.domain.is_none() && self.is_null_default(e, &ty) {
+                        saw_default = true;
+                        continue;
+                    }
                     col.default = Some(ast::deparse_expr(e)?);
                     saw_default = true;
                 }
@@ -1197,6 +1203,24 @@ impl Ddl<'_, '_> {
             }
         }
         Ok(())
+    }
+
+    /// Whether default `e` of a column of type `ty` cooks to a bare NULL constant (`NULL`,
+    /// `NULL::<the column's type>`), which Postgres doesn't store (AddRelationNewConstraints).
+    pub(super) fn is_null_default(&self, e: &pb::Node, ty: &DataType) -> bool {
+        match inner(e) {
+            Some(NodeEnum::AConst(c)) => c.isnull,
+            Some(NodeEnum::TypeCast(tc)) => {
+                tc.arg.as_deref().is_some_and(|a| matches!(inner(a), Some(NodeEnum::AConst(c)) if c.isnull))
+                    && tc.type_name.as_ref().is_some_and(|tn| {
+                        matches!(
+                            crate::sql::binder::resolve_type_name(&self.cat, self.search_path(), tn),
+                            Ok((t, None)) if t.same_base(ty)
+                        )
+                    })
+            }
+            _ => false,
+        }
     }
 
     pub(super) fn check_default(&self, e: &pb::Node, ty: &DataType, colname: &str) -> Result<()> {
@@ -1401,14 +1425,37 @@ impl Ddl<'_, '_> {
             owned_by: Some((t.oid, idx)),
             unlogged: None,
         };
+        let mut logged: Option<&pb::DefElem> = None;
         for d in def_elems(opts) {
             if d.defname == "sequence_name"
                 && let Some(NodeEnum::List(l)) = d.arg.as_deref().and_then(inner)
             {
                 name = names(&l.items).last().cloned().unwrap_or(name);
             }
+            // generateSerialExtraStmts: LOGGED / UNLOGGED (pg_dump's, for a sequence whose
+            // persistence isn't its table's) is the sequence's own persistence.
+            if d.defname == "logged" || d.defname == "unlogged" {
+                if logged.is_some() {
+                    return Err(crate::sql::binder::ast::with_pos(
+                        Error::new(code::SYNTAX_ERROR, "conflicting or redundant options"),
+                        d.location,
+                    ));
+                }
+                logged = Some(d);
+            }
         }
-        self.apply_seq_options(&mut sq, opts, true)?;
+        if let Some(d) = logged {
+            let unlogged = d.defname == "unlogged";
+            sq.unlogged = (unlogged != t.unlogged).then_some(unlogged);
+        }
+        let opts: Vec<pb::Node> = opts
+            .iter()
+            .filter(|o| {
+                !matches!(inner(o), Some(NodeEnum::DefElem(d)) if d.defname == "logged" || d.defname == "unlogged")
+            })
+            .cloned()
+            .collect();
+        self.apply_seq_options(&mut sq, &opts, true)?;
         // generateSerialExtraStmts's DEBUG1 (CREATE TABLE's, while the table isn't in the
         // catalog yet; else ALTER TABLE's).
         let stmt = if self.cat.tables.contains_key(&t.oid) {
@@ -2316,10 +2363,7 @@ impl Ddl<'_, '_> {
                     // until it is checked, too). Only `roll_pk_clustered` (or the legacy
                     // layout) keys rows by it.
                     let keyed = primary && pk_keys_rows(&t, deferrable)?;
-                    let id = if keyed { 0 } else { t.next_index_id };
-                    if !keyed {
-                        t.next_index_id += 1;
-                    }
+                    let id = if keyed { 0 } else { t.new_index_id(ix_oid) };
                     let index = Index {
                         oid: ix_oid,
                         name: name.clone(),
@@ -2661,7 +2705,7 @@ impl Ddl<'_, '_> {
             oid: ix_oid,
             name: name.clone(),
             table: t.oid,
-            id: t.next_index_id,
+            id: t.new_index_id(ix_oid),
             columns: parts.columns,
             include: parts.include,
             unique: false,
@@ -2675,7 +2719,6 @@ impl Ddl<'_, '_> {
             clustered: false,
             replident: false,
         };
-        t.next_index_id += 1;
         t.indexes.push(ix_oid);
         let con_oid = self.cat.alloc_con_oid(x.deferrable);
         let mut con = Constraint::new(
@@ -3822,8 +3865,7 @@ impl Ddl<'_, '_> {
             if on {
                 ix.id = 0;
             } else {
-                ix.id = t.next_index_id;
-                t.next_index_id += 1;
+                ix.id = t.new_index_id(ix.oid);
             }
             t.pkey_unkeyed = !on;
             self.cat.put_index(ix);
@@ -4639,7 +4681,14 @@ impl Ddl<'_, '_> {
                         // (ATExecColumnDefault cooks it without the query text: no position.)
                         self.check_default(e, &ty, &cmd.name)
                             .map_err(|e| Error { position: None, ..e })?;
-                        t.columns[idx].default = Some(ast::deparse_expr(e)?);
+                        // (SET DEFAULT NULL removes the default: a NULL constant isn't stored.)
+                        t.columns[idx].default = if t.columns[idx].domain.is_none()
+                            && self.is_null_default(e, &ty)
+                        {
+                            None
+                        } else {
+                            Some(ast::deparse_expr(e)?)
+                        };
                         // A new pg_attrdef row replaces the old.
                         t.columns[idx].def_oid = self.cat.alloc_oid();
                     }
@@ -9076,11 +9125,10 @@ impl Ddl<'_, '_> {
                             let copy = Index {
                                 oid,
                                 name: copy_name,
-                                id: tt.next_index_id,
+                                id: tt.new_index_id(oid),
                                 valid: false,
                                 ..ix.clone()
                             };
-                            tt.next_index_id += 1;
                             tt.indexes.push(oid);
                             self.cat.put_storage(tt);
                             self.cat.put_index(copy);

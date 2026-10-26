@@ -1646,10 +1646,7 @@ impl Ddl<'_, '_> {
             // `pkey_unkeyed`.)
             let keyed = primary
                 && super::table::pk_keys_rows(&t, scon.as_ref().is_some_and(|c| c.deferrable))?;
-            let id = if keyed { 0 } else { t.next_index_id };
-            if !keyed {
-                t.next_index_id += 1;
-            }
+            let id = if keyed { 0 } else { t.new_index_id(oid) };
             if !primary {
                 t.indexes.push(oid);
             }
@@ -1946,10 +1943,7 @@ impl Ddl<'_, '_> {
             // `pkey_unkeyed`.)
             let keyed = primary
                 && super::table::pk_keys_rows(&part, pcon.as_ref().is_some_and(|c| c.deferrable))?;
-            let id = if keyed { 0 } else { part.next_index_id };
-            if !keyed {
-                part.next_index_id += 1;
-            }
+            let id = if keyed { 0 } else { part.new_index_id(oid) };
             if !primary {
                 part.indexes.push(oid);
             }

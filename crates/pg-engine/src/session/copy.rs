@@ -1172,7 +1172,14 @@ impl Session {
             return Ok(data.len());
         }
         let f = &c.format;
-        let fmt = self.state.settings.borrow().format_ctx();
+        let mut fmt = self.state.settings.borrow().format_ctx();
+        // (regclass, regtype, ... input looks names up: the transaction's catalog, the path.)
+        if let Some(txn) = &self.txn {
+            fmt.names = Some(Arc::new(crate::catalog::names::CatalogNames::new(
+                txn.borrow().catalog(),
+                self.state.search_path(),
+            )));
+        }
         if f.binary {
             let (rows, took, ended) = binary_copy_in(data, c, &fmt, st, last)?;
             for row in rows {
@@ -1266,7 +1273,8 @@ impl Session {
                 }
                 continue;
             }
-            if rec.len() > c.ncols {
+            // (NextCopyFrom: with no columns to fill, a line's fields are ignored.)
+            if c.ncols > 0 && rec.len() > c.ncols {
                 return Err(Error::new(
                     code::BAD_COPY_FILE_FORMAT,
                     "extra data after last expected column",

@@ -47,32 +47,41 @@ cargo test -p pg-engine --test pg_dump -- --ignored --nocapture pg_dump_tap
 
 ## Scores
 
-| measure | before (2d82227) | now |
+| measure | before (2d82227) | round 17 (agent 37) | round 19 (agent 54) |
+|---|---|---|---|
+| 002_pg_dump.pl TAP checks | 32 / 14,609 (pg_dump could not start) | 14,604 / 14,609 | 14,609 / 14,609 (the last, the locale provider, with agent 60's database locales) |
+| 001_basic.pl, 005_pg_dump_filterfile.pl | not run | 96 / 96, 108 / 108 | 96 / 96, 108 / 108 |
+| 004_pg_dump_parallel.pl (parallel dump and restore) | 2 / 4 | 4 / 4 | 4 / 4 |
+| regression database dumps (pg_dump runs at all) | fails | every format and option dumps | every format and option dumps |
+
+Over the regression database (entries are the dump's `-- Name:` sections; round 19's run of
+`pg_dump_roundtrip` on a full `pg_regress` run of this batch, 51,148 units matching):
+
+| run | round 17 | round 19 |
 |---|---|---|
-| 002_pg_dump.pl TAP checks | 32 / 14,609 (pg_dump could not start) | 14,604 / 14,609 |
-| 001_basic.pl, 005_pg_dump_filterfile.pl | not run | 96 / 96, 108 / 108 |
-| 004_pg_dump_parallel.pl (parallel dump and restore) | 2 / 4 | 4 / 4 |
-| regression database dumps (pg_dump runs at all) | fails (`acldefault`, `name` subscripts, `"char" = text`, `pg_export_snapshot`) | every format and option dumps |
+| plain, custom, directory, directory `-j 4`, tar, `--inserts`, `--column-inserts` | 2,690 / 2,733 | 2,719 / 2,733 |
+| `--schema-only` | 2,025 / 2,031 | 2,031 / 2,031 |
+| `--data-only` | 658 / 695 | 681 / 695 |
+| `--no-owner --no-privileges` | 2,675 / 2,718 | 2,704 / 2,718 |
+| `-n public -N regress_*` | 2,218 / 2,257 | 2,246 / 2,257 |
+| `-t tenk1 -t onek* -t public.road` | 20 / 21 | 20 / 21 |
+| engine dump restored into the reference (pg_restore, `-j 4` from custom and directory, tar, psql) | 4 errors | 0 errors each; re-dumped: 2,704 / 2,733 |
+| reference dump restored into the engine (the same five ways) | never finished | 0 errors each (15 before); re-dumped: 2,704 / 2,733, as the reference's own |
+| `pg_dumpall --globals-only / --roles-only / --tablespaces-only` | | 7 / 7, 7 / 7, 5 / 5 |
+| psql backslash commands (`psql_meta.sql`) | 122 / 146 | 140 / 146 (the 6 left: sizes, `\dnS`) |
 
-Over the regression database (round 17's run; entries are the dump's `-- Name:` sections):
+What still differs in the data entries (14 of plain's 14) is the databases' state, not pg_dump:
+values computed from `random()` / `now()` / `version()`, the oids in `dropped_objects`, and rows
+in another physical order (`gtest29`, `rtest_emplog`: an UPDATE's new row versions placed
+differently, so the rows a rule logs come in another order; `road`, `ihighway`, the spgist /
+quad tables). The schema-only dump matches entry for entry.
 
-| run | entries matching |
-|---|---|
-| plain, custom, directory, directory `-j 4`, tar, `--inserts`, `--column-inserts` | 2,690 / 2,733 |
-| `--schema-only` | 2,025 / 2,031 (2,031 / 2,031 with this batch's fixes, measured per entry) |
-| `--data-only` | 658 / 695 |
-| `--no-owner --no-privileges` | 2,675 / 2,718 |
-| `-n public -N regress_*` | 2,218 / 2,257 |
-| `-t tenk1 -t onek* -t public.road` | 20 / 21 |
-| engine dump restored into the reference (pg_restore, psql) | 4 errors, 2,675 / 2,733 |
-| psql backslash commands (`psql_meta.sql`) | 122 / 146 (before this batch's psql fixes) |
-
-The first round-trip run (before the fixes after it) had 2,647 / 2,738 plain entries and
-1,990 / 2,033 schema entries matching. What still differs in the data and sequence entries is
-the databases' state, not pg_dump: values computed from `random()` / `now()`, rows in another
-physical order (UPDATEs' new versions placed differently), TOAST relation names (oids), the
-large objects' oids, and the regression engine's sequences, which came back 32 values ahead
-after the regression harness killed the engine (it now stops it with SIGTERM).
+A re-dump of a restored database is compared with the target side's own dump of its
+regression database, so it also counts what a dump and restore don't keep on PostgreSQL itself:
+29 entries on both sides alike (an inherited table's column order, row order, the
+non-reproducible values). Before this round's last two fixes the engine's had 46: NULL-constant
+defaults it stored where PostgreSQL drops them (`DEFAULT NULL::integer` after a restore), and
+functions over `character`, whose parameter came back as `character(1)`.
 
 ## Bugs fixed (round 17, agent 37)
 
@@ -148,26 +157,103 @@ Goldens: `tests/sql/a37_pgdump_catalog.sql`, `a37_pgdump_catalog2.sql`,
 `a37_stored_expr_path.sql`, `a37_psql_catalog.sql`; wire tests `exported_snapshots`,
 `concurrent_ddl`, `sequences_survive_a_clean_close`, `database_settings`.
 
+## Bugs fixed (round 19, agent 54)
+
+- **Databases' own options**: `CREATE / ALTER DATABASE ... IS_TEMPLATE / ALLOW_CONNECTIONS /
+  CONNECTION LIMIT` and a superuser's `UPDATE pg_database SET datistemplate / datallowconn /
+  datconnlimit` are kept with the cluster's databases (`engine.rs` `DbEntry`,
+  `session/ddl/database.rs`) and shown in pg_database (template0 and template1 are templates);
+  a rollback puts them back. Enforced as PostgreSQL does, messages and codes recorded from it:
+  refused connections, "too many connections for database", "permission denied to copy
+  database" (a non-template only by its owner), "cannot drop a template database" (by
+  datistemplate, 42809), "cannot disallow connections for current database", and invalid
+  databases (datconnlimit -2): "cannot connect to invalid database", "cannot use invalid
+  database ... as template", FATAL "cannot alter invalid database", skipped by pg_dumpall.
+  initdb's templates have its ACL (`=c/postgres`, `postgres=CTc/postgres`). Wire test
+  `database_options`. (4 of 002's 5 failures.)
+- `ALTER FUNCTION / AGGREGATE <built-in> OWNER TO` (pg_proc.proowner of built-ins,
+  `Catalog::builtin_proc_owners`, catalog record tag 49; its ACL's owner entries move).
+- **PostgreSQL's dump restored into the engine had 15 errors**, all fixed: `ALTER FUNCTION`
+  naming a shell type in its signature and `ALTER TYPE <shell> OWNER` / GRANT on one
+  (LookupTypeName finds shells); an identity column's sequence options `LOGGED` / `UNLOGGED`
+  (pg_dump's, for a sequence whose persistence isn't its table's); a view over a SQL function
+  whose body names a table off the restore's empty search_path (a stored query doesn't read
+  the body: only planning, inlining, does); COPY into a table with no columns; COPY of
+  regclass / regtype / ... values (their input had no catalog); the default operator class of
+  a binary-coercible type (cidr's is inet's: GetDefaultOpClass), which broke `CREATE INDEX ...
+  USING brin (cidrcol)` and every index of cidr without an opclass.
+- **Concurrent DDL silently corrupted indexes**: two transactions making indexes of one table
+  at once (`pg_restore -j` does) gave both the same storage id (`next_index_id`, a per-table
+  counter both took the same value of), so each index read the other's entries (`WHERE y = 7`
+  returned 2 rows); when the counters differed, the commit failed with a serialization error
+  instead (pg_restore -j's one error). A new index's storage id is its oid
+  (`Table::new_index_id`). Wire test `concurrent_ddl`, which fails without it.
+- **Concurrent DDL's merge was O(catalog)** (`txn/catmerge.rs`): it serialized the three
+  catalogs whole to JSON for every commit that raced another, under the commit lock;
+  `pg_restore -j 4` of the regression database took 110-137 s against 6 s serially, and of 3,000
+  tables more than 30 minutes. It now compares the catalogs record by record as a commit stores
+  them (`persist::record_changes`), takes the current catalog with this transaction's records,
+  merging only records both changed: the regression database 5 s with `-j 4`, 3,000 tables
+  254 s (see the benchmark below).
+- A range constructor over a domain shows the casts to the domain (`d1range((a)::d1, ((a +
+  5))::d1)`), not added twice when re-read.
+- A NULL-constant default (`DEFAULT NULL`, `NULL::integer`) isn't stored, as in PostgreSQL;
+  `SET DEFAULT NULL` removes the default.
+- A function's parameter and result types drop their modifiers (`character` was
+  `character(1)`, and `f('abc')` failed "value too long for type character(1)").
+- psql: range constructors are visible to `\df` (pg_function_is_visible), unlogged sequences
+  have their init fork in their size (`\ds+`).
+- Harness: restores in every format and with `pg_restore -j 4` both ways, their times; psql's
+  output normalized for what PostgreSQL varies too (`\watch`'s clock, large objects' ids, the
+  oids ECHO_HIDDEN's queries name); SCRAM secrets' salts; the engine started with the
+  reference's password.
+
+Goldens: `tests/sql/a54_restore_fixes.sql`; wire tests `database_options`, `concurrent_ddl`.
+
+## pg_dump and pg_restore at scale (round 19)
+
+`scale_setup.sql` (`psql -v big=20000000 -f`): 10 schemas × 300 tables (bigserial key, an index, a
+CHECK, a comment, 20 rows), 1,000 views, one table of 20,000,000 rows (~3 GB in PostgreSQL)
+with two indexes; 19,420 pg_class rows. Release engine and the pinned reference on the same 4
+cores (8-11), the client programs unpinned; seconds:
+
+| step | PostgreSQL 3,000 tables | engine | PostgreSQL + 20 M rows | engine |
+|---|---|---|---|---|
+| build it (psql) | 19.6 | 70.5 | 105 | 454 |
+| database size | 235 MB | 12 MB | 3,015 MB | 868 MB |
+| `pg_dump -Fc` | 3.6 | 5.9 | 59.6 | 87.9 |
+| `pg_dump --schema-only` | 2.1 | 4.4 | 1.9 | 3.5 |
+| `pg_dump -Fd -j 4` (synchronized snapshots) | 3.0 | 12.1 | 54.8 | 85.5 |
+| `pg_restore` | 24.5 | 75.3 | 66.9 | 453 |
+| `pg_restore -j 4` | 18.8 | 253.9 | 52.7 | 600 |
+
+Both restores give the same rows (count and sum checked) without errors. pg_dump's catalog
+queries take about twice PostgreSQL's time (4.4 s for the schema of 3,000 tables). `pg_dump -j`
+gains nothing on the engine (each worker's session regenerates the catalog's rows for its own
+snapshot), and parallel restore is still slower than a serial one: every DDL commit that
+raced another still merges, reindexes the whole merged catalog (`Catalog::reindex`) and checks
+its names under the commit lock, O(catalog) per commit. Bulk loading (COPY of 20 M rows,
+index builds) is the rest of the restore's time.
+
 ## What's left
 
-- **Databases' own options**: `ALTER DATABASE ... CONNECTION LIMIT / ALLOW_CONNECTIONS /
-  IS_TEMPLATE` and `UPDATE pg_database SET datconnlimit` are not kept (pg_database shows -1,
-  true, false), so the invalid-database TAP checks (datconnlimit = -2: "cannot connect to
-  invalid database", pg_dumpall skipping it) fail: 4 of 002's 5 failures. Needs the cluster
-  registry's database entries to keep them (`engine.rs` `DbEntry`).
-- **Locale provider**: every engine database reports the builtin provider with locale
-  C.UTF-8 (and behaves so: `upper('é')` is 'É'), where the reference cluster (initdb
-  `--locale=C`) and `CREATE DATABASE ... LOCALE 'C'` give libc C (`upper('é')` is 'é').
-  pg_dumpall writes `LOCALE_PROVIDER = builtin ... BUILTIN_LOCALE = 'C.UTF-8'`; the 5th TAP
-  failure. A decision about the engine's default collation, not taken here.
-- `ALTER FUNCTION <built-in> OWNER TO` (002's setup) is refused.
-- A range constructor over a domain subtype prints without the casts to the domain
-  (`gtestdomain1range(a, a + 5)` for PostgreSQL's `...((a)::gtestdomain1, ((a + 5))::...)`).
-- psql: sizes (`\dt+`, `\di+`, `\l+`, `\db+`) are the engine's storage's; `\dnS` lacks the
-  `pg_temp_N` / `pg_toast_temp_N` schemas PostgreSQL keeps after sessions end; `\l` shows the
-  locale provider above.
-- Restoring the regression database into the engine is slow (a debug engine took over an
-  hour for psql's 450,000-line restore): each DDL statement copies and stores the catalog,
-  which grows with the database (agent 36's per-object catalog storage is the place).
+- **Sizes** (decided: format and magnitude, not bytes). Relations' sizes (`pg_relation_size`,
+  `pg_table_size`, `\dt+`, `\di+`, `\dm+`, `\ds+`) are PostgreSQL's page model
+  (`catalog/heapsim.rs`, `btsim.rs`, ...), equal where the state is: PostgreSQL's differ where
+  autovacuum made a table's FSM and visibility map (+32 kB, the engine has no autovacuum) and
+  where an index grew by inserts the model lays out otherwise. Database and tablespace sizes
+  (`pg_database_size`, `pg_tablespace_size`, `\l+`, `\db+`) are the engine's storage on disk,
+  compressed: the regression database 11 MB (PostgreSQL 91 MB), 20 M rows 868 MB (3 GB);
+  `pg_global` is 0 (the shared catalogs are in the cluster's registry file). pg_size_pretty
+  formats them as PostgreSQL does. (A database's size as the sum of its modelled relations
+  would cost a model of every relation per call.)
+- psql `\dnS`: the engine keeps `pg_temp_N` schemas, but numbers them by backend pid
+  (`pg_temp_3595`), PostgreSQL by ProcNumber (small, reused slots that its auxiliary
+  processes share): not reproducible without modelling them.
+- Restore speed: serial restores are 3-7x PostgreSQL's (bulk loads, per-statement DDL);
+  `pg_restore -j` and `pg_dump -j` are slower than serial ones (above). Agent 49's catalog
+  work is the place: an incremental `reindex` and name check for a merged catalog, and
+  catalog rows shared across snapshots.
+- Row order after UPDATEs differs in a few tables (data entries above).
 - `003_pg_dump_with_server.pl` (a test extension in the server) and `010_dump_connstr.pl`
   (clusters made with other bootstrap superusers) don't run.

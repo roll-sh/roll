@@ -3197,8 +3197,15 @@ fn rel_of(cat: &Catalog, oid: u32) -> Option<Rel> {
     if let Some((t, is_index)) = cat.toast_owner(oid) {
         return Some(Rel::Toast(t.clone(), is_index));
     }
-    if cat.sequences.contains_key(&oid) {
-        return Some(Rel::OnePage(false));
+    if let Some(s) = cat.sequences.get(&oid) {
+        // (An unlogged one has an init fork of a page too; temporary ones are 't'.)
+        let unlogged = !cat.schema_name(s.schema).starts_with("pg_temp")
+            && s.unlogged.unwrap_or_else(|| {
+                s.owned_by
+                    .and_then(|(t, _)| cat.tables.get(&t))
+                    .is_some_and(|t| t.unlogged)
+            });
+        return Some(Rel::OnePage(unlogged));
     }
     None
 }

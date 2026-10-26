@@ -325,6 +325,7 @@ impl Database {
             seq_undo: Vec::new(),
             pgstat: Default::default(),
             db_owner_undo: Vec::new(),
+            db_options_undo: Vec::new(),
             exported: false,
         }
     }
@@ -754,6 +755,9 @@ pub struct Txn {
     /// Databases whose owner this transaction changed: (name, the previous owner), put
     /// back when it rolls back.
     pub db_owner_undo: Vec<(String, String)>,
+    /// Databases whose options (datistemplate, datallowconn, datconnlimit) this transaction
+    /// changed: (name, the previous options), put back when it rolls back.
+    pub db_options_undo: Vec<(String, crate::session::state::DbOptions)>,
     /// It exported snapshots (pg_export_snapshot), which go when it ends.
     exported: bool,
 }

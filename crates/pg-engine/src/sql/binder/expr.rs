@@ -4516,13 +4516,25 @@ impl Binder<'_, '_> {
                 if schema.is_none() {
                     self.note_func_ref(f.location, def.oid);
                 }
-                // A range over a domain: its constructor's bounds are of the domain.
+                // A range over a domain: its constructor's bounds are of the domain (shown as
+                // casts to it, `(a)::d`, where they aren't of it already).
                 if let DataType::Range(rt) = &ret
                     && let Some(d) = rt.subtype_domain
-                    && !self.deparse
                     && let Some(dc) = self.domain_coerce(d)?
                 {
                     for a in args.iter_mut().take(2) {
+                        // (One of the domain already, maybe relabeled to its base type by
+                        // the call's coercion: that value.)
+                        let mut x = &*a;
+                        while self.domain_of(x) != Some(d)
+                            && let Expr::Relabel(y, _) | Expr::Cast(y, _, _, false) = x
+                        {
+                            x = y;
+                        }
+                        if self.domain_of(x) == Some(d) {
+                            *a = x.clone();
+                            continue;
+                        }
                         let e = std::mem::replace(a, Expr::null(DataType::Unknown));
                         *a = Expr::CoerceToDomain(Box::new(e), dc.clone());
                     }
@@ -7695,7 +7707,7 @@ impl Binder<'_, '_> {
             self.call_collation(&coerced)?;
         }
         let at = self.sql_fn_at(&fdef, &coerced, FnPlace::Scalar);
-        let (plan, cols) = self.in_sql_fn(&fdef, at, |b| {
+        let bound = self.in_sql_fn(&fdef, at, |b| {
             let (plan, cols) = b.bind_user_body(&fdef, &coerced)?;
             if fdef.language == "sql" {
                 check_sql_retval(&b.cat, &b.ctx.search_path, &fdef, Some(&cols))?;
@@ -7790,7 +7802,18 @@ impl Binder<'_, '_> {
                 }
             };
             Ok((plan, cols))
-        })?;
+        });
+        let (plan, cols) = match bound {
+            Ok(x) => x,
+            // Postgres reads a SQL function's body only when it plans the call (inlining)
+            // or runs it, never for a query it only stores (a view, a rule, CREATE TABLE AS
+            // ... WITH NO DATA): a body that doesn't bind here (it names a table not on this
+            // search_path, as in a pg_dump restore) leaves the call as it is.
+            Err(_) if self.unplanned && fdef.language == "sql" => {
+                return Ok(Expr::Call(func::display_def(&fdef), coerced, ret));
+            }
+            Err(e) => return Err(e),
+        };
         // inline_function: the body's expression in place of the call, the arguments in
         // place of its parameters (so a CASE evaluates only the branch it takes).
         // (Not with an argument that is a CASE's test value, which a CASE in the body

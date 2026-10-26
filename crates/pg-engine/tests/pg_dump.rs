@@ -137,7 +137,7 @@ impl Engine {
         let logf = std::fs::File::create(log).unwrap();
         let child = Command::new(bin)
             .args(["--data", data.to_str().unwrap(), "--listen", &format!("127.0.0.1:{port}")])
-            .args(["--no-sync", "--idle-close-secs", "100000"])
+            .args(["--no-sync", "--idle-close-secs", "100000", "--password", "pw"])
             .env("RUST_LOG", "warn")
             .stdout(logf.try_clone().unwrap())
             .stderr(logf)
@@ -344,6 +344,7 @@ fn pg_psql_meta() {
         m
     };
     let (ur, ue) = (units(&r), units(&e));
+    let (ur, ue) = (normalize_psql(&lines, ur), normalize_psql(&lines, ue));
     let mut report = String::from("# psql backslash commands: last run\n\n");
     let (mut same, mut diffs) = (0, String::new());
     for (i, l) in lines.iter().enumerate() {
@@ -364,6 +365,43 @@ fn pg_psql_meta() {
     std::fs::write(cfg.dir.join("psql-diffs.txt"), diffs).unwrap();
     std::fs::create_dir_all(&cfg.report_dir).unwrap();
     std::fs::write(cfg.report_dir.join("PSQL.md"), report).unwrap();
+}
+
+/// What differs from run to run of PostgreSQL itself in psql's output: `\watch`'s clock,
+/// and object identifiers (the oid counter's values: large objects' ids in `\dl` /
+/// `\lo_list`, the oids ECHO_HIDDEN's queries name).
+fn normalize_psql(lines: &[&str], units: BTreeMap<usize, String>) -> BTreeMap<usize, String> {
+    let oid = |w: &str| w.len() >= 5 && w.bytes().all(|b| b.is_ascii_digit()) && w.parse::<u64>().is_ok_and(|n| n >= 16384);
+    units
+        .into_iter()
+        .map(|(i, text)| {
+            let cmd = lines.get(i).copied().unwrap_or("");
+            let mut out = String::with_capacity(text.len());
+            for l in text.lines() {
+                let mut l = l.to_string();
+                if l.contains(" (every ") && l.ends_with("s)") {
+                    l = format!("<time>{}", &l[l.find(" (every ").unwrap()..]);
+                }
+                if (cmd.starts_with("\\dl") || cmd.starts_with("\\lo_list"))
+                    && let Some((id, rest)) = l.split_once(" | ")
+                    && oid(id.trim())
+                {
+                    l = format!("<oid> | {rest}");
+                }
+                // ECHO_HIDDEN: `WHERE c.oid = '16399'`, `attrelid = '16399'`, ...
+                let mut parts: Vec<String> = l.split('\'').map(str::to_string).collect();
+                for (j, p) in parts.iter_mut().enumerate() {
+                    if j % 2 == 1 && oid(p) {
+                        *p = "<oid>".into();
+                    }
+                }
+                l = parts.join("'");
+                out.push_str(&l);
+                out.push('\n');
+            }
+            (i, out)
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -435,6 +473,11 @@ fn normalize(dump: &str) -> String {
             continue;
         }
         let mut l = l.to_string();
+        // A SCRAM secret's salt is random (pg_dumpall's roles).
+        if let Some(p) = l.find(" PASSWORD 'SCRAM-SHA-256$") {
+            let end = l[p + 11..].find('\'').map_or(l.len(), |e| p + 11 + e + 1);
+            l.replace_range(p..end, " PASSWORD '<scram secret>'");
+        }
         if !los.is_empty() && (l.contains("lo_") || l.contains("LARGE OBJECT") || l.contains("BLOB")) {
             for (n, oid) in los.iter().enumerate() {
                 l = replace_word(&l, oid, &format!("<lo{}>", n + 1));
@@ -667,9 +710,21 @@ fn summary(r: &Result<Cmp, String>) -> String {
     }
 }
 
-/// Each side's custom dump restored with pg_restore, and its plain dump with psql, into a
-/// fresh database on the other side, which is dumped again and compared with that side's
-/// dump of its own regression database.
+/// How a dump is restored: (name, pg_dump run it restores, pg_restore's options; None:
+/// the plain dump through psql).
+const RESTORES: &[(&str, &str, Option<&[&str]>)] = &[
+    ("pg_restore", "custom", Some(&[])),
+    ("pg_restore_j4", "custom", Some(&["-j", "4"])),
+    ("pg_restore_dir_j4", "directory", Some(&["-j", "4"])),
+    ("pg_restore_tar", "tar", Some(&[])),
+    ("psql", "plain", None),
+];
+
+/// Each side's dumps restored (custom, directory and tar archives with pg_restore, in
+/// parallel too; the plain dump with psql) into a fresh database on the other side, which is
+/// dumped again and compared with that side's dump of its own regression database.
+/// `PGDUMP_RESTORES` (comma-separated names of `RESTORES`, `<from>:<name>` for one
+/// direction) runs some.
 fn restores(
     cfg: &Config,
     dumps: &Path,
@@ -678,8 +733,17 @@ fn restores(
 ) -> Vec<Line> {
     let mut lines = Vec::new();
     let target = "pgdump_restored";
+    let only: Option<Vec<String>> = std::env::var("PGDUMP_RESTORES")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(|v| v.split(',').map(str::to_string).collect());
     for (from, to, port) in [("engine", "ref", cfg.ref_port), ("ref", "engine", cfg.port)] {
-        for how in ["pg_restore", "psql"] {
+        for &(how, run, opts) in RESTORES {
+            if let Some(only) = &only
+                && !only.iter().any(|o| o == how || *o == format!("{from}:{how}"))
+            {
+                continue;
+            }
             let name = format!("restore_{from}_to_{to}_{how}");
             let (_, errs) = psql(
                 cfg,
@@ -690,9 +754,18 @@ fn restores(
                 ),
             );
             assert!(errs.is_empty(), "{name}: {errs:?}");
-            let errors = if how == "pg_restore" {
-                let file = dumps.join(format!("{from}-custom.dump"));
-                let o = client(cfg, port, &["pg_restore", "-d", target, file.to_str().unwrap()], None);
+            let started = Instant::now();
+            let errors = if let Some(opts) = opts {
+                let ext = match run {
+                    "custom" => "dump",
+                    "directory" => "dir",
+                    _ => "tar",
+                };
+                let file = dumps.join(format!("{from}-{run}.{ext}"));
+                let mut args = vec!["pg_restore", "-d", target];
+                args.extend_from_slice(opts);
+                args.push(file.to_str().unwrap());
+                let o = client(cfg, port, &args, None);
                 o.stderr
                     .lines()
                     .filter(|l| l.contains("error:") || l.contains("ERROR:"))
@@ -702,14 +775,15 @@ fn restores(
                 let sql = std::fs::read_to_string(dumps.join(format!("{from}-plain.sql"))).unwrap_or_default();
                 psql(cfg, port, target, &sql).1
             };
+            let secs = started.elapsed().as_secs_f64();
             let again = dump(cfg, port, target, &dumps.join(format!("{name}.sql")), Format::Plain, &[]);
             let result = again.map(|d| {
                 let c = compare(&plain[to], &d);
                 write_diffs(&diffs.join(format!("{name}.txt")), &c, &format!("{to} original"), "restored");
                 c
             });
-            eprintln!("{name}: {} errors, {}", errors.len(), summary(&result));
-            lines.push(Line { name, result, restore_errors: Some(dedup(errors)) });
+            eprintln!("{name}: {} errors, {secs:.0} s, {}", errors.len(), summary(&result));
+            lines.push(Line { name: format!("{name} ({secs:.0} s)"), result, restore_errors: Some(dedup(errors)) });
             psql(cfg, port, "postgres", &format!("DROP DATABASE IF EXISTS {target} WITH (FORCE);\n"));
         }
     }

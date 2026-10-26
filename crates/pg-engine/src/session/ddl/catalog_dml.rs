@@ -189,7 +189,9 @@ impl Ddl<'_, '_> {
 }
 
 impl Ddl<'_, '_> {
-    /// UPDATE pg_database SET datacl = ...: a superuser's direct change of databases' ACLs.
+    /// UPDATE pg_database SET datacl / datistemplate / datallowconn / datconnlimit = ...: a
+    /// superuser's direct change of databases' ACLs and options (pg_dump's `--clean` unmarks
+    /// a template so it can be dropped; datconnlimit -2 marks a database invalid).
     fn update_pg_database(&mut self, s: &pb::UpdateStmt) -> Result<String> {
         let me = self.ctx.sess.current_role(&self.cat);
         if !self.cat.is_superuser(me) {
@@ -199,16 +201,22 @@ impl Ddl<'_, '_> {
             ));
         }
         let mut targets = vec![target(col("oid"))];
+        let mut cols = Vec::new();
         for t in &s.target_list {
             let Some(NodeEnum::ResTarget(rt)) = inner(t) else {
                 continue;
             };
-            if rt.name != "datacl" {
-                return Err(crate::error::unsupported(format!(
-                    "UPDATE of pg_database.{}",
-                    rt.name
-                )));
-            }
+            let ty = match rt.name.as_str() {
+                "datacl" => "_aclitem",
+                "datistemplate" | "datallowconn" => "bool",
+                "datconnlimit" => "int4",
+                _ => {
+                    return Err(crate::error::unsupported(format!(
+                        "UPDATE of pg_database.{}",
+                        rt.name
+                    )));
+                }
+            };
             let val = rt.val.as_deref().cloned().unwrap_or_else(|| {
                 mk(NodeEnum::AConst(pb::AConst {
                     isnull: true,
@@ -216,7 +224,8 @@ impl Ddl<'_, '_> {
                     location: -1,
                 }))
             });
-            targets.push(target(cast(val, "_aclitem")));
+            targets.push(target(cast(val, ty)));
+            cols.push(rt.name.as_str());
         }
         let sel = pb::SelectStmt {
             target_list: targets,
@@ -233,7 +242,33 @@ impl Ddl<'_, '_> {
         };
         for r in &rows {
             let Value::Oid(oid) = r[0] else { continue };
-            for v in &r[1..] {
+            let name = self
+                .ctx
+                .sess
+                .cluster
+                .databases()
+                .into_iter()
+                .find(|d| d.0 == oid)
+                .map(|d| d.1);
+            let old = self.ctx.sess.cluster.database_options(oid);
+            let mut new = old;
+            for (col, v) in cols.iter().zip(&r[1..]) {
+                match (*col, v) {
+                    ("datistemplate", Value::Bool(b)) => new.is_template = *b,
+                    ("datallowconn", Value::Bool(b)) => new.allow_connections = *b,
+                    ("datconnlimit", Value::Int4(n)) => new.conn_limit = *n,
+                    ("datacl", _) => {}
+                    // (The columns are NOT NULL.)
+                    (c, _) => {
+                        return Err(Error::new(
+                            code::NOT_NULL_VIOLATION,
+                            format!("null value in column \"{c}\" of relation \"pg_database\" violates not-null constraint"),
+                        ));
+                    }
+                }
+                if *col != "datacl" {
+                    continue;
+                }
                 let acl = match v {
                     Value::Array(a) => {
                         let mut acl = Vec::with_capacity(a.items.len());
@@ -253,6 +288,9 @@ impl Ddl<'_, '_> {
                 };
                 self.cat
                     .set_acl(crate::catalog::acl::ObjKind::Database, oid, 0, acl);
+            }
+            if let Some(name) = name {
+                self.set_database_options(&name, old, new)?;
             }
         }
         self.save()?;
