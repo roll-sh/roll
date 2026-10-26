@@ -286,9 +286,64 @@ pub fn update(t: &Table, key: &[u8], old: &[Value], new: Row, ctx: &ExecCtx) -> 
     }
 }
 
+/// postgresGetForeignModifyBatchSize: the `batch_size` option (the table's, else its
+/// server's, else 1), 1 with RETURNING, a view's check option or a BEFORE / AFTER ROW INSERT
+/// trigger.
+pub fn batch_size(cat: &crate::catalog::Catalog, t: &Table, returning: bool, wco: bool, trigs: &[u16]) -> usize {
+    let row_insert = trigs.iter().any(|ty| ty & tt::ROW != 0 && ty & tt::INSERT != 0 && ty & tt::INSTEAD == 0);
+    if returning || wco || row_insert {
+        return 1;
+    }
+    let f = t.foreign.as_ref();
+    let srv = f.and_then(|f| cat.servers.get(&f.server));
+    let size = super::option::get(f.and_then(|f| f.options.as_ref()), "batch_size")
+        .or_else(|| srv.and_then(|s| super::option::get(s.options.as_ref(), "batch_size")))
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(1);
+    // (EXPLAIN shows the option as it is: the 65535-parameter cap is a running statement's.)
+    size
+}
+
 /// deparseDeleteSql.
 pub fn delete_sql(cat: &crate::catalog::Catalog, t: &Table) -> String {
     format!("DELETE FROM {} WHERE ctid = $1", relation_name(cat, t))
+}
+
+/// postgresExecForeignTruncate: one server's tables truncated by one remote TRUNCATE, each
+/// table (or its server) allowing truncates (`truncatable`, default on).
+pub fn truncate(rels: &[std::sync::Arc<Table>], cascade: bool, restart: bool, ctx: &ExecCtx) -> Result<()> {
+    let cat = ctx.catalog();
+    let Some(first) = rels.first() else { return Ok(()) };
+    for t in rels {
+        if !super::scan::bool_option(&cat, t, "truncatable", true) {
+            return Err(crate::error::Error::new(
+                crate::error::code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                format!("foreign table \"{}\" does not allow truncates", t.name),
+            ));
+        }
+    }
+    // (The connection is the first table's user mapping's, for the current user.)
+    let m = super::scan::mapping_for(first, None, ctx)?;
+    let key = connection::get_connection(ctx, &m, false)?;
+    let names: Vec<String> = rels.iter().map(|t| relation_name(&cat, t)).collect();
+    let sql = format!(
+        "TRUNCATE {} {} IDENTITY {}",
+        names.join(", "),
+        if restart { "RESTART" } else { "CONTINUE" },
+        if cascade { "CASCADE" } else { "RESTRICT" }
+    );
+    let intr = crate::remote::interrupts(ctx);
+    let r = connection::with_conn(ctx, key, |c| {
+        let r = c.exec(&sql, &intr)?;
+        if r.status != Status::CommandOk {
+            return Err(connection::report(&r, c, Some(&sql)));
+        }
+        Ok(())
+    });
+    if r.is_err() {
+        connection::note_error(ctx, key);
+    }
+    r
 }
 
 /// DELETE of the row at remote ctid `key`: the deleted row as the remote server returned

@@ -5364,6 +5364,23 @@ impl Builder<'_, '_> {
         self.level_in(p, false)
     }
 
+    /// create_append_plan's asynchronous subplans (enable_async_append): a postgres_fdw scan
+    /// of a table whose `async_capable` option (or its server's) is on, right under an
+    /// Append of more than one subplan (runtime-pruned ones count), is an Async Foreign Scan.
+    #[inline(never)]
+    fn mark_async(&self, n: &mut ExNode) {
+        let on = self
+            .ctx
+            .sess
+            .settings
+            .borrow()
+            .get_str("enable_async_append")
+            .is_none_or(|v| v != "off" && v != "false");
+        if on {
+            mark_async_in(n, &self.ctx.catalog());
+        }
+    }
+
     /// `level`; `shared`: its InitPlans are the enclosing level's.
     fn level_in(&mut self, p: &Arc<Plan>, shared: bool) -> ExNode {
         if !shared {
@@ -5377,6 +5394,7 @@ impl Builder<'_, '_> {
         self.pop_level();
         self.proj_depth = saved_depth;
         self.settle(&mut node);
+        self.mark_async(&mut node);
         if self.o.verbose {
             carry_group_junk(&mut node);
             let mut whole = Vec::new();
@@ -5386,6 +5404,7 @@ impl Builder<'_, '_> {
             // (A LockRows at the level's top returns its rows' marks too, resjunk, and so
             // do the Limits over it, which return their input's target list.)
             lock_junk(&mut node);
+            copy_mark_rows(&mut node);
         }
         if shared {
             return node;
@@ -5663,6 +5682,8 @@ impl Builder<'_, '_> {
                     || matches!(&**p, Plan::Scan(s) if s.with_key && (UNDER_LOCK_ROWS.with(|u| u.get() > 0) || sys_read(s))));
             // (Nor one returning the system columns it reads.)
             let sys_cols = b.node.is_scan() && matches!(&**p, Plan::Scan(s) if s.sys && sys_read(s));
+            // (Nor one of a table with a dropped column: build_physical_tlist punts.)
+            let dropped = b.node.is_scan() && matches!(&**p, Plan::Scan(s) if s.table.columns.iter().any(|c| c.dropped));
             // (An inheritance tree's Append returns its appendrel's reltarget: the parent's
             // columns needed above, set_append_rel_size's translation of them.)
             let appendrel = b.node.node_type == "Append" && matches!(&**p, Plan::Append { inh: Some(_), .. });
@@ -5670,7 +5691,7 @@ impl Builder<'_, '_> {
             let sorted_append = matches!(b.node.node_type, "Sort" | "Incremental Sort")
                 && matches!(&**p, Plan::Sort { input, .. } if matches!(&**input, Plan::Append { inh: Some(_), .. }))
                 && b.node.children.first().is_some_and(|c| c.node_type == "Append" && c.children.iter().all(ExNode::is_scan));
-            let mut mask = (b.node.is_join() || appendrel || sorted_append || b.node.node_type == "Index Only Scan" || b.node.node_type == "WindowAgg" || dummy || member || sorted_join || srf_target || marked || sys_cols)
+            let mut mask = (b.node.is_join() || appendrel || sorted_append || b.node.node_type == "Index Only Scan" || b.node.node_type == "WindowAgg" || dummy || member || sorted_join || srf_target || marked || sys_cols || dropped)
                 .then(|| self.needed.get(&addr(p)).cloned())
                 .flatten();
             if srf_target
@@ -11484,7 +11505,7 @@ impl Builder<'_, '_> {
                     None => n.par_safe = self.param_scan_safe(s),
                 }
             }
-            if s.mark.is_some() {
+            if s.mark.is_some() && !s.fdw.as_ref().is_some_and(|f| f.copy_mark) {
                 n = self.lock_scan(n, p, s, &names);
             }
             if !gating.is_empty() {
@@ -11690,7 +11711,7 @@ impl Builder<'_, '_> {
         n.cols = cols;
         n.key = Some(addr(p));
         n.subplans.append(&mut self.pending);
-        if s.mark.is_some() {
+        if s.mark.is_some() && !s.fdw.as_ref().is_some_and(|f| f.copy_mark) {
             n = self.lock_scan(n, p, s, &names);
         }
         if !gating.is_empty() {
@@ -11776,6 +11797,12 @@ impl Builder<'_, '_> {
         let exprs: Vec<&Expr> = ip.returning.iter().chain(ip.rules.view_checks.iter().map(|(_, e)| e)).collect();
         let back = modify::Back::of(t, &modify::tgtypes(&ip.rules.triggers), crate::catalog::trigger_type::INSERT, &exprs, ip.sys.then_some(t.columns.len()));
         self.foreign_returning(n, t, back);
+        let batch = modify::batch_size(&self.ctx.catalog(), t, !ip.returning.is_empty(), !ip.rules.view_checks.is_empty(), &modify::tgtypes(&ip.rules.triggers));
+        for d in &mut n.details {
+            if let Detail::Text("Batch Size", s) = d {
+                *s = batch.to_string();
+            }
+        }
     }
 
     /// A postgres_fdw DELETE's RETURNING clause, after its Remote SQL.
@@ -16729,6 +16756,53 @@ fn unique_for(cat: &crate::catalog::Catalog, p: &Plan, keys: &[&Expr]) -> bool {
     }
 }
 
+/// A postgres_fdw scan locked by its remote query's locking clause (a SELECT's row mark
+/// copied whole, ROW_MARK_COPY): its whole row is the row mark's junk column, last.
+fn copy_mark_rows(n: &mut ExNode) {
+    let remote_locked = n.node_type == "Foreign Scan"
+        && n.details.iter().any(|d| matches!(d, Detail::Text("Remote SQL", s) if s.ends_with(" FOR UPDATE") || s.ends_with(" FOR SHARE")));
+    if remote_locked && !n.output.is_empty() && !n.output.iter().any(|o| o == "ctid" || o.ends_with(".ctid") || o.ends_with(".*")) {
+        let field = |k: &str| n.target.iter().find(|t| t.0 == k).map(|t| t.1.clone());
+        if let Some(alias) = field("Alias").or_else(|| field("Relation Name")) {
+            n.output.push(format!("{}.*", quote_ident(&alias)));
+        }
+    }
+    for c in &mut n.children {
+        copy_mark_rows(c);
+    }
+}
+
+/// `Builder::mark_async` over a level's tree.
+fn mark_async_in(n: &mut ExNode, cat: &crate::catalog::Catalog) {
+    if n.node_type == "Append" {
+        let removed: usize = n
+            .details
+            .iter()
+            .filter_map(|d| match d {
+                Detail::Text("Subplans Removed", k) => k.parse::<usize>().ok(),
+                _ => None,
+            })
+            .sum();
+        let members = n.children.iter().filter(|c| c.relationship.is_none_or(|r| r == "Member")).count();
+        if members + removed > 1 {
+            for c in n.children.iter_mut().filter(|c| c.relationship.is_none_or(|r| r == "Member") && c.node_type == "Foreign Scan" && c.title.starts_with("Foreign Scan")) {
+                let field = |k: &str| c.target.iter().find(|t| t.0 == k).map(|t| t.1.clone());
+                let (Some(rel), schema) = (field("Relation Name"), field("Schema")) else { continue };
+                let table = cat
+                    .tables
+                    .values()
+                    .find(|t| t.name == rel && t.foreign.is_some() && schema.as_ref().is_none_or(|s| cat.schema_name(t.schema) == s));
+                if table.is_some_and(|t| crate::ext::postgres_fdw::scan::is_postgres_fdw(cat, t) && crate::ext::postgres_fdw::scan::async_capable(cat, t)) {
+                    c.title = format!("Async {}", c.title);
+                }
+            }
+        }
+    }
+    for c in &mut n.children {
+        mark_async_in(c, cat);
+    }
+}
+
 /// A postgres_fdw UPDATE / DELETE target's whole row (add_row_identity_columns' wholerow
 /// junk), after its ctid wherever the source's nodes return it.
 fn wholerow_after_ctid(n: &mut ExNode, refname: &str) {
@@ -18316,7 +18390,7 @@ impl Render<'_> {
             if n.parallel_aware { "true" } else { "false" },
             true,
         );
-        self.w.prop("Async Capable", "false", true);
+        self.w.prop("Async Capable", if n.title.starts_with("Async ") { "true" } else { "false" }, true);
         // ("Inner Unique" comes after the target list: see `details`.)
         for (k, v, numeric) in n.target.iter().filter(|t| t.0 != "Inner Unique") {
             self.w.prop(k, v, *numeric);

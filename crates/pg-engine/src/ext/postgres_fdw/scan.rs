@@ -69,7 +69,7 @@ pub fn spec(s: &ScanPlan, need: Option<&[bool]>, cat: &Catalog, fmt: &crate::typ
     let remote: Vec<Expr> = order.into_iter().filter(|c| d.shippable(c)).collect();
     let local: Vec<Expr> = filter.into_iter().filter(|c| !remote.iter().any(|r| r.same_as(c))).collect();
     let n = t.columns.len();
-    let wholerow = s.fdw.as_ref().is_some_and(|f| f.wholerow);
+    let wholerow = s.fdw.as_ref().is_some_and(|f| f.wholerow || f.copy_mark);
     let mut used: Vec<bool> = (0..n).map(|i| wholerow || need.is_none_or(|m| m.get(i).copied().unwrap_or(false))).collect();
     for c in &local {
         for col in c.columns() {
@@ -82,7 +82,7 @@ pub fn spec(s: &ScanPlan, need: Option<&[bool]>, cat: &Catalog, fmt: &crate::typ
     let target = s.fdw.as_ref().is_some_and(|f| f.target);
     // (The ctid also when a condition checked here or the plan above reads it.)
     let ctid = target
-        || s.mark.is_some()
+        || (s.mark.is_some() && !s.fdw.as_ref().is_some_and(|f| f.copy_mark))
         || ctid_col.is_some_and(|c| {
             need.is_none_or(|m| m.get(c).copied().unwrap_or(false)) || local.iter().any(|x| x.columns().contains(&c))
         });
@@ -140,6 +140,21 @@ pub fn mapping_for(t: &Table, check_as: Option<u32>, ctx: &ExecCtx) -> Result<co
     let f = t.foreign.as_ref().ok_or_else(|| crate::error::internal("not a foreign table"))?;
     let user = check_as.unwrap_or_else(|| ctx.current_user());
     connection::user_mapping(&ctx.catalog(), user, f.server)
+}
+
+/// A boolean option of table `t`, else its server's (the table's wins), else `default`.
+pub fn bool_option(cat: &Catalog, t: &Table, name: &str, default: bool) -> bool {
+    let f = t.foreign.as_ref();
+    let srv = f.and_then(|f| cat.servers.get(&f.server));
+    option::get(f.and_then(|f| f.options.as_ref()), name)
+        .or_else(|| srv.and_then(|s| option::get(s.options.as_ref(), name)))
+        .and_then(|v| crate::ext::dblink::def_boolean(name, v).ok())
+        .unwrap_or(default)
+}
+
+/// postgresIsForeignPathAsyncCapable: the `async_capable` option.
+pub fn async_capable(cat: &Catalog, t: &Table) -> bool {
+    bool_option(cat, t, "async_capable", false)
 }
 
 /// fetch_size: the table's option, else the server's, else 100.

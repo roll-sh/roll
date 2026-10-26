@@ -65,6 +65,11 @@ fn order_for(cat: &Catalog, fmt: &crate::types::text::FormatCtx, input: &Plan, k
 /// remote LIMIT when nothing is checked locally.
 pub fn push(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan) {
     // (Children first: a sort under a merge join reads a presorted remote scan too.)
+    if let Plan::LockRows { input, marks, width } = p
+        && let Some(level) = remote_lock(cat, input, marks, *width)
+    {
+        *p = level;
+    }
     match p {
         Plan::Update(up) => mark_target(cat, &mut up.source, up.rules.table.oid, true),
         Plan::Delete(dp) => mark_target(cat, &mut dp.source, dp.table.oid, false),
@@ -172,4 +177,47 @@ pub fn push_level(ctx: &crate::exec::ExecCtx, p: &mut Plan) {
         return;
     }
     push(&cat, ctx.fmt(), p);
+}
+
+/// A level whose locking clause marks only postgres_fdw tables: their row marks are whole-row
+/// copies (ROW_MARK_COPY, the wrapper choosing none) and the rows are locked by the remote
+/// query's FOR UPDATE / FOR SHARE, so PostgreSQL's plan has no LockRows. The level without
+/// it: each locked scan sends the locking clause and returns its columns (no ctid).
+fn remote_lock(cat: &Catalog, input: &Arc<Plan>, marks: &[crate::sql::plan::LockMark], width: usize) -> Option<Plan> {
+    let remote = |t: &crate::catalog::Table| t.foreign.is_some() && is_postgres_fdw(cat, t);
+    if marks.is_empty() || !marks.iter().all(|m| m.lock.is_some() && !m.tables.is_empty() && m.tables.iter().all(|t| remote(t))) {
+        return None;
+    }
+    // The level's columns (the marks' keys come after them).
+    let (scan_in, exprs) = match &**input {
+        Plan::Project { input, exprs } if exprs.len() >= width => (input.clone(), exprs[..width].to_vec()),
+        _ => {
+            let types = crate::sql::paths::analyzejoins::col_types(input);
+            (input.clone(), (0..width).map(|i| Expr::Col(i, types.get(i).cloned().unwrap_or(crate::types::DataType::Unknown))).collect())
+        }
+    };
+    // (Only scans keyed at the end of their row: dropping the key moves no column.)
+    let mut inner = (*scan_in).clone();
+    let mut ok = true;
+    set_remote_locks(&mut inner, marks, &mut ok);
+    if !ok || exprs.iter().any(|e| e.columns().iter().any(|c| *c >= crate::sql::binder::plan_width(&inner))) {
+        return None;
+    }
+    Some(Plan::Project { input: Arc::new(inner), exprs })
+}
+
+fn set_remote_locks(p: &mut Plan, marks: &[crate::sql::plan::LockMark], ok: &mut bool) {
+    // (A lone scan: dropping its key moves no other relation's columns.)
+    let Plan::Scan(s) = p else {
+        *ok = false;
+        return;
+    };
+    match marks.iter().find(|m| m.tables.iter().any(|t| t.oid == s.table.oid)) {
+        Some(m) if s.with_key && !s.sys && s.fdw.is_none() => {
+            s.with_key = false;
+            s.mark = m.lock;
+            s.fdw = Some(Arc::new(FdwPushdown { copy_mark: true, ..Default::default() }));
+        }
+        _ => *ok = false,
+    }
 }

@@ -212,6 +212,9 @@ pub struct FdwPushdown {
     /// The target's whole row goes up too (add_row_identity_columns: an UPDATE's, or a
     /// DELETE's under row triggers): the scan reads every column.
     pub wholerow: bool,
+    /// The scan's row mark is a whole-row copy (ROW_MARK_COPY), its rows locked by the
+    /// remote query's locking clause: no ctid, no LockRows.
+    pub copy_mark: bool,
 }
 
 /// `ScanPlan::params`.

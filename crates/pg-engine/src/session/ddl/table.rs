@@ -7499,6 +7499,10 @@ impl Ddl<'_, '_> {
                 if let Some(e) = self.cat.fdw_modify_error(&t, "truncate") {
                     return Err(e);
                 }
+                // (restrict_nonsystem_relation_kind, as GetFdwRoutineForRelation checks it.)
+                if t.foreign.is_some() && crate::session::settings::restricted_kinds(&self.ctx.sess.settings.borrow()).1 {
+                    return Err(Error::new(code::OBJECT_NOT_IN_PREREQUISITE_STATE, "access to non-system foreign table is restricted"));
+                }
                 tables.push(t);
             }
         }
@@ -7557,7 +7561,17 @@ impl Ddl<'_, '_> {
         for (t, b) in tables.iter().zip(&trigs) {
             crate::exec::trigger::statement(b, t, true, tt::TRUNCATE, &[], self.ctx)?;
         }
+        // (Foreign tables go to their wrappers afterwards, a server's all in one call:
+        // ExecuteTruncateGuts's per-server lists.)
+        let mut foreign: Vec<(u32, Vec<Arc<Table>>)> = Vec::new();
         for t in &tables {
+            if let Some(f) = &t.foreign {
+                match foreign.iter_mut().find(|(s, _)| *s == f.server) {
+                    Some((_, v)) => v.push(t.clone()),
+                    None => foreign.push((f.server, vec![t.clone()])),
+                }
+                continue;
+            }
             // ExecuteTruncateGuts gives the TOAST table new files too, under its own
             // AccessExclusiveLock (and its index's).
             if t.toast != 0 {
@@ -7589,6 +7603,10 @@ impl Ddl<'_, '_> {
                     self.set_frozen_xid(t, xmin);
                 }
             }
+        }
+        // Then the foreign tables, by server (ExecForeignTruncate).
+        for (_, rels) in &foreign {
+            crate::ext::postgres_fdw::modify::truncate(rels, cascade, s.restart_seqs, self.ctx)?;
         }
         // Then the sequences, each with a new file too.
         if s.restart_seqs {
