@@ -31,7 +31,7 @@ pub(crate) fn catalog_dml_query(node: &NodeEnum) -> Option<pb::Node> {
 /// Whether `s` updates pg_class or pg_database (unqualified or in pg_catalog).
 pub(crate) fn is_pg_class_update(s: &pb::UpdateStmt) -> bool {
     s.relation.as_ref().is_some_and(|rv| {
-        matches!(rv.relname.as_str(), "pg_class" | "pg_database")
+        matches!(rv.relname.as_str(), "pg_class" | "pg_database" | "pg_constraint")
             && (rv.schemaname.is_empty() || rv.schemaname == "pg_catalog")
     }) && s.with_clause.is_none()
         && crate::sql::binder::ast::returning(&s.returning_clause).is_empty()
@@ -130,6 +130,9 @@ impl Ddl<'_, '_> {
     pub(super) fn update_pg_class(&mut self, s: &pb::UpdateStmt) -> Result<String> {
         if s.relation.as_ref().is_some_and(|rv| rv.relname == "pg_database") {
             return self.update_pg_database(s);
+        }
+        if s.relation.as_ref().is_some_and(|rv| rv.relname == "pg_constraint") {
+            return self.update_pg_constraint(s);
         }
         let me = self.ctx.sess.current_role(&self.cat);
         if !self.cat.is_superuser(me) {
@@ -259,6 +262,60 @@ impl Ddl<'_, '_> {
     /// UPDATE pg_database SET datacl / datistemplate / datallowconn / datconnlimit = ...: a
     /// superuser's direct change of databases' ACLs and options (pg_dump's `--clean` unmarks
     /// a template so it can be dropped; datconnlimit -2 marks a database invalid).
+    /// UPDATE pg_constraint SET convalidated = ...: a superuser marking constraints not
+    /// validated (ActiveRecord's check_all_foreign_keys_valid! sets it false, then ALTER TABLE
+    /// ... VALIDATE CONSTRAINT checks the rows again).
+    fn update_pg_constraint(&mut self, s: &pb::UpdateStmt) -> Result<String> {
+        let me = self.ctx.sess.current_role(&self.cat);
+        if !self.cat.is_superuser(me) {
+            return Err(Error::new(code::INSUFFICIENT_PRIVILEGE, "permission denied for table pg_constraint"));
+        }
+        let mut val = None;
+        for t in &s.target_list {
+            let Some(NodeEnum::ResTarget(rt)) = inner(t) else { continue };
+            match rt.name.as_str() {
+                "convalidated" => val = rt.val.as_deref().cloned(),
+                other => return Err(crate::error::unsupported(format!("UPDATE of pg_constraint.{other}"))),
+            }
+        }
+        let val = val.unwrap_or_else(|| mk(NodeEnum::AConst(pb::AConst { isnull: true, val: None, location: -1 })));
+        let sel = pb::SelectStmt {
+            target_list: vec![target(col("oid")), target(cast(val, "bool"))],
+            from_clause: vec![mk(NodeEnum::RangeVar(s.relation.clone().unwrap()))],
+            where_clause: s.where_clause.clone(),
+            ..Default::default()
+        };
+        let node = mk(NodeEnum::SelectStmt(Box::new(sel)));
+        let child = self.ctx.child(self.ctx.params);
+        let rows = {
+            let mut b = Binder::new(&child, Vec::new());
+            let bq = b.bind_statement(&node)?;
+            crate::exec::collect(&bq.plan, &child, None)?
+        };
+        for r in &rows {
+            let (Value::Oid(oid), v) = (&r[0], &r[1]) else { continue };
+            let validated = match v {
+                Value::Bool(b) => *b,
+                _ => {
+                    return Err(Error::new(
+                        code::NOT_NULL_VIOLATION,
+                        "null value in column \"convalidated\" of relation \"pg_constraint\" violates not-null constraint",
+                    ));
+                }
+            };
+            let owner = self.cat.tables.values().find(|t| t.constraints.iter().any(|c| c.oid == *oid)).cloned();
+            if let Some(t) = owner {
+                let mut t = (*t).clone();
+                for c in t.constraints.iter_mut().filter(|c| c.oid == *oid) {
+                    c.validated = validated;
+                }
+                self.cat.put_storage(t);
+            }
+        }
+        self.save()?;
+        Ok(format!("UPDATE {}", rows.len()))
+    }
+
     fn update_pg_database(&mut self, s: &pb::UpdateStmt) -> Result<String> {
         let me = self.ctx.sess.current_role(&self.cat);
         if !self.cat.is_superuser(me) {

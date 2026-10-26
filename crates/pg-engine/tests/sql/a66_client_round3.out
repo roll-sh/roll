@@ -375,3 +375,73 @@ ERROR 0A000: FOR SHARE cannot be applied to the nullable side of an outer join
 > drop table lk_post, lk_user
 -- DROP TABLE
 
+> create table fk_parent (id int primary key)
+-- CREATE TABLE
+
+> create table fk_child (id int, pid int references fk_parent)
+-- CREATE TABLE
+
+> alter table fk_child disable trigger all
+-- ALTER TABLE
+
+> insert into fk_child values (1, 42)
+-- INSERT 0 1
+
+> alter table fk_child enable trigger all
+-- ALTER TABLE
+
+> select conname, convalidated from pg_constraint where conrelid = 'fk_child'::regclass
+conname:name | convalidated:bool
+fk_child_pid_fkey | t
+-- SELECT 1
+
+> do $$
+>   declare r record;
+> BEGIN
+> FOR r IN (
+>   SELECT FORMAT(
+>     'UPDATE pg_catalog.pg_constraint SET convalidated=false WHERE conname = ''%1$I'' AND connamespace::regnamespace = ''%2$I''::regnamespace AND conrelid::regclass = ''%3$I''::regclass; ALTER TABLE %2$I.%3$I VALIDATE CONSTRAINT %1$I;',
+>     constraint_name,
+>     table_schema,
+>     table_name
+>   ) AS constraint_check
+>   FROM information_schema.table_constraints WHERE constraint_type = 'FOREIGN KEY'
+> )
+>   LOOP
+>     EXECUTE (r.constraint_check);
+>   END LOOP;
+> END;
+> $$
+ERROR 23503: insert or update on table "fk_child" violates foreign key constraint "fk_child_pid_fkey"
+DETAIL: Key (pid)=(42) is not present in table "fk_parent".
+CONTEXT: SQL statement "UPDATE pg_catalog.pg_constraint SET convalidated=false WHERE conname = 'fk_child_pid_fkey' AND connamespace::regnamespace = 'public'::regnamespace AND conrelid::regclass = 'fk_child'::regclass; ALTER TABLE public.fk_child VALIDATE CONSTRAINT fk_child_pid_fkey;"
+CONTEXT: PL/pgSQL function inline_code_block line 14 at EXECUTE
+OBJECTS: schema=public table=fk_child constraint=fk_child_pid_fkey
+
+> select conname, convalidated from pg_constraint where conrelid = 'fk_child'::regclass
+conname:name | convalidated:bool
+fk_child_pid_fkey | t
+-- SELECT 1
+
+> update pg_catalog.pg_constraint set convalidated = false where conname = 'fk_child_pid_fkey'
+-- UPDATE 1
+
+> select conname, convalidated from pg_constraint where conrelid = 'fk_child'::regclass
+conname:name | convalidated:bool
+fk_child_pid_fkey | f
+-- SELECT 1
+
+> delete from fk_child
+-- DELETE 1
+
+> alter table fk_child validate constraint fk_child_pid_fkey
+-- ALTER TABLE
+
+> select conname, convalidated from pg_constraint where conrelid = 'fk_child'::regclass
+conname:name | convalidated:bool
+fk_child_pid_fkey | t
+-- SELECT 1
+
+> drop table fk_child, fk_parent
+-- DROP TABLE
+

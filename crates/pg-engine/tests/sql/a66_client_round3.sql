@@ -140,3 +140,33 @@ select distinct s.pid from (select p.id as pid, u.name from lk_post p left join 
   where p.id = 1 for update of p) s order by 1 limit 1;
 select s.pid from (select p.id as pid from lk_post p left join lk_user u on u.id = p.author for share of u) s;
 drop table lk_post, lk_user;
+create table fk_parent (id int primary key);
+create table fk_child (id int, pid int references fk_parent);
+alter table fk_child disable trigger all;
+insert into fk_child values (1, 42);
+alter table fk_child enable trigger all;
+select conname, convalidated from pg_constraint where conrelid = 'fk_child'::regclass;
+do $$
+  declare r record;
+BEGIN
+FOR r IN (
+  SELECT FORMAT(
+    'UPDATE pg_catalog.pg_constraint SET convalidated=false WHERE conname = ''%1$I'' AND connamespace::regnamespace = ''%2$I''::regnamespace AND conrelid::regclass = ''%3$I''::regclass; ALTER TABLE %2$I.%3$I VALIDATE CONSTRAINT %1$I;',
+    constraint_name,
+    table_schema,
+    table_name
+  ) AS constraint_check
+  FROM information_schema.table_constraints WHERE constraint_type = 'FOREIGN KEY'
+)
+  LOOP
+    EXECUTE (r.constraint_check);
+  END LOOP;
+END;
+$$;
+select conname, convalidated from pg_constraint where conrelid = 'fk_child'::regclass;
+update pg_catalog.pg_constraint set convalidated = false where conname = 'fk_child_pid_fkey';
+select conname, convalidated from pg_constraint where conrelid = 'fk_child'::regclass;
+delete from fk_child;
+alter table fk_child validate constraint fk_child_pid_fkey;
+select conname, convalidated from pg_constraint where conrelid = 'fk_child'::regclass;
+drop table fk_child, fk_parent;

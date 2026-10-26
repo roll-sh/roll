@@ -343,9 +343,11 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   `Txn::stmt_catalog`.) Round 19, agent 66 (round 3 of the suites; with file_fdw and server
   encodings, above and below): pgjdbc, tokio-postgres, sqlx, Drizzle and Npgsql now match
   PostgreSQL exactly, TypeORM, Django and Hibernate (all of hibernate-core) differ in one to
-  two tests each (STATUS.md). Superuser DML on pg_description is `session/ddl/
+  two tests each, ActiveRecord's adapter tests in five (postgres_fdw's loopback
+  authentication, a cancel; STATUS.md). Superuser DML on pg_description is `session/ddl/
   description_dml.rs` (a comment DML moves under another catalog keeps that classoid:
-  `Catalog::class_comments`); `catalog_dml::catalog_dml_query` is the query such DML runs,
+  `Catalog::class_comments`); UPDATE pg_constraint SET convalidated (ActiveRecord's foreign
+  key check), in PL/pgSQL too; `catalog_dml::catalog_dml_query` is the query such DML runs,
   which Parse / PREPARE bind to type its parameters (`UPDATE pg_class SET relname = $1`).
   GUC_IS_NAME parameters truncate with their NOTICE (`settings::take_name_notices`, sent
   after AuthenticationOk at startup). Left: a planner bug behind Hibernate's "column #32 out

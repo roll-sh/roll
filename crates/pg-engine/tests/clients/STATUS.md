@@ -58,7 +58,7 @@ hibernate-core (its failures on PostgreSQL there are the environment's).
 | tokio-postgres (tests, postgres, derive) | 0.7.18 | 221 / 0 | | 212 / 9 *; round 19: 221 / 0 | 0 |
 | sqlx (9 postgres targets) | 0.9.0 | 333 / 0 | | 318 / 15 *; round 19: 333 / 0 | 0 |
 | Prisma (push, pull, migrate, client) | 7.10.1 | 47 / 0 | | 47 / 0 * | 0 (bit(n) lengths in `db pull`, fixed) |
-| ActiveRecord (Rails, PostgreSQL adapter tests) | 8.1.4 | 10159 / 1 | | 748 / 28 | 27: see below (the engine ran adapters/postgresql only) |
+| ActiveRecord (Rails, PostgreSQL adapter tests) | 8.1.4 | 10159 / 1; adapters: 776 / 1 | | 748 / 28; round 19: 769 / 8 (its 2 referential-integrity failures pass since, rerun) | 5: postgres_fdw's loopback (4), a cancel (see below) |
 | Hibernate (hibernate-core subset; round 19: all of hibernate-core) | 7.4.14 | 3088 / 0; round 19: 12774 / 858 | | 3080 / 8; round 19: 12772 / 860 | 2: see below |
 | TypeORM (postgres) | 1.1.2 | 3059 / 11 | | 2977 / 56; round 19: 3058 / 12 | 1: xml2 (custom extension installation) |
 | Drizzle (pg integration) | 0.45.4 | 852 / 0 | | 849 / 3; round 19: 852 / 0 | 0 |
@@ -89,6 +89,14 @@ Engine, open:
   `program 'echo 1,2,3,4'` table, which runs a server program: refused, as COPY ... PROGRAM is
   (HANDOFF "Decisions"); it passes only if programs were allowed (an operator setting, as
   `--allow-server-files` is, would do).
+- ActiveRecord ForeignTableTest (4): postgres_fdw's server has only `dbname` (a loopback
+  through libpq's default socket) and its user mapping no password. The reference image trusts
+  local socket connections; the engine, started with `--password`, asks for one ("fe_sendauth:
+  no password supplied"), with `--allow-outbound local` too. An engine started with trust
+  authentication (or a mapping with a password) would pass; how the engine should treat its
+  own loopback connections is an authentication policy question (agent 59's postgres_fdw).
+- ActiveRecord PostgresqlTransactionTest#test_raises_QueryCanceled_when_canceling_statement_
+  due_to_user_request: a cancel while the statement waits on a row lock (agent 56's item).
 - ActiveRecord: ALTER TABLE ... DISABLE / ENABLE TRIGGER ALL is about 1.4 ms a table in a debug
   build (PostgreSQL: 0.1 ms; fixture loading); schema introspection is slower.
 - asyncpg's introspection tests: its type introspection query on a large catalog is slower
@@ -117,6 +125,10 @@ HANDOFF):
   as USER-DEFINED in its schema, a renamed enum by its name now, a row type's schema
   (pg_statistic_ext_data.stxdexpr), and a column's collation; a FROM subquery's own FOR UPDATE
   over its outer join's nullable side errors.
+- ActiveRecord's check_all_foreign_keys_valid! (PostgreSQLReferentialIntegrityTest, 2): a DO
+  block's EXECUTE of `UPDATE pg_catalog.pg_constraint SET convalidated = false ...; ALTER TABLE
+  ... VALIDATE CONSTRAINT ...`: a superuser's UPDATE of pg_constraint.convalidated, in
+  PL/pgSQL too.
 - Django: a GROUP BY key that is a sub-select over a join, named by its ordinal (two bindings of
   the sub-select differ in their joins' `bound` ids only).
 - pgjdbc: `relname LIKE 'a\'` (a pattern ending in its escape character) fails only when

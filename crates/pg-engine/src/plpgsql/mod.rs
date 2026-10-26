@@ -4586,6 +4586,13 @@ fn bind_node(b: &mut Binder, node: Node, targets: Option<&[DataType]>) -> Result
             depend_update: true,
         });
     }
+    // A superuser's UPDATE of pg_class / pg_database / pg_constraint (ActiveRecord's EXECUTE
+    // of `UPDATE pg_catalog.pg_constraint SET convalidated = false ...`): as it runs alone.
+    if let Some(NodeEnum::UpdateStmt(u)) = node.node.as_ref()
+        && crate::session::ddl::is_pg_class_update(u)
+    {
+        return Ok(Compiled::Utility(Box::new(node)));
+    }
     match node.node {
         Some(NodeEnum::SelectStmt(ref s)) if s.into_clause.is_some() => {
             Ok(Compiled::Utility(Box::new(node)))
