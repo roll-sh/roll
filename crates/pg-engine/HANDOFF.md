@@ -226,7 +226,9 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   Downgrades are supported after a clean shutdown only (BENCH.md's agent 43 section:
   "Durability"). COPY FROM still parses its rows whole before they go in, and big
   transactions buffer their writes whole until commit (BENCH.md "Where it is still slower"
-  item 2). The regression suite, goldens and difftest are unchanged unit for unit.
+  item 2). A COPY that takes a table past the model's size stops modelling it at once
+  (`CopyLoad::flush`), so its scans go parallel without a restart (agent 48's q06 finding).
+  The regression suite, goldens and difftest are unchanged unit for unit.
   - **Accepted internal differences** (the engine's storage needn't imitate PostgreSQL's;
     only what clients see must match): tables over 400,000 row versions have estimated heap
     and index sizes (relpages, pg_relation_size) rather than PostgreSQL's page for page;

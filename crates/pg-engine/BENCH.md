@@ -1305,6 +1305,15 @@ before, 8,048 after, medians of 3; range scans 2,627 / 2,658), the rest of the O
     laid out again when a database reopens still packs its rows afresh (2,250 pages where
     PostgreSQL keeps 2,521): putting them back at their stored TIDs changed where new rows
     go. Both are accepted internal differences (HANDOFF).
+12. **A COPY past the model's size** stops modelling the table when its rows go in
+    (`CopyLoad::flush` runs the size check single inserts run), so a bulk-loaded table's
+    scans go parallel and its index-only scans read entries without a restart (agent 48's
+    q06 finding; `big_tables` `copy_past_the_model`). The TPC-H load here (CREATE INDEX and
+    VACUUM ANALYZE after the COPY, which already dropped the model) doesn't show it: q06 by
+    parallel seq scan is 1.1–1.7 s right after the load both before and after. Seen on the
+    way, for the planner's owners: q06's default plan on that load is a Parallel Bitmap Heap
+    Scan over `lineitem_l_shipdate_idx`, 20–23 s with 3.5 s of planning, against 1.1–1.5 s
+    with bitmap and index scans off.
 
 ### Durability, crash recovery and the storage format
 
