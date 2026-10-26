@@ -24,7 +24,9 @@ run is a faithful isolationtester.
 
 A *step* is one `step ...` line of isolationtester's output with what follows it (its rows,
 errors, notices, `<waiting ...>` and `<... completed>`); a permutation matches when all of its
-output is identical. Before this round the engine had no `pg_isolation_test_session_is_blocked`
+output is identical. Re-measured at 9407d0ee (round 20, agent 73; a full run, debug build,
+private reference): the same 120 / 122 specs and 1,646 / 1,648 permutations, the same two
+differing. Before this round the engine had no `pg_isolation_test_session_is_blocked`
 at all (isolationtester can't run without it: 0 specs); the 'before' column is the first run with
 it implemented over the old lock manager.
 

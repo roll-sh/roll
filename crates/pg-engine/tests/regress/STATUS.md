@@ -50,7 +50,7 @@ cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 ## Summary
 
 <!-- generated: summary -->
-From the full run of commit `ed6356cc` (debug build of the engine, 2026-10-25 09:30 UTC, reference `a57-ref1`; cluster-global objects it had before: none), written by the harness (HANDOFF.md, "Regression suite"); don't edit these numbers by hand.
+From the full run of commit `9407d0ee` (debug build of the engine, 2026-10-26 19:15 UTC, reference `a73-ref1`; cluster-global objects it had before: none), written by the harness (HANDOFF.md, "Regression suite"); don't edit these numbers by hand.
 
 | | |
 |---|---|
