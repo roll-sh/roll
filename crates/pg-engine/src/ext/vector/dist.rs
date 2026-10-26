@@ -524,6 +524,7 @@ pub(super) fn sparsevec_norm(a: &[u8]) -> f64 {
 
 /// The float8 the SQL function `symbol` (its C name) returns for two values of its type,
 /// bit for bit (the dimensions are the caller's to check).
+#[allow(dead_code)] // (the index access methods' entry point)
 pub(crate) fn distance(symbol: &str) -> Option<fn(&Value, &Value) -> f64> {
     macro_rules! by_symbol {
         ($($name:literal => $f:path),* $(,)?) => {
@@ -566,6 +567,7 @@ pub(crate) fn distance(symbol: &str) -> Option<fn(&Value, &Value) -> f64> {
 
 /// The float8 the norm function `symbol` returns (`vector_norm`, `halfvec_l2_norm`,
 /// `sparsevec_l2_norm`).
+#[allow(dead_code)]
 pub(crate) fn norm(symbol: &str) -> Option<fn(&Value) -> f64> {
     fn w<const K: u8>(v: &Value) -> f64 {
         match K {
@@ -584,6 +586,7 @@ pub(crate) fn norm(symbol: &str) -> Option<fn(&Value) -> f64> {
 
 /// A vector, halfvec or sparsevec normalized as the SQL `l2_normalize` does it (another
 /// value as it is).
+#[allow(dead_code)]
 pub(crate) fn l2_normalize(v: &Value) -> Value {
     use crate::ext::types::{HALFVEC, SPARSEVEC, VECTOR};
     match v {
