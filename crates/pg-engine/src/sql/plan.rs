@@ -200,7 +200,7 @@ pub struct ScanPlan {
 
 /// What a foreign scan sends besides its conditions: the sort it stands for, and the LIMIT /
 /// OFFSET over that (`has_limit`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct FdwPushdown {
     pub order: Vec<SortKey>,
     pub limit: Option<Expr>,
@@ -209,6 +209,9 @@ pub struct FdwPushdown {
     /// The scan reads the target of an UPDATE / DELETE: it locks the rows and returns their
     /// ctids (another relation's row marks copy whole rows, PostgreSQL's ROW_MARK_COPY).
     pub target: bool,
+    /// The target's whole row goes up too (add_row_identity_columns: an UPDATE's, or a
+    /// DELETE's under row triggers): the scan reads every column.
+    pub wholerow: bool,
 }
 
 /// `ScanPlan::params`.

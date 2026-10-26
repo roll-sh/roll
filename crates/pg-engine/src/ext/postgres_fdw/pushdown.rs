@@ -66,8 +66,8 @@ fn order_for(cat: &Catalog, fmt: &crate::types::text::FormatCtx, input: &Plan, k
 pub fn push(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan) {
     // (Children first: a sort under a merge join reads a presorted remote scan too.)
     match p {
-        Plan::Update(up) => mark_target(&mut up.source, up.rules.table.oid),
-        Plan::Delete(dp) => mark_target(&mut dp.source, dp.table.oid),
+        Plan::Update(up) => mark_target(cat, &mut up.source, up.rules.table.oid, true),
+        Plan::Delete(dp) => mark_target(cat, &mut dp.source, dp.table.oid, false),
         Plan::Limit { input, limit, offset, with_ties: None } if matches!(&**input, Plan::Sort { .. }) => {
             if let Plan::Sort { input: sin, keys } = &**input
                 && let Some((order, path)) = order_for(cat, fmt, sin, keys)
@@ -83,7 +83,7 @@ pub fn push(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan) {
                     limit: if lim { limit.clone() } else { None },
                     offset: if lim { offset.clone() } else { None },
                     has_limit: lim,
-                    target: false,
+                    ..Default::default()
                 }));
                 *p = if lim {
                     sin
@@ -107,7 +107,7 @@ pub fn push(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan) {
                             limit: limit.clone(),
                             offset: offset.clone(),
                             has_limit: true,
-                            target: false,
+                            ..Default::default()
                         }));
                         *p = inp;
                         return;
@@ -119,7 +119,7 @@ pub fn push(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan) {
             if let Some((order, path)) = order_for(cat, fmt, input, keys) {
                 let mut inp = (**input).clone();
                 if let Some(s) = scan_at(&mut inp, &path) {
-                    s.fdw = Some(Arc::new(FdwPushdown { order, limit: None, offset: None, has_limit: false, target: false }));
+                    s.fdw = Some(Arc::new(FdwPushdown { order, limit: None, offset: None, has_limit: false, ..Default::default() }));
                     *p = inp;
                     return;
                 }
@@ -136,7 +136,9 @@ pub fn push(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan) {
 
 /// The target scans of an UPDATE / DELETE of a foreign table (`FdwPushdown::target`): the
 /// scans of it returning their rows' keys, wherever the source has them (joins included).
-fn mark_target(source: &mut Arc<Plan>, oid: u32) {
+/// Their whole rows go up too for an UPDATE, and for a DELETE of a table with row triggers
+/// of it (add_row_identity_columns).
+fn mark_target(cat: &Catalog, source: &mut Arc<Plan>, oid: u32, update: bool) {
     if !has_foreign(source) {
         return;
     }
@@ -144,18 +146,15 @@ fn mark_target(source: &mut Arc<Plan>, oid: u32) {
     if let Plan::Scan(s) = p {
         // (An inheritance member too: its scan returns the key as the root's does.)
         if s.table.foreign.is_some() && s.with_key && (s.table.oid == oid || !s.table.inherits.is_empty()) {
-            s.fdw = Some(Arc::new(FdwPushdown {
-                order: Vec::new(),
-                limit: None,
-                offset: None,
-                has_limit: false,
-                target: true,
-            }));
+            use crate::catalog::trigger_type as tt;
+            let wholerow = update
+                || cat.triggers.values().any(|tg| tg.table == s.table.oid && tg.tgtype & tt::ROW != 0 && tg.tgtype & tt::DELETE != 0);
+            s.fdw = Some(Arc::new(FdwPushdown { target: true, wholerow, ..Default::default() }));
         }
         return;
     }
     for c in crate::sql::explain::plan_inputs_mut(p) {
-        mark_target(c, oid);
+        mark_target(cat, c, oid, update);
     }
 }
 

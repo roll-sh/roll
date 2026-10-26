@@ -31,6 +31,25 @@ pub fn open_need(plan: &Arc<Plan>, need: Option<Vec<bool>>, ctx: &ExecCtx) -> Re
     open(plan, ctx)
 }
 
+/// An UPDATE's node: a postgres_fdw statement sent whole, or ModifyTable's. (Out of
+/// `open_node`, whose frame is on every plan level's stack.)
+#[inline(never)]
+fn open_update(p: &crate::sql::plan::UpdatePlan, ctx: &ExecCtx) -> Result<BoxNode> {
+    match crate::ext::postgres_fdw::direct::open_update(p, ctx)? {
+        Some(n) => Ok(n),
+        None => Ok(Box::new(super::dml::UpdateNode::new(Box::new(p.clone()), ctx)?)),
+    }
+}
+
+/// A DELETE's node: a postgres_fdw statement sent whole, or ModifyTable's.
+#[inline(never)]
+fn open_delete(p: &crate::sql::plan::DeletePlan, ctx: &ExecCtx) -> Result<BoxNode> {
+    match crate::ext::postgres_fdw::direct::open_delete(p, ctx)? {
+        Some(n) => Ok(n),
+        None => Ok(Box::new(super::dml::DeleteNode::new(Box::new(p.clone()), ctx)?)),
+    }
+}
+
 fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNode> {
     use super::need as nd;
     Ok(match &**plan {
@@ -490,14 +509,8 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             })
         }
         Plan::Insert(p) => Box::new(super::dml::InsertNode::new(p.clone(), ctx)?),
-        Plan::Update(p) => match crate::ext::postgres_fdw::direct::open_update(p, ctx) {
-            Some(n) => n,
-            None => Box::new(super::dml::UpdateNode::new(p.clone(), ctx)?),
-        },
-        Plan::Delete(p) => match crate::ext::postgres_fdw::direct::open_delete(p, ctx) {
-            Some(n) => n,
-            None => Box::new(super::dml::DeleteNode::new(p.clone(), ctx)?),
-        },
+        Plan::Update(p) => open_update(p, ctx)?,
+        Plan::Delete(p) => open_delete(p, ctx)?,
         Plan::Merge(p) => Box::new(super::merge::MergeNode::new(p.clone(), ctx)?),
     })
 }

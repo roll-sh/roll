@@ -69,7 +69,8 @@ pub fn spec(s: &ScanPlan, need: Option<&[bool]>, cat: &Catalog, fmt: &crate::typ
     let remote: Vec<Expr> = order.into_iter().filter(|c| d.shippable(c)).collect();
     let local: Vec<Expr> = filter.into_iter().filter(|c| !remote.iter().any(|r| r.same_as(c))).collect();
     let n = t.columns.len();
-    let mut used: Vec<bool> = (0..n).map(|i| need.is_none_or(|m| m.get(i).copied().unwrap_or(false))).collect();
+    let wholerow = s.fdw.as_ref().is_some_and(|f| f.wholerow);
+    let mut used: Vec<bool> = (0..n).map(|i| wholerow || need.is_none_or(|m| m.get(i).copied().unwrap_or(false))).collect();
     for c in &local {
         for col in c.columns() {
             if col < n {
@@ -195,7 +196,7 @@ fn make_row(n: &ScanNode, vals: Vec<Option<String>>, ctx: &ExecCtx) -> Result<Ro
     }
     let ctid = if n.ctid { vals.get(n.retrieved.len()).cloned().flatten() } else { None };
     if n.with_key {
-        row.push(Value::Bytea(Arc::from(ctid.clone().unwrap_or_default().into_bytes())));
+        row.push(Value::Bytea(Arc::from(super::modify::row_key(t.oid, ctid.as_deref().unwrap_or("")))));
     }
     if n.sys {
         let tid = ctid

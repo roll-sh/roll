@@ -1049,6 +1049,7 @@ impl Binder<'_, '_> {
                 self.rls_checks(&t, super::rls::SELECT, true, false, &mut rules.rls_checks)?;
             }
         }
+        let plan_checks = rules.view_checks.clone();
         let plan = InsertPlan {
             rules,
             source: Arc::new(source),
@@ -1059,7 +1060,7 @@ impl Binder<'_, '_> {
             overriding_system: over_system,
             overriding_user: over_user,
             sys: self.want_sys,
-            route: self.partition_routing(&t)?,
+            route: leaf_view_checks(self.partition_routing(&t)?, &t, &plan_checks),
             copy: None,
             // (Through an updatable view: its relation's alias in the view.)
             alias: match &view {
@@ -3364,6 +3365,26 @@ impl Binder<'_, '_> {
         self.level().scope = saved;
         r
     }
+}
+
+/// The views' check options of an INSERT routed into foreign partitions, as each foreign
+/// leaf's (ExecInitPartitionInfo's mapped WCOs): its server's stored row is what they check.
+fn leaf_view_checks(
+    route: Option<Arc<crate::sql::plan::PartRouting>>,
+    root: &Table,
+    checks: &[(String, crate::sql::expr::Expr)],
+) -> Option<Arc<crate::sql::plan::PartRouting>> {
+    let mut route = route?;
+    if checks.is_empty() || !route.leaves.iter().any(|l| l.rules.table.foreign.is_some()) {
+        return Some(route);
+    }
+    for l in &mut Arc::make_mut(&mut route).leaves {
+        if l.rules.table.foreign.is_some() {
+            let leaf = l.rules.table.clone();
+            l.rules.view_checks = checks.iter().map(|(n, e)| (n.clone(), super::inherit::to_child(e.clone(), root, &leaf))).collect();
+        }
+    }
+    Some(route)
 }
 
 /// A parent's columns as a member's (by name; none for a dropped column or one the member

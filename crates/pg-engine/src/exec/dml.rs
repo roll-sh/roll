@@ -11,7 +11,7 @@ use super::{BoxNode, ExecCtx, Node, Row, eval_all};
 use crate::catalog::trigger_type as tt;
 use crate::catalog::{ConstraintKind, FkAction, IndexKey, Table};
 use crate::error::{Error, Frame, Result, code};
-use crate::sql::expr::{eval, eval_bool};
+use crate::sql::expr::{Expr, eval, eval_bool};
 use crate::sql::plan::{
     BoundIndex, ConflictAction, CopyLines, DeletePlan, InsertPlan, OldNew, PartLeaf, PartRouting,
     RowMark, TableRules, UpdatePlan, Wait,
@@ -2509,7 +2509,7 @@ pub fn delete_row(
     ctx: &ExecCtx,
 ) -> Result<()> {
     if t.foreign.is_some() && crate::ext::postgres_fdw::scan::is_postgres_fdw(&ctx.catalog(), t) {
-        return crate::ext::postgres_fdw::modify::delete(t, dkey, ctx);
+        return crate::ext::postgres_fdw::modify::delete(t, dkey, ctx).map(|_| ());
     }
     ssi_change(t, indexes, dkey, old, None, ctx)?;
     // heap_delete sets its xmax: writers of its unique keys wait for us now.
@@ -2879,6 +2879,13 @@ pub fn insert_prepared(
     let t = &rules.table;
     // A postgres_fdw foreign table: the row goes to the remote server.
     if t.foreign.is_some() && crate::ext::postgres_fdw::scan::is_postgres_fdw(&ctx.catalog(), t) {
+        // (A row routed here from a partitioned table: what this leaf's AFTER ROW triggers
+        // and the views' check options read comes back.)
+        let _back = (!crate::ext::postgres_fdw::modify::has_back()).then(|| {
+            let exprs: Vec<&Expr> = rules.view_checks.iter().map(|(_, e)| e).collect();
+            let tg = crate::ext::postgres_fdw::modify::tgtypes(&rules.triggers);
+            crate::ext::postgres_fdw::modify::with_back(crate::ext::postgres_fdw::modify::Back::of(t, &tg, tt::INSERT, &exprs, None))
+        });
         let row = crate::ext::postgres_fdw::modify::insert(t, p.row, ctx)?;
         if trigger::wants_after(&rules.triggers, tt::INSERT, ctx) {
             after.push(AfterRow {
@@ -2888,6 +2895,8 @@ pub fn insert_prepared(
                 key: Vec::new(),
             });
         }
+        // (The views' check options, on the row as stored there: ExecWithCheckOptions.)
+        check_view_options(rules, &row, ctx)?;
         return Ok(Inserted::Stored(row, Vec::new()));
     }
     // Others' index expressions over our in-progress row (check_exclusion_or_unique_
@@ -3266,8 +3275,18 @@ impl InsertNode {
                 }
             };
         }
-        let wants = !self.plan.returning.is_empty() || trigger::any(&rules.triggers, true, false, tt::INSERT, ctx);
-        let _ret = crate::ext::postgres_fdw::modify::returning(wants && rules.table.foreign.is_some());
+        // (A postgres_fdw table's rows come back as the remote server stored them, for
+        // RETURNING, the views' check options and AFTER ROW triggers.)
+        let _back = rules.table.foreign.is_some().then(|| {
+            let n = rules.table.columns.len();
+            crate::ext::postgres_fdw::modify::with_back(crate::ext::postgres_fdw::modify::Back::of(
+                &rules.table,
+                &crate::ext::postgres_fdw::modify::tgtypes(&rules.triggers),
+                tt::INSERT,
+                &self.plan.returning.iter().chain(rules.view_checks.iter().map(|(_, e)| e)).collect::<Vec<_>>(),
+                self.plan.sys.then_some(n),
+            ))
+        });
         let r = match resume {
             Some((None, p)) => insert_prepared(
                 rules,
@@ -3641,6 +3660,11 @@ impl Node for InsertNode {
                     self.last_table,
                 ));
                 written_tid(&key, &mut row, ctx)?;
+                // (A foreign table's row: the ctid its server returned.)
+                if self.plan.rules.table.foreign.is_some() {
+                    let n = row.len() - super::scan::NUM_SYS_COLS;
+                    row[n] = crate::ext::postgres_fdw::modify::last_ctid().unwrap_or(Value::Tid(u32::MAX, 0));
+                }
             }
             let row = with_old_new(row.clone(), self.plan.old_new, old.as_deref(), Some(&row));
             return Ok(Some(eval_all(&self.plan.returning, &row, ctx)?));
@@ -3759,6 +3783,16 @@ fn member_row(
     if t.columns.len() == n && map.iter().enumerate().all(|(i, m)| *m == Some(i)) {
         return Ok(src[..n].to_vec());
     }
+    // (A foreign member's row is its server's: the named table's columns put in place.)
+    if t.foreign.is_some() {
+        let mut row = vec![Value::Null; t.columns.len()];
+        for (i, m) in map.iter().enumerate() {
+            if let (Some(c), Some(v)) = (m, src.get(i)) {
+                row[*c] = v.clone();
+            }
+        }
+        return Ok(row);
+    }
     let bytes = ctx.txn.borrow().get_latest(dkey)?.and_then(|(_, b)| b);
     match bytes {
         Some(b) => decode_table_row(t, &b),
@@ -3768,7 +3802,7 @@ fn member_row(
 
 /// The columns an UPDATE assigns, with the generated columns computed from them
 /// (ExecGetAllUpdatedCols: UPDATE OF triggers on those fire too).
-fn updated_cols(rules: &TableRules, sets: &[(usize, crate::sql::expr::Expr)]) -> Vec<usize> {
+pub(crate) fn updated_cols(rules: &TableRules, sets: &[(usize, crate::sql::expr::Expr)]) -> Vec<usize> {
     let mut cols: Vec<usize> = sets.iter().map(|(c, _)| *c).collect();
     for (i, g) in rules.generated.iter().enumerate() {
         if let Some(g) = g
@@ -4341,8 +4375,20 @@ impl Node for UpdateNode {
                     return Ok(Some(eval_all(&self.plan.returning, &out, ctx)?));
                 }
             }
-            let set_cols: Vec<usize> = self.plan.sets.iter().map(|(c, _)| *c).collect();
-            let stored = crate::ext::postgres_fdw::modify::with_set_cols(set_cols, || update_row(rules, &dkey, &old, new, ctx))?;
+            let set_cols = crate::ext::postgres_fdw::modify::target_cols(&t, msets.iter().map(|(c, _)| *c), &rules.generated, &crate::ext::postgres_fdw::modify::tgtypes(&rules.triggers));
+            let stored = if t.foreign.is_some() {
+                // (A postgres_fdw table's row comes back as the remote server stored it, for
+                // RETURNING, the views' check options and AFTER ROW triggers; the views'
+                // check options run on it.)
+                let exprs: Vec<&Expr> = self.plan.returning.iter().chain(rules.view_checks.iter().map(|(_, e)| e)).collect();
+                let back = crate::ext::postgres_fdw::modify::Back::of(&t, &crate::ext::postgres_fdw::modify::tgtypes(&rules.triggers), tt::UPDATE, &exprs, self.plan.sys.then_some(n + 1));
+                let _back = crate::ext::postgres_fdw::modify::with_back(back);
+                let stored = crate::ext::postgres_fdw::modify::with_set_cols(set_cols, || update_row(rules, &dkey, &old, new, ctx))?;
+                check_view_options(rules, &stored, ctx)?;
+                stored
+            } else {
+                update_row(rules, &dkey, &old, new, ctx)?
+            };
             if self.plan.inh {
                 if trigger::any(&rules.triggers, true, false, tt::UPDATE, ctx) {
                     self.ordered.push((
@@ -4398,7 +4444,10 @@ impl Node for UpdateNode {
                 for (i, v) in sys_values(&new_key, xid, 0, t.oid).into_iter().enumerate() {
                     out[n + 1 + i] = v;
                 }
-                if let Some(Value::Tid(b, o)) = tid_at(&new_key, ctx)? {
+                if t.foreign.is_some() {
+                    // (A foreign table's row: the ctid its server returned.)
+                    out[n + 1] = crate::ext::postgres_fdw::modify::last_ctid().unwrap_or(Value::Tid(u32::MAX, 0));
+                } else if let Some(Value::Tid(b, o)) = tid_at(&new_key, ctx)? {
                     out[n + 1] = Value::Tid(b, o);
                 }
             }
@@ -4627,7 +4676,17 @@ impl Node for DeleteNode {
                 SelfModified::ByThis => continue,
                 SelfModified::ByLater => return Err(triggered_change("deleted")),
             }
-            delete_row(&t, indexes, &dkey, &old, ctx)?;
+            {
+                // (A postgres_fdw table's statement returns what RETURNING and AFTER ROW
+                // triggers read.)
+                let _back = t.foreign.is_some().then(|| {
+                    let exprs: Vec<&Expr> = self.plan.returning.iter().collect();
+                    let n = self.plan.table.columns.len();
+                    let back = crate::ext::postgres_fdw::modify::Back::of(&t, &crate::ext::postgres_fdw::modify::tgtypes(triggers), tt::DELETE, &exprs, self.plan.sys.then_some(n + 1));
+                    crate::ext::postgres_fdw::modify::with_back(back)
+                });
+                delete_row(&t, indexes, &dkey, &old, ctx)?;
+            }
             if self.plan.inh {
                 if trigger::any(triggers, true, false, tt::DELETE, ctx) {
                     self.ordered.push((

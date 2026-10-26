@@ -9247,6 +9247,9 @@ impl Builder<'_, '_> {
                     c.node.output = out;
                 }
                 let mut n = self.modify("Insert", t, &refname, &c.node);
+                if t.foreign.is_some() {
+                    self.foreign_insert_returning(&mut n, ip);
+                }
                 self.check_option_subplans(&mut n, &ip.rules.view_checks, t, &refname);
                 // (RETURNING's sub-selects show without VERBOSE too: its list is shown to
                 // find them.)
@@ -9578,6 +9581,9 @@ impl Builder<'_, '_> {
                     c.node.output = vec!["NULL::oid".into(), "NULL::tid".into()];
                 }
                 let mut n = self.modify("Delete", t, &refname, &c.node);
+                if t.foreign.is_some() {
+                    self.foreign_delete_returning(&mut n, dp);
+                }
                 self.returning(&mut n, &returning, t, &c.node);
                 if !returning.is_empty() {
                     let exported = if none_read {
@@ -9607,6 +9613,9 @@ impl Builder<'_, '_> {
                     }
                 }
                 n.children.push(c.node.child("Outer"));
+                if t.foreign.is_some() {
+                    self.foreign_delete_child(&mut n, dp, &refname);
+                }
                 Built::passthrough(n, Vec::new())
             }
             Plan::Merge(mp) => {
@@ -10111,7 +10120,19 @@ impl Builder<'_, '_> {
             let schema = self.ctx.catalog().schema_name(t.schema).to_string();
             let mut tmp = ExNode::default();
             self.target(&mut tmp, Some("Relation Name"), Some(&t.name), Some(&schema), r);
-            targets.push((format!("{op}{}", tmp.title), tmp.target));
+            // (A foreign member: "Foreign <op>", and VERBOSE, its statement for each row
+            // under it: ExplainForeignModify.)
+            let mut title = format!("{op}{}", tmp.title);
+            if t.foreign.is_some() {
+                title = format!("Foreign {title}");
+                if self.o.verbose
+                    && let Some(sql) = self.member_remote_sql(op, pt, t, sets, returning, sys)
+                {
+                    title.push_str("\n  Remote SQL: ");
+                    title.push_str(&sql);
+                }
+            }
+            targets.push((title, tmp.target));
         }
         let refname = if multi_target_append(source) {
             target_append(source).map(|a| self.refname(a))
@@ -10312,8 +10333,27 @@ impl Builder<'_, '_> {
             }
         }
         n.details.push(Detail::Targets(targets));
+        let mut child = child;
+        if self.o.verbose {
+            self.member_wholerows(&mut child, op, &rels);
+        }
         n.children.push(child.child("Outer"));
         Built::passthrough(n, Vec::new())
+    }
+
+    /// A postgres_fdw member's whole row goes up after its ctid: an UPDATE's, a DELETE's
+    /// under row triggers (add_row_identity_columns).
+    #[inline(never)]
+    fn member_wholerows(&self, child: &mut ExNode, op: &str, rels: &[(Arc<crate::catalog::Table>, String)]) {
+        use crate::catalog::trigger_type as tt;
+        let cat = self.ctx.catalog();
+        for (t, r) in rels {
+            let whole = op == "Update"
+                || crate::ext::postgres_fdw::modify::catalog_tgtypes(&cat, t.oid).iter().any(|ty| ty & tt::ROW != 0 && ty & tt::DELETE != 0);
+            if t.foreign.is_some() && whole && crate::ext::postgres_fdw::scan::is_postgres_fdw(&cat, t) {
+                wholerow_after_ctid(child, r);
+            }
+        }
     }
 
     /// A UNION under an ORDER BY: hashed then sorted, or (when cheaper) each arm sorted,
@@ -11716,14 +11756,89 @@ impl Builder<'_, '_> {
     /// A postgres_fdw UPDATE's statement for each row (kept out of `node`'s frame).
     #[inline(never)]
     fn foreign_update_sql(&self, n: &mut ExNode, up: &super::plan::UpdatePlan) {
+        use crate::ext::postgres_fdw::modify;
         let cat = self.ctx.catalog();
         let t = &up.rules.table;
         if self.o.verbose && crate::ext::postgres_fdw::scan::is_postgres_fdw(&cat, t) {
-            let mut cols: Vec<usize> = up.sets.iter().map(|(c, _)| *c).filter(|c| t.columns.get(*c).is_some_and(|x| x.generated.is_none())).collect();
-            cols.sort_unstable();
-            cols.dedup();
-            n.details.push(Detail::Text("Remote SQL", crate::ext::postgres_fdw::modify::update_sql(&cat, t, &cols)));
+            let cols = modify::target_cols(t, up.sets.iter().map(|(c, _)| *c), &up.rules.generated, &modify::tgtypes(&up.rules.triggers));
+            let exprs: Vec<&Expr> = up.returning.iter().chain(up.rules.view_checks.iter().map(|(_, e)| e)).collect();
+            let back = modify::Back::of(t, &modify::tgtypes(&up.rules.triggers), crate::catalog::trigger_type::UPDATE, &exprs, up.sys.then_some(t.columns.len() + 1));
+            n.details.push(Detail::Text("Remote SQL", modify::update_sql(&cat, t, &cols) + &back.sql(t)));
         }
+    }
+
+    /// A postgres_fdw INSERT's RETURNING clause, after its Remote SQL. (Out of `convert`,
+    /// whose frame is on every plan level's stack.)
+    #[inline(never)]
+    fn foreign_insert_returning(&self, n: &mut ExNode, ip: &super::plan::InsertPlan) {
+        use crate::ext::postgres_fdw::modify;
+        let t = &ip.rules.table;
+        let exprs: Vec<&Expr> = ip.returning.iter().chain(ip.rules.view_checks.iter().map(|(_, e)| e)).collect();
+        let back = modify::Back::of(t, &modify::tgtypes(&ip.rules.triggers), crate::catalog::trigger_type::INSERT, &exprs, ip.sys.then_some(t.columns.len()));
+        self.foreign_returning(n, t, back);
+    }
+
+    /// A postgres_fdw DELETE's RETURNING clause, after its Remote SQL.
+    #[inline(never)]
+    fn foreign_delete_returning(&self, n: &mut ExNode, dp: &super::plan::DeletePlan) {
+        use crate::ext::postgres_fdw::modify;
+        let t = &dp.table;
+        let exprs: Vec<&Expr> = dp.returning.iter().collect();
+        let back = modify::Back::of(t, &modify::tgtypes(&dp.triggers), crate::catalog::trigger_type::DELETE, &exprs, dp.sys.then_some(t.columns.len() + 1));
+        self.foreign_returning(n, t, back);
+    }
+
+    /// A postgres_fdw INSERT's / DELETE's RETURNING clause, after its Remote SQL.
+    #[inline(never)]
+    fn foreign_returning(&self, n: &mut ExNode, t: &crate::catalog::Table, back: crate::ext::postgres_fdw::modify::Back) {
+        let suffix = back.sql(t);
+        for d in &mut n.details {
+            if let Detail::Text("Remote SQL", s) = d {
+                s.push_str(&suffix);
+            }
+        }
+    }
+
+    /// A postgres_fdw member's statement for each row of an inheritance UPDATE / DELETE
+    /// (ExplainForeignModify), its columns matched to the parent's by name.
+    #[inline(never)]
+    fn member_remote_sql(
+        &self,
+        op: &str,
+        pt: &crate::catalog::Table,
+        t: &crate::catalog::Table,
+        sets: &[(usize, Expr)],
+        returning: &[Expr],
+        sys: bool,
+    ) -> Option<String> {
+        use crate::catalog::trigger_type as tt;
+        use crate::ext::postgres_fdw::modify;
+        let cat = self.ctx.catalog();
+        if !crate::ext::postgres_fdw::scan::is_postgres_fdw(&cat, t) {
+            return None;
+        }
+        let by_name = |c: usize| pt.columns.get(c).and_then(|pc| t.columns.iter().position(|x| !x.dropped && x.name == pc.name));
+        let trigs = modify::catalog_tgtypes(&cat, t.oid);
+        let event = if op == "Update" { tt::UPDATE } else { tt::DELETE };
+        let exprs: Vec<&Expr> = returning.iter().collect();
+        let back = modify::Back::of(pt, &trigs, event, &exprs, sys.then_some(pt.columns.len() + 1));
+        let back = modify::Back {
+            cols: if trigs.iter().any(|ty| ty & tt::ROW != 0 && ty & (tt::BEFORE | tt::INSTEAD) == 0 && ty & event != 0) {
+                (0..t.columns.len()).filter(|i| !t.columns[*i].dropped).collect()
+            } else {
+                let mut c: Vec<usize> = back.cols.iter().filter_map(|c| by_name(*c)).collect();
+                c.sort_unstable();
+                c
+            },
+            ctid: back.ctid,
+        };
+        let sql = if op == "Update" {
+            let cols = modify::target_cols(t, sets.iter().filter_map(|(c, _)| by_name(*c)), &[], &trigs);
+            modify::update_sql(&cat, t, &cols)
+        } else {
+            modify::delete_sql(&cat, t)
+        };
+        Some(sql + &back.sql(t))
     }
 
     /// An UPDATE's input: its scan, or the Foreign Update sent whole.
@@ -11735,7 +11850,40 @@ impl Builder<'_, '_> {
                 let f = self.foreign_modify("Update", &up.rules.table, refname, d.sql, &child);
                 n.children.push(f.child("Outer"));
             }
-            None => n.children.push(child.child("Outer")),
+            None => {
+                let mut child = child;
+                if self.o.verbose && crate::ext::postgres_fdw::scan::is_postgres_fdw(&self.ctx.catalog(), &up.rules.table) {
+                    wholerow_after_ctid(&mut child, refname);
+                }
+                n.children.push(child.child("Outer"))
+            }
+        }
+    }
+
+    /// A DELETE's input (`n`'s last child): its scan, or the Foreign Delete sent whole. (Its
+    /// child is taken here, not in `convert`: an ExNode moved there grows the frame every
+    /// plan level stacks.)
+    #[inline(never)]
+    fn foreign_delete_child(&self, n: &mut ExNode, dp: &super::plan::DeletePlan, refname: &str) {
+        let cat = self.ctx.catalog();
+        if !crate::ext::postgres_fdw::scan::is_postgres_fdw(&cat, &dp.table) {
+            return;
+        }
+        let Some(mut child) = n.children.pop() else { return };
+        match crate::ext::postgres_fdw::direct::delete(dp, &cat, self.ctx.fmt()) {
+            Some(d) => {
+                n.details.retain(|x| !matches!(x, Detail::Text("Remote SQL", _)));
+                let f = self.foreign_modify("Delete", &dp.table, refname, d.sql, &child);
+                n.children.push(f.child("Outer"));
+            }
+            None => {
+                use crate::catalog::trigger_type as tt;
+                let row_trigs = dp.triggers.iter().any(|b| b.trig.tgtype & tt::ROW != 0 && b.trig.tgtype & tt::DELETE != 0);
+                if self.o.verbose && row_trigs {
+                    wholerow_after_ctid(&mut child, refname);
+                }
+                n.children.push(child)
+            }
         }
     }
 
@@ -16581,6 +16729,22 @@ fn unique_for(cat: &crate::catalog::Catalog, p: &Plan, keys: &[&Expr]) -> bool {
     }
 }
 
+/// A postgres_fdw UPDATE / DELETE target's whole row (add_row_identity_columns' wholerow
+/// junk), after its ctid wherever the source's nodes return it.
+fn wholerow_after_ctid(n: &mut ExNode, refname: &str) {
+    let q = quote_ident(refname);
+    let qualified = format!("{q}.ctid");
+    if let Some(i) = n.output.iter().position(|o| *o == qualified || o == "ctid") {
+        let whole = format!("{q}.*");
+        if n.output.get(i + 1) != Some(&whole) {
+            n.output.insert(i + 1, whole);
+        }
+    }
+    for c in &mut n.children {
+        wholerow_after_ctid(c, refname);
+    }
+}
+
 fn lock_rows(child: ExNode) -> ExNode {
     let mut n = ExNode {
         key: child.key,
@@ -18058,10 +18222,13 @@ impl Render<'_> {
                     }
                 }
                 Detail::Targets(list) if text => {
+                    // (A title's further lines are its FDW's details, indented under it.)
                     for (title, _) in list {
-                        self.w.spaces(self.w.indent * 2);
-                        self.w.buf.push_str(title);
-                        self.w.buf.push('\n');
+                        for line in title.split('\n') {
+                            self.w.spaces(self.w.indent * 2);
+                            self.w.buf.push_str(line);
+                            self.w.buf.push('\n');
+                        }
                     }
                 }
                 Detail::Targets(list) => {
