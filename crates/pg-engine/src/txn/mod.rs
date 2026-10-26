@@ -348,6 +348,7 @@ impl Database {
             lock_timeout: None,
             deadlock_timeout: Duration::from_secs(1),
             deadline: None,
+            txn_deadline: None,
             lock_peer: None,
             wrote: false,
             started: Instant::now(),
@@ -766,6 +767,9 @@ pub struct Txn {
     pub deadlock_timeout: Duration,
     /// When the running statement times out (statement_timeout).
     pub deadline: Option<Instant>,
+    /// When the transaction times out (transaction_timeout, from its start or from the SET
+    /// that turned it on: the session ends).
+    pub txn_deadline: Option<Instant>,
     /// The session's own lock owner (session-level advisory locks), whose locks don't
     /// conflict with this transaction's.
     pub lock_peer: Option<u64>,
@@ -1029,7 +1033,16 @@ impl Txn {
                 return Ok(());
             }
             crate::exec::flush_live_notices();
-            let safe = self.db.ssi.wait_safe(self.id, &self.cancel)?;
+            let safe = match self.db.ssi.wait_safe(self.id, &self.waits(WaitPolicy::Block)) {
+                Ok(s) => s,
+                Err(e) => {
+                    // No snapshot was set: the next statement that needs one waits again
+                    // (Parse binding a query twice must not lose the error).
+                    self.sxact = false;
+                    self.snapshot_fixed = false;
+                    return Err(e);
+                }
+            };
             self.sxact = false;
             if safe {
                 return Ok(());
@@ -1849,6 +1862,7 @@ impl Txn {
             cancel: &self.cancel,
             lock_timeout: self.lock_timeout,
             deadline: self.deadline,
+            txn_deadline: self.txn_deadline,
             deadlock_timeout: self.deadlock_timeout,
         }
     }
@@ -1954,7 +1968,7 @@ impl Txn {
     pub fn lock_catalog_row(&mut self, class: u32, oid: u32, mode: RowLockMode, modifies: bool) -> Result<()> {
         let key = locks::catalog_row_key(class, oid);
         let name = catalog_name(class);
-        self.lock_row(class, &key, mode, WaitPolicy::Block, &|| name.to_string())?;
+        self.lock_row(class, &key, mode, WaitPolicy::Block, &|| name.to_string(), &|| None)?;
         if modifies {
             self.row_modified(&key);
         }
@@ -2081,13 +2095,13 @@ impl Txn {
     }
 
     /// Wait for the writer of an in-progress index entry: its speculative insertion to
-    /// finish (SpeculativeInsertionWait) or its (sub)transaction to end (XactLockTableWait).
-    pub fn wait_for_key_holder(&mut self, kh: &locks::KeyHolder) -> Result<()> {
-        let k = match kh.token {
-            Some(token) => locks::spectoken_key(kh.xid, token),
-            None => locks::xact_key(kh.holder),
-        };
-        self.wait_for_lock(&k)
+    /// finish (SpeculativeInsertionWait) or its (sub)transaction to end (XactLockTableWait,
+    /// whose failure carries `xact_ctx`'s CONTEXT line).
+    pub fn wait_for_key_holder(&mut self, kh: &locks::KeyHolder, xact_ctx: Option<String>) -> Result<()> {
+        match kh.token {
+            Some(token) => self.wait_for_lock(&locks::spectoken_key(kh.xid, token)),
+            None => self.wait_for_lock(&locks::xact_key(kh.holder)).map_err(|e| e.inner_context(xact_ctx)),
+        }
     }
 
     /// Wait for (sub)transaction `holder` (by its lock id) to end (XactLockTableWait).
@@ -2159,7 +2173,8 @@ impl Txn {
     }
 
     /// Lock row `key` of relation `rel` in `mode` (heap_lock_tuple's wait for conflicting
-    /// lockers); `what` names the relation. Ok(false) only for SKIP LOCKED.
+    /// lockers); `what` names the relation, `xact_ctx` is the CONTEXT line of a failed wait
+    /// for a holder's transaction. Ok(false) only for SKIP LOCKED.
     pub fn lock_row(
         &mut self,
         rel: u32,
@@ -2167,6 +2182,7 @@ impl Txn {
         mode: RowLockMode,
         policy: WaitPolicy,
         what: &dyn Fn() -> String,
+        xact_ctx: &dyn Fn() -> Option<String>,
     ) -> Result<bool> {
         let holder = self.holder();
         let xid = self.cur_xid();
@@ -2186,6 +2202,7 @@ impl Txn {
             &self.waits(policy),
             what,
             compact,
+            xact_ctx,
         )?;
         if got {
             if !self.xact_locks.contains(&holder) {
@@ -2744,12 +2761,16 @@ impl Txn {
         self.snapshot_fixed
     }
 
+    /// CHECK_FOR_INTERRUPTS: a cancel, or the transaction's timeout (which ends the session).
     pub fn check_cancel(&self) -> Result<()> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(Error::new(
                 code::QUERY_CANCELED,
                 "canceling statement due to user request",
             ));
+        }
+        if self.txn_deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(locks::transaction_timeout());
         }
         Ok(())
     }

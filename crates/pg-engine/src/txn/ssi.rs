@@ -17,7 +17,7 @@
 use crate::error::{Error, Result, code};
 use parking_lot::{Condvar, Mutex};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 /// A predicate lock target: (relation, page, tuple offset); page None: the relation,
@@ -339,7 +339,7 @@ impl Ssi {
     /// GetSafeSnapshot (SERIALIZABLE READ ONLY DEFERRABLE): wait until the writable
     /// transactions concurrent with this snapshot have finished. Ok(true): the snapshot is
     /// safe (and needs no tracking); Ok(false): it isn't, take another.
-    pub fn wait_safe(&self, id: u64, cancel: &AtomicBool) -> Result<bool> {
+    pub fn wait_safe(&self, id: u64, w: &super::locks::Waits<'_>) -> Result<bool> {
         let mut st = self.st.lock();
         if let Some(s) = st.sx.get_mut(&id) {
             s.deferrable_waiting = true;
@@ -354,14 +354,27 @@ impl Ssi {
                 st.release_one(id);
                 return Ok(true);
             }
-            if cancel.load(Ordering::Relaxed) {
+            // (GetSafeSnapshot's ProcWaitForSignal takes interrupts: a cancel, the
+            // statement's or the transaction's timeout; it's no lock: lock_timeout isn't.)
+            let now = std::time::Instant::now();
+            let fail = if w.cancel.load(Ordering::Relaxed) {
+                Some(Error::new(code::QUERY_CANCELED, "canceling statement due to user request"))
+            } else if w.deadline.is_some_and(|d| now >= d) {
+                Some(Error::new(code::QUERY_CANCELED, "canceling statement due to statement timeout"))
+            } else if w.txn_deadline.is_some_and(|d| now >= d) {
+                Some(super::locks::transaction_timeout())
+            } else {
+                None
+            };
+            if let Some(e) = fail {
                 st.release_one(id);
-                return Err(Error::new(
-                    code::QUERY_CANCELED,
-                    "canceling statement due to user request",
-                ));
+                return Err(e);
             }
-            self.cv.wait_for(&mut st, Duration::from_millis(50));
+            let mut wake = now + Duration::from_millis(50);
+            for d in [w.deadline, w.txn_deadline].into_iter().flatten() {
+                wake = wake.min(d);
+            }
+            self.cv.wait_for(&mut st, wake.saturating_duration_since(now));
         }
     }
 

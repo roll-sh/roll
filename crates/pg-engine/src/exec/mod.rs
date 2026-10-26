@@ -491,6 +491,27 @@ pub(crate) fn reads_enclosing(p: &crate::sql::plan::Plan, depth: usize) -> bool 
         || crate::sql::explain::plan_inputs(p).into_iter().any(|c| reads_enclosing(c, depth))
 }
 
+/// A statement starts: its waits' limits from the session's settings (lock_timeout,
+/// deadlock_timeout, statement_timeout's deadline from now), before anything it does can wait
+/// (its snapshot: a SERIALIZABLE READ ONLY DEFERRABLE transaction's wait for a safe one).
+/// statement_timeout only counts when it is shorter than transaction_timeout
+/// (enable_statement_timeout); transaction_timeout runs from the transaction's start, or
+/// from the first statement after a SET turned it on (assign_transaction_timeout).
+pub fn arm_statement_waits(t: &mut crate::txn::Txn, settings: &crate::session::settings::Settings) {
+    let ms = |v: i64| std::time::Duration::from_millis(v as u64);
+    let lt = settings.lock_timeout();
+    t.lock_timeout = (lt > 0).then(|| ms(lt));
+    t.deadlock_timeout = ms(settings.int("deadlock_timeout").max(1));
+    let st = settings.statement_timeout();
+    let tt = settings.int("transaction_timeout");
+    t.deadline = (st > 0 && (tt <= 0 || st < tt)).then(|| Instant::now() + ms(st));
+    if tt <= 0 {
+        t.txn_deadline = None;
+    } else if t.txn_deadline.is_none() {
+        t.txn_deadline = Some(Instant::now() + ms(tt));
+    }
+}
+
 impl<'a> ExecCtx<'a> {
     pub fn new(
         txn: &'a RefCell<Txn>,
@@ -517,17 +538,10 @@ impl<'a> ExecCtx<'a> {
         let catalog = txn.borrow().catalog();
         let path_role = usable_path(&catalog, sess, &mut search_path);
         let settings = sess.settings.borrow();
-        let timeout = settings.statement_timeout();
-        let deadline = (timeout > 0)
-            .then(|| Instant::now() + std::time::Duration::from_millis(timeout as u64));
-        // The lock waits of the statement: lock_timeout, deadlock_timeout, statement_timeout.
-        if let Ok(mut t) = txn.try_borrow_mut() {
-            let lt = settings.lock_timeout();
-            t.lock_timeout = (lt > 0).then(|| std::time::Duration::from_millis(lt as u64));
-            t.deadlock_timeout =
-                std::time::Duration::from_millis(settings.int("deadlock_timeout").max(1) as u64);
-            t.deadline = deadline;
-        }
+        // statement_timeout's deadline: armed with the statement's other waits when it
+        // started (`arm_statement_waits`, before its snapshot: a safe-snapshot wait is ended
+        // by it too).
+        let deadline = txn.try_borrow().ok().and_then(|t| t.deadline);
         crate::stack::set_max_depth_kb(match settings.max_stack_depth() {
             0 => 2048,
             kb => kb,

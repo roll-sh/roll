@@ -260,6 +260,17 @@ impl Error {
         self.context = Some(c.into().into_boxed_str());
         self
     }
+    /// A CONTEXT line of the innermost frame (an error context callback's, such as
+    /// XactLockTableWait's), ahead of any the error has.
+    pub fn inner_context(mut self, line: Option<String>) -> Self {
+        if let Some(line) = line {
+            self.context = Some(match self.context.take() {
+                Some(c) => format!("{line}\n{c}").into_boxed_str(),
+                None => line.into_boxed_str(),
+            });
+        }
+        self
+    }
     /// Add the CONTEXT lines of the frames it was raised in (outermost first), once.
     pub fn in_frames(mut self, frames: &[Frame]) -> Self {
         if self.stacked {
@@ -537,6 +548,7 @@ pub mod code {
     pub const STATEMENT_TIMEOUT: &str = "57014";
     pub const IDLE_SESSION_TIMEOUT: &str = "57P05";
     pub const IDLE_IN_TRANSACTION_SESSION_TIMEOUT: &str = "25P03";
+    pub const TRANSACTION_TIMEOUT: &str = "25P04";
 }
 
 #[macro_export]

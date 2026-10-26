@@ -209,6 +209,10 @@ pub struct Session {
     prepared_meta: HashMap<String, (String, i64, bool)>,
     pub portals: HashMap<String, Portal>,
     pub cancel: Arc<AtomicBool>,
+    /// The running statement's waits are armed (`exec::arm_statement_waits`): its
+    /// statement_timeout runs from when it started, across everything it does. Each
+    /// statement of a query string and each extended-protocol message starts it afresh.
+    waits_armed: bool,
     /// NOTICE / WARNING messages for the client.
     pub notices: Vec<Error>,
     /// LISTEN channels.
@@ -338,6 +342,7 @@ impl Session {
             prepared_meta: HashMap::new(),
             portals: HashMap::new(),
             cancel: Arc::new(AtomicBool::new(false)),
+            waits_armed: false,
             notices: Vec::new(),
             infer_params: false,
             multi_stmt: false,
@@ -391,6 +396,50 @@ impl Session {
                 (t.xid_if_assigned(), xmin)
             }
             None => (None, None),
+        }
+    }
+
+    /// When a session waiting for its client's next query (after ReadyForQuery) times out,
+    /// and the FATAL it ends with (ProcessInterrupts' idle timeouts): in a transaction
+    /// block, idle_in_transaction_session_timeout or the transaction's transaction_timeout,
+    /// whichever comes first; outside one, idle_session_timeout.
+    pub fn idle_timeout(&self) -> Option<(std::time::Instant, Error)> {
+        let st = self.state.settings.borrow();
+        let after = |v: i64| std::time::Instant::now() + std::time::Duration::from_millis(v as u64);
+        if self.status == TxnStatus::Idle {
+            let v = st.int("idle_session_timeout");
+            return (v > 0).then(|| {
+                let e = Error::new(
+                    code::IDLE_SESSION_TIMEOUT,
+                    "terminating connection due to idle-session timeout",
+                );
+                (after(v), e.fatal())
+            });
+        }
+        let v = st.int("idle_in_transaction_session_timeout");
+        let idle = (v > 0).then(|| {
+            let e = Error::new(
+                code::IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
+                "terminating connection due to idle-in-transaction timeout",
+            );
+            (after(v), e.fatal())
+        });
+        // (transaction_timeout SET in the block and not yet armed by a statement runs from
+        // now.)
+        let tt = st.int("transaction_timeout");
+        let txn = self.txn.as_ref().and_then(|t| {
+            let mut t = t.borrow_mut();
+            if tt <= 0 {
+                t.txn_deadline = None;
+            } else if t.txn_deadline.is_none() {
+                t.txn_deadline = Some(after(tt));
+            }
+            t.txn_deadline
+        });
+        match (idle, txn) {
+            (Some((i, e)), Some(d)) if i <= d => Some((i, e)),
+            (_, Some(d)) => Some((d, crate::txn::locks::transaction_timeout())),
+            (idle, None) => idle,
         }
     }
 
@@ -469,6 +518,12 @@ impl Session {
         let lt = self.state.settings.borrow().lock_timeout();
         if lt > 0 {
             txn.lock_timeout = Some(std::time::Duration::from_millis(lt as u64));
+        }
+        // StartTransaction: transaction_timeout runs from here.
+        let tt = self.state.settings.borrow().int("transaction_timeout");
+        if tt > 0 {
+            txn.txn_deadline =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(tt as u64));
         }
         txn_settings(&self.state, iso, ro);
         if self.status == TxnStatus::Idle {
@@ -734,6 +789,9 @@ impl Session {
             if t.isolation == crate::txn::Isolation::Serializable && t.read_only {
                 t.deferrable = self.state.settings.borrow().bool("transaction_deferrable");
             }
+            if !std::mem::replace(&mut self.waits_armed, true) {
+                crate::exec::arm_statement_waits(&mut t, &self.state.settings.borrow());
+            }
             t.begin_statement(!self.state.no_snapshot.get())?;
         }
         // (The catalog the statement reads, which `begin_statement` took.)
@@ -874,6 +932,7 @@ impl Session {
 
     /// Run one statement of a simple query.
     pub fn execute(&mut self, p: &Arc<Prepared>) -> Result<Outcome> {
+        self.waits_armed = false;
         self.execute_with(p, &[], 0)
     }
 
@@ -1611,6 +1670,7 @@ impl Session {
         // (`pg_temp` is this session's while it binds, on a thread another session may
         // have run on: an embedder's Parse / Describe before any execute.)
         crate::catalog::set_session_temp_schema(&self.state.temp_schema());
+        self.waits_armed = false;
         if !name.is_empty() && self.prepared.contains_key(name) {
             return Err(Error::new(
                 code::DUPLICATE_PREPARED_STATEMENT,
@@ -1914,6 +1974,7 @@ impl Session {
         formats: &[i16],
         result_formats: Vec<i16>,
     ) -> Result<()> {
+        self.waits_armed = false;
         let r = crate::stack::grow(|| self.bind_inner(portal, stmt, params, formats, result_formats));
         if r.is_err() {
             self.on_error();
@@ -2082,6 +2143,7 @@ impl Session {
 
     /// Execute message. Returns the outcome and whether the portal was suspended (more rows).
     pub fn execute_portal(&mut self, portal: &str, max_rows: usize) -> Result<(Outcome, bool)> {
+        self.waits_armed = false;
         crate::stack::grow(|| self.execute_portal_here(portal, max_rows))
     }
 

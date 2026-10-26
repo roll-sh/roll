@@ -73,7 +73,13 @@ custom extension installation test installs tablefunc and xml2).
 Locking and timeouts (agent 34): statement_timeout and pg_cancel_backend don't end a row-lock
 wait, SET LOCAL lock_timeout doesn't stop an UPDATE waiting on a row (ActiveRecord, Hibernate),
 idle_in_transaction_session_timeout isn't enforced, serializable write skew in ActiveRecord's
-two cases.
+two cases. (Round 20, agent 73: the lock waits end over the simple and the extended
+protocol since round 17's lock manager, now checked by `tests/wire_waits.rs` for every kind
+of wait against PostgreSQL's transcript; idle_in_transaction_session_timeout,
+transaction_timeout and idle_session_timeout are enforced; a safe-snapshot wait's
+statement_timeout and extended-protocol cancel, and a cancel arriving while idle, are fixed.
+psycopg 3's, asyncpg's and pgx's cancel, timeout, interrupt, deadlock and notification tests
+(`-k` / `-run` on those words: 42, 31 and 110 tests) pass on both servers, no difference.)
 
 Engine, open:
 - Hibernate BulkManipulationTest.testUpdateWithWhereExistsSubquery: "column #32 out of range"

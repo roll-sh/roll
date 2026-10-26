@@ -572,7 +572,7 @@ impl LockRowsNode {
 
 impl Node for LockRowsNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
-        use super::scan::{Locked, lock_row};
+        use super::scan::{Locked, Xltw, lock_row};
         'rows: loop {
             let Some(row) = self.node.next(ctx)? else {
                 return Ok(None);
@@ -597,7 +597,7 @@ impl Node for LockRowsNode {
                     tests.push(Some((key, None)));
                     continue;
                 };
-                match lock_row(t, &key, mark, wait, ctx)? {
+                match lock_row(t, &key, mark, wait, Xltw::Lock, ctx)? {
                     Locked::Skip => continue 'rows,
                     Locked::Same => tests.push(Some((key, None))),
                     Locked::Newer(b) => {
@@ -685,7 +685,7 @@ impl Node for CatalogLockNode {
             let got = ctx
                 .txn
                 .borrow_mut()
-                .lock_row(self.class, &key, self.mode, policy, &|| name.clone())?;
+                .lock_row(self.class, &key, self.mode, policy, &|| name.clone(), &|| None)?;
             if got {
                 return Ok(Some(row));
             }

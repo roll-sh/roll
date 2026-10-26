@@ -2462,7 +2462,7 @@ impl Node for ScanNode {
                 continue;
             }
             if let Some((mark, wait)) = self.plan.mark {
-                match lock_row(&self.plan.table, &key, mark, wait, ctx)? {
+                match lock_row(&self.plan.table, &key, mark, wait, Xltw::Lock, ctx)? {
                     Locked::Skip => continue,
                     Locked::Same => {}
                     Locked::Newer(fresh) => {
@@ -2558,9 +2558,49 @@ pub fn tid_recheck(
 pub const MOVED_TO_PARTITION: &str =
     "tuple to be locked was already moved to another partition due to concurrent update";
 
-/// Lock a row, then check whether it changed after our snapshot.
-pub fn lock_row(t: &Table, key: &[u8], mark: RowMark, wait: Wait, ctx: &ExecCtx) -> Result<Locked> {
-    lock_row_mode(t, key, lock_mode(mark), wait, ctx)
+/// Lock a row, then check whether it changed after our snapshot. `oper` is what the lock is
+/// for, named by the CONTEXT of a failed wait for the holder's transaction.
+pub fn lock_row(t: &Table, key: &[u8], mark: RowMark, wait: Wait, oper: Xltw, ctx: &ExecCtx) -> Result<Locked> {
+    lock_row_mode(t, key, lock_mode(mark), wait, oper, ctx)
+}
+
+/// XLTW_Oper: what a wait for a row's locker or writer was for.
+#[derive(Clone, Copy, Debug)]
+pub enum Xltw {
+    /// heap_update.
+    Update,
+    /// heap_delete.
+    Delete,
+    /// heap_lock_tuple (SELECT ... FOR ..., ON CONFLICT DO UPDATE, foreign key checks).
+    Lock,
+    /// A unique index's check of a row being inserted (_bt_check_unique), in the index.
+    InsertIndex,
+}
+
+/// XactLockTableWait's error context callback: the CONTEXT line of a failed wait (a
+/// timeout, cancel or deadlock) for the transaction holding `key` of `rel` (a table, or
+/// the index for `InsertIndex`), naming the version our snapshot sees by its TID. Read
+/// only when the wait fails, without the transaction (it is borrowed while it waits).
+pub fn xltw_context<'a>(oper: Xltw, rel: &'a str, key: &'a [u8], ctx: &ExecCtx) -> impl Fn() -> Option<String> + 'a {
+    let db = ctx.sess.db.clone();
+    let ts = ctx.txn.try_borrow().map_or(u64::MAX >> 1, |t| t.snapshot_ts());
+    move || {
+        let bytes = db.store.get(key, ts).ok().flatten();
+        let (b, o) = match bytes.as_deref().and_then(stored_tid) {
+            Some(t) => t,
+            None => match ctid_of(key) {
+                Value::Tid(b, o) => (b, o),
+                _ => return None,
+            },
+        };
+        let verb = match oper {
+            Xltw::Update => "updating",
+            Xltw::Delete => "deleting",
+            Xltw::Lock => "locking",
+            Xltw::InsertIndex => "inserting index",
+        };
+        Some(format!("while {verb} tuple ({b},{o}) in relation \"{rel}\""))
+    }
 }
 
 /// `lock_row` in a row lock strength.
@@ -2569,13 +2609,15 @@ pub fn lock_row_mode(
     key: &[u8],
     mode: RowLockMode,
     wait: Wait,
+    oper: Xltw,
     ctx: &ExecCtx,
 ) -> Result<Locked> {
     ctx.txn.borrow_mut().output_cid();
+    let xact_ctx = xltw_context(oper, &t.name, key, ctx);
     let got = ctx
         .txn
         .borrow_mut()
-        .lock_row(t.oid, key, mode, wait_policy(wait), &|| t.name.clone())?;
+        .lock_row(t.oid, key, mode, wait_policy(wait), &|| t.name.clone(), &xact_ctx)?;
     if !got {
         return Ok(Locked::Skip);
     }

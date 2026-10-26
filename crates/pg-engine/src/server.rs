@@ -128,23 +128,53 @@ pub fn set_idle_hook(f: fn()) {
 }
 
 /// A connection's reading side: a read that waits past `IDLE_TRIM` runs the idle hook (once
-/// until the client sends something again) and goes on waiting.
+/// until the client sends something again) and goes on waiting; one waiting past `deadline`
+/// (an idle timeout) fails with `IdleTimeout`.
 struct IdleRead {
     s: TcpStream,
     armed: bool,
+    deadline: Option<std::time::Instant>,
 }
+
+/// The error a read past `IdleRead::deadline` fails with.
+#[derive(Debug)]
+struct IdleTimeout;
+
+impl std::fmt::Display for IdleTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("idle timeout")
+    }
+}
+
+impl std::error::Error for IdleTimeout {}
 
 impl IdleRead {
     fn new(s: TcpStream) -> std::io::Result<IdleRead> {
         if IDLE_HOOK.get().is_some() {
             s.set_read_timeout(Some(IDLE_TRIM))?;
         }
-        Ok(IdleRead { s, armed: true })
+        Ok(IdleRead { s, armed: true, deadline: None })
+    }
+
+    /// The socket's read timeout: the idle hook's period, and no later than the deadline.
+    fn wait_for(&self) -> Option<std::time::Duration> {
+        let hook = IDLE_HOOK.get().map(|_| IDLE_TRIM);
+        let left = self.deadline.map(|d| {
+            d.saturating_duration_since(std::time::Instant::now())
+                .max(std::time::Duration::from_millis(1))
+        });
+        match (hook, left) {
+            (Some(h), Some(l)) => Some(h.min(l)),
+            (h, l) => h.or(l),
+        }
     }
 }
 
 impl Read for IdleRead {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.deadline.is_some() {
+            self.s.set_read_timeout(self.wait_for())?;
+        }
         loop {
             match self.s.read(buf) {
                 Ok(n) => {
@@ -157,10 +187,16 @@ impl Read for IdleRead {
                         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                     ) =>
                 {
+                    if self.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        return Err(std::io::Error::other(IdleTimeout));
+                    }
                     if std::mem::take(&mut self.armed)
                         && let Some(h) = IDLE_HOOK.get()
                     {
                         h();
+                    }
+                    if self.deadline.is_some() {
+                        self.s.set_read_timeout(self.wait_for())?;
                     }
                 }
                 Err(e) => return Err(e),
@@ -183,6 +219,9 @@ struct Conn {
     terminated: Option<Arc<AtomicBool>>,
     /// The socket, for what goes out while a statement runs (`WireSink`).
     live: std::rc::Rc<TcpStream>,
+    /// ReadyForQuery went out and no message came since: the session is idle, and its idle
+    /// timeouts run (only then: not between the messages of an extended query).
+    at_ready: bool,
 }
 
 impl Conn {
@@ -207,8 +246,24 @@ impl Conn {
 
     /// A regular message: (type, body).
     fn read_message(&mut self) -> std::io::Result<Option<(u8, Vec<u8>)>> {
+        self.read_message_by(None)
+    }
+
+    /// `read_message`, its first byte awaited no later than `deadline` (an idle timeout:
+    /// the read fails with `IdleTimeout`).
+    fn read_message_by(
+        &mut self,
+        deadline: Option<std::time::Instant>,
+    ) -> std::io::Result<Option<(u8, Vec<u8>)>> {
         let mut t = [0u8; 1];
-        if self.rd.read(&mut t)? == 0 {
+        self.rd.get_mut().deadline = deadline;
+        let first = self.rd.read(&mut t);
+        if deadline.is_some() {
+            let r = self.rd.get_mut();
+            r.deadline = None;
+            r.s.set_read_timeout(IDLE_HOOK.get().map(|_| IDLE_TRIM))?;
+        }
+        if first? == 0 {
             return Ok(None);
         }
         let len = self.read_i32()?;
@@ -526,6 +581,7 @@ fn handle(
         fatal: false,
         terminated: None,
         live: std::rc::Rc::new(stream.try_clone()?),
+        at_ready: false,
     };
     // Notices a statement raises before it waits for a lock go out then, as Postgres
     // flushes each notice: after what the connection had buffered (`Conn::unflushed`).
@@ -1016,10 +1072,24 @@ fn message_loop(
     // After an error in extended protocol, messages are skipped until Sync.
     let mut skipping = false;
     loop {
-        let Some((t, body)) = c.read_message()? else {
+        let idle = if std::mem::take(&mut c.at_ready) { s.idle_timeout() } else { None };
+        let msg = match c.read_message_by(idle.as_ref().map(|i| i.0)) {
+            Ok(m) => m,
+            Err(e) if e.get_ref().is_some_and(|e| e.is::<IdleTimeout>()) => {
+                // The timeout's FATAL, then the session ends (its transaction rolls back).
+                c.error(&idle.unwrap().1);
+                return c.flush();
+            }
+            Err(e) => return Err(e),
+        };
+        let Some((t, body)) = msg else {
             return Ok(());
         };
         s.notifications_busy();
+        // A cancel that came while the session waited for this message cancels nothing
+        // (ProcessInterrupts ignores QueryCancelPending while DoingCommandRead). (Cleared
+        // before the check: a termination sets `terminated` before the cancel flag.)
+        s.cancel.store(false, Ordering::Relaxed);
         if terminated.load(Ordering::Relaxed) {
             return Ok(());
         }
@@ -1193,6 +1263,7 @@ fn ready_for_query(c: &mut Conn, s: &Session) -> std::io::Result<()> {
     }
     c.ready(s.status())?;
     s.notifications_idle();
+    c.at_ready = true;
     Ok(())
 }
 

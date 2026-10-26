@@ -861,6 +861,17 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   quiet temporary-object cleanup at session end, and no fixed cap on PL/pgSQL nesting; TOAST
   relations nameable and locked (D2). 120 specs, 1,646 of 1,648 permutations; what's left
   is classified there (two corner cases).
+  Round 20 (agent 73): how clients end waits, which the suite doesn't see (its steps go over
+  the simple protocol, its errors print tersely). `tests/wire_waits.rs` ends every kind of
+  wait by statement_timeout, lock_timeout, SET LOCAL lock_timeout and a CancelRequest, over the
+  simple and the extended protocol, against PostgreSQL's transcript (`wire_waits.expected`).
+  Fixed: a SERIALIZABLE DEFERRABLE safe-snapshot wait ignored statement_timeout and lost an
+  extended-protocol cancel; a statement's timeout restarted with each of its phases (waits are
+  armed once per statement, `exec::arm_statement_waits`); a cancel arriving while idle in a
+  block canceled the next statement; row and unique-key waits had no XactLockTableWait CONTEXT
+  (`scan::Xltw`); idle_in_transaction_session_timeout, transaction_timeout and
+  idle_session_timeout were ignored (the FATALs, idle or running: `server.rs` `IdleRead`,
+  `Session::idle_timeout`, `Txn::txn_deadline`). isolation STATUS.md has the details.
 
 ## Repository layout
 

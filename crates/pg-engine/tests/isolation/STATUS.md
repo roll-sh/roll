@@ -234,6 +234,46 @@ it implemented over the old lock manager.
   the SLRU when shared memory runs out (the engine keeps them until no snapshot needs them, the
   same conflicts), two-phase commit and parallel-worker sharing of a serializable transaction.
 
+## Waits a client ends: timeouts and cancel (round 20, agent 73)
+
+isolationtester cancels steps with the simple protocol and prints errors tersely, so the suite
+doesn't see how drivers end waits. `tests/wire_waits.rs` does: every kind of wait (row locks
+FOR UPDATE / SHARE, unique-key waits, relation locks, advisory session / transaction locks, a
+SERIALIZABLE READ ONLY DEFERRABLE transaction's wait for a safe snapshot, pg_sleep, a long
+scan, a FOR UPDATE portal fetched one row per Execute) ended by statement_timeout,
+lock_timeout, SET LOCAL lock_timeout in a block, and a CancelRequest from another connection,
+over the simple and the extended protocol (tokio-postgres: Parse / Bind / Execute); then the
+connection's next statement and the waiter's retry once the hold ends. The transcript is
+PostgreSQL 18.6's (`wire_waits.expected`, recorded from it: `WIRE_WAITS_REF`; tuple positions
+masked). At 9407d0ee lock waits already ended right in both protocols (agent 51's driver
+failures predate round 17's lock manager); what differed:
+
+- **A safe-snapshot wait ignored statement_timeout**, and over the extended protocol a cancel
+  of it was lost: Parse binds the query (exec_parse_message takes the snapshot, so the wait is
+  there), the canceled bind fell back to binding again for its parameter types, and that bind
+  found the snapshot already set and skipped the wait. The statement's waits (lock_timeout,
+  deadlock_timeout, statement_timeout's deadline) are armed once per statement, before its
+  snapshot (`exec::arm_statement_waits`, `Session::waits_armed`: each statement of a query
+  string and each extended-protocol message starts afresh; a statement's later phases no longer
+  restart its timeout), the wait takes them, and a failed wait leaves no snapshot behind.
+- **A cancel arriving while the session was idle in a transaction block** stayed pending and
+  canceled a later statement (ProcessInterrupts ignores it while DoingCommandRead): cleared
+  when a message arrives.
+- **XactLockTableWait's CONTEXT**: a wait for a row's locker or writer that ends in a timeout,
+  cancel or deadlock says `while updating / deleting / locking tuple (b,o) in relation "t"`
+  (`scan::Xltw`, `xltw_context`: the version the waiter's snapshot sees), a unique check's
+  `while inserting index tuple (b,o) in relation "t_pkey"` (its own new tuple; the stored TID
+  when it has one, else the key's stand-in, as for ctid). The tuple lock's wait has none, as
+  in Postgres.
+- **idle_in_transaction_session_timeout, transaction_timeout and idle_session_timeout** were
+  accepted and ignored. Now: waiting for the next query after ReadyForQuery (not between an
+  extended query's messages), a session past idle_in_transaction_session_timeout (in a block,
+  failed or not) or idle_session_timeout (outside one) ends with Postgres's FATAL (25P03 /
+  57P05); transaction_timeout (`Txn::txn_deadline`, from the transaction's start, or from the
+  first statement after a SET turned it on) ends it idle or running, in lock and safe-snapshot
+  waits, pg_sleep and scans (25P04; a statement_timeout not shorter than it doesn't arm, as
+  enable_statement_timeout). `server.rs` `IdleRead::deadline`, `Session::idle_timeout`.
+
 ## What round 18 changed (agent 56)
 
 What UPDATE, DELETE, MERGE, INSERT ... ON CONFLICT and foreign key checks see and change

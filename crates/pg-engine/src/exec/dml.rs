@@ -4,7 +4,7 @@
 
 use super::scan::{
     Locked, NUM_SYS_COLS, data_key, decode_table_row, encode_table_row_at, index_entry_key,
-    index_value_prefix, lock_row, lock_row_mode, sys_values,
+    index_value_prefix, lock_row, lock_row_mode, sys_values, Xltw,
 };
 use super::trigger::{self, AfterRow};
 use super::{BoxNode, ExecCtx, Node, Row, eval_all};
@@ -760,6 +760,8 @@ pub enum Dirty {
 pub struct Entering<'a> {
     pub token: Option<u32>,
     pub row: Option<&'a Arc<Vec<Value>>>,
+    /// The row's storage key (its heap tuple, named by a wait's CONTEXT).
+    pub key: Option<&'a [u8]>,
 }
 
 /// The lock of a unique key (`locks::UNIQUE_KEY`): per key value, or the whole index under a
@@ -834,7 +836,8 @@ fn find_conflict(
                 if dirty == Dirty::Partial {
                     return Ok(Some(Vec::new()));
                 }
-                ctx.txn.borrow_mut().wait_for_key_holder(&kh)?;
+                let line = unique_wait_context(t, bix, entering, None, ctx);
+                ctx.txn.borrow_mut().wait_for_key_holder(&kh, line)?;
                 continue;
             }
             if let Some(e) = entering {
@@ -861,10 +864,43 @@ fn find_conflict(
             if dirty == Dirty::Partial {
                 return Ok(Some(dkey));
             }
-            ctx.txn.borrow_mut().wait_for_xact(h)?;
+            let line = unique_wait_context(t, bix, entering, Some(&dkey), ctx);
+            ctx.txn.borrow_mut().wait_for_xact(h).map_err(|e| e.inner_context(line))?;
             continue;
         }
         return Ok(Some(dkey));
+    }
+}
+
+/// XactLockTableWait's CONTEXT for a unique check's wait (XLTW_InsertIndex): an entry being
+/// added names its own heap tuple in the index (_bt_check_unique); ON CONFLICT's pre-check
+/// names the tuple it found in the table (check_exclusion_or_unique_constraint; not when
+/// that is another transaction's entry in progress, whose row key isn't kept).
+fn unique_wait_context(
+    t: &Table,
+    bix: &BoundIndex,
+    entering: Option<&Entering>,
+    found: Option<&[u8]>,
+    ctx: &ExecCtx,
+) -> Option<String> {
+    let (rel, key) = match entering {
+        Some(e) => (bix.index.name.as_str(), e.key?),
+        None => (t.name.as_str(), found?),
+    };
+    let (b, o) = row_tid(key, ctx);
+    Some(format!("while inserting index tuple ({b},{o}) in relation \"{rel}\""))
+}
+
+/// A row version's heap TID as its ctid shows it: the one stored with it, else the key's
+/// stand-in (a row not written yet: the unique checks run before the heap write).
+fn row_tid(key: &[u8], ctx: &ExecCtx) -> (u32, u16) {
+    let stored = ctx.txn.try_borrow().ok().and_then(|x| x.get(key).ok().flatten());
+    if let Some(tid) = stored.as_deref().and_then(super::scan::stored_tid) {
+        return tid;
+    }
+    match super::scan::ctid_of(key) {
+        Value::Tid(b, o) => (b, o),
+        _ => (0, 1),
     }
 }
 
@@ -1191,7 +1227,7 @@ fn defer_recheck(
     let Some(con) = bix.constraint.as_ref().filter(|c| c.deferral.0) else {
         return Ok(false);
     };
-    if index_conflict(t, bix, vals, exclude, Some(&Entering { token: None, row: None }), Dirty::Partial, false, ctx)?.is_none() {
+    if index_conflict(t, bix, vals, exclude, Some(&Entering { token: None, row: None, key: Some(dkey) }), Dirty::Partial, false, ctx)?.is_none() {
         return Ok(true);
     }
     let deferred = ctx.txn.borrow().is_deferred(con.oid, con.deferral);
@@ -1216,7 +1252,7 @@ fn recheck_row(t: &Table, bix: &BoundIndex, dkey: &[u8], ctx: &ExecCtx) -> Resul
     let Some(vals) = index_values(bix, &row, ctx)? else {
         return Ok(());
     };
-    if let Some((_, other)) = index_conflict(t, bix, &vals, Some(dkey), Some(&Entering { token: None, row: None }), Dirty::Wait, false, ctx)? {
+    if let Some((_, other)) = index_conflict(t, bix, &vals, Some(dkey), Some(&Entering { token: None, row: None, key: Some(dkey) }), Dirty::Wait, false, ctx)? {
         return Err(index_violation(t, bix, &vals, other.as_deref(), ctx));
     }
     Ok(())
@@ -1650,12 +1686,13 @@ fn period_agg(
     let mut any = false;
     for (leaf, lcols, rows) in scan_tree(parent, cols, &vals[..n - 1], ctx, false)? {
         for (dkey, _) in rows {
+            let xact_ctx = super::scan::xltw_context(Xltw::Lock, &leaf.name, &dkey, ctx);
             let got = ctx
                 .txn
                 .borrow_mut()
                 .lock_row(leaf.oid, &dkey, RowLockMode::KeyShare, WaitPolicy::Block, &|| {
                     leaf.name.clone()
-                })?;
+                }, &xact_ctx)?;
             if !got {
                 continue;
             }
@@ -1943,7 +1980,7 @@ fn find_parent(
             if ctx.txn.borrow().get(dkey)?.is_none() {
                 return Ok(false);
             }
-            return match super::scan::lock_row_mode(parent, dkey, RowLockMode::KeyShare, Wait::Block, ctx) {
+            return match super::scan::lock_row_mode(parent, dkey, RowLockMode::KeyShare, Wait::Block, Xltw::Lock, ctx) {
                 Ok(Locked::Same) => Ok(true),
                 Ok(_) => Ok(false),
                 Err(e) if e.code == code::SERIALIZATION_FAILURE => Err(Error::new(
@@ -1955,12 +1992,13 @@ fn find_parent(
         }
         // (The version the latest snapshot sees, before any wait.)
         let seen = ctx.txn.borrow().get_latest(dkey)?.map(|(ts, _)| ts);
+        let xact_ctx = super::scan::xltw_context(Xltw::Lock, &parent.name, dkey, ctx);
         let got = ctx
             .txn
             .borrow_mut()
             .lock_row(parent.oid, dkey, RowLockMode::KeyShare, WaitPolicy::Block, &|| {
                 parent.name.clone()
-            })?;
+            }, &xact_ctx)?;
         if !got {
             return Ok(false);
         }
@@ -2327,8 +2365,9 @@ fn fk_parent_action(
                     Vec::new()
                 };
                 let mut queue = Vec::new();
+                let oper = if ev == tt::UPDATE { Xltw::Update } else { Xltw::Delete };
                 for (dkey, crow) in children {
-                    if let Locked::Skip = lock_row(&leaf, &dkey, RowMark::Update, Wait::Block, ctx)?
+                    if let Locked::Skip = lock_row(&leaf, &dkey, RowMark::Update, Wait::Block, oper, ctx)?
                     {
                         continue;
                     }
@@ -2724,7 +2763,7 @@ pub fn update_row_rls(
         if defer_recheck(t, bix, &nv, &new_key, Some(dkey), ctx)? {
             continue;
         }
-        let entering = Entering { token: None, row: None };
+        let entering = Entering { token: None, row: None, key: Some(new_key.as_slice()) };
         if let Some((_, other)) =
             index_conflict(t, bix, &nv, Some(dkey), Some(&entering), Dirty::Wait, false, ctx)?
         {
@@ -3071,7 +3110,7 @@ fn index_entries_checked(
                         let nondet = unkeyed_nondet(t, bix, ctx);
                         let lk = unique_lock_key(t, bix, v, !nondet.is_empty());
                         let had = ctx.txn.borrow().holds_lock_mode(&lk, LockMode::Exclusive);
-                        let entering = Entering { token: Some(token), row: shared };
+                        let entering = Entering { key: Some(p.dkey.as_slice()), token: Some(token), row: shared };
                         let found = find_conflict(t, bix, v, None, Some(&entering), Dirty::Partial, false, ctx)?;
                         if ctx.txn.borrow().holds_lock_mode(&lk, LockMode::Exclusive) {
                             if !had {
@@ -3087,7 +3126,7 @@ fn index_entries_checked(
                 _ => {
                     check_without_overlaps(t, bix, v)?;
                     if !defer_recheck(t, bix, v, &p.dkey, None, ctx)? {
-                        let entering = Entering { token: None, row: shared };
+                        let entering = Entering { key: Some(p.dkey.as_slice()), token: None, row: shared };
                         if let Some((_, other)) =
                             index_conflict(t, bix, v, None, Some(&entering), Dirty::Wait, false, ctx)?
                         {
@@ -3559,12 +3598,14 @@ impl InsertNode {
                 // ours (TM_Updated / TM_Deleted), the insertion starts over in READ
                 // COMMITTED; a snapshot transaction fails.
                 let found = ctx.txn.borrow().get_latest(&c.existing)?.map(|(ts, _)| ts);
+                let xact_ctx = super::scan::xltw_context(Xltw::Lock, &name, &c.existing, ctx);
                 ctx.txn.borrow_mut().lock_row(
                     t.oid,
                     &c.existing,
                     mode,
                     WaitPolicy::Block,
                     &|| name.clone(),
+                    &xact_ctx,
                 )?;
                 let latest = ctx.txn.borrow().get_latest(&c.existing)?;
                 let snapshot = ctx.txn.borrow().isolation.txn_snapshot();
@@ -4401,7 +4442,7 @@ impl Node for UpdateNode {
                 SelfModified::ByThis => continue,
                 SelfModified::ByLater => return Err(triggered_change("updated")),
             }
-            let old: Row = match lock_row(&t, &dkey, RowMark::NoKeyUpdate, Wait::Block, ctx)? {
+            let old: Row = match lock_row(&t, &dkey, RowMark::NoKeyUpdate, Wait::Block, Xltw::Update, ctx)? {
                 Locked::Skip => continue,
                 Locked::Same => match map {
                     Some(map) => member_row(&t, map, &src, &dkey, ctx)?,
@@ -4459,7 +4500,7 @@ impl Node for UpdateNode {
             // SHARE lockers, foreign key checks among them, conflict with).
             let keys = crate::exec::scan::key_columns(&t, &ctx.catalog());
             if keys.iter().any(|&i| old.get(i) != new.get(i)) {
-                lock_row_mode(&t, &dkey, RowLockMode::Update, Wait::Block, ctx)?;
+                lock_row_mode(&t, &dkey, RowLockMode::Update, Wait::Block, Xltw::Update, ctx)?;
             }
             // A row leaving its partition moves through the partitioned table updated.
             if let Some(routing) = &self.plan.route {
@@ -4803,7 +4844,7 @@ impl Node for DeleteNode {
                     return Err(triggered_change(if before { "updated" } else { "deleted" }));
                 }
             }
-            let old: Row = match lock_row(&t, &dkey, RowMark::Update, Wait::Block, ctx)? {
+            let old: Row = match lock_row(&t, &dkey, RowMark::Update, Wait::Block, Xltw::Delete, ctx)? {
                 Locked::Skip => continue,
                 Locked::Same => match map {
                     Some(map) => member_row(&t, map, &src, &dkey, ctx)?,

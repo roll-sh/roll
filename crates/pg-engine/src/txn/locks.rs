@@ -143,7 +143,14 @@ pub struct Waits<'a> {
     pub lock_timeout: Option<Duration>,
     /// When the statement times out (statement_timeout).
     pub deadline: Option<Instant>,
+    /// When the transaction times out (transaction_timeout: the session ends).
+    pub txn_deadline: Option<Instant>,
     pub deadlock_timeout: Duration,
+}
+
+/// transaction_timeout passed: ProcessInterrupts ends the session.
+pub fn transaction_timeout() -> Error {
+    Error::new(code::TRANSACTION_TIMEOUT, "terminating connection due to transaction timeout").fatal()
 }
 
 impl<'a> Waits<'a> {
@@ -153,6 +160,7 @@ impl<'a> Waits<'a> {
             cancel,
             lock_timeout: None,
             deadline: None,
+            txn_deadline: None,
             deadlock_timeout: Duration::from_secs(1),
         }
     }
@@ -163,6 +171,7 @@ impl<'a> Waits<'a> {
             cancel: self.cancel,
             lock_timeout: self.lock_timeout,
             deadline: self.deadline,
+            txn_deadline: self.txn_deadline,
             deadlock_timeout: self.deadlock_timeout,
         }
     }
@@ -679,6 +688,8 @@ impl LockManager {
                     code::QUERY_CANCELED,
                     "canceling statement due to statement timeout",
                 ))
+            } else if w.txn_deadline.is_some_and(|d| now >= d) {
+                Some(transaction_timeout())
             } else if !checked && now >= start + w.deadlock_timeout {
                 checked = true;
                 match self.deadlock_check(&mut s, proc) {
@@ -706,6 +717,9 @@ impl LockManager {
                 wake = wake.min(start + t);
             }
             if let Some(d) = w.deadline {
+                wake = wake.min(d);
+            }
+            if let Some(d) = w.txn_deadline {
                 wake = wake.min(d);
             }
             self.cv.wait_until(&mut s, wake.max(now + Duration::from_millis(1)));
@@ -877,6 +891,7 @@ impl LockManager {
         w: &Waits<'_>,
         what: &dyn Fn() -> String,
         mut compact: Option<&mut bool>,
+        xact_ctx: &dyn Fn() -> Option<String>,
     ) -> Result<bool> {
         let mut have_tuple_lock = false;
         let mut first = true;
@@ -994,7 +1009,9 @@ impl LockManager {
                     }
                     Err(e) => {
                         release_tuple(self, have_tuple_lock);
-                        return Err(e);
+                        // XactLockTableWait's error context callback ("while updating
+                        // tuple ..."): only this wait has it, not the tuple lock's.
+                        return Err(e.inner_context(xact_ctx()));
                     }
                 }
             }

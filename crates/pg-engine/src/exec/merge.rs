@@ -6,7 +6,7 @@ use super::dml::{
     Inserted, Owner, delete_row, insert_new, insert_routed, key_of, move_row, new_row,
     partition_ok, update_row_rls,
 };
-use super::scan::{Locked, data_key, decode_table_row, lock_row, sys_values};
+use super::scan::{Locked, Xltw, data_key, decode_table_row, lock_row, sys_values};
 use super::trigger::{self, AfterRow};
 use super::{BoxNode, ExecCtx, Node, Row, eval_all};
 use crate::catalog::trigger_type as tt;
@@ -245,6 +245,7 @@ impl MergeNode {
                         RowMark::Update
                     },
                     Wait::Block,
+                    if update { Xltw::Update } else { Xltw::Delete },
                     ctx,
                 // (A row moved to another partition fails as table_tuple_lock reports it,
                 // "tuple to be locked was already moved ...", before ExecMergeMatched could.)
