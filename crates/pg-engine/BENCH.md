@@ -843,6 +843,75 @@ relation's own filtered rows), q19 (an OR whose arms share the join clause), q20
   (`DIFFTEST_PLAN=0.5`): the same mismatch records as the base, statement for statement.
 - Every TPC-H result hash agrees with PostgreSQL's.
 
+### Second batch (round 20, agent 64)
+
+The same method as the first batch's table, run after it: **pg** PostgreSQL 18.6; **before**
+the first batch (`ec57b622`); **after** with the second batch. Every result hash agrees with
+PostgreSQL's.
+
+| query | pg | before | after | after / pg | after / before | spread |
+|---|---|---|---|---|---|---|
+| q01 | 1.764 | 8.051 | 7.924 | 0.22x | 1.02x | 24% |
+| q02 | 0.196 | 1.144 | 1.162 | 0.17x | 0.98x | 9% |
+| q03 | 0.365 | 2.279 | 2.203 | 0.17x | 1.03x | 14% |
+| q04 | 0.169 | 0.991 | 1.006 | 0.17x | 0.99x | 16% |
+| q05 | 0.346 | 1.201 | 1.242 | 0.28x | 0.97x | 28% |
+| q06 | 0.349 | 1.776 | 1.806 | 0.19x | 0.98x | 11% |
+| q07 | 0.359 | 7.078 | 7.268 | 0.05x | 0.97x | 31% |
+| q08 | 0.172 | 2.823 | 2.791 | 0.06x | 1.01x | 36% |
+| q09 | 1.236 | 19.71 | 18.79 | 0.07x | 1.05x | 5% |
+| q10 | 0.588 | 6.270 | 6.088 | 0.10x | 1.03x | 5% |
+| q11 | 0.084 | 1.069 | 0.935 | 0.09x | 1.14x | 5% |
+| q12 | 0.539 | 6.793 | 6.216 | 0.09x | 1.09x | 21% |
+| q13 | 0.677 | 5.396 | 4.864 | 0.14x | 1.11x | 21% |
+| q14 | 0.173 | 2.317 | 1.994 | 0.09x | 1.16x | 25% |
+| q15 | 0.289 | 1.653 | 1.438 | 0.20x | 1.15x | 51% |
+| q16 | 0.236 | 1.492 | 1.388 | 0.17x | 1.08x | 21% |
+| q17 | 0.805 | 3.587 | 3.273 | 0.25x | 1.10x | 20% |
+| q18 | 2.393 | 11.02 | 10.31 | 0.23x | 1.07x | 15% |
+| q19 | 0.068 | 0.565 | 0.430 | 0.16x | 1.31x | 20% |
+| q20 | 0.105 | 3.177 | 2.848 | 0.04x | 1.12x | 20% |
+| q21 | 0.491 | 2.955 | 2.836 | 0.17x | 1.04x | 35% |
+| q22 | 0.111 | 0.621 | 0.675 | 0.16x | 0.92x | 20% |
+| all 22 | 11.51 | 92.0 | 87.5 | 0.13x | 1.05x | |
+
+
+Plans (the same comparison as above): **15 of 22** have PostgreSQL's shape, q15 and q19 added
+(q22 counted in the first batch's 13). Changes:
+
+1. **Duplicate ORs** (canonicalize_qual's process_duplicate_ors, `binder/expr.rs`
+   `factor_ors`): a clause every arm of an OR has, equal as written, comes out in front of
+   it. q19's three arms each have `p_partkey = l_partkey`, which now drives the index scan
+   of lineitem_l_partkey_l_suppkey_idx PostgreSQL has (it was a BitmapOr of three).
+2. **Sorts past work_mem** cost by the session's work_mem (`costs::work_mem`, set by the
+   settings readers as planning starts; it was 4MB always), with tuplesort_merge_order's
+   merge order.
+3. **Group estimates per relation** (`extstat::num_groups`): each relation's distinct values
+   scaled by its own filtered rows, not the grouping's input rows (q16: 16,008 groups for
+   PostgreSQL's 15,848, was 19,334); a parameterized scan's per-loop rows aren't taken for
+   its relation's.
+4. **A grouped CTE's order** (PostgreSQL 17's CTE pathkeys): its CTE Scan returns the
+   grouping's sort order (q15 has no Sort over its join); a grouped CTE's columns take no
+   base statistics (examine_simple_variable punts on GROUP BY and set operations).
+
+Left, with what was found:
+
+- q05: the engine prefers a nested loop with orders outside and a Memoize of a
+  customer_pkey scan inside (52,158 against PostgreSQL's 52,990 for customer outside and an
+  index scan of orders_o_custkey_idx); Memoize's cost (its hit ratio over o_custkey's
+  n_distinct, its cache entries in hash_mem) is the place to compare.
+- q16: PostgreSQL sorts the partial join below a Gather Merge for the GroupAggregate (its
+  count(DISTINCT) has no partial form); the engine gathers, then sorts.
+- q18: PostgreSQL plans the IN as an inner join over the unique-ified sub-select (its GROUP
+  BY output is distinct already) with orders' partial scan below; the engine keeps a Hash
+  Semi Join, serial.
+- q20: PostgreSQL pulls the outer IN up to a semi join; the engine keeps it as a SubPlan
+  filter on supplier.
+- q07, q08, q21: join order and form not examined yet.
+- Executor: q18's full index scan of lineitem_pkey under a GroupAggregate (6M rows in key
+  order, one thread), index-only scans of big tables that need the heap, window functions
+  and sorts on one thread, numeric values allocating.
+
 ## Catalog, DDL and sessions (round 18, agent 44)
 
 Measured on the same machine and harness as above (PostgreSQL in `a44-pg`, the pinned image

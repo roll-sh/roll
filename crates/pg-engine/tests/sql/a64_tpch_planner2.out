@@ -1,0 +1,182 @@
+> create table a64_p as select g as k, g % 7 as j, g % 100 as h, 'x' || (g % 13) as t from generate_series(1, 20000) g
+-- SELECT 20000
+
+> create table a64_q as select g as k, g % 5 as j, g % 40 as h from generate_series(1, 5000) g
+-- SELECT 5000
+
+> create index on a64_q (k)
+-- CREATE INDEX
+
+> analyze a64_p, a64_q
+-- ANALYZE
+
+> set work_mem = '64kB'
+-- SET
+
+> explain select k, sum(j) from a64_p group by k
+QUERY PLAN:text
+GroupAggregate  (cost=2309.77..2659.77 rows=20000 width=12)
+  Group Key: k
+  ->  Sort  (cost=2309.77..2359.77 rows=20000 width=8)
+        Sort Key: k
+        ->  Seq Scan on a64_p  (cost=0.00..328.00 rows=20000 width=8)
+-- EXPLAIN
+
+> explain select * from a64_p order by t, k
+QUERY PLAN:text
+Sort  (cost=2442.77..2492.77 rows=20000 width=15)
+  Sort Key: t, k
+  ->  Seq Scan on a64_p  (cost=0.00..328.00 rows=20000 width=15)
+-- EXPLAIN
+
+> reset work_mem
+-- RESET
+
+> explain select * from a64_p order by t, k
+QUERY PLAN:text
+Sort  (cost=1756.77..1806.77 rows=20000 width=15)
+  Sort Key: t, k
+  ->  Seq Scan on a64_p  (cost=0.00..328.00 rows=20000 width=15)
+-- EXPLAIN
+
+> explain (costs off)
+> select count(*) from a64_p p, a64_q q
+> where (p.k = q.k and p.j = 1 and q.j = 2) or (p.k = q.k and p.j = 3 and q.h = 4)
+>    or (q.k = p.k and p.h = 5)
+QUERY PLAN:text
+Aggregate
+  ->  Nested Loop
+        ->  Seq Scan on a64_p p
+              Filter: ((j = 1) OR (j = 3) OR (h = 5))
+        ->  Bitmap Heap Scan on a64_q q
+              Recheck Cond: ((p.k = k) OR (p.k = k) OR (k = p.k))
+              Filter: (((p.k = k) AND (p.j = 1) AND (j = 2)) OR ((p.k = k) AND (p.j = 3) AND (h = 4)) OR ((k = p.k) AND (p.h = 5)))
+              ->  BitmapOr
+                    ->  Bitmap Index Scan on a64_q_k_idx
+                          Index Cond: (k = p.k)
+                    ->  Bitmap Index Scan on a64_q_k_idx
+                          Index Cond: (k = p.k)
+                    ->  Bitmap Index Scan on a64_q_k_idx
+                          Index Cond: (k = p.k)
+-- EXPLAIN
+
+> select count(*) from a64_p p, a64_q q
+> where (p.k = q.k and p.j = 1 and q.j = 2) or (p.k = q.k and p.j = 3 and q.h = 4)
+>    or (q.k = p.k and p.h = 5)
+count:int8
+211
+-- SELECT 1
+
+> explain (costs off)
+> select count(*) from a64_p p, a64_q q
+> where (p.k = q.k and p.j = 1 and q.j = 2) or (p.k = q.k and p.j = 3 and q.h = 4)
+>    or (p.k = q.k and p.h = 5)
+QUERY PLAN:text
+Aggregate
+  ->  Hash Join
+        Hash Cond: (p.k = q.k)
+        Join Filter: (((p.j = 1) AND (q.j = 2)) OR ((p.j = 3) AND (q.h = 4)) OR (p.h = 5))
+        ->  Seq Scan on a64_p p
+              Filter: ((j = 1) OR (j = 3) OR (h = 5))
+        ->  Hash
+              ->  Seq Scan on a64_q q
+-- EXPLAIN
+
+> select count(*) from a64_p p, a64_q q
+> where (p.k = q.k and p.j = 1 and q.j = 2) or (p.k = q.k and p.j = 3 and q.h = 4)
+>    or (p.k = q.k and p.h = 5)
+count:int8
+211
+-- SELECT 1
+
+> explain (costs off) select * from a64_q where (j = 1 and h = 2) or (j = 1)
+QUERY PLAN:text
+Seq Scan on a64_q
+  Filter: (j = 1)
+-- EXPLAIN
+
+> explain (costs off) select * from a64_q where (j = 1 and h = 2) or (h = 2 and k = 3)
+QUERY PLAN:text
+Seq Scan on a64_q
+  Filter: ((h = 2) AND ((j = 1) OR (k = 3)))
+-- EXPLAIN
+
+> explain select p.j, p.h, q.h, count(*) from a64_p p join a64_q q on p.k = q.k
+> where p.j < 3 group by p.j, p.h, q.h
+QUERY PLAN:text
+HashAggregate  (cost=597.50..618.93 rows=2143 width=20)
+  Group Key: p.j, p.h, q.h
+  ->  Hash Join  (cost=144.50..576.08 rows=2143 width=12)
+        Hash Cond: (p.k = q.k)
+        ->  Seq Scan on a64_p p  (cost=0.00..378.00 rows=8572 width=12)
+              Filter: (j < 3)
+        ->  Hash  (cost=82.00..82.00 rows=5000 width=8)
+              ->  Seq Scan on a64_q q  (cost=0.00..82.00 rows=5000 width=8)
+-- EXPLAIN
+
+> explain select p.j, q.h, count(*) from a64_p p join a64_q q on p.k = q.k
+> where q.k < 100 group by p.j, q.h
+QUERY PLAN:text
+GroupAggregate  (cost=418.52..420.50 rows=99 width=16)
+  Group Key: p.j, q.h
+  ->  Sort  (cost=418.52..418.77 rows=99 width=8)
+        Sort Key: p.j, q.h
+        ->  Hash Join  (cost=11.25..415.24 rows=99 width=8)
+              Hash Cond: (p.k = q.k)
+              ->  Seq Scan on a64_p p  (cost=0.00..328.00 rows=20000 width=8)
+              ->  Hash  (cost=10.02..10.02 rows=99 width=8)
+                    ->  Index Scan using a64_q_k_idx on a64_q q  (cost=0.28..10.02 rows=99 width=8)
+                          Index Cond: (k < 100)
+-- EXPLAIN
+
+> set enable_hashagg = off
+-- SET
+
+> explain (costs off)
+> with c as materialized (select h, count(*) as n from a64_p group by h)
+> select c.h, c.n, q.k from c join a64_q q on q.k = c.h order by c.h
+QUERY PLAN:text
+Sort
+  Sort Key: c.h
+  CTE c
+    ->  GroupAggregate
+          Group Key: a64_p.h
+          ->  Sort
+                Sort Key: a64_p.h
+                ->  Seq Scan on a64_p
+  ->  Hash Join
+        Hash Cond: (q.k = c.h)
+        ->  Seq Scan on a64_q q
+        ->  Hash
+              ->  CTE Scan on c
+-- EXPLAIN
+
+> with c as materialized (select h, count(*) as n from a64_p group by h)
+> select c.h, c.n, q.k from c join a64_q q on q.k = c.h order by c.h limit 5
+h:int4 | n:int8 | k:int4
+1 | 200 | 1
+2 | 200 | 2
+3 | 200 | 3
+4 | 200 | 4
+5 | 200 | 5
+-- SELECT 5
+
+> explain (costs off)
+> with c as materialized (select h, count(*) as n from a64_p group by h)
+> select * from c order by h
+QUERY PLAN:text
+CTE Scan on c
+  CTE c
+    ->  GroupAggregate
+          Group Key: a64_p.h
+          ->  Sort
+                Sort Key: a64_p.h
+                ->  Seq Scan on a64_p
+-- EXPLAIN
+
+> reset enable_hashagg
+-- RESET
+
+> drop table a64_p, a64_q
+-- DROP TABLE
+

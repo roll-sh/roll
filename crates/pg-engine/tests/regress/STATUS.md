@@ -208,6 +208,12 @@ analyzed (BENCH.md "Round 20"):
 
 Golden: `tests/sql/a64_tpch_planner.sql` (recorded from PostgreSQL 18.6).
 
+Second batch (`process_duplicate_ors`, sorts by the session's work_mem, group estimates per
+relation, a grouped CTE's order and statistics; BENCH.md "Round 20", second batch): a full
+run against the committed baseline (`9407d0ee`): 51,148 / 51,150, no unit changed; the
+difftest pair against the first batch identical statement for statement, the smoke
+passing. Golden `tests/sql/a64_tpch_planner2.sql`.
+
 ## Round 19, agent 60 (database locales: libc C by default, CREATE DATABASE's providers)
 
 The engine's databases reported and behaved as the builtin C.UTF-8 locale; the reference is

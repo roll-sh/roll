@@ -234,7 +234,8 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   plan after a restart took 2-3 s), parallel safety of join clauses, a merge join's gathered
   input keeping its partial paths, hashed groupings' spill against in-order index paths,
   expression group counts, "Planned Partitions" in text EXPLAIN. 13 of the 22 plans have
-  Postgres's shape after the first batch (6 before). Executor: a bitmap heap scan selecting
+  Postgres's shape after the first batch (6 before), 15 after the second (duplicate ORs,
+  sorts by the session's work_mem, per-relation group estimates, a grouped CTE's order). Executor: a bitmap heap scan selecting
   many rows of a table too big to model runs as a filtered (parallel) scan of the table,
   outside EXPLAIN ANALYZE and predicate locking (q06 26 s -> about 2 s).
 - **Catalog, DDL and sessions** (round 18, agent 44; BENCH.md "Catalog, DDL and sessions"): the
@@ -1218,6 +1219,21 @@ them all with the "Fixed in round N" sections describing what was already tried.
 6. **equivclass**, **inherit** and **collate.icu.utf8**: done (round 15, agent 10).
 7. **partition_aggregate**: done (137/137).
 8. The 18 plan-choice units listed in STATUS.md ("Plan choice visible in results").
+9. **TPC-H plans and the planner tail** (round 20, agent 64; BENCH.md "Round 20" lists each
+   TPC-H query's remaining cause): 15 of the 22 SF1 plans have PostgreSQL's shape. Left:
+   q05 (Memoize's cost against an inner index scan), q16 (a sorted partial join under a
+   Gather Merge for a grouping without a partial form), q18 (a semi join made an inner join
+   over a sub-select already distinct), q20 (an IN pulled up over a sub-select with its own
+   correlated sub-select), q07 / q08 / q21 (not examined). The planner leftovers passed on:
+   join 355 at the default collapse limit (a LATERAL subquery with unread outputs kept as a
+   parameterized item under a Memoize; changes every such LATERAL: its own batch with a full
+   run); a correlated NOT IN inside an IN (PostgreSQL: a semi join with a Join Filter; the
+   engine: a SubPlan); agent 52's Subquery Scan cost that setrefs removes (2.19 for 2.20)
+   and a bare PlaceHolderVar ranked last in a LATERAL join's output; `SELECT DISTINCT ...
+   ORDER BY 1 DESC` (PostgreSQL's distinct pathkeys take the ORDER BY's directions,
+   transformDistinctClause listing the ORDER BY items first, so one Sort serves both; the
+   engine's parallel DISTINCT sorts ascending, then sorts again: difftest seed 1777 in
+   smoke_known); `One-Time Filter: false` on the nullable side of `LEFT JOIN ... ON false`.
 
 Smaller known differences that don't fail a unit today (round 14, agent 11 fixed the DISTINCT
 `((a + 1))` Sort output listed here before): a pulled-up one-row VALUES' constants aren't

@@ -104,7 +104,11 @@ impl Gucs {
             random_page_cost: num("random_page_cost", 4.0),
             seq_page_cost: num("seq_page_cost", 1.0),
             cache_pages: num("effective_cache_size", 524288.0),
-            work_mem: num("work_mem", 4096.0),
+            work_mem: {
+                let w = num("work_mem", 4096.0);
+                costs::set_work_mem(w);
+                w
+            },
             hash_mem_multiplier: num("hash_mem_multiplier", 2.0),
         }
     }

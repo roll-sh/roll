@@ -107,6 +107,8 @@ pub struct GroupVar {
     pub ndistinct: f64,
     /// Over an inheritance tree (its inherited statistics objects' data).
     pub inh: bool,
+    /// The relation's rows after its restrictions (RelOptInfo.rows; 0: not known).
+    pub rows: f64,
 }
 
 impl GroupVar {
@@ -124,6 +126,7 @@ impl GroupVar {
             },
             ndistinct: v.ndistinct(cat).0,
             inh: v.inh,
+            rows: v.rows,
         }
     }
 
@@ -146,8 +149,9 @@ pub fn add_unique(vars: &mut Vec<GroupVar>, v: GroupVar) {
 
 /// The rest of estimate_num_groups once the group expressions are variables: per relation,
 /// the product of the distinct counts (a statistics object's for the columns it covers),
-/// clamped, scaled down when `rows` (the one relation's filtered rows) is fewer than its
-/// tuples. `numdistinct`: the factor the other expressions contribute.
+/// clamped, scaled down when the relation's filtered rows are fewer than its tuples (its
+/// variables' `rows`; else `rows`, for one relation). `numdistinct`: the factor the other
+/// expressions contribute.
 pub fn num_groups(
     ctx: &ExecCtx,
     mut vars: Vec<GroupVar>,
@@ -164,6 +168,12 @@ pub fn num_groups(
         let rel = vars[0].table.clone();
         let tuples = vars[0].tuples;
         let inh = vars[0].inh;
+        // (RelOptInfo.rows of the relation; not known: the one relation's input rows.)
+        let rel_rows = match vars[0].rows {
+            r if r > 0.0 => Some(r),
+            _ if single => rows,
+            _ => None,
+        };
         let (mut relvars, rest): (Vec<GroupVar>, Vec<GroupVar>) =
             vars.into_iter().partition(|v| v.table.oid == rel.oid);
         vars = rest;
@@ -207,8 +217,7 @@ pub fn num_groups(
             }
             // The relation's rows after its restrictions: fewer of its values show up.
             // (Dell'Era's estimate of the distinct values a sample of the rows holds.)
-            if let Some(rows) = rows
-                && single
+            if let Some(rows) = rel_rows
                 && reldistinct > 0.0
                 && rows < tuples
             {

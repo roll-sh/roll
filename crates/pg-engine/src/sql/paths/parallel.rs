@@ -32,6 +32,8 @@ impl ParCfg {
                 .and_then(|v| v.parse::<f64>().ok())
                 .unwrap_or(d)
         };
+        // (Planning starts: its sorts' memory, `costs::work_mem`.)
+        crate::sql::costs::set_work_mem(num("work_mem", 4096.0));
         ParCfg {
             setup_cost: num("parallel_setup_cost", 1000.0),
             tuple_cost: num("parallel_tuple_cost", 0.1),

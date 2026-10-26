@@ -67,6 +67,22 @@ const BLCKSZ: f64 = 8192.0;
 /// work_mem (4MB), in bytes.
 pub const WORK_MEM: f64 = 4096.0 * 1024.0;
 
+thread_local! {
+    /// work_mem (bytes) of the session whose statement is being planned: the settings
+    /// readers (`Gucs::read`, `JoinGucs::read`, `ParCfg::read`) set it as planning starts.
+    static PLAN_WORK_MEM: std::cell::Cell<f64> = const { std::cell::Cell::new(WORK_MEM) };
+}
+
+/// The planning session's work_mem, in kB (`PLAN_WORK_MEM`).
+pub fn set_work_mem(kb: f64) {
+    PLAN_WORK_MEM.with(|c| c.set(kb.max(64.0) * 1024.0));
+}
+
+/// work_mem in bytes, as the statement being planned has it.
+pub fn work_mem() -> f64 {
+    PLAN_WORK_MEM.with(|c| c.get())
+}
+
 /// clamp_row_est.
 pub fn clamp_rows(r: f64) -> f64 {
     if r.is_nan() || r <= 1.0 {
@@ -1975,10 +1991,12 @@ pub fn sort_cost(input_total: f64, rows: f64, width: u32, limit: Option<f64>) ->
         _ => (tuples, input_bytes),
     };
     let mut startup = input_total;
-    if output_bytes > WORK_MEM {
+    let work_mem = work_mem();
+    if output_bytes > work_mem {
         let npages = (input_bytes / BLCKSZ).ceil();
-        let nruns = input_bytes / WORK_MEM;
-        let mergeorder = 6.0_f64.max((WORK_MEM / (BLCKSZ * 3.0 + 1024.0 * 8.0)).floor());
+        let nruns = input_bytes / work_mem;
+        // tuplesort_merge_order: a tape's buffer and its merge buffer each.
+        let mergeorder = (work_mem / (2.0 * BLCKSZ + 32.0 * BLCKSZ)).floor().clamp(6.0, 500.0);
         let log_runs = if nruns > mergeorder {
             (nruns.ln() / mergeorder.ln()).ceil()
         } else {
@@ -1987,7 +2005,7 @@ pub fn sort_cost(input_total: f64, rows: f64, width: u32, limit: Option<f64>) ->
         let npageaccesses = 2.0 * npages * log_runs;
         startup += comparison * tuples * tuples.log2();
         startup += npageaccesses * (SEQ_PAGE_COST * 0.75 + 4.0 * 0.25);
-    } else if tuples > 2.0 * output || input_bytes > WORK_MEM {
+    } else if tuples > 2.0 * output || input_bytes > work_mem {
         // A bounded heap sort.
         startup += comparison * tuples * (2.0 * output).log2();
     } else {
@@ -2006,7 +2024,7 @@ pub fn relation_byte_size(rows: f64, width: u32) -> f64 {
 pub fn material_cost(startup: f64, total: f64, rows: f64, width: u32) -> (f64, f64) {
     let mut run = total - startup + 2.0 * CPU_OPERATOR_COST * rows;
     let bytes = relation_byte_size(rows, width);
-    if bytes > WORK_MEM {
+    if bytes > work_mem() {
         run += SEQ_PAGE_COST * (bytes / BLCKSZ).ceil();
     }
     (startup, startup + run)

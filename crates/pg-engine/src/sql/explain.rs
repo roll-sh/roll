@@ -8928,12 +8928,14 @@ impl Builder<'_, '_> {
                     let cols = if node.cols.is_empty() {
                         vec![]
                     } else {
+                        let grouped = cte_grouped(cte);
                         node.cols
                             .iter()
                             .map(|c| ColInfo {
                                 // (A column of a relation: its statistics, as
-                                // examine_simple_variable finds them through the CTE.)
-                                var: c.var.clone().filter(|v| v.expr.is_none()),
+                                // examine_simple_variable finds them through the CTE,
+                                // unless it groups or is a set operation.)
+                                var: c.var.clone().filter(|v| v.expr.is_none() && !grouped),
                                 distinct: c.distinct.or(
                                     (node.rows < costs::DEFAULT_NUM_DISTINCT).then(|| costs::clamp_rows(node.rows)),
                                 ),
@@ -11415,9 +11417,10 @@ impl Builder<'_, '_> {
             let mut n = self.planned_scan(p, s, d, &names);
             n.rel_order = s.reltarget.0.iter().filter_map(|&c| names.get(c)).map(|nm| self.pick(nm, Cx::Output)).collect();
             n.width = width;
+            let rel_rows = if scan_parameterized(s) { 0.0 } else { n.rows };
             for c in &mut cols {
                 if let Some(v) = &mut c.var {
-                    v.rows = n.rows;
+                    v.rows = rel_rows;
                 }
             }
             n.cols = cols;
@@ -11637,9 +11640,11 @@ impl Builder<'_, '_> {
             n.details.push(Detail::IndexSearches(scan_addr(s)));
         }
         n.width = width;
+        // (RelOptInfo.rows: a parameterized scan's rows are per loop, not the relation's.)
+        let rel_rows = if scan_parameterized(s) { 0.0 } else { n.rows };
         for c in &mut cols {
             if let Some(v) = &mut c.var {
-                v.rows = n.rows;
+                v.rows = rel_rows;
             }
         }
         n.cols = cols;
@@ -16660,12 +16665,13 @@ pub(crate) fn push_cte_estimates(ctes: &[(usize, Arc<Plan>)], names: &[String], 
     let mut n = 0;
     for ((_, cte), name) in ctes.iter().zip(names) {
         let e = estimate(cte, ctx);
+        let grouped = cte_grouped(cte);
         let cols: Vec<ColInfo> = e
             .cols
             .iter()
             .map(|(w, v, d)| ColInfo {
                 width: *w,
-                var: v.clone().filter(|v| v.expr.is_none()),
+                var: v.clone().filter(|v| v.expr.is_none() && !grouped),
                 // (get_variable_numdistinct without statistics: a small relation's rows.)
                 distinct: d.or((e.rows < costs::DEFAULT_NUM_DISTINCT).then(|| costs::clamp_rows(e.rows))),
                 groups: None,
@@ -16757,14 +16763,15 @@ fn cte_push(name: String, rows: f64, cols: Vec<ColInfo>, order: Vec<SortKey>) {
     CTE_ESTIMATES.with(|m| m.borrow_mut().push((name, rows, cols)));
 }
 
-/// The order a materialized CTE's (or any query's) rows come out in: its top Sort's keys or
-/// an ordered index scan's, over its output columns, through projections and a LIMIT.
-fn plan_output_order(p: &Plan, ctx: &ExecCtx) -> Vec<SortKey> {
+/// The order a materialized CTE's (or any query's) rows come out in: its top Sort's keys, an
+/// ordered index scan's or a sorted grouping's (its group keys, as its plan sorts them), over
+/// its output columns, through projections and a LIMIT (PostgreSQL 17's CTE pathkeys).
+fn plan_output_order(p: &Arc<Plan>, ctx: &ExecCtx) -> Vec<SortKey> {
     let w = super::binder::plan_width(p);
     let mut map: Vec<Option<usize>> = (0..w).map(Some).collect();
     let mut cur = p;
     let keys = loop {
-        match cur {
+        match &**cur {
             Plan::Barrier { input, .. } | Plan::Limit { input, .. } | Plan::LockRows { input, .. } | Plan::Context { input, .. } => {
                 cur = input
             }
@@ -16781,6 +16788,21 @@ fn plan_output_order(p: &Plan, ctx: &ExecCtx) -> Vec<SortKey> {
             Plan::Sort { keys, .. } => break keys.clone(),
             Plan::Scan(sp) if matches!(sp.access, crate::sql::plan::Access::Index { ordered: true, .. }) => {
                 break super::paths::index_order(ctx, sp);
+            }
+            // (A grouping's output: its group keys first.)
+            Plan::Agg { groups, sets: None, .. } if !groups.is_empty() => {
+                let Some(gs) = estimate(cur, ctx).group_sort else { return Vec::new() };
+                break gs
+                    .into_iter()
+                    .filter_map(|(i, desc, nulls_first)| {
+                        groups.get(i).map(|g| SortKey {
+                            expr: Expr::Col(i, g.ty()),
+                            desc,
+                            nulls_first,
+                            using: None,
+                        })
+                    })
+                    .collect();
             }
             _ => return Vec::new(),
         }
@@ -20467,6 +20489,47 @@ fn agg_result(p: &Plan, j: usize) -> bool {
         Plan::Agg { groups, sets: None, aggs, .. } => j >= groups.len() && j < groups.len() + aggs.len(),
         Plan::Barrier { input, .. } | Plan::Filter { input, .. } => agg_result(input, j),
         Plan::Project { exprs, input } => matches!(exprs.get(j), Some(Expr::Col(k, _)) if agg_result(input, *k)),
+        _ => false,
+    }
+}
+
+/// A scan reading an outer value (a nested loop's parameter) in its filter or its index
+/// conditions: its rows are per loop.
+fn scan_parameterized(s: &ScanPlan) -> bool {
+    fn outer(e: &Expr) -> bool {
+        let mut found = false;
+        e.walk(&mut |x| {
+            if matches!(x, Expr::Outer(..)) {
+                found = true;
+            }
+        });
+        found
+    }
+    fn bitmap(q: &super::plan::BitmapQual) -> bool {
+        match q {
+            super::plan::BitmapQual::Index { quals, .. } => quals.iter().any(|x| outer(&x.expr) || outer(&x.orig)),
+            super::plan::BitmapQual::And(l) | super::plan::BitmapQual::Or(l) => l.iter().any(bitmap),
+        }
+    }
+    s.filter.as_ref().is_some_and(outer)
+        || match &s.access {
+            super::plan::Access::Index { quals, .. } => quals.iter().any(|x| outer(&x.expr) || outer(&x.orig)),
+            super::plan::Access::Bitmap(q, _) => bitmap(q),
+            _ => false,
+        }
+}
+
+/// A CTE whose query groups (GROUP BY, grouping sets) or is a set operation: its columns'
+/// base statistics don't apply (examine_simple_variable punts on them).
+fn cte_grouped(p: &Plan) -> bool {
+    match p {
+        Plan::Agg { groups, sets, .. } => !groups.is_empty() || sets.is_some(),
+        Plan::SetOp { .. } => true,
+        Plan::Barrier { input, .. }
+        | Plan::Project { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::Sort { input, .. }
+        | Plan::Limit { input, .. } => cte_grouped(input),
         _ => false,
     }
 }

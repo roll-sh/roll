@@ -3117,6 +3117,110 @@ impl Binder<'_, '_> {
         if self.deparse {
             return e;
         }
+        // The rest of find_duplicate_ors: ANDs and ORs flattened, and the clauses every arm of
+        // an OR has taken out in front of it (process_duplicate_ors: `(A AND B) OR (A AND C)`
+        // is `A AND (B OR C)`, so A can be an index or join clause).
+        fn factor_ors(e: Expr) -> Expr {
+            match e {
+                Expr::Or(xs) => {
+                    let mut list = Vec::new();
+                    for x in xs.into_iter().map(factor_ors) {
+                        match x {
+                            Expr::Or(ys) => list.extend(ys),
+                            x => list.push(x),
+                        }
+                    }
+                    duplicate_ors(list)
+                }
+                Expr::And(xs) => {
+                    let mut list = Vec::new();
+                    for x in xs.into_iter().map(factor_ors) {
+                        match x {
+                            Expr::And(ys) => list.extend(ys),
+                            x => list.push(x),
+                        }
+                    }
+                    Expr::And(list)
+                }
+                e => e,
+            }
+        }
+        fn duplicate_ors(orlist: Vec<Expr>) -> Expr {
+            if orlist.len() < 2 {
+                return orlist.into_iter().next().unwrap_or(Expr::Const(Value::Bool(false), DataType::Bool));
+            }
+            let args = |x: &Expr| -> Vec<Expr> {
+                match x {
+                    Expr::And(ys) => ys.clone(),
+                    x => vec![x.clone()],
+                }
+            };
+            // The shortest AND as the reference (a non-AND arm is one clause: it wins).
+            let mut reference: Vec<Expr> = Vec::new();
+            for x in &orlist {
+                match x {
+                    Expr::And(ys) => {
+                        if reference.is_empty() || ys.len() < reference.len() {
+                            reference = ys.clone();
+                        }
+                    }
+                    x => {
+                        reference = vec![x.clone()];
+                        break;
+                    }
+                }
+            }
+            let mut uniq: Vec<Expr> = Vec::new();
+            for r in reference {
+                if !uniq.iter().any(|u| u.same_as(&r)) {
+                    uniq.push(r);
+                }
+            }
+            let winners: Vec<Expr> = uniq
+                .into_iter()
+                .filter(|r| orlist.iter().all(|x| args(x).iter().any(|a| a.same_as(r))))
+                .collect();
+            if winners.is_empty() {
+                return Expr::Or(orlist);
+            }
+            // The arms less the winners; an arm left empty makes the OR redundant.
+            let mut neworlist = Vec::new();
+            let mut degenerate = false;
+            for x in &orlist {
+                let rest: Vec<Expr> = args(x).into_iter().filter(|a| !winners.iter().any(|w| w.same_as(a))).collect();
+                match rest.len() {
+                    0 => {
+                        degenerate = true;
+                        break;
+                    }
+                    1 => neworlist.extend(rest),
+                    _ => neworlist.push(Expr::And(rest)),
+                }
+            }
+            let mut out = winners;
+            if !degenerate {
+                if neworlist.len() == 1 {
+                    out.extend(neworlist);
+                } else {
+                    let mut flat = Vec::new();
+                    for x in neworlist {
+                        match x {
+                            Expr::Or(ys) => flat.extend(ys),
+                            x => flat.push(x),
+                        }
+                    }
+                    out.push(Expr::Or(flat));
+                }
+            }
+            let mut flat = Vec::new();
+            for x in out {
+                match x {
+                    Expr::And(ys) => flat.extend(ys),
+                    x => flat.push(x),
+                }
+            }
+            if flat.len() == 1 { flat.pop().unwrap() } else { Expr::And(flat) }
+        }
         // canonicalize_qual's find_duplicate_ors (not a CHECK): NULL is as good as FALSE.
         fn drop_nulls(e: Expr, failing: &dyn Fn(&[Expr]) -> bool) -> Expr {
             let falsy = |x: &Expr| matches!(x, Expr::Const(Value::Null, _) | Expr::Const(Value::Bool(false), _));
@@ -3170,6 +3274,7 @@ impl Binder<'_, '_> {
         let pending = self.fold_err.clone().unwrap_or_default();
         let failing = |xs: &[Expr]| check && xs.iter().any(|x| super::fold::fails(x, ctx, &pending));
         let e = drop_nulls(e, &failing);
+        let e = factor_ors(e);
         let fix = |q: Expr| match q {
             Expr::Call(d, args, ty)
                 if d.name == "="
