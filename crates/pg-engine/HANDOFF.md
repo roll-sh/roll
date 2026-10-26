@@ -621,7 +621,10 @@ Prefix scratch objects, and drop scratch databases and roles afterwards.
   is shared with other projects: delete a finished worktree's `target/` and your `/tmp` and
   `~/.cache` data when you're done.
 - Stop any engine you start after each run; never kill processes, drop databases or delete
-  files you didn't create.
+  files you didn't create. Never `pkill -f` by pattern: other agents run the same commands.
+- **Ports are shared.** Before starting a server or container on a port, check that nothing
+  is listening there. Scripts must refuse to run setup (DROP/CREATE DATABASE, pgbench -i)
+  against a port they didn't just start. One bench run did, against another agent's server.
 - **Pushing with several agents on one branch:** commit, then rebase onto the branch and push
   (`git push origin HEAD:<branch>`), never with force. Build commits from rebases of real
   commits; never copy files or a tree out of a snapshot worktree. ddffa59 did that, was based on
