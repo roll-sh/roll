@@ -225,6 +225,18 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   stack only at function calls (`bind_func_call`); a check in `bind_node` (as
   transformExprRecurse has) turns 400 into the error, but 1,000 still overflows elsewhere on
   the raw parse tree before binding. Probe and partial patch: agent 48's report.
+- **TPC-H plans and analytic speed** (round 20, agent 64; BENCH.md "Round 20", STATUS.md):
+  the engine's plans at SF1 compared with PostgreSQL 18.6's on the same data, both analyzed,
+  and the causes of the differences fixed in statistics and estimates: ANALYZE samples pages
+  and then rows in them as acquire_sample_rows does (n_distinct of a page-clustered column
+  like l_orderkey is Postgres's), btree heights and deduplicated pivots of indexes too big to
+  model, cold heap models (relallvisible kept; a big table isn't read to be sized: the first
+  plan after a restart took 2-3 s), parallel safety of join clauses, a merge join's gathered
+  input keeping its partial paths, hashed groupings' spill against in-order index paths,
+  expression group counts, "Planned Partitions" in text EXPLAIN. 13 of the 22 plans have
+  Postgres's shape after the first batch (6 before). Executor: a bitmap heap scan selecting
+  many rows of a table too big to model runs as a filtered (parallel) scan of the table,
+  outside EXPLAIN ANALYZE and predicate locking (q06 26 s -> about 2 s).
 - **Catalog, DDL and sessions** (round 18, agent 44; BENCH.md "Catalog, DDL and sessions"): the
   catalog is stored as a record per object (`catalog/persist.rs`, catalog format 1: older
   databases are rewritten when first opened), so a DDL commit writes only what changed; its

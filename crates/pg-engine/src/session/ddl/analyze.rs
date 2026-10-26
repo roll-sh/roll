@@ -121,11 +121,12 @@ impl Ddl<'_, '_> {
             .map(|c| c.stattarget)
             .max()
             .unwrap_or(0);
-        // The sample: every row while they fit in 300 × the largest target, else rows
-        // spread evenly over the table: a reservoir sample (Vitter's algorithm R, as
-        // acquire_sample_rows's reservoir), from a fixed seed so it repeats (evenly spaced
-        // rows would alias with periodic data). Taken as the rows are read: only the
-        // reservoir is held.
+        // The sample: every row while they fit in 300 × the largest target, else
+        // acquire_sample_rows's: a reservoir sample (Vitter's algorithm R, as its
+        // reservoir), from a fixed seed so it repeats (evenly spaced rows would alias with
+        // periodic data), of the rows of that many of the table's pages, all of them when it
+        // has fewer (`sampled_blocks`). Taken as the rows are read: only the reservoir is
+        // held.
         let want = 300 * max_target.max(1) as usize;
         let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
         let mut next = || {
@@ -150,6 +151,7 @@ impl Ddl<'_, '_> {
             }
             total += 1;
         };
+        let (mut all_rows, mut sampled) = (0usize, false);
         if inherit {
             for row in self.inherited_rows(t)? {
                 let mut row = Some(row);
@@ -170,13 +172,30 @@ impl Ddl<'_, '_> {
         } else {
             let start = crate::storage::keys::index_prefix(t.oid, 0);
             let end = crate::storage::keys::prefix_end(&start);
+            let (pages, tuples) = self
+                .cat
+                .relstats
+                .get(&t.oid)
+                .map_or((0, 0.0), |s| (s.pages.max(0) as usize, s.tuples));
+            let chosen = sampled_blocks(pages, want);
             let scan = self.ctx.txn.borrow().scan(&start, &end);
-            for r in scan {
+            for (i, r) in scan.enumerate() {
                 self.ctx.check()?;
                 let (_, bytes) = r?;
+                all_rows += 1;
+                // (The page row i is on, the rows filling the pages evenly in table order.)
+                if let Some(c) = &chosen {
+                    let b = ((i as f64 * pages as f64 / tuples.max(1.0)) as usize).min(pages - 1);
+                    if !c[b] {
+                        continue;
+                    }
+                }
                 offer(&mut || Err(bytes.to_vec()));
             }
+            sampled = chosen.is_some();
         }
+        // (Sampled by pages: the table's rows all the same.)
+        let total = if sampled { all_rows } else { total };
         reservoir.sort_unstable_by_key(|(i, _)| *i);
         let sample: Vec<Row> = reservoir
             .into_iter()
@@ -846,6 +865,44 @@ impl StatSets<'_> {
 
 /// Whether an expression's value is a new datum rather than one of the row's own (a column,
 /// or whatever COALESCE / CASE / a binary-compatible cast passes through).
+/// A pseudo-random stream from a fixed seed (splitmix64), so a sample repeats.
+fn splitmix(seed: u64) -> impl FnMut() -> u64 {
+    let mut state = seed;
+    move || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+}
+
+/// BlockSampler's choice of `targ` of a table's `blocks` pages (Knuth's Algorithm S, from a
+/// fixed seed), when it has more; None when every page is read.
+///
+/// Sampling pages, not rows, matters for a column clustered by page (TPC-H's l_orderkey:
+/// an order's lines share a page): the rows sampled from one page repeat its values, and
+/// n_distinct comes out as low as Postgres's does.
+fn sampled_blocks(blocks: usize, targ: usize) -> Option<Vec<bool>> {
+    if blocks <= targ {
+        return None;
+    }
+    let mut rand = splitmix(0x5DEE_CE66_D1CE_4E5B);
+    let mut chosen = vec![false; blocks];
+    let mut left = targ;
+    for (b, c) in chosen.iter_mut().enumerate() {
+        let u = (rand() >> 11) as f64 / (1u64 << 53) as f64;
+        if u * ((blocks - b) as f64) < left as f64 {
+            *c = true;
+            left -= 1;
+            if left == 0 {
+                break;
+            }
+        }
+    }
+    Some(chosen)
+}
+
 fn fresh_value(e: &crate::sql::expr::Expr) -> bool {
     use crate::sql::expr::Expr;
     match e {

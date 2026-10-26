@@ -736,6 +736,113 @@ measurable regression. A streamed small result costs a sink (one allocation per 
 and, per row, a settings-generation check. The rendering context is still built once per
 statement, as before.
 
+## Round 20 (agent 64): TPC-H plans, first batch
+
+The same harness and settings, both servers on cores 24-27 and the client on 16-19, the
+machine shared with other agents (load 11-20). **pg** is PostgreSQL 18.6 (container
+`a64-pg`); **before** the engine at `61e57157` (this round's base, after agent 43's storage
+round); **after** with this batch (`ec57b622`). Each engine run follows a restart and a first
+read of lineitem, orders and partsupp; medians of 3, the better of two interleaved runs per
+side; **spread** the larger of the two sides' run-to-run differences. Every result hash
+agrees with PostgreSQL's.
+
+| query | pg | before | after | after / pg | after / before | spread |
+|---|---|---|---|---|---|---|
+| q01 | 1.631 | 8.237 | 8.276 | 0.20x | 1.00x | 9% |
+| q02 | 0.193 | 1.294 | 1.175 | 0.16x | 1.10x | 10% |
+| q03 | 0.357 | 2.505 | 2.455 | 0.15x | 1.02x | 46% |
+| q04 | 0.155 | 4.600 | 1.068 | 0.14x | 4.31x | 10% |
+| q05 | 0.302 | 4.886 | 1.333 | 0.23x | 3.67x | 35% |
+| q06 | 0.368 | 18.41 | 1.836 | 0.20x | 10.02x | 32% |
+| q07 | 0.358 | 5.490 | 7.716 | 0.05x | 0.71x | 3% |
+| q08 | 0.170 | 2.212 | 2.826 | 0.06x | 0.78x | 9% |
+| q09 | 1.158 | 12.50 | 18.61 | 0.06x | 0.67x | 21% |
+| q10 | 0.571 | 9.181 | 5.865 | 0.10x | 1.57x | 25% |
+| q11 | 0.085 | 1.464 | 1.005 | 0.08x | 1.46x | 7% |
+| q12 | 0.453 | 6.579 | 6.621 | 0.07x | 0.99x | 19% |
+| q13 | 0.649 | 5.328 | 5.066 | 0.13x | 1.05x | 11% |
+| q14 | 0.159 | 11.14 | 1.943 | 0.08x | 5.74x | 39% |
+| q15 | 0.280 | 9.654 | 1.466 | 0.19x | 6.59x | 24% |
+| q16 | 0.204 | 1.494 | 1.426 | 0.14x | 1.05x | 29% |
+| q17 | 0.801 | 3.677 | 3.510 | 0.23x | 1.05x | 5% |
+| q18 | 2.416 | 5.472 | 10.64 | 0.23x | 0.51x | 9% |
+| q19 | 0.059 | 0.521 | 0.502 | 0.12x | 1.04x | 29% |
+| q20 | 0.106 | 2.988 | 2.855 | 0.04x | 1.05x | 3% |
+| q21 | 0.511 | 3.261 | 2.801 | 0.18x | 1.16x | 9% |
+| q22 | 0.114 | 0.699 | 0.633 | 0.18x | 1.10x | 13% |
+| all 22 | 11.10 | 121.6 | 89.6 | 0.12x | 1.36x | |
+
+The base is slower than round 19's engine on the queries with bitmap heap scans over
+lineitem (q06, q14, q15: agent 43 measured q06's plan at 20-23 s there); this batch makes
+them 6-10x faster. q07-q09 vary with the machine's load more than the spread shows: run
+alone, interleaved, twice each, q07 took 8.6-9.0 s before and 5.4-5.6 s after, q09 12.4-12.9
+s before and 13.7-14.0 s after. q18 is slower for a real reason: it now has PostgreSQL's
+plan, its IN sub-select grouped along a full index scan of lineitem_pkey (6M rows in key
+order), which the engine runs on one thread with a row fetch per entry batch where
+PostgreSQL reads the heap in order.
+
+### Plans
+
+`EXPLAIN (COSTS ON)` of the 22 queries on both servers, compared node by node (shapes;
+costs can't agree to the digit: PostgreSQL's ANALYZE samples at random). Before: 6 of 22 had
+PostgreSQL's shape (q01, q06, q09, q11, q12, q14). After: 13 (q01-q04, q06, q09-q14, q17,
+q22). What differed and why:
+
+1. **n_distinct of l_orderkey** (q03, q04, q10, q18 and every join on it): PostgreSQL's
+   ANALYZE samples 30,000 of lineitem's 112,456 pages and then rows within them; an order's
+   lines share a page, so the sample repeats orders and its n_distinct is about 390,000. The
+   engine sampled rows uniformly (about 1.2M), so it expected fewer lineitem rows per order.
+   ANALYZE now samples pages as acquire_sample_rows does (`analyze.rs` `sampled_blocks`;
+   414,838 here, PostgreSQL 392,494; its own varies run to run).
+2. **Index sizes of tables too big to model**: the btree height was 0 (index scans started at
+   0.18 for PostgreSQL's 0.43; `sizing::btree_level`), and deduplicated indexes' inner pages
+   held whole posting tuples as downlinks (l_shipdate_idx 6,047 pages for 5,207;
+   `relsize::btree_pages` now takes pivots without posting lists: 5,209).
+3. **A cold heap model forgot the visibility map**: after a restart ANALYZE wrote
+   relallvisible 0 for modelled tables (customer, part, supplier), pricing index-only scans
+   as heap fetches; the model now starts from the catalog's relallvisible.
+4. **Parallel plans**: a join with a correlated sub-select in its clauses got partial paths
+   (q17; PostgreSQL's joinrel isn't consider_parallel); a merge join whose sorted input
+   became a Gather Merge lost that input's partial plans, so the Parallel Hash Join
+   PostgreSQL picks was never built (q12); partial and finalized hashed aggregations left
+   out their spill costs.
+5. **Grouping**: an index path in the grouping's order competed with hashing without the
+   hash's spill (q18's sub-select: 621,298 hashed against 386,872 sorted along the index);
+   an expression key estimated 200 groups for its Vars' 744 (q22); a group key that is an
+   aggregate of the grouping below printed in parentheses (q13).
+
+Left (the second batch has some): q05 (the engine finds a cheaper nested loop the other
+way round, orders outside and a Memoize of customer_pkey inside, which PostgreSQL costs
+higher), q07 / q08 (join order), q15 (a CTE's sort order), q16 (group estimate: each
+relation's own filtered rows), q19 (an OR whose arms share the join clause), q20 / q21
+(IN / EXISTS forms), q18 (the semi join as an inner join over the unique sub-select).
+
+### What changed in the executor
+
+- **Dense bitmap heap scans** (`exec/scan.rs` `dense_bitmap_scan`): a bitmap heap scan of a
+  table too big to model selecting at least one row in 32 runs as a scan of the table
+  checking the bitmap's conditions and then the filter, in the parallel scan's workers
+  where it can: the same rows in the same (heap) order. Not under EXPLAIN ANALYZE (its
+  counters are the bitmap's) or predicate locking (which locks what a scan reads); the
+  cumulative statistics count the bitmap's index scan and fetches as before. Otherwise a
+  dense bitmap rechecks its rows from one ordered scan of the table (`rows_in_order`)
+  instead of a lookup per entry. q06: 18-26 s -> 1.8 s.
+- **Planning reads no table**: the first statement touching a table too big to model after
+  its database opened read all of it to size it (2-3 s for lineitem, in the first EXPLAIN
+  after a restart: agent 65's finding); a table whose last VACUUM / ANALYZE counted more rows
+  than the model holds is now sized from pg_class (17 ms).
+- ANALYZE decodes only the rows it keeps in the sample.
+
+### Verification (round 20, first batch)
+
+- `cargo test -p pg-engine` (golden `a64_tpch_planner`, recorded from PostgreSQL 18.6) and
+  `cargo clippy -p pg-engine --all-targets` with no new warnings.
+- The regression suite in full (debug build, private reference): 51,148 / 51,150, no unit
+  changed against the committed baseline.
+- `difftest smoke` passes; 150 seeds x 120 statements with planner-setting variants
+  (`DIFFTEST_PLAN=0.5`): the same mismatch records as the base, statement for statement.
+- Every TPC-H result hash agrees with PostgreSQL's.
+
 ## Catalog, DDL and sessions (round 18, agent 44)
 
 Measured on the same machine and harness as above (PostgreSQL in `a44-pg`, the pinned image

@@ -111,7 +111,8 @@ impl Gucs {
 
     /// cost_agg's disk costs of a hashed aggregation expected to spill
     /// (hash_agg_entry_size, hash_agg_set_limits, hash_choose_num_partitions): the
-    /// (startup, total) cost to add.
+    /// (startup, total) cost to add, and the partitions it plans (EXPLAIN's "Planned
+    /// Partitions": 0 when the groups fit in hash_mem).
     pub fn hashagg_spill(
         &self,
         input_rows: f64,
@@ -119,7 +120,7 @@ impl Gucs {
         groups: f64,
         num_trans: usize,
         trans_space: f64,
-    ) -> (f64, f64) {
+    ) -> (f64, f64, u32) {
         const BLCKSZ: f64 = 8192.0;
         let maxalign = |x: f64| (x / 8.0).ceil() * 8.0;
         // TupleHashEntryData; the minimal tuple (its header MAXALIGNed); the per-group
@@ -153,11 +154,12 @@ impl Gucs {
             let ng = if limit > entry { (limit / entry).floor() } else { 1.0 };
             (limit, ng, parts)
         };
+        let planned = partitions as u32;
         let nbatches = ((groups * entry) / mem_limit).max(groups / ngroups_limit).ceil().max(1.0);
         let partitions = partitions.max(2.0);
         let depth = (nbatches.ln() / partitions.ln()).ceil();
         if depth <= 0.0 || !depth.is_finite() {
-            return (0.0, 0.0);
+            return (0.0, 0.0, planned);
         }
         let pages = costs::relation_byte_size(input_rows, input_width) / BLCKSZ;
         let written = pages * depth * 2.0;
@@ -166,6 +168,7 @@ impl Gucs {
         (
             written * self.random_page_cost + spill,
             written * self.random_page_cost + read * self.seq_page_cost + spill,
+            planned,
         )
     }
 }
@@ -475,7 +478,11 @@ fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo>
             }
         };
         let height = match am {
-            Am::Btree => crate::exec::sizing::btree_height(ix.oid, db).map_or(0, |h| h as i32),
+            Am::Btree => {
+                let width: u32 = b.keys.iter().map(|k| costs::type_width(&k.ty())).sum();
+                let relpages = cat.relstats.get(&ix.oid).map_or(0.0, |s| s.pages as f64);
+                crate::exec::sizing::btree_level(ix.oid, pages.max(relpages), width, db) as i32
+            }
             _ => -1,
         };
         // The key columns' operator classes (by_family AMs).
@@ -4987,8 +4994,16 @@ impl Planner<'_, '_> {
         if let Some(keys) = keys {
             let n = child_needs(p, needed).pop().unwrap_or_default();
             let distinct = matches!(p, Plan::Distinct { .. });
+            // (The transition states a hashed grouping keeps per group, for its spill.)
+            let trans = match &*p {
+                Plan::Agg { aggs, .. } => (
+                    aggs.len(),
+                    aggs.iter().map(|a| parallel::agg_trans_space(a.def.sig.oid)).sum::<f64>(),
+                ),
+                _ => (0, 0.0),
+            };
             if let Plan::Agg { input, .. } | Plan::Distinct { input, .. } = p
-                && self.hinted_scan(take(input), &n, keys, distinct)
+                && self.hinted_scan(take(input), &n, keys, distinct, trans)
             {
                 return;
             }
@@ -5675,7 +5690,14 @@ impl Planner<'_, '_> {
 
     /// A scan (through projections) whose order on `keys` (over its consumer's row) would
     /// be useful above: its index paths in that order considered, the cheapest taken.
-    fn hinted_scan(&self, p: &mut Plan, needed: &[bool], keys: Vec<Expr>, distinct: bool) -> bool {
+    fn hinted_scan(
+        &self,
+        p: &mut Plan,
+        needed: &[bool],
+        keys: Vec<Expr>,
+        distinct: bool,
+        trans: (usize, f64),
+    ) -> bool {
         let scan_needed = scan_needs(p, needed);
         let Some((s, mapped)) = sort_target(p, keys) else {
             return false;
@@ -5727,10 +5749,11 @@ impl Planner<'_, '_> {
         let key_refs: Vec<&Expr> = want.merge.iter().collect();
         let groups = self.num_groups(&rel, &key_refs, c.rows);
         // (A hashed DISTINCT returns its groups at cpu_tuple_cost each, a Unique not; an
-        // aggregation's do either way.)
+        // aggregation's do either way. Hashing spills groups that outgrow hash_mem.)
+        let spill = self.g.hashagg_spill(c.rows, width, groups, trans.0, trans.1).1;
         let hashed = (
             !self.g.hashagg as u32,
-            c.total + if distinct { groups * costs::CPU_TUPLE_COST } else { 0.0 },
+            c.total + spill + if distinct { groups * costs::CPU_TUPLE_COST } else { 0.0 },
         );
         let sorted = (
             c.disabled + !self.g.sort as u32,

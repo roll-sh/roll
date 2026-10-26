@@ -713,6 +713,14 @@ impl Heap {
         self.pages.iter().filter(|p| p.all_visible).count() as u32
     }
 
+    /// The visibility map as a database opened afresh finds it: its first `n` pages
+    /// all-visible (the catalog's relallvisible; the map isn't kept with the model).
+    pub fn seed_all_visible(&mut self, n: u32) {
+        for p in self.pages.iter_mut().take(n as usize) {
+            p.all_visible = true;
+        }
+    }
+
     /// Whether the visibility map marks page `blk` all-visible.
     pub fn page_all_visible(&self, blk: u32) -> bool {
         self.pages.get(blk as usize).is_some_and(|p| p.all_visible)

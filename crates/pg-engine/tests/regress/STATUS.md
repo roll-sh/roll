@@ -164,6 +164,50 @@ stats_ext 50 newly differed, `pg_describe_object` of a temporary schema's statis
 unqualified (statistics objects' visibility skips the temporary schema, as
 StatisticsObjIsVisible does: fixed). Full debug runs of the final change on a private reference (`a62-ref1`), before and after its rebase onto `6957f0d7`, measured **51148** both, no unit changed against the baseline; the generated blocks are left to the next full run.
 
+## Round 20, agent 64 (TPC-H plans: page-sampled ANALYZE, btree heights and pivots, parallel join safety; dense bitmap scans)
+
+Measured by full runs of the batch (debug builds, private reference `a64-ref`) against the
+committed baseline (`results.tsv`: `ed6356cc`, and `9407d0ee` after a rebase): **51,148 /
+51,150, no unit changed** both times. The
+difftest smoke passes, and 150 seeds x 120 statements with planner-setting variants
+(`DIFFTEST_PLAN=0.5`) give the same mismatch records as the batch's base (`61e57157`),
+statement for statement. (The generated blocks are left to the next committed full run.)
+
+No unit of the suite changes: its tables are small enough to model and to sample whole. The
+causes were found on TPC-H at SF1 against PostgreSQL 18.6 loaded with the same data and
+analyzed (BENCH.md "Round 20"):
+
+- **ANALYZE samples pages, then rows in them** (acquire_sample_rows; `analyze.rs`
+  `sampled_blocks`): a table with more pages than the sample (300 x the statistics target)
+  takes that many pages (Knuth's Algorithm S, a fixed seed) and a reservoir of rows from
+  them. A column clustered by page (l_orderkey: an order's lines share a page) repeats its
+  values in the sample, so its n_distinct is Postgres's: 414,838 for its 392,494 (row
+  sampling gave about 1.2M), which decides every join with lineitem on l_orderkey.
+- **Btree sizes of tables too big to model**: the planner's tree height is the levels a
+  sorted build stacks over the index's pages (`sizing::btree_level`; it was 0, so index
+  scans started at 0.18 where Postgres's start at 0.43); deduplicated indexes' inner pages
+  hold pivots without posting lists (`relsize::posting_tuples` / `btree_pages`: a page
+  starting with an 808-byte posting tuple had an 808-byte downlink; l_shipdate_idx 6,047
+  pages, now 5,209 for Postgres's 5,207).
+- **Cold models**: a heap model built when a table is first touched after its database opens
+  starts its visibility map from the catalog's relallvisible (ANALYZE after a restart wrote 0,
+  which priced index-only scans as fetching every page), and a table its last VACUUM or
+  ANALYZE found too big to model isn't read again to be sized (the first plan after a restart
+  read all of lineitem: 2-3 s, now 17 ms).
+- **Parallel safety of join clauses**: a join with a correlated sub-select in its clauses
+  has no partial paths (joinrel consider_parallel; TPC-H q17's join stays serial).
+- **A merge join's Gather Merge input** keeps its unsorted relation (`presort`), so the
+  join's other partial paths (a Parallel Hash Join) are built from it (q12).
+- **Grouping**: the hashed grouping's spill counts when an index in the keys' order competes
+  with it (`hinted_scan`; q18's sub-select groups along lineitem_pkey); partial and finalized
+  hashed aggregations cost their spill; a grouping keyed on an expression estimates its
+  groups from the Vars it reads (`ColInfo::groups`; q22's 744 for 200); a key that is an
+  aggregate its input computes is shown bare (`Group Key: count(orders.o_orderkey)`, q13).
+- **EXPLAIN shows a HashAggregate's "Planned Partitions"** in text when it plans any
+  (hash_agg_set_limits; the JSON / YAML / XML forms already had the property, always 0).
+
+Golden: `tests/sql/a64_tpch_planner.sql` (recorded from PostgreSQL 18.6).
+
 ## Round 19, agent 60 (database locales: libc C by default, CREATE DATABASE's providers)
 
 The engine's databases reported and behaved as the builtin C.UTF-8 locale; the reference is

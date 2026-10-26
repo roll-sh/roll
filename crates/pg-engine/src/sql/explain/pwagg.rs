@@ -385,7 +385,7 @@ impl Builder<'_, '_> {
                 let mut f = h.clone();
                 f.strategy = Some("Sorted");
                 f.title = f.title.replace("HashAggregate", "GroupAggregate");
-                f.details.retain(|d| !matches!(d, Detail::HashAggInfo));
+                f.details.retain(|d| !matches!(d, Detail::HashAggInfo(_)));
                 forms.push(f);
             }
             for form in &forms {

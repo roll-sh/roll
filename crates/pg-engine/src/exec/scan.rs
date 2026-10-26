@@ -372,6 +372,7 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
     if s.table.foreign.is_some() {
         return open_foreign(s, need, ctx);
     }
+    let raw_need = need;
     let need = scan_need(s, need, ctx);
     let epq = ctx.epq.borrow().clone();
     if let Some(test) = epq.as_ref().and_then(|m| m.get(&(s as *const ScanPlan as usize))) {
@@ -427,6 +428,9 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
     }
     // A bitmap heap scan: the rows the bitmap selects, in heap order.
     if let (Access::Bitmap(q, _), None) = (&s.access, &s.current_of) {
+        if let Some(node) = dense_bitmap_scan(s, q, raw_need, ctx)? {
+            return Ok(node);
+        }
         let keys = bitmap_rows(s, q, ctx)?;
         let mut plan = s.clone();
         plan.access = Access::Seq;
@@ -1097,6 +1101,11 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
             }
             let secondary = reads_entries(index);
             let mut out = Vec::new();
+            // (Many rows of a big table: their keys first, then the rows by one scan in
+            // key order, rather than a lookup each.)
+            let tuples = ctx.catalog().relstats.get(&t.oid).map_or(-1.0, |r| r.tuples);
+            let dense = secondary && tuples > 0.0 && super::sizing::is_estimated(t.oid, &ctx.sess.db);
+            let mut sorted_keys: Vec<Vec<u8>> = Vec::new();
             for (start, end) in &ranges {
                 let entries: Vec<(Vec<u8>, bytes::Bytes)> = {
                     let txn = ctx.txn.borrow();
@@ -1106,6 +1115,10 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
                     };
                     it.collect::<Result<_>>()?
                 };
+                if dense && entries.len() as f64 * 32.0 >= tuples {
+                    sorted_keys.extend(entries.into_iter().map(|(_, v)| v.to_vec()));
+                    continue;
+                }
                 for (k, v) in entries {
                     ctx.check()?;
                     let (dkey, bytes) = if secondary {
@@ -1121,6 +1134,24 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
                     } else {
                         (k, v)
                     };
+                    let row = decode_table_row(t, &bytes)?;
+                    let mut ok = true;
+                    for c in quals {
+                        if !eval_bool(&c.orig, &row, ctx)? {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if ok {
+                        out.push(dkey);
+                    }
+                }
+            }
+            if !sorted_keys.is_empty() {
+                sorted_keys.sort_unstable();
+                sorted_keys.dedup();
+                for (dkey, bytes) in rows_in_order(sorted_keys, ctx)? {
+                    ctx.check()?;
                     let row = decode_table_row(t, &bytes)?;
                     let mut ok = true;
                     for c in quals {
@@ -1173,6 +1204,164 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
         }
     };
     ctx.count(key, |st| st.loops += 1);
+    Ok(out)
+}
+
+/// A bitmap heap scan selecting many rows of a table too big to model, run as a
+/// sequential scan of the table checking the bitmap's conditions and the filter: the same
+/// rows in the same (heap) order, read in the table's order (and in parallel) rather than
+/// looked up one by one. Not under EXPLAIN ANALYZE (its counters are the bitmap's) or
+/// predicate locking (which locks what the scan reads); the cumulative statistics are
+/// counted as the bitmap scan counts them.
+fn dense_bitmap_scan(
+    s: &ScanPlan,
+    q: &BitmapQual,
+    need: Option<&[bool]>,
+    ctx: &ExecCtx,
+) -> Result<Option<BoxNode>> {
+    if ctx.instrumented()
+        || s.mark.is_some()
+        || s.sample.is_some()
+        || s.limit.is_some()
+        || s.index.is_some()
+        || s.table.pk_clustered()
+        || predicate_locked(&s.table, ctx)
+        || !super::sizing::is_estimated(s.table.oid, &ctx.sess.db)
+    {
+        return Ok(None);
+    }
+    let tuples = ctx.catalog().relstats.get(&s.table.oid).map_or(-1.0, |r| r.tuples);
+    if tuples <= 0.0 {
+        return Ok(None);
+    }
+    // The bitmap's entries (index keys only, no rows read) and its condition.
+    fn entries(t: &Table, q: &BitmapQual, ctx: &ExecCtx, counted: &mut Vec<(u32, i64)>) -> Result<Option<(f64, crate::sql::expr::Expr)>> {
+        use crate::sql::expr::Expr;
+        Ok(match q {
+            BitmapQual::Index { index, quals, bounds, .. } => {
+                if quals.is_empty() {
+                    return Ok(None);
+                }
+                let mut n = 0i64;
+                for (start, end) in ranges(t, index, bounds, ctx)? {
+                    let txn = ctx.txn.borrow();
+                    let it = match ctx.snapshot().as_deref() {
+                        Some(sn) => txn.scan_snap(&start, &end, sn),
+                        None => txn.scan(&start, &end),
+                    };
+                    for r in it {
+                        r?;
+                        n += 1;
+                    }
+                }
+                counted.push((index.oid, n));
+                Some((n as f64, Expr::And(quals.iter().map(|x| x.orig.clone()).collect())))
+            }
+            BitmapQual::And(list) | BitmapQual::Or(list) => {
+                let mut ns = Vec::new();
+                let mut es = Vec::new();
+                for x in list {
+                    let Some((n, e)) = entries(t, x, ctx, counted)? else { return Ok(None) };
+                    ns.push(n);
+                    es.push(e);
+                }
+                if matches!(q, BitmapQual::And(_)) {
+                    Some((ns.iter().copied().fold(f64::INFINITY, f64::min), Expr::And(es)))
+                } else {
+                    Some((ns.iter().sum(), Expr::Or(es)))
+                }
+            }
+        })
+    }
+    let mut counted = Vec::new();
+    let Some((n, cond)) = entries(&s.table, q, ctx, &mut counted)? else {
+        return Ok(None);
+    };
+    if n * 32.0 < tuples {
+        return Ok(None);
+    }
+    if super::pgstat::scan_counts(ctx) {
+        for &(ix, rows) in &counted {
+            super::pgstat::count_index_scan(ctx, ix);
+            super::pgstat::count_returned(ctx, ix, rows);
+            super::pgstat::count_blocks(ctx, ix, 1);
+        }
+        super::pgstat::count_fetched(ctx, s.table.oid, n.min(tuples) as i64);
+    }
+    let mut plan = s.clone();
+    plan.access = Access::Seq;
+    plan.filter = Some(match s.filter.clone() {
+        Some(f) => crate::sql::expr::Expr::And(vec![cond, f]),
+        None => cond,
+    });
+    let need = scan_need(&plan, need, ctx);
+    let p = index_prefix(s.table.oid, 0);
+    Ok(Some(Box::new(ScanNode {
+        stat: StatTarget::Off,
+        sample: None,
+        only: None,
+        key: s as *const ScanPlan as usize,
+        need,
+        plan,
+        ranges: vec![(p.clone(), prefix_end(&p))],
+        cur_range: 0,
+        iter: None,
+        secondary: false,
+        emitted: 0,
+        keys: None,
+        ios: false,
+        ios_entries: None,
+        tid_order: true,
+        sorted: None,
+        streamed: false,
+        par: None,
+        par_tried: false,
+        run: Default::default(),
+        pending: None,
+        one_run: false,
+        blocks: Default::default(),
+        prune_next: 0,
+        nblocks: None,
+        last_block: None,
+        fetched: Default::default(),
+        batch: FETCH_BATCH_MIN,
+        ios_cols: None,
+    })))
+}
+
+/// The visible rows with these data keys (sorted, distinct), by one range scan from the
+/// first to the last, in key order: what a lookup of each finds.
+fn rows_in_order(keys: Vec<Vec<u8>>, ctx: &ExecCtx) -> Result<Vec<(Vec<u8>, bytes::Bytes)>> {
+    let (Some(first), Some(last)) = (keys.first(), keys.last()) else {
+        return Ok(Vec::new());
+    };
+    let end = prefix_end(last);
+    let txn = ctx.txn.borrow();
+    let it = match ctx.snapshot().as_deref() {
+        Some(s) => txn.scan_snap(first, &end, s),
+        None => txn.scan(first, &end),
+    };
+    let mut want = keys.iter().peekable();
+    let mut out = Vec::with_capacity(keys.len());
+    let mut n = 0u32;
+    for r in it {
+        n = n.wrapping_add(1);
+        if n.is_multiple_of(4096) {
+            ctx.check()?;
+        }
+        let (k, v) = r?;
+        while want.peek().is_some_and(|w| w.as_slice() < k.as_slice()) {
+            want.next();
+        }
+        match want.peek() {
+            Some(w) if w.as_slice() == k.as_slice() => {
+                want.next();
+                out.push((k, v));
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
     Ok(out)
 }
 

@@ -54,6 +54,9 @@ pub struct RelFiles {
     toast: HashMap<u32, Toast>,
     /// Tables too big to model.
     untracked: HashSet<u32>,
+    /// Tables whose models this process dropped (a model built for one of the others is
+    /// the first since the database was opened).
+    dropped: HashSet<u32>,
     /// Their heaps' estimated sizes.
     estimated: HashMap<u32, EstHeap>,
     /// Bulk loads (COPY) in progress, by (table, transaction).
@@ -1099,6 +1102,23 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     if !heap_missing && missing.is_empty() {
         return Ok(true);
     }
+    // A table first touched since its database opened that its last VACUUM or ANALYZE found
+    // too big to model: its size is the pages they counted, without reading it again (the
+    // planner reads only pg_class and pg_statistic, as Postgres's does).
+    let cold = heap_missing && !db.relfiles.lock().dropped.contains(&t.oid);
+    let known_big = if cold {
+        ctx.catalog()
+            .relstats
+            .get(&t.oid)
+            .filter(|s| s.tuples > max_versions() as f64 && s.pages > 0)
+            .map(|s| s.pages as u32)
+    } else {
+        None
+    };
+    if let Some(pages) = known_big {
+        untrack(db, t, Some(EstHeap { pages, room: 0, reusable: 0 }));
+        return Ok(false);
+    }
     let start = index_prefix(t.oid, 0);
     let end = prefix_end(&start);
     // (Read up to the limit; a bigger table's rest is only measured, a row at a time.)
@@ -1188,6 +1208,13 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     if heap_missing && !rf.heaps.contains_key(&t.oid) {
         let (mut h, tids) = heapsim::rewritten(heap_fillfactor(t), lens);
         h.unstamped = stored.iter().zip(&tids).any(|(s, t)| s.is_some_and(|s| s != *t));
+        // (The first model of the table since the database was opened: the pages its
+        // last VACUUM left all-visible stay so, as Postgres's visibility map keeps them.)
+        if !rf.dropped.contains(&t.oid)
+            && let Some(st) = ctx.catalog().relstats.get(&t.oid)
+        {
+            h.seed_all_visible(st.allvisible.max(0) as u32);
+        }
         rf.heaps.insert(t.oid, h);
         rebuild_toast(rf, t, exts);
     }
@@ -1216,6 +1243,7 @@ fn default_opts() -> BtreeOpts {
 
 /// Forget a table's files (`keep_untracked`: unless it is too big to model).
 fn forget(rf: &mut RelFiles, t: &Table) {
+    rf.dropped.insert(t.oid);
     rf.heaps.remove(&t.oid);
     for i in t.indexes.iter().chain(&t.pkey_index) {
         rf.btrees.remove(i);
@@ -1671,6 +1699,7 @@ pub fn storage_rolled_back(rel: u32, db: &Database) {
     match cat.tables.get(&rel) {
         Some(t) => forget(&mut rf, t),
         None => {
+            rf.dropped.insert(rel);
             rf.heaps.remove(&rel);
         }
     }
@@ -2538,6 +2567,7 @@ pub struct Detached {
 /// Take a table's models out (its rows are about to be stored under new keys).
 pub fn detach(t: &Table, db: &Database) -> Detached {
     let mut rf = db.relfiles.lock();
+    rf.dropped.insert(t.oid);
     let heap = rf.heaps.remove(&t.oid);
     let btrees = t
         .indexes
@@ -2841,6 +2871,25 @@ pub fn measured(t: &Table, ctx: &ExecCtx) -> Result<Option<(i32, i32, HashMap<u3
 /// A btree index's root level, if modelled.
 pub fn btree_height(index: u32, db: &Database) -> Option<u32> {
     db.relfiles.lock().btrees.get(&index).map(Btree::height)
+}
+
+/// A btree index's root level for the planner (_bt_getrootheight): the model's, else, for an
+/// index too big to model, the levels a sorted build stacks over its `pages` (inner pages
+/// 70% full of downlinks to keys `key_width` bytes wide: TPC-H's lineitem_pkey has 2).
+pub fn btree_level(index: u32, pages: f64, key_width: u32, db: &Database) -> u32 {
+    if let Some(h) = btree_height(index, db) {
+        return h;
+    }
+    let downlink = (8 + key_width as usize).div_ceil(8) * 8 + heapsim::ITEM_ID;
+    let fanout = ((heapsim::BLCKSZ - 24 - 16) * 70 / 100 / downlink).max(2) as f64;
+    // (The metapage isn't in the tree.)
+    let mut level = (pages - 1.0).max(1.0);
+    let mut h = 0;
+    while level > 1.0 {
+        level = (level / fanout).ceil();
+        h += 1;
+    }
+    h
 }
 
 /// The leaf pages of btree `index` an index scan over these entry ranges (with the

@@ -849,7 +849,7 @@ impl Builder<'_, '_> {
             };
             a.title = format!("{mode} {base}");
             a.details.retain(|d| {
-                !matches!(d, Detail::HashAggInfo | Detail::List("Group Key", _))
+                !matches!(d, Detail::HashAggInfo(_) | Detail::List("Group Key", _))
             });
             if !keys.is_empty() {
                 let shown = if mode == "Finalize" {
@@ -862,7 +862,7 @@ impl Builder<'_, '_> {
                 a.details.insert(0, Detail::List("Group Key", shown));
             }
             if kind == "Hashed" {
-                a.details.push(Detail::HashAggInfo);
+                a.details.push(Detail::HashAggInfo(0));
             }
             a.disabled = kind == "Hashed" && !g.hashagg;
             a.order = if kind == "Sorted" { keys.clone() } else { Vec::new() };
@@ -915,6 +915,13 @@ impl Builder<'_, '_> {
             ph.rows = pgroups;
             ph.startup_cost = part.total_cost + in_rows * (trans + group_ops);
             ph.total_cost = ph.startup_cost + pgroups * (costs::CPU_TUPLE_COST + gexpr);
+            // (cost_agg's disk costs when the groups won't fit in hash_mem, partial and
+            // finalized alike: the transition states of all the aggregates.)
+            let (num_trans, trans_space) = crate::sql::paths::parallel::agg_transitions(aggs);
+            let (s, t, parts) = g.hashagg_spill(in_rows, part.width, pgroups, num_trans, trans_space);
+            ph.startup_cost += s;
+            ph.total_cost += t;
+            super::plan_partitions(&mut ph.details, parts);
             ph.output = partial_out.clone();
             let si = sorted(self, part.clone());
             let mut ps = make("Sorted", "Partial", si);
@@ -947,6 +954,10 @@ impl Builder<'_, '_> {
                 let gi = &f.children[0];
                 f.startup_cost = gi.total_cost + gi.rows * (combine + group_ops);
                 f.total_cost = f.startup_cost + ngroups * (costs::CPU_TUPLE_COST + gexpr);
+                let (s, t, parts) = g.hashagg_spill(gi.rows, gi.width, ngroups, num_trans, trans_space);
+                f.startup_cost += s;
+                f.total_cost += t;
+                super::plan_partitions(&mut f.details, parts);
                 f.rows = ngroups;
                 f
             };

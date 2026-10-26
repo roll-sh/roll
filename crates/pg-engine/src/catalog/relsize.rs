@@ -656,22 +656,22 @@ pub fn equal_image(ty: &DataType) -> bool {
 }
 
 /// The index tuples a sorted build writes for `n` equal keys of plain size `base` with
-/// deduplication: posting list tuples (a heap TID each) of at most 10% of a page.
-pub fn posting_tuples(base: usize, n: usize, out: &mut Vec<usize>) {
+/// deduplication: posting list tuples (a heap TID each) of at most 10% of a page. Each with
+/// the size of the pivot tuple a page starting with it gets above (_bt_truncate: never a
+/// posting list; a heap TID too when the key is the one before it).
+pub fn posting_tuples(base: usize, n: usize, out: &mut Vec<(usize, usize)>) {
     const MAX_POSTING: usize = (BLCKSZ * 10 / 100) / MAXALIGN * MAXALIGN - ITEM_ID;
     let per = (MAX_POSTING / MAXALIGN * MAXALIGN).saturating_sub(base) / 6;
+    let with_tid = align(base + 6, MAXALIGN);
     if per < 2 {
-        out.extend(std::iter::repeat_n(base, n));
+        out.extend((0..n).map(|i| (base, if i == 0 { base } else { with_tid })));
         return;
     }
     let mut left = n;
     while left > 0 {
         let k = left.min(per);
-        out.push(if k == 1 {
-            base
-        } else {
-            align(base + 6 * k, MAXALIGN)
-        });
+        let pivot = if left == n { base } else { with_tid };
+        out.push((if k == 1 { base } else { align(base + 6 * k, MAXALIGN) }, pivot));
         left -= k;
     }
 }
@@ -681,22 +681,23 @@ const BT_MAX_ITEM: usize = 2704;
 
 /// Pages of a btree built over index tuples of these sizes (in key order): leaves filled
 /// to 90%, inner pages to 70%, a metapage, and a root above more than one leaf.
-pub fn btree_pages(tuples: &[usize]) -> i32 {
+pub fn btree_pages(tuples: &[(usize, usize)]) -> i32 {
     if tuples.is_empty() {
         return 1;
     }
     let usable = BLCKSZ - PAGE_HEADER - 16;
-    let fill = |items: &[usize], reserve: usize| -> Vec<usize> {
+    // (Items with their pivots' sizes.)
+    let fill = |items: &[(usize, usize)], reserve: usize| -> Vec<(usize, usize)> {
         // The first item of each page (its downlink's key size, as the next level sees it).
         let mut firsts = Vec::new();
         let mut free = 0usize;
         let mut started = false;
-        for &it in items {
+        for &(it, pivot) in items {
             // (No btree tuple is bigger than BTMaxItemSize: a page holds at least three.)
             let need = it.min(BT_MAX_ITEM) + ITEM_ID;
             // PageGetFreeSpace leaves room for one more line pointer.
             if !started || free.saturating_sub(ITEM_ID) < need + reserve {
-                firsts.push(it);
+                firsts.push((pivot, pivot));
                 free = usable - ITEM_ID; // the high key's line pointer
                 started = true;
             }
@@ -710,7 +711,7 @@ pub fn btree_pages(tuples: &[usize]) -> i32 {
     while level.len() > 1 {
         // Downlinks: the leftmost is a bare "minus infinity" tuple.
         let mut down = level.clone();
-        down[0] = 8;
+        down[0] = (8, 8);
         level = fill(&down, BLCKSZ * 30 / 100);
         pages += level.len();
     }

@@ -384,7 +384,9 @@ enum Detail {
     SortInfo,
     /// An Incremental Sort's full-sort and presorted groups under ANALYZE.
     IncSortInfo,
-    HashAggInfo,
+    /// A hashed aggregation's partitions planned for spilling (hash_agg_set_limits), then its
+    /// batches and memory under ANALYZE.
+    HashAggInfo(u32),
     HashInfo,
     /// An index scan's descents (by its `ScanPlan`).
     IndexSearches(usize),
@@ -436,7 +438,7 @@ impl Detail {
             self,
             Detail::SortInfo
                 | Detail::IncSortInfo
-                | Detail::HashAggInfo
+                | Detail::HashAggInfo(_)
                 | Detail::HashInfo
                 | Detail::IndexSearches(_)
                 | Detail::HeapFetches(_)
@@ -453,6 +455,9 @@ struct ColInfo {
     var: Option<costs::VarRef>,
     /// A distinct count known otherwise (a VALUES list's columns are taken as unique).
     distinct: Option<f64>,
+    /// An expression's groups (estimate_num_groups over the Vars it reads): what grouping by
+    /// it estimates, where other estimates take it as unknown.
+    groups: Option<f64>,
 }
 
 impl std::fmt::Debug for ColInfo {
@@ -5976,6 +5981,7 @@ impl Builder<'_, '_> {
                         width: type_width(&e.ty()),
                         var: None,
                         distinct: Some(rows.len() as f64),
+                        groups: None,
                     })
                     .collect();
                 n.width = n.cols.iter().map(|c| c.width).sum();
@@ -6246,6 +6252,7 @@ impl Builder<'_, '_> {
                             width: type_width(&c.ty),
                             var: None,
                             distinct,
+                            groups: None,
                         })
                         .collect();
                 }
@@ -6743,6 +6750,24 @@ impl Builder<'_, '_> {
                                     ds.filter(|d| !d.is_empty() && !e.is_volatile())
                                         .map(|d| d.iter().product::<f64>().min(costs::clamp_rows(c.node.rows)))
                                 }
+                            },
+                            // (Grouped by: estimate_num_groups over the Vars it reads, those
+                            // without statistics by their distinct counts.)
+                            groups: {
+                                use super::extstat::{GroupVar, add_unique};
+                                let cat = self.ctx.catalog();
+                                let mut vars = Vec::new();
+                                let mut other = 1.0;
+                                for j in e.columns() {
+                                    match c.node.cols.get(j) {
+                                        Some(ColInfo { var: Some(v), .. }) => add_unique(&mut vars, GroupVar::of(&cat, v)),
+                                        Some(x) => other *= x.distinct.unwrap_or(costs::DEFAULT_NUM_DISTINCT),
+                                        None => other *= costs::DEFAULT_NUM_DISTINCT,
+                                    }
+                                }
+                                (!vars.is_empty() && !e.is_volatile()).then(|| {
+                                    super::extstat::num_groups(self.ctx, vars, other, c.node.rows, Some(c.node.rows))
+                                })
                             },
                         },
                     })
@@ -7718,7 +7743,11 @@ impl Builder<'_, '_> {
                         }
                         if parallel::par_beats(&gm, &n) {
                             gm.alt = Some(Box::new(n));
-                            return Built::passthrough(with_alts(gm, extra), c.exported);
+                            // (Its input unsorted too: a merge join's other partial paths
+                            // read it so.)
+                            let mut top = with_alts(gm, extra);
+                            top.presort = presort;
+                            return Built::passthrough(top, c.exported);
                         }
                         n.alt = Some(Box::new(gm));
                     }
@@ -7917,7 +7946,7 @@ impl Builder<'_, '_> {
                         })
                         .collect();
                     n.details.push(Detail::List("Group Key", keys));
-                    n.details.push(Detail::HashAggInfo);
+                    n.details.push(Detail::HashAggInfo(0));
                     n.disabled = !crate::sql::paths::Gucs::read(self.ctx).hashagg;
                     n
                 } else if on.is_some() {
@@ -7974,7 +8003,7 @@ impl Builder<'_, '_> {
                         })
                         .collect();
                     n.details.push(Detail::List("Group Key", keys));
-                    n.details.push(Detail::HashAggInfo);
+                    n.details.push(Detail::HashAggInfo(0));
                     n
                 };
                 let cols = if c.node.cols.len() == c.exported.len() {
@@ -8017,13 +8046,14 @@ impl Builder<'_, '_> {
                     // A hashed aggregation with no aggregates.
                     n.startup_cost = c.node.total_cost + c.node.rows * key_ops;
                     n.total_cost = n.startup_cost + n.rows * costs::CPU_TUPLE_COST;
-                    let (s, t) = crate::sql::paths::Gucs::read(self.ctx).hashagg_spill(
+                    let (s, t, parts) = crate::sql::paths::Gucs::read(self.ctx).hashagg_spill(
                         c.node.rows,
                         c.node.width,
                         n.rows,
                         0,
                         0.0,
                     );
+                    plan_partitions(&mut n.details, parts);
                     n.startup_cost += s;
                     n.total_cost += t;
                     // create_agg_path: its target's expressions (the computed keys) per
@@ -8328,7 +8358,7 @@ impl Builder<'_, '_> {
                     .map(|k| self.pick(k, Cx::Upper))
                     .collect();
                 n.details.push(Detail::List("Group Key", keys));
-                n.details.push(Detail::HashAggInfo);
+                n.details.push(Detail::HashAggInfo(0));
                 // No statistics for a union's output: every row may be distinct.
                 let ncols = app.exported.len() as f64;
                 n.rows = app.node.rows;
@@ -8338,7 +8368,8 @@ impl Builder<'_, '_> {
                     app.node.total_cost + app.node.rows * costs::CPU_OPERATOR_COST * ncols;
                 n.total_cost = n.startup_cost + n.rows * costs::CPU_TUPLE_COST;
                 let g = crate::sql::paths::Gucs::read(self.ctx);
-                let (s, t) = g.hashagg_spill(app.node.rows, app.node.width, n.rows, 0, 0.0);
+                let (s, t, parts) = g.hashagg_spill(app.node.rows, app.node.width, n.rows, 0, 0.0);
+                plan_partitions(&mut n.details, parts);
                 n.startup_cost += s;
                 n.total_cost += t;
                 n.disabled = !g.hashagg;
@@ -9022,6 +9053,7 @@ impl Builder<'_, '_> {
                         var: None,
                         distinct: (b.node.rows * 10.0 < costs::DEFAULT_NUM_DISTINCT)
                             .then(|| costs::clamp_rows(b.node.rows * 10.0)),
+                        groups: None,
                     })
                     .collect();
                 cte_push(format!("\u{1}{id}"), b.node.rows * 10.0, wcols, Vec::new());
@@ -9034,7 +9066,7 @@ impl Builder<'_, '_> {
                 n.width = b.node.width.max(r.node.width);
                 n.startup_cost = b.node.startup_cost;
                 n.total_cost = b.node.total_cost + r.node.total_cost * 10.0 + costs::CPU_TUPLE_COST * n.rows;
-                n.cols = b.node.cols.iter().map(|c| ColInfo { width: c.width, var: None, distinct: None }).collect();
+                n.cols = b.node.cols.iter().map(|c| ColInfo { width: c.width, var: None, distinct: None, groups: None }).collect();
                 n.children.push(b.node.child("Outer"));
                 n.children.push(r.node.child("Inner"));
                 Built::passthrough(n, b.exported)
@@ -10312,7 +10344,7 @@ impl Builder<'_, '_> {
         agg.key = Some(addr(input));
         let gkeys = exported.iter().map(|k| self.pick(k, Cx::Upper)).collect();
         agg.details.push(Detail::List("Group Key", gkeys));
-        agg.details.push(Detail::HashAggInfo);
+        agg.details.push(Detail::HashAggInfo(0));
         agg.rows = app.rows;
         agg.width = app.width;
         agg.startup_cost = app.total_cost + app.rows * costs::CPU_OPERATOR_COST * ncols as f64;
@@ -10674,7 +10706,8 @@ impl Builder<'_, '_> {
             x.rows = rows;
             x.startup_cost = child.total_cost + child.rows * key_ops;
             x.total_cost = x.startup_cost + rows * (costs::CPU_TUPLE_COST + per_group);
-            let (ss, st) = g.hashagg_spill(child.rows, child.width, rows, 0, 0.0);
+            let (ss, st, parts) = g.hashagg_spill(child.rows, child.width, rows, 0, 0.0);
+            plan_partitions(&mut x.details, parts);
             x.startup_cost += ss;
             x.total_cost += st;
             x.disabled = !g.hashagg;
@@ -10861,7 +10894,10 @@ impl Builder<'_, '_> {
                 match cols.get(*j).and_then(|c| c.var.as_ref()) {
                     Some(v) => add_unique(&mut vars, GroupVar::of(&cat, v)),
                     None => {
-                        total *= cols.get(*j).and_then(|c| c.distinct).unwrap_or(costs::DEFAULT_NUM_DISTINCT)
+                        total *= cols
+                            .get(*j)
+                            .and_then(|c| c.groups.or(c.distinct))
+                            .unwrap_or(costs::DEFAULT_NUM_DISTINCT)
                     }
                 }
                 continue;
@@ -11310,6 +11346,7 @@ impl Builder<'_, '_> {
                     inh: false,
                 }),
                 distinct: None,
+                groups: None,
             })
             .collect();
         let mut width: u32 = cols.iter().map(|c| c.width).sum();
@@ -11320,6 +11357,7 @@ impl Builder<'_, '_> {
                 width: 6,
                 var: None,
                 distinct: None,
+                groups: None,
             });
         }
         if s.sys {
@@ -11564,10 +11602,11 @@ impl Builder<'_, '_> {
                 correlation *= 0.75;
             }
             let db = &self.ctx.sess.db;
+            let ix_pages = crate::exec::sizing::btree_blocks(ix.oid, db).unwrap_or(1) as f64;
             let scan = costs::IndexScan {
                 heap: size,
-                index_pages: crate::exec::sizing::btree_blocks(ix.oid, db).unwrap_or(1) as f64,
-                tree_height: crate::exec::sizing::btree_height(ix.oid, db).unwrap_or(0),
+                index_pages: ix_pages,
+                tree_height: crate::exec::sizing::btree_level(ix.oid, ix_pages, 8 * ix.columns.len() as u32, db),
                 index_sel,
                 boundary_sel: index_sel,
                 unique_eq: (ix.unique || ix.primary)
@@ -13623,11 +13662,15 @@ impl Builder<'_, '_> {
                 }
                 all.extend((0..groups.len()).filter(|i| !all.contains(i)).collect::<Vec<_>>());
                 all.retain(|i| !redundant.get(*i).copied().unwrap_or(false));
-                // (A hashed grouping shows a key its input computes as the expression.)
+                // (A hashed grouping shows a key its input computes as the expression:
+                // show_agg_keys deparses the child's target list.)
                 let computed = |i: usize| match (groups.get(i), &**input) {
-                    (Some(Expr::Col(j, _)), Plan::Project { exprs, .. }) => {
-                        exprs.get(*j).is_some_and(|e| !matches!(e, Expr::Col(..) | Expr::Const(..)))
-                    }
+                    (Some(Expr::Col(j, _)), Plan::Project { exprs, input: pin }) => exprs.get(*j).is_some_and(|e| match e {
+                        Expr::Col(k, _) => agg_result(pin, *k),
+                        Expr::Const(..) => false,
+                        _ => true,
+                    }),
+                    (Some(Expr::Col(j, _)), p) => agg_result(p, *j),
                     _ => false,
                 };
                 let shown: Vec<String> = all
@@ -13639,7 +13682,7 @@ impl Builder<'_, '_> {
                     })
                     .collect();
                 n.details.push(Detail::List("Group Key", shown));
-                n.details.push(Detail::HashAggInfo);
+                n.details.push(Detail::HashAggInfo(0));
                 n.rows = (c.node.rows * 0.2).clamp(1.0, 200.0);
             }
             Some(sets) => {
@@ -13657,7 +13700,7 @@ impl Builder<'_, '_> {
                 for _ in sets.iter().filter(|s| s.is_empty()) {
                     n.details.push(Detail::List("Group Key", vec!["()".into()]));
                 }
-                n.details.push(Detail::HashAggInfo);
+                n.details.push(Detail::HashAggInfo(0));
                 n.rows = (c.node.rows * 0.2).clamp(1.0, 200.0) * sets.len() as f64;
             }
         }
@@ -13669,6 +13712,7 @@ impl Builder<'_, '_> {
                     width: type_width(&g.ty()),
                     var: None,
                     distinct: None,
+                    groups: None,
                 },
             })
             .collect();
@@ -13710,13 +13754,14 @@ impl Builder<'_, '_> {
                     .iter()
                     .map(|a| crate::sql::paths::parallel::agg_trans_space(a.def.sig.oid))
                     .sum();
-                let (s, t) = crate::sql::paths::Gucs::read(self.ctx).hashagg_spill(
+                let (s, t, parts) = crate::sql::paths::Gucs::read(self.ctx).hashagg_spill(
                     in_rows,
                     c.node.width,
                     ngroups,
                     aggs.len(),
                     space,
                 );
+                plan_partitions(&mut n.details, parts);
                 n.startup_cost += s;
                 n.total_cost += t;
             }
@@ -13744,6 +13789,7 @@ impl Builder<'_, '_> {
             width: type_width(&a.ty),
             var: None,
             distinct: None,
+            groups: None,
         }));
         n.width = cols.iter().map(|c| c.width).sum();
         n.cols = cols;
@@ -13930,7 +13976,7 @@ impl Builder<'_, '_> {
                 let mut ga = n.clone();
                 ga.strategy = Some("Sorted");
                 put_group_sort(&mut ga.details, group_sort.clone());
-                ga.details.retain(|d| !matches!(d, Detail::HashAggInfo));
+                ga.details.retain(|d| !matches!(d, Detail::HashAggInfo(_)));
                 for d in &mut ga.details {
                     if let Detail::List("Group Key", k) = d {
                         *k = group_names.clone();
@@ -14753,6 +14799,7 @@ impl Builder<'_, '_> {
                 width: type_width(&x.ty),
                 var: None,
                 distinct: None,
+                groups: None,
             }));
             n.key = cur.key;
             if self.o.verbose && Some(wi) != last_win {
@@ -14872,11 +14919,16 @@ impl Builder<'_, '_> {
         // sides as their relations give them, with their partial plans.)
         let unsorted = |b: &Built| -> Built {
             match &b.node.presort {
-                Some(p) if meta.method == Some(super::plan::JoinMethod::Merge) && b.node.node_type == "Sort" => Built {
-                    node: p.0.clone(),
-                    internal: p.1.clone(),
-                    exported: b.exported.clone(),
-                },
+                Some(p)
+                    if meta.method == Some(super::plan::JoinMethod::Merge)
+                        && matches!(b.node.node_type, "Sort" | "Gather Merge") =>
+                {
+                    Built {
+                        node: p.0.clone(),
+                        internal: p.1.clone(),
+                        exported: b.exported.clone(),
+                    }
+                }
                 _ => copy(b),
             }
         };
@@ -15185,6 +15237,7 @@ impl Builder<'_, '_> {
                         width: w / n.max(1) as u32,
                         var: None,
                         distinct: None,
+                        groups: None,
                     };
                     n
                 ]
@@ -16264,8 +16317,16 @@ impl Builder<'_, '_> {
         // (it must be something a worker can run).
         let (outer_part, inner_part) = if swapped { (rpart, lpart) } else { (lpart, rpart) };
         let outer_part = nl_outer.map(Box::new).or(outer_part);
-        n.par_safe = n.children.iter().all(parallel::safe_tree);
+        // (A join relation considers parallel paths only with its clauses parallel safe:
+        // not a correlated sub-select, whose Params a worker doesn't get.)
+        let clauses_safe = {
+            let cat = self.ctx.catalog();
+            let safe = |e: &Expr| super::paths::parallel::hazard(e, &cat) == 's';
+            cond.is_none_or(safe) && hash.is_none_or(|(a, b)| a.iter().chain(b).all(safe))
+        };
+        n.par_safe = clauses_safe && n.children.iter().all(parallel::safe_tree);
         if let (Some(c), Some(po)) = (pcost, outer_part)
+            && clauses_safe
             && gating.is_empty()
             && (parallel_hash
                 || matches!(shown_kind, JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti))
@@ -16607,6 +16668,7 @@ pub(crate) fn push_cte_estimates(ctes: &[(usize, Arc<Plan>)], names: &[String], 
                 var: v.clone().filter(|v| v.expr.is_none()),
                 // (get_variable_numdistinct without statistics: a small relation's rows.)
                 distinct: d.or((e.rows < costs::DEFAULT_NUM_DISTINCT).then(|| costs::clamp_rows(e.rows))),
+                groups: None,
             })
             .collect();
         cte_push(name.clone(), e.rows, cols, plan_output_order(cte, ctx));
@@ -16628,6 +16690,7 @@ pub(crate) fn push_work_estimate(id: usize, base: &Arc<Plan>, ctx: &ExecCtx) {
             width: *w,
             var: None,
             distinct: (e.rows * 10.0 < costs::DEFAULT_NUM_DISTINCT).then(|| costs::clamp_rows(e.rows * 10.0)),
+            groups: None,
         })
         .collect();
     cte_push(format!("\u{1}{id}"), e.rows * 10.0, cols, Vec::new());
@@ -17792,13 +17855,26 @@ impl Render<'_> {
                         }
                     }
                 }
-                Detail::HashAggInfo => {
+                Detail::HashAggInfo(planned) => {
+                    // (show_hashagg_info: in text only when some are planned, the batches on
+                    // the same line under ANALYZE.)
+                    let planned = *planned;
                     if !text && self.o.costs {
-                        self.w.prop("Planned Partitions", "0", true);
+                        self.w.prop("Planned Partitions", &planned.to_string(), true);
+                    }
+                    let shown = text && self.o.costs && planned > 0;
+                    if shown && !executed {
+                        self.w.prop("Planned Partitions", &planned.to_string(), true);
                     }
                     if executed {
                         let kb = self.memory_kb(n, 32);
-                        if text {
+                        if shown {
+                            self.w.prop(
+                                "Planned Partitions",
+                                &format!("{planned}  Batches: 1  Memory Usage: {kb}kB"),
+                                true,
+                            );
+                        } else if text {
                             self.w
                                 .prop("Batches", &format!("1  Memory Usage: {kb}kB"), true);
                         } else {
@@ -18872,6 +18948,7 @@ pub fn set_group_estimates(
                 width: type_width(&g.ty()),
                 var: None,
                 distinct: None,
+                groups: None,
             },
         })
         .collect();
@@ -20371,4 +20448,25 @@ fn old_new_rows(e: &Expr, on: Option<&super::plan::OldNew>) -> Expr {
             })
         })
         .unwrap_or_else(|_| e.clone())
+}
+
+/// Records a hashed aggregation's planned partitions in its HashAggInfo.
+fn plan_partitions(details: &mut [Detail], parts: u32) {
+    for d in details {
+        if let Detail::HashAggInfo(p) = d {
+            *p = parts;
+        }
+    }
+}
+
+/// Whether output `j` of `p` is an aggregate's result its aggregation node computes (seen
+/// through a subquery's plain projections and filters), which a node above deparses as
+/// the aggregate itself.
+fn agg_result(p: &Plan, j: usize) -> bool {
+    match p {
+        Plan::Agg { groups, sets: None, aggs, .. } => j >= groups.len() && j < groups.len() + aggs.len(),
+        Plan::Barrier { input, .. } | Plan::Filter { input, .. } => agg_result(input, j),
+        Plan::Project { exprs, input } => matches!(exprs.get(j), Some(Expr::Col(k, _)) if agg_result(input, *k)),
+        _ => false,
+    }
 }
