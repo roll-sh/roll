@@ -144,13 +144,13 @@ pub fn primary_key_keys_rows() -> bool {
 /// the column's NULLS FIRST / LAST says (the plain encoding puts it last ascending, first
 /// descending); strings under `kc`, the column's collation when it doesn't sort by bytes.
 pub fn encode_index_value(out: &mut Vec<u8>, v: &Value, desc: bool, nulls_first: bool, kc: Option<&KeyColl>) {
-    let legacy = LEGACY_INDEX_KEYS.with(|l| l.get());
-    if v.is_null() && nulls_first != desc && !legacy {
+    let legacy = || LEGACY_INDEX_KEYS.with(|l| l.get());
+    if v.is_null() && nulls_first != desc && !legacy() {
         out.push(if desc { NULL } else { !NULL });
         return;
     }
     match kc {
-        Some(kc) if !legacy => {
+        Some(kc) if !legacy() => {
             let start = out.len();
             encode_collated(out, v, kc);
             if desc {

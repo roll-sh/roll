@@ -807,7 +807,7 @@ impl Engine {
             let Some(t) = cat.table(ix.table) else { continue };
             let nulls = from < 1 && ix.columns.iter().any(|c| c.nulls_first != c.desc);
             let collated = from < 2
-                && (!crate::sql::binder::column_key_colls(cat, &t, ix).is_empty()
+                && (!crate::sql::binder::column_key_colls(cat, t, ix).is_empty()
                     || (matches!(ix.method.as_str(), "btree" | "hash")
                         && ix.columns.iter().any(|c| matches!(c.key, crate::catalog::IndexKey::Expr(_)))
                         && (icu_default
