@@ -1039,12 +1039,6 @@ fn exists_join(
     if corr.is_empty() || corr.iter().any(crate::sql::explain::expr_volatile_deep) {
         return None;
     }
-    // (Its local quals keep no sub-select: they would be the semi join's side's own.)
-    if let Plan::Scan(s) = &rhs
-        && s.filter.as_ref().is_some_and(has_sublink)
-    {
-        return None;
-    }
     let nleft = width(plan);
     // (The sub-select's equalities as written, its ON clauses' then its WHERE's.)
     let written = sublink_written(&rhs, bound);
@@ -1601,7 +1595,13 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -
         let (corr, rhs) = sub_join(p)?;
         Some((None, corr, rhs))
     };
-    let (corr, rhs, types, scan_limited) = match sub_rel(p) {
+    // (Its WHERE's own sub-selects go along: convert_ANY_sublink_to_join makes the
+    // sub-select a subquery of the query, pulled up with its quals, SubPlans and all.)
+    let rel = {
+        let _g = crate::scoped::set(&EXISTS_SUBLINKS, true, "sublink::EXISTS_SUBLINKS");
+        sub_rel(p)
+    };
+    let (corr, rhs, types, scan_limited) = match rel {
         Some(x) => x,
         None if let Some((ex, corr, rhs)) = tree() => {
             if ex.is_some() {
