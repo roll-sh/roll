@@ -1290,10 +1290,12 @@ pub static ROWS_FROM_INDEX_ENTRIES: std::sync::atomic::AtomicU64 = std::sync::at
 fn index_only_columns(s: &ScanPlan, ctx: &ExecCtx) -> Option<Vec<(usize, crate::types::DataType, bool)>> {
     use crate::catalog::IndexKey;
     use crate::types::DataType as T;
-    let (ix, _) = s.index.as_ref()?;
+    let (ix, b) = s.index.as_ref()?;
     if !matches!(s.access, Access::Index { only: true, .. })
         || ix.method != "btree"
         || !ix.include.is_empty()
+        // (Keys under a collation's sort keys don't give their strings back.)
+        || b.colls.iter().any(Option::is_some)
         || s.mark.is_some()
         || s.sys
         || s.sample.is_some()

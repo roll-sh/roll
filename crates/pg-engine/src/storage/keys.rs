@@ -578,8 +578,8 @@ mod tests {
                 // Two columns in a row, then the data key's suffix.
                 for (v, ty) in &cases {
                     let mut k = vec![0u8; 8];
-                    encode_index_value(&mut k, v, desc, nulls_first);
-                    encode_index_value(&mut k, &Value::Int4(5), desc, nulls_first);
+                    encode_index_value(&mut k, v, desc, nulls_first, None);
+                    encode_index_value(&mut k, &Value::Int4(5), desc, nulls_first, None);
                     k.extend_from_slice(&[0x20, 1, 2, 3]);
                     let mut pos = 8;
                     let got = decode_index_value(&k, &mut pos, ty, desc);
