@@ -41,7 +41,7 @@ PGCONTRIB_ONLY=uuid-ossp,citext PGREGRESS_DIR=$D PGREGRESS_CONTAINER=a39-ref \
 
 ## Scores
 
-Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013 (1,013 / 1,013 since round 19, agent 71: a run of that module). Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053 (81.1%). Round 19 (agent 66): file_fdw 187 / 187. Round 19 (agent 71), a full run of every module: 7,683 / 8,270 units of 34 modules (pageinspect not applicable, postgres_fdw 1,664); the 10 modules with tests added this round 346 / 350 (tsm_system_time 14 / 16, auto_explain 10 / 12, the rest whole); amcheck 203 / 204 in a run after it. Baseline (before any
+Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013 (1,013 / 1,013 since round 19, agent 71: a run of that module). Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053; agent 72: postgres_fdw 1,739 / 2,053 (84.7%). Round 19 (agent 66): file_fdw 187 / 187. Round 19 (agent 71), a full run of every module: 7,683 / 8,270 units of 34 modules (pageinspect not applicable, postgres_fdw 1,664); the 10 modules with tests added this round 346 / 350 (tsm_system_time 14 / 16, auto_explain 10 / 12, the rest whole); amcheck 203 / 204 in a run after it. Baseline (before any
 extension was ported; CREATE EXTENSION was a stand-in): 2,752 / 7,733
 units (35.6%). The reference matches `expected/` for every module except dblink (the reference
 has no `regress.so`, whose functions dblink's test creates).
@@ -69,7 +69,7 @@ has no `regress.so`, whose functions dblink's test creates).
 | amcheck | 204 | 203 | applicable checks only (see below) |
 | pageinspect | 291 | — | not applicable (not available) |
 | pg_buffercache | 38 | 38 | done (no buffer pool: every buffer unused) |
-| postgres_fdw | 2053 | 1664 | see below |
+| postgres_fdw | 2053 | 1739 | see below |
 | file_fdw | 187 | 187 | done (files are the server files of `--allow-server-files`; programs refused) |
 | tsm_system_rows | 16 | 16 | done (round 19, agent 71) |
 | tsm_system_time | 16 | 14 | see below |
@@ -184,7 +184,17 @@ has no `regress.so`, whose functions dblink's test creates).
   deparse.c's text) and the rest checked locally, INSERT / UPDATE / DELETE per row by remote
   ctid, UPDATE / DELETE sent whole when PostgreSQL would (Foreign Update / Foreign Delete),
   constraints left to the remote server, ANALYZE sampling the remote table, IMPORT FOREIGN
-  SCHEMA, EXPLAIN's Remote SQL. Left: join, aggregate, ORDER BY / LIMIT and FOR UPDATE
+  SCHEMA, EXPLAIN's Remote SQL. Agent 72: each remote INSERT / UPDATE / DELETE returns what
+  deparseReturningList asks for (the RETURNING list's columns and ctid, the views' check
+  options' columns, every column under an AFTER ROW trigger) and the stored row is the one
+  the server returned (remote triggers' changes reach RETURNING, AFTER triggers and the
+  check options, which run on it, a foreign partition's too); an UPDATE under a BEFORE ROW
+  UPDATE trigger sends every column, generated ones as DEFAULT; non-direct UPDATEs (and
+  DELETEs under row triggers) read the target's whole row; direct modification runs with a
+  WHERE, statement triggers and RETURNING tableoid; inheritance members' "Foreign Update" /
+  "Foreign Delete" lines with their Remote SQL; a foreign row's key names its table, so an
+  inheritance UPDATE / DELETE finds its foreign member. Left: join, aggregate, ORDER BY /
+  LIMIT and FOR UPDATE
   pushdown (Foreign Scans of joins and upper relations: the planner's foreign paths and
   postgres_fdw's costs), use_remote_estimate, batch inserts, async append, TRUNCATE.
 - **file_fdw** (round 19, agent 66; `src/ext/file_fdw.rs`): done. The validator (options by

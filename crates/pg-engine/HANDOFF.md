@@ -154,6 +154,17 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   `plan_level`), ctid conditions shipped, INSERT ... RETURNING the remote row, DML per row by
   remote ctid or sent whole (Foreign Update / Delete), ANALYZE, IMPORT FOREIGN SCHEMA; joins
   and aggregates aren't pushed down yet (contrib STATUS.md has the list).
+  Agent 72 checked agent 59's shared hooks with full regress runs of `61e57157` (debug and
+  release, private references): 51,148 / 51,150, no unit changed. Its DML round
+  (postgres_fdw 1,739 / 2,053): what a remote statement returns is one `modify::Back`
+  (deparseReturningList), set around each row's change by the DML node (`with_back`), and the
+  stored row is the server's; a foreign row's key is `modify::row_key` (the table's key prefix,
+  then the remote ctid), so `member_at` finds an inheritance member by it as by a stored
+  row's. Mind the stack: `explain::convert` (about 280 kB in debug) and `nodes::open_node` are
+  on every plan level's stack, and parallel_scan's nested system-view queries overflowed a
+  2 MB test thread when an ExNode moved into a call in `convert` and a `?` on a
+  Result<Option<BoxNode>> in `open_node` added under 2 kB per level; keep FDW branches in
+  `#[inline(never)]` helpers taking references (`foreign_delete_child`, `nodes::open_update`).
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a
