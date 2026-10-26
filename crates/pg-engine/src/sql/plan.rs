@@ -185,6 +185,18 @@ pub struct ScanPlan {
     /// target list's columns, kept though a clause goes later (an equivalence class with a
     /// constant replacing it, self-join elimination).
     pub reltarget: RelVars,
+    /// A postgres_fdw scan's ORDER BY and LIMIT sent with it (`ext::postgres_fdw::pushdown`).
+    pub fdw: Option<Arc<FdwPushdown>>,
+}
+
+/// What a foreign scan sends besides its conditions: the sort it stands for, and the LIMIT /
+/// OFFSET over that (`has_limit`).
+#[derive(Clone, Debug)]
+pub struct FdwPushdown {
+    pub order: Vec<SortKey>,
+    pub limit: Option<Expr>,
+    pub offset: Option<Expr>,
+    pub has_limit: bool,
 }
 
 /// `ScanPlan::params`.

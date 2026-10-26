@@ -50,6 +50,21 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+/// getClosestMatch over `candidates` (varlena.c's ClosestMatchState with max_d 4).
+pub(crate) fn closest_match<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let mut best: Option<(usize, &str)> = None;
+    if name.is_empty() {
+        return None;
+    }
+    for n in candidates {
+        let d = levenshtein(name, n);
+        if d <= 4 && d <= name.len() / 2 && best.is_none_or(|b| d < b.0) {
+            best = Some((d, n));
+        }
+    }
+    best.map(|b| b.1)
+}
+
 /// postgresql_fdw_validator: every option must be a libpq connection option of the
 /// catalog's context.
 fn postgresql_validate(options: &[String], catalog: u32) -> Result<()> {
@@ -138,6 +153,17 @@ impl Ddl<'_, '_> {
         let result: Vec<String> = list.into_iter().map(|(n, v)| format!("{n}={v}")).collect();
         if validator == POSTGRESQL_FDW_VALIDATOR {
             postgresql_validate(&result, catalog)?;
+        } else if let Some(f) = self.cat.functions.get(&validator)
+            && let Some(bin) = &f.probin
+            && let Some(v) = crate::ext::native::fdw_validator(bin, &f.body)
+        {
+            v(&crate::ext::native::FdwValidate {
+                options: &result,
+                catalog,
+                cat: &self.cat,
+                superuser: self.is_superuser(),
+                notice: &|e| self.ctx.notice(e),
+            })?;
         }
         Ok((!result.is_empty()).then_some(result))
     }

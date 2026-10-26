@@ -57,6 +57,10 @@ pub struct EngineOptions {
     /// initdb's locale and encoding options, for a new data directory (an existing one keeps
     /// what it was made with). The default is initdb's `--locale=C --encoding=UTF8`.
     pub locale: crate::types::collation::dblocale::InitdbLocale,
+    /// Where outbound connections (dblink, postgres_fdw) may go: `local` (the engine
+    /// itself, reached without a host), `host[:port]`, `*[:port]`, `addr/bits` (see
+    /// `remote::outbound`). Empty (the default): refused for every role.
+    pub outbound: Vec<String>,
 }
 
 impl Default for EngineOptions {
@@ -72,6 +76,7 @@ impl Default for EngineOptions {
             server_files: None,
             shared_preload_libraries: Vec::new(),
             locale: Default::default(),
+            outbound: Vec::new(),
         }
     }
 }
@@ -181,17 +186,33 @@ pub struct Engine {
     me: Weak<Engine>,
     server_files: Option<crate::server_files::ServerFiles>,
     statements: Option<crate::ext::pg_stat_statements::Store>,
+    /// The outbound allow-list (None: refused).
+    outbound: Option<crate::remote::outbound::Outbound>,
+    /// The address the server listens on (`server::serve`), which connections without a host
+    /// reach.
+    listen: std::sync::OnceLock<std::net::SocketAddr>,
 }
 
 const REGISTRY_FILE: &str = "databases.json";
 
 impl Engine {
+    /// The server's listening address (the first one noted), for connections the engine
+    /// makes to itself (dblink, postgres_fdw without a host).
+    pub fn note_listen_addr(&self, addr: std::net::SocketAddr) {
+        let _ = self.listen.set(addr);
+    }
+
     pub fn open(opts: EngineOptions) -> Result<Arc<Engine>> {
         let server_files = match &opts.server_files {
             Some(d) => Some(crate::server_files::ServerFiles::new(d).map_err(|e| {
                 internal(format!("server files directory \"{}\": {e}", d.display()))
             })?),
             None => None,
+        };
+        let outbound = if opts.outbound.is_empty() {
+            None
+        } else {
+            Some(crate::remote::outbound::Outbound::parse(&opts.outbound).map_err(internal)?)
         };
         std::fs::create_dir_all(opts.data_dir.join("base"))?;
         let path = opts.data_dir.join(REGISTRY_FILE);
@@ -285,6 +306,8 @@ impl Engine {
                 me: me.clone(),
                 server_files,
                 statements,
+                outbound,
+                listen: std::sync::OnceLock::new(),
             }
         });
         engine.init_shared()?;
@@ -1370,6 +1393,18 @@ fn dir_size(p: &Path) -> u64 {
 impl Cluster for Engine {
     fn server_files(&self) -> Option<&crate::server_files::ServerFiles> {
         self.server_files.as_ref()
+    }
+
+    fn outbound(&self) -> Option<&crate::remote::outbound::Outbound> {
+        self.outbound.as_ref()
+    }
+
+    fn listen_addr(&self) -> Option<std::net::SocketAddr> {
+        self.listen.get().copied()
+    }
+
+    fn bootstrap_superuser(&self) -> String {
+        self.opts.superuser.clone()
     }
 
     fn statements(&self) -> Option<&crate::ext::pg_stat_statements::Store> {

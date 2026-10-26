@@ -18,6 +18,7 @@ fn open(dir: &std::path::Path) -> std::sync::Arc<Engine> {
         server_files: None,
         shared_preload_libraries: Vec::new(),
         locale: Default::default(),
+        outbound: Vec::new(),
     })
     .unwrap()
 }

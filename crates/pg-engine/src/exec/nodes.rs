@@ -473,8 +473,14 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             })
         }
         Plan::Insert(p) => Box::new(super::dml::InsertNode::new(p.clone(), ctx)?),
-        Plan::Update(p) => Box::new(super::dml::UpdateNode::new(p.clone(), ctx)?),
-        Plan::Delete(p) => Box::new(super::dml::DeleteNode::new(p.clone(), ctx)?),
+        Plan::Update(p) => match crate::ext::postgres_fdw::direct::open_update(p, ctx) {
+            Some(n) => n,
+            None => Box::new(super::dml::UpdateNode::new(p.clone(), ctx)?),
+        },
+        Plan::Delete(p) => match crate::ext::postgres_fdw::direct::open_delete(p, ctx) {
+            Some(n) => n,
+            None => Box::new(super::dml::DeleteNode::new(p.clone(), ctx)?),
+        },
         Plan::Merge(p) => Box::new(super::merge::MergeNode::new(p.clone(), ctx)?),
     })
 }

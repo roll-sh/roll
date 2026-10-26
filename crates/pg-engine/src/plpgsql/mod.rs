@@ -2672,16 +2672,21 @@ impl<'c, 'a> Interp<'c, 'a> {
         let e = match r {
             Ok(f) => {
                 self.cx().sess.settings.borrow_mut().subxact_leave(level, true);
+                let depth = self.cx().txn.borrow().subtxn_depth();
                 self.cx().txn.borrow_mut().release_savepoint(&sp)?;
+                crate::ext::postgres_fdw::connection::subxacts_end(self.cx().sess, depth + 1, depth + 1, true)?;
                 return Ok(f);
             }
             Err(e) => e,
         };
         self.cx().sess.settings.borrow_mut().subxact_leave(level, false);
         {
+            let depth = self.cx().txn.borrow().subtxn_depth();
             let mut txn = self.cx().txn.borrow_mut();
             txn.rollback_to(&sp)?;
             txn.release_savepoint(&sp)?;
+            drop(txn);
+            let _ = crate::ext::postgres_fdw::connection::subxacts_end(self.cx().sess, depth + 1, depth + 1, false);
         }
         if e.severity == crate::error::Severity::Fatal {
             return Err(e);
@@ -4761,6 +4766,10 @@ pub fn condition_code(name: &str) -> Option<&'static str> {
 }
 
 /// SQLSTATEs as `&'static str`: known codes come from the table; others are interned once.
+pub(crate) fn intern_sqlstate(code: &str) -> &'static str {
+    intern(code)
+}
+
 fn intern(code: &str) -> &'static str {
     if let Some((_, c)) = conditions::CONDITIONS.iter().find(|(_, c)| *c == code) {
         return c;

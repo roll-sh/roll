@@ -3961,6 +3961,14 @@ impl Catalog {
         let f = t.foreign.as_ref()?;
         let fdw = self.servers.get(&f.server).and_then(|s| self.fdws.get(&s.fdw));
         let name = fdw.map_or("", |w| w.name.as_str());
+        // (postgres_fdw's handler is native code.)
+        if fdw.is_some_and(|w| {
+            self.functions.get(&w.handler).is_some_and(|h| {
+                h.probin.as_deref().is_some_and(|b| crate::ext::native::library(b) == "postgres_fdw")
+            })
+        }) {
+            return None;
+        }
         Some(match fdw {
             Some(w) if w.handler != 0 => Error::new(
                 code::FEATURE_NOT_SUPPORTED,

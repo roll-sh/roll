@@ -331,6 +331,14 @@ impl Ddl<'_, '_> {
         self.require_schema_create(schema)?;
         let fdw = self.cat.fdws.get(&srv.fdw).cloned();
         let name = fdw.as_ref().map_or(String::new(), |f| f.name.clone());
+        let pg_fdw = fdw.as_ref().is_some_and(|w| {
+            self.cat.functions.get(&w.handler).is_some_and(|h| {
+                h.probin.as_deref().is_some_and(|b| crate::ext::native::library(b) == "postgres_fdw")
+            })
+        });
+        if pg_fdw {
+            return self.import_postgres_fdw(s, &srv);
+        }
         Err(match fdw {
             Some(f) if f.handler != 0 => Error::new(
                 FDW_NO_SCHEMAS,
@@ -338,6 +346,55 @@ impl Ddl<'_, '_> {
             ),
             _ => no_handler(&name),
         })
+    }
+}
+
+impl Ddl<'_, '_> {
+    /// ImportForeignSchema with postgres_fdw's commands: each table the LIMIT TO / EXCEPT
+    /// list lets through is created in the local schema.
+    fn import_postgres_fdw(&mut self, s: &pb::ImportForeignSchemaStmt, srv: &crate::catalog::userobj::ForeignServer) -> Result<String> {
+        let names: Vec<String> = s
+            .table_list
+            .iter()
+            .filter_map(|n| match inner(n) {
+                Some(NodeEnum::RangeVar(r)) => Some(r.relname.clone()),
+                _ => None,
+            })
+            .collect();
+        let list = match pb::ImportForeignSchemaType::try_from(s.list_type) {
+            Ok(pb::ImportForeignSchemaType::FdwImportSchemaLimitTo) => Some((true, names)),
+            Ok(pb::ImportForeignSchemaType::FdwImportSchemaExcept) => Some((false, names)),
+            _ => None,
+        };
+        let options: Vec<(String, String)> = super::def_elems(&s.options)
+            .map(|d| (d.defname.clone(), crate::sql::binder::ast::def_arg_str(d).unwrap_or_default()))
+            .collect();
+        let imp = crate::ext::postgres_fdw::import::Import { remote_schema: &s.remote_schema, list: list.clone(), options };
+        let cmds = crate::ext::postgres_fdw::import::commands(self.ctx, srv, &imp)?;
+        for (table, sql) in cmds {
+            // IsImportableForeignTable.
+            if let Some((limit, l)) = &list
+                && l.contains(&table) != *limit
+            {
+                continue;
+            }
+            let stmts = crate::sql::parse::parse(&sql)?;
+            let Some(NodeEnum::CreateForeignTableStmt(mut cs)) = stmts.first().and_then(|r| r.stmt.as_deref()).and_then(|n| n.node.clone()) else {
+                continue;
+            };
+            if let Some(base) = cs.base_stmt.as_mut()
+                && let Some(rv) = base.relation.as_mut()
+            {
+                rv.schemaname = s.local_schema.clone();
+            }
+            let node = NodeEnum::CreateForeignTableStmt(cs);
+            let ctx = self.ctx;
+            ctx.sess.framed(crate::error::Frame::Text(format!("importing foreign table \"{table}\"")), |_| {
+                super::run_nested(|| super::execute(ctx, &node, &sql)).map(|_| ())
+            })?;
+            self.reload_catalog();
+        }
+        Ok("IMPORT FOREIGN SCHEMA".into())
     }
 }
 

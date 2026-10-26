@@ -476,6 +476,15 @@ pub mod code {
     pub const CONFIG_FILE_ERROR: &str = "F0000";
     pub const PROTOCOL_VIOLATION: &str = "08P01";
     pub const CONNECTION_EXCEPTION: &str = "08000";
+    pub const CONNECTION_DOES_NOT_EXIST: &str = "08003";
+    pub const SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION: &str = "08001";
+    pub const CONNECTION_FAILURE: &str = "08006";
+    pub const S_R_E_PROHIBITED_SQL_STATEMENT_ATTEMPTED: &str = "2F003";
+    pub const FDW_ERROR: &str = "HV000";
+    pub const FDW_OUT_OF_MEMORY: &str = "HV001";
+    pub const FDW_INVALID_OPTION_NAME: &str = "HV00D";
+    pub const FDW_OPTION_NAME_NOT_FOUND: &str = "HV00J";
+    pub const FDW_INVALID_ATTRIBUTE_VALUE: &str = "HV024";
     pub const PROGRAM_LIMIT_EXCEEDED: &str = "54000";
     pub const STATEMENT_TOO_COMPLEX: &str = "54001";
     pub const TOO_MANY_COLUMNS: &str = "54011";

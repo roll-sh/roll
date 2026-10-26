@@ -9467,6 +9467,9 @@ impl Builder<'_, '_> {
                     c.node.output = out;
                 }
                 let mut n = self.modify("Update", t, &refname, &c.node);
+                if t.foreign.is_some() {
+                    self.foreign_update_sql(&mut n, up);
+                }
                 self.check_option_subplans(&mut n, &up.rules.view_checks, t, &refname);
                 self.returning(&mut n, &returning, t, &c.node);
                 if !returning.is_empty() {
@@ -9487,7 +9490,11 @@ impl Builder<'_, '_> {
                         n.output = out;
                     }
                 }
-                n.children.push(c.node.child("Outer"));
+                if t.foreign.is_some() {
+                    self.foreign_update_child(&mut n, up, &refname, c.node);
+                } else {
+                    n.children.push(c.node.child("Outer"));
+                }
                 Built::passthrough(n, Vec::new())
             }
             Plan::Delete(dp) => {
@@ -9837,6 +9844,22 @@ impl Builder<'_, '_> {
         n.startup_cost = child.startup_cost;
         n.total_cost = child.total_cost;
         n.width = 0;
+        // A postgres_fdw table's statement (ExplainForeignModify).
+        let cat = self.ctx.catalog();
+        if self.o.verbose && t.foreign.is_some() && crate::ext::postgres_fdw::scan::is_postgres_fdw(&cat, t) {
+            match op {
+                "Insert" => {
+                    let (sql, _) = crate::ext::postgres_fdw::modify::insert_sql(&cat, t);
+                    n.details.push(Detail::Text("Remote SQL", sql));
+                    n.details.push(Detail::Text("Batch Size", "1".into()));
+                }
+                "Delete" => n.details.push(Detail::Text(
+                    "Remote SQL",
+                    format!("DELETE FROM {} WHERE ctid = $1", crate::ext::postgres_fdw::deparse::relation_name(&cat, t)),
+                )),
+                _ => {}
+            }
+        }
         n
     }
 
@@ -11638,6 +11661,56 @@ impl Builder<'_, '_> {
         text
     }
 
+    /// A postgres_fdw UPDATE's statement for each row (kept out of `node`'s frame).
+    #[inline(never)]
+    fn foreign_update_sql(&self, n: &mut ExNode, up: &super::plan::UpdatePlan) {
+        let cat = self.ctx.catalog();
+        let t = &up.rules.table;
+        if self.o.verbose && crate::ext::postgres_fdw::scan::is_postgres_fdw(&cat, t) {
+            let mut cols: Vec<usize> = up.sets.iter().map(|(c, _)| *c).filter(|c| t.columns.get(*c).is_some_and(|x| x.generated.is_none())).collect();
+            cols.sort_unstable();
+            cols.dedup();
+            n.details.push(Detail::Text("Remote SQL", crate::ext::postgres_fdw::modify::update_sql(&cat, t, &cols)));
+        }
+    }
+
+    /// An UPDATE's input: its scan, or the Foreign Update sent whole.
+    #[inline(never)]
+    fn foreign_update_child(&self, n: &mut ExNode, up: &super::plan::UpdatePlan, refname: &str, child: ExNode) {
+        match crate::ext::postgres_fdw::direct::update(up, &self.ctx.catalog(), self.ctx.fmt()) {
+            Some(d) => {
+                n.details.retain(|x| !matches!(x, Detail::Text("Remote SQL", _)));
+                let f = self.foreign_modify("Update", &up.rules.table, refname, d.sql, &child);
+                n.children.push(f.child("Outer"));
+            }
+            None => n.children.push(child.child("Outer")),
+        }
+    }
+
+    /// A postgres_fdw direct modification's node (Foreign Update / Foreign Delete).
+    fn foreign_modify(&self, op: &str, t: &crate::catalog::Table, refname: &str, sql: String, child: &ExNode) -> ExNode {
+        let mut f = ExNode::new(if op == "Update" { "Foreign Update" } else { "Foreign Delete" });
+        let schema = self.ctx.catalog().schema_name(t.schema).to_string();
+        self.target(&mut f, Some("Relation Name"), Some(&t.name), Some(&schema), refname);
+        f.startup_cost = child.startup_cost;
+        f.total_cost = child.total_cost;
+        f.rows = child.rows;
+        if self.o.verbose {
+            f.details.push(Detail::Text("Remote SQL", sql));
+        }
+        f
+    }
+
+    /// A postgres_fdw scan's remote query (over the columns the plan reads of it).
+    fn foreign_spec(&self, p: &Arc<Plan>, s: &ScanPlan) -> Option<crate::ext::postgres_fdw::scan::Spec> {
+        let cat = self.ctx.catalog();
+        if s.table.foreign.is_none() || !crate::ext::postgres_fdw::scan::is_postgres_fdw(&cat, &s.table) {
+            return None;
+        }
+        let need = self.needed.get(&addr(p)).cloned();
+        Some(crate::ext::postgres_fdw::scan::spec(s, need.as_deref(), &cat, self.ctx.fmt()))
+    }
+
     /// A scan the planner chose by cost: its node (and bitmap children) with the planner's
     /// estimates.
     fn planned_scan(
@@ -11650,7 +11723,14 @@ impl Builder<'_, '_> {
         use super::plan::Access;
         let refname = self.refname(p);
         let t = &s.table;
+        // (A postgres_fdw foreign table: its conditions run remotely, but for the local ones.)
+        let fspec = self.foreign_spec(p, s);
+        let mut d = d;
+        if let Some(f) = &fspec {
+            d.filter = f.local.clone();
+        }
         let mut n = match &s.access {
+            _ if fspec.is_some() => ExNode::new("Foreign Scan"),
             Access::Index { only, .. } => {
                 let ix_name = s.index.as_ref().map(|i| i.0.name.clone()).unwrap_or_default();
                 let ty = if *only { "Index Only Scan" } else { "Index Scan" };
@@ -11792,6 +11872,12 @@ impl Builder<'_, '_> {
                 "Rows Removed by Filter",
                 vec![Removed::Scan(scan_addr(s))],
             ));
+        }
+        if let Some(f) = fspec {
+            if self.o.verbose {
+                n.details.push(Detail::Text("Remote SQL", f.sql));
+            }
+            return n;
         }
         match &s.access {
             Access::Index { only, .. } => {

@@ -85,8 +85,18 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   amcheck nearly. Extension types the engine implements natively are `Value::Ext`
   (`src/ext/types.rs`); extension libraries' GUCs are `session/ext_gucs.tsv`. Left:
   pg_stat_statements at 996 / 1,013 (2PC, nested statement listing, worker counts, squashing), pageinspect
-  (not applicable),
-  postgres_fdw / dblink (an outbound-network policy decision), see STATUS.md.
+  (not applicable), see STATUS.md.
+- **dblink and postgres_fdw** (round 19, agent 59): native, over the engine's own client
+  (`src/remote/`: libpq's connection strings, a blocking wire client on `postgres-protocol`
+  with SCRAM / md5 / cleartext, asynchronous queries, notifications, cancel requests; no libpq,
+  no C), behind the operator's outbound allow-list (Decisions below). dblink 218 / 218;
+  postgres_fdw (`src/ext/postgres_fdw/`): connection cache per user mapping with remote
+  transactions and savepoints following the local ones (`session/mod.rs` `finish_txn`, the
+  SAVEPOINT statements, PL/pgSQL exception blocks), scans through remote cursors with
+  shippable conditions sent (deparse.c's walker and text), ORDER BY / LIMIT of a sort over a
+  foreign scan sent (`pushdown.rs`, run at the end of every `plan_level`), DML per row by
+  remote ctid or sent whole (Foreign Update / Delete), ANALYZE, IMPORT FOREIGN SCHEMA; joins
+  and aggregates aren't pushed down yet (contrib STATUS.md has the list).
 - **search_path in routines** (round 19, agent 53): PL/pgSQL functions, DO blocks and SQL
   functions bind each statement under the session's search path as it is when the statement
   runs (`Interp::resync`, `ExecCtx::session_path` / `resynced` / `path_stale`), as
@@ -805,6 +815,19 @@ definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
   `COPY ... PROGRAM` stays refused for everyone. Code: `src/server_files.rs`; tests:
   `tests/server_files.rs`, `tests/sql/server_files_roles.sql`. The regress harness runs with it
   (`PGREGRESS_DIR` as the directory), which is how misc_functions, largeobject and copy match.
+- **Outbound connections are refused by default** (dblink, postgres_fdw): a tenant's database
+  dialing arbitrary hosts would be a server-side request forgery and credential risk.
+  `roll-engine --allow-outbound <list>` (embedded: `EngineOptions::outbound`), a startup
+  setting, not a GUC, allows destinations: `local` (the engine itself, which a connection
+  without a host reaches as PostgreSQL's Unix socket would, at the reported `port` only),
+  `host[:port]` (a name or address as the connection string gives it), `*[:port]`,
+  `addr/bits` (every address the host resolves to must be in it). Anything else fails as
+  libpq fails ("connection to server ... failed: outbound connections to this destination are
+  not allowed by this server"), wrapped in dblink's / postgres_fdw's own error. With it,
+  behaviour is PostgreSQL's, and PostgreSQL's rules stay on: non-superusers must supply a
+  password the server then uses (password_required), and the server process's environment
+  (PGPASSWORD, service files, .pgpass) is never read. Code: `src/remote/outbound.rs`; tests:
+  `tests/outbound.rs`. The contrib harness runs with `--allow-outbound local`.
 - **Default table layout is PostgreSQL-exact**: rows under a heap-ordered row id, primary key
   as a separate index, so scans return PG's order and `ctid`s match.
 - **`roll_pk_clustered`** (opt-in storage parameter) keeps rows keyed by the primary key for

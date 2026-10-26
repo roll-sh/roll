@@ -351,7 +351,20 @@ fn scan_need(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Option<Rc<[b
     Some(Rc::from(out))
 }
 
+/// A foreign table's scan: postgres_fdw's (another wrapper fails as planning would).
+#[inline(never)]
+fn open_foreign(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNode> {
+    let cat = ctx.catalog();
+    if crate::ext::postgres_fdw::scan::is_postgres_fdw(&cat, &s.table) {
+        return crate::ext::postgres_fdw::scan::open(s, need, ctx);
+    }
+    Err(cat.fdw_routine_error(&s.table).unwrap_or_else(|| crate::error::internal("foreign table without a wrapper")))
+}
+
 pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNode> {
+    if s.table.foreign.is_some() {
+        return open_foreign(s, need, ctx);
+    }
     let need = scan_need(s, need, ctx);
     let epq = ctx.epq.borrow().clone();
     if let Some(test) = epq.as_ref().and_then(|m| m.get(&(s as *const ScanPlan as usize))) {

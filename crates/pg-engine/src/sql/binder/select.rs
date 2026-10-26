@@ -4559,6 +4559,7 @@ impl Binder<'_, '_> {
                     useful: Default::default(),
                     params: Default::default(),
                     reltarget: Default::default(),
+                    fdw: None,
                 };
                 let mut scan = scan;
                 if !colnames.is_empty() {
@@ -4672,6 +4673,7 @@ impl Binder<'_, '_> {
                             useful: Default::default(),
                             params: Default::default(),
                             reltarget: Default::default(),
+                            fdw: None,
                         }))
                     }
                     None if self.view_stack.contains(&v.oid) => {

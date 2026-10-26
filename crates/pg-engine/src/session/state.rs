@@ -74,6 +74,19 @@ pub trait Cluster: Send + Sync {
     fn statements(&self) -> Option<&crate::ext::pg_stat_statements::Store> {
         None
     }
+    /// Where outbound connections may go (None: nowhere).
+    fn outbound(&self) -> Option<&crate::remote::outbound::Outbound> {
+        None
+    }
+    /// The server's listening address, when it serves the wire protocol.
+    fn listen_addr(&self) -> Option<std::net::SocketAddr> {
+        None
+    }
+    /// The superuser the cluster was bootstrapped with (the default user of outbound
+    /// connections, as libpq's is the operating system user the server runs as).
+    fn bootstrap_superuser(&self) -> String {
+        "postgres".into()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -223,6 +236,8 @@ pub struct SessionState {
     /// Above 0: notices are collected, not sent as they are raised (code that looks at or
     /// drops what a step raised: `hold_notices`).
     pub notice_hold: Cell<u32>,
+    /// Connections this session made to other servers (dblink's, postgres_fdw's cache).
+    pub remote: RefCell<crate::remote::SessionConns>,
 }
 
 /// While alive, notices are collected instead of streamed (`SessionState::hold_notices`).
@@ -302,6 +317,7 @@ impl SessionState {
             system_user: None,
             in_use: RefCell::new(Vec::new()),
             notice_hold: Cell::new(0),
+            remote: RefCell::new(Default::default()),
         }
     }
 

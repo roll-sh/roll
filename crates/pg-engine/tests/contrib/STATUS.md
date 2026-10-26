@@ -41,10 +41,10 @@ PGCONTRIB_ONLY=uuid-ossp,citext PGREGRESS_DIR=$D PGREGRESS_CONTAINER=a39-ref \
 
 ## Scores
 
-Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013. Baseline (before any
+Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013. Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,611 / 2,053 (78.5%; its two files: postgres_fdw 1,602 / 2,043, query_cancel 9 / 10). Baseline (before any
 extension was ported; CREATE EXTENSION was a stand-in): 2,752 / 7,733
-units (35.6%). The reference matches `expected/` for every module except postgres_fdw and
-dblink (they connect to a loopback server).
+units (35.6%). The reference matches `expected/` for every module except dblink (the reference
+has no `regress.so`, whose functions dblink's test creates).
 
 | module | units | matching | status |
 |---|---|---|---|
@@ -69,8 +69,8 @@ dblink (they connect to a loopback server).
 | amcheck | 204 | 202 | applicable checks only (see below) |
 | pageinspect | 291 | — | not applicable (not available) |
 | pg_buffercache | 38 | 38 | done (no buffer pool: every buffer unused) |
-| postgres_fdw | 2053 | — | assessed, not done |
-| dblink | 218 | — | assessed, not done |
+| postgres_fdw | 2053 | 1611 | see below |
+| dblink | 218 | 218 | done |
 
 ### What is left, per module
 
@@ -99,12 +99,38 @@ dblink (they connect to a loopback server).
   layouts, checksums). The engine's tables and indexes are key-value data, so there are no
   such pages to show; making the functions up would mislead. Not available
   (`CREATE EXTENSION pageinspect` fails as for an uninstalled extension).
-- **postgres_fdw / dblink**: they open libpq connections from the server to other servers.
-  Feasible in principle (the workspace has a PostgreSQL client; the FDW machinery exists),
-  but in roll's model an engine dialing arbitrary hosts is an outbound-network (SSRF) and
-  credential-handling decision, like server-side files: it should be an opt-in startup
-  setting with an allow-list, the same policy as `--allow-server-files`. Not implemented; the
-  suites need a loopback server too.
+- **dblink / postgres_fdw: outbound connections** (round 19, agent 59). Both run over the
+  engine's own client (`src/remote/`: libpq's connection strings and option table, a
+  blocking wire client on `postgres-protocol` with trust / cleartext / md5 / SCRAM, extended
+  queries, asynchronous sends, notifications and cancel requests). No libpq, no C.
+  Connections go only where the operator allows: `roll-engine --allow-outbound <list>`
+  (`EngineOptions::outbound`, HANDOFF "Decisions"); without it every connection fails with
+  libpq's "connection to server ... failed: outbound connections to this destination are not
+  allowed by this server". A connection without a host (libpq's default Unix socket) is the
+  engine itself (`local`); the contrib harness runs with `--allow-outbound local`.
+  PostgreSQL's own rules stay on: non-superusers must give a password and the server must use
+  it (dblink_connstr_check / dblink_security_check, postgres_fdw's check_conn_params /
+  pgfdw_security_check, password_required); the engine's environment (PGPASSWORD, service
+  files) is never read. Tests: `tests/outbound.rs`.
+- **dblink**: done (`src/ext/dblink.rs`): named and unnamed connections, cursors, async
+  queries, notifications, cancel, the remote session's DateStyle / IntervalStyle applied to
+  results, the build_sql functions, dblink_fdw's validator, dblink_connect_u as its owner (a
+  SECURITY DEFINER C function's `symbol#secdef` code, `native_def`).
+- **postgres_fdw** (`src/ext/postgres_fdw/`): the validator (option.c), the connection cache
+  per user mapping with remote transactions and savepoints following the local ones (commit,
+  abort, RELEASE / ROLLBACK TO, PL/pgSQL exception blocks; PREPARE TRANSACTION refused),
+  invalidation on ALTER SERVER / USER MAPPING, keep_connections, postgres_fdw_get_connections
+  / disconnect / disconnect_all, scans through cursors fetched `fetch_size` rows at a time
+  with shippable conditions sent (foreign_expr_walker's shippability and collation rules,
+  deparse.c's text) and the rest checked locally, INSERT / UPDATE / DELETE per row by remote
+  ctid, UPDATE / DELETE sent whole when PostgreSQL would (Foreign Update / Foreign Delete),
+  constraints left to the remote server, ANALYZE sampling the remote table, IMPORT FOREIGN
+  SCHEMA, EXPLAIN's Remote SQL. Left: join, aggregate, ORDER BY / LIMIT and FOR UPDATE
+  pushdown (Foreign Scans of joins and upper relations: the planner's foreign paths and
+  postgres_fdw's costs), use_remote_estimate, batch inserts, async append, TRUNCATE.
+- **Query Identifier**: the contrib servers preload pg_stat_statements, which turns query ids
+  on; the harness runs the other modules with `compute_query_id = off`, as their own test
+  configurations have it (their EXPLAIN VERBOSE shows no Query Identifier).
 - **pg_stat_statements** (`src/ext/pg_stat_statements/`, `session/pgss.rs`): the engine
   starts it with `--shared-preload-libraries pg_stat_statements` (EngineOptions
   `shared_preload_libraries`; the contrib harness passes it). Statements are grouped by a

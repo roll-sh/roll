@@ -32,6 +32,8 @@ parking_lot.workspace = true
 pg-snowball.workspace = true
 pg-icu.workspace = true
 pg_query.workspace = true
+postgres-protocol.workspace = true
+fallible-iterator.workspace = true
 prost.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true

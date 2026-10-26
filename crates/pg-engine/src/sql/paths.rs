@@ -6205,6 +6205,7 @@ fn plan_level_ordered(
     if let Some(b) = bound {
         note_bound_join_tree(ctx, plan, b);
     }
+    crate::ext::postgres_fdw::pushdown::push_level(ctx, plan);
     p.removed.get()
 }
 

@@ -472,6 +472,18 @@ impl Session {
             let _ = self.finish_txn(false);
             return Err(e);
         }
+        // XACT_EVENT_PRE_COMMIT: postgres_fdw's remote transactions commit first (a failure
+        // aborts the local one).
+        if commit
+            && self.txn.is_some()
+            && let Err(e) = crate::ext::postgres_fdw::connection::pre_commit(&self.state)
+        {
+            let _ = self.finish_txn(false);
+            return Err(e);
+        }
+        if !commit {
+            crate::ext::postgres_fdw::connection::abort(&self.state);
+        }
         let txn = self.txn.take();
         self.implicit = false;
         self.status = TxnStatus::Idle;
@@ -2264,12 +2276,14 @@ impl Session {
             K::TransStmtRelease => {
                 self.require_block("RELEASE SAVEPOINT")?;
                 self.ensure_txn();
+                let before = self.txn.as_ref().unwrap().borrow().subtxn_depth();
                 self.txn
                     .as_ref()
                     .unwrap()
                     .borrow_mut()
                     .release_savepoint(&t.savepoint_name)?;
                 let depth = self.txn.as_ref().unwrap().borrow().subtxn_depth();
+                crate::ext::postgres_fdw::connection::subxacts_end(&self.state, before + 1, depth + 2, true)?;
                 self.state.settings.borrow_mut().subxact_commit(depth);
                 self.restore_read_only(depth, depth);
                 for c in self.state.cursors.borrow_mut().values_mut() {
@@ -2280,12 +2294,14 @@ impl Session {
             K::TransStmtRollbackTo => {
                 self.require_block("ROLLBACK TO SAVEPOINT")?;
                 self.ensure_txn();
+                let before = self.txn.as_ref().unwrap().borrow().subtxn_depth();
                 self.txn
                     .as_ref()
                     .unwrap()
                     .borrow_mut()
                     .rollback_to(&t.savepoint_name)?;
                 let depth = self.txn.as_ref().unwrap().borrow().subtxn_depth();
+                let _ = crate::ext::postgres_fdw::connection::subxacts_end(&self.state, before + 1, depth + 1, false);
                 self.state.settings.borrow_mut().subxact_abort(depth);
                 self.restore_read_only(depth.saturating_sub(1), depth);
                 // Cursors opened in the subtransactions rolled back are gone.
@@ -2303,7 +2319,10 @@ impl Session {
             }
             K::TransStmtPrepare if self.status == TxnStatus::InBlock => {
                 let temp = self.state.temp_used.get();
+                // (XACT_EVENT_PRE_PREPARE: postgres_fdw refuses before anything else.)
+                let fdw = crate::ext::postgres_fdw::connection::pre_prepare(&self.state);
                 self.finish_txn(false)?;
+                fdw?;
                 Err(if temp {
                     Error::new(
                         code::FEATURE_NOT_SUPPORTED,

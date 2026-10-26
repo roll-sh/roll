@@ -886,7 +886,7 @@ pub fn restricted_kinds(st: &Settings) -> (bool, bool) {
 
 /// `SplitIdentifierString` on commas: the identifiers (downcased unless quoted), or `None`
 /// when the list is malformed.
-fn split_identifiers(raw: &str) -> Option<Vec<String>> {
+pub(crate) fn split_identifiers(raw: &str) -> Option<Vec<String>> {
     let mut out = Vec::new();
     let mut it = raw.chars().peekable();
     loop {

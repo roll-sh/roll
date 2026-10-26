@@ -110,6 +110,7 @@ pub fn unsettled_for_test() -> Vec<&'static str> {
     crate::session::ddl::unsettled(&mut out);
     crate::session::ddl::event_trigger::unsettled(&mut out);
     crate::exec::trigger::unsettled(&mut out);
+    crate::ext::postgres_fdw::modify::unsettled(&mut out);
     crate::sql::scs::unsettled(&mut out);
     crate::types::regex::unsettled(&mut out);
     out

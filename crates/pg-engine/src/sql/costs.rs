@@ -166,6 +166,16 @@ pub fn rel_size(t: &Table, ctx: &ExecCtx) -> RelSize {
         return crate::sql::paths::sys_size(st, ctx);
     }
     let cat = ctx.catalog();
+    // A foreign table: pg_class's statistics (postgresGetForeignRelSize), else 10 pages of
+    // rows of its width.
+    if t.foreign.is_some() {
+        if let Some(s) = cat.relstats.get(&t.oid).filter(|s| s.tuples >= 0.0) {
+            return RelSize { pages: s.pages.max(0) as f64, tuples: s.tuples };
+        }
+        let width: u32 = (0..t.columns.len()).filter(|&i| !t.columns[i].dropped).map(|i| col_width(&cat, t, i)).sum();
+        let maxalign = |w: u32| w.div_ceil(8) * 8;
+        return RelSize { pages: 10.0, tuples: ((10 * BLCKSZ as u32) / (maxalign(width) + 24)) as f64 };
+    }
     let mut curpages = crate::exec::sizing::heap_blocks(t, ctx)
         .ok()
         .flatten()

@@ -70,6 +70,9 @@ pub fn serve(
     listener: TcpListener,
     opts: ServerOptions,
 ) -> std::io::Result<()> {
+    if let Ok(a) = listener.local_addr() {
+        engine.note_listen_addr(a);
+    }
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(s) => s,

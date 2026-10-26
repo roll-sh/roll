@@ -38,8 +38,8 @@ pub fn library(probin: &str) -> &str {
 /// Whether the engine has native code for library `lib` (so a symbol it lacks is an error,
 /// as `dlsym` failing is).
 pub fn has_library(lib: &str) -> bool {
-    matches!(lib, "_int" | "amcheck" | "btree_gin" | "btree_gist" | "citext" | "cube" | "earthdistance" | "fuzzystrmatch" | "hstore" | "isn" | "lo" | "ltree" | "pgcrypto"
-            | "pg_buffercache" | "pg_stat_statements" | "pg_trgm" | "seg" | "tablefunc" | "unaccent" | "uuid-ossp")
+    matches!(lib, "_int" | "amcheck" | "btree_gin" | "btree_gist" | "citext" | "cube" | "dblink" | "earthdistance" | "fuzzystrmatch" | "hstore" | "isn" | "lo" | "ltree" | "pgcrypto"
+            | "pg_buffercache" | "pg_stat_statements" | "pg_trgm" | "postgres_fdw" | "seg" | "tablefunc" | "unaccent" | "uuid-ossp")
 }
 
 /// A made operator class's support function `number` (for its input type), when it is a C
@@ -121,6 +121,7 @@ pub fn lookup(probin: &str, symbol: &str) -> Option<Native> {
         "btree_gist" => super::btree::btree_gist(symbol),
         "ltree" => super::ltree::symbol(symbol),
         "citext" => super::citext::symbol(symbol),
+        "dblink" => super::dblink::symbol(symbol),
         "hstore" => super::hstore::symbol(symbol),
         "fuzzystrmatch" => super::fuzzystrmatch::symbol(symbol),
         "isn" => super::isn::symbol(symbol),
@@ -133,6 +134,7 @@ pub fn lookup(probin: &str, symbol: &str) -> Option<Native> {
         "pgcrypto" => super::pgcrypto::symbol(symbol),
         "pg_trgm" => super::pg_trgm::symbol(symbol),
         "pg_stat_statements" => super::pg_stat_statements::symbol(symbol),
+        "postgres_fdw" => super::postgres_fdw::symbol(symbol),
         "uuid-ossp" => super::uuid_ossp::symbol(symbol),
         _ => None,
     }
@@ -194,5 +196,29 @@ pub fn ts_dict(
     match (lib, init) {
         ("unaccent", "unaccent_init") => super::unaccent::init(options).map(Some),
         _ => Ok(None),
+    }
+}
+
+/// What a foreign-data wrapper's validator function gets: the options (`name=value`) of an
+/// object of system catalog `catalog` (pg_foreign_data_wrapper, pg_foreign_server,
+/// pg_user_mapping or pg_foreign_table / pg_attribute).
+pub struct FdwValidate<'a> {
+    pub options: &'a [String],
+    pub catalog: u32,
+    pub cat: &'a crate::catalog::Catalog,
+    /// The current user is a superuser.
+    pub superuser: bool,
+    /// Where warnings go.
+    pub notice: &'a dyn Fn(crate::error::Error),
+}
+
+pub type FdwValidator = fn(&FdwValidate) -> crate::Result<()>;
+
+/// The validator function `symbol` in the library `probin` names.
+pub fn fdw_validator(probin: &str, symbol: &str) -> Option<FdwValidator> {
+    match (library(probin), symbol) {
+        ("dblink", "dblink_fdw_validator") => Some(super::dblink::validate),
+        ("postgres_fdw", "postgres_fdw_validator") => Some(super::postgres_fdw::option::validate),
+        _ => None,
     }
 }

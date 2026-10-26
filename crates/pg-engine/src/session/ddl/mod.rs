@@ -30,6 +30,7 @@ mod table;
 mod trigger;
 mod userobj;
 mod fdw;
+pub(crate) use fdw::closest_match;
 mod foreign;
 mod publication;
 mod subscription;
@@ -1216,6 +1217,11 @@ impl<'c, 'a> Ddl<'c, 'a> {
 
     /// Every stored row of a table (as of this transaction), with its storage key.
     fn table_rows(&self, t: &Table) -> Result<Vec<(Vec<u8>, Row)>> {
+        // (A postgres_fdw table's rows are the remote server's.)
+        if t.foreign.is_some() && crate::ext::postgres_fdw::scan::is_postgres_fdw(&self.cat, t) {
+            let (rows, _) = crate::ext::postgres_fdw::scan::remote_rows(t, self.ctx)?;
+            return Ok(rows.into_iter().map(|r| (Vec::new(), r)).collect());
+        }
         let mut out = Vec::new();
         for r in self.scan_rows(t) {
             self.ctx.check()?;

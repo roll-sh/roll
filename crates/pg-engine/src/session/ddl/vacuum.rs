@@ -189,6 +189,16 @@ impl Ddl<'_, '_> {
                     {
                         return Err(e);
                     }
+                    // postgres_fdw samples the remote table.
+                    if analyze && !vacuum && crate::ext::postgres_fdw::scan::is_postgres_fdw(&self.cat, &t) {
+                        let (rows, pages) = crate::ext::postgres_fdw::scan::remote_rows(&t, self.ctx)?;
+                        self.analyze_columns(&t, &[], false)?;
+                        self.cat.relstats.insert(
+                            t.oid,
+                            RelStats { pages, tuples: rows.len() as f64, allvisible: 0, allfrozen: 0 },
+                        );
+                        self.save()?;
+                    }
                     continue;
                 }
                 Some(Relation::Table(t)) => t,

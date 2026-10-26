@@ -7479,7 +7479,14 @@ impl Binder<'_, '_> {
     /// A C function's call target: the native code for its library and symbol
     /// (`crate::ext::native`), over its declared argument and result types.
     pub(crate) fn native_def(fdef: &crate::catalog::Function) -> Option<FuncDef> {
-        let n = crate::ext::native::lookup(fdef.probin.as_deref()?, &fdef.body)?;
+        let bin = fdef.probin.as_deref()?;
+        // (A SECURITY DEFINER C function runs as its owner: a library may have code for
+        // that case, `symbol#secdef`.)
+        let n = fdef
+            .security_definer
+            .then(|| crate::ext::native::lookup(bin, &format!("{}#secdef", fdef.body)))
+            .flatten()
+            .or_else(|| crate::ext::native::lookup(bin, &fdef.body))?;
         let args: Vec<DataType> = fdef.args.iter().map(|a| a.1.clone()).collect();
         Some(FuncDef {
             oid: fdef.oid,

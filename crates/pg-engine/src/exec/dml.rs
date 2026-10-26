@@ -276,6 +276,11 @@ pub fn check_row_rls(
             d.check(&row[i], ctx)?;
         }
     }
+    // (A foreign table's constraints are the remote server's to enforce: ExecConstraints
+    // runs for local tables only.)
+    if t.foreign.is_some() {
+        return Ok(());
+    }
     for (i, c) in t.live_columns() {
         if c.not_null && row[i].is_null() {
             return Err(with_failing_row(
@@ -2393,6 +2398,9 @@ pub fn delete_row(
     old: &[Value],
     ctx: &ExecCtx,
 ) -> Result<()> {
+    if t.foreign.is_some() && crate::ext::postgres_fdw::scan::is_postgres_fdw(&ctx.catalog(), t) {
+        return crate::ext::postgres_fdw::modify::delete(t, dkey, ctx);
+    }
     ssi_change(t, indexes, dkey, old, None, ctx)?;
     // heap_delete sets its xmax: writers of its unique keys wait for us now.
     ctx.txn.borrow_mut().row_modified(dkey);
@@ -2531,6 +2539,9 @@ pub fn update_row_rls(
     }
     check_partition(rules, &new, ctx)?;
     check_row_rls(rules, rls, &new, ctx)?;
+    if t.foreign.is_some() && crate::ext::postgres_fdw::scan::is_postgres_fdw(&ctx.catalog(), t) {
+        return crate::ext::postgres_fdw::modify::update(t, dkey, old, new, ctx);
+    }
     ssi_change(t, &rules.indexes, dkey, old, Some(&new), ctx)?;
     // heap_update sets the old version's xmax: writers of its unique keys wait for us now.
     ctx.txn.borrow_mut().row_modified(dkey);
@@ -2756,6 +2767,19 @@ pub fn insert_prepared(
     ctx: &ExecCtx,
 ) -> Result<Inserted> {
     let t = &rules.table;
+    // A postgres_fdw foreign table: the row goes to the remote server.
+    if t.foreign.is_some() && crate::ext::postgres_fdw::scan::is_postgres_fdw(&ctx.catalog(), t) {
+        let row = crate::ext::postgres_fdw::modify::insert(t, p.row, ctx)?;
+        if trigger::wants_after(&rules.triggers, tt::INSERT, ctx) {
+            after.push(AfterRow {
+                event: tt::INSERT,
+                old: None,
+                new: Some(row.clone()),
+                key: Vec::new(),
+            });
+        }
+        return Ok(Inserted::Stored(row, Vec::new()));
+    }
     // Others' index expressions over our in-progress row (check_exclusion_or_unique_
     // constraint's FormIndexDatum) need it.
     let shared = rules
@@ -4181,7 +4205,8 @@ impl Node for UpdateNode {
                     return Ok(Some(eval_all(&self.plan.returning, &out, ctx)?));
                 }
             }
-            let stored = update_row(rules, &dkey, &old, new, ctx)?;
+            let set_cols: Vec<usize> = self.plan.sets.iter().map(|(c, _)| *c).collect();
+            let stored = crate::ext::postgres_fdw::modify::with_set_cols(set_cols, || update_row(rules, &dkey, &old, new, ctx))?;
             if self.plan.inh {
                 if trigger::any(&rules.triggers, true, false, tt::UPDATE, ctx) {
                     self.ordered.push((

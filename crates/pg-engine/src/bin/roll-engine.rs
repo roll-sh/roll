@@ -64,6 +64,13 @@ struct Args {
     /// its own). The default is initdb's `--locale=C --encoding=UTF8`, the reference's.
     #[command(flatten)]
     initdb: InitdbArgs,
+    /// Let dblink and postgres_fdw connect to these destinations (comma-separated): `local`
+    /// (this server, reached without a host as through PostgreSQL's Unix socket),
+    /// `host[:port]`, `*[:port]` (any host), `addr/bits` (a network). PostgreSQL's own rules
+    /// (password_required, non-superusers authenticating with a password) still apply. Off
+    /// by default: every outbound connection is refused.
+    #[arg(long, value_name = "LIST", value_delimiter = ',')]
+    allow_outbound: Vec<String>,
 }
 
 /// initdb's locale and encoding options.
@@ -141,6 +148,7 @@ fn main() -> anyhow::Result<()> {
         server_files: a.allow_server_files,
         shared_preload_libraries: a.shared_preload_libraries,
         locale: a.initdb.options(),
+        outbound: a.allow_outbound,
         ..EngineOptions::default()
     })?;
     // SIGTERM / SIGINT: a clean shutdown (pg_ctl stop's smart / fast modes end sessions the

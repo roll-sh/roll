@@ -1212,6 +1212,9 @@ impl EngineProc {
             // (The contrib suites' reference preloads pg_stat_statements, as its
             // temp-config does: so does the engine.)
             .args(if contrib_mode() { &["--shared-preload-libraries", "pg_stat_statements"][..] } else { &[][..] })
+            // (dblink's and postgres_fdw's suites connect to a loopback server: the engine
+            // itself, reached without a host as through PostgreSQL's Unix socket.)
+            .args(if contrib_mode() { &["--allow-outbound", "local"][..] } else { &[][..] })
             .env("RUST_LOG", "warn")
             .env("RUST_BACKTRACE", "0")
             .stdout(logf.try_clone().unwrap())
@@ -1319,7 +1322,14 @@ fn psql(
         format!("PGAPPNAME={app}"),
         "PGTZ=America/Los_Angeles".into(),
         "PGDATESTYLE=Postgres, MDY".into(),
-        "PGOPTIONS=-c intervalstyle=postgres_verbose".into(),
+        // (The contrib suites' servers preload pg_stat_statements, which turns query ids on:
+        // the other modules' own test configurations don't load it, so their EXPLAIN
+        // VERBOSE shows no Query Identifier.)
+        if contrib_mode() && !cfg.src.ends_with("pg_stat_statements") {
+            "PGOPTIONS=-c intervalstyle=postgres_verbose -c compute_query_id=off".into()
+        } else {
+            "PGOPTIONS=-c intervalstyle=postgres_verbose".into()
+        },
         "LC_MESSAGES=C".into(),
     ];
     let mut regress: Vec<_> = regress_env(cfg).into_iter().collect();
