@@ -153,6 +153,11 @@ impl Ddl<'_, '_> {
             for row in self.inherited_rows(t)? {
                 offer(row);
             }
+        } else if t.foreign.is_some() && crate::ext::postgres_fdw::scan::is_postgres_fdw(&self.cat, t) {
+            // postgresAcquireSampleRowsFunc: the remote table's rows.
+            for row in crate::ext::postgres_fdw::scan::remote_rows(t, self.ctx)?.0 {
+                offer(row);
+            }
         } else {
             for r in self.scan_rows(t) {
                 self.ctx.check()?;

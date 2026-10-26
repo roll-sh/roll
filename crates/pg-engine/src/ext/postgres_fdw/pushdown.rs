@@ -142,7 +142,8 @@ fn mark_target(source: &mut Arc<Plan>, oid: u32) {
     }
     let p = Arc::make_mut(source);
     if let Plan::Scan(s) = p {
-        if s.table.oid == oid && s.table.foreign.is_some() && s.with_key {
+        // (An inheritance member too: its scan returns the key as the root's does.)
+        if s.table.foreign.is_some() && s.with_key && (s.table.oid == oid || !s.table.inherits.is_empty()) {
             s.fdw = Some(Arc::new(FdwPushdown {
                 order: Vec::new(),
                 limit: None,

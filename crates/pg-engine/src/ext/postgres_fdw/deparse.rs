@@ -391,6 +391,8 @@ impl Deparser<'_> {
         let e = match e {
             Expr::Relabel(x, _) => x,
             Expr::Cast(x, DataType::Varchar(_), DataType::Text, false) => x,
+            // (A length coercion the binder adds, char(n) to char: the same type.)
+            Expr::Cast(x, from, to, false) if from.oid() == to.oid() => x,
             e => e,
         };
         matches!(e, Expr::Col(i, _) if *i < self.table.columns.len() || Some(*i) == self.ctid_col)

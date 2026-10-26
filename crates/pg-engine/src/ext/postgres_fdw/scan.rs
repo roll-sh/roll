@@ -167,6 +167,9 @@ struct ScanNode {
     /// The remote query and its parameters (`$n`), declared as a cursor at the first row.
     sql: String,
     params: Vec<Expr>,
+    /// The FROM item's alias and column aliases (conversion errors name them).
+    alias: Option<String>,
+    col_aliases: Option<Arc<Vec<(String, String)>>>,
 }
 
 /// make_tuple_from_result_row: a remote row as the table's row (columns not retrieved are
@@ -178,7 +181,16 @@ fn make_row(n: &ScanNode, vals: Vec<Option<String>>, ctx: &ExecCtx) -> Result<Ro
         if let Some(Some(s)) = vals.get(k) {
             let col = &t.columns[i];
             row[i] = crate::types::text::parse_value(s, &col.ty, ctx.fmt())
-                .map_err(|e| e.context(format!("column \"{}\" of foreign table \"{}\"", col.name, t.name)))?;
+                .map_err(|e| {
+                    // (conversion_error_callback: the names the query knows them by.)
+                    let cname = n
+                        .col_aliases
+                        .as_ref()
+                        .and_then(|a| a.iter().find(|(c, _)| *c == col.name).map(|(_, x)| x.clone()))
+                        .unwrap_or_else(|| col.name.clone());
+                    let rname = n.alias.clone().unwrap_or_else(|| t.name.clone());
+                    e.context(format!("column \"{cname}\" of foreign table \"{rname}\""))
+                })?;
         }
     }
     let ctid = if n.ctid { vals.get(n.retrieved.len()).cloned().flatten() } else { None };
@@ -197,6 +209,9 @@ fn make_row(n: &ScanNode, vals: Vec<Option<String>>, ctx: &ExecCtx) -> Result<Ro
 
 /// Open a foreign scan (BeginForeignScan + create_cursor).
 pub fn open(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNode> {
+    if s.current_of.is_some() {
+        return Err(unsupported("WHERE CURRENT OF is not supported for this table type"));
+    }
     let cat = ctx.catalog();
     let spec = spec(s, need, &cat, ctx.fmt());
     let m = mapping_for(&s.table, s.check_as, ctx)?;
@@ -215,6 +230,8 @@ pub fn open(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNod
         local: spec.local,
         sql: spec.sql,
         params: spec.params,
+        alias: s.alias.clone(),
+        col_aliases: s.col_aliases.clone(),
     }))
 }
 
@@ -231,11 +248,18 @@ impl ScanNode {
             })
             .collect::<Result<_>>()?;
         self.cursor = format!("c{}", connection::next_cursor(ctx));
-        let declare = format!("DECLARE {} CURSOR FOR\n{}", self.cursor, self.sql);
+        // (The parameters' values go in as literals of the parameters' types: `$n::type`
+        // becomes `'value'::type`, highest numbers first.)
+        let mut text = self.sql.clone();
+        for (i, v) in values.iter().enumerate().rev() {
+            let lit = v.as_deref().map_or("NULL".to_string(), super::deparse::string_literal);
+            text = text.replace(&format!("${}::", i + 1), &format!("{lit}::"));
+        }
+        let declare = format!("DECLARE {} CURSOR FOR\n{text}", self.cursor);
         let intr = crate::remote::interrupts(ctx);
         let query = &self.sql;
         let res = connection::with_conn(ctx, self.key, |c| {
-            let r = if values.is_empty() { c.exec(&declare, &intr)? } else { c.exec_params(&declare, None, &values, &intr)? };
+            let r = c.exec(&declare, &intr)?;
             if r.status != Status::CommandOk {
                 return Err(connection::report(&r, c, Some(query)));
             }
@@ -313,7 +337,6 @@ impl Node for ScanNode {
     }
 }
 
-#[allow(dead_code)]
 fn unsupported(what: &str) -> Error {
     Error::new(code::FEATURE_NOT_SUPPORTED, what.to_string())
 }
@@ -360,6 +383,8 @@ pub fn remote_rows(t: &Table, ctx: &ExecCtx) -> Result<(Vec<Row>, i32)> {
         local: Vec::new(),
         sql: String::new(),
         params: Vec::new(),
+        alias: None,
+        col_aliases: None,
     };
     let rows = res.rows.into_iter().map(|v| make_row(&node, v, ctx)).collect::<Result<Vec<_>>>()?;
     Ok((rows, pages))

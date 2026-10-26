@@ -41,7 +41,7 @@ PGCONTRIB_ONLY=uuid-ossp,citext PGREGRESS_DIR=$D PGREGRESS_CONTAINER=a39-ref \
 
 ## Scores
 
-Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013. Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,644 / 2,053 (80.1%). Baseline (before any
+Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013. Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053 (81.1%). Baseline (before any
 extension was ported; CREATE EXTENSION was a stand-in): 2,752 / 7,733
 units (35.6%). The reference matches `expected/` for every module except dblink (the reference
 has no `regress.so`, whose functions dblink's test creates).
@@ -69,7 +69,7 @@ has no `regress.so`, whose functions dblink's test creates).
 | amcheck | 204 | 202 | applicable checks only (see below) |
 | pageinspect | 291 | — | not applicable (not available) |
 | pg_buffercache | 38 | 38 | done (no buffer pool: every buffer unused) |
-| postgres_fdw | 2053 | 1644 | see below |
+| postgres_fdw | 2053 | 1664 | see below |
 | dblink | 218 | 218 | done |
 
 ### What is left, per module
