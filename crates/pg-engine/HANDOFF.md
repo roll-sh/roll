@@ -123,6 +123,11 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   (makeSortGroupClauseForSetOp). Golden `a53_hashability`. (In debug builds the explain
   `convert` frame is about 280 kB and nests per plan level: a field added to `ExNode` grows
   it, and a 2 MB test thread overflowed.)
+- **Extension types on the wire** (round 19, agent 53): hstore, ltree, lquery, ltxtquery,
+  cube and citext send and receive the binary format with PostgreSQL's own send / receive
+  byte layouts (`ext/binary.rs`); seg, isn and query_int have none and fail as PostgreSQL
+  does. IS [NOT] DISTINCT FROM and NULLIF pick `=` as `oper` does (an extension's
+  operator). Golden `a53_ext_distinct`, wire test `extension_types_binary_format`.
 - **Performance** (round 17, agent 36): measured for the first time, `tools/bench/` against a
   pinned PostgreSQL 18.6 on the same 4 cores; numbers, method and the optimisations made are
   in `BENCH.md`. Over the wire the engine beats PostgreSQL on single-client OLTP (point
