@@ -386,6 +386,7 @@ impl Binder<'_, '_> {
                 }
                 _ => None,
             };
+            let mut deferred = None;
             let (plan, mut cols) = match recursive_sel {
                 // (A WITH on the recursive UNION itself: its queries are seen by both sides.)
                 Some(s) => match &s.with_clause {
@@ -402,6 +403,13 @@ impl Binder<'_, '_> {
                         Error::new(code::SYNTAX_ERROR, "WITH query is not recursive"),
                         cte.location,
                     ));
+                }
+                None if matches!(inner(q), Some(NodeEnum::SelectStmt(_))) && !self.deparse => {
+                    // (Its plan-time errors wait for a reference: `defer_plan`.)
+                    self.defer_plan.borrow_mut().push(None);
+                    let r = self.in_sibling(|b| b.bind_select_node(q));
+                    deferred = self.defer_plan.borrow_mut().pop().flatten();
+                    r?
                 }
                 None => self.in_sibling(|b| b.bind_select_node(q))?,
             };
@@ -480,6 +488,7 @@ impl Binder<'_, '_> {
                 no_returning,
                 inline,
                 work_filter: None,
+                deferred,
             });
             if !self.deparse && self.ctes.last().and_then(|l| l.last()).is_some_and(|c| c.inline.is_none()) {
                 pushed.0 += crate::sql::explain::push_cte_estimates(
@@ -643,6 +652,7 @@ impl Binder<'_, '_> {
             no_returning: false,
             inline: None,
             work_filter,
+            deferred: None,
         });
         // (The recursive term is planned seeing its worktable as ten times the non-recursive
         // term.)
@@ -1833,6 +1843,18 @@ impl Binder<'_, '_> {
         self.level().st.group_srfs = self.level().st.srfs.len();
         self.level().st.group_exprs = groups.clone();
         self.level().st.grouping_sets = sets.is_some();
+        // (Grouping sets: the occurrences of keys without columns in the select list and
+        // HAVING are kept apart from their surroundings while bound.)
+        if sets.is_some() && !self.deparse {
+            let st = &self.level().st;
+            let marks: Vec<String> = groups
+                .iter()
+                .zip(&st.group_text)
+                .filter(|(g, _)| g.columns().is_empty() && !g.is_volatile() && !g.has_outer_refs())
+                .filter_map(|(_, t)| t.clone())
+                .collect();
+            self.level().st.pass_marks = marks;
+        }
         // Select list.
         let targets = self.in_clause(Clause::Select, |b| b.bind_targets(&s.target_list))?;
         // The collations the outputs derive, while the targets are in the FROM row's terms.
@@ -1848,6 +1870,7 @@ impl Binder<'_, '_> {
             }
             None => None,
         };
+        self.level().st.pass_marks.clear();
         // DISTINCT / DISTINCT ON
         let distinct_all = s.distinct_clause.len() == 1 && s.distinct_clause[0].node.is_none();
         let mut distinct_on: Vec<Expr> = Vec::new();
@@ -2988,8 +3011,10 @@ impl Binder<'_, '_> {
             self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut plan, lim);
             drop(_own);
             drop(_pushed);
-            if !self.unplanned {
-                super::check_merge_keys(self.ctx, &mut plan)?;
+            if !self.unplanned
+                && let Err(e) = super::check_merge_keys(self.ctx, &mut plan)
+            {
+                self.plan_error(e)?;
             }
         }
         Ok((plan, cols))
@@ -3423,7 +3448,9 @@ impl Binder<'_, '_> {
             _ => Some(g),
         };
         let literal = written.is_some_and(literal_node);
-        let text = (!literal).then(|| written.map(|w| strip_locations(&format!("{w:?}")))).flatten();
+        // (A literal's text too: its occurrences inside other items are kept from folding
+        // as an expression's are, `SelectState::pass_marks`.)
+        let text = written.map(|w| strip_locations(&format!("{w:?}")));
         let st = &mut self.level().st;
         st.group_targets.resize(groups.len(), None);
         st.group_literal.resize(groups.len(), false);
@@ -4021,7 +4048,9 @@ impl Binder<'_, '_> {
                     let _own = crate::scoped::set(&crate::sql::paths::OWN_LOCK, false, "rowmarks::OWN_LOCK");
                     self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut plan, lim);
                     drop(_pushed);
-                    super::check_merge_keys(self.ctx, &mut plan)?;
+                    if let Err(e) = super::check_merge_keys(self.ctx, &mut plan) {
+                        self.plan_error(e)?;
+                    }
                     plan
                 } else {
                     let mut plan = plan;
@@ -4289,6 +4318,10 @@ impl Binder<'_, '_> {
                             ),
                             rv.location,
                         ));
+                    }
+                    // (Its query's plan-time error, now that it is read.)
+                    if let Some(e) = c.deferred.clone() {
+                        self.plan_error(e)?;
                     }
                     // An inlined one: its query as a subquery here.
                     if let Some(q) = &c.inline {
@@ -7177,7 +7210,7 @@ fn json_references(v: &serde_json::Value, name: &str) -> bool {
 }
 
 /// A node's debug text without its `location`s: two nodes written alike compare equal.
-fn strip_locations(s: &str) -> String {
+pub(super) fn strip_locations(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(i) = rest.find("location: ") {
@@ -7341,6 +7374,15 @@ fn post_agg_with(
     // reference plans it, only the select-list item the key names reads such a key.)
     let keyed = |g: &Expr| {
         !g.columns().is_empty() || g.is_volatile() || (outer_keys && g.has_outer_refs())
+    };
+    // (A key's occurrence kept from folding while bound (`SelectState::pass_marks`): its
+    // expression, a pass-through value below when it is one.)
+    let e = match e {
+        Expr::SqlSyntax(a) if matches!(&*a, Expr::SqlSyntax(_)) => match *a {
+            Expr::SqlSyntax(b) => *b,
+            a => a,
+        },
+        e => e,
     };
     // (A constant key's other occurrences: values of the group's rows.)
     if let Some(pt) = pass

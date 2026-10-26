@@ -143,12 +143,11 @@ impl K {
             K::Const(v) => v.clone(),
             K::Call { f, args, strict, ret } => {
                 let (mut t0, mut t1) = (Value::Null, Value::Null);
+                // (Both arguments before a strict call's NULL: the second's failure, a
+                // fallback to the evaluator, still happens.)
                 let x = args[0].arg(row, &mut t0)?;
-                if *strict && x.is_null() {
-                    return Some(Value::Null);
-                }
                 let y = args[1].arg(row, &mut t1)?;
-                if *strict && y.is_null() {
+                if *strict && (x.is_null() || y.is_null()) {
                     return Some(Value::Null);
                 }
                 if matches!(x, Value::Ext(..)) || matches!(y, Value::Ext(..)) {

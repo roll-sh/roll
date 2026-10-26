@@ -1164,6 +1164,11 @@ pub struct DummyInfo {
     /// Postgres simplified them before it found the relation empty, so one that fails still
     /// fails the statement (`binder::fold`).
     pub kept: Vec<Expr>,
+    /// Those that only a reader of an output column would have simplified (per column: a
+    /// subquery's output its query above reads, which pull_up_subqueries substitutes before
+    /// eval_const_expressions): they fail the statement once something above reads the
+    /// column (`analyzejoins::settle_kept_cols`).
+    pub kept_cols: Vec<(usize, Expr)>,
 }
 
 #[derive(Clone, Debug)]

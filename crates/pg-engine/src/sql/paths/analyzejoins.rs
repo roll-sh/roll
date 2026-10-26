@@ -853,7 +853,9 @@ fn plain_cols(p: &Plan) -> Option<Vec<(String, Option<String>)>> {
 fn dummy(p: &Plan) -> Plan {
     let mut d = dummy_rel(p);
     let kept = crate::sql::binder::fold::candidates(p);
-    if !kept.is_empty() {
+    let cols = crate::sql::binder::fold::output_candidates(p, &kept);
+    let projected = matches!(d, Plan::Project { .. });
+    if !kept.is_empty() || !cols.is_empty() {
         let mut cur = &mut d;
         while let Plan::Project { input, .. } = cur {
             cur = Arc::make_mut(input);
@@ -861,10 +863,48 @@ fn dummy(p: &Plan) -> Plan {
         if let Plan::Empty { info, .. } = cur {
             let mut i = info.as_deref().cloned().unwrap_or_default();
             i.kept.extend(kept);
+            // (Over a projection dummy_rel keeps, its expressions read them: what they
+            // read stays with the Empty below as any.)
+            if !projected {
+                i.kept_cols.extend(cols);
+            }
             *info = Some(Arc::new(i));
         }
     }
     d
+}
+
+/// Over a statement's whole plan (its levels' outputs read only as the levels above read
+/// them, which a level planned apart doesn't know): the constants an Empty keeps for readers
+/// of its columns (`DummyInfo::kept_cols`) are kept outright when the plan above reads the
+/// column (`binder::fold::first_error` then finds them).
+pub(crate) fn settle_kept_cols(p: &mut Plan, needed: &[bool]) {
+    fn has(p: &Plan) -> bool {
+        match p {
+            Plan::Empty { info: Some(i), .. } => !i.kept_cols.is_empty(),
+            p => crate::sql::explain::plan_inputs(p).into_iter().any(|c| has(c)),
+        }
+    }
+    if !has(p) {
+        return;
+    }
+    if let Plan::Empty { info: Some(i), .. } = p {
+        let mut j = (**i).clone();
+        for (k, e) in std::mem::take(&mut j.kept_cols) {
+            if needed.get(k).copied().unwrap_or(true) && !j.kept.iter().any(|x| x.same_as(&e)) {
+                j.kept.push(e);
+            }
+        }
+        *i = Arc::new(j);
+        return;
+    }
+    let needs = super::child_needs(p, needed);
+    for (k, c) in crate::sql::explain::plan_inputs_mut(p).into_iter().enumerate() {
+        let n = needs.get(k).cloned().unwrap_or_else(|| vec![true; plan_width(c)]);
+        if has(c) {
+            settle_kept_cols(Arc::make_mut(c), &n);
+        }
+    }
 }
 
 fn dummy_rel(p: &Plan) -> Plan {
@@ -908,7 +948,7 @@ fn dummy_rel(p: &Plan) -> Plan {
     let mut unplanned = Vec::new();
     unplanned_subqueries(p, &mut unplanned);
     let qual_false = pseudo_false(p);
-    Plan::Empty { ncols, cols, info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec, table: None, unplanned, qual_false, kept: Vec::new() })) }
+    Plan::Empty { ncols, cols, info: Some(Arc::new(crate::sql::plan::DummyInfo { rels, ec, table: None, unplanned, qual_false, kept: Vec::new(), kept_cols: Vec::new() })) }
 }
 
 /// The FROM subqueries (not pulled up) a plan proven empty reads, never planned: each with

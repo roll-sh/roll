@@ -291,6 +291,8 @@ errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with E
 | wide, batch 5 engine | 1340–1539 × 100 | 19,868 | wrong_rows 6, wrong_state 3, tag 9 |
 | wide, batch 6 engine | 1540–1739 × 100 | 19,943 | crash 2, wrong_rows 6, wrong_state 3, tag 3 |
 | round 2 (agent 68), before and after batch 1 | 1740–1889 × 100 | 14,895 | wrong_rows 3, wrong_state 3, tag 6 (the same both) |
+| round 2, base (a4823f7c) | 1890–2039 × 100 | 14,991 | wrong_rows 1, wrong_state 1, engine_error 44, eval_error 96, tag 6 |
+| round 2, batch 2 | 1890–2039 × 100 | 14,991 | wrong_state 1, engine_error 30, eval_error 84, tag 5 |
 
 ## Round 2 (agent 68)
 
@@ -311,12 +313,73 @@ Batch 1 (`a68_lateral_postpone`):
 - Harness: the regress cleanup drops only the databases its own run's statements created
   (HANDOFF, "How to test").
 
+Batch 2, from seeds 1740–1889 (`a68_groupingsets_folded`, `a68_fold_empty_subquery`,
+`a68_strict_args`, `a68_distinct_equal_values`, `a68_full_join_distinct`):
+
+- **Wrong rows (grouping sets, folding)**: a GROUP BY item without columns (`abs(9)`,
+  `position('bar' in 'foo')`, `1 + 1`, a typed literal `('2025-06-19'::date)`) that occurs inside a select-list
+  item or HAVING is a value of the group's rows there, NULL in the empty set's row over no
+  input; the binder folded it into its surroundings first (`abs(9) * 2` became `18`, never
+  NULL). While a grouping-set query's select list and HAVING are bound, such an occurrence
+  is now kept apart (`SelectState::pass_marks`, marked `SqlSyntax(SqlSyntax(_))` so nothing
+  folds through it) and `post_agg` makes it the pass-through value (seed 1830 #9). Agent 45's
+  open item ("grouping-key matching of folded expressions") is this.
+- **Wrong rows (DISTINCT, equal values)**: a plain DISTINCT under an ORDER BY that EXPLAIN shows
+  as a Unique over a Sort kept the first row of each group it read, not the first in the
+  sort's order, which differs for values that compare equal but differ (`'1 mon'` /
+  `'30 days'`): seed 1777 #34. Such a DISTINCT now sorts all its rows first, on the ORDER BY's
+  keys and then its other columns (`exec/nodes.rs` `distinct_presort`), when its column
+  types allow such ties; `sort_rows_by` is Postgres's quicksort instead of a stable sort.
+- **Wrong state (errors PostgreSQL raises)**: a strict function's arguments are all evaluated
+  before a NULL one makes the call NULL (EEOP_FUNCEXPR_STRICT), so `(b #> '{a,b}') || (b -
+  'a')` over a JSON `null` fails with "cannot delete from scalar" as in PostgreSQL instead of
+  updating the row to NULL (seed 1832 #4; `sql/expr.rs`, `exec/kernel.rs`).
+- **Wrong state (errors PostgreSQL raises)**: a FROM subquery found empty under a level found
+  empty too dropped the constants of its outputs that failed to fold, so `INSERT ... SELECT
+  ... FROM v WHERE NULL GROUP BY CUBE (v.c3, 1)` (c3 `jsonb_array_length('{...}')`) inserted
+  a row where PostgreSQL fails (seed 1827 #39). An empty relation now keeps, per output column,
+  the failing constants a reader of it would have simplified (`DummyInfo::kept_cols`), kept
+  outright once the statement's whole plan shows the column read (`settle_kept_cols`, before
+  `fold::first_error`: a level planned apart doesn't know which of its outputs its parent
+  reads, and an unread view output must not fail, as `SELECT c2 FROM v WHERE false`).
+- **Wrong state (engine error)**: `x IS DISTINCT FROM y` over constants wasn't folded (a
+  `FULL JOIN ... ON 1 IS DISTINCT FROM 1` failed "FULL JOIN is only supported with
+  merge-joinable or hash-joinable join conditions"), and a WITH query nothing reads failed
+  the statement with that planning error, where PostgreSQL never plans it (seed 1829 #97: a
+  DELETE ... RETURNING whose sub-select has such a CTE). A plan-time error of a read-only WITH
+  query's body is kept with it (`Binder::defer_plan`, `CteDef::deferred`) and raised where
+  the query is read (or kept with the WITH query around that reference).
+
 ## Open
 
-- **Wrong rows (bind-time folding, grouping sets)**: a HAVING or select-list expression with a
-  subexpression equal to a grouping key that folding merges with its surroundings (`HAVING 1
-  > (10.00 - ('2025-06-19' - '1999-11-11'::date))` with a key `('2025-06-19'::date)`, `abs(9) +
-  1` with a key `abs(9)`) isn't nulled by the sets that lack the key.
+- **Wrong rows (collations, composite types; agent 67's leftover)**: a composite type's text
+  field declared with a collation (`CREATE TYPE ct AS (a text COLLATE "en-x-icu", b int)`) is
+  compared by bytes everywhere a record is: `ROW('a', 1)::ct < ROW('B', 1)::ct` is false
+  (PostgreSQL's record_cmp compares each field under its attcollation: true), `WHERE c >=
+  ROW('Z', 0)::ct` counts 4 of 5 rows (PostgreSQL 1), min / max and ORDER BY differ; an index
+  on such a column keys the field by bytes too (`storage/keys.rs` encodes a Record's fields
+  with `encode_value`; `key_colls` gives a composite column no `KeyColl`). Both have to change
+  together (an index keyed under the field collation while comparisons stay bytewise would
+  disagree with its own scans): per-field collations into the record comparison
+  (`sql/func/ops.rs` record compare, `compare_values` for sorts, hashing / grouping), then
+  `KeyColl` per field for composite index columns behind an index key format 3 (rebuilt on
+  open, as `Engine::reencoded_indexes` does for format 2).
+
+- **Wrong rows (JSON_VALUE / JSON_QUERY, a PostgreSQL 18.6 quirk)**: after a row whose call
+  fell back to its ON ERROR (or, without an ON ERROR step, ON EMPTY) default, a row whose
+  input is NULL returns that default too instead of NULL: the NULL-input step falls through
+  to the ON ERROR check and `jsestate->error` still holds the previous row's (only the path
+  step resets it). Seed 1801 #53 (`JSON_VALUE(t2.c, '$.a' RETURNING int DEFAULT -1 ON ERROR)`
+  over a LEFT JOIN's null-extended row). Not emulated: it needs per-call-site state across
+  rows, and the result depends on the row order, which differs between plans.
+- **Plan choice**: `SELECT DISTINCT a FROM t ORDER BY 1 DESC` is a HashAggregate under a Sort in
+  the engine where PostgreSQL has a Unique over a Sort (ASC agrees), so which of two equal
+  values (`'1 mon'` / `'30 days'`) is kept differs (planner costs).
+- Constant folding: a qual over a pulled-up subquery's output whose constant fails, ANDed
+  with NULL above a subquery found empty (`... t WHERE t.c3 > 0 AND NULL` with `c3`
+  `jsonb_array_length('{}')` under `WHERE NULL`), doesn't fail the statement as in
+  PostgreSQL; a dummy projection kept over an empty relation (`dummy_rel`'s target list)
+  doesn't pass on its input's per-column constants (`kept_cols`).
 - A stable SQL function whose body fails only at run time on some rows (seed 1472 #24's `f0`):
   the engine fails an INSERT ... SELECT PostgreSQL completes.
 
@@ -326,11 +389,12 @@ Batch 1 (`a68_lateral_postpone`):
   a CASE arm a pulled-up constant makes unreachable. The five new smoke entries (s5 #6, s10
   #33, s12 #52, s20 #42, s22 #62) are these.
 
-- **Wrong rows (bind-time folding)**: the grouping-key matching above compares folded
-  expressions, PostgreSQL's (`substitute_grouped_columns`) the expressions as written:
-  `1+0`, `1::int8`, `COALESCE(1, 5)`, `(1+1)*3` and `HAVING 1 = 1` over a key `1` / `1+1`
-  differ in the no-input empty set's row (PostgreSQL: `(1) + 0` is NULL, `COALESCE((1), 5)`
-  is 5, the HAVING drops the row).
+- Grouping keys' occurrences are matched by their text as written (`pass_marks`): one written
+  differently but equal (`abs(+9)` for a key `abs(9)`, an untyped `'2025-06-19'` an operator
+  makes a date for a key `('2025-06-19'::date)`: `HAVING 1 > (10.00 - ('2025-06-19' -
+  '1999-11-11'::date))`) is still folded with its surroundings; PostgreSQL compares the
+  transformed expressions. Bare literals aren't marked (their type comes from the context;
+  a key written as one matches the constant it becomes).
 - EXPLAIN only: a single-table FROM subquery on the nullable side whose WHERE is a
   sub-select (`c LEFT JOIN (SELECT x FROM a WHERE (SELECT false)) s ON ...`): PostgreSQL
   checks it as the outer join's Join Filter, the engine gates the scan with a Result.

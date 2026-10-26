@@ -212,6 +212,16 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
         }
         Plan::Sort { input, keys } => {
             let bound = ctx.sort_bound.take();
+            if let Some(d) = distinct_presort(plan, ctx) {
+                return Ok(Box::new(SortNode {
+                    presorted: 0,
+                    key: Arc::as_ptr(plan) as usize,
+                    input: Some(d),
+                    keys: keys.clone(),
+                    out: Vec::new().into_iter(),
+                    bound,
+                }));
+            }
             Box::new(SortNode {
                 presorted: super::pghash::presorted_keys(plan, ctx).min(keys.len()),
                 key: Arc::as_ptr(plan) as usize,
@@ -252,6 +262,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             prev: None,
             hashed: (on.is_none() || *hashed).then(|| plan.clone()),
             out: None,
+            presort: None,
         }),
         Plan::SetOp {
             kind,
@@ -1925,6 +1936,50 @@ impl Node for ConstFalseFullNode {
     }
 }
 
+/// A Sort over a plain DISTINCT that EXPLAIN shows as a Unique over a Sort (the ORDER BY's
+/// keys, then the other output columns): when equal values may differ, the DISTINCT keeps
+/// the first of each group in that sort's order, not the first it reads, so it sorts its
+/// input so first. (The Sort above then finds its rows already in order.)
+fn distinct_presort(plan: &Arc<Plan>, ctx: &ExecCtx) -> Option<BoxNode> {
+    let Plan::Sort { input, keys } = &**plan else { return None };
+    let Plan::Distinct { input: below, on: None, .. } = &**input else { return None };
+    let types = row_types(below);
+    if types.iter().all(equal_is_identical) || !crate::sql::explain::sort_is_unique(plan, ctx) {
+        return None;
+    }
+    let mut all = keys.clone();
+    for (i, t) in types.iter().enumerate() {
+        if !keys.iter().any(|k| matches!(k.expr, Expr::Col(c, _) if c == i)) {
+            all.push(SortKey { expr: Expr::Col(i, t.clone()), desc: false, nulls_first: false, using: None });
+        }
+    }
+    let mut d = match &**input {
+        Plan::Distinct { input: below, on, hashed, .. } => DistinctNode {
+            input: open(below, ctx).ok()?,
+            on: on.clone(),
+            seen: HashMap::default(),
+            prev: None,
+            hashed: (on.is_none() || *hashed).then(|| input.clone()),
+            out: None,
+            presort: None,
+        },
+        _ => return None,
+    };
+    d.presort = Some(all);
+    Some(Box::new(d))
+}
+
+/// Whether two values of a type that compare equal are always the same value (so which of
+/// them a DISTINCT keeps can't be seen).
+fn equal_is_identical(t: &crate::types::DataType) -> bool {
+    use crate::types::DataType as T;
+    match t {
+        T::Bool | T::Int2 | T::Int4 | T::Int8 | T::Text | T::Varchar(_) | T::Name | T::Char | T::Bytea | T::Date
+        | T::Time(_) | T::Timetz(_) | T::Timestamp(_) | T::Timestamptz(_) | T::Uuid | T::Oid => true,
+        t => t.elem().is_some_and(|e| !matches!(e, T::Unknown) && e != t && equal_is_identical(e)),
+    }
+}
+
 struct DistinctNode {
     input: BoxNode,
     on: Option<Vec<Expr>>,
@@ -1934,6 +1989,9 @@ struct DistinctNode {
     /// once the input is read, in the table's order.
     hashed: Option<Arc<Plan>>,
     out: Option<std::vec::IntoIter<Row>>,
+    /// Under a Sort EXPLAIN shows it as a Unique over (`distinct_presort`): all rows sorted
+    /// on these keys first, the first of each group kept in that order.
+    presort: Option<Vec<SortKey>>,
 }
 
 /// A plan's column types as far as its nodes say (`col_types`, through a UNION ALL's first
@@ -2011,21 +2069,19 @@ fn sort_rows_by(rows: &mut [Row], cols: &[usize], ctx: &ExecCtx) -> Result<()> {
         nulls_first: false,
         using: None,
     };
-    let mut err = None;
-    rows.sort_by(|a, b| {
+    // (Postgres's quicksort: rows with equal keys in the order its Sort leaves them.)
+    let mut f = |a: &Row, b: &Row| -> Result<Ordering> {
         for &c in cols {
-            match compare_values(&a[c], &b[c], &key, ctx) {
-                Ok(Ordering::Equal) => {}
-                Ok(o) => return o,
-                Err(e) => {
-                    err.get_or_insert(e);
-                    return Ordering::Equal;
-                }
+            match compare_values(&a[c], &b[c], &key, ctx)? {
+                Ordering::Equal => {}
+                o => return Ok(o),
             }
         }
-        Ordering::Equal
-    });
-    match err {
+        Ok(Ordering::Equal)
+    };
+    let mut cmp = super::pgsort::Cmp::new(&mut f);
+    super::pgsort::pg_qsort(rows, &mut cmp);
+    match cmp.err {
         Some(e) => Err(e),
         None => Ok(()),
     }
@@ -2068,7 +2124,16 @@ impl Node for DistinctNode {
                 .collect();
             let whole = |r: &Row| super::agg::group_key(r, &norms);
             // (Grouped on keys, the rest passed through: each group's first row whole.)
-            let out = if let Some(on) = &self.on {
+            let out = if let Some(keys) = self.presort.take() {
+                let mut seen: HashMap<Row, ()> = HashMap::default();
+                let mut out: Vec<Row> = Vec::new();
+                for r in sort_rows(rows, &keys, ctx)? {
+                    if seen.insert(whole(&r), ()).is_none() {
+                        out.push(r);
+                    }
+                }
+                out
+            } else if let Some(on) = &self.on {
                 let colls = super::agg::nondeterministic_keys(on, ctx);
                 let mut keyed = Vec::with_capacity(rows.len());
                 for r in rows {
@@ -2077,16 +2142,29 @@ impl Node for DistinctNode {
                 }
                 let types: Vec<crate::types::DataType> = on.iter().map(Expr::ty).collect();
                 hashed_distinct_keyed(keyed, types, &plan, ctx)?
-            // (Shown as a Unique over its input sorted: the rows in that order.)
+            // (Shown as a Unique over its input sorted: the rows in that order. With values
+            // that compare equal but differ (`'1 mon'` / `'30 days'`, `1.0` / `1.00`), the
+            // one kept is the first of its run in that order, so all rows are sorted first.)
             } else if let Some(cols) = crate::sql::explain::distinct_order(&plan, ctx) {
+                let ties = row_types(&input).iter().any(|t| !equal_is_identical(t));
                 let mut seen: HashMap<Row, ()> = HashMap::default();
                 let mut out: Vec<Row> = Vec::new();
-                for r in rows {
-                    if seen.insert(whole(&r), ()).is_none() {
-                        out.push(r);
+                if ties {
+                    let mut all = rows;
+                    sort_rows_by(&mut all, &cols, ctx)?;
+                    for r in all {
+                        if seen.insert(whole(&r), ()).is_none() {
+                            out.push(r);
+                        }
                     }
+                } else {
+                    for r in rows {
+                        if seen.insert(whole(&r), ()).is_none() {
+                            out.push(r);
+                        }
+                    }
+                    sort_rows_by(&mut out, &cols, ctx)?;
                 }
-                sort_rows_by(&mut out, &cols, ctx)?;
                 out
             } else {
                 let types = output_types(&input, rows.first());

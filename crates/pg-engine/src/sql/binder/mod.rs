@@ -335,6 +335,13 @@ pub(crate) struct SelectState {
     /// Deparse mode: each window function call as written (its name and OVER), by index.
     pub window_defs: Vec<(String, pb::WindowDef)>,
     pub in_agg: bool,
+    /// Grouping-set queries, while the select list and HAVING are bound: the text of each
+    /// GROUP BY item without columns (written as an expression). An occurrence of one inside
+    /// an item is bound kept apart from its surroundings (`bind_expr`), so folding doesn't
+    /// merge it away: it is a value of the group's rows there (`post_agg`'s pass-through),
+    /// NULL in the empty set's row over no input, as substitute_grouped_columns has it.
+    pub pass_marks: Vec<String>,
+    pub pass_depth: usize,
     /// What the sub-selects of the select list, HAVING and ORDER BY read of this level
     /// (their params), outside aggregate arguments: check_ungrouped_columns checks them as
     /// written, before folding may drop the sub-select (`NULL BETWEEN (SELECT t.x) AND 1`).
@@ -455,6 +462,8 @@ pub(crate) struct CteDef {
     pub no_returning: bool,
     /// inline_cte: its query, put in place of each reference as a subquery.
     pub inline: Option<std::sync::Arc<Plan>>,
+    /// A plan-time error of its query (`Binder::defer_plan`): raised where it is read.
+    pub deferred: Option<crate::error::Error>,
     /// The recursive term's CYCLE check over its work table's row (`NOT is_cycle`): a
     /// restriction of the work table's scan, as the rewritten WHERE clause is.
     pub work_filter: Option<Expr>,
@@ -508,6 +517,11 @@ pub struct Binder<'b, 'a> {
     /// Binding for display (`pg_get_expr` & co.): keep casts and calls as written instead of
     /// folding them, like the trees Postgres stores.
     pub deparse: bool,
+    /// While a WITH query that only reads is bound, the first error PostgreSQL raises only
+    /// when it plans the query (a FULL JOIN without mergeable / hashable clauses, a key
+    /// without a collation): kept with the CTE (`CteDef::deferred`), the statement's only
+    /// when something reads the CTE (an unreferenced one is never planned).
+    pub(crate) defer_plan: std::cell::RefCell<Vec<Option<crate::error::Error>>>,
     /// Privileges the statement needs.
     pub(crate) perms: perms::Perms,
     /// Role relation privileges are checked as (a view's owner inside its query).
@@ -684,6 +698,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             want_sys: false,
             rls_sys: None,
             deparse: false,
+            defer_plan: Default::default(),
             perms: perms::Perms::default(),
             check_as: None,
             definer: None,
@@ -885,7 +900,7 @@ impl<'b, 'a> Binder<'b, 'a> {
         let r = self.bind_statement_inner(n);
         let pending = std::mem::replace(&mut self.fold_err, prev).unwrap_or_default();
         match r {
-            Ok(q) if !pending.is_empty() => match fold::first_error(&q.plan, &pending, self.ctx) {
+            Ok(q) if !pending.is_empty() => match fold::first_error(&settled(&q.plan), &pending, self.ctx) {
                 Some(e) => Err(e),
                 None => Ok(q),
             },
@@ -896,6 +911,18 @@ impl<'b, 'a> Binder<'b, 'a> {
     /// A constant expression `e` failed to fold with `err`: it stays unfolded. Inside a
     /// statement the error waits for the plan (`fold_err`); binding a lone expression it is
     /// raised now, unless folding is deferred (a CASE arm, a default) or nothing is planned.
+    /// An error PostgreSQL raises when it plans a query: kept with the WITH query being bound
+    /// (`defer_plan`), else the statement's.
+    pub(crate) fn plan_error(&self, e: crate::error::Error) -> Result<()> {
+        match self.defer_plan.borrow_mut().last_mut() {
+            Some(slot) => {
+                slot.get_or_insert(e);
+                Ok(())
+            }
+            None => Err(e),
+        }
+    }
+
     pub(crate) fn fold_failed(&mut self, e: &Expr, err: crate::error::Error) -> Result<()> {
         if self.unplanned {
             return Ok(());
@@ -2312,4 +2339,22 @@ impl Coll {
             (a, _) => a,
         })
     }
+}
+
+/// A statement's plan with the constants its empty relations keep for their readers settled
+/// (`analyzejoins::settle_kept_cols`): every output of the statement is read.
+fn settled(plan: &Plan) -> std::borrow::Cow<'_, Plan> {
+    fn has(p: &Plan) -> bool {
+        match p {
+            Plan::Empty { info: Some(i), .. } => !i.kept_cols.is_empty(),
+            p => crate::sql::explain::plan_inputs(p).into_iter().any(|c| has(c)),
+        }
+    }
+    if !has(plan) {
+        return std::borrow::Cow::Borrowed(plan);
+    }
+    let mut p = plan.clone();
+    let all = vec![true; plan_width(plan)];
+    crate::sql::paths::analyzejoins::settle_kept_cols(&mut p, &all);
+    std::borrow::Cow::Owned(p)
 }

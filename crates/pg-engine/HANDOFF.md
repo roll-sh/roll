@@ -399,6 +399,13 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   the left side (its WHERE over a join) is the LATERAL join's own clause, as
   distribute_qual_to_rels postpones it, not a restriction of the left side that dropped the
   rows a LEFT JOIN LATERAL should null-extend (`outerjoins.rs` `postpone_lateral_clauses`).
+  Its batch 2: a grouping-set query's key without columns keeps its occurrences inside the
+  select list and HAVING apart from folding (pass-through values, `SelectState::pass_marks`);
+  a DISTINCT shown as a Unique over a Sort keeps each group's first row in Postgres's
+  quicksort order; strict calls evaluate every argument before returning NULL (a later
+  argument's error still happens); an empty relation keeps its outputs' failed constants per
+  column (`DummyInfo::kept_cols`) for the plan above; `IS DISTINCT FROM` over constants folds.
+  The smoke also runs the fixed wide-grammar seeds (`SMOKE_EXTRA`).
   Open: tests/difftest/STATUS.md.
 - **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
   PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified

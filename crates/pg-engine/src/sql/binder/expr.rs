@@ -70,6 +70,28 @@ pub(super) fn unsettled(out: &mut Vec<&'static str>) {
 
 impl Binder<'_, '_> {
     pub fn bind_expr(&mut self, n: &Node) -> Result<Expr> {
+        if self.levels.last().is_none_or(|l| l.st.pass_marks.is_empty()) {
+            return self.bind_expr_unmarked(n);
+        }
+        // (A grouping key's occurrence inside a select-list item or HAVING, not the whole
+        // item: `SelectState::pass_marks`. Marked as `SqlSyntax(SqlSyntax(_))`, which is
+        // never built otherwise and which nothing folds through. Not a bare literal, whose
+        // type comes from its context (`post_agg` matches the constant it becomes), nor
+        // inside aggregate arguments or a window's definition.)
+        let lv = self.level();
+        let mark = lv.st.pass_depth > 0
+            && !lv.st.in_agg
+            && !matches!(lv.clause, Clause::Window)
+            && !matches!(inner(n), Some(NodeEnum::AConst(_)))
+            && lv.st.pass_marks.contains(&super::select::strip_locations(&format!("{n:?}")));
+        self.level().st.pass_depth += 1;
+        let r = self.bind_expr_unmarked(n);
+        self.level().st.pass_depth -= 1;
+        let e = r?;
+        Ok(if mark { Expr::SqlSyntax(Box::new(Expr::SqlSyntax(Box::new(e)))) } else { e })
+    }
+
+    fn bind_expr_unmarked(&mut self, n: &Node) -> Result<Expr> {
         let e = self.bind_node(n)?;
         // Different explicit collations meeting is an error (assign_collations).
         let mut explicit = 0;
@@ -2573,7 +2595,20 @@ impl Binder<'_, '_> {
         let l = self.coerce_implicit(l, &types[0])?;
         let r = self.coerce_implicit(r, &types[1])?;
         let def = self.collated(def, &[&l, &r]);
-        Ok(Expr::IsDistinct(Box::new(l), Box::new(r), not, def))
+        let e = Expr::IsDistinct(Box::new(l), Box::new(r), not, def);
+        // eval_const_expressions: a DistinctExpr over constants is evaluated (so `FULL JOIN
+        // ... ON 1 IS DISTINCT FROM 1` is a constant-false clause).
+        if let Expr::IsDistinct(l, r, _, def) = &e
+            && !self.deparse
+            && !self.unplanned
+            && def.volatility == 'i'
+            && matches!(**l, Expr::Const(..))
+            && matches!(**r, Expr::Const(..))
+            && let Ok(v) = eval(&e, &[], self.ctx)
+        {
+            return Ok(Expr::Const(v, DataType::Bool));
+        }
+        Ok(e)
     }
 
     /// The `=` IS DISTINCT FROM and NULLIF compare with (make_distinct_op's
@@ -4089,7 +4124,9 @@ impl Binder<'_, '_> {
             self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut p, None);
             drop(_own);
             drop(_pushed);
-            super::check_merge_keys(self.ctx, &mut p)?;
+            if let Err(e) = super::check_merge_keys(self.ctx, &mut p) {
+                self.plan_error(e)?;
+            }
             (Arc::new(p), Some(unplanned))
         } else {
             (plan, None)

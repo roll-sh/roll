@@ -19071,6 +19071,11 @@ pub fn distinct_order(plan: &Arc<Plan>, ctx: &ExecCtx) -> Option<Vec<usize>> {
     level_node(plan, ctx).unique_keys
 }
 
+/// A Sort over a DISTINCT (`plan`) that EXPLAIN shows as a Unique over the input sorted.
+pub fn sort_is_unique(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
+    level_node(plan, ctx).node_type == "Unique"
+}
+
 /// An aggregation (`plan`) EXPLAIN shows split in two, a Partial Aggregate in the workers
 /// under a Finalize Aggregate (create_partial_grouping_paths): its aggregates' states are
 /// combined (the combine function runs) before their results are made.

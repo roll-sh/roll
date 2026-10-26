@@ -917,12 +917,15 @@ fn eval_spread(
 ) -> Result<Value> {
     let fixed = args.len() - 1;
     let mut vals = Vec::with_capacity(args.len());
+    let mut null_arg = false;
     for a in &args[..fixed] {
         let v = eval(a, row, ctx)?;
-        if def.strict && v.is_null() {
-            return Ok(Value::Null);
-        }
+        null_arg |= def.strict && v.is_null();
         vals.push(v);
+    }
+    if null_arg {
+        let _ = eval(&args[fixed], row, ctx)?;
+        return Ok(Value::Null);
     }
     let elem = args[fixed].ty().elem().cloned().unwrap_or(DataType::Text);
     if def.name == "satisfies_hash_partition" {
@@ -1006,10 +1009,15 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
             if n > buf.len() {
                 heap.reserve(n);
             }
+            // (A strict function's arguments are all evaluated before a NULL one makes the
+            // call NULL, as ExecInterpExpr's EEOP_FUNCEXPR_STRICT: a later one's error still
+            // happens.)
+            let mut null_arg = false;
             for (i, a) in args.iter().enumerate() {
                 let mut v = eval(a, row, ctx)?;
                 if def.strict && v.is_null() {
-                    return Ok(Value::Null);
+                    null_arg = true;
+                    continue;
                 }
                 // An extension type's value passed to a built-in function over its
                 // representation (citext's `AS 'texticlike'`): the built-in's value.
@@ -1021,6 +1029,9 @@ pub fn eval(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
                 } else {
                     buf[i] = v;
                 }
+            }
+            if null_arg {
+                return Ok(Value::Null);
             }
             let vals: &[Value] = if n > buf.len() { &heap } else { &buf[..n] };
             // Range bounds compare under the collation the call carries.

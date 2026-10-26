@@ -1301,6 +1301,7 @@ impl Tree<'_, '_, '_> {
                     used: std::cell::Cell::new(false),
                     no_returning: false,
                     work_filter: None,
+                    deferred: None,
                     inline: None,
                 });
                 self.q().ctes.push(Cte {
@@ -1342,6 +1343,7 @@ impl Tree<'_, '_, '_> {
                 used: std::cell::Cell::new(false),
                 no_returning: false,
                 work_filter: None,
+                deferred: None,
                 inline: None,
             });
             self.q().ctes.push(Cte {

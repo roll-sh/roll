@@ -772,6 +772,10 @@ fn run() {
     });
 }
 
+/// Wider-grammar seeds whose mismatches were fixed, each run up to the statement that showed
+/// one (the smoke run checks them too; their other mismatches are in smoke_known.txt).
+const SMOKE_EXTRA: &[(u64, usize)] = &[(1604, 74), (1777, 35), (1827, 40), (1829, 98), (1830, 10), (1832, 5)];
+
 /// The regression check other agents run: fixed seeds, a few minutes. It fails on a
 /// mismatch (of a class above `error_message`) that `difftest/smoke_known.txt` doesn't list:
 /// the open ones STATUS.md describes. `DIFFTEST_SMOKE_RECORD=1` rewrites the list (after a
@@ -781,7 +785,11 @@ fn run() {
 fn smoke() {
     let score = on_big_stack(|| {
         let seeds: Vec<u64> = (1..=env("DIFFTEST_SMOKE_SEEDS", "25").parse().unwrap()).collect();
-        run_seeds(&seeds, 80)
+        let mut score = run_seeds(&seeds, 80);
+        for &(seed, n) in SMOKE_EXTRA {
+            score.found.extend(run_seeds(&[seed], n).found);
+        }
+        score
     });
     let serious = |f: &&String| {
         let c = f.split(' ').next().and_then(Class::from_name).unwrap_or(Class::Crash);

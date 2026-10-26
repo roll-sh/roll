@@ -236,40 +236,69 @@ pub(crate) fn exists_simplified(p: &Plan) -> bool {
 /// relation, degenerate grouping): those that failed to fold, with what dropped plans
 /// already kept.
 pub(crate) fn candidates(p: &Plan) -> Vec<Expr> {
-    // (Only what Postgres would have simplified: quals, and the outputs something in the
-    // dropped plan reads; an output nothing reads was a subquery's unused one.)
-    fn go(p: &Plan, needed: &[bool], out: &mut Vec<Expr>) {
-        let push = |e: &Expr, out: &mut Vec<Expr>| {
-            e.walk(&mut |x| {
-                if foldable(x) && !out.iter().any(|o| o.same_as(x)) {
-                    out.push(x.clone());
-                }
-            });
-        };
-        match p {
-            Plan::Empty { info: Some(i), .. } => out.extend(i.kept.iter().cloned()),
-            Plan::Project { exprs, .. } => {
-                for (k, e) in exprs.iter().enumerate() {
-                    if needed.get(k).copied().unwrap_or(false) {
-                        push(e, out);
-                    }
+    let mut out = Vec::new();
+    candidates_go(p, &[], &mut out);
+    out
+}
+
+/// Per output column of a plan about to be dropped, the `candidates` that only a reader of
+/// that column adds to `base` (`DummyInfo::kept_cols`).
+pub(crate) fn output_candidates(p: &Plan, base: &[Expr]) -> Vec<(usize, Expr)> {
+    let w = crate::sql::binder::plan_width(p);
+    let new = |c: Vec<Expr>| -> Vec<Expr> { c.into_iter().filter(|e| !base.iter().any(|b| b.same_as(e))).collect() };
+    let mut all = Vec::new();
+    candidates_go(p, &vec![true; w], &mut all);
+    if new(all).is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for k in 0..w {
+        let mut need = vec![false; w];
+        need[k] = true;
+        let mut c = Vec::new();
+        candidates_go(p, &need, &mut c);
+        out.extend(new(c).into_iter().map(|e| (k, e)));
+    }
+    out
+}
+
+// (Only what Postgres would have simplified: quals, and the outputs something in the
+// dropped plan reads; an output nothing reads was a subquery's unused one.)
+fn candidates_go(p: &Plan, needed: &[bool], out: &mut Vec<Expr>) {
+    let push = |e: &Expr, out: &mut Vec<Expr>| {
+        e.walk(&mut |x| {
+            if foldable(x) && !out.iter().any(|o| o.same_as(x)) {
+                out.push(x.clone());
+            }
+        });
+    };
+    match p {
+        Plan::Empty { info: Some(i), .. } => {
+            out.extend(i.kept.iter().cloned());
+            for (k, e) in &i.kept_cols {
+                if needed.get(*k).copied().unwrap_or(false) && !out.iter().any(|o| o.same_as(e)) {
+                    out.push(e.clone());
                 }
             }
-            _ => {
-                for e in exprs(p) {
+        }
+        Plan::Project { exprs, .. } => {
+            for (k, e) in exprs.iter().enumerate() {
+                if needed.get(k).copied().unwrap_or(false) {
                     push(e, out);
                 }
             }
         }
-        let needs = crate::sql::paths::child_needs(p, needed);
-        for (k, c) in crate::sql::explain::plan_inputs(p).into_iter().enumerate() {
-            let n = needs.get(k).cloned().unwrap_or_else(|| vec![true; crate::sql::binder::plan_width(c)]);
-            go(c, &n, out);
+        _ => {
+            for e in exprs(p) {
+                push(e, out);
+            }
         }
     }
-    let mut out = Vec::new();
-    go(p, &[], &mut out);
-    out
+    let needs = crate::sql::paths::child_needs(p, needed);
+    for (k, c) in crate::sql::explain::plan_inputs(p).into_iter().enumerate() {
+        let n = needs.get(k).cloned().unwrap_or_else(|| vec![true; crate::sql::binder::plan_width(c)]);
+        candidates_go(c, &n, out);
+    }
 }
 
 /// `candidates` of some expressions.
