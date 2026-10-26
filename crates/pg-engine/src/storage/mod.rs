@@ -26,6 +26,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use tracing::{debug, info, warn};
 use wal::WalWriter;
 
+/// The store directory's subdirectory for transactions' spilled writes.
+const SPILL_DIR: &str = "spill";
+
 pub fn mvcc_key(user: &[u8], ts: u64) -> Vec<u8> {
     let mut k = Vec::with_capacity(user.len() + 8);
     k.extend_from_slice(user);
@@ -45,6 +48,29 @@ pub struct StoreOptions {
     /// Flush and compact in a background thread (off: only when asked, for tests that
     /// need the store left as a crash would leave it).
     pub background: bool,
+    /// A transaction's buffered writes past about this many bytes go to disk
+    /// (`txn::spill`), so a transaction of any size runs in bounded memory. The default
+    /// is 64 MB, or `ROLL_TXN_SPILL_BYTES` (tests set it tiny to spill all the time).
+    pub txn_spill_bytes: usize,
+}
+
+/// `set_default_txn_spill_bytes`'s value (0: none set).
+static DEFAULT_SPILL_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+/// The default `txn_spill_bytes` of stores opened from now on (tests; 0: the usual one).
+pub fn set_default_txn_spill_bytes(n: usize) {
+    DEFAULT_SPILL_BYTES.store(n, Ordering::Relaxed);
+}
+
+/// The default `StoreOptions::txn_spill_bytes`.
+fn default_spill_bytes() -> usize {
+    match DEFAULT_SPILL_BYTES.load(Ordering::Relaxed) {
+        0 => std::env::var("ROLL_TXN_SPILL_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(64 << 20),
+        n => n,
+    }
 }
 
 impl Default for StoreOptions {
@@ -57,6 +83,7 @@ impl Default for StoreOptions {
             target_file_bytes: 64 << 20,
             cache: BlockCache::new(256 << 20),
             background: true,
+            txn_spill_bytes: default_spill_bytes(),
         }
     }
 }
@@ -106,6 +133,22 @@ struct Manifest {
     l0: Vec<SstMeta>,
     /// Sorted by key, non-overlapping.
     l1: Vec<SstMeta>,
+}
+
+/// Sort writes by key, the last write of a key winning (a transaction's come sorted).
+fn sort_writes(writes: &mut Vec<(Vec<u8>, Option<Bytes>)>) {
+    if !writes.windows(2).all(|w| w[0].0 < w[1].0) {
+        writes.sort_by(|a, b| a.0.cmp(&b.0));
+        writes.dedup_by(|b, a| {
+            // (The last write of a key wins.)
+            if a.0 == b.0 {
+                std::mem::swap(a, b);
+                true
+            } else {
+                false
+            }
+        });
+    }
 }
 
 /// Where an L0 file goes in a list kept newest first.
@@ -212,7 +255,9 @@ impl Store {
             },
             Err(e) => return Err(e.into()),
         };
-        // Leftovers from an interrupted flush or compaction.
+        // Leftovers from an interrupted flush or compaction, and spilled writes of
+        // transactions a crash ended.
+        let _ = std::fs::remove_dir_all(dir.join(SPILL_DIR));
         for e in std::fs::read_dir(dir)? {
             let p = e?.path();
             if p.extension().is_some_and(|x| x == "tmp") {
@@ -330,9 +375,26 @@ impl Store {
         &self.dir
     }
 
+    /// Where transactions spill their writes (`txn::spill`). Emptied when the store opens:
+    /// what a crash left there belongs to transactions that are gone.
+    pub fn spill_dir(&self) -> PathBuf {
+        self.dir.join(SPILL_DIR)
+    }
+
+    /// `StoreOptions::txn_spill_bytes`.
+    pub fn txn_spill_bytes(&self) -> usize {
+        self.opts.txn_spill_bytes
+    }
+
     /// The newest commit timestamp; a snapshot at this ts sees every committed write.
     pub fn visible_ts(&self) -> u64 {
         self.visible.load(Ordering::Acquire)
+    }
+
+    /// The last commit timestamp handed out: no version newer than it can be read
+    /// (commits waiting for their WAL fsync included).
+    pub fn last_assigned_ts(&self) -> u64 {
+        self.assigned.load(Ordering::Acquire)
     }
 
     pub fn pin(self: &Arc<Self>, ts: u64) -> SnapshotPin {
@@ -376,7 +438,40 @@ impl Store {
 
     /// (commit ts, value) of the newest version visible at `ts`; a tombstone has value None.
     pub fn get_version(&self, key: &[u8], ts: u64) -> Result<Option<(u64, Option<Bytes>)>> {
-        let view = self.view();
+        self.view().get_version(key, ts)
+    }
+
+    /// Commit ts of the newest version of `key`, committed or deleted (for conflict checks).
+    pub fn latest_version_ts(&self, key: &[u8]) -> Result<Option<u64>> {
+        Ok(self.get_version(key, u64::MAX >> 1)?.map(|(ts, _)| ts))
+    }
+}
+
+impl View {
+    /// A view of `files` alone, newest first: a transaction's spilled writes
+    /// (`txn::spill`), read with the store's own merging and version rules.
+    pub fn of_files(files: Vec<Arc<SstReader>>) -> Arc<View> {
+        Arc::new(View {
+            mem: Arc::new(Memtable::new(0)),
+            imm: Vec::new(),
+            l0: files,
+            l1: Vec::new(),
+        })
+    }
+
+    /// Ascending scan of user keys in [start, end) at `ts`, nothing pruned.
+    pub fn scan(self: &Arc<Self>, start: &[u8], end: &[u8], ts: u64) -> Scan {
+        Scan::new(self.clone(), start.to_vec(), end.to_vec(), ts, 0)
+    }
+
+    /// Descending scan of user keys in [start, end) at `ts`.
+    pub fn scan_rev(self: &Arc<Self>, start: &[u8], end: &[u8], ts: u64) -> RevScan {
+        RevScan::new(self.clone(), start.to_vec(), end.to_vec(), ts)
+    }
+
+    /// (ts, value) of the newest version of `key` at or before `ts`; a tombstone has value None.
+    pub fn get_version(&self, key: &[u8], ts: u64) -> Result<Option<(u64, Option<Bytes>)>> {
+        let view = self;
         let seek = mvcc_key(key, ts);
         let mem_get = |m: &Memtable| {
             m.map
@@ -412,12 +507,9 @@ impl Store {
         }
         Ok(None)
     }
+}
 
-    /// Commit ts of the newest version of `key`, committed or deleted (for conflict checks).
-    pub fn latest_version_ts(&self, key: &[u8]) -> Result<Option<u64>> {
-        Ok(self.get_version(key, u64::MAX >> 1)?.map(|(ts, _)| ts))
-    }
-
+impl Store {
     /// `get_version` of each of `keys` (ascending, no duplicates), read together: one view
     /// of the sources, each file's blocks read once for the keys falling in them (an index
     /// scan's heap fetches, a run at a time).
@@ -627,6 +719,36 @@ impl Store {
         Ok(ts)
     }
 
+    /// Commit writes too many to hold in memory (a transaction's spilled ones, `txn::spill`):
+    /// `writes` come in key order (strictly ascending: each key's last write) and go in as
+    /// an SST of their own (`ingest_locked`), merged with the writes `check` gives under the
+    /// commit lock (the catalog's records: sorted here, winning over `writes`); `each` checks
+    /// every key of `writes` under the lock as it is written. `keys`: about how many.
+    pub fn commit_sorted(
+        self: &Arc<Self>,
+        keys: usize,
+        writes: &mut dyn Iterator<Item = Result<(Vec<u8>, Option<Bytes>)>>,
+        check: impl FnOnce(&Store, &mut Vec<(Vec<u8>, Option<Bytes>)>) -> Result<()>,
+        each: &dyn Fn(&Store, &[u8]) -> Result<()>,
+        after: impl FnOnce(u64),
+    ) -> Result<u64> {
+        let ts;
+        {
+            let mut c = self.commit.lock();
+            if self.closed.load(Ordering::Acquire) {
+                return Err(internal("database is closed"));
+            }
+            let mut extra = Vec::new();
+            check(self, &mut extra)?;
+            sort_writes(&mut extra);
+            ts = self.assigned.load(Ordering::Acquire) + 1;
+            self.ingest_stream_locked(&mut c, ts, keys, writes, extra, each)?;
+            after(ts);
+        }
+        self.schedule_background();
+        Ok(ts)
+    }
+
     /// Commit `writes` at `ts` as an SST of their own instead of WAL records and memtable
     /// entries (a bulk load's, an index build's): written once, with no copy in memory. The
     /// memtable is frozen first, so every earlier commit is in an older source; the file is
@@ -641,29 +763,70 @@ impl Store {
         mut writes: Vec<(Vec<u8>, Option<Bytes>)>,
     ) -> Result<()> {
         // (A transaction's writes come sorted; others are sorted here.)
-        if !writes.windows(2).all(|w| w[0].0 < w[1].0) {
-            writes.sort_by(|a, b| a.0.cmp(&b.0));
-            writes.dedup_by(|b, a| {
-                // (The last write of a key wins.)
-                if a.0 == b.0 {
-                    std::mem::swap(a, b);
-                    true
-                } else {
-                    false
-                }
-            });
-        }
+        sort_writes(&mut writes);
+        let n = writes.len();
+        self.ingest_stream_locked(c, ts, n, &mut writes.into_iter().map(Ok), Vec::new(), &|_, _| Ok(()))
+    }
+
+    /// `ingest_locked` of `writes` coming in key order (strictly ascending), merged with
+    /// `extra` (sorted, winning over `writes` on a key); `each` checks each key of `writes`
+    /// first and fails the commit (a serializable commit's conflict check). `keys` is about
+    /// how many keys there are (the bloom filter's size).
+    fn ingest_stream_locked(
+        &self,
+        c: &mut CommitState,
+        ts: u64,
+        keys: usize,
+        writes: &mut dyn Iterator<Item = Result<(Vec<u8>, Option<Bytes>)>>,
+        extra: Vec<(Vec<u8>, Option<Bytes>)>,
+        each: &dyn Fn(&Store, &[u8]) -> Result<()>,
+    ) -> Result<()> {
         self.rotate_locked(c)?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut w = SstWriter::create(&self.dir, id, self.opts.compress)?;
+        // (Uncompressed: the commit waits for this file, and compaction, in the background,
+        // compresses it when it moves to L1.)
+        let mut w = SstWriter::create(&self.dir, id, false)?;
+        w.expect_keys(keys + extra.len());
         let mut key = Vec::new();
-        for (k, v) in &writes {
+        let mut add = |w: &mut SstWriter, k: &[u8], v: Option<&[u8]>| {
             key.clear();
             key.extend_from_slice(k);
             key.extend_from_slice(&(!ts).to_be_bytes());
-            w.add(&key, v.as_deref())?;
+            w.add(&key, v)
+        };
+        let mut extra = extra.into_iter().peekable();
+        let mut fill = || -> Result<()> {
+            for item in &mut *writes {
+                let (k, v) = item?;
+                each(self, &k)?;
+                let mut shadowed = false;
+                while let Some((ek, _)) = extra.peek()
+                    && *ek <= k
+                {
+                    let (ek, ev) = extra.next().unwrap();
+                    shadowed |= ek == k;
+                    add(&mut w, &ek, ev.as_deref())?;
+                }
+                if !shadowed {
+                    add(&mut w, &k, v.as_deref())?;
+                }
+            }
+            for (ek, ev) in extra.by_ref() {
+                add(&mut w, &ek, ev.as_deref())?;
+            }
+            Ok(())
+        };
+        if let Err(e) = fill() {
+            w.abandon();
+            return Err(e);
         }
-        drop(writes);
+        if w.entries() == 0 {
+            // (Nothing to write after all: the commit takes its timestamp alone.)
+            w.abandon();
+            self.assigned.store(ts, Ordering::Release);
+            self.made_durable(ts);
+            return Ok(());
+        }
         let meta = w.finish()?;
         let reader = match SstReader::open(&self.dir, meta.clone(), self.opts.cache.clone()) {
             Ok(r) => Arc::new(r),
@@ -683,6 +846,8 @@ impl Store {
                 return Err(e);
             }
             *m = next;
+            // (Handed out before its versions can be read: `last_assigned_ts`.)
+            self.assigned.store(ts, Ordering::Release);
             let mut v = self.view.write();
             let mut imm = vec![Frozen::Sst(reader)];
             imm.extend(v.imm.iter().cloned());
@@ -693,7 +858,6 @@ impl Store {
                 l1: v.l1.clone(),
             });
         }
-        self.assigned.store(ts, Ordering::Release);
         self.made_durable(ts);
         Ok(())
     }

@@ -963,6 +963,22 @@ fn committed_conflict(
 /// An ON CONFLICT DO UPDATE starting its row over (never reaches a client).
 const RETRY_INSERT: &str = "XXRTY";
 
+/// The error COPY FROM's insert stops with when it has inserted every row read so far: the
+/// caller reads the next batch into the feed and asks for the next row again
+/// (`session::copy`; nothing of the insert's state changes on it).
+pub const NEED_COPY_ROWS: &str = "XXCPY";
+
+/// COPY FROM's next row (its values, line number and text); None: the data has all been
+/// read and inserted.
+fn next_copied(c: &CopyLines, ctx: &ExecCtx) -> Result<Option<(Row, (usize, String))>> {
+    let next = c.feed.lock().unwrap().rows.pop_front();
+    match next {
+        Some((exprs, line, raw)) => Ok(Some((eval_all(&exprs, &[], ctx)?, (line, raw)))),
+        None if c.feed.lock().unwrap().done => Ok(None),
+        None => Err(Error::new(NEED_COPY_ROWS, "COPY FROM needs its next rows")),
+    }
+}
+
 /// pg_opclass oid of record_image_ops.
 const RECORD_IMAGE_OPS: u32 = 10036;
 
@@ -3101,8 +3117,8 @@ pub struct InsertNode {
     routed_after: Vec<(usize, AfterRow)>,
     /// The table each RETURNING row went to (tableoid).
     last_table: u32,
-    /// Source rows read (COPY: the next input line).
-    read: usize,
+    /// COPY: the line number and text of the row being inserted.
+    copy_line: (usize, String),
     /// COPY FROM's bulk insert into the table's modelled heap.
     copy_load: Option<super::sizing::CopyLoad>,
     /// The last row went to a partition laid out as the root: RETURNING reads it from the
@@ -3156,7 +3172,7 @@ impl InsertNode {
             after: Vec::new(),
             routed_after: Vec::new(),
             last_table,
-            read: 0,
+            copy_line: (0, String::new()),
             copy_load,
             virtual_slot: false,
             queue_mark: None,
@@ -3287,15 +3303,16 @@ impl InsertNode {
         src: Row,
         ctx: &ExecCtx,
     ) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
-        let (line, raw) = &c.lines[self.read];
-        self.read += 1;
+        let (line, raw) = std::mem::take(&mut self.copy_line);
+        let raw_len = raw.len();
         let frames = &ctx.sess.frames;
         let n = {
             let mut f = frames.borrow_mut();
-            f.push(Frame::Text(format!(
-                "COPY {}, line {line}: \"{raw}\"",
-                c.table
-            )));
+            f.push(Frame::Copy {
+                table: c.table.clone(),
+                line,
+                raw: Some(raw),
+            });
             f.len() - 1
         };
         let r = self.insert(src, ctx).map_err(|e| {
@@ -3303,13 +3320,17 @@ impl InsertNode {
                 && !e.stacked
                 && (e.code == code::UNIQUE_VIOLATION || e.code == code::EXCLUSION_VIOLATION)
             {
-                frames.borrow_mut()[n] = Frame::Text(format!("COPY {}, line {line}", c.table));
+                frames.borrow_mut()[n] = Frame::Copy {
+                    table: c.table.clone(),
+                    line,
+                    raw: None,
+                };
             }
             e.in_frames(&frames.borrow())
         });
         frames.borrow_mut().truncate(n);
         if let Some(l) = &self.copy_load {
-            l.row_done(raw.len(), ctx);
+            l.row_done(raw_len, ctx);
         }
         r
     }
@@ -3548,7 +3569,17 @@ impl Node for InsertNode {
         }
         loop {
             ctx.check()?;
-            let Some(src) = self.source.next(ctx)? else {
+            let next = match &self.plan.copy {
+                Some(c) => match next_copied(c, ctx)? {
+                    Some((row, line)) => {
+                        self.copy_line = line;
+                        Some(row)
+                    }
+                    None => None,
+                },
+                None => self.source.next(ctx)?,
+            };
+            let Some(src) = next else {
                 self.done = true;
                 if let Some(l) = self.copy_load.take() {
                     l.finish(ctx);
@@ -3562,8 +3593,9 @@ impl Node for InsertNode {
                     if let Some(p) = ctx.sess.copy_progress.borrow_mut().as_mut() {
                         p.tuples_processed = ctx.processed.get() as i64;
                     }
-                    if let Some(msg) = &c.skipped_notice {
-                        ctx.notice(crate::session::notice(msg.clone()));
+                    let notice = c.feed.lock().unwrap().skipped_notice.clone();
+                    if let Some(msg) = notice {
+                        ctx.notice(crate::session::notice(msg));
                     }
                 }
                 let mark = self.queue_mark.unwrap_or(0);

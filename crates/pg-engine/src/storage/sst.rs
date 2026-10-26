@@ -105,6 +105,46 @@ mod hex_bytes {
     }
 }
 
+/// `x % d` for a fixed `d`, by multiplication (Lemire, Kaser and Kurz, "Faster remainder by
+/// direct computation"): exactly `%`'s result, without a 64-bit division (tens of cycles,
+/// seven per bloom probe).
+#[derive(Clone, Copy)]
+pub(crate) struct FastMod {
+    m: u128,
+    d: u64,
+}
+
+impl FastMod {
+    pub(crate) fn new(d: u64) -> FastMod {
+        FastMod {
+            m: (u128::MAX / d.max(1) as u128).wrapping_add(1),
+            d,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn rem(self, a: u64) -> u64 {
+        let low = self.m.wrapping_mul(a as u128);
+        let d = self.d as u128;
+        let bottom = ((low as u64 as u128) * d) >> 64;
+        let top = (low >> 64) * d;
+        ((top + bottom) >> 64) as u64
+    }
+}
+
+/// The bloom filter bits of a key's hash `h` (`nbits` = the filter's bits).
+#[inline]
+fn bloom_bits(h: u64, nbits: FastMod) -> impl Iterator<Item = usize> {
+    let (h1, h2) = (h, (h >> 32) | 1);
+    (0..BLOOM_K as u64).map(move |i| nbits.rem(h1.wrapping_add(i.wrapping_mul(h2))) as usize)
+}
+
+fn bloom_set(bloom: &mut [u8], nbits: FastMod, h: u64) {
+    for bit in bloom_bits(h, nbits) {
+        bloom[bit / 8] |= 1 << (bit % 8);
+    }
+}
+
 pub fn sst_path(dir: &Path, id: u64) -> PathBuf {
     dir.join(format!("{id:016x}.sst"))
 }
@@ -125,9 +165,32 @@ pub struct SstWriter {
     min_ts: u64,
     max_ts: u64,
     compress: bool,
+    /// fsync the file when it is finished (not for a transaction's spilled writes, which
+    /// a crash discards).
+    sync: bool,
+    /// The bloom filter, when sized up front (`expect_keys`): its bits are set as keys come
+    /// instead of keeping every key's hash until `finish`.
+    bloom: Option<(Vec<u8>, FastMod)>,
 }
 
 impl SstWriter {
+    /// A file of a transaction's spilled writes (`txn::spill`): uncompressed, not fsynced.
+    pub fn create_temp(dir: &Path, id: u64) -> Result<Self> {
+        let mut w = Self::create(dir, id, false)?;
+        w.sync = false;
+        Ok(w)
+    }
+
+    /// Size the bloom filter for about `n` user keys now (a big ingested commit's: 8 bytes
+    /// a key less to hold until the end).
+    pub fn expect_keys(&mut self, n: usize) {
+        if self.entries == 0 {
+            let b = vec![0u8; (n * BLOOM_BITS_PER_KEY).max(64).div_ceil(8)];
+            let m = FastMod::new(b.len() as u64 * 8);
+            self.bloom = Some((b, m));
+        }
+    }
+
     pub fn create(dir: &Path, id: u64, compress: bool) -> Result<Self> {
         let path = sst_path(dir, id);
         let tmp = path.with_extension("tmp");
@@ -148,6 +211,8 @@ impl SstWriter {
             min_ts: u64::MAX,
             max_ts: 0,
             compress,
+            sync: true,
+            bloom: None,
         })
     }
 
@@ -192,7 +257,10 @@ impl SstWriter {
         self.max_ts = self.max_ts.max(ts);
         let h = hash64(user_key(key));
         if self.last_user_hash != Some(h) {
-            self.hashes.push(h);
+            match &mut self.bloom {
+                Some((b, m)) => bloom_set(b, *m, h),
+                None => self.hashes.push(h),
+            }
             self.last_user_hash = Some(h);
         }
         if self.block.len() >= BLOCK_TARGET {
@@ -247,16 +315,18 @@ impl SstWriter {
         self.out.write_all(&index)?;
         self.offset += index.len() as u64;
 
-        let nbits = (self.hashes.len() * BLOOM_BITS_PER_KEY).max(64);
-        let mut bloom = vec![0u8; nbits.div_ceil(8)];
-        let nbits = bloom.len() * 8;
-        for h in &self.hashes {
-            let (h1, h2) = (*h, (h >> 32) | 1);
-            for i in 0..BLOOM_K as u64 {
-                let bit = (h1.wrapping_add(i.wrapping_mul(h2)) % nbits as u64) as usize;
-                bloom[bit / 8] |= 1 << (bit % 8);
+        let bloom = match self.bloom.take() {
+            Some((b, _)) => b,
+            None => {
+                let nbits = (self.hashes.len() * BLOOM_BITS_PER_KEY).max(64);
+                let mut bloom = vec![0u8; nbits.div_ceil(8)];
+                let m = FastMod::new(bloom.len() as u64 * 8);
+                for h in &self.hashes {
+                    bloom_set(&mut bloom, m, *h);
+                }
+                bloom
             }
-        }
+        };
         let bloom_off = self.offset;
         self.out.write_all(&bloom)?;
         self.offset += bloom.len() as u64;
@@ -278,7 +348,9 @@ impl SstWriter {
             .out
             .into_inner()
             .map_err(|e| internal(format!("flush sst: {e}")))?;
-        file.sync_all()?;
+        if self.sync {
+            file.sync_all()?;
+        }
         std::fs::rename(self.path.with_extension("tmp"), &self.path)?;
         Ok(SstMeta {
             id: self.id,
@@ -307,6 +379,8 @@ pub struct SstReader {
     /// (last key, offset, len)
     index: Vec<(Vec<u8>, u64, u32)>,
     bloom: Vec<u8>,
+    /// Remainders by the bloom filter's bit count.
+    bloom_mod: FastMod,
     cache: Arc<BlockCache>,
     cache_id: u64,
     obsolete: AtomicBool,
@@ -466,6 +540,7 @@ impl SstReader {
             file,
             path,
             index,
+            bloom_mod: FastMod::new(bloom.len() as u64 * 8),
             bloom,
             cache,
             cache_id,
@@ -479,16 +554,11 @@ impl SstReader {
     }
 
     pub fn may_contain(&self, user_key: &[u8]) -> bool {
-        let nbits = self.bloom.len() * 8;
-        if nbits == 0 {
+        if self.bloom.is_empty() {
             return true;
         }
         let h = hash64(user_key);
-        let (h1, h2) = (h, (h >> 32) | 1);
-        (0..BLOOM_K as u64).all(|i| {
-            let bit = (h1.wrapping_add(i.wrapping_mul(h2)) % nbits as u64) as usize;
-            self.bloom[bit / 8] & (1 << (bit % 8)) != 0
-        })
+        bloom_bits(h, self.bloom_mod).all(|bit| self.bloom[bit / 8] & (1 << (bit % 8)) != 0)
     }
 
     pub fn block_count(&self) -> usize {
@@ -551,6 +621,39 @@ impl Drop for SstReader {
         self.cache.forget_file(self.cache_id);
         if self.obsolete.load(Ordering::Acquire) {
             let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bloom filter's bits must not change with how they are computed: files written
+    /// before are read with the same bits.
+    #[test]
+    fn fast_mod_is_rem() {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut ds: Vec<u64> = vec![1, 2, 3, 7, 64, 72, 1000, 8 * 1250, u32::MAX as u64, u64::MAX];
+        for _ in 0..200 {
+            let (a, b) = (next(), next());
+            ds.push(a >> (b % 60));
+        }
+        for d in ds.into_iter().filter(|&d| d > 0) {
+            let m = FastMod::new(d);
+            for a in [0, 1, d - 1, d, d.wrapping_add(1), u64::MAX, u64::MAX - 1] {
+                assert_eq!(m.rem(a), a % d, "{a} % {d}");
+            }
+            for _ in 0..2000 {
+                let a = next();
+                assert_eq!(m.rem(a), a % d, "{a} % {d}");
+            }
         }
     }
 }

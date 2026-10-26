@@ -921,17 +921,28 @@ pub struct InsertPlan {
     pub alias: Option<String>,
 }
 
-/// COPY FROM's input: the table and each row's line number and text
-/// (`CopyFromErrorCallback`).
+/// COPY FROM's input: the table, and its rows as they are read (`CopyFromErrorCallback`).
 #[derive(Debug)]
 pub struct CopyLines {
-    pub table: String,
-    pub lines: Vec<(usize, String)>,
+    pub table: std::sync::Arc<str>,
     /// Rows are buffered (no BEFORE ROW triggers, no volatile defaults): index
     /// insertion happens later, when the line's text is gone.
     pub multi: bool,
+    /// The rows read and not inserted yet: COPY FROM reads its data a batch at a time as
+    /// the insert takes it (`session::copy`), as CopyFrom does.
+    pub feed: std::sync::Mutex<CopyFeed>,
+}
+
+#[derive(Debug, Default)]
+pub struct CopyFeed {
+    /// Each row with its line number and text.
+    pub rows: std::collections::VecDeque<(Vec<Expr>, usize, String)>,
+    /// The data has all been read.
+    pub done: bool,
+    /// Rows read so far.
+    pub fed: usize,
     /// ON_ERROR IGNORE's notice of the rows skipped, raised after the rows are in and
-    /// before the AFTER STATEMENT triggers fire.
+    /// before the AFTER STATEMENT triggers fire (set once the data is all read).
     pub skipped_notice: Option<String>,
 }
 

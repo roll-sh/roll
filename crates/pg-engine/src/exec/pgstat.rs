@@ -431,11 +431,7 @@ fn consistency(ctx: &ExecCtx) -> Consistency {
 
 /// Whether track_counts is on.
 fn counting(ctx: &ExecCtx) -> bool {
-    ctx.sess
-        .settings
-        .borrow()
-        .get_raw("track_counts")
-        .is_none_or(|v| v != "off")
+    ctx.sess.settings.borrow().track_counts()
 }
 
 /// Run `f` on the shared entries as a reader sees them under stats_fetch_consistency

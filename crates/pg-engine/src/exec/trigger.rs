@@ -24,16 +24,7 @@ fn enabled(bt: &BoundTrigger, ctx: &ExecCtx) -> bool {
     match bt.trig.enabled {
         'D' => false,
         'A' => true,
-        e => {
-            (e == 'R')
-                == (ctx
-                    .sess
-                    .settings
-                    .borrow()
-                    .get_raw("session_replication_role")
-                    .as_deref()
-                    == Some("replica"))
-        }
+        e => (e == 'R') == ctx.sess.settings.borrow().replica_role(),
     }
 }
 

@@ -43,6 +43,14 @@ pub enum Frame {
     },
     /// Anything else, as its line ("COPY t, line 2: ...").
     Text(String),
+    /// COPY FROM's row being inserted (`CopyFromErrorCallback`): the table, the line number
+    /// and its text (None: left out, an error found after the line was buffered). Made into
+    /// text only when shown.
+    Copy {
+        table: std::sync::Arc<str>,
+        line: usize,
+        raw: Option<String>,
+    },
 }
 
 /// What of a SQL function is running.
@@ -112,6 +120,12 @@ impl Frame {
                 ..
             } => format!("SQL function \"{name}\" during startup"),
             Frame::Text(t) => t.clone(),
+            Frame::Copy {
+                table,
+                line,
+                raw: Some(raw),
+            } => format!("COPY {table}, line {line}: \"{raw}\""),
+            Frame::Copy { table, line, raw: None } => format!("COPY {table}, line {line}"),
         }
     }
 }

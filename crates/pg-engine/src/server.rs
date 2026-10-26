@@ -1500,49 +1500,38 @@ fn outcome(c: &mut Conn, s: &mut Session, o: Outcome, formats: &[i16]) -> Result
                 }
             });
             c.flush()?;
-            // The data is read as it comes (CopyFrom reads lines as the client sends them):
-            // a bad line fails the COPY while the client is still sending. (Read whenever
-            // the client has nothing more queued, or enough has piled up.)
-            let mut st = crate::session::CopyInParsed::default();
-            let mut data = Vec::new();
-            loop {
-                match c.read_message()? {
-                    Some((b'd', body)) => {
-                        data.extend_from_slice(&body);
-                        if c.rd.buffer().is_empty() || data.len() >= 64 << 10 {
-                            let took = s.copy_in_feed(&cin, &mut st, &data, false)?;
-                            data.drain(..took);
+            // The data is read as the insert takes it (CopyFrom reads lines as the client
+            // sends them): a bad line fails the COPY while the client is still sending, and
+            // only a batch of rows is held at a time.
+            let mut read = || -> Result<Option<Vec<u8>>> {
+                loop {
+                    match c.read_message()? {
+                        Some((b'd', body)) => return Ok(Some(body)),
+                        Some((b'c', _)) => return Ok(None),
+                        Some((b'f', body)) => {
+                            let msg = Body::new(&body).cstr().unwrap_or("").to_string();
+                            return Err(Error::new(
+                                code::QUERY_CANCELED,
+                                format!("COPY from stdin failed: {msg}"),
+                            ));
+                        }
+                        Some((b'H' | b'S', _)) => {}
+                        Some((t, _)) => {
+                            return Err(Error::new(
+                                code::PROTOCOL_VIOLATION,
+                                format!("unexpected message type 0x{t:02X} during COPY from stdin"),
+                            ));
+                        }
+                        None => {
+                            return Err(Error::new(
+                                code::CONNECTION_EXCEPTION,
+                                "unexpected EOF on client connection with an open transaction",
+                            ));
                         }
                     }
-                    Some((b'c', _)) => break,
-                    Some((b'f', body)) => {
-                        let msg = Body::new(&body).cstr().unwrap_or("").to_string();
-                        s.on_error();
-                        return Err(Error::new(
-                            code::QUERY_CANCELED,
-                            format!("COPY from stdin failed: {msg}"),
-                        ));
-                    }
-                    Some((b'H' | b'S', _)) => {}
-                    Some((t, _)) => {
-                        s.on_error();
-                        return Err(Error::new(
-                            code::PROTOCOL_VIOLATION,
-                            format!("unexpected message type 0x{t:02X} during COPY from stdin"),
-                        ));
-                    }
-                    None => {
-                        return Err(Error::new(
-                            code::CONNECTION_EXCEPTION,
-                            "unexpected EOF on client connection with an open transaction",
-                        ));
-                    }
                 }
-            }
-            let r = match s.copy_in_feed(&cin, &mut st, &data, true) {
-                Ok(_) => s.copy_in_end(cin, st),
-                Err(e) => Err(e),
             };
+            let r = s.copy_in_stream(cin, &mut read);
             send_notices(c, s);
             command_complete(c, &r?.tag);
             Ok(())

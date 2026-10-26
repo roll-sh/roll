@@ -249,9 +249,7 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   GB, 1M-row bulk steps up to 2.6x faster (VACUUM; COPY and the count after unchanged), index
   scans 1.2–1.4x in-process; the first `count(*)` of lineitem 37–51 s → 6.6–18 s.
   Downgrades are supported after a clean shutdown only (BENCH.md's agent 43 section:
-  "Durability"). COPY FROM still parses its rows whole before they go in, and big
-  transactions buffer their writes whole until commit (BENCH.md "Where it is still slower"
-  item 2). A COPY that takes a table past the model's size stops modelling it at once
+  "Durability"). A COPY that takes a table past the model's size stops modelling it at once
   (`CopyLoad::flush`), so its scans go parallel without a restart (agent 48's q06 finding).
   The regression suite, goldens and difftest are unchanged unit for unit.
   - **Accepted internal differences** (the engine's storage needn't imitate PostgreSQL's;
@@ -262,6 +260,35 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     against 604): putting rows back at their stored TIDs would change where new rows go; WAL files are
     zero-filled ahead and big commits are SST files of their own, so a crashed database must
     be reopened by this version before an older one.
+- **Bounded memory for big transactions and COPY** (round 19, agent 69; BENCH.md's agent 69
+  section):
+  - A transaction's write buffer spills to disk past `StoreOptions::txn_spill_bytes` (64 MB;
+    `ROLL_TXN_SPILL_BYTES` or `storage::set_default_txn_spill_bytes` for tests), so a
+    transaction of any size holds a bounded buffer (`txn/spill.rs`). The buffer and its undo
+    journal go to a sorted run (a private, unsynced SST under `<db>/spill/<txn>/`). Every
+    version in a run carries its journal position (`Ent::ts`), so statement snapshots,
+    cursors and `ROLLBACK TO` a savepoint taken before a spill read the runs "as of" their
+    mark with the store's own version rules (`View::of_files`). Runs merge in tiers of 4.
+    `ROLLBACK TO` past a spill rewrites only the run that straddles the savepoint.
+  - A spilled transaction's commit streams the buffer merged over the runs into one ingested
+    SST (`Store::commit_sorted`), with the snapshot-isolation conflict check per key as it
+    is written. `Store::open` deletes what a crash left in `spill/`. No storage format
+    change: runs never enter the MANIFEST.
+  - COPY FROM reads its data as the insert takes it, a batch at a time (CopyFrom's 1,000
+    rows or 64 kB). `Session::copy_in_stream` is the server's entry; the insert node asks
+    for the next batch with `dml::NEED_COPY_ROWS`, and `CopyLines::feed` holds the batch.
+    A parse error in a later batch now comes after an insert error of an earlier batch,
+    as in PostgreSQL. The error context is `Frame::Copy`, made into text only when shown.
+  - A big index build hands its entries to the transaction as sorted runs
+    (`Txn::put_new_index_entries`) instead of one buffer insert per entry.
+  - Tests: `tests/txn_spill.rs` (one script with a 2 kB and a default buffer, the same
+    results), `tests/crash_bulk.rs` (kill -9 of a process loading spilled transactions; all
+    or nothing per transaction, indexes agreeing with rows), and the whole crate suite with
+    `ROLL_TXN_SPILL_BYTES=4096`, which passes.
+  - Still unbounded: locks held per row until commit. That is a row lock per row a statement
+    locks or writes, and a unique-key lock and key holder per key inserted into a unique
+    index. A 5M-row INSERT … SELECT into a table with a primary key peaks at 2.6 GB (6.0 GB
+    before). BENCH.md "Where it is still slower" item 2 has the details.
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
   `session::RowSink` (`session/sink.rs`, PostgreSQL's DestReceiver) takes them in

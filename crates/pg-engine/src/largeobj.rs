@@ -560,10 +560,13 @@ pub fn open(
             ));
         }
     }
-    let own = (!write).then(|| {
-        let start = data_prefix(oid);
-        Arc::new(txn.writes_in(&start, &prefix_end(&start)))
-    });
+    let own = match write {
+        false => {
+            let start = data_prefix(oid);
+            Some(Arc::new(txn.writes_in(&start, &prefix_end(&start))?))
+        }
+        true => None,
+    };
     Ok(Desc {
         oid,
         offset: 0,

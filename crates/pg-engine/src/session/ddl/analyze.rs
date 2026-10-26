@@ -135,42 +135,56 @@ impl Ddl<'_, '_> {
             z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
             z ^ (z >> 31)
         };
-        // (Each kept row with its place in the table.)
-        let mut reservoir: Vec<(usize, Row)> = Vec::new();
+        // (Each kept row with its place in the table; a stored row is decoded only once it
+        // is in the sample at the end, the same picks.)
+        let mut reservoir: Vec<(usize, std::result::Result<Row, Vec<u8>>)> = Vec::new();
         let mut total = 0usize;
-        let mut offer = |row: Row| {
+        let mut offer = |row: &mut dyn FnMut() -> std::result::Result<Row, Vec<u8>>| {
             if total < want {
-                reservoir.push((total, row));
+                reservoir.push((total, row()));
             } else {
                 let j = (next() % (total as u64 + 1)) as usize;
                 if j < want {
-                    reservoir[j] = (total, row);
+                    reservoir[j] = (total, row());
                 }
             }
             total += 1;
         };
         if inherit {
             for row in self.inherited_rows(t)? {
-                offer(row);
+                let mut row = Some(row);
+                offer(&mut || Ok(row.take().unwrap()));
             }
         } else if t.foreign.is_some() && crate::ext::postgres_fdw::scan::is_postgres_fdw(&self.cat, t) {
             // postgresAcquireSampleRowsFunc: the remote table's rows.
             for row in crate::ext::postgres_fdw::scan::remote_rows(t, self.ctx)?.0 {
-                offer(row);
+                let mut row = Some(row);
+                offer(&mut || Ok(row.take().unwrap()));
             }
         } else if crate::ext::file_fdw::is_file_table(&self.cat, t) {
             // file_fdw's file_acquire_sample_rows.
             for row in crate::ext::file_fdw::read_all(t, self.ctx)? {
-                offer(row);
+                let mut row = Some(row);
+                offer(&mut || Ok(row.take().unwrap()));
             }
         } else {
-            for r in self.scan_rows(t) {
+            let start = crate::storage::keys::index_prefix(t.oid, 0);
+            let end = crate::storage::keys::prefix_end(&start);
+            let scan = self.ctx.txn.borrow().scan(&start, &end);
+            for r in scan {
                 self.ctx.check()?;
-                offer(r?.1);
+                let (_, bytes) = r?;
+                offer(&mut || Err(bytes.to_vec()));
             }
         }
         reservoir.sort_unstable_by_key(|(i, _)| *i);
-        let sample: Vec<Row> = reservoir.into_iter().map(|(_, r)| r).collect();
+        let sample: Vec<Row> = reservoir
+            .into_iter()
+            .map(|(_, r)| match r {
+                Ok(row) => Ok(row),
+                Err(bytes) => crate::exec::scan::decode_table_row(t, &bytes),
+            })
+            .collect::<Result<_>>()?;
         if sample.is_empty() {
             return Ok(());
         }

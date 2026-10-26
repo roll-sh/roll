@@ -3623,7 +3623,16 @@ impl Ddl<'_, '_> {
                 None => Ok(None),
             }
         };
-        // (A row at a time: nothing of the table is held but the unique keys.)
+        // (A row at a time: nothing of the table is held but the unique keys, and a batch of
+        // entries: a big build's go in as sorted runs, `Txn::put_new_index_entries`.)
+        let range_start = crate::storage::keys::index_prefix(t.oid, ix.id);
+        let range_end = crate::storage::keys::prefix_end(&range_start);
+        let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut batch_bytes = 0usize;
+        // (How the build's batches go in, once the first has: as sorted runs or not.)
+        let mut direct: Option<bool> = None;
+        // (Half the spill threshold, at most 32 MB: a build too big to buffer.)
+        let run_bytes = (self.ctx.txn.borrow().db.store.txn_spill_bytes() / 2).min(32 << 20);
         for r in self.scan_rows(t) {
             self.ctx.check()?;
             let (dkey, row) = r?;
@@ -3641,7 +3650,29 @@ impl Ddl<'_, '_> {
             }
             if ix.id != 0 {
                 let k = index_entry_key(t, ix, &vals, &dkey, &bix.colls);
-                self.ctx.txn.borrow_mut().put_new_index_entry(k, dkey)?;
+                batch_bytes += k.len() + dkey.len() + 64;
+                batch.push((k, dkey));
+                if batch_bytes >= run_bytes {
+                    let b = std::mem::take(&mut batch);
+                    let d = self
+                        .ctx
+                        .txn
+                        .borrow_mut()
+                        .put_new_index_entries(b, &range_start, &range_end, direct)?;
+                    direct = Some(d);
+                    batch_bytes = 0;
+                }
+            }
+        }
+        if direct.is_some() {
+            self.ctx
+                .txn
+                .borrow_mut()
+                .put_new_index_entries(batch, &range_start, &range_end, direct)?;
+        } else {
+            let mut txn = self.ctx.txn.borrow_mut();
+            for (k, dkey) in batch {
+                txn.put_new_index_entry(k, dkey)?;
             }
         }
         drop(seen);

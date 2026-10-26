@@ -4,7 +4,7 @@
 use super::{Outcome, QueryResult, Session};
 use crate::catalog::{Relation, Table};
 use crate::error::{Error, Result, code};
-use crate::exec::collect;
+use crate::exec::ExecCtx;
 use crate::sql::binder::ast::{const_str, inner, names, with_pos};
 use crate::sql::binder::{Binder, table_rules};
 use crate::sql::expr::Expr;
@@ -442,7 +442,7 @@ pub struct CopyIn {
     pub file_size: Option<i64>,
 }
 
-/// COPY FROM data read so far (`Session::copy_in_feed`).
+/// COPY FROM data read so far, a batch at a time (`Session::copy_in_run`).
 #[derive(Default)]
 pub struct CopyInParsed {
     rows: Vec<Vec<Expr>>,
@@ -958,116 +958,28 @@ impl Session {
         Ok(data)
     }
 
-    /// The client's data for a COPY FROM STDIN arrived.
+    /// The data of a COPY FROM STDIN, all of it at hand (an in-process client's).
     pub fn copy_in_finish(&mut self, c: CopyIn, data: &[u8]) -> Result<QueryResult> {
-        let r = self.copy_in_rows(&c, data);
-        if r.is_err() {
-            self.on_error();
-        }
-        self.pgss_copy_done(&r);
-        r
+        let mut chunks = data.chunks(COPY_READ);
+        self.copy_in_stream(c, &mut || Ok(chunks.next().map(|d| d.to_vec())))
     }
 
-    /// COPY FROM STDIN as its data arrives (CopyFrom reads the lines as the client sends
-    /// them, so a bad line fails the COPY before the rest of the data has come): reads the
-    /// complete records at the start of `data` (all of it when `last`), returns how many
-    /// bytes it took. Then `copy_in_end`.
-    pub fn copy_in_feed(
+    /// COPY FROM, its data read as the insert takes it, as CopyFrom reads lines as the client
+    /// sends them: `read` gives the next piece of the data (None: the end). The rows go in a
+    /// batch at a time (CopyFrom's multi-insert buffer: COPY_TUPLES rows or COPY_BYTES of
+    /// lines), each batch parsed whole first; a bad line fails the COPY before the rest of
+    /// the data has come, and memory holds a batch, not the data.
+    pub fn copy_in_stream(
         &mut self,
-        c: &CopyIn,
-        st: &mut CopyInParsed,
-        data: &[u8],
-        last: bool,
-    ) -> Result<usize> {
-        let before = st.rows.len();
-        let r = self.copy_in_parse(c, st, data, last);
-        if let Err(e) = &r {
-            self.on_error();
-            self.pgss_copy_done(&Err(e.clone()));
-            return r;
-        }
-        // A row a NOT NULL column refuses fails the COPY as it is read: the rows up to it
-        // go in, and its own error is the one inserting them raises.
-        if !last && let Some(k) = self.copy_null_violation(c, st, before) {
-            st.rows.truncate(k + 1);
-            st.lines.truncate(k + 1);
-            let r = self.copy_in_insert(c, std::mem::take(st));
-            self.on_error();
-            let e = match r {
-                Err(e) => e,
-                Ok(_) => crate::error::internal("COPY row with a null in a NOT NULL column went in"),
-            };
-            self.pgss_copy_done(&Err(e.clone()));
-            return Err(e);
-        }
-        r
-    }
-
-    /// The first row from `from` on with a NULL a NOT NULL column refuses.
-    fn copy_null_violation(&mut self, c: &CopyIn, st: &mut CopyInParsed, from: usize) -> Option<usize> {
-        if st.not_null.is_none() {
-            let t = c.table.clone();
-            let early = c.filter.is_none()
-                && t.partkey.is_none()
-                && self
-                    .with_ctx(&[], |ctx| {
-                        let rules = crate::sql::binder::table_rules(&t, ctx)?;
-                        Ok(!crate::exec::trigger::any(
-                            &rules.triggers,
-                            true,
-                            true,
-                            crate::catalog::trigger_type::INSERT,
-                            ctx,
-                        ))
-                    })
-                    .unwrap_or(false);
-            let mut cols = Vec::new();
-            if early {
-                for (k, &col) in c.target.iter().enumerate() {
-                    let tc = &t.columns[col];
-                    if tc.not_null && tc.domain.is_none() {
-                        cols.push(k);
-                    }
-                }
-                st.not_null_missing = t.columns.iter().enumerate().any(|(i, tc)| {
-                    tc.not_null
-                        && !tc.dropped
-                        && !c.target.contains(&i)
-                        && tc.default.is_none()
-                        && tc.identity.is_none()
-                        && tc.generated.is_none()
-                        && tc.domain.is_none()
-                });
-            }
-            st.not_null = Some(cols);
-        }
-        if st.not_null_missing && st.rows.len() > from {
-            return Some(from);
-        }
-        let cols = st.not_null.as_ref()?;
-        (from..st.rows.len()).find(|&r| {
-            cols.iter()
-                .any(|&k| matches!(st.rows[r].get(k), Some(Expr::Const(Value::Null, _))))
-        })
-    }
-
-    /// The end of COPY FROM STDIN's data (after `copy_in_feed` took all of it): the rows go in.
-    pub fn copy_in_end(&mut self, c: CopyIn, st: CopyInParsed) -> Result<QueryResult> {
-        let r = self.copy_in_insert(&c, st);
+        c: CopyIn,
+        read: &mut dyn FnMut() -> Result<Option<Vec<u8>>>,
+    ) -> Result<QueryResult> {
+        let r = self.copy_in_run(&c, read);
         if r.is_err() {
             self.on_error();
         }
         self.pgss_copy_done(&r);
         r
-    }
-
-    /// The client aborted COPY FROM STDIN.
-    pub fn copy_in_fail(&mut self, msg: &str) -> Error {
-        self.on_error();
-        Error::new(
-            code::QUERY_CANCELED,
-            format!("COPY from stdin failed: {msg}"),
-        )
     }
 
     /// The encoding COPY data is in: the ENCODING option's, else the client's.
@@ -1081,20 +993,16 @@ impl Session {
     }
 
     fn copy_in_rows(&mut self, c: &CopyIn, data: &[u8]) -> Result<QueryResult> {
-        let mut st = CopyInParsed::default();
-        self.copy_in_parse(c, &mut st, data, true)?;
-        self.copy_in_insert(c, st)
+        let mut chunks = data.chunks(COPY_READ);
+        self.copy_in_run(c, &mut || Ok(chunks.next().map(|d| d.to_vec())))
     }
 
-    /// Read the complete records at the start of `data` (every one when `last`) into `st`;
-    /// returns the bytes taken.
-    fn copy_in_parse(
+    /// COPY FROM's insert, fed a batch of rows at a time from `read`'s data.
+    fn copy_in_run(
         &mut self,
         c: &CopyIn,
-        st: &mut CopyInParsed,
-        data: &[u8],
-        last: bool,
-    ) -> Result<usize> {
+        read: &mut dyn FnMut() -> Result<Option<Vec<u8>>>,
+    ) -> Result<QueryResult> {
         // CopyFrom's CheckValidResultRel, before any row is read: a foreign table's
         // wrapper must take rows.
         if c.table.is_foreign() {
@@ -1104,18 +1012,403 @@ impl Session {
                 return Err(e);
             }
         }
-        let mut fmt = self.state.settings.borrow().format_ctx();
-        // (regclass, regtype, ... input looks names up: the transaction's catalog, the path.)
-        if let Some(txn) = &self.txn {
+        let t = c.table.clone();
+        let f = &c.format;
+        let enc = self.copy_encoding(f);
+        let processed = self.with_ctx(&[], |ctx| {
+            let mut fmt = ctx.sess.settings.borrow().format_ctx();
+            // (regclass, regtype, ... input looks names up: the transaction's catalog, the
+            // path.)
             fmt.names = Some(Arc::new(crate::catalog::names::CatalogNames::new(
-                txn.borrow().catalog(),
-                self.state.search_path(),
+                ctx.txn.borrow().catalog(),
+                ctx.sess.search_path(),
             )));
-        }
-        let enc = self.copy_encoding(&c.format);
-        parse_copy_data(c, st, data, last, &fmt, enc, &mut |e| self.raise_notice(e))
+            let mut rd = CopyReader {
+                c,
+                st: CopyInParsed::default(),
+                pending: Vec::new(),
+                eof: false,
+                fmt: &fmt,
+                enc,
+                read,
+                excluded: 0,
+                null_stop: false,
+                batch_bytes: 0,
+            };
+            let rules = table_rules(&t, ctx)?;
+            rd.st.not_null = Some(rd.not_null_columns(&rules, ctx));
+            let target = rd.target();
+            let ncols = target.len();
+            // CopyFrom buffers rows unless BEFORE ROW triggers or volatile defaults
+            // (other than nextval) need them one at a time.
+            let volatile_default = rules.defaults.iter().enumerate().any(|(i, d)| {
+                !target.contains(&i)
+                    && d.as_ref().is_some_and(|d| {
+                        let mut v = false;
+                        d.walk(&mut |e| match e {
+                            Expr::Call(f, ..) if f.volatility == 'v' && f.name != "nextval" => {
+                                v = true
+                            }
+                            Expr::Subquery(_) => v = true,
+                            _ => {}
+                        });
+                        v
+                    })
+            });
+            let multi = !volatile_default
+                && !crate::exec::trigger::any(
+                    &rules.triggers,
+                    true,
+                    true,
+                    crate::catalog::trigger_type::INSERT,
+                    ctx,
+                );
+            // The defaults COPY may use are planned when it starts (BeginCopyFrom): those of
+            // the columns not copied, and with DEFAULT, every column's.
+            for (i, d) in rules.defaults.iter().enumerate() {
+                if let Some(d) = d
+                    && (f.default.is_some() || !target.contains(&i))
+                    && t.columns[i].generated.is_none()
+                {
+                    crate::sql::binder::check_folds(d, ctx)?;
+                }
+            }
+            let copy = Arc::new(crate::sql::plan::CopyLines {
+                table: t.name.as_str().into(),
+                multi,
+                feed: Default::default(),
+            });
+            let plan = Arc::new(Plan::Insert(Box::new(InsertPlan {
+                rules: rules.clone(),
+                source: Arc::new(Plan::Values {
+                    rows: Vec::new(),
+                    ncols,
+                    rti: Default::default(),
+                }),
+                target,
+                on_conflict: None,
+                returning: Vec::new(),
+                old_new: None,
+                overriding_system: true,
+                overriding_user: false,
+                sys: false,
+                route: crate::sql::binder::partition_routing(&t, ctx)?,
+                copy: Some(copy.clone()),
+                alias: None,
+            })));
+            *ctx.sess.copy_progress.borrow_mut() = Some(super::state::CopyProgress {
+                relid: t.oid,
+                command: 1,
+                // PROGRESS_COPY_TYPE_FILE (with the file's size) or _PIPE.
+                kind: if c.file_size.is_some() { 1 } else { 3 },
+                bytes_total: c.file_size.unwrap_or(0),
+                ..Default::default()
+            });
+            let r = ctx.statement(|| {
+                let mut node = crate::exec::nodes::open(&plan, ctx)?;
+                loop {
+                    match node.next(ctx) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => return Ok(()),
+                        Err(e) if e.code == crate::exec::dml::NEED_COPY_ROWS => {
+                            rd.next_batch(&rules, &copy, ctx)?
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            });
+            *ctx.sess.copy_progress.borrow_mut() = None;
+            r?;
+            if rd.null_stop {
+                return Err(crate::error::internal(
+                    "COPY row with a null in a NOT NULL column went in",
+                ));
+            }
+            // Through a view's INSTEAD OF trigger every row counts (CopyFrom's processed).
+            if ctx.catalog().views.contains_key(&t.oid) {
+                return Ok(copy.feed.lock().unwrap().fed as u64);
+            }
+            Ok(ctx.processed.get())
+        })?;
+        Ok(QueryResult::command(format!("COPY {processed}")))
     }
 }
+
+/// COPY FROM's data, read and parsed a batch at a time (`Session::copy_in_run`).
+struct CopyReader<'a> {
+    c: &'a CopyIn,
+    st: CopyInParsed,
+    /// Data read and not yet parsed (a record's start).
+    pending: Vec<u8>,
+    eof: bool,
+    fmt: &'a crate::types::text::FormatCtx,
+    enc: i32,
+    read: &'a mut dyn FnMut() -> Result<Option<Vec<u8>>>,
+    /// Rows WHERE left out.
+    excluded: i64,
+    /// A row a NOT NULL column refuses was read: it is the last to go in, and fails.
+    null_stop: bool,
+    /// The bytes of the lines in the batch being read.
+    batch_bytes: usize,
+}
+
+impl CopyReader<'_> {
+    /// The columns the rows going in give: the copied ones, or with WHERE every column
+    /// (the rows that pass carry them all).
+    fn target(&self) -> Vec<usize> {
+        if self.c.filter.is_none() {
+            return self.c.target.clone();
+        }
+        self.c
+            .table
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, col)| !col.dropped && col.generated.is_none())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The target positions of NOT NULL columns, checked as rows are read (ExecConstraints
+    /// runs on each row before it is buffered); empty when that can't be done early
+    /// (BEFORE ROW triggers or a WHERE may change or drop the row).
+    fn not_null_columns(&mut self, rules: &crate::sql::plan::TableRules, ctx: &ExecCtx) -> Vec<usize> {
+        let (c, t) = (self.c, &self.c.table);
+        let early = c.filter.is_none()
+            && t.partkey.is_none()
+            && !crate::exec::trigger::any(
+                &rules.triggers,
+                true,
+                true,
+                crate::catalog::trigger_type::INSERT,
+                ctx,
+            );
+        let mut cols = Vec::new();
+        if early {
+            for (k, &col) in c.target.iter().enumerate() {
+                let tc = &t.columns[col];
+                if tc.not_null && tc.domain.is_none() {
+                    cols.push(k);
+                }
+            }
+            self.st.not_null_missing = t.columns.iter().enumerate().any(|(i, tc)| {
+                tc.not_null
+                    && !tc.dropped
+                    && !c.target.contains(&i)
+                    && tc.default.is_none()
+                    && tc.identity.is_none()
+                    && tc.generated.is_none()
+                    && tc.domain.is_none()
+            });
+        }
+        cols
+    }
+
+    /// The first row from `from` on with a NULL a NOT NULL column refuses.
+    fn null_violation(&self, from: usize) -> Option<usize> {
+        let st = &self.st;
+        if st.not_null_missing && st.rows.len() > from {
+            return Some(from);
+        }
+        let cols = st.not_null.as_ref()?;
+        (from..st.rows.len()).find(|&r| {
+            cols.iter()
+                .any(|&k| matches!(st.rows[r].get(k), Some(Expr::Const(Value::Null, _))))
+        })
+    }
+
+    fn batch_full(&self) -> bool {
+        self.st.rows.len() >= crate::exec::sizing::COPY_TUPLES
+            || self.batch_bytes >= crate::exec::sizing::COPY_BYTES
+    }
+
+    /// Read and parse the next batch of rows into the feed (marking it done at the end of
+    /// the data).
+    fn next_batch(
+        &mut self,
+        rules: &crate::sql::plan::TableRules,
+        copy: &crate::sql::plan::CopyLines,
+        ctx: &ExecCtx,
+    ) -> Result<()> {
+        while !self.eof && !self.null_stop && !self.batch_full() {
+            let before = self.st.rows.len();
+            let mut notices = Vec::new();
+            match (self.read)()? {
+                Some(chunk) => {
+                    self.pending.extend_from_slice(&chunk);
+                    let took = parse_copy_data(
+                        self.c,
+                        &mut self.st,
+                        &self.pending,
+                        false,
+                        self.fmt,
+                        self.enc,
+                        &mut |n| notices.push(n),
+                    )?;
+                    self.pending.drain(..took);
+                }
+                None => {
+                    let data = std::mem::take(&mut self.pending);
+                    parse_copy_data(
+                        self.c,
+                        &mut self.st,
+                        &data,
+                        true,
+                        self.fmt,
+                        self.enc,
+                        &mut |n| notices.push(n),
+                    )?;
+                    self.eof = true;
+                }
+            }
+            for n in notices {
+                ctx.notice(n);
+            }
+            self.batch_bytes += self.st.lines[before..].iter().map(|l| l.1.len()).sum::<usize>();
+            // A row a NOT NULL column refuses fails the COPY as it is read: the rows up to it
+            // go in, and its own error is the one inserting them raises.
+            if let Some(k) = self.null_violation(before) {
+                self.st.rows.truncate(k + 1);
+                self.st.lines.truncate(k + 1);
+                self.null_stop = true;
+            }
+        }
+        let rows = std::mem::take(&mut self.st.rows);
+        let lines = std::mem::take(&mut self.st.lines);
+        self.batch_bytes = 0;
+        let (rows, lines) = self.prepare(rows, lines, rules, ctx)?;
+        if let Some(p) = ctx.sess.copy_progress.borrow_mut().as_mut() {
+            p.bytes_processed = self.st.bytes as i64;
+            p.tuples_excluded = self.excluded;
+            p.tuples_skipped = self.st.skipped as i64;
+        }
+        let mut feed = copy.feed.lock().unwrap();
+        feed.fed += rows.len();
+        feed.rows
+            .extend(rows.into_iter().zip(lines).map(|(r, (line, raw))| (r, line, raw)));
+        if self.eof || self.null_stop {
+            feed.done = true;
+            let skipped = self.st.skipped;
+            feed.skipped_notice = (skipped > 0 && self.c.format.log_verbosity >= 1).then(|| {
+                if skipped == 1 {
+                    "1 row was skipped due to data type incompatibility".to_string()
+                } else {
+                    format!("{skipped} rows were skipped due to data type incompatibility")
+                }
+            });
+        }
+        Ok(())
+    }
+
+    /// A batch's rows as they go in: WHERE (each row, with the defaults of the columns not
+    /// copied, checked before it goes in), the domains' input checks, DEFAULT markers.
+    #[allow(clippy::type_complexity)]
+    fn prepare(
+        &mut self,
+        mut rows: Vec<Vec<Expr>>,
+        mut lines: Vec<(usize, String)>,
+        rules: &crate::sql::plan::TableRules,
+        ctx: &ExecCtx,
+    ) -> Result<(Vec<Vec<Expr>>, Vec<(usize, String)>)> {
+        let (c, t, fmt) = (self.c, &self.c.table, self.fmt);
+        let f = &c.format;
+        let target = &c.target;
+        if let Some(filter) = &c.filter {
+            let all = self.target();
+            let mut kept = Vec::with_capacity(rows.len());
+            let mut kept_lines = Vec::with_capacity(lines.len());
+            for (row, line) in rows.into_iter().zip(lines) {
+                let mut full = vec![Value::Null; t.columns.len()];
+                for (e, &col) in row.iter().zip(target) {
+                    full[col] = match e {
+                        Expr::Default(_) => match &rules.defaults[col] {
+                            Some(d) => crate::sql::expr::eval(d, &[], ctx)?,
+                            None => Value::Null,
+                        },
+                        e => crate::sql::expr::eval(e, &[], ctx)?,
+                    };
+                }
+                for &col in &all {
+                    if !target.contains(&col)
+                        && let Some(d) = &rules.defaults[col]
+                    {
+                        full[col] = crate::sql::expr::eval(d, &[], ctx)?;
+                    }
+                }
+                if !crate::sql::expr::eval_bool(filter, &full, ctx)? {
+                    self.excluded += 1;
+                    continue;
+                }
+                kept.push(
+                    all.iter()
+                        .map(|&i| Expr::Const(full[i].clone(), t.columns[i].ty.clone()))
+                        .collect::<Vec<_>>(),
+                );
+                kept_lines.push(line);
+            }
+            // (The rows that pass carry every column, their values computed.)
+            return Ok((kept, kept_lines));
+        }
+        // A domain's input function checks each value (NULL too) as the line is read.
+        let mut keep = vec![true; rows.len()];
+        'rows: for (k, (row, (line, _))) in rows.iter().zip(&lines).enumerate() {
+            for (e, &col) in row.iter().zip(target) {
+                let (Expr::Const(v, ty), Some(Some(d))) = (e, rules.domain_checks.get(col)) else {
+                    continue;
+                };
+                if let Err(err) = d.check(v, ctx) {
+                    let colname = &t.columns[col].name;
+                    let shown = if v.is_null() {
+                        "null input".to_string()
+                    } else {
+                        format!("\"{}\"", format_value(v, ty, fmt))
+                    };
+                    // ON_ERROR ignore: the domain's input function failed softly.
+                    if f.on_error_ignore {
+                        self.st.skipped += 1;
+                        if let Some(limit) = f.reject_limit
+                            && self.st.skipped as i64 > limit
+                        {
+                            return Err(Error::new(code::INVALID_TEXT_REPRESENTATION, format!("skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility"))
+                                .context(format!("COPY {}, line {line}, column {colname}: {shown}", t.name)));
+                        }
+                        if f.log_verbosity >= 2 {
+                            ctx.notice(
+                                super::notice(format!("skipping row due to data type incompatibility at line {line} for column \"{colname}\": {shown}")).context(format!("COPY {}", t.name)),
+                            );
+                        }
+                        keep[k] = false;
+                        continue 'rows;
+                    }
+                    return Err(err.context(format!(
+                        "COPY {}, line {line}, column {colname}: {shown}",
+                        t.name
+                    )));
+                }
+            }
+        }
+        if keep.contains(&false) {
+            let mut it = keep.iter();
+            rows.retain(|_| *it.next().unwrap());
+            let mut it = keep.iter();
+            lines.retain(|_| *it.next().unwrap());
+        }
+        // DEFAULT markers take the column default.
+        for row in &mut rows {
+            for (e, &col) in row.iter_mut().zip(target) {
+                if let Expr::Default(ty) = e {
+                    *e = rules.defaults[col]
+                        .clone()
+                        .unwrap_or_else(|| Expr::null(ty.clone()));
+                }
+            }
+        }
+        Ok((rows, lines))
+    }
+}
+
+/// How much of COPY data at hand goes to the parser at a time.
+const COPY_READ: usize = 64 << 10;
 
 /// NextCopyFrom over COPY data: the complete records at the start of `data` (every one when
 /// `last`), in encoding `enc`, read into `st`; returns the bytes taken. `notice` gets ON_ERROR
@@ -1352,222 +1645,6 @@ impl CopyInParsed {
     pub(crate) fn take_rows(&mut self) -> (Vec<Vec<Expr>>, usize) {
         self.lines.clear();
         (std::mem::take(&mut self.rows), self.skipped)
-    }
-}
-
-impl Session {
-    /// COPY FROM's rows, read, go in.
-    fn copy_in_insert(&mut self, c: &CopyIn, st: CopyInParsed) -> Result<QueryResult> {
-        let CopyInParsed {
-            mut rows,
-            mut lines,
-            mut skipped,
-            bytes: data_len,
-            ..
-        } = st;
-        let t = c.table.clone();
-        let f = &c.format;
-        let fmt = self.state.settings.borrow().format_ctx();
-        let mut ncols = c.ncols;
-        let mut target = c.target.clone();
-        let mut excluded = 0i64;
-        let processed = self.with_ctx(&[], |ctx| {
-            let rules = table_rules(&t, ctx)?;
-            // WHERE: each row, with the defaults of the columns not copied, checked before it
-            // goes in; the rows that pass carry every column.
-            if let Some(f) = &c.filter {
-                let all: Vec<usize> = t
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, col)| !col.dropped && col.generated.is_none())
-                    .map(|(i, _)| i)
-                    .collect();
-                let mut kept = Vec::with_capacity(rows.len());
-                let mut kept_lines = Vec::with_capacity(lines.len());
-                for (row, line) in std::mem::take(&mut rows).into_iter().zip(std::mem::take(&mut lines)) {
-                    let mut full = vec![Value::Null; t.columns.len()];
-                    for (e, &col) in row.iter().zip(&target) {
-                        full[col] = match e {
-                            Expr::Default(ty) => match &rules.defaults[col] {
-                                Some(d) => crate::sql::expr::eval(d, &[], ctx)?,
-                                None => {
-                                    let _ = ty;
-                                    Value::Null
-                                }
-                            },
-                            e => crate::sql::expr::eval(e, &[], ctx)?,
-                        };
-                    }
-                    for &col in &all {
-                        if !target.contains(&col)
-                            && let Some(d) = &rules.defaults[col]
-                        {
-                            full[col] = crate::sql::expr::eval(d, &[], ctx)?;
-                        }
-                    }
-                    if !crate::sql::expr::eval_bool(f, &full, ctx)? {
-                        excluded += 1;
-                        continue;
-                    }
-                    kept.push(
-                        all.iter()
-                            .map(|&i| Expr::Const(full[i].clone(), t.columns[i].ty.clone()))
-                            .collect::<Vec<_>>(),
-                    );
-                    kept_lines.push(line);
-                }
-                rows = kept;
-                lines = kept_lines;
-                target = all;
-                ncols = target.len();
-            }
-            // CopyFrom buffers rows unless BEFORE ROW triggers or volatile defaults
-            // (other than nextval) need them one at a time.
-            let volatile_default = rules.defaults.iter().enumerate().any(|(i, d)| {
-                !target.contains(&i)
-                    && d.as_ref().is_some_and(|d| {
-                        let mut v = false;
-                        d.walk(&mut |e| match e {
-                            Expr::Call(f, ..) if f.volatility == 'v' && f.name != "nextval" => {
-                                v = true
-                            }
-                            Expr::Subquery(_) => v = true,
-                            _ => {}
-                        });
-                        v
-                    })
-            });
-            let multi = !volatile_default
-                && !crate::exec::trigger::any(
-                    &rules.triggers,
-                    true,
-                    true,
-                    crate::catalog::trigger_type::INSERT,
-                    ctx,
-                );
-            // A domain's input function checks each value (NULL too) as the line is read.
-            if c.filter.is_none() {
-                let mut keep = vec![true; rows.len()];
-                'rows: for (k, (row, (line, _))) in rows.iter().zip(&lines).enumerate() {
-                    for (e, &col) in row.iter().zip(&target) {
-                        let (Expr::Const(v, ty), Some(Some(d))) = (e, rules.domain_checks.get(col))
-                        else {
-                            continue;
-                        };
-                        if let Err(err) = d.check(v, ctx) {
-                            let colname = &t.columns[col].name;
-                            let shown = if v.is_null() {
-                                "null input".to_string()
-                            } else {
-                                format!("\"{}\"", format_value(v, ty, &fmt))
-                            };
-                            // ON_ERROR ignore: the domain's input function failed softly.
-                            if f.on_error_ignore {
-                                skipped += 1;
-                                if let Some(limit) = f.reject_limit
-                                    && skipped as i64 > limit
-                                {
-                                    return Err(Error::new(code::INVALID_TEXT_REPRESENTATION, format!("skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility"))
-                                        .context(format!("COPY {}, line {line}, column {colname}: {shown}", t.name)));
-                                }
-                                if f.log_verbosity >= 2 {
-                                    ctx.notice(
-                                        super::notice(format!("skipping row due to data type incompatibility at line {line} for column \"{colname}\": {shown}")).context(format!("COPY {}", t.name)),
-                                    );
-                                }
-                                keep[k] = false;
-                                continue 'rows;
-                            }
-                            return Err(err.context(format!(
-                                "COPY {}, line {line}, column {colname}: {shown}",
-                                t.name
-                            )));
-                        }
-                    }
-                }
-                if keep.contains(&false) {
-                    let mut it = keep.iter();
-                    rows.retain(|_| *it.next().unwrap());
-                    let mut it = keep.iter();
-                    lines.retain(|_| *it.next().unwrap());
-                }
-            }
-            let skipped_notice = (skipped > 0 && f.log_verbosity >= 1).then(|| {
-                if skipped == 1 {
-                    "1 row was skipped due to data type incompatibility".to_string()
-                } else {
-                    format!("{skipped} rows were skipped due to data type incompatibility")
-                }
-            });
-            let copy = Some(Arc::new(crate::sql::plan::CopyLines {
-                table: t.name.clone(),
-                lines,
-                multi,
-                skipped_notice,
-            }));
-            // The defaults COPY may use are planned when it starts (BeginCopyFrom): those of
-            // the columns not copied, and with DEFAULT, every column's.
-            for (i, d) in rules.defaults.iter().enumerate() {
-                if let Some(d) = d
-                    && (f.default.is_some() || !target.contains(&i))
-                    && t.columns[i].generated.is_none()
-                {
-                    crate::sql::binder::check_folds(d, ctx)?;
-                }
-            }
-            // DEFAULT markers take the column default.
-            for row in &mut rows {
-                for (e, &col) in row.iter_mut().zip(&target) {
-                    if let Expr::Default(ty) = e {
-                        *e = rules.defaults[col]
-                            .clone()
-                            .unwrap_or_else(|| Expr::null(ty.clone()));
-                    }
-                }
-            }
-            let plan = Plan::Insert(Box::new(InsertPlan {
-                rules,
-                source: Arc::new(Plan::Values { rows, ncols, rti: Default::default() }),
-                target,
-                on_conflict: None,
-                returning: Vec::new(),
-                old_new: None,
-                overriding_system: true,
-                overriding_user: false,
-                sys: false,
-                route: crate::sql::binder::partition_routing(&t, ctx)?,
-                copy,
-                alias: None,
-            }));
-            *ctx.sess.copy_progress.borrow_mut() = Some(super::state::CopyProgress {
-                relid: t.oid,
-                command: 1,
-                // PROGRESS_COPY_TYPE_FILE (with the file's size) or _PIPE.
-                kind: if c.file_size.is_some() { 1 } else { 3 },
-                bytes_total: c.file_size.unwrap_or(0),
-                bytes_processed: data_len as i64,
-                tuples_excluded: excluded,
-                tuples_skipped: skipped as i64,
-                ..Default::default()
-            });
-            let fed = match &plan {
-                Plan::Insert(i) => match &*i.source {
-                    Plan::Values { rows, .. } => rows.len(),
-                    _ => 0,
-                },
-                _ => 0,
-            };
-            let r = collect(&Arc::new(plan), ctx, None);
-            *ctx.sess.copy_progress.borrow_mut() = None;
-            r?;
-            // Through a view's INSTEAD OF trigger every row counts (CopyFrom's processed).
-            if ctx.catalog().views.contains_key(&t.oid) {
-                return Ok(fed as u64);
-            }
-            Ok(ctx.processed.get())
-        })?;
-        Ok(QueryResult::command(format!("COPY {processed}")))
     }
 }
 

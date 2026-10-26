@@ -442,6 +442,10 @@ struct Derived {
     /// and `lock_timeout` (ms).
     default_txn: (crate::txn::Isolation, bool),
     lock_timeout: i64,
+    /// `track_counts` is on; `session_replication_role` is `replica` (read for every row
+    /// written).
+    track_counts: bool,
+    replica_role: bool,
 }
 
 /// A session's search path (`session_search_path`) for a `$user` and backend id: what every
@@ -1231,8 +1235,20 @@ impl Settings {
                     self.bool("default_transaction_read_only"),
                 ),
                 lock_timeout: self.int("lock_timeout"),
+                track_counts: self.get_str("track_counts").is_none_or(|v| v != "off"),
+                replica_role: self.get_str("session_replication_role") == Some("replica"),
             })
         })
+    }
+
+    /// Whether `track_counts` is on.
+    pub fn track_counts(&self) -> bool {
+        self.derived().track_counts
+    }
+
+    /// Whether `session_replication_role` is `replica`.
+    pub fn replica_role(&self) -> bool {
+        self.derived().replica_role
     }
 
     /// A login-time default (ALTER ROLE / DATABASE ... SET): validated like SET; RESET returns to it.

@@ -1406,6 +1406,117 @@ before, 8,048 after, medians of 3; range scans 2,627 / 2,658), the rest of the O
   `0a8ec4ee` (see the commit).
 - `difftest smoke` passes before and after the rebase.
 
+## Round 19 (agent 69): bounded memory for big transactions and COPY
+
+Agent 43's open items: big transactions buffered their writes whole until commit, COPY FROM
+parsed all of its data before the first row went in, and index builds inserted one entry at a
+time. Same harness. The servers were on cores 4–7 and the clients on 12–15, on a loaded
+machine (load 10–20, other agents' builds unpinned on every core). Bulk times are medians of
+3 interleaved runs from a fresh data directory: **before** is `8d724fe7` (this round's
+start) and **after** is this round on `fb4b987c`. PostgreSQL ran in the same window, 3
+repetitions.
+
+### Bulk, 1M rows (seconds; peak memory of the whole run)
+
+| step | pg | before | after | after / pg |
+|---|---|---|---|---|
+| COPY in | 0.84 | 5.17 | 4.82 | 0.17x |
+| CREATE INDEX | 0.37 | 3.84 | 2.52 | 0.15x |
+| CREATE UNIQUE INDEX | 0.25 | 2.30 | 2.23 | 0.11x |
+| COPY out | 0.42 | 1.63 | 1.61 | 0.26x |
+| INSERT … SELECT | 0.72 | 2.90 | 2.99 | 0.24x |
+| UPDATE half | 4.36 | 3.74 | 3.40 | 1.28x |
+| DELETE a quarter | 0.21 | 2.68 | 2.35 | 0.09x |
+| VACUUM | 0.24 | 0.79 | 0.82 | 0.29x |
+| ANALYZE | 0.10 | 1.47 | 1.27 | 0.08x |
+| count(*) after | 0.04 | 0.12 | 0.16 | 0.25x |
+| peak memory | 343–363 MB | 1,754 MB | 879 MB | |
+
+COPY in's own peak, by RSS sampled during the step: 1,488 MB before, about 200 MB after.
+PostgreSQL's peak is a fresh container's (`anon + shmem`). One transaction of 5M rows
+(`INSERT INTO big SELECT g, g % 1000, md5(g::text) FROM generate_series(1, 5000000) g`, a
+primary key) peaks at 6.0 GB before and 2.6 GB after. Most of what is left is a lock per
+inserted key (see "Where it is still slower" item 2).
+
+### Restoring agent 54's scale case (`tests/pg_dump/scale_setup.sql`, `-v big=20000000`)
+
+The case is 3,000 tables, 1,000 views and a 20M-row table with two indexes. It was built in
+PostgreSQL, dumped once with `pg_dump -Fc` (598 MB), then restored serially with
+`pg_restore` into an empty database on each server. Each engine had a fresh data directory
+(`--cache-mb 2048`). All three restores give the same `count(*)` and `sum(a)` of the big
+table, with no errors.
+
+| | PostgreSQL | before | after |
+|---|---|---|---|
+| `pg_restore` (s) | 60 | 308 | 299 |
+| peak memory | | 29.8 GB | 4.3 GB |
+
+Agent 54 measured 453 s for the engine's restore on a busier machine. The time left is the
+20M-row COPY and the two index builds (item 2 below). The memory left is mostly the 2 GB
+block cache filled by those scans, plus the unique index build's key hashes
+(`UniqueKeys`, about 45 bytes a row).
+
+### What changed
+
+1. **A transaction's writes spill to disk** (`txn/spill.rs`). Past `txn_spill_bytes`
+   (64 MB) the write buffer and its undo journal go to a sorted run and the buffer starts
+   empty. A run is a private, unsynced SST under `<db>/spill/<txn>/`, and every version in it
+   is stamped with its journal position. Reads go through the buffer, then the runs (as of a
+   statement snapshot's or cursor's mark, with the store's own version rules), then the
+   store. `ROLLBACK TO` a savepoint taken before a spill rewrites the one run that straddles
+   it; one taken after works on the buffer as before. Runs merge in tiers of 4, so a
+   transaction of n spills keeps O(log n) of them.
+2. **Spilled commits stream** (`Store::commit_sorted`). The buffer merged over the runs goes
+   straight into the commit's ingested SST, and the snapshot-isolation conflict check runs
+   per key as it is written. Ingested SSTs are written uncompressed (compaction compresses
+   them when they move to L1), with the bloom filter sized up front instead of a hash per
+   key held to the end.
+3. **COPY FROM reads its data as the insert takes it** (`Session::copy_in_stream`,
+   `CopyReader`). The rows go in a batch at a time, CopyFrom's buffer (1,000 rows or 64 kB),
+   each batch parsed whole first; a NOT NULL violation still stops the reading at its row.
+   The error context is `Frame::Copy`, formatted only when shown (it was a `format!` per row).
+4. **Index builds write sorted runs** (`Txn::put_new_index_entries`). A build past half the
+   spill threshold (32 MB of entries) sorts each batch and hands it to the transaction as a
+   run instead of one `BTreeMap` insert per entry. Smaller builds are unchanged.
+5. **Per-row costs on the write path:**
+   - `changed_since_snapshot` answers without reading the store when nothing has committed
+     since the snapshot (`Store::last_assigned_ts`). It was a bloom probe of every SST per
+     row a DELETE or UPDATE locks.
+   - The lock manager's lock and row maps use the crate's fast hasher, and a row lock no
+     longer clones its holder list.
+   - `track_counts` and `session_replication_role` are derived settings, not a String-keyed
+     lookup per row written.
+   - Bloom filter bits are computed by multiplication (`sst::FastMod`, the same bits as `%`:
+     `fast_mod_is_rem`).
+   - ANALYZE decodes only the rows its sample keeps (the same picks, the same statistics).
+
+### Durability, crash recovery and the storage format
+
+- No storage format change: runs never enter the MANIFEST, and `Store::open` deletes the
+  `spill/` directory, which only a crash can leave behind. A spilled transaction commits as
+  one ingested SST, as agent 43's big commits do.
+- `tests/crash_bulk.rs`: a child process (the test binary run again) commits batches of
+  COPY plus an UPDATE of the same rows, each spilling (a 256 kB threshold), and is killed
+  with SIGKILL at three moments. Each reopen holds every batch whose COMMIT returned and all
+  or none of the one cut short, and index scans count what the table holds. No spilled
+  files are left.
+- `tests/txn_spill.rs`: one script with a 2 kB buffer (hundreds of spills) and with the
+  default one gives the same results. It covers the transaction's own writes, an index
+  built after a spill, a cursor opened before an UPDATE, savepoints rolled back across spills,
+  unique violations of spilled keys, reverse scans, REPEATABLE READ, rollback, and a reopen.
+- The whole crate suite passes with `ROLL_TXN_SPILL_BYTES=4096`, where nearly every
+  transaction with more than a few rows spills: goldens in both modes, wire, storage format
+  and upgrade, catalog storage, big tables, parallel scans.
+
+### Verification (round 19, agent 69)
+
+- `cargo test -p pg-engine` in full, at the default threshold and with
+  `ROLL_TXN_SPILL_BYTES=4096`; `cargo clippy -p pg-engine --all-targets` adds no warnings.
+- The regression suite in full (debug, a private reference): 51,148 / 51,150, with no unit
+  newly differing or newly matching against the committed `results.tsv`.
+- `difftest smoke` passes. The isolation suite in full matches STATUS.md's current score:
+  109 / 122 specs, 1,616 / 1,648 permutations, 12,154 / 12,238 steps.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:
@@ -1420,18 +1531,30 @@ In rough order of what it costs users:
    projection mask passed down to scans), a batch (vector) interface between scans, filters,
    projections and aggregates with typed column arrays, `i128` / scaled-integer numeric
    accumulators, and running a plan's Gather over worker threads.
-2. **Bulk loads, CREATE INDEX, DELETE, VACUUM, ANALYZE (3–10x slower; 4–7x PostgreSQL's
-   memory).** Round 18 (agent 43) streamed the index builds, VACUUM, ANALYZE and ALTER
-   TABLE's checks, and ingests big commits as SSTs (the TPC-H load's peak 18 GB → 4.8 GB, the
-   1M bulk run's 2.7 → 2.3 GB). What is left: COPY FROM parses all of its rows into
-   expressions before the first goes in (about ten times the input; reading them as the
-   insert takes them, as CopyFrom does, while still failing early on a bad line, is the
-   fix); a transaction's writes are still buffered whole until commit (`Txn::writes`, a
-   `BTreeMap` with a journal entry per write: about 230 bytes per written key, 140 for an
-   index build's, 0.9 GB for lineitem's primary key; spilling a big buffer to sorted runs,
-   merged into the ingested SST at commit, would bound it); per-row executor and heap-model
-   work dominates the time (COPY spends ~7 µs a row against PostgreSQL's ~1.2); an index
-   build inserts its entries into that buffer one at a time instead of writing a sorted run.
+2. **Bulk loads, CREATE INDEX, DELETE, VACUUM, ANALYZE (3–10x slower).** Round 18 (agent 43)
+   streamed the index builds, VACUUM, ANALYZE and ALTER TABLE's checks, and ingests big
+   commits as SSTs. Round 19 (agent 69) bounded the memory: a transaction's write buffer
+   spills to sorted runs on disk, COPY FROM reads its data a batch at a time, and index builds
+   write sorted runs (the 1M bulk run's peak 1.75 GB → 0.85 GB). What is left:
+   - Per-row executor and heap-model work dominates the time. COPY spends ~5 µs a row against
+     PostgreSQL's ~0.8. A row goes through `Expr` constants, `InsertNode`'s general path,
+     the heap model's key map for the first 400k rows, a `BTreeMap` buffer insert and a row
+     lock.
+   - Locks held per row until commit: a row lock per row written or locked (a lock-manager
+     entry and a key copy in `Txn::row_locks`, about 160 bytes a row), and for a table with
+     a unique index a heavyweight lock and key holder per inserted key (the engine's stand-in
+     for PostgreSQL's dirty-snapshot check of uncommitted index entries; a few hundred bytes a
+     key, in `LockManager::locks`, `Txn::locks_held` and the lock journal). A 5M-row INSERT …
+     SELECT into a table with a primary key peaks at 2.6 GB (6.0 GB before), and an UPDATE of
+     all of it adds 0.8 GB. PostgreSQL keeps both kinds in the tuples and index entries.
+     Bounding them means a compact per-transaction form for bulk locks, such as sorted runs
+     probed through a bloom filter, that other transactions' conflict checks consult.
+   - ANALYZE of a table too big to model measures every row for the planner's relpages and
+     index pages: the text width of every value and an index sort key per row, then sorted.
+     The sample itself is cheap. Estimating those from the sample would change relpages
+     (TPC-H plans read them; agent 64).
+   - An index build writes its entries twice: as sorted runs, then into the commit's SST.
+     Linking runs in as L0 files would need a per-file commit timestamp in the SST format.
 3. **Index scans over many rows (range scans, secondary lookups: 0.2–0.4x at 8 clients over
    the wire in round 17).** Round 18 (agent 43) batched an index scan's heap fetches and
    answers index-only scans of big tables from the entries (1.2–1.4x in-process). What is

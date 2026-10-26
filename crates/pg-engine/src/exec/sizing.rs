@@ -43,8 +43,8 @@ fn max_versions() -> usize {
     MAX_VERSIONS_HERE.with(|m| m.get())
 }
 /// COPY's multi-insert buffer limits (MAX_BUFFERED_TUPLES, MAX_BUFFERED_BYTES).
-const COPY_TUPLES: usize = 1000;
-const COPY_BYTES: usize = 65535;
+pub const COPY_TUPLES: usize = 1000;
+pub const COPY_BYTES: usize = 65535;
 
 #[derive(Default)]
 pub struct RelFiles {

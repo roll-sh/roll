@@ -434,12 +434,13 @@ struct RowHold {
 
 #[derive(Default)]
 struct State {
-    locks: HashMap<Vec<u8>, Entry>,
+    /// (Keyed with the fast hasher: a row lock is taken for every row a statement writes.)
+    locks: crate::exec::fasthash::HashMap<Vec<u8>, Entry>,
     /// Waiting backends' requests (a backend waits for one lock at a time).
     waiters: HashMap<u64, Waiter>,
     /// The process id of each backend.
     pids: HashMap<u64, i32>,
-    rows: HashMap<Vec<u8>, Vec<RowHold>>,
+    rows: crate::exec::fasthash::HashMap<Vec<u8>, Vec<RowHold>>,
 }
 
 #[derive(Default)]
@@ -799,10 +800,12 @@ impl LockManager {
         };
         loop {
             let mut s = self.state.lock();
-            if let Some(pid) = pid_of(proc) {
+            if let Some(pid) = pid_of(proc)
+                && s.pids.get(&proc) != Some(&pid)
+            {
                 s.pids.insert(proc, pid);
             }
-            let holds = s.rows.get(row).cloned().unwrap_or_default();
+            let holds: &[RowHold] = s.rows.get(row).map_or(&[], |h| h.as_slice());
             if first {
                 first = false;
                 let mine: Vec<&RowHold> = holds.iter().filter(|h| h.owner == owner).collect();
