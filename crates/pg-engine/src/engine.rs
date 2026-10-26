@@ -61,6 +61,9 @@ pub struct EngineOptions {
     /// itself, reached without a host), `host[:port]`, `*[:port]`, `addr/bits` (see
     /// `remote::outbound`). Empty (the default): refused for every role.
     pub outbound: Vec<String>,
+    /// max_prepared_transactions: how many transactions may be prepared at once (PREPARE
+    /// TRANSACTION). 0 (the default, as PostgreSQL's): two-phase commit is disabled.
+    pub max_prepared_transactions: usize,
 }
 
 impl Default for EngineOptions {
@@ -77,6 +80,7 @@ impl Default for EngineOptions {
             shared_preload_libraries: Vec::new(),
             locale: Default::default(),
             outbound: Vec::new(),
+            max_prepared_transactions: 0,
         }
     }
 }
@@ -154,6 +158,10 @@ struct Registry {
     /// lc_monetary, lc_numeric, lc_time; empty: C, a registry from before they were kept).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     config: Vec<(String, String)>,
+    /// Databases that may hold prepared transactions' state records (added before a
+    /// transaction there prepares): opened at startup to recover them.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    prepared_dbs: BTreeSet<u32>,
 }
 
 /// A connected client, for pg_stat_activity and cancel / terminate.
@@ -204,6 +212,8 @@ pub struct Engine {
     shared_history: Mutex<std::collections::VecDeque<(u64, Arc<SharedCatalog>)>>,
     oids: Arc<OidGen>,
     xids: Arc<crate::txn::xids::Xids>,
+    /// The cluster's prepared transactions.
+    twophase: Arc<crate::txn::twophase::TwoPhase>,
     backends: Mutex<HashMap<i32, Backend>>,
     next_pid: AtomicI32,
     /// Held while a database's indexes are brought to the current key format.
@@ -315,6 +325,20 @@ impl Engine {
                     }
                 }
             }).with_oldest(oldest_xid));
+            let weak = me.clone();
+            let twophase = Arc::new(crate::txn::twophase::TwoPhase::new(
+                opts.max_prepared_transactions,
+                move |db| {
+                    if let Some(e) = weak.upgrade() {
+                        let mut r = e.registry.lock();
+                        if r.prepared_dbs.insert(db)
+                            && let Err(err) = e.save(&r)
+                        {
+                            warn!(error = %err, "saving the registry failed");
+                        }
+                    }
+                },
+            ));
             Engine {
                 opts,
                 cache,
@@ -325,6 +349,7 @@ impl Engine {
                 shared_history: Mutex::new(Default::default()),
                 oids,
                 xids,
+                twophase,
                 index_upgrade: Mutex::new(()),
                 backends: Mutex::new(HashMap::new()),
                 next_pid: AtomicI32::new(1000 + (std::process::id() as i32 % 1000) * 10),
@@ -338,6 +363,15 @@ impl Engine {
             }
         });
         engine.init_shared()?;
+        // Databases with prepared transactions open now, so those are there (in
+        // pg_prepared_xacts, holding their locks) from the start.
+        let prepared: Vec<DbEntry> = {
+            let r = engine.registry.lock();
+            r.databases.iter().filter(|d| r.prepared_dbs.contains(&d.oid)).cloned().collect()
+        };
+        for e in &prepared {
+            engine.open_db(e)?;
+        }
         let weak = Arc::downgrade(&engine);
         let tick =
             (engine.opts.idle_close / 4).clamp(Duration::from_millis(100), Duration::from_secs(10));
@@ -421,6 +455,14 @@ impl Engine {
         db.set_locale(Arc::new(locale));
         db.set_oids(self.oids.clone());
         db.set_xids(self.xids.clone());
+        db.set_twophase(self.twophase.clone());
+        // Its prepared transactions, with their locks, before any session can see it.
+        if db.recover_prepared()? == 0 {
+            let mut r = self.registry.lock();
+            if r.prepared_dbs.remove(&entry.oid) {
+                let _ = self.save(&r);
+            }
+        }
         info!(database = %entry.name, "opened database");
         open.dbs.insert(entry.oid, db.clone());
         Ok(db)
@@ -1339,6 +1381,9 @@ impl Engine {
                 warn!(database = %db.name, error = %e, "close failed");
             }
         }
+        // Prepared transactions go from memory (their state records stay stored, for the
+        // next start); they hold their databases.
+        self.twophase.clear();
     }
 
     /// Close a database that must have no sessions (DROP / RENAME / template copy), and keep
@@ -1392,6 +1437,29 @@ impl Engine {
         } else {
             format!("There are {n} other sessions using the database.")
         }
+    }
+
+    fn prepared_detail(n: usize) -> String {
+        if n == 1 {
+            "There is 1 prepared transaction using the database.".to_string()
+        } else {
+            format!("There are {n} prepared transactions using the database.")
+        }
+    }
+
+    /// The "is being accessed by other users" error with errdetail_busy_db's detail.
+    fn busy_with(name: &str, sessions: usize, prepared: usize) -> Error {
+        let e = Error::new(
+            code::OBJECT_IN_USE,
+            format!("database \"{name}\" is being accessed by other users"),
+        );
+        e.detail(match (sessions, prepared) {
+            (0, p) => Self::prepared_detail(p),
+            (s, 0) => Self::others_detail(s),
+            (s, p) => format!(
+                "There are {s} other session(s) and {p} prepared transaction(s) using the database."
+            ),
+        })
     }
 
     fn save(&self, r: &Registry) -> Result<()> {
@@ -1572,6 +1640,12 @@ impl Cluster for Engine {
                     )
                 })?;
                 let n = self.sessions_on(e.oid, None).len();
+                let p = self.twophase.in_database(e.oid);
+                if p > 0 {
+                    let mut err = Self::busy_with(t, n, p);
+                    err.message = format!("source database \"{t}\" is being accessed by other users");
+                    return Err(err);
+                }
                 if n > 0 {
                     return Err(Self::source_busy(t, n));
                 }
@@ -1655,10 +1729,19 @@ impl Cluster for Engine {
                 "cannot drop the currently open database",
             ));
         }
+        let prepared = self.twophase.in_database(entry.oid);
+        if force && prepared > 0 {
+            // TerminateOtherDBBackends.
+            return Err(Error::new(
+                code::OBJECT_IN_USE,
+                format!("database \"{name}\" is being used by prepared transactions"),
+            )
+            .detail(Self::prepared_detail(prepared)));
+        }
         let users = self.sessions_on(entry.oid, None);
-        if !users.is_empty() {
+        if !users.is_empty() || prepared > 0 {
             if !force {
-                return Err(Self::busy(name, users.len()));
+                return Err(Self::busy_with(name, users.len(), prepared));
             }
             for pid in &users {
                 self.terminate_backend(*pid);

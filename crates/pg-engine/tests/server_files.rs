@@ -22,6 +22,7 @@ fn open(data: &Path, files: Option<&Path>) -> Arc<Engine> {
         shared_preload_libraries: Vec::new(),
         locale: Default::default(),
         outbound: Vec::new(),
+        max_prepared_transactions: 0,
     })
     .unwrap()
 }

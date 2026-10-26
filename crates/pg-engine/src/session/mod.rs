@@ -12,6 +12,7 @@ pub mod ddl;
 pub mod settings;
 pub mod state;
 mod pgss;
+mod prepared;
 pub mod sink;
 mod utility;
 pub(crate) use utility::{LIST_QUOTE, split_guc_list};
@@ -2373,49 +2374,29 @@ impl Session {
                 Ok(QueryResult::command("ROLLBACK"))
             }
             K::TransStmtPrepare if self.status == TxnStatus::InBlock => {
-                let temp = self.state.temp_used.get();
-                // (XACT_EVENT_PRE_PREPARE: postgres_fdw refuses before anything else.)
-                let fdw = crate::ext::postgres_fdw::connection::pre_prepare(&self.state);
-                self.finish_txn(false)?;
-                fdw?;
-                Err(if temp {
-                    Error::new(
-                        code::FEATURE_NOT_SUPPORTED,
-                        "cannot PREPARE a transaction that has operated on temporary objects",
-                    )
-                } else {
-                    Error::new(
-                        code::OBJECT_NOT_IN_PREREQUISITE_STATE,
-                        "prepared transactions are disabled",
-                    )
-                    .hint("Set \"max_prepared_transactions\" to a nonzero value.")
-                })
+                self.prepare_txn(&t.gid)?;
+                Ok(QueryResult::command("PREPARE TRANSACTION"))
             }
-            // FinishPreparedTransaction: no transaction is ever prepared here, so LockGXact
-            // finds none (it doesn't look at max_prepared_transactions).
+            // FinishPreparedTransaction (PreventInTransactionBlock first).
             K::TransStmtCommitPrepared | K::TransStmtRollbackPrepared => {
-                let what = if kind == K::TransStmtCommitPrepared {
-                    "COMMIT PREPARED"
-                } else {
-                    "ROLLBACK PREPARED"
-                };
+                let commit = kind == K::TransStmtCommitPrepared;
+                let what = if commit { "COMMIT PREPARED" } else { "ROLLBACK PREPARED" };
                 if self.status != TxnStatus::Idle {
                     return Err(Error::new(
                         code::ACTIVE_SQL_TRANSACTION,
                         format!("{what} cannot run inside a transaction block"),
                     ));
                 }
-                Err(Error::new(
-                    code::UNDEFINED_OBJECT,
-                    format!("prepared transaction with identifier \"{}\" does not exist", t.gid),
-                ))
+                self.finish_prepared(&t.gid, commit)?;
+                Ok(QueryResult::command(what))
             }
+            // Outside a block (EndTransactionBlock's warning; no PREPARE result tag).
             K::TransStmtPrepare => {
-                Err(Error::new(
-                    code::OBJECT_NOT_IN_PREREQUISITE_STATE,
-                    "prepared transactions are disabled",
-                )
-                .hint("Set \"max_prepared_transactions\" to a nonzero value."))
+                self.raise_notice(warning(
+                    code::NO_ACTIVE_SQL_TRANSACTION,
+                    "there is no transaction in progress",
+                ));
+                Ok(QueryResult::command("ROLLBACK"))
             }
             _ => Err(crate::error::unsupported("this transaction command")),
         }
@@ -2816,15 +2797,16 @@ impl Drop for Session {
     }
 }
 
+/// IsTransactionExitStmt: what a failed transaction block still runs.
 fn ends_failed_txn(n: Option<&NodeEnum>) -> bool {
     use pb::TransactionStmtKind as K;
     match n {
         Some(NodeEnum::TransactionStmt(t)) => matches!(
             K::try_from(t.kind),
             Ok(K::TransStmtCommit
+                | K::TransStmtPrepare
                 | K::TransStmtRollback
-                | K::TransStmtRollbackTo
-                | K::TransStmtRollbackPrepared)
+                | K::TransStmtRollbackTo)
         ),
         _ => false,
     }
@@ -3004,7 +2986,10 @@ fn committed_notify(state: &SessionState, committed: bool, notes: &[(String, Str
     let hub = &state.db.notify;
     for (listen, ch) in listens {
         match (listen, ch) {
-            (true, Some(ch)) => hub.listen(state.pid, &ch),
+            (true, Some(ch)) => {
+                state.ever_listened.set(true);
+                hub.listen(state.pid, &ch)
+            }
             (_, ch) => hub.unlisten(state.pid, ch.as_deref()),
         }
     }

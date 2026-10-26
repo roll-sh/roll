@@ -88,7 +88,12 @@ fn run_engine(path: &Path) -> String {
     let store = open_store(dir.path());
     let src = std::fs::read_to_string(path).unwrap();
     let locale = common::createdb_locale(common::createdb_options(&src));
-    let mut s = common::engine_session_with(store, &db_name(path), locale);
+    let mut s = common::engine_session_prepared(
+        store,
+        &db_name(path),
+        locale,
+        common::max_prepared_transactions(&src),
+    );
     set_raw_order(wants_raw_order(&src));
     let mut out = String::new();
     for stmt in statements(&src) {
@@ -199,28 +204,38 @@ fn golden_wire() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let opts = pg_engine::engine::EngineOptions {
-        data_dir: dir.path().to_path_buf(),
-        cache_bytes: 8 << 20,
-        memtable_bytes: 2 << 20,
-        sync: false,
-        idle_close: std::time::Duration::from_millis(200),
-        superuser: "postgres".into(),
-        password: Some("pw".into()),
-        server_files: None,
-        shared_preload_libraries: Vec::new(),
-        locale: Default::default(),
-        outbound: Vec::new(),
-    };
-    let engine = pg_engine::engine::Engine::open(opts).unwrap();
-    let server = pg_engine::server::ServerOptions {
-        auth: pg_engine::server::AuthMethod::ScramSha256,
-    };
-    let addr = pg_engine::server::spawn(engine.clone(), "127.0.0.1:0", server)
-        .unwrap()
-        .to_string();
-    compare(&sql_files(), "wire.actual", |f| run_wire(&addr, f));
-    engine.shutdown();
+    // (One engine per max_prepared_transactions the files ask for: a server setting.)
+    let files = sql_files();
+    let max_of = |f: &PathBuf| common::max_prepared_transactions(&std::fs::read_to_string(f).unwrap());
+    let mut settings: Vec<usize> = files.iter().map(max_of).collect();
+    settings.sort();
+    settings.dedup();
+    for max in settings {
+        let mine: Vec<PathBuf> = files.iter().filter(|f| max_of(f) == max).cloned().collect();
+        let opts = pg_engine::engine::EngineOptions {
+            data_dir: dir.path().join(max.to_string()),
+            cache_bytes: 8 << 20,
+            memtable_bytes: 2 << 20,
+            sync: false,
+            idle_close: std::time::Duration::from_millis(200),
+            superuser: "postgres".into(),
+            password: Some("pw".into()),
+            server_files: None,
+            shared_preload_libraries: Vec::new(),
+            locale: Default::default(),
+            outbound: Vec::new(),
+            max_prepared_transactions: max,
+        };
+        let engine = pg_engine::engine::Engine::open(opts).unwrap();
+        let server = pg_engine::server::ServerOptions {
+            auth: pg_engine::server::AuthMethod::ScramSha256,
+        };
+        let addr = pg_engine::server::spawn(engine.clone(), "127.0.0.1:0", server)
+            .unwrap()
+            .to_string();
+        compare(&mine, "wire.actual", |f| run_wire(&addr, f));
+        engine.shutdown();
+    }
 }
 
 fn run_wire(addr: &str, path: &Path) -> String {

@@ -36,6 +36,9 @@
 //!   canceled after it, and the spec given up after twice it.
 //! - `PGISOLATION_PORT` (55700), `PGISOLATION_REF` (`127.0.0.1:55499`), `PGISOLATION_PASSWORD`
 //!   (`pw`), `PGISOLATION_ENGINE_BIN` (default: the one cargo built).
+//! - `PGISOLATION_MAX_PREPARED`: the engine's max_prepared_transactions (default 0), for a
+//!   reference started with `-c max_prepared_transactions=<n>` (the 2PC specs:
+//!   prepared-transactions, prepared-transactions-cic, stats).
 //! - `PGISOLATION_DB`: the database name (default `isolation_regression`, the one
 //!   pg_isolation_regress uses; specs naming it get the name given here instead).
 //! - `PGISOLATION_REPORT_DIR`: where `REPORT.md` and `hunks/` go (default `tests/isolation`).
@@ -118,7 +121,15 @@ fn pg_isolation() {
     }
     let mut schedule = read_schedule(&cfg.src.join("isolation_schedule"));
     if let Some(only) = &cfg.only {
+        // (Specs outside the schedule, such as installcheck-prepared-txns' 2PC ones, run when
+        // named.)
+        let extra: Vec<_> = only
+            .iter()
+            .filter(|t| !schedule.contains(t) && cfg.src.join("specs").join(format!("{t}.spec")).exists())
+            .cloned()
+            .collect();
         schedule.retain(|t| only.contains(t));
+        schedule.extend(extra);
     }
     schedule.retain(|t| !cfg.skip.contains(t));
     if !cfg.report_only {
@@ -1635,6 +1646,12 @@ impl EngineProc {
                 "--no-sync",
                 "--idle-close-secs",
                 "100000",
+            ])
+            // (A reference started with max_prepared_transactions runs the 2PC specs'
+            // prepared paths: the engine takes the same setting.)
+            .args([
+                "--max-prepared-transactions",
+                &std::env::var("PGISOLATION_MAX_PREPARED").unwrap_or_else(|_| "0".into()),
             ])
             .env("RUST_LOG", "warn")
             .env("RUST_BACKTRACE", "0")

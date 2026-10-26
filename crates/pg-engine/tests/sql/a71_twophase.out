@@ -1,0 +1,496 @@
+> DROP ROLE IF EXISTS regress_a71_2pc
+NOTICE 00000: role "regress_a71_2pc" does not exist, skipping
+-- DROP ROLE
+
+> DROP ROLE IF EXISTS regress_a71_2pc_other
+NOTICE 00000: role "regress_a71_2pc_other" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE regress_a71_2pc
+-- CREATE ROLE
+
+> CREATE ROLE regress_a71_2pc_other
+-- CREATE ROLE
+
+> CREATE TABLE tp (id int PRIMARY KEY, v text)
+-- CREATE TABLE
+
+> GRANT ALL ON tp TO regress_a71_2pc, regress_a71_2pc_other
+-- GRANT
+
+> INSERT INTO tp VALUES (1, 'a'), (2, 'b')
+-- INSERT 0 2
+
+> SHOW max_prepared_transactions
+max_prepared_transactions:text
+5
+-- SHOW
+
+> PREPARE TRANSACTION 'a71_none'
+WARNING 25P01: there is no transaction in progress
+-- ROLLBACK
+
+> SELECT count(*) FROM pg_prepared_xacts
+count:int8
+0
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> UPDATE tp SET v = 'x' WHERE id = 1
+-- UPDATE 1
+
+> INSERT INTO tp VALUES (3, 'c')
+-- INSERT 0 1
+
+> PREPARE TRANSACTION 'a71_one'
+-- PREPARE TRANSACTION
+
+> SELECT * FROM tp ORDER BY id
+id:int4 | v:text
+1 | a
+2 | b
+-- SELECT 2
+
+> SELECT gid, owner FROM pg_prepared_xacts ORDER BY gid
+gid:text | owner:name
+a71_one | postgres
+-- SELECT 1
+
+> SELECT transaction::text::bigint > 0 AS has_xid, prepared <= now() AS ok FROM pg_prepared_xacts
+has_xid:bool | ok:bool
+t | t
+-- SELECT 1
+
+> SELECT locktype, mode, granted, pid IS NULL AS no_pid, virtualtransaction LIKE '-1/%' AS dummy
+>   FROM pg_locks WHERE pid IS NULL AND locktype IN ('relation', 'transactionid') ORDER BY 1, 2
+locktype:text | mode:text | granted:bool | no_pid:bool | dummy:bool
+relation | RowExclusiveLock | t | t | f
+relation | RowExclusiveLock | t | t | f
+transactionid | ExclusiveLock | t | t | f
+-- SELECT 3
+
+> SELECT * FROM tp WHERE id = 1 FOR UPDATE NOWAIT
+ERROR 55P03: could not obtain lock on row in relation "tp"
+
+> BEGIN
+-- BEGIN
+
+> LOCK TABLE tp IN ACCESS EXCLUSIVE MODE NOWAIT
+ERROR 55P03: could not obtain lock on relation "tp"
+
+> ROLLBACK
+-- ROLLBACK
+
+> UPDATE tp SET v = 'free' WHERE id = 2
+-- UPDATE 1
+
+> BEGIN
+-- BEGIN
+
+> NOTIFY a71_chan
+-- NOTIFY
+
+> PREPARE TRANSACTION 'a71_one'
+ERROR 42710: transaction identifier "a71_one" is already in use
+
+> SELECT gid FROM pg_prepared_xacts ORDER BY gid
+gid:text
+a71_one
+-- SELECT 1
+
+> COMMIT PREPARED 'a71_nosuch'
+ERROR 42704: prepared transaction with identifier "a71_nosuch" does not exist
+
+> ROLLBACK PREPARED 'a71_nosuch'
+ERROR 42704: prepared transaction with identifier "a71_nosuch" does not exist
+
+> BEGIN
+-- BEGIN
+
+> COMMIT PREPARED 'a71_one'
+ERROR 25001: COMMIT PREPARED cannot run inside a transaction block
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> ROLLBACK PREPARED 'a71_one'
+ERROR 25001: ROLLBACK PREPARED cannot run inside a transaction block
+
+> ROLLBACK
+-- ROLLBACK
+
+> SET ROLE regress_a71_2pc
+-- SET
+
+> COMMIT PREPARED 'a71_one'
+ERROR 42501: permission denied to finish prepared transaction
+HINT: Must be superuser or the user that prepared the transaction.
+
+> RESET ROLE
+-- RESET
+
+> COMMIT PREPARED 'a71_one'
+-- COMMIT PREPARED
+
+> COMMIT PREPARED 'a71_one'
+ERROR 42704: prepared transaction with identifier "a71_one" does not exist
+
+> SELECT * FROM tp ORDER BY id
+id:int4 | v:text
+1 | x
+2 | free
+3 | c
+-- SELECT 3
+
+> SELECT count(*) FROM pg_prepared_xacts
+count:int8
+0
+-- SELECT 1
+
+> SET ROLE regress_a71_2pc
+-- SET
+
+> BEGIN
+-- BEGIN
+
+> DELETE FROM tp WHERE id = 3
+-- DELETE 1
+
+> PREPARE TRANSACTION 'a71_role'
+-- PREPARE TRANSACTION
+
+> SELECT gid, owner FROM pg_prepared_xacts
+gid:text | owner:name
+a71_role | regress_a71_2pc
+-- SELECT 1
+
+> SET ROLE regress_a71_2pc_other
+-- SET
+
+> ROLLBACK PREPARED 'a71_role'
+ERROR 42501: permission denied to finish prepared transaction
+HINT: Must be superuser or the user that prepared the transaction.
+
+> SET ROLE regress_a71_2pc
+-- SET
+
+> ROLLBACK PREPARED 'a71_role'
+-- ROLLBACK PREPARED
+
+> RESET ROLE
+-- RESET
+
+> SELECT * FROM tp ORDER BY id
+id:int4 | v:text
+1 | x
+2 | free
+3 | c
+-- SELECT 3
+
+> BEGIN
+-- BEGIN
+
+> PREPARE TRANSACTION 'gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg'
+ERROR 22023: transaction identifier "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg" is too long
+
+> BEGIN
+-- BEGIN
+
+> LISTEN a71_chan
+-- LISTEN
+
+> PREPARE TRANSACTION 'a71_listen'
+ERROR 0A000: cannot PREPARE a transaction that has executed LISTEN, UNLISTEN, or NOTIFY
+
+> BEGIN
+-- BEGIN
+
+> NOTIFY a71_chan, 'x'
+-- NOTIFY
+
+> PREPARE TRANSACTION 'a71_notify'
+ERROR 0A000: cannot PREPARE a transaction that has executed LISTEN, UNLISTEN, or NOTIFY
+
+> BEGIN
+-- BEGIN
+
+> UNLISTEN *
+-- UNLISTEN
+
+> PREPARE TRANSACTION 'a71_unlisten'
+-- PREPARE TRANSACTION
+
+> ROLLBACK PREPARED 'a71_unlisten'
+-- ROLLBACK PREPARED
+
+> BEGIN ISOLATION LEVEL REPEATABLE READ
+-- BEGIN
+
+> SELECT pg_export_snapshot() IS NOT NULL
+?column?:bool
+t
+-- SELECT 1
+
+> PREPARE TRANSACTION 'a71_snap'
+ERROR 0A000: cannot PREPARE a transaction that has exported snapshots
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c CURSOR WITH HOLD FOR SELECT * FROM tp
+-- DECLARE CURSOR
+
+> PREPARE TRANSACTION 'a71_hold'
+ERROR 0A000: cannot PREPARE a transaction that has created a cursor WITH HOLD
+
+> BEGIN
+-- BEGIN
+
+> CREATE TEMP TABLE a71_tmp (a int)
+-- CREATE TABLE
+
+> PREPARE TRANSACTION 'a71_temp'
+ERROR 0A000: cannot PREPARE a transaction that has operated on temporary objects
+
+> SELECT pg_advisory_lock(71)
+pg_advisory_lock:void
+
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> SELECT pg_advisory_xact_lock(71)
+pg_advisory_xact_lock:void
+
+-- SELECT 1
+
+> PREPARE TRANSACTION 'a71_both'
+ERROR 0A000: cannot PREPARE while holding both session-level and transaction-level locks on the same object
+
+> SELECT pg_advisory_unlock(71)
+pg_advisory_unlock:bool
+t
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> SELECT 1/0
+ERROR 22012: division by zero
+
+> PREPARE TRANSACTION 'a71_failed'
+-- ROLLBACK
+
+> SELECT count(*) FROM pg_prepared_xacts
+count:int8
+0
+-- SELECT 1
+
+> CREATE TABLE tp_ref (id int REFERENCES tp DEFERRABLE INITIALLY DEFERRED)
+-- CREATE TABLE
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO tp_ref VALUES (99)
+-- INSERT 0 1
+
+> PREPARE TRANSACTION 'a71_deferred'
+ERROR 23503: insert or update on table "tp_ref" violates foreign key constraint "tp_ref_id_fkey"
+DETAIL: Key (id)=(99) is not present in table "tp".
+OBJECTS: schema=public table=tp_ref constraint=tp_ref_id_fkey
+
+> SELECT count(*) FROM pg_prepared_xacts
+count:int8
+0
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> CREATE TABLE tp_new (a int)
+-- CREATE TABLE
+
+> INSERT INTO tp_new VALUES (1)
+-- INSERT 0 1
+
+> SAVEPOINT s1
+-- SAVEPOINT
+
+> INSERT INTO tp_new VALUES (2)
+-- INSERT 0 1
+
+> ROLLBACK TO s1
+-- ROLLBACK
+
+> SAVEPOINT s2
+-- SAVEPOINT
+
+> INSERT INTO tp_new VALUES (3)
+-- INSERT 0 1
+
+> SET LOCAL work_mem = '2MB'
+-- SET
+
+> SET search_path = public, pg_catalog
+-- SET
+
+> DROP TABLE tp_ref
+-- DROP TABLE
+
+> DECLARE c2 CURSOR FOR SELECT 1
+-- DECLARE CURSOR
+
+> PREPARE TRANSACTION 'a71_ddl'
+-- PREPARE TRANSACTION
+
+> FETCH c2
+ERROR 34000: cursor "c2" does not exist
+
+> SHOW work_mem
+work_mem:text
+4MB
+-- SHOW
+
+> SHOW search_path
+search_path:text
+public, pg_catalog
+-- SHOW
+
+> RESET search_path
+-- RESET
+
+> SELECT * FROM tp_new
+ERROR 42P01: relation "tp_new" does not exist (at 15)
+
+> SELECT count(*) FROM pg_class WHERE relname = 'tp_ref'
+count:int8
+1
+-- SELECT 1
+
+> COMMIT PREPARED 'a71_ddl'
+-- COMMIT PREPARED
+
+> SELECT * FROM tp_new ORDER BY a
+a:int4
+1
+3
+-- SELECT 2
+
+> SELECT count(*) FROM pg_class WHERE relname = 'tp_ref'
+count:int8
+0
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> SELECT * FROM tp WHERE id = 1 FOR SHARE
+id:int4 | v:text
+1 | x
+-- SELECT 1
+
+> PREPARE TRANSACTION 'a71_p1'
+-- PREPARE TRANSACTION
+
+> BEGIN
+-- BEGIN
+
+> SELECT * FROM tp WHERE id = 1 FOR SHARE
+id:int4 | v:text
+1 | x
+-- SELECT 1
+
+> PREPARE TRANSACTION 'a71_p2'
+-- PREPARE TRANSACTION
+
+> BEGIN
+-- BEGIN
+
+> SELECT 1
+?column?:int4
+1
+-- SELECT 1
+
+> PREPARE TRANSACTION 'a71_p3'
+-- PREPARE TRANSACTION
+
+> BEGIN
+-- BEGIN
+
+> PREPARE TRANSACTION 'a71_p4'
+-- PREPARE TRANSACTION
+
+> BEGIN
+-- BEGIN
+
+> PREPARE TRANSACTION 'a71_p5'
+-- PREPARE TRANSACTION
+
+> BEGIN
+-- BEGIN
+
+> PREPARE TRANSACTION 'a71_p6'
+ERROR 53200: maximum number of prepared transactions reached
+HINT: Increase "max_prepared_transactions" (currently 5).
+
+> SELECT gid FROM pg_prepared_xacts ORDER BY gid
+gid:text
+a71_p1
+a71_p2
+a71_p3
+a71_p4
+a71_p5
+-- SELECT 5
+
+> SELECT * FROM tp WHERE id = 1 FOR UPDATE NOWAIT
+ERROR 55P03: could not obtain lock on row in relation "tp"
+
+> SELECT * FROM tp WHERE id = 1 FOR KEY SHARE NOWAIT
+id:int4 | v:text
+1 | x
+-- SELECT 1
+
+> ROLLBACK PREPARED 'a71_p2'
+-- ROLLBACK PREPARED
+
+> SELECT gid FROM pg_prepared_xacts
+gid:text
+a71_p1
+a71_p3
+a71_p4
+a71_p5
+-- SELECT 4
+
+> ROLLBACK PREPARED 'a71_p1'
+-- ROLLBACK PREPARED
+
+> ROLLBACK PREPARED 'a71_p3'
+-- ROLLBACK PREPARED
+
+> COMMIT PREPARED 'a71_p4'
+-- COMMIT PREPARED
+
+> COMMIT PREPARED 'a71_p5'
+-- COMMIT PREPARED
+
+> SELECT count(*) FROM pg_prepared_xacts
+count:int8
+0
+-- SELECT 1
+
+> DROP TABLE tp, tp_new
+-- DROP TABLE
+
+> DROP ROLE regress_a71_2pc
+-- DROP ROLE
+
+> DROP ROLE regress_a71_2pc_other
+-- DROP ROLE
+

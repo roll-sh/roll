@@ -56,6 +56,7 @@ fn engine(dir: &std::path::Path) -> std::sync::Arc<pg_engine::engine::Engine> {
         shared_preload_libraries: Vec::new(),
         locale: Default::default(),
         outbound: Vec::new(),
+        max_prepared_transactions: 0,
     })
     .unwrap()
 }

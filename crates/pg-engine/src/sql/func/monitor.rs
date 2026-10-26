@@ -254,6 +254,29 @@ fn backend_io(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
     rows(io_rows(&counts, None, Some(c.exec.sess.pid), c))
 }
 
+/// pg_prepared_xact(): the cluster's prepared transactions (transaction, gid, prepared,
+/// ownerid, dbid), in the registry's order.
+fn prepared_xact(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    rows(
+        c.exec
+            .sess
+            .db
+            .twophase()
+            .list()
+            .into_iter()
+            .map(|p| {
+                vec![
+                    Value::Oid(p.xid as u32),
+                    Value::text(p.gid),
+                    Value::Timestamptz(p.prepared_at),
+                    Value::Oid(p.owner),
+                    Value::Oid(p.db),
+                ]
+            })
+            .collect(),
+    )
+}
+
 /// pg_stat_get_activity(pid): the backends (all for NULL), with what only their own role,
 /// its members and pg_read_all_stats may see hidden from others.
 fn activity(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
@@ -804,6 +827,7 @@ fn expandarray(a: &[Value], _: &FnCtx) -> Result<SrfIter> {
 }
 
 pub fn register(r: &mut Registry) {
+    r.from_pg(1065, None, Some(prepared_xact));
     // Built from what the backends report.
     r.from_pg(2022, None, Some(activity));
     r.from_pg(1936, None, Some(backend_idset));
@@ -861,8 +885,8 @@ pub fn register(r: &mut Registry) {
             r.from_pg(s.oid, Some(if untracked { no_stat } else { counter }), None);
         }
     }
-    // Server files, shared memory, replication and two-phase state: nothing to show.
-    for oid in [6399, 5052, 4100, 3329, 6250, 1065, 6014, 3781] {
+    // Server files, shared memory and replication state: nothing to show.
+    for oid in [6399, 5052, 4100, 3329, 6250, 6014, 3781] {
         r.from_pg(oid, None, Some(no_rows));
     }
     r.from_pg(3400, None, Some(pg_config));

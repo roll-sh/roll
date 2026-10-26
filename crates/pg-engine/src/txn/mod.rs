@@ -5,6 +5,7 @@ pub(crate) mod catmerge;
 pub mod locks;
 pub(crate) mod spill;
 pub mod ssi;
+pub mod twophase;
 pub mod xids;
 
 use crate::catalog::{Catalog, Sequence, persist};
@@ -112,6 +113,8 @@ pub struct Database {
     last_local: AtomicU64,
     /// Transaction ids (the engine's, shared by every database).
     xids: RwLock<Arc<xids::Xids>>,
+    /// Prepared transactions (the engine's registry, shared by every database).
+    twophase: RwLock<Arc<twophase::TwoPhase>>,
     /// The modelled on-disk layout of tables and indexes (`exec::sizing`).
     pub relfiles: Mutex<crate::exec::sizing::RelFiles>,
     /// The cumulative statistics (`exec::pgstat`).
@@ -190,6 +193,7 @@ impl Database {
             lo_oid: Mutex::new(0),
             last_local: AtomicU64::new(version),
             xids: RwLock::new(Arc::new(xids::Xids::local())),
+            twophase: RwLock::new(Arc::new(twophase::TwoPhase::local())),
             relfiles: Mutex::new(Default::default()),
             pgstat: Mutex::new(Default::default()),
             sys_rows: Mutex::new(Default::default()),
@@ -253,6 +257,33 @@ impl Database {
 
     pub fn xids(&self) -> Arc<xids::Xids> {
         self.xids.read().clone()
+    }
+
+    /// Take part in the cluster's prepared transactions.
+    pub fn set_twophase(&self, t: Arc<twophase::TwoPhase>) {
+        *self.twophase.write() = t;
+    }
+
+    pub fn twophase(&self) -> Arc<twophase::TwoPhase> {
+        self.twophase.read().clone()
+    }
+
+    /// The prepared transactions whose state records this database's store holds, made again
+    /// (`twophase::recover`) and registered; how many. Run when the database opens, after it
+    /// joined the cluster's transaction ids and registry.
+    pub fn recover_prepared(self: &Arc<Self>) -> Result<usize> {
+        let (from, to) = twophase::record_range();
+        let ts = self.store.visible_ts();
+        let records: Vec<(Vec<u8>, Bytes)> = self.store.scan(from, to, ts).collect::<Result<_>>()?;
+        let tp = self.twophase();
+        let mut n = 0;
+        for (_, v) in &records {
+            if let Some((info, txn)) = twophase::recover(self, v)? {
+                tp.recovered(info, txn);
+                n += 1;
+            }
+        }
+        Ok(n)
     }
 
     /// A large object oid to try: at least `floor`, past every one handed out before.
@@ -335,6 +366,7 @@ impl Database {
             db_owner_undo: Vec::new(),
             db_options_undo: Vec::new(),
             exported: false,
+            prepared: false,
         }
     }
 
@@ -773,6 +805,8 @@ pub struct Txn {
     pub db_options_undo: Vec<(String, crate::session::state::DbOptions)>,
     /// It exported snapshots (pg_export_snapshot), which go when it ends.
     exported: bool,
+    /// A prepared transaction (PREPARE TRANSACTION): its commit checks ran when it prepared.
+    prepared: bool,
 }
 
 impl Txn {
@@ -2280,6 +2314,7 @@ impl Txn {
 
     pub fn commit(mut self) -> Result<u64> {
         if self.sxact
+            && !self.prepared
             && let Err(e) = self.db.ssi.pre_commit(self.id)
         {
             self.ssi_finish(false, 0);
@@ -2321,7 +2356,9 @@ impl Txn {
         let base = self.catalog_base;
         let base_cat = self.catalog_base_cat.take();
         let start = self.start_ts;
-        let strict = self.isolation.txn_snapshot();
+        // (A prepared transaction checked its writes when it prepared; its row locks kept
+        // them since.)
+        let strict = self.isolation.txn_snapshot() && !self.prepared;
         let keys: Vec<Vec<u8>> = if strict {
             writes.iter().map(|(k, _)| k.clone()).collect()
         } else {
@@ -2496,6 +2533,9 @@ impl Txn {
     }
 
     fn release_locks(&mut self) {
+        if self.prepared {
+            self.db.locks.forget_prepared(self.id);
+        }
         if self.locks_held.is_empty() && self.row_locks.is_empty() && self.xact_locks.is_empty() {
             return;
         }

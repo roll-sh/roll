@@ -129,10 +129,13 @@ pub fn execute(ctx: &ExecCtx, node: &NodeEnum, sql: &str) -> Result<String> {
             return Ok("LISTEN".into());
         }
         NodeEnum::UnlistenStmt(s) => {
-            ctx.sess.listen_actions.borrow_mut().push((
-                false,
-                (!s.conditionname.is_empty()).then(|| s.conditionname.clone()),
-            ));
+            // (Async_Unlisten: a backend that couldn't be listening queues nothing.)
+            if !ctx.sess.listen_actions.borrow().is_empty() || ctx.sess.ever_listened.get() {
+                ctx.sess.listen_actions.borrow_mut().push((
+                    false,
+                    (!s.conditionname.is_empty()).then(|| s.conditionname.clone()),
+                ));
+            }
             return Ok("UNLISTEN".into());
         }
         // SET in a routine (EXECUTE, a SQL function's body, an extension script): the

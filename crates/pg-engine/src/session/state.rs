@@ -266,6 +266,8 @@ pub struct SessionState {
     /// LISTEN (true) / UNLISTEN of a channel (None: all) in the current transaction, applied
     /// when it commits.
     pub listen_actions: RefCell<Vec<(bool, Option<String>)>>,
+    /// A LISTEN of this session committed once (unlistenExitRegistered).
+    pub ever_listened: Cell<bool>,
     /// The COPY running (pg_stat_progress_copy).
     pub copy_progress: RefCell<Option<CopyProgress>>,
     /// Owners of the SECURITY DEFINER functions running (innermost last): the current user.
@@ -309,6 +311,11 @@ impl SessionState {
         let mut settings = Settings::new();
         for (name, value) in cluster.config_settings() {
             settings.set_config_file(&name, &value);
+        }
+        // The server's max_prepared_transactions (a postmaster setting).
+        let max_prepared = db.twophase().max();
+        if max_prepared > 0 {
+            settings.set_config_file("max_prepared_transactions", &max_prepared.to_string());
         }
         // A preloaded library's parameters are there from the start.
         if cluster.statements().is_some() {
@@ -364,6 +371,7 @@ impl SessionState {
             pl_strict_params: RefCell::new(HashMap::new()),
             pl_signatures: RefCell::new(HashMap::new()),
             listen_actions: RefCell::new(Vec::new()),
+            ever_listened: Cell::new(false),
             copy_progress: RefCell::new(None),
             portal_seq: Cell::new(0),
             definer: RefCell::new(Vec::new()),

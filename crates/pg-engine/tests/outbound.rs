@@ -23,6 +23,7 @@ fn open(data: &Path, outbound: &[&str]) -> Arc<Engine> {
         shared_preload_libraries: Vec::new(),
         locale: Default::default(),
         outbound: outbound.iter().map(|s| s.to_string()).collect(),
+        max_prepared_transactions: 0,
     })
     .unwrap()
 }

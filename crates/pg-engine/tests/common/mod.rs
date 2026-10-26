@@ -61,14 +61,37 @@ pub fn engine_session(store: Arc<Store>, dbname: &str) -> Session {
 
 /// A session on database `dbname` of `store`, whose locale is `locale`.
 pub fn engine_session_with(store: Arc<Store>, dbname: &str, locale: DbLocale) -> Session {
+    engine_session_prepared(store, dbname, locale, 0)
+}
+
+/// `engine_session_with`, the server's max_prepared_transactions `max_prepared`.
+pub fn engine_session_prepared(
+    store: Arc<Store>,
+    dbname: &str,
+    locale: DbLocale,
+    max_prepared: usize,
+) -> Session {
     let db = Database::open(dbname, 16384, store, "postgres").expect("open database");
     db.set_locale(Arc::new(DbDefault::open(locale.clone()).expect("database locale")));
+    if max_prepared > 0 {
+        db.set_twophase(Arc::new(pg_engine::txn::twophase::TwoPhase::new(max_prepared, |_| {})));
+    }
     let cluster = Arc::new(SingleCluster {
         name: dbname.to_string(),
         started: 0,
         locale,
     });
     Session::new(SessionState::new(db, cluster, "postgres", 4242))
+}
+
+/// A golden file's `-- max_prepared_transactions: <n>` line among its leading comments: the
+/// server setting it runs with (its `.out` recorded from a reference started with it). 0:
+/// none, the default.
+pub fn max_prepared_transactions(src: &str) -> usize {
+    src.lines()
+        .take_while(|l| l.starts_with("--"))
+        .find_map(|l| l.strip_prefix("-- max_prepared_transactions:"))
+        .map_or(0, |n| n.trim().parse().expect("max_prepared_transactions: a number"))
 }
 
 /// The CREATE DATABASE options golden files' databases are made with (on the reference

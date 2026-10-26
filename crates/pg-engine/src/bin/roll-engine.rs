@@ -71,6 +71,10 @@ struct Args {
     /// by default: every outbound connection is refused.
     #[arg(long, value_name = "LIST", value_delimiter = ',')]
     allow_outbound: Vec<String>,
+    /// max_prepared_transactions: how many transactions may be prepared at once for
+    /// two-phase commit (PREPARE TRANSACTION). 0, the default as in PostgreSQL, disables it.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    max_prepared_transactions: usize,
 }
 
 /// initdb's locale and encoding options.
@@ -149,6 +153,7 @@ fn main() -> anyhow::Result<()> {
         shared_preload_libraries: a.shared_preload_libraries,
         locale: a.initdb.options(),
         outbound: a.allow_outbound,
+        max_prepared_transactions: a.max_prepared_transactions,
         ..EngineOptions::default()
     })?;
     // SIGTERM / SIGINT: a clean shutdown (pg_ctl stop's smart / fast modes end sessions the

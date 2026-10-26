@@ -180,6 +180,20 @@ impl Xids {
         s.latest_completed = s.latest_completed.max(xid);
     }
 
+    /// A prepared transaction recovered at startup: its id and its subtransactions' are
+    /// running again (ProcArrayAdd of its dummy proc).
+    pub fn recover_running(&self, xid: u64, subs: &[u64]) {
+        let mut s = self.state.lock();
+        for &x in std::iter::once(&xid).chain(subs) {
+            s.running.insert(x);
+            s.aborted.remove(&x);
+            if x >= s.next {
+                s.next = x + 1;
+            }
+        }
+        s.subs.extend(subs.iter().copied());
+    }
+
     /// The next id to hand out.
     pub fn next(&self) -> u64 {
         self.state.lock().next

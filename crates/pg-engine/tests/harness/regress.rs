@@ -1211,8 +1211,12 @@ impl EngineProc {
                 files.to_str().unwrap(),
             ])
             // (The contrib suites' reference preloads pg_stat_statements, as its
-            // temp-config does: so does the engine.)
-            .args(if contrib_mode() { &["--shared-preload-libraries", "pg_stat_statements"][..] } else { &[][..] })
+            // temp-config does: so does the engine; and takes its max_prepared_transactions.)
+            .args(if contrib_mode() {
+                &["--shared-preload-libraries", "pg_stat_statements", "--max-prepared-transactions", "5"][..]
+            } else {
+                &[][..]
+            })
             // (dblink's and postgres_fdw's suites connect to a loopback server: the engine
             // itself, reached without a host as through PostgreSQL's Unix socket.)
             .args(if contrib_mode() { &["--allow-outbound", "local"][..] } else { &[][..] })

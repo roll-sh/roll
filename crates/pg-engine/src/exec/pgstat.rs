@@ -1135,6 +1135,28 @@ pub fn end_xact(
     commit: bool,
     cat: &crate::catalog::Catalog,
 ) {
+    end_xact_counts(sess, xact, commit, cat, true)
+}
+
+/// A prepared transaction finished by COMMIT / ROLLBACK PREPARED in this backend
+/// (pgstat_twophase_postcommit / postabort): its counts join this backend's pending ones,
+/// without a transaction count of its own (the statement's transaction has one).
+pub fn end_prepared(
+    sess: &crate::session::state::SessionState,
+    xact: XactStats,
+    commit: bool,
+    cat: &crate::catalog::Catalog,
+) {
+    end_xact_counts(sess, xact, commit, cat, false)
+}
+
+fn end_xact_counts(
+    sess: &crate::session::state::SessionState,
+    xact: XactStats,
+    commit: bool,
+    cat: &crate::catalog::Catalog,
+    count_xact: bool,
+) {
     let wal = xact.wal_records;
     let counts = xact.end_xact(commit);
     {
@@ -1142,10 +1164,10 @@ pub fn end_xact(
         for (rel, c) in counts {
             add_pending(p.tab(rel), &c);
         }
-        if commit {
-            p.xact_commit += 1;
-        } else {
-            p.xact_rollback += 1;
+        match (count_xact, commit) {
+            (false, _) => {}
+            (true, true) => p.xact_commit += 1,
+            (true, false) => p.xact_rollback += 1,
         }
         // (A heap insert's record, about 60 bytes, and the commit record.)
         if wal > 0 {

@@ -111,6 +111,56 @@ fn max_num(a: Option<&Value>, b: Option<&Value>) -> Value {
     Value::from(n(a).max(n(b)))
 }
 
+/// A prepared transaction's catalog changes, kept in its state record (`hb` / `hm`: the
+/// header fields of the catalog its DDL started from and of its own; `changes`: its records
+/// that differ from that base's, `persist::record_changes`), carried onto `cur` when it is
+/// recovered. The objects it changed were locked since it prepared, so its records go in as
+/// they are; header fields merge as in `merge`.
+pub fn reapply(
+    cur: &Catalog,
+    hb: &Map<String, Value>,
+    hm: &Map<String, Value>,
+    changes: Vec<(u8, u32, Option<Bytes>)>,
+) -> Result<Catalog> {
+    let mut out = cur.clone();
+    let hc = persist::header_fields(cur)?;
+    let mut head = Map::new();
+    let keys: BTreeSet<&String> = hb.keys().chain(hm.keys()).chain(hc.keys()).collect();
+    for k in keys {
+        let (bv, mv, cv) = (hb.get(k), hm.get(k), hc.get(k));
+        let v = match k.as_str() {
+            "version" | "catalog_format" | "class_tick" => continue,
+            "next_oid" => Some(max_num(mv, cv)),
+            _ => merge_opt(bv, mv, cv)?,
+        };
+        if let Some(v) = v {
+            head.insert(k.clone(), v);
+        }
+    }
+    persist::set_header(&mut out, &head)?;
+    let mut set = Vec::new();
+    for (tag, oid, v) in changes {
+        if tag == persist::CLASS_ORDER_TAG {
+            match v {
+                None => {
+                    out.class_order.remove(&oid);
+                }
+                Some(b) => set.push((serde_json::from_slice::<u64>(&b).unwrap_or(0), oid)),
+            }
+            continue;
+        }
+        persist::apply_record(&mut out, tag, oid, v.as_deref())?;
+    }
+    set.sort();
+    for (_, oid) in set {
+        out.class_tick += 1;
+        out.class_order.insert(oid, out.class_tick);
+    }
+    out.catalog_format = cur.catalog_format;
+    out.reindex();
+    Ok(out)
+}
+
 /// A value that may be absent on any side (absent: not there, or a default skipped).
 fn merge_opt(b: Option<&Value>, m: Option<&Value>, c: Option<&Value>) -> Result<Option<Value>> {
     if m == b {

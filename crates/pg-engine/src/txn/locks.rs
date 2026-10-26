@@ -441,6 +441,8 @@ struct State {
     /// The process id of each backend.
     pids: HashMap<u64, i32>,
     rows: crate::exec::fasthash::HashMap<Vec<u8>, Vec<RowHold>>,
+    /// Prepared transactions' dummy backends (`transfer`).
+    prepared: std::collections::HashSet<u64>,
 }
 
 #[derive(Default)]
@@ -1011,7 +1013,12 @@ impl LockManager {
             for h in &e.holds {
                 if h.proc != *proc
                     && w.mode.conflicts_with(h.mode)
-                    && let Some(p) = s.pids.get(&h.proc).copied().or_else(|| pid_of(h.proc))
+                    && let Some(p) = s
+                        .pids
+                        .get(&h.proc)
+                        .copied()
+                        .or_else(|| pid_of(h.proc))
+                        .or_else(|| s.prepared.contains(&h.proc).then_some(0))
                     && !out.contains(&p)
                 {
                     out.push(p);
@@ -1082,6 +1089,85 @@ impl LockManager {
             }
         }
         v
+    }
+
+    /// PostPrepare_Locks: what transaction `owner` holds (heavyweight locks, row locks, its
+    /// transaction locks) now belongs to its prepared transaction's dummy backend `proc`,
+    /// which has no pid: its holds conflict with every session, the one that prepared it
+    /// too, and pg_blocking_pids reports it as 0.
+    pub fn transfer(&self, owner: u64, proc: u64) {
+        let mut s = self.state.lock();
+        s.prepared.insert(proc);
+        for e in s.locks.values_mut() {
+            for h in e.holds.iter_mut().filter(|h| h.owner == owner) {
+                h.proc = proc;
+                h.fastpath = false;
+            }
+        }
+        for holds in s.rows.values_mut() {
+            for h in holds.iter_mut().filter(|h| h.owner == owner) {
+                h.proc = proc;
+            }
+        }
+    }
+
+    /// A prepared transaction's dummy backend is gone (COMMIT / ROLLBACK PREPARED).
+    pub fn forget_prepared(&self, proc: u64) {
+        self.state.lock().prepared.remove(&proc);
+    }
+
+    /// AtPrepare_Locks' check: a lock `owner` holds that `peer` (its session's own owner)
+    /// holds too.
+    pub fn held_by_both(&self, owner: u64, peer: u64) -> bool {
+        let s = self.state.lock();
+        s.locks.values().any(|e| {
+            e.holds.iter().any(|h| h.owner == owner) && e.holds.iter().any(|h| h.owner == peer)
+        })
+    }
+
+    /// The row locks `owner` holds: (row, strongest mode, whether an update's or delete's).
+    pub fn rows_of(&self, owner: u64) -> Vec<(Vec<u8>, RowLockMode, bool)> {
+        let s = self.state.lock();
+        let mut out = Vec::new();
+        for (row, holds) in &s.rows {
+            let mine = holds.iter().filter(|h| h.owner == owner);
+            let mut best: Option<(RowLockMode, bool)> = None;
+            for h in mine {
+                let b = best.get_or_insert((h.mode, h.modifies));
+                b.0 = b.0.max(h.mode);
+                b.1 |= h.modifies;
+            }
+            if let Some((m, modifies)) = best {
+                out.push((row.clone(), m, modifies));
+            }
+        }
+        out
+    }
+
+    /// The unique key locks `owner` recorded an in-progress index entry for: (key, the
+    /// entry's transaction id).
+    pub fn key_holders_of(&self, owner: u64) -> Vec<(Vec<u8>, u64)> {
+        let s = self.state.lock();
+        s.locks
+            .iter()
+            .filter_map(|(k, e)| match &e.key_holder {
+                Some((o, kh)) if *o == owner => Some((k.clone(), kh.xid)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A recovered prepared transaction's row lock (lock_row's grant, without waiting: at
+    /// recovery nothing else holds any).
+    pub fn restore_row(&self, row: &[u8], owner: u64, proc: u64, mode: RowLockMode, modifies: bool) {
+        let mut s = self.state.lock();
+        s.rows.entry(row.to_vec()).or_default().push(RowHold {
+            holder: owner,
+            owner,
+            proc,
+            mode,
+            modifies,
+        });
     }
 
     /// Whether anyone holds a lock (for idle detection and tests).

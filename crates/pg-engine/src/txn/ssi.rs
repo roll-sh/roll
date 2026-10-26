@@ -650,5 +650,47 @@ impl Ssi {
         drop(st);
         self.cv.notify_all();
     }
+
+    /// PostPrepare_PredicateLocks: `id` (past `pre_commit`) belongs to no backend any more.
+    pub fn detach(&self, id: u64) {
+        if let Some(m) = self.st.lock().sx.get_mut(&id) {
+            m.pid = 0;
+        }
+    }
+
+    /// What a prepared transaction's state record keeps of `id` (AtPrepare_PredicateLocks):
+    /// its SIRead locks and the rows it changed.
+    pub fn prepared_state(&self, id: u64) -> Option<(Vec<Target>, Vec<(u32, Vec<u8>)>)> {
+        let st = self.st.lock();
+        let m = st.get(id)?;
+        let mut writes: Vec<(u32, Vec<u8>)> = m.writes.iter().cloned().collect();
+        writes.sort();
+        Some((m.locks.clone(), writes))
+    }
+
+    /// predicatelock_twophase_recover: a prepared serializable transaction found at startup,
+    /// tracked again with its SIRead locks and writes. Its conflicts weren't kept: as
+    /// Postgres's summary of them, it counts as having written (others reading what it wrote
+    /// conflict out to it).
+    pub fn recover_prepared(&self, id: u64, xid: u64, locks: Vec<Target>, writes: Vec<(u32, Vec<u8>)>) {
+        let mut st = self.st.lock();
+        st.last_commit_seq += 1;
+        let seq = st.last_commit_seq;
+        let rels = writes.iter().map(|w| w.0).collect();
+        st.sx.insert(
+            id,
+            Sxact {
+                xid,
+                did_write: !writes.is_empty(),
+                prepared: true,
+                prepare_seq: seq,
+                last_commit_before_snapshot: seq.saturating_sub(1),
+                locks,
+                writes: writes.into_iter().collect(),
+                rels,
+                ..Default::default()
+            },
+        );
+    }
 }
 

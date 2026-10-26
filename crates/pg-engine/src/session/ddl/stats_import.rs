@@ -962,6 +962,8 @@ pub(crate) fn relation_lock_rows(ctx: &ExecCtx) -> Vec<Vec<Value>> {
     let me = ctx.sess.pid;
     let mut rows: Vec<Vec<Value>> = Vec::new();
     let n = || Value::Null;
+    // (A prepared transaction keeps the virtual transaction id of the backend that prepared
+    // it: MarkAsPreparingGuts clones it.)
     let vxid = |owner: u64, pid: Option<i32>| {
         if pid == Some(me) {
             format!("3/{}", txn.id as u32)
