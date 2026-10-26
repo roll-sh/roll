@@ -424,7 +424,7 @@ pub fn route_row(routing: &PartRouting, row: &[Value], ctx: &ExecCtx) -> Result<
             .leaves
             .get(leaf)
             .filter(|l| l.rules.table.is_foreign())
-            .and_then(|l| ctx.catalog().fdw_routine_error(&l.rules.table))
+            .and_then(|l| ctx.catalog().fdw_modify_error(&l.rules.table, "insert into"))
         {
             Some(e) => Err(e),
             None => Ok(leaf),
@@ -3037,6 +3037,9 @@ impl InsertNode {
         // (ExecutorStart: es_output_cid, which the next command moves past.)
         ctx.txn.borrow_mut().output_cid();
         let rules = &plan.rules;
+        if let Some(e) = ctx.catalog().fdw_modify_error(&rules.table, "insert into") {
+            return Err(e);
+        }
         if !rules.view
             && plan.on_conflict.as_ref().is_some_and(|oc| {
                 matches!(oc.action, crate::sql::plan::ConflictAction::Update { .. })
@@ -3710,6 +3713,11 @@ impl UpdateNode {
             for m in &plan.members {
                 check_replica_identity(&m.rules.table, crate::catalog::pubsub::RiCmd::Update, ctx)?;
             }
+            let cat = ctx.catalog();
+            let tables = std::iter::once(&plan.rules.table).chain(plan.members.iter().map(|m| &m.rules.table));
+            if let Some(e) = tables.filter_map(|t| cat.fdw_modify_error(t, "update")).next() {
+                return Err(e);
+            }
         }
         let deferred = ctx.defer_after.replace(false);
         let capture = ctx.capture.replace(false);
@@ -4315,6 +4323,11 @@ impl DeleteNode {
             check_replica_identity(&plan.table, crate::catalog::pubsub::RiCmd::Delete, ctx)?;
             for m in &plan.members {
                 check_replica_identity(&m.table, crate::catalog::pubsub::RiCmd::Delete, ctx)?;
+            }
+            let cat = ctx.catalog();
+            let tables = std::iter::once(&plan.table).chain(plan.members.iter().map(|m| &m.table));
+            if let Some(e) = tables.filter_map(|t| cat.fdw_modify_error(t, "delete from")).next() {
+                return Err(e);
             }
         }
         let deferred = ctx.defer_after.replace(false);

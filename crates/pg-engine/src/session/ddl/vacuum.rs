@@ -183,14 +183,14 @@ impl Ddl<'_, '_> {
                         self.ctx.notice(crate::session::warning(code::WARNING, msg));
                     }
                     // (A skipped VACUUM skips its ANALYZE too.)
-                    if analyze
-                        && !vacuum
-                        && let Some(e) = self.cat.fdw_routine_error(&t)
-                    {
+                    if !analyze || vacuum {
+                        continue;
+                    }
+                    if let Some(e) = self.cat.fdw_routine_error(&t) {
                         return Err(e);
                     }
                     // postgres_fdw samples the remote table.
-                    if analyze && !vacuum && crate::ext::postgres_fdw::scan::is_postgres_fdw(&self.cat, &t) {
+                    if crate::ext::postgres_fdw::scan::is_postgres_fdw(&self.cat, &t) {
                         let (rows, pages) = crate::ext::postgres_fdw::scan::remote_rows(&t, self.ctx)?;
                         self.analyze_columns(&t, &[], false)?;
                         self.cat.relstats.insert(
@@ -199,7 +199,11 @@ impl Ddl<'_, '_> {
                         );
                         self.save()?;
                     }
-                    continue;
+                    // file_fdw's AnalyzeForeignTable runs with the relations below.
+                    if !crate::ext::file_fdw::is_file_table(&self.cat, &t) {
+                        continue;
+                    }
+                    t
                 }
                 Some(Relation::Table(t)) => t,
                 Some(Relation::View(v)) if v.materialized => match &v.storage {
@@ -344,6 +348,22 @@ impl Ddl<'_, '_> {
                 if r.is_foreign() {
                     if analyze && let Some(e) = self.cat.fdw_routine_error(&r) {
                         return Err(e);
+                    }
+                    if analyze && !vacuum && crate::ext::file_fdw::is_file_table(&self.cat, &r) {
+                        self.analyze_columns(&r, &cols, false)?;
+                        // fileAnalyzeForeignTable: the file's pages, the rows it has.
+                        let tuples = crate::ext::file_fdw::read_all(&r, self.ctx)?.len() as f64;
+                        let pages = crate::ext::file_fdw::estimate(&r, 0, self.ctx).map_or(1.0, |s| s.pages);
+                        self.cat.relstats.insert(
+                            r.oid,
+                            RelStats {
+                                pages: pages as i32,
+                                tuples,
+                                allvisible: 0,
+                                allfrozen: 0,
+                            },
+                        );
+                        analyzed.push(r.oid);
                     }
                     continue;
                 }

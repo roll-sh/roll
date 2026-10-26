@@ -302,3 +302,53 @@ fn predefined_roles_and_privileges() {
     run(&mut s, "RESET ROLE");
     engine.shutdown();
 }
+
+/// file_fdw reads the server's files as COPY FROM does: none by default, and when allowed
+/// only inside the directory; programs never. A file bigger than one read chunk streams.
+#[test]
+fn file_fdw_tables() {
+    let data = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(files.path()).unwrap();
+    let mut big = String::from("n;s\n");
+    for i in 0..20_000 {
+        big.push_str(&format!("{i};\"row {i}\"\n"));
+    }
+    big.push_str("x;bad\n");
+    std::fs::write(root.join("big.csv"), &big).unwrap();
+    let setup = |s: &mut Session, file: &str| {
+        run(s, "CREATE EXTENSION file_fdw");
+        run(s, "CREATE SERVER srv FOREIGN DATA WRAPPER file_fdw");
+        run(s, &format!("CREATE FOREIGN TABLE big (n int, s text) SERVER srv OPTIONS (filename {}, format 'csv', header 'match', delimiter ';', on_error 'ignore')", lit(file)));
+        run(s, "CREATE FOREIGN TABLE prog (a text) SERVER srv OPTIONS (program 'echo 1')");
+    };
+    let open_hint = "HINT: COPY FROM instructs the PostgreSQL server process to read a file. You may want a client-side facility such as psql's \\copy.";
+    {
+        let engine = open(data.path(), None);
+        let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+        setup(&mut s, "big.csv");
+        assert_eq!(
+            err(&mut s, "SELECT count(*) FROM big"),
+            format!("42501 could not open file \"big.csv\" for reading: Permission denied {open_hint}")
+        );
+        engine.shutdown();
+    }
+    let data = tempfile::tempdir().unwrap();
+    let engine = open(data.path(), Some(&root));
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    setup(&mut s, "big.csv");
+    check(&mut s, "SELECT count(*) = 20000 AND sum(n) = 199990000 FROM big");
+    check(&mut s, "SELECT s = 'row 12345' FROM big WHERE n = 12345");
+    assert!(s.notices.iter().any(|n| n.message == "1 row was skipped due to data type incompatibility"));
+    run(&mut s, &format!("ALTER FOREIGN TABLE big OPTIONS (SET filename {})", lit(&root.join("big.csv").to_string_lossy())));
+    check(&mut s, "SELECT count(*) = 20000 FROM big");
+    run(&mut s, "ALTER FOREIGN TABLE big OPTIONS (SET filename '/etc/passwd')");
+    assert_eq!(err(&mut s, "SELECT * FROM big"), "42501 absolute path not allowed");
+    run(&mut s, "ALTER FOREIGN TABLE big OPTIONS (SET filename '../x.csv')");
+    assert_eq!(err(&mut s, "SELECT * FROM big"), "42501 path must be in or below the data directory");
+    assert_eq!(
+        err(&mut s, "SELECT * FROM prog"),
+        "42501 could not execute command \"echo 1\": Permission denied"
+    );
+    engine.shutdown();
+}

@@ -7429,7 +7429,7 @@ impl Ddl<'_, '_> {
                 self.note_lock(t.oid, lockmode::ACCESS_EXCLUSIVE)?;
                 self.not_in_use(t.oid, "TRUNCATE", &t.name)?;
                 // truncate_check_rel: a foreign table's wrapper would do it.
-                if let Some(e) = self.cat.fdw_routine_error(&t) {
+                if let Some(e) = self.cat.fdw_modify_error(&t, "truncate") {
                     return Err(e);
                 }
                 tables.push(t);

@@ -166,13 +166,16 @@ pub fn rel_size(t: &Table, ctx: &ExecCtx) -> RelSize {
         return crate::sql::paths::sys_size(st, ctx);
     }
     let cat = ctx.catalog();
-    // A foreign table: pg_class's statistics (postgresGetForeignRelSize), else 10 pages of
-    // rows of its width.
+    // A foreign table: file_fdw's estimate (by its file); else pg_class's statistics
+    // (postgresGetForeignRelSize), else 10 pages of rows of its width.
     if t.foreign.is_some() {
+        let width: u32 = (0..t.columns.len()).filter(|&i| !t.columns[i].dropped).map(|i| col_width(&cat, t, i)).sum();
+        if let Some(s) = crate::ext::file_fdw::estimate(t, width, ctx) {
+            return s;
+        }
         if let Some(s) = cat.relstats.get(&t.oid).filter(|s| s.tuples >= 0.0) {
             return RelSize { pages: s.pages.max(0) as f64, tuples: s.tuples };
         }
-        let width: u32 = (0..t.columns.len()).filter(|&i| !t.columns[i].dropped).map(|i| col_width(&cat, t, i)).sum();
         let maxalign = |w: u32| w.div_ceil(8) * 8;
         return RelSize { pages: 10.0, tuples: ((10 * BLCKSZ as u32) / (maxalign(width) + 24)) as f64 };
     }

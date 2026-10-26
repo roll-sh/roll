@@ -406,6 +406,9 @@ enum Detail {
     /// order (key, descending, NULLS FIRST; `sort_dir`). Not shown: what the executor
     /// emits its groups by. (Here rather than a field: `ExNode`s fill big stack frames.)
     GroupSort(Vec<(usize, bool, bool)>),
+    /// A file_fdw scan's "Foreign File Size" (ExplainPropertyInteger in bytes): shown with
+    /// costs only.
+    FileSize(u64),
 }
 
 /// Set a node's `Detail::GroupSort` (none: empty).
@@ -11349,7 +11352,10 @@ impl Builder<'_, '_> {
             conjuncts(f, &mut parts);
         }
         if s.current_of.is_none()
-            && let Some(d) = super::paths::describe(self.ctx, s)
+            && let Some(d) = match self.needed.get(&addr(p)) {
+                Some(m) if t.is_foreign() => super::paths::describe_foreign(self.ctx, s, m),
+                _ => super::paths::describe(self.ctx, s),
+            }
         {
             // (A volatile clause of no columns is the relation's, as distribute_qual_to_rels
             // puts it: not a gating qual.)
@@ -11753,6 +11759,11 @@ impl Builder<'_, '_> {
             Access::Bitmap(..) => ExNode::new("Bitmap Heap Scan"),
             Access::Tid { .. } => ExNode::new("Tid Scan"),
             Access::TidRange(_) => ExNode::new("Tid Range Scan"),
+            _ if t.is_foreign() => {
+                let mut n = ExNode::new("Foreign Scan");
+                n.operation = Some("Select");
+                n
+            }
             _ => ExNode::new("Seq Scan"),
         };
         let schema = self.ctx.catalog().schema_name(t.schema).to_string();
@@ -11880,6 +11891,13 @@ impl Builder<'_, '_> {
                 n.details.push(Detail::Text("Remote SQL", f.sql));
             }
             return n;
+        }
+        // file_fdw's ExplainForeignScan.
+        if let Some((what, file, size)) = crate::ext::file_fdw::explain_info(t, self.ctx) {
+            n.details.push(Detail::Text(what, file));
+            if let Some(b) = size {
+                n.details.push(Detail::FileSize(b));
+            }
         }
         match &s.access {
             Access::Index { only, .. } => {
@@ -15337,7 +15355,7 @@ impl Builder<'_, '_> {
                         .find(|c| c.node_type == "Hash")
                         .map_or(1, |h| joins::hash_table_size(h.rows, h.width, &g).1),
                 ),
-                "Seq Scan" | "Bitmap Heap Scan" | "Values Scan" | "Subquery Scan" | "Append" => {
+                "Seq Scan" | "Foreign Scan" | "Bitmap Heap Scan" | "Values Scan" | "Subquery Scan" | "Append" => {
                     InKind::NoMark
                 }
                 _ => InKind::Plain,
@@ -17959,6 +17977,13 @@ impl Render<'_> {
                     }
                     self.w.close("Target Tables", false);
                 }
+                Detail::FileSize(b) if self.o.costs => {
+                    if self.w.format == Format::Text {
+                        self.w.prop("Foreign File Size", &format!("{b} b"), false);
+                    } else {
+                        self.w.prop("Foreign File Size", &b.to_string(), true);
+                    }
+                }
                 Detail::SortInfo
                 | Detail::IncSortInfo
                 | Detail::HashInfo
@@ -17967,6 +17992,7 @@ impl Render<'_> {
                 | Detail::HeapBlocks(_)
                 | Detail::MergeTuples(_)
                 | Detail::GroupSort(_)
+                | Detail::FileSize(_)
                 | Detail::MemoizeInfo => {}
             }
         }

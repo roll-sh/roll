@@ -359,6 +359,9 @@ fn open_foreign(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<Bo
     if crate::ext::postgres_fdw::scan::is_postgres_fdw(&cat, &s.table) {
         return crate::ext::postgres_fdw::scan::open(s, need, ctx);
     }
+    if crate::ext::file_fdw::is_file_table(&cat, &s.table) {
+        return crate::ext::file_fdw::open(s, need, ctx);
+    }
     Err(cat.fdw_routine_error(&s.table).unwrap_or_else(|| crate::error::internal("foreign table without a wrapper")))
 }
 

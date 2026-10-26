@@ -246,6 +246,7 @@ const CONTRIB_MODULES: &[&str] = &[
     "amcheck",
     "pageinspect",
     "pg_buffercache",
+    "file_fdw",
     "postgres_fdw",
     "dblink",
 ];

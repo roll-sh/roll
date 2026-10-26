@@ -150,6 +150,13 @@ impl Ddl<'_, '_> {
                 }
             }
         }
+        // optionListToArray: "a=b=c" would be ambiguous.
+        if let Some((n, _)) = list.iter().find(|(n, _)| n.contains('=')) {
+            return Err(Error::new(
+                code::INVALID_PARAMETER_VALUE,
+                format!("invalid option name \"{n}\": must not contain \"=\""),
+            ));
+        }
         let result: Vec<String> = list.into_iter().map(|(n, v)| format!("{n}={v}")).collect();
         if validator == POSTGRESQL_FDW_VALIDATOR {
             postgresql_validate(&result, catalog)?;
@@ -157,12 +164,14 @@ impl Ddl<'_, '_> {
             && let Some(bin) = &f.probin
             && let Some(v) = crate::ext::native::fdw_validator(bin, &f.body)
         {
+            let (me, dbo) = (self.me(), self.db_owner());
             v(&crate::ext::native::FdwValidate {
                 options: &result,
                 catalog,
                 cat: &self.cat,
                 superuser: self.is_superuser(),
                 notice: &|e| self.ctx.notice(e),
+                has_privs: &|role| self.cat.has_privs_of_role(me, role, dbo),
             })?;
         }
         Ok((!result.is_empty()).then_some(result))

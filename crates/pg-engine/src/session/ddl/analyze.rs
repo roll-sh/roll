@@ -158,6 +158,11 @@ impl Ddl<'_, '_> {
             for row in crate::ext::postgres_fdw::scan::remote_rows(t, self.ctx)?.0 {
                 offer(row);
             }
+        } else if crate::ext::file_fdw::is_file_table(&self.cat, t) {
+            // file_fdw's file_acquire_sample_rows.
+            for row in crate::ext::file_fdw::read_all(t, self.ctx)? {
+                offer(row);
+            }
         } else {
             for r in self.scan_rows(t) {
                 self.ctx.check()?;

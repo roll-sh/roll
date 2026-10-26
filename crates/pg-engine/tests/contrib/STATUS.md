@@ -41,7 +41,7 @@ PGCONTRIB_ONLY=uuid-ossp,citext PGREGRESS_DIR=$D PGREGRESS_CONTAINER=a39-ref \
 
 ## Scores
 
-Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013. Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053 (81.1%). Baseline (before any
+Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013. Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053 (81.1%). Round 19 (agent 66): file_fdw 187 / 187. Baseline (before any
 extension was ported; CREATE EXTENSION was a stand-in): 2,752 / 7,733
 units (35.6%). The reference matches `expected/` for every module except dblink (the reference
 has no `regress.so`, whose functions dblink's test creates).
@@ -70,6 +70,7 @@ has no `regress.so`, whose functions dblink's test creates).
 | pageinspect | 291 | — | not applicable (not available) |
 | pg_buffercache | 38 | 38 | done (no buffer pool: every buffer unused) |
 | postgres_fdw | 2053 | 1664 | see below |
+| file_fdw | 187 | 187 | done (files are the server files of `--allow-server-files`; programs refused) |
 | dblink | 218 | 218 | done |
 
 ### What is left, per module
@@ -128,6 +129,21 @@ has no `regress.so`, whose functions dblink's test creates).
   SCHEMA, EXPLAIN's Remote SQL. Left: join, aggregate, ORDER BY / LIMIT and FOR UPDATE
   pushdown (Foreign Scans of joins and upper relations: the planner's foreign paths and
   postgres_fdw's costs), use_remote_estimate, batch inserts, async append, TRUNCATE.
+- **file_fdw** (round 19, agent 66; `src/ext/file_fdw.rs`): done. The validator (options by
+  catalog with getClosestMatch's hint, the filename / program privileges, COPY's own option
+  checks through `CopyFormat::parse`), scans read by COPY FROM's parser
+  (`copy::parse_copy_data`, a 64 kB chunk at a time: header match, FORCE_NOT_NULL /
+  FORCE_NULL from column options, DEFAULT markers, ENCODING, ON_ERROR ignore with its
+  NOTICE and REJECT_LIMIT), estimate_size / estimate_costs from the file's size (rows by the
+  scan's reltarget width), EXPLAIN's Foreign File / Foreign Program / Foreign File Size,
+  ANALYZE sampling the file, `ctid` (4294967295,0) and tableoid only, and CheckValidResultRel's
+  "cannot insert into / update / delete from / truncate foreign table" (`fdw_modify_error`).
+  Files are the server's files: with `--allow-server-files <dir>` relative names are in
+  `<dir>` and absolute ones must be inside it (as COPY FROM's); without it no file opens
+  ("could not open file ...: Permission denied"). A `program` table is accepted where
+  PostgreSQL accepts it but never runs ("could not execute command ...: Permission denied"),
+  as COPY ... PROGRAM is refused. Tests: golden `a66_file_fdw`, `tests/server_files.rs`
+  `file_fdw_tables`.
 - **Query Identifier**: the contrib servers preload pg_stat_statements, which turns query ids
   on; the harness runs the other modules with `compute_query_id = off`, as their own test
   configurations have it (their EXPLAIN VERBOSE shows no Query Identifier).

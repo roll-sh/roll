@@ -3992,18 +3992,49 @@ impl Catalog {
         out
     }
 
+    /// Whether function `handler` is a foreign-data wrapper handler with native code.
+    pub fn fdw_handler_native(&self, handler: u32) -> bool {
+        self.functions.get(&handler).is_some_and(|h| {
+            h.probin
+                .as_deref()
+                .is_some_and(|b| crate::ext::native::fdw_handler(b, &h.body))
+        })
+    }
+
+    /// The handler function of foreign table `t`'s wrapper (0: none; not a foreign table).
+    pub fn fdw_handler_of(&self, t: &Table) -> u32 {
+        t.foreign
+            .as_ref()
+            .and_then(|f| self.servers.get(&f.server))
+            .and_then(|s| self.fdws.get(&s.fdw))
+            .map_or(0, |w| w.handler)
+    }
+
+    /// CheckValidResultRel for foreign table `t`: why it can't take the rows a command
+    /// (`what`: "insert into", "update", "delete from", "truncate") would change: no
+    /// handler, or a wrapper that can't change rows (file_fdw). None for other tables.
+    pub fn fdw_modify_error(&self, t: &Table, what: &str) -> Option<Error> {
+        if let Some(e) = self.fdw_routine_error(t) {
+            return Some(e);
+        }
+        // (postgres_fdw changes the remote table's rows.)
+        let modifies = self.functions.get(&self.fdw_handler_of(t)).is_some_and(|h| h.body == "postgres_fdw_handler");
+        (t.is_foreign() && !modifies).then(|| {
+            Error::new(
+                code::FEATURE_NOT_SUPPORTED,
+                format!("cannot {what} foreign table \"{}\"", t.name),
+            )
+        })
+    }
+
     /// Why foreign table `t` can't be read or written (GetFdwRoutineForRelation): its
     /// wrapper has no handler, or one that can't run here. None for other tables.
     pub fn fdw_routine_error(&self, t: &Table) -> Option<Error> {
         let f = t.foreign.as_ref()?;
         let fdw = self.servers.get(&f.server).and_then(|s| self.fdws.get(&s.fdw));
         let name = fdw.map_or("", |w| w.name.as_str());
-        // (postgres_fdw's handler is native code.)
-        if fdw.is_some_and(|w| {
-            self.functions.get(&w.handler).is_some_and(|h| {
-                h.probin.as_deref().is_some_and(|b| crate::ext::native::library(b) == "postgres_fdw")
-            })
-        }) {
+        // (Handlers the engine has native code for run.)
+        if fdw.is_some_and(|w| self.fdw_handler_native(w.handler)) {
             return None;
         }
         Some(match fdw {

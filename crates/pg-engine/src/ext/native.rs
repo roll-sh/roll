@@ -38,7 +38,7 @@ pub fn library(probin: &str) -> &str {
 /// Whether the engine has native code for library `lib` (so a symbol it lacks is an error,
 /// as `dlsym` failing is).
 pub fn has_library(lib: &str) -> bool {
-    matches!(lib, "_int" | "amcheck" | "btree_gin" | "btree_gist" | "citext" | "cube" | "dblink" | "earthdistance" | "fuzzystrmatch" | "hstore" | "isn" | "lo" | "ltree" | "pgcrypto"
+    matches!(lib, "_int" | "amcheck" | "btree_gin" | "btree_gist" | "citext" | "cube" | "dblink" | "earthdistance" | "file_fdw" | "fuzzystrmatch" | "hstore" | "isn" | "lo" | "ltree" | "pgcrypto"
             | "pg_buffercache" | "pg_stat_statements" | "pg_trgm" | "postgres_fdw" | "seg" | "tablefunc" | "unaccent" | "uuid-ossp")
 }
 
@@ -125,6 +125,7 @@ pub fn lookup(probin: &str, symbol: &str) -> Option<Native> {
         "hstore" => super::hstore::symbol(symbol),
         "fuzzystrmatch" => super::fuzzystrmatch::symbol(symbol),
         "isn" => super::isn::symbol(symbol),
+        "file_fdw" => super::file_fdw::symbol(symbol),
         "lo" => super::lo::symbol(symbol),
         "tablefunc" => super::tablefunc::symbol(symbol),
         "unaccent" => super::unaccent::symbol(symbol),
@@ -210,6 +211,8 @@ pub struct FdwValidate<'a> {
     pub superuser: bool,
     /// Where warnings go.
     pub notice: &'a dyn Fn(crate::error::Error),
+    /// has_privs_of_role(current user, role).
+    pub has_privs: &'a dyn Fn(u32) -> bool,
 }
 
 pub type FdwValidator = fn(&FdwValidate) -> crate::Result<()>;
@@ -218,7 +221,16 @@ pub type FdwValidator = fn(&FdwValidate) -> crate::Result<()>;
 pub fn fdw_validator(probin: &str, symbol: &str) -> Option<FdwValidator> {
     match (library(probin), symbol) {
         ("dblink", "dblink_fdw_validator") => Some(super::dblink::validate),
+        ("file_fdw", "file_fdw_validator") => Some(super::file_fdw::validate),
         ("postgres_fdw", "postgres_fdw_validator") => Some(super::postgres_fdw::option::validate),
         _ => None,
     }
+}
+
+/// Whether `symbol` in `probin` is a foreign-data wrapper handler the engine runs.
+pub fn fdw_handler(probin: &str, symbol: &str) -> bool {
+    matches!(
+        (library(probin), symbol),
+        ("file_fdw", "file_fdw_handler") | ("postgres_fdw", "postgres_fdw_handler")
+    )
 }

@@ -1,0 +1,234 @@
+> SET client_min_messages = warning
+-- SET
+
+> DROP ROLE IF EXISTS a66_fdw_user
+-- DROP ROLE
+
+> RESET client_min_messages
+-- RESET
+
+> CREATE EXTENSION file_fdw
+-- CREATE EXTENSION
+
+> CREATE SERVER a66_srv FOREIGN DATA WRAPPER file_fdw
+-- CREATE SERVER
+
+> CREATE FOREIGN TABLE a66_t (a int, b text) SERVER a66_srv
+>   OPTIONS (filename '/nonexistent/a66.csv', format 'csv', header 'match')
+-- CREATE FOREIGN TABLE
+
+> CREATE FOREIGN TABLE a66_x () SERVER a66_srv OPTIONS (filenam 'x')
+ERROR HV00D: invalid option "filenam"
+HINT: Perhaps you meant the option "filename".
+
+> CREATE FOREIGN TABLE a66_x () SERVER a66_srv OPTIONS (filename 'a', program 'b')
+ERROR 42601: conflicting or redundant options
+
+> CREATE FOREIGN TABLE a66_x () SERVER a66_srv OPTIONS (filename 'a', on_error 'ignore', reject_limit 'x')
+ERROR 22P02: invalid input syntax for type bigint: "x"
+
+> CREATE FOREIGN TABLE a66_x () SERVER a66_srv OPTIONS (filename 'a', on_error 'ignore', reject_limit '3')
+-- CREATE FOREIGN TABLE
+
+> DROP FOREIGN TABLE a66_x
+-- DROP FOREIGN TABLE
+
+> CREATE FOREIGN TABLE a66_x () SERVER a66_srv OPTIONS (filename 'a', header 'maybe')
+ERROR 42601: header requires a Boolean value or "match"
+
+> CREATE FOREIGN TABLE a66_x () SERVER a66_srv OPTIONS ("a=b" 'true')
+ERROR 22023: invalid option name "a=b": must not contain "="
+
+> CREATE FOREIGN TABLE a66_x (c int OPTIONS (force_quote 'true')) SERVER a66_srv OPTIONS (filename 'a')
+ERROR HV00D: invalid option "force_quote"
+HINT: Perhaps you meant the option "force_null".
+
+> ALTER FOREIGN TABLE a66_t ALTER COLUMN a OPTIONS (force_not_null 'maybe')
+ERROR 42601: force_not_null requires a Boolean value
+
+> ALTER FOREIGN TABLE a66_t ALTER COLUMN a OPTIONS (force_not_null 'on', force_null 'off')
+-- ALTER FOREIGN TABLE
+
+> ALTER FOREIGN TABLE a66_t OPTIONS (SET format 'text')
+-- ALTER FOREIGN TABLE
+
+> ALTER FOREIGN TABLE a66_t OPTIONS (DROP filename)
+ERROR HV002: either filename or program is required for file_fdw foreign tables
+
+> ALTER SERVER a66_srv OPTIONS (ADD filename 'x')
+ERROR HV00D: invalid option "filename"
+HINT: There are no valid options in this context.
+
+> ALTER FOREIGN DATA WRAPPER file_fdw OPTIONS (ADD format 'csv')
+ERROR HV00D: invalid option "format"
+HINT: There are no valid options in this context.
+
+> CREATE FOREIGN TABLE a66_p (a real) SERVER a66_srv OPTIONS (program 'cat -n')
+-- CREATE FOREIGN TABLE
+
+> SELECT c.relname, ft.ftoptions, (SELECT array_agg(attfdwoptions ORDER BY attnum) FROM pg_attribute
+>   WHERE attrelid = c.oid AND attnum > 0) AS cols
+> FROM pg_foreign_table ft JOIN pg_class c ON c.oid = ft.ftrelid ORDER BY 1
+ERROR 22004: cannot accumulate null arrays
+
+> SELECT file_fdw_validator('{filename=x,foo=1}', 'pg_foreign_table'::regclass)
+ERROR HV00D: invalid option "foo"
+
+> SELECT file_fdw_validator('{force_not_null=true,force_not_null=false}', 'pg_attribute'::regclass)
+ERROR 42601: conflicting or redundant options
+HINT: Option "force_not_null" supplied more than once for a column.
+
+> SELECT file_fdw_validator('{program=x}', 'pg_foreign_server'::regclass)
+ERROR HV00D: invalid option "program"
+HINT: There are no valid options in this context.
+
+> SELECT file_fdw_validator('{}', 'pg_user_mapping'::regclass)
+file_fdw_validator:void
+
+-- SELECT 1
+
+> SELECT file_fdw_validator(NULL, 0) IS NULL
+?column?:bool
+t
+-- SELECT 1
+
+> CREATE ROLE a66_fdw_user
+-- CREATE ROLE
+
+> GRANT USAGE ON FOREIGN SERVER a66_srv TO a66_fdw_user
+-- GRANT
+
+> GRANT CREATE ON SCHEMA public TO a66_fdw_user
+-- GRANT
+
+> SET ROLE a66_fdw_user
+-- SET
+
+> CREATE FOREIGN TABLE a66_u () SERVER a66_srv OPTIONS (filename 'a')
+ERROR 42501: permission denied to set the "filename" option of a file_fdw foreign table
+DETAIL: Only roles with privileges of the "pg_read_server_files" role may set this option.
+
+> CREATE FOREIGN TABLE a66_u () SERVER a66_srv OPTIONS (program 'a')
+ERROR 42501: permission denied to set the "program" option of a file_fdw foreign table
+DETAIL: Only roles with privileges of the "pg_execute_server_program" role may set this option.
+
+> RESET ROLE
+-- RESET
+
+> GRANT pg_read_server_files TO a66_fdw_user
+-- GRANT ROLE
+
+> SET ROLE a66_fdw_user
+-- SET
+
+> CREATE FOREIGN TABLE a66_u () SERVER a66_srv OPTIONS (filename 'a')
+-- CREATE FOREIGN TABLE
+
+> CREATE FOREIGN TABLE a66_v () SERVER a66_srv OPTIONS (program 'a')
+ERROR 42501: permission denied to set the "program" option of a file_fdw foreign table
+DETAIL: Only roles with privileges of the "pg_execute_server_program" role may set this option.
+
+> SELECT * FROM a66_t
+ERROR 42501: permission denied for foreign table a66_t
+
+> DROP FOREIGN TABLE a66_u
+-- DROP FOREIGN TABLE
+
+> RESET ROLE
+-- RESET
+
+> INSERT INTO a66_t VALUES (1, 'x')
+ERROR 0A000: cannot insert into foreign table "a66_t"
+
+> UPDATE a66_t SET a = 1
+ERROR 0A000: cannot update foreign table "a66_t"
+
+> DELETE FROM a66_t WHERE a = 1
+ERROR 0A000: cannot delete from foreign table "a66_t"
+
+> TRUNCATE a66_t
+ERROR 0A000: cannot truncate foreign table "a66_t"
+
+> INSERT INTO a66_t SELECT 1, 'x' WHERE false
+ERROR 0A000: cannot insert into foreign table "a66_t"
+
+> CREATE TABLE a66_parent (a int, b text)
+-- CREATE TABLE
+
+> ALTER FOREIGN TABLE a66_t INHERIT a66_parent
+-- ALTER FOREIGN TABLE
+
+> UPDATE a66_parent SET a = 2
+ERROR 0A000: cannot update foreign table "a66_t"
+
+> DELETE FROM a66_parent
+ERROR 0A000: cannot delete from foreign table "a66_t"
+
+> SELECT * FROM ONLY a66_parent
+a:int4 | b:text
+-- SELECT 0
+
+> ALTER FOREIGN TABLE a66_t NO INHERIT a66_parent
+-- ALTER FOREIGN TABLE
+
+> DROP TABLE a66_parent
+-- DROP TABLE
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a66_t WHERE a > 1
+QUERY PLAN:text
+Foreign Scan on a66_t
+  Filter: (a > 1)
+  Foreign File: /nonexistent/a66.csv
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a66_t
+QUERY PLAN:text
+Foreign Scan on a66_t  (cost=0.00..138.00 rows=1280 width=36)
+  Foreign File: /nonexistent/a66.csv
+-- EXPLAIN
+
+> EXPLAIN SELECT a FROM a66_t WHERE b = 'x'
+QUERY PLAN:text
+Foreign Scan on a66_t  (cost=0.00..272.40 rows=13 width=4)
+  Filter: (b = 'x'::text)
+  Foreign File: /nonexistent/a66.csv
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM a66_p
+QUERY PLAN:text
+Foreign Scan on public.a66_p
+  Output: a
+  Foreign Program: cat -n
+-- EXPLAIN
+
+> EXPLAIN (FORMAT JSON, COSTS OFF) SELECT * FROM a66_t
+QUERY PLAN:json
+[
+  {
+    "Plan": {
+      "Node Type": "Foreign Scan",
+      "Operation": "Select",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Relation Name": "a66_t",
+      "Alias": "a66_t",
+      "Disabled": false,
+      "Foreign File": "/nonexistent/a66.csv"
+    }
+  }
+]
+-- EXPLAIN
+
+> DROP EXTENSION file_fdw CASCADE
+NOTICE 00000: drop cascades to 3 other objects
+DETAIL: drop cascades to server a66_srv
+DETAIL: drop cascades to foreign table a66_t
+DETAIL: drop cascades to foreign table a66_p
+-- DROP EXTENSION
+
+> REVOKE CREATE ON SCHEMA public FROM a66_fdw_user
+-- REVOKE
+
+> DROP ROLE a66_fdw_user
+-- DROP ROLE
+

@@ -3131,10 +3131,10 @@ impl Planner<'_, '_> {
     fn paths(&self, rel: &Rel, want: &Want) -> Vec<Path> {
         let startup = want.startup();
         let mut list = Vec::new();
-        // cost_seqscan.
+        // cost_seqscan (or the foreign table's wrapper's estimate).
         let seq_total = rel.qual_startup
             + self.g.seq_page_cost * rel.size.pages
-            + (CPU_TUPLE_COST + rel.qual_cost) * rel.size.tuples;
+            + (seq_cpu_tuple_cost(&self.cat, &rel.table) + rel.qual_cost) * rel.size.tuples;
         add_path(
             &mut list,
             Path {
@@ -3490,6 +3490,20 @@ impl Planner<'_, '_> {
                 need[c] = true;
             }
         }
+        // A file_fdw table's size comes from its file, its tuples from the width of the
+        // columns the scan returns (estimate_size's reltarget width).
+        let size = match t.is_foreign() {
+            true => {
+                let width = need
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, n)| **n)
+                    .map(|(i, _)| costs::col_width(&self.cat, &t, i))
+                    .sum();
+                crate::ext::file_fdw::estimate(&t, width, self.ctx).unwrap_or(size)
+            }
+            false => size,
+        };
         let mut indexes = index_infos(self.ctx, &t, size.tuples);
         if s.with_key || s.mark.is_some() {
             indexes.iter_mut().for_each(|ii| ii.target = true);
@@ -4216,14 +4230,34 @@ pub fn describe(ctx: &ExecCtx, s: &ScanPlan) -> Option<ScanDesc> {
     describe_with(ctx, s, None)
 }
 
+/// `describe` of a foreign scan whose columns used above are `needed` (its reltarget: a
+/// file_fdw table's estimate is by their width).
+pub fn describe_foreign(ctx: &ExecCtx, s: &ScanPlan, needed: &[bool]) -> Option<ScanDesc> {
+    describe_need(ctx, s, None, needed)
+}
+
+/// CPU per tuple of a sequential scan of `t`: cpu_tuple_cost, or ten times it for a
+/// file_fdw table (its estimate_costs).
+fn seq_cpu_tuple_cost(cat: &crate::catalog::Catalog, t: &Table) -> f64 {
+    if t.is_foreign() && crate::ext::file_fdw::is_file_table(cat, t) {
+        CPU_TUPLE_COST * 10.0
+    } else {
+        CPU_TUPLE_COST
+    }
+}
+
 /// `describe`, of the scan as a partial path of `par` = (workers, parallel divisor): its
 /// CPU costs and rows spread over the processes.
 pub fn describe_with(ctx: &ExecCtx, s: &ScanPlan, par: Option<(usize, f64)>) -> Option<ScanDesc> {
+    describe_need(ctx, s, par, &[])
+}
+
+fn describe_need(ctx: &ExecCtx, s: &ScanPlan, par: Option<(usize, f64)>, needed: &[bool]) -> Option<ScanDesc> {
     if matches!(s.access, Access::Unplanned) {
         return None;
     }
     let p = Planner::new(ctx);
-    let rel = p.rel(s, &[])?;
+    let rel = p.rel(s, needed)?;
     let div = par.map_or(1.0, |(_, d)| d);
     let prows = |r: f64| if par.is_some() { costs::clamp_rows(r / div) } else { r };
     match &s.access {
@@ -4232,7 +4266,7 @@ pub fn describe_with(ctx: &ExecCtx, s: &ScanPlan, par: Option<(usize, f64)>) -> 
             startup: rel.qual_startup,
             total: rel.qual_startup
                 + p.g.seq_page_cost * rel.size.pages
-                + (CPU_TUPLE_COST + rel.qual_cost) * rel.size.tuples / div,
+                + (seq_cpu_tuple_cost(&p.cat, &rel.table) + rel.qual_cost) * rel.size.tuples / div,
             rows: prows(rel.rows),
             index_conds: Vec::new(),
             recheck: Vec::new(),

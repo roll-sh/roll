@@ -52,7 +52,7 @@ there, so fewer of its tests ran than in round 17).
 | pgjdbc (jdbc2/3/4/42, core) | 42.7.7 | 8221 / 0 | 8214 / 7 | 8218 / 3 * | 3: DML on pg_description / pg_class |
 | Npgsql (Npgsql.Tests) | 9.0.3 | 1919 / 2 | 1908 / 16 | 1903 / 11 | 9: hstore (4), ltree (4), SQL_ASCII database |
 | SQLAlchemy (dialect/postgresql, sql) | 2.0.41 | 15801 / 2 | 15755 / 48 | 15801 / 2 * | 0 |
-| Django (26 apps) | 5.2.4 | 3793 / 15 | 3789 / 19 | 3792 / 16 | 1: file_fdw |
+| Django (26 apps) | 5.2.4 | 3793 / 15 | 3789 / 19 | 3792 / 16 | 2: a file_fdw program table (see below), an ungrouped column (round 19) |
 | tokio-postgres (tests, postgres, derive) | 0.7.18 | 221 / 0 | | 212 / 9 * | 9: ltree / lquery / ltxtquery / hstore binary (7), startup NOTICE, pg_database order |
 | sqlx (9 postgres targets) | 0.9.0 | 333 / 0 | | 318 / 15 * | 15: contrib types (7), domain arrays (3), empty arrays (2), 3 not looked at (see below) |
 | Prisma (push, pull, migrate, client) | 7.10.1 | 47 / 0 | | 47 / 0 * | 0 (bit(n) lengths in `db pull`, fixed) |
@@ -96,6 +96,12 @@ Engine, open:
 - Drizzle: `INSERT INTO t (a, b) SELECT id, $1 FROM u WHERE ... ORDER BY ...` types $1 text.
 - TypeORM: enum change / rename (loadTables' regtype cast over a renamed enum), table names
   with quotes, collation change SQL, extension installation.
+- Django (round 19, agent 66): file_fdw is native now (contrib STATUS.md), but inspectdb's
+  test_foreign_data_wrapper reads `SELECT * ... LIMIT 1` from a `program 'echo 1,2,3,4'`
+  table, which runs a server program: refused, as COPY ... PROGRAM is (HANDOFF
+  "Decisions"); it passes only if programs were allowed. aggregation's
+  test_aggregation_subquery_annotation_multivalued fails with "subquery uses ungrouped
+  column" (new since round 18's runs, not from file_fdw; not looked at).
 - tokio-postgres: no NOTICE at startup for a truncated application_name; pg_database's row
   order.
 - asyncpg's introspection tests: its type introspection query on a large catalog is slower

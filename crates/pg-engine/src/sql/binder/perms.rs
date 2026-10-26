@@ -262,7 +262,7 @@ impl Binder<'_, '_> {
 /// "table", "view", … for "permission denied for …".
 pub fn rel_word(cat: &crate::catalog::Catalog, oid: u32) -> (&'static str, String) {
     if let Some(t) = cat.tables.get(&oid) {
-        return ("table", t.name.clone());
+        return (if t.is_foreign() { "foreign table" } else { "table" }, t.name.clone());
     }
     if let Some(v) = cat.views.get(&oid) {
         return (

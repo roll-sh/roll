@@ -98,6 +98,15 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   `plan_level`), ctid conditions shipped, INSERT ... RETURNING the remote row, DML per row by
   remote ctid or sent whole (Foreign Update / Delete), ANALYZE, IMPORT FOREIGN SCHEMA; joins
   and aggregates aren't pushed down yet (contrib STATUS.md has the list).
+- **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
+  contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
+  (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a
+  server file under the `--allow-server-files` policy (no file without it), and the
+  `program` option is accepted but never run (COPY ... PROGRAM stays refused, Decisions).
+  Wrappers that can't change rows get CheckValidResultRel's errors from
+  `Catalog::fdw_modify_error` (the DML nodes, partition routing, COPY FROM, TRUNCATE);
+  postgres_fdw is exempt there. Costs follow file_fdw's estimate_size / estimate_costs
+  (`paths::seq_cpu_tuple_cost`, `describe_foreign` for EXPLAIN's reltarget width).
 - **search_path in routines** (round 19, agent 53): PL/pgSQL functions, DO blocks and SQL
   functions bind each statement under the session's search path as it is when the statement
   runs (`Interp::resync`, `ExecCtx::session_path` / `resynced` / `path_stale`), as

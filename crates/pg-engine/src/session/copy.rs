@@ -86,7 +86,7 @@ fn copy_bool(d: &pb::DefElem) -> Result<bool> {
 
 impl CopyFormat {
     /// ProcessCopyOptions.
-    fn parse(opts: &[pb::Node], is_from: bool) -> Result<CopyFormat> {
+    pub(crate) fn parse(opts: &[pb::Node], is_from: bool) -> Result<CopyFormat> {
         let mut f = CopyFormat {
             csv: false,
             binary: false,
@@ -243,7 +243,24 @@ impl CopyFormat {
                     }
                 }
                 "reject_limit" => {
-                    let n = arg.and_then(crate::sql::binder::ast::ival).unwrap_or(0);
+                    // defGetCopyRejectLimitOption: a string (file_fdw's options) is read as
+                    // an int8.
+                    let n = match arg.and_then(inner) {
+                        None => {
+                            return Err(Error::new(
+                                code::SYNTAX_ERROR,
+                                "reject_limit requires a numeric value",
+                            ));
+                        }
+                        Some(NodeEnum::String(s)) => {
+                            let ty = crate::types::DataType::Int8;
+                            match parse_value(&s.sval, &ty, &Default::default())? {
+                                Value::Int8(n) => n,
+                                _ => 0,
+                            }
+                        }
+                        Some(_) => arg.and_then(crate::sql::binder::ast::ival).unwrap_or(0),
+                    };
                     if n <= 0 {
                         return Err(Error::new(
                             code::INVALID_PARAMETER_VALUE,
@@ -933,28 +950,7 @@ impl Session {
         let Some(sf) = self.state.cluster.server_files() else {
             return Err(crate::error::internal("COPY from a file without server files"));
         };
-        let path = sf.resolve(name)?;
-        let open_error = |e: std::io::Error| {
-            let err = crate::server_files::file_error(
-                &e,
-                &format!("could not open file \"{name}\" for reading"),
-            );
-            if crate::server_files::is_enoent_or_eacces(&e) {
-                err.hint("COPY FROM instructs the PostgreSQL server process to read a file. You may want a client-side facility such as psql's \\copy.")
-            } else {
-                err
-            }
-        };
-        let mut f = std::fs::File::open(&path).map_err(open_error)?;
-        let m = f.metadata().map_err(|e| {
-            crate::server_files::file_error(&e, &format!("could not stat file \"{name}\""))
-        })?;
-        if m.is_dir() {
-            return Err(Error::new(
-                code::WRONG_OBJECT_TYPE,
-                format!("\"{name}\" is a directory"),
-            ));
-        }
+        let mut f = open_copy_file(Some(sf), name)?;
         let mut data = Vec::new();
         std::io::Read::read_to_end(&mut f, &mut data).map_err(|e| {
             crate::server_files::file_error(&e, &format!("could not read from COPY file \"{name}\""))
@@ -1099,12 +1095,15 @@ impl Session {
         data: &[u8],
         last: bool,
     ) -> Result<usize> {
-        // (After the end-of-copy marker or the binary trailer the rest is ignored.)
-        if st.ended {
-            st.bytes += data.len();
-            return Ok(data.len());
+        // CopyFrom's CheckValidResultRel, before any row is read: a foreign table's
+        // wrapper must take rows.
+        if c.table.is_foreign() {
+            self.ensure_txn();
+            let cat = self.txn.as_ref().unwrap().borrow().catalog();
+            if let Some(e) = cat.fdw_modify_error(&c.table, "insert into") {
+                return Err(e);
+            }
         }
-        let f = &c.format;
         let mut fmt = self.state.settings.borrow().format_ctx();
         // (regclass, regtype, ... input looks names up: the transaction's catalog, the path.)
         if let Some(txn) = &self.txn {
@@ -1113,182 +1112,249 @@ impl Session {
                 self.state.search_path(),
             )));
         }
-        if f.binary {
-            let (rows, took, ended) = binary_copy_in(data, c, &fmt, st, last)?;
-            for row in rows {
-                st.records += 1;
-                st.rows.push(row);
-                st.lines.push((st.records, String::new()));
-            }
-            st.ended = ended;
-            st.bytes += took;
-            return Ok(took);
-        }
-        let take = if last {
-            data.len()
-        } else {
-            record_boundary(data, f)
-        };
-        if take == 0 {
-            return Ok(0);
-        }
-        let data = &data[..take];
-        st.bytes += take;
         let enc = self.copy_encoding(&c.format);
-        // Data in another encoding is converted line by line, errors naming the line.
-        let converted;
-        let data = if enc != crate::types::mbconv::UTF8 {
-            let mut out = Vec::with_capacity(data.len());
-            for (i, line) in data.split_inclusive(|b| *b == b'\n').enumerate() {
-                let u = crate::types::mbconv::to_utf8(line, enc).map_err(|e| {
-                    e.context(format!("COPY {}, line {}", c.table.name, st.phys_lines + i + 1))
-                })?;
-                out.extend_from_slice(u.as_bytes());
-            }
-            converted = out;
-            &converted[..]
-        } else {
-            data
-        };
-        st.phys_lines += data.iter().filter(|b| **b == b'\n').count();
-        let text = std::str::from_utf8(data).map_err(|_| {
-            Error::new(
-                code::CHARACTER_NOT_IN_REPERTOIRE,
-                "invalid byte sequence for encoding \"UTF8\"",
-            )
-        })?;
-        let t = c.table.clone();
-        let records = if f.csv {
-            split_csv(text, f)?
-        } else {
-            let (records, ended) = split_text(text, f, &t.name, st.records)?;
-            st.ended = ended;
-            records
-        };
-        let first = st.records;
-        st.records += records.len();
-        st.rows.reserve(records.len());
-        st.lines.reserve(records.len());
-        let CopyInParsed {
-            rows,
-            lines,
-            skipped,
-            ..
-        } = st;
-        let ctx_line = |line: usize, raw: &str| format!("COPY {}, line {line}: \"{raw}\"", t.name);
-        'records: for (lineno, (raw, rec)) in records.into_iter().enumerate() {
-            let lineno = first + lineno;
-            let line = lineno + 1;
-            if lineno == 0 && f.header {
-                if f.header_match {
-                    if rec.len() != c.ncols {
-                        return Err(Error::new(
-                            code::BAD_COPY_FILE_FORMAT,
-                            format!(
-                                "wrong number of fields in header line: got {}, expected {}",
-                                rec.len(),
-                                c.ncols
-                            ),
-                        )
-                        .context(ctx_line(line, &raw)));
+        parse_copy_data(c, st, data, last, &fmt, enc, &mut |e| self.raise_notice(e))
+    }
+}
+
+/// NextCopyFrom over COPY data: the complete records at the start of `data` (every one when
+/// `last`), in encoding `enc`, read into `st`; returns the bytes taken. `notice` gets ON_ERROR
+/// ignore's verbose notices.
+pub(crate) fn parse_copy_data(
+    c: &CopyIn,
+    st: &mut CopyInParsed,
+    data: &[u8],
+    last: bool,
+    fmt: &crate::types::text::FormatCtx,
+    enc: i32,
+    notice: &mut dyn FnMut(Error),
+) -> Result<usize> {
+    // (After the end-of-copy marker or the binary trailer the rest is ignored.)
+    if st.ended {
+        st.bytes += data.len();
+        return Ok(data.len());
+    }
+    let f = &c.format;
+    if f.binary {
+        let (rows, took, ended) = binary_copy_in(data, c, fmt, st, last)?;
+        for row in rows {
+            st.records += 1;
+            st.rows.push(row);
+            st.lines.push((st.records, String::new()));
+        }
+        st.ended = ended;
+        st.bytes += took;
+        return Ok(took);
+    }
+    let take = if last {
+        data.len()
+    } else {
+        record_boundary(data, f)
+    };
+    if take == 0 {
+        return Ok(0);
+    }
+    let data = &data[..take];
+    st.bytes += take;
+    // Data in another encoding is converted line by line, errors naming the line.
+    let converted;
+    let data = if enc != crate::types::mbconv::UTF8 {
+        let mut out = Vec::with_capacity(data.len());
+        for (i, line) in data.split_inclusive(|b| *b == b'\n').enumerate() {
+            let u = crate::types::mbconv::to_utf8(line, enc).map_err(|e| {
+                e.context(format!("COPY {}, line {}", c.table.name, st.phys_lines + i + 1))
+            })?;
+            out.extend_from_slice(u.as_bytes());
+        }
+        converted = out;
+        &converted[..]
+    } else {
+        data
+    };
+    st.phys_lines += data.iter().filter(|b| **b == b'\n').count();
+    let text = std::str::from_utf8(data).map_err(|_| {
+        Error::new(
+            code::CHARACTER_NOT_IN_REPERTOIRE,
+            "invalid byte sequence for encoding \"UTF8\"",
+        )
+    })?;
+    let t = c.table.clone();
+    let records = if f.csv {
+        split_csv(text, f)?
+    } else {
+        let (records, ended) = split_text(text, f, &t.name, st.records)?;
+        st.ended = ended;
+        records
+    };
+    let first = st.records;
+    st.records += records.len();
+    st.rows.reserve(records.len());
+    st.lines.reserve(records.len());
+    let CopyInParsed {
+        rows,
+        lines,
+        skipped,
+        ..
+    } = st;
+    let ctx_line = |line: usize, raw: &str| format!("COPY {}, line {line}: \"{raw}\"", t.name);
+    'records: for (lineno, (raw, rec)) in records.into_iter().enumerate() {
+        let lineno = first + lineno;
+        let line = lineno + 1;
+        if lineno == 0 && f.header {
+            if f.header_match {
+                if rec.len() != c.ncols {
+                    return Err(Error::new(
+                        code::BAD_COPY_FILE_FORMAT,
+                        format!(
+                            "wrong number of fields in header line: got {}, expected {}",
+                            rec.len(),
+                            c.ncols
+                        ),
+                    )
+                    .context(ctx_line(line, &raw)));
+                }
+                for (n, (field, &col)) in rec.iter().zip(&c.target).enumerate() {
+                    let want = &t.columns[col].name;
+                    if field.is_null(f) {
+                        return Err(Error::new(code::BAD_COPY_FILE_FORMAT, format!("column name mismatch in header line field {}: got null value (\"{}\"), expected \"{want}\"", n + 1, f.null))
+                            .context(ctx_line(line, &raw)));
                     }
-                    for (n, (field, &col)) in rec.iter().zip(&c.target).enumerate() {
-                        let want = &t.columns[col].name;
-                        if field.is_null(f) {
-                            return Err(Error::new(code::BAD_COPY_FILE_FORMAT, format!("column name mismatch in header line field {}: got null value (\"{}\"), expected \"{want}\"", n + 1, f.null))
-                                .context(ctx_line(line, &raw)));
-                        }
-                        if field.value != *want {
-                            return Err(Error::new(code::BAD_COPY_FILE_FORMAT, format!("column name mismatch in header line field {}: got \"{}\", expected \"{want}\"", n + 1, field.value))
-                                .context(ctx_line(line, &raw)));
-                        }
+                    if field.value != *want {
+                        return Err(Error::new(code::BAD_COPY_FILE_FORMAT, format!("column name mismatch in header line field {}: got \"{}\", expected \"{want}\"", n + 1, field.value))
+                            .context(ctx_line(line, &raw)));
                     }
                 }
+            }
+            continue;
+        }
+        // (NextCopyFrom: with no columns to fill, a line's fields are ignored.)
+        if c.ncols > 0 && rec.len() > c.ncols {
+            return Err(Error::new(
+                code::BAD_COPY_FILE_FORMAT,
+                "extra data after last expected column",
+            )
+            .context(ctx_line(line, &raw)));
+        }
+        // (A missing field is found after the ones before it converted: NextCopyFrom.)
+        let missing = (rec.len() < c.ncols).then_some(rec.len());
+        let mut row = Vec::with_capacity(c.ncols);
+        for (field, &col) in rec.into_iter().zip(&c.target) {
+            let colname = &t.columns[col].name;
+            let ty = &t.columns[col].ty;
+            if field.is_default(f) {
+                let c = &t.columns[col];
+                if c.default.is_none() && c.identity.is_none() && c.domain.is_none() {
+                    return Err(Error::new(
+                        code::BAD_COPY_FILE_FORMAT,
+                        "unexpected default marker in COPY data",
+                    )
+                    .detail(format!("Column \"{colname}\" has no default value."))
+                    .context(ctx_line(line, &raw)));
+                }
+                row.push(Expr::Default(ty.clone()));
                 continue;
             }
-            // (NextCopyFrom: with no columns to fill, a line's fields are ignored.)
-            if c.ncols > 0 && rec.len() > c.ncols {
-                return Err(Error::new(
-                    code::BAD_COPY_FILE_FORMAT,
-                    "extra data after last expected column",
-                )
-                .context(ctx_line(line, &raw)));
-            }
-            // (A missing field is found after the ones before it converted: NextCopyFrom.)
-            let missing = (rec.len() < c.ncols).then_some(rec.len());
-            let mut row = Vec::with_capacity(c.ncols);
-            for (field, &col) in rec.into_iter().zip(&c.target) {
-                let colname = &t.columns[col].name;
-                let ty = &t.columns[col].ty;
-                if field.is_default(f) {
-                    let c = &t.columns[col];
-                    if c.default.is_none() && c.identity.is_none() && c.domain.is_none() {
-                        return Err(Error::new(
-                            code::BAD_COPY_FILE_FORMAT,
-                            "unexpected default marker in COPY data",
-                        )
-                        .detail(format!("Column \"{colname}\" has no default value."))
-                        .context(ctx_line(line, &raw)));
-                    }
-                    row.push(Expr::Default(ty.clone()));
-                    continue;
+            let mut value = if field.is_null(f) {
+                None
+            } else {
+                Some(field.value)
+            };
+            if f.csv {
+                if value.is_none() && f.forces_not_null(colname) {
+                    value = Some(f.null.clone());
+                } else if value.as_ref().is_some_and(|v| *v == f.null) && f.forces_null(colname)
+                {
+                    value = None;
                 }
-                let mut value = if field.is_null(f) {
-                    None
-                } else {
-                    Some(field.value)
-                };
-                if f.csv {
-                    if value.is_none() && f.forces_not_null(colname) {
-                        value = Some(f.null.clone());
-                    } else if value.as_ref().is_some_and(|v| *v == f.null) && f.forces_null(colname)
-                    {
-                        value = None;
+            }
+            let v = match value {
+                None => Value::Null,
+                Some(s) => match parse_value(&s, ty, fmt) {
+                    Ok(v) => v,
+                    Err(_) if f.on_error_ignore => {
+                        *skipped += 1;
+                        if let Some(limit) = f.reject_limit
+                            && *skipped as i64 > limit
+                        {
+                            return Err(Error::new(code::INVALID_TEXT_REPRESENTATION, format!("skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility"))
+                                .context(format!("COPY {}, line {line}, column {colname}: \"{s}\"", t.name)));
+                        }
+                        if f.log_verbosity >= 2 {
+                            notice(
+                                super::notice(format!("skipping row due to data type incompatibility at line {line} for column \"{colname}\": \"{s}\"")).context(format!("COPY {}", t.name)),
+                            );
+                        }
+                        continue 'records;
                     }
-                }
-                let v = match value {
-                    None => Value::Null,
-                    Some(s) => match parse_value(&s, ty, &fmt) {
-                        Ok(v) => v,
-                        Err(_) if f.on_error_ignore => {
-                            *skipped += 1;
-                            if let Some(limit) = f.reject_limit
-                                && *skipped as i64 > limit
-                            {
-                                return Err(Error::new(code::INVALID_TEXT_REPRESENTATION, format!("skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility"))
-                                    .context(format!("COPY {}, line {line}, column {colname}: \"{s}\"", t.name)));
-                            }
-                            if f.log_verbosity >= 2 {
-                                self.raise_notice(
-                                    super::notice(format!("skipping row due to data type incompatibility at line {line} for column \"{colname}\": \"{s}\"")).context(format!("COPY {}", t.name)),
-                                );
-                            }
-                            continue 'records;
-                        }
-                        Err(e) => {
-                            return Err(e.context(format!(
-                                "COPY {}, line {line}, column {colname}: \"{s}\"",
-                                t.name
-                            )));
-                        }
-                    },
-                };
-                row.push(Expr::Const(v, ty.clone()));
-            }
-            if let Some(n) = missing {
-                let col = &t.columns[c.target[n]].name;
-                return Err(Error::new(
-                    code::BAD_COPY_FILE_FORMAT,
-                    format!("missing data for column \"{col}\""),
-                )
-                .context(ctx_line(line, &raw)));
-            }
-            rows.push(row);
-            lines.push((line, raw));
+                    Err(e) => {
+                        return Err(e.context(format!(
+                            "COPY {}, line {line}, column {colname}: \"{s}\"",
+                            t.name
+                        )));
+                    }
+                },
+            };
+            row.push(Expr::Const(v, ty.clone()));
         }
-        Ok(take)
+        if let Some(n) = missing {
+            let col = &t.columns[c.target[n]].name;
+            return Err(Error::new(
+                code::BAD_COPY_FILE_FORMAT,
+                format!("missing data for column \"{col}\""),
+            )
+            .context(ctx_line(line, &raw)));
+        }
+        rows.push(row);
+        lines.push((line, raw));
     }
+    Ok(take)
+}
 
+/// BeginCopyFrom's file, opened: relative names are in the server's files directory (`sf`),
+/// errors are PostgreSQL's for a file it can't open (or a directory). Without server files
+/// no file can be opened.
+pub(crate) fn open_copy_file(
+    sf: Option<&crate::server_files::ServerFiles>,
+    name: &str,
+) -> Result<std::fs::File> {
+    let open_error = |e: std::io::Error| {
+        let err = crate::server_files::file_error(
+            &e,
+            &format!("could not open file \"{name}\" for reading"),
+        );
+        if crate::server_files::is_enoent_or_eacces(&e) {
+            err.hint("COPY FROM instructs the PostgreSQL server process to read a file. You may want a client-side facility such as psql's \\copy.")
+        } else {
+            err
+        }
+    };
+    let Some(sf) = sf else {
+        return Err(open_error(std::io::ErrorKind::PermissionDenied.into()));
+    };
+    let path = sf.resolve(name)?;
+    let f = std::fs::File::open(&path).map_err(open_error)?;
+    let m = f.metadata().map_err(|e| {
+        crate::server_files::file_error(&e, &format!("could not stat file \"{name}\""))
+    })?;
+    if m.is_dir() {
+        return Err(Error::new(
+            code::WRONG_OBJECT_TYPE,
+            format!("\"{name}\" is a directory"),
+        ));
+    }
+    Ok(f)
+}
+
+impl CopyInParsed {
+    /// The rows read so far (each the copied columns' values, or `Expr::Default` for a
+    /// DEFAULT marker), taken; ON_ERROR ignore's count of rows skipped.
+    pub(crate) fn take_rows(&mut self) -> (Vec<Vec<Expr>>, usize) {
+        self.lines.clear();
+        (std::mem::take(&mut self.rows), self.skipped)
+    }
+}
+
+impl Session {
     /// COPY FROM's rows, read, go in.
     fn copy_in_insert(&mut self, c: &CopyIn, st: CopyInParsed) -> Result<QueryResult> {
         let CopyInParsed {
