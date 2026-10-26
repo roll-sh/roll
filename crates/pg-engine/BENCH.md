@@ -1456,6 +1456,16 @@ Agent 54 measured 453 s for the engine's restore on a busier machine. The time l
 block cache filled by those scans, plus the unique index build's key hashes
 (`UniqueKeys`, about 45 bytes a row).
 
+### TPC-H SF1 load (`bench tpch-load --sf 1`: COPY in 100k-row chunks, keys and indexes, VACUUM ANALYZE)
+
+| | before | after |
+|---|---|---|
+| COPY / keys and indexes / VACUUM ANALYZE (s) | 146 / 155 / 32 | 103 / 144 / 20 |
+| peak memory | 3.6 GB | 2.5 GB |
+
+PostgreSQL's peak for the same load was 1.2 GB (round 17). Each run was one, on a fresh data
+directory.
+
 ### What changed
 
 1. **A transaction's writes spill to disk** (`txn/spill.rs`). Past `txn_spill_bytes`
