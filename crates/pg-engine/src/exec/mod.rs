@@ -1284,12 +1284,13 @@ pub fn collect(plan: &Arc<Plan>, ctx: &ExecCtx, limit: Option<usize>) -> Result<
     })
 }
 
-/// Run a query, its rows into `out` as they come: what it made before an error stays there.
-pub fn collect_into(plan: &Arc<Plan>, ctx: &ExecCtx, out: &mut Vec<Row>) -> Result<()> {
+/// Run a query, handing each row to `f` as the executor returns it (a DestReceiver's
+/// receiveSlot): the rows before an error have been handed over; an error of `f` ends it.
+pub fn run_each(plan: &Arc<Plan>, ctx: &ExecCtx, mut f: impl FnMut(Row) -> Result<()>) -> Result<()> {
     ctx.statement(|| {
         let mut node = nodes::open(plan, ctx)?;
         while let Some(r) = node.next(ctx)? {
-            out.push(r);
+            f(r)?;
         }
         Ok(())
     })

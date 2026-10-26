@@ -4,7 +4,8 @@
 //!     bench --target wire --port 5433 <workload> [options]
 //!     bench --target inproc --data <dir> <workload> [options]
 //!
-//! Workloads: oltp-load, oltp, analytic-load, analytic, tpch-load, tpch, bulk, ddl, scale, idle,
+//! Workloads: oltp-load, oltp, analytic-load, analytic, tpch-load, tpch, bulk, stream-load, stream,
+//! ddl, scale, idle,
 //! startup, startup-catalog. Results are printed as `RESULT\t<label>\t<workload>\t<case>\t<k=v>...` lines.
 
 mod tpch;
@@ -38,6 +39,9 @@ trait Conn {
     fn copy_in(&mut self, sql: &str, data: &[u8]) -> Res<()>;
     /// Bytes of COPY TO STDOUT data.
     fn copy_out(&mut self, sql: &str) -> Res<u64>;
+    /// A query's rows (`copy`: COPY TO's data messages) read as they come, none kept:
+    /// (seconds to the first, how many).
+    fn stream(&mut self, sql: &str, copy: bool) -> Res<(f64, u64)>;
 }
 
 #[derive(Debug)]
@@ -168,6 +172,34 @@ impl Conn for Wire {
             Ok(n)
         })
     }
+    fn stream(&mut self, sql: &str, copy: bool) -> Res<(f64, u64)> {
+        use futures::StreamExt;
+        let start = Instant::now();
+        let mut first = None;
+        let mut n = 0u64;
+        self.rt.block_on(async {
+            if copy {
+                let st = self.c.copy_out(sql).await.map_err(db_err)?;
+                futures::pin_mut!(st);
+                while let Some(b) = st.next().await {
+                    b.map_err(db_err)?;
+                    first.get_or_insert_with(|| start.elapsed().as_secs_f64());
+                    n += 1;
+                }
+            } else {
+                let st = self.c.simple_query_raw(sql).await.map_err(db_err)?;
+                futures::pin_mut!(st);
+                while let Some(m) = st.next().await {
+                    if let tokio_postgres::SimpleQueryMessage::Row(_) = m.map_err(db_err)? {
+                        first.get_or_insert_with(|| start.elapsed().as_secs_f64());
+                        n += 1;
+                    }
+                }
+            }
+            Ok::<_, String>(())
+        })?;
+        Ok((first.unwrap_or(0.0), n))
+    }
 }
 
 struct InProc {
@@ -238,6 +270,26 @@ impl Conn for InProc {
         }
         self.s.end_batch().map_err(pg_err)?;
         Ok(n)
+    }
+    fn stream(&mut self, sql: &str, copy: bool) -> Res<(f64, u64)> {
+        if copy {
+            // (In-process COPY TO's data is collected: `Outcome::CopyOut`.)
+            let (n, s) = timed(|| self.copy_out(sql));
+            return Ok((s, n?));
+        }
+        let start = Instant::now();
+        let got = std::rc::Rc::new(std::cell::Cell::new((0.0f64, 0u64)));
+        let g = got.clone();
+        self.s
+            .query_each(sql, move |_, row| {
+                if row.is_some() {
+                    let (f, n) = g.get();
+                    g.set((if n == 0 { start.elapsed().as_secs_f64() } else { f }, n + 1));
+                }
+                Ok(())
+            })
+            .map_err(pg_err)?;
+        Ok(got.get())
     }
 }
 
@@ -798,6 +850,58 @@ fn bulk(cx: &Ctx) {
 // ---------------------------------------------------------------------------------------------
 // DDL and catalogs
 
+// ---------------------------------------------------------------------------------------------
+// Streaming results: a big SELECT / COPY TO read as it comes
+
+fn stream_load(cx: &Ctx) {
+    let rows: u64 = cx.opt("rows", 10_000_000);
+    let mut c = cx.conn();
+    let _ = c.simple("DROP TABLE IF EXISTS stream_t");
+    must(c.simple("CREATE TABLE stream_t (id int, v int, t text)"), "create stream_t");
+    let step = 1_000_000;
+    let mut at = 0;
+    while at < rows {
+        let hi = (at + step).min(rows);
+        let sql = format!(
+            "INSERT INTO stream_t SELECT g, g % 1000, md5(g::text) FROM generate_series({}, {hi}) g",
+            at + 1
+        );
+        must(c.simple(&sql), "load stream_t");
+        at = hi;
+    }
+    must(c.simple("VACUUM ANALYZE stream_t"), "analyze stream_t");
+    cx.report("stream-load", "rows", &[("rows", rows.to_string())]);
+}
+
+/// Time to the first row, the whole time and the server's peak memory above what it had
+/// before, for the whole table as a SELECT and as COPY TO.
+fn stream(cx: &Ctx) {
+    let reps: usize = cx.opt("reps", 3);
+    let mut c = cx.conn();
+    for (case, sql, copy) in [
+        ("select_all", "SELECT * FROM stream_t", false),
+        ("copy_out", "COPY stream_t TO STDOUT", true),
+    ] {
+        for rep in 0..reps {
+            let before = cx.mem.bytes();
+            let m = MemSampler::start(&cx.mem);
+            let (r, secs) = timed(|| must(c.stream(sql, copy), case));
+            let peak = m.stop();
+            cx.report(
+                "stream",
+                case,
+                &[
+                    ("rep", rep.to_string()),
+                    ("rows", r.1.to_string()),
+                    ("first_row_s", format!("{:.4}", r.0)),
+                    ("secs", format!("{secs:.3}")),
+                    ("peak_mb", mb(peak.saturating_sub(before))),
+                ],
+            );
+        }
+    }
+}
+
 fn ddl(cx: &Ctx) {
     let tables: usize = cx.opt("tables", 500);
     let reps: usize = cx.opt("reps", 20);
@@ -1245,6 +1349,8 @@ fn main() {
             "tpch-load" => tpch_load(&cx),
             "tpch" => run_queries(&cx, "tpch", tpch::QUERIES),
             "bulk" => bulk(&cx),
+            "stream-load" => stream_load(&cx),
+            "stream" => stream(&cx),
             "ddl" => ddl(&cx),
             "scale" => scale(&cx),
             "scale-ops" => scale_ops(&cx),

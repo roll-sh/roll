@@ -174,6 +174,8 @@ struct Conn {
     fatal: bool,
     /// pg_terminate_backend was called on this session.
     terminated: Option<Arc<AtomicBool>>,
+    /// The socket, for what goes out while a statement runs (`WireSink`).
+    live: std::rc::Rc<TcpStream>,
 }
 
 impl Conn {
@@ -220,6 +222,8 @@ impl Conn {
 
     /// After a panic: drop a message left half written.
     fn drop_partial(&mut self) {
+        // (And what a statement cut short had parked or sent into `UNFLUSHED`.)
+        UNFLUSHED.with(|u| u.borrow_mut().clear());
         if let Some(at) = self.partial.take()
             && at <= self.out.len()
         {
@@ -510,6 +514,7 @@ fn handle(
         partial: None,
         fatal: false,
         terminated: None,
+        live: std::rc::Rc::new(stream.try_clone()?),
     };
     // Notices a statement raises before it waits for a lock go out then, as Postgres
     // flushes each notice: after what the connection had buffered (`Conn::unflushed`).
@@ -1184,8 +1189,19 @@ fn send_changed(c: &mut Conn, s: &mut Session) {
     }
 }
 
-fn row_description(c: &mut Conn, cols: &[OutCol], formats: &[i16]) {
-    c.msg(b'T', |b| {
+/// Write a message (type `t`, the body `body` writes) to `b`.
+fn put_msg<T>(b: &mut BytesMut, t: u8, body: impl FnOnce(&mut BytesMut) -> T) -> T {
+    b.put_u8(t);
+    let at = b.len();
+    b.put_i32(0);
+    let r = body(b);
+    let len = (b.len() - at) as i32;
+    b[at..at + 4].copy_from_slice(&len.to_be_bytes());
+    r
+}
+
+fn put_row_description(b: &mut BytesMut, cols: &[OutCol], formats: &[i16]) {
+    put_msg(b, b'T', |b| {
         b.put_i16(cols.len() as i16);
         for (i, col) in cols.iter().enumerate() {
             cstr(b, &col.name);
@@ -1199,6 +1215,10 @@ fn row_description(c: &mut Conn, cols: &[OutCol], formats: &[i16]) {
     });
 }
 
+fn row_description(c: &mut Conn, cols: &[OutCol], formats: &[i16]) {
+    put_row_description(&mut c.out, cols, formats);
+}
+
 fn result_format(formats: &[i16], i: usize) -> i16 {
     match formats.len() {
         0 => 0,
@@ -1207,45 +1227,138 @@ fn result_format(formats: &[i16], i: usize) -> i16 {
     }
 }
 
-fn data_rows(c: &mut Conn, r: &QueryResult, formats: &[i16], fmt: &FormatCtx) -> Result<()> {
+/// A DataRow (printtup). A value its output function or the client's encoding can't take
+/// fails the row: nothing of it is left in `b`.
+fn put_data_row(b: &mut BytesMut, row: &[crate::types::Value], cols: &[OutCol], formats: &[i16], fmt: &FormatCtx) -> Result<()> {
+    let start = b.len();
+    let r = put_msg(b, b'D', |b| {
+        b.put_i16(row.len() as i16);
+        for (i, v) in row.iter().enumerate() {
+            if v.is_null() {
+                b.put_i32(-1);
+                continue;
+            }
+            let text = crate::types::DataType::Text;
+            let ty = cols.get(i).map_or(&text, |c| &c.ty);
+            let at = b.len();
+            b.put_i32(0);
+            if result_format(formats, i) == 1 {
+                crate::types::binary::encode(v, ty, fmt, b)?;
+            } else {
+                b.put_slice(&to_client(&format_value(v, ty, fmt))?);
+            }
+            let n = (b.len() - at - 4) as i32;
+            b[at..at + 4].copy_from_slice(&n.to_be_bytes());
+        }
+        Ok(())
+    });
+    if r.is_err() {
+        b.truncate(start);
+    }
+    r
+}
+
+/// The rows a statement collected (none, when they streamed: `WireSink`).
+fn data_rows(c: &mut Conn, s: &Session, r: &QueryResult, formats: &[i16]) -> Result<()> {
+    if r.rows.is_empty() {
+        return Ok(());
+    }
+    let fmt = s.format_ctx();
     let cols = r.cols.as_deref().unwrap_or(&[]);
     for row in &r.rows {
-        let mut err = None;
-        c.msg(b'D', |b| {
-            b.put_i16(row.len() as i16);
-            for (i, v) in row.iter().enumerate() {
-                if v.is_null() {
-                    b.put_i32(-1);
-                    continue;
-                }
-                let ty = cols
-                    .get(i)
-                    .map(|c| c.ty.clone())
-                    .unwrap_or(crate::types::DataType::Text);
-                let at = b.len();
-                b.put_i32(0);
-                if result_format(formats, i) == 1 {
-                    if let Err(e) = crate::types::binary::encode(v, &ty, fmt, b) {
-                        err.get_or_insert(e);
-                    }
-                } else {
-                    match to_client(&format_value(v, &ty, fmt)) {
-                        Ok(t) => b.put_slice(&t),
-                        Err(e) => {
-                            err.get_or_insert(e);
-                        }
-                    }
-                }
-                let n = (b.len() - at - 4) as i32;
-                b[at..at + 4].copy_from_slice(&n.to_be_bytes());
-            }
-        });
-        if let Some(e) = err {
-            return Err(e);
-        }
+        put_data_row(&mut c.out, row, cols, formats, &fmt)?;
         c.maybe_flush()?;
     }
     Ok(())
+}
+
+/// A statement's rows (and COPY TO's data) on their way to the client as the executor makes
+/// them: into the buffer parked while the statement runs (`UNFLUSHED`), behind what the
+/// connection had buffered and in order with the notices it raises, and to the socket each
+/// time 8 kB have piled up (PostgreSQL's send buffer, PQ_SEND_BUFFER_SIZE). The client has
+/// the rows as they're made and the rows before an error; memory stays bounded for any
+/// result: a client that stops reading stops the statement, as a full socket does a backend.
+struct WireSink {
+    wr: std::rc::Rc<TcpStream>,
+    /// The portal's result formats (an Execute's); empty: text, and a simple query's
+    /// RowDescription goes out first.
+    formats: Vec<i16>,
+    describe: bool,
+}
+
+impl WireSink {
+    fn put(&mut self, f: impl FnOnce(&mut BytesMut) -> Result<()>) -> Result<()> {
+        UNFLUSHED.with(|u| {
+            let mut b = u.borrow_mut();
+            f(&mut b)?;
+            if b.len() >= 8 << 10 {
+                (&*self.wr)
+                    .write_all(&b)
+                    .map_err(|e| crate::session::sink::connection_lost(&e))?;
+                b.clear();
+            }
+            Ok(())
+        })
+    }
+}
+
+impl crate::session::RowSink for WireSink {
+    fn begin(&mut self, cols: &[OutCol]) -> Result<()> {
+        if self.describe {
+            self.put(|b| {
+                put_row_description(b, cols, &[]);
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    fn row(&mut self, row: crate::exec::Row, cols: &[OutCol], fmt: &FormatCtx) -> Result<()> {
+        let formats = std::mem::take(&mut self.formats);
+        let r = self.put(|b| put_data_row(b, &row, cols, &formats, fmt));
+        self.formats = formats;
+        r
+    }
+
+    fn takes_copy(&self) -> bool {
+        true
+    }
+
+    fn copy_begin(&mut self, binary: bool, ncols: usize) -> Result<()> {
+        let f = if binary { 1 } else { 0 };
+        self.put(|b| {
+            put_msg(b, b'H', |b| {
+                b.put_i8(f);
+                b.put_i16(ncols as i16);
+                for _ in 0..ncols {
+                    b.put_i16(f as i16);
+                }
+            });
+            Ok(())
+        })
+    }
+
+    fn copy_data(&mut self, data: &[u8]) -> Result<()> {
+        self.put(|b| {
+            put_msg(b, b'd', |b| b.put_slice(data));
+            Ok(())
+        })
+    }
+
+    fn copy_end(&mut self) -> Result<()> {
+        self.put(|b| {
+            put_msg(b, b'c', |_| {});
+            Ok(())
+        })
+    }
+}
+
+/// Run `f` (a statement) with its rows streaming to the client (`WireSink`).
+fn streamed<T>(c: &mut Conn, s: &mut Session, formats: &[i16], describe: bool, f: impl FnOnce(&mut Session) -> T) -> T {
+    s.row_sink = Some(Box::new(WireSink { wr: c.live.clone(), formats: formats.to_vec(), describe }));
+    let r = c.unflushed(|| f(s));
+    s.row_sink = None;
+    r
 }
 
 fn command_complete(c: &mut Conn, tag: &str) {
@@ -1280,40 +1393,31 @@ fn simple_batch(
     stmts: &[Arc<Prepared>],
 ) -> std::io::Result<()> {
     for (i, p) in stmts.iter().enumerate() {
-        s.partial_rows = None;
         // (What came before, the scanner's warnings say, goes before what the statement
         // raises as it runs.)
         send_notices(c, s);
-        let mut out = c.unflushed(|| s.execute(p));
+        let mut out = streamed(c, s, &[], true, |s| s.execute(p));
         // Like Postgres, an implicit transaction commits before the last command tag goes out,
         // so deferred constraint failures replace it.
         if i + 1 == stmts.len()
             && matches!(out, Ok(Outcome::Done(_)))
             && let Err(e) = s.end_batch()
         {
-            // (The rows went out as the statement ran, before the commit failed.)
+            // (The rows went out as the statement ran, before the commit failed: what
+            // didn't stream goes now.)
             if let Ok(Outcome::Done(r)) = out
                 && r.cols.is_some()
             {
-                s.partial_rows = Some(r);
+                if s.sent.is_none() {
+                    row_description(c, r.cols.as_deref().unwrap_or(&[]), &[]);
+                }
+                let _ = data_rows(c, s, &r, &[]);
             }
             out = Err(e);
         }
         send_notices(c, s);
-        let r = match out {
-            Ok(o) => outcome(c, s, o, &[]),
-            Err(e) => {
-                // The rows a SELECT made before failing went out before the error.
-                if let Some(rows) = s.partial_rows.take()
-                    && let Some(cols) = &rows.cols
-                {
-                    row_description(c, cols, &[]);
-                    let fmt = s.format_ctx();
-                    let _ = data_rows(c, &rows, &[], &fmt);
-                }
-                Err(e)
-            }
-        };
+        // (The rows a SELECT made before failing went out before the error.)
+        let r = out.and_then(|o| outcome(c, s, o, &[]));
         send_changed(c, s);
         if let Err(e) = r {
             let _ = s.end_batch();
@@ -1334,11 +1438,11 @@ fn outcome(c: &mut Conn, s: &mut Session, o: Outcome, formats: &[i16]) -> Result
         Outcome::Done(r) => {
             if let Some(cols) = &r.cols
                 && formats.is_empty()
+                && s.sent.is_none()
             {
                 row_description(c, cols, &[]);
             }
-            let fmt = s.format_ctx();
-            data_rows(c, &r, formats, &fmt)?;
+            data_rows(c, s, &r, formats)?;
             command_complete(c, &r.tag);
             Ok(())
         }
@@ -1547,32 +1651,21 @@ fn execute_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
         c.msg(b'I', |_| {});
         return Ok(());
     }
-    s.partial_rows = None;
     send_notices(c, s);
-    let r = c.unflushed(|| s.execute_portal(&portal, max_rows));
+    let r = streamed(c, s, &formats, false, |s| s.execute_portal(&portal, max_rows));
     if r.is_ok() {
         s.note_executed();
     }
     send_notices(c, s);
-    // The rows a SELECT made before failing went out before the error (as DataRows of the
-    // portal's formats: Execute sends no RowDescription).
-    if r.is_err()
-        && let Some(rows) = s.partial_rows.take()
-    {
-        let fmt = s.format_ctx();
-        let _ = data_rows(c, &rows, &formats, &fmt);
-    }
     let (o, more) = r.map_err(|e| e.in_chars(&sql))?;
     match o {
         Outcome::Done(r) if more => {
-            let fmt = s.format_ctx();
-            data_rows(c, &r, &formats, &fmt)?;
+            data_rows(c, s, &r, &formats)?;
             c.msg(b's', |_| {});
         }
         // Rows only: Execute doesn't send a RowDescription.
         Outcome::Done(r) => {
-            let fmt = s.format_ctx();
-            data_rows(c, &r, &formats, &fmt)?;
+            data_rows(c, s, &r, &formats)?;
             command_complete(c, &r.tag);
         }
         o => outcome(c, s, o, &formats)?,

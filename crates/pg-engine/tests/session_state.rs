@@ -500,3 +500,33 @@ fn panic_leaves_no_state() {
     });
     assert!(problems.is_empty(), "{}", problems.join("\n\n"));
 }
+
+/// `Session::query_each`: a SELECT's rows reach the callback as the executor makes them
+/// (the rows before an error too), its result keeps only the tag; RETURNING's rows are
+/// collected as with `query`.
+#[test]
+fn query_each_streams_rows_to_a_callback() {
+    on_thread(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = engine_session(open_store(dir.path()), "b");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let log = seen.clone();
+        let sql = "SELECT g FROM generate_series(1, 3) g; SELECT 10 / (2 - g) FROM generate_series(1, 3) g";
+        let r = s.query_each(sql, move |cols, row| {
+            log.borrow_mut().push(match row {
+                None => format!("cols {}", cols.len()),
+                Some(r) => format!("{:?}", r[0]),
+            });
+            Ok(())
+        });
+        assert_eq!(r.unwrap_err().code, "22012");
+        let seen = seen.borrow().join(", ");
+        assert_eq!(seen, "cols 1, Int4(1), Int4(2), Int4(3), cols 1, Int4(10)");
+        let sql = "CREATE TABLE t (a int); INSERT INTO t VALUES (1) RETURNING a; SELECT a FROM t";
+        let r = s.query_each(sql, |_, _| Ok(())).unwrap();
+        let shape: Vec<(String, usize)> = r.iter().map(|q| (q.tag.clone(), q.rows.len())).collect();
+        let want: Vec<(String, usize)> =
+            vec![("CREATE TABLE".into(), 0), ("INSERT 0 1".into(), 1), ("SELECT 1".into(), 0)];
+        assert_eq!(shape, want);
+    });
+}

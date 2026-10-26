@@ -225,10 +225,10 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   far as each Execute's row count (`cursor::Lazy::next_rows`); it found and fixed a wrong
   result: EXISTS over a join that the subquery's planning had made a parameterized nested loop
   (`sublink::unparameterized`, a regression of 530923f). Left, besides contrib types and
-  locking: rows still go out after the statement has made them all (single-row mode, memory
-  for big results), DML on pg_description / pg_class.relname, SQL_ASCII databases, and the new
-  suites' items in STATUS.md. (Concurrent DDL commits through `txn/catmerge.rs`; its base is
-  the catalog the statement started from, `Txn::stmt_catalog`.)
+  locking: DML on pg_description / pg_class.relname, SQL_ASCII databases, and the new
+  suites' items in STATUS.md (rows stream since round 19, agent 65: below). (Concurrent DDL
+  commits through `txn/catmerge.rs`; its base is the catalog the statement started from,
+  `Txn::stmt_catalog`.)
 - **Storage and bulk performance** (round 18, agent 43): compact SST blocks, batched heap
   fetches for index scans (`Store::get_versions`, `Txn::get_many_snap`), index-only scans of
   big tables answered from the index entries (an entry visible to a snapshot points at a row
@@ -253,6 +253,41 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     against 604): putting rows back at their stored TIDs would change where new rows go; WAL files are
     zero-filled ahead and big commits are SST files of their own, so a crashed database must
     be reopened by this version before an older one.
+- **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
+  the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
+  `session::RowSink` (`session/sink.rs`, PostgreSQL's DestReceiver) takes them in
+  `Session::run_query` (and `execute_suspended`, an Execute on a suspended portal). The
+  server's `WireSink` (`server.rs`) writes each DataRow into the buffer parked while a
+  statement runs (`UNFLUSHED`, behind what the connection had buffered and in order with the
+  notices the statement raises) and writes it to the socket every 8 kB (PQ_SEND_BUFFER_SIZE).
+  So the first row arrives while the statement runs (libpq single-row / chunked mode, ruby-pg).
+  Notices interleave with rows, the rows before an error go ahead of it, and a result of any
+  size takes a row's memory: a client that stops reading stops the statement, as a full socket
+  does a backend. COPY TO STDOUT streams the same way (`CopyLines`, `CopyDest` in
+  `session/copy.rs`, CopyOutResponse before the query runs), and COPY TO a file writes as it
+  goes. The rest keeps PostgreSQL's portal strategies and still collects first: RETURNING and
+  a data-modifying WITH (PORTAL_ONE_RETURNING / ONE_MOD_WITH run to completion before sending
+  anything), and EXECUTE, FETCH, EXPLAIN and SHOW (PORTAL_UTIL_SELECT fills a store). Only a
+  SelectStmt or CopyStmt sees the sink (`execute_with_inner`), so a statement nested in another
+  (EXECUTE's query) collects. Embedders: `Session::query_each(sql, f)` hands each SELECT's rows
+  to a callback as they are made; `query` / `execute` are unchanged. A 10M-row SELECT over the
+  wire: the first row in about 1 ms (before: 1–4 s; PostgreSQL 0.5–1.2 ms), +68 MB of server
+  memory for the result (before: +1.9 GB; COPY TO +66 MB, before +3.1 GB); pgbench
+  select-only unchanged (BENCH.md "Round 19 (agent 65): streaming results").
+  Found and left open, not output-path work:
+  - the first statement that plans a big table after the engine starts takes 2–3 s, because
+    planning a cold table reads it whole into the block cache (BENCH.md);
+  - `catalog/system.rs`'s debug assertion on pg_class's row count fails under concurrent
+    CREATE / DROP TABLE (pgjdbc TypeCacheDLLStressTest; the same before this change).
+  - `tests/parallel_scan.rs` runs its queries in-process on the test harness's 2 MB thread,
+    and its debug build needs within 64 KB of that: a few KB more frame on the executor's path
+    overflowed it (`run_query`'s rare branches are functions of their own for that). The
+    2 MB-thread item under "Joins, DISTINCT aggregates" is the general case.
+  Verified: crate tests, clippy, wire tests `rows_stream_as_the_executor_makes_them` and
+  `cancel_while_rows_stream`, the difftest smoke, the regression suite in full (debug, private
+  reference): 51,148 / 51,150, no unit changed against `results.tsv`; isolation spot checks
+  (nowait*, skip-locked*, eval-plan-qual, deadlock, ...: as before); and the client suites in
+  tests/clients/STATUS.md (ruby-pg now matches PostgreSQL).
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.

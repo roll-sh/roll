@@ -12,6 +12,7 @@ pub mod ddl;
 pub mod settings;
 pub mod state;
 mod pgss;
+pub mod sink;
 mod utility;
 pub(crate) use utility::{LIST_QUOTE, split_guc_list};
 pub(crate) use utility::set_value;
@@ -35,6 +36,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use copy::{CopyIn, CopyInParsed, CopyOut};
+pub use sink::RowSink;
 
 /// Transaction status as ReadyForQuery reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,10 +217,12 @@ pub struct Session {
     /// transaction_read_only as each open savepoint started (a subtransaction's change
     /// ends with it: CommitSubTransaction / AbortSubTransaction restore XactReadOnly).
     ro_stack: Vec<bool>,
-    /// The rows a SELECT sent before it failed: Postgres streams a SELECT's rows as the
-    /// executor makes them, so the client has these (and a chunked-mode psql, FETCH_COUNT,
-    /// prints the full chunks) before the ErrorResponse.
-    pub partial_rows: Option<QueryResult>,
+    /// Where a top-level SELECT's rows (and COPY TO STDOUT's data, when it takes it) go as
+    /// the executor makes them, instead of into its `QueryResult` (`sink`).
+    pub row_sink: Option<Box<dyn RowSink>>,
+    /// Some(rows): the last statement handed its rows to `row_sink` (`begin` was called);
+    /// its `QueryResult` has none.
+    pub sent: Option<usize>,
     /// pg_stat_statements: the top-level statement running, and the parallel workers its
     /// plan used.
     pgss_tracked: Option<pgss::Tracked>,
@@ -331,7 +335,8 @@ impl Session {
             pipelining: false,
             ro_stack: Vec::new(),
             source: String::new(),
-            partial_rows: None,
+            row_sink: None,
+            sent: None,
             pgss_tracked: None,
             pgss_workers: 0,
             pgss_copy: None,
@@ -632,6 +637,7 @@ impl Session {
     /// After an engine panic caught around this session's work (the server's `guard`): the
     /// statement failed as after an error, and the session goes on.
     pub fn recover_from_panic(&mut self) {
+        self.row_sink = None;
         self.state.clear_running();
         self.set_batch_len(0);
         self.on_error();
@@ -853,6 +859,22 @@ impl Session {
         self.query_copy(sql, &[])
     }
 
+    /// `query`, each SELECT's rows handed to `f` as the executor makes them instead of
+    /// collected (`f(cols, None)` first, as each starts: a RowDescription): any result in
+    /// bounded memory, the first row as soon as it is made, the rows before an error seen.
+    /// Their `QueryResult`s have the command tags and no rows; other statements' rows
+    /// (RETURNING, EXECUTE, FETCH, SHOW) are in theirs as with `query`.
+    pub fn query_each(
+        &mut self,
+        sql: &str,
+        f: impl FnMut(&[OutCol], Option<Row>) -> Result<()> + 'static,
+    ) -> Result<Vec<QueryResult>> {
+        self.row_sink = Some(Box::new(sink::FnSink(f)));
+        let r = self.query_copy(sql, &[]);
+        self.row_sink = None;
+        r
+    }
+
     /// `query`, with `copy_data` as the input of a COPY FROM STDIN.
     pub fn query_copy(&mut self, sql: &str, copy_data: &[u8]) -> Result<Vec<QueryResult>> {
         let stmts = match self.parse(sql) {
@@ -973,7 +995,17 @@ impl Session {
         }
         self.state.db.touch();
         self.sync_lists();
+        // Only a SELECT's rows and COPY TO's data go to the sink as they're made; what else
+        // returns rows (EXECUTE, FETCH, EXPLAIN, SHOW, RETURNING) sends them once it's done,
+        // and a statement it runs inside (EXECUTE's query) collects them.
+        self.sent = None;
+        let direct = matches!(node, Some(NodeEnum::SelectStmt(_) | NodeEnum::CopyStmt(_)));
+        let sink = if direct { None } else { self.row_sink.take() };
         let r = self.dispatch(&p, stmt, node, params);
+        if sink.is_some() {
+            self.row_sink = sink;
+            self.sent = None;
+        }
         self.state.no_snapshot.set(false);
         if r.is_err() {
             self.on_error();
@@ -1434,64 +1466,61 @@ impl Session {
         // A SELECT's rows go out as they're made (PORTAL_ONE_SELECT); a data-modifying
         // query's when it has finished.
         let streams = !bq.plan.writes() && matches!(inner(stmt), Some(NodeEnum::SelectStmt(_)));
+        // Its rows go to the sink as they're made (the client's DataRows), else into `made`.
+        let mut sink = if streams { self.row_sink.take() } else { None };
         let mut suspended = None;
         let mut made = Vec::new();
-        // ExecutorRun began (past ExecutorStart's permission checks): the RowDescription went
-        // out, so an error from here on follows it.
-        let mut started = false;
+        let mut sent = None;
         let mut parallel = false;
         let r = self.with_ctx(params, |ctx| {
             bq.check_perms(ctx)?;
-            started = true;
+            // ExecutorRun begins (past ExecutorStart's permission checks): the RowDescription
+            // goes out, so an error from here on follows it.
+            let mut feed = sink.as_deref_mut().map(|k| sink::Feed::new(k, &bq.cols));
+            if let Some(f) = feed.as_mut() {
+                sent = Some(0);
+                f.sink.begin(&bq.cols)?;
+            }
+            let mut put = |r: Row, ctx: &ExecCtx| -> Result<()> {
+                match feed.as_mut() {
+                    Some(f) => {
+                        let r = f.row(ctx, r);
+                        sent = Some(f.sent);
+                        r
+                    }
+                    None => {
+                        made.push(r);
+                        Ok(())
+                    }
+                }
+            };
+            // (The less common ways are functions of their own: what this frame holds is
+            // on the stack while the plan runs.)
             if streams && in_parallel_worker(ctx, &bq.plan) {
-                crate::exec::pgstat::count_parallel_workers(ctx, 1, 1);
                 parallel = true;
-                let frame = crate::error::Frame::Text("parallel worker".into());
-                // The worker's own locks (an advisory lock its functions take) go when it
-                // ends: its transaction is its own.
-                let mark = ctx.txn.borrow().lock_mark();
-                let r = ctx.sess.framed(frame, |_| crate::exec::collect_into(&bq.plan, ctx, &mut made));
-                ctx.txn.borrow_mut().release_locks_since(mark);
-                r?;
-                return Ok((std::mem::take(&mut made), ctx.processed.get()));
+                run_as_parallel_worker(ctx, &bq.plan, &mut put)?;
+            } else if streams && fetch > 0 {
+                suspended = run_suspendable(ctx, &bq.plan, params, fetch, &mut put)?;
+            } else if streams {
+                crate::exec::run_each(&bq.plan, ctx, |r| put(r, ctx))?;
+            } else {
+                drop(put);
+                made = collect(&bq.plan, ctx, None)?;
             }
-            // An Execute with a row count: as many rows, the executor kept for the next one.
-            if streams && fetch > 0 {
-                let mut lazy = crate::session::cursor::Lazy::new(
-                    ctx,
-                    bq.plan.clone(),
-                    std::rc::Rc::new(Vec::new()),
-                    None,
-                    ctx.child(&[]).keep(),
-                )
-                .with_params(params.to_vec());
-                if !lazy.next_rows(ctx, fetch, &mut made)? {
-                    suspended = Some(lazy);
-                }
-                return Ok((std::mem::take(&mut made), ctx.processed.get()));
-            }
-            if streams {
-                crate::exec::collect_into(&bq.plan, ctx, &mut made)?;
-                return Ok((std::mem::take(&mut made), ctx.processed.get()));
-            }
-            let rows = collect(&bq.plan, ctx, None)?;
-            Ok((rows, ctx.processed.get()))
+            Ok(ctx.processed.get())
         });
-        let (rows, processed) = match r {
-            Ok(r) => r,
-            Err(e) => {
-                if streams && started {
-                    self.partial_rows = Some(QueryResult::rows(bq.cols.clone(), made, ""));
-                }
-                return Err(e);
-            }
-        };
+        if streams {
+            self.row_sink = sink;
+        }
+        self.sent = sent;
+        let processed = r?;
+        let rows = made;
         if parallel {
             self.pgss_workers += 1;
         }
         self.pgss_measure(true);
         self.suspended = suspended;
-        let tag = query_tag(&bq.plan, stmt, rows.len(), processed);
+        let tag = query_tag(&bq.plan, stmt, sent.unwrap_or(rows.len()), processed);
         let returns = !bq.cols.is_empty() || matches!(inner(stmt), Some(NodeEnum::SelectStmt(_)));
         Ok(QueryResult {
             cols: if returns { Some(bq.cols.clone()) } else { None },
@@ -2022,11 +2051,12 @@ impl Session {
         let r = match out {
             Outcome::Done(mut r) => {
                 let mut more = false;
+                let n = self.sent.unwrap_or(r.rows.len());
                 if max_rows > 0
-                    && (r.rows.len() > max_rows
-                        || r.rows.len() == max_rows && r.cols.is_some() && r.tag.starts_with("SELECT "))
+                    && (n > max_rows
+                        || n == max_rows && r.cols.is_some() && r.tag.starts_with("SELECT "))
                 {
-                    let rest: VecDeque<Row> = r.rows.split_off(max_rows).into();
+                    let rest: VecDeque<Row> = r.rows.split_off(max_rows.min(r.rows.len())).into();
                     pt.tag_verb = r.tag.split(' ').next().unwrap_or("SELECT").to_string();
                     pt.pending = Some(rest);
                     more = true;
@@ -2128,23 +2158,33 @@ impl Session {
             ));
         }
         let mut rows = Vec::new();
-        let r = self.with_ctx(&pt.params.clone(), |ctx| lazy.next_rows(ctx, max_rows, &mut rows));
-        let done = match r {
-            Ok(done) => done,
-            Err(e) => {
-                // (The rows made before the error went out before it.)
-                self.partial_rows = Some(QueryResult::rows(pt.cols.clone().unwrap_or_default(), rows, ""));
-                return Err(e);
+        let mut sink = self.row_sink.take();
+        let cols = pt.cols.clone().unwrap_or_default();
+        let mut sent = None;
+        let r = self.with_ctx(&pt.params.clone(), |ctx| match sink.as_deref_mut() {
+            Some(k) => {
+                let mut feed = sink::Feed::new(k, &cols);
+                sent = Some(0);
+                feed.sink.begin(&cols)?;
+                let r = lazy.each_row(ctx, max_rows, |r, ctx| feed.row(ctx, r));
+                sent = Some(feed.sent);
+                r
             }
-        };
+            None => lazy.next_rows(ctx, max_rows, &mut rows),
+        });
+        self.row_sink = sink;
+        self.sent = sent;
+        // (The rows made before an error went out before it.)
+        let done = r?;
+        let count = sent.unwrap_or(rows.len());
         if done {
             // (Run to its end, it stays there: Execute again returns no rows.)
             pt.pending = Some(VecDeque::new());
         } else {
             pt.lazy = Some(lazy);
         }
-        let more = max_rows > 0 && rows.len() == max_rows;
-        let tag = format!("SELECT {}", rows.len());
+        let more = max_rows > 0 && count == max_rows;
+        let tag = format!("SELECT {count}");
         Ok((Outcome::Done(QueryResult { cols: pt.cols.clone(), rows, tag }), more))
     }
 
@@ -3042,6 +3082,38 @@ fn range_entries(plan: &Plan) -> usize {
 /// Gather (standard_planner), when a worker can be launched; the leader relays the worker's
 /// errors and notices with the CONTEXT line "parallel worker" (HandleParallelMessage; not
 /// in `regress` mode), and pg_stat_database counts the worker.
+/// debug_parallel_query's single worker: the query run as a worker's, rows to `put`.
+#[inline(never)]
+fn run_as_parallel_worker(
+    ctx: &ExecCtx,
+    plan: &Arc<Plan>,
+    put: &mut dyn FnMut(Row, &ExecCtx) -> Result<()>,
+) -> Result<()> {
+    crate::exec::pgstat::count_parallel_workers(ctx, 1, 1);
+    let frame = crate::error::Frame::Text("parallel worker".into());
+    // The worker's own locks (an advisory lock its functions take) go when it ends: its
+    // transaction is its own.
+    let mark = ctx.txn.borrow().lock_mark();
+    let r = ctx.sess.framed(frame, |_| crate::exec::run_each(plan, ctx, |r| put(r, ctx)));
+    ctx.txn.borrow_mut().release_locks_since(mark);
+    r
+}
+
+/// An Execute with a row count: as many rows to `put`, the executor returned for the next
+/// one when there are more (PortalRunSelect).
+#[inline(never)]
+fn run_suspendable(
+    ctx: &ExecCtx,
+    plan: &Arc<Plan>,
+    params: &[Value],
+    fetch: usize,
+    put: &mut dyn FnMut(Row, &ExecCtx) -> Result<()>,
+) -> Result<Option<cursor::Lazy>> {
+    let mut lazy = cursor::Lazy::new(ctx, plan.clone(), std::rc::Rc::new(Vec::new()), None, ctx.child(&[]).keep())
+        .with_params(params.to_vec());
+    Ok(if lazy.each_row(ctx, fetch, put)? { None } else { Some(lazy) })
+}
+
 fn in_parallel_worker(ctx: &crate::exec::ExecCtx, plan: &crate::sql::plan::Plan) -> bool {
     {
         let s = ctx.sess.settings.borrow();

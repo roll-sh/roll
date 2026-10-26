@@ -2498,6 +2498,58 @@ fn rechecks_after_concurrent_updates() {
     s.engine.shutdown();
 }
 
+/// A SELECT's rows go out as the executor makes them (printtup): the first while the
+/// statement still runs, the rows before an error ahead of it, notices in order with them;
+/// COPY TO's data too. What PostgreSQL runs to completion first (EXECUTE, RETURNING, a
+/// data-modifying WITH) sends nothing before its error.
+#[test]
+fn rows_stream_as_the_executor_makes_them() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    let wait = Duration::from_millis(1500);
+    let slow = "SELECT g::text FROM generate_series(1, 2000) g UNION ALL SELECT pg_sleep(3)::text";
+    for copy in [false, true] {
+        let start = Instant::now();
+        let sql = if copy { format!("COPY ({slow}) TO STDOUT\0") } else { format!("{slow}\0") };
+        c.send(b'Q', sql.as_bytes());
+        let first = if copy { b'H' } else { b'T' };
+        assert_eq!(c.next_within(wait).map(|m| m.0), Some(first));
+        let (t, b) = c.next_within(wait).expect("a row, before the statement ends");
+        assert_eq!((t, b.ends_with(b"1\n") || b.ends_with(b"\x011")), (if copy { b'd' } else { b'D' }, true));
+        assert!(start.elapsed() < Duration::from_secs(3));
+        let rest = c.read();
+        assert_eq!(rest.last().map(String::as_str), Some(if copy { "C COPY 2001" } else { "C SELECT 2001" }));
+    }
+    // The extended protocol's Execute.
+    let start = Instant::now();
+    c.parse("", slow);
+    c.bind("", "");
+    c.execute("", 0);
+    c.send(b'S', b"");
+    assert_eq!(c.next_within(wait).map(|m| m.0), Some(b'1'));
+    assert_eq!(c.next_within(wait).map(|m| m.0), Some(b'2'));
+    assert_eq!(c.next_within(wait).map(|m| m.0), Some(b'D'));
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert_eq!(c.read().last().map(String::as_str), Some("C SELECT 2001"));
+
+    let div = "SELECT 10 / (4 - i) FROM generate_series(1, 6) i";
+    assert_eq!(c.query(div), ["T ?column?:23/-1", "D 3", "D 5", "D 10", "E 22012"]);
+    assert_eq!(c.query("SELECT 1 / (i - 1) FROM generate_series(1, 3) i"), ["T ?column?:23/-1", "E 22012"]);
+    c.parse("", div);
+    c.bind("", "");
+    c.execute("", 0);
+    assert_eq!(c.sync(), ["D 3", "D 5", "D 10", "E 22012"]);
+    assert_eq!(
+        c.query(&format!("COPY ({div}) TO STDOUT")),
+        ["H", "d", "d", "d", "E 22012"]
+    );
+    c.query("CREATE TABLE rs (a int)");
+    assert_eq!(c.query(&format!("PREPARE rsp AS {div}; EXECUTE rsp")), ["C PREPARE", "E 22012"]);
+    assert_eq!(c.query(&format!("INSERT INTO rs {div} RETURNING a")), ["E 22012"]);
+    assert_eq!(c.query(&format!("WITH w AS (INSERT INTO rs VALUES (1) RETURNING a) {div}")), ["E 22012"]);
+    assert_eq!(c.query("SELECT count(*) FROM rs"), ["T count:20/-1", "D 0", "C SELECT 1"]);
+}
+
 /// What PostgreSQL sends as it happens rather than at a statement's end: a notice as it is
 /// raised (send_message_to_frontend flushes it), a COPY FROM STDIN's bad line while the
 /// client is still sending (CopyFrom reads lines as they come), and a portal's rows up to
@@ -2890,6 +2942,44 @@ fn detach_partition_concurrently() {
                 .unwrap(),
             ["dp1|f", "dp2|f"]
         );
+    });
+    s.engine.shutdown();
+}
+
+/// A cancel while a SELECT's rows or COPY TO's data stream out stops them, whichever node
+/// makes them (generate_series checks for no interrupts of its own), as the executor's
+/// CHECK_FOR_INTERRUPTS does: psycopg's test_copy_out_error_with_copy_not_finished.
+#[test]
+fn cancel_while_rows_stream() {
+    let s = server(AuthMethod::Trust);
+    runtime().block_on(async {
+        let c = s.connect("postgres").await;
+        for copy in [true, false] {
+            let token = c.cancel_token();
+            let sql = "SELECT g FROM generate_series(1, 20000000) g";
+            let r: Result<(), tokio_postgres::Error> = async {
+                if copy {
+                    let st = c.copy_out(&format!("COPY ({sql}) TO STDOUT")).await?;
+                    futures::pin_mut!(st);
+                    st.next().await.expect("data")?;
+                    token.cancel_query(NoTls).await?;
+                    while let Some(d) = st.next().await {
+                        d?;
+                    }
+                } else {
+                    let st = c.simple_query_raw(sql).await?;
+                    futures::pin_mut!(st);
+                    st.next().await.expect("a row")?;
+                    token.cancel_query(NoTls).await?;
+                    while let Some(m) = st.next().await {
+                        m?;
+                    }
+                }
+                Ok(())
+            }
+            .await;
+            assert_eq!(r.unwrap_err().code().map(|c| c.code()), Some("57014"), "copy {copy}");
+        }
     });
     s.engine.shutdown();
 }

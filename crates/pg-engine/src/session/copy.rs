@@ -840,19 +840,25 @@ impl Session {
                 .map(|b| *b)
                 .unwrap(),
         };
-        // (Its notices go out with the data: the query's before CopyOutResponse, as now, the
-        // AFTER triggers' after the data, `trailing`.)
+        // The data goes to the client as it is made, CopyOutResponse first (DoCopyTo sends it
+        // before the executor runs), or into the file; the query's notices interleave with
+        // it, its AFTER triggers' (which fire at its end) follow it. Without a sink that
+        // takes it (an embedder's session) the data is collected into `Outcome::CopyOut`,
+        // the AFTER triggers' notices kept for after it (`trailing`).
+        let to_file = !s.filename.is_empty();
+        let mut sink = if to_file { None } else { self.row_sink.take().filter(|k| k.takes_copy()) };
+        let collecting = sink.is_none() && !to_file;
         let held = self.state.notice_hold.get();
-        self.state.notice_hold.set(held + 1);
+        if collecting {
+            self.state.notice_hold.set(held + 1);
+        }
+        let enc = self.copy_encoding(&format);
+        let fmt = self.state.settings.borrow().format_ctx();
         let run = self.with_ctx(params, |ctx| {
             let bq = Binder::new(ctx, Vec::new()).bind_statement(&stmt)?;
             bq.check_perms(ctx)?;
             // BeginCopyTo opens the file once the query is planned.
-            let file = if s.filename.is_empty() {
-                None
-            } else {
-                Some(create_copy_file(ctx, &s.filename)?)
-            };
+            let file = if to_file { Some(create_copy_file(ctx, &s.filename)?) } else { None };
             if s.query.is_some() {
                 for c in &format.force_quote {
                     if !bq.cols.iter().any(|o| o.name == *c) {
@@ -863,135 +869,62 @@ impl Session {
                     }
                 }
             }
-            // The rows go out as they come; AFTER triggers fire at the query's end (their
-            // notices follow the data).
-            // (One statement around both, so the query's own doesn't run the queue.)
-            let mut rows = Vec::new();
-            let mut mark = 0;
-            let run = ctx.statement(|| {
-                crate::exec::trigger::batch(ctx, || {
-                    rows = collect(&bq.plan, ctx, None)?;
-                    mark = ctx.notices.borrow().len();
-                    Ok(())
+            let mut lines = CopyLines::new(&format, &bq.cols, fmt, enc)?;
+            let mut dest = match (file, sink.as_deref_mut()) {
+                (Some((name, f)), _) => CopyDest::File(name, std::io::BufWriter::new(f)),
+                (None, Some(k)) => {
+                    k.copy_begin(format.binary, bq.cols.len())?;
+                    CopyDest::Client(k)
+                }
+                (None, None) => CopyDest::Collect(Vec::new()),
+            };
+            let (mut n, mut mark) = (0usize, 0);
+            let run = lines.header().and_then(|h| h.map_or(Ok(()), |h| dest.put(h))).and_then(|()| {
+                // (One statement around both, so the query's own doesn't run the queue.)
+                ctx.statement(|| {
+                    crate::exec::trigger::batch(ctx, || {
+                        crate::exec::run_each(&bq.plan, ctx, |r| {
+                            // (A cancel while the data goes out stops it: `sink::Feed::row`.)
+                            ctx.check()?;
+                            n += 1;
+                            dest.put(lines.row(&r)?)
+                        })?;
+                        if let Some(t) = lines.trailer() {
+                            dest.put(t)?;
+                        }
+                        dest.end()?;
+                        mark = ctx.notices.borrow().len();
+                        Ok(())
+                    })
                 })
             });
-            // An error running the query comes after CopyOutResponse (DoCopyTo sends it
-            // before the executor runs), to the client; one into a file is the statement's.
+            let after = if run.is_ok() { ctx.notices.borrow().len() - mark } else { 0 };
+            // An error into a file, or to a client the data streams to, is the statement's.
             let failed = match run {
-                Ok(()) => None,
-                Err(e) if file.is_none() => Some(e),
-                Err(e) => return Err(e),
+                // (An error into a file, or to a client the data streams to, is the
+                // statement's.)
+                Err(e) if !collecting => return Err(e),
+                r => r.err(),
             };
-            let after = if failed.is_some() {
-                0
-            } else {
-                ctx.notices.borrow().len() - mark
-            };
-            Ok((rows, bq.cols, after, file, failed))
+            Ok((failed, dest.collected(), n, after, bq.cols.len()))
         });
         self.state.notice_hold.set(held);
-        let (rows, cols, after, file, failed) = run?;
+        self.row_sink = self.row_sink.take().or(sink);
+        let (failed, data, n, after, ncols) = run?;
+        let tag = format!("COPY {n}");
+        if !collecting {
+            return Ok(Outcome::Done(QueryResult::command(tag)));
+        }
+        // An error running the query comes after CopyOutResponse and the rows before it.
         let trailing = self.notices.split_off(self.notices.len().saturating_sub(after));
-        let fmt = self.state.settings.borrow().format_ctx();
-        let mut data = Vec::new();
-        if format.header {
-            let line: Vec<String> = cols
-                .iter()
-                .map(|c| {
-                    if format.csv {
-                        csv_field(&c.name, &format, false, cols.len() == 1)
-                    } else {
-                        text_escape(&c.name, format.delimiter)
-                    }
-                })
-                .collect();
-            data.push(format!("{}\n", line.join(&format.delimiter.to_string())).into_bytes());
-        }
-        if let Some(e) = failed {
-            return self.copy_out_to(file, CopyOut {
-                data,
-                ncols: cols.len(),
-                tag: String::new(),
-                binary: format.binary,
-                trailing,
-                error: Some(e),
-            });
-        }
-        if format.binary {
-            let (data, error) = binary_copy_out(&rows, &cols, &fmt)?;
-            return self.copy_out_to(file, CopyOut {
-                data,
-                ncols: cols.len(),
-                tag: format!("COPY {}", rows.len()),
-                binary: true,
-                trailing,
-                error,
-            });
-        }
-        for r in &rows {
-            let mut fields = Vec::with_capacity(r.len());
-            for (v, c) in r.iter().zip(&cols) {
-                fields.push(match v {
-                    Value::Null => format.null.clone(),
-                    v => {
-                        let s = format_value(v, &c.ty, &fmt);
-                        if format.csv {
-                            let force =
-                                format.force_quote_all || format.force_quote.contains(&c.name);
-                            csv_field(&s, &format, force, cols.len() == 1)
-                        } else {
-                            text_escape(&s, format.delimiter)
-                        }
-                    }
-                });
-            }
-            data.push(format!("{}\n", fields.join(&format.delimiter.to_string())).into_bytes());
-        }
-        // The data goes out in the ENCODING option's encoding, else the client's.
-        let enc = self.copy_encoding(&format);
-        let mut error = None;
-        if enc != crate::types::mbconv::UTF8 {
-            for i in 0..data.len() {
-                match crate::types::mbconv::convert(&data[i], crate::types::mbconv::UTF8, enc) {
-                    Ok(d) => data[i] = d.into_owned(),
-                    Err(e) => {
-                        data.truncate(i);
-                        error = Some(e);
-                        break;
-                    }
-                }
-            }
-        }
-        self.copy_out_to(file, CopyOut {
+        Ok(Outcome::CopyOut(CopyOut {
             data,
-            ncols: cols.len(),
-            tag: format!("COPY {}", rows.len()),
-            binary: false,
+            ncols,
+            tag: if failed.is_some() { String::new() } else { tag },
+            binary: format.binary,
             trailing,
-            error,
-        })
-    }
-
-    /// COPY TO's data: to the client, or into the server file `file` (name, handle).
-    fn copy_out_to(&mut self, file: Option<(String, std::fs::File)>, out: CopyOut) -> Result<Outcome> {
-        use std::io::Write;
-        let Some((name, mut f)) = file else {
-            return Ok(Outcome::CopyOut(out));
-        };
-        if let Some(e) = out.error {
-            return Err(e);
-        }
-        let mut w = std::io::BufWriter::new(&mut f);
-        for d in &out.data {
-            w.write_all(d).map_err(|e| {
-                crate::server_files::file_error(&e, &format!("could not write to COPY file \"{name}\""))
-            })?;
-        }
-        w.flush().map_err(|e| {
-            crate::server_files::file_error(&e, &format!("could not write to COPY file \"{name}\""))
-        })?;
-        self.notices.extend(out.trailing);
-        Ok(Outcome::Done(QueryResult::command(out.tag)))
+            error: failed,
+        }))
     }
 
     /// BeginCopyFrom's file: its contents (relative names are in the server's files
@@ -1873,54 +1806,162 @@ fn split_csv(data: &str, f: &CopyFormat) -> Result<Records> {
 
 /// COPY TO in binary format: the signature, flags and extension area, then each row as a
 /// field count and length-prefixed fields (typsend), then the trailer.
-fn binary_copy_out(
-    rows: &[Vec<Value>],
-    cols: &[crate::sql::plan::OutCol],
-    fmt: &crate::types::text::FormatCtx,
-) -> Result<(Vec<Vec<u8>>, Option<Error>)> {
-    use bytes::BufMut;
-    for c in cols {
-        if !crate::types::binary::supports_binary(&c.ty) {
-            return Err(Error::new(
-                code::UNDEFINED_FUNCTION,
-                format!(
-                    "no binary output function available for type {}",
-                    c.ty.display()
-                ),
-            ));
+/// COPY TO's data, a CopyData message (a line) at a time: the header, each row's, the binary
+/// trailer; text in the target encoding (CopyToTextLikeOneRow, CopySendEndOfRow).
+struct CopyLines<'a> {
+    format: &'a CopyFormat,
+    cols: &'a [crate::sql::plan::OutCol],
+    fmt: crate::types::text::FormatCtx,
+    enc: i32,
+    /// The binary signature, not sent yet: it goes out with the first row (or the trailer).
+    signature: Option<Vec<u8>>,
+}
+
+impl<'a> CopyLines<'a> {
+    fn new(
+        format: &'a CopyFormat,
+        cols: &'a [crate::sql::plan::OutCol],
+        fmt: crate::types::text::FormatCtx,
+        enc: i32,
+    ) -> Result<Self> {
+        let mut signature = None;
+        if format.binary {
+            for c in cols {
+                if !crate::types::binary::supports_binary(&c.ty) {
+                    return Err(Error::new(
+                        code::UNDEFINED_FUNCTION,
+                        format!("no binary output function available for type {}", c.ty.display()),
+                    ));
+                }
+            }
+            let mut head = b"PGCOPY\n\xff\r\n\0".to_vec();
+            head.extend_from_slice(&0i32.to_be_bytes());
+            head.extend_from_slice(&0i32.to_be_bytes());
+            signature = Some(head);
+        }
+        Ok(CopyLines { format, cols, fmt, enc, signature })
+    }
+
+    /// Text in the target encoding.
+    fn encoded(&self, line: String) -> Result<Vec<u8>> {
+        use crate::types::mbconv;
+        if self.enc == mbconv::UTF8 {
+            return Ok(line.into_bytes());
+        }
+        Ok(mbconv::convert(line.as_bytes(), mbconv::UTF8, self.enc)?.into_owned())
+    }
+
+    /// The HEADER line (text and CSV).
+    fn header(&self) -> Result<Option<Vec<u8>>> {
+        let f = self.format;
+        if !f.header || f.binary {
+            return Ok(None);
+        }
+        let single = self.cols.len() == 1;
+        let line: Vec<String> = self
+            .cols
+            .iter()
+            .map(|c| if f.csv { csv_field(&c.name, f, false, single) } else { text_escape(&c.name, f.delimiter) })
+            .collect();
+        self.encoded(format!("{}\n", line.join(&f.delimiter.to_string()))).map(Some)
+    }
+
+    fn row(&mut self, r: &[Value]) -> Result<Vec<u8>> {
+        use bytes::BufMut;
+        let f = self.format;
+        if f.binary {
+            let mut b = bytes::BytesMut::new();
+            if let Some(h) = self.signature.take() {
+                b.put_slice(&h);
+            }
+            b.put_i16(r.len() as i16);
+            for (v, c) in r.iter().zip(self.cols) {
+                if v.is_null() {
+                    b.put_i32(-1);
+                    continue;
+                }
+                let at = b.len();
+                b.put_i32(0);
+                crate::types::binary::encode(v, &c.ty, &self.fmt, &mut b)?;
+                let n = (b.len() - at - 4) as i32;
+                b[at..at + 4].copy_from_slice(&n.to_be_bytes());
+            }
+            return Ok(b.to_vec());
+        }
+        let single = self.cols.len() == 1;
+        let mut line = String::new();
+        for (i, (v, c)) in r.iter().zip(self.cols).enumerate() {
+            if i > 0 {
+                line.push(f.delimiter);
+            }
+            match v {
+                Value::Null => line.push_str(&f.null),
+                v => {
+                    let s = format_value(v, &c.ty, &self.fmt);
+                    if f.csv {
+                        let force = f.force_quote_all || f.force_quote.contains(&c.name);
+                        line.push_str(&csv_field(&s, f, force, single));
+                    } else {
+                        line.push_str(&text_escape(&s, f.delimiter));
+                    }
+                }
+            }
+        }
+        line.push('\n');
+        self.encoded(line)
+    }
+
+    /// The binary trailer (with the signature, when no row carried it).
+    fn trailer(&mut self) -> Option<Vec<u8>> {
+        if !self.format.binary {
+            return None;
+        }
+        let mut tail = self.signature.take().unwrap_or_default();
+        tail.extend_from_slice(&(-1i16).to_be_bytes());
+        Some(tail)
+    }
+}
+
+/// Where COPY TO's data goes: the client, as it is made; a server file; or a list.
+enum CopyDest<'a> {
+    Client(&'a mut dyn super::RowSink),
+    File(String, std::io::BufWriter<std::fs::File>),
+    Collect(Vec<Vec<u8>>),
+}
+
+impl CopyDest<'_> {
+    fn put(&mut self, d: Vec<u8>) -> Result<()> {
+        use std::io::Write;
+        match self {
+            CopyDest::Client(k) => k.copy_data(&d),
+            CopyDest::File(name, w) => w.write_all(&d).map_err(|e| {
+                crate::server_files::file_error(&e, &format!("could not write to COPY file \"{name}\""))
+            }),
+            CopyDest::Collect(v) => {
+                v.push(d);
+                Ok(())
+            }
         }
     }
-    // One CopyData per row, as CopySendEndOfRow sends them: the header goes out with the first
-    // row (or the trailer, without rows).
-    let mut data = Vec::with_capacity(rows.len() + 1);
-    let mut head = b"PGCOPY\n\xff\r\n\0".to_vec();
-    head.extend_from_slice(&0i32.to_be_bytes());
-    head.extend_from_slice(&0i32.to_be_bytes());
-    let mut head = Some(head);
-    for r in rows {
-        let mut b = bytes::BytesMut::new();
-        if let Some(h) = head.take() {
-            b.put_slice(&h);
+
+    /// The data is complete: CopyDone, or the file flushed.
+    fn end(&mut self) -> Result<()> {
+        use std::io::Write;
+        match self {
+            CopyDest::Client(k) => k.copy_end(),
+            CopyDest::File(name, w) => w.flush().map_err(|e| {
+                crate::server_files::file_error(&e, &format!("could not write to COPY file \"{name}\""))
+            }),
+            CopyDest::Collect(_) => Ok(()),
         }
-        b.put_i16(r.len() as i16);
-        for (v, c) in r.iter().zip(cols) {
-            if v.is_null() {
-                b.put_i32(-1);
-                continue;
-            }
-            let mut field = bytes::BytesMut::new();
-            if let Err(e) = crate::types::binary::encode(v, &c.ty, fmt, &mut field) {
-                return Ok((data, Some(e)));
-            }
-            b.put_i32(field.len() as i32);
-            b.put_slice(&field);
-        }
-        data.push(b.to_vec());
     }
-    let mut tail = head.unwrap_or_default();
-    tail.extend_from_slice(&(-1i16).to_be_bytes());
-    data.push(tail);
-    Ok((data, None))
+
+    fn collected(self) -> Vec<Vec<u8>> {
+        match self {
+            CopyDest::Collect(v) => v,
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// COPY FROM in binary format: each tuple's fields through the columns' typreceive. Reads

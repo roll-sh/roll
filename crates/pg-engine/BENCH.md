@@ -41,6 +41,8 @@ pg-engine`, clippy and a full regression run unit for unit (see "Verification").
   - **Bulk** at 100k and 1M rows: COPY in, CREATE INDEX (plain and unique), COPY out,
     INSERT … SELECT, UPDATE of half the rows, DELETE of a quarter, VACUUM, ANALYZE, a
     count after.
+  - **Streaming** (`stream-load --rows 10000000`, `stream`): a 10M-row SELECT and COPY TO
+    read as they come: time to the first row, the whole time, the server's peak memory.
   - **DDL and catalogs**: 500 tables (serial key, check, default, index, added column),
     `information_schema.columns` / `.tables`, psql's `\d` queries, a `pg_class` ×
     `pg_attribute` join, an ORM-style `pg_constraint` query, a `regclass` cast, DROP.
@@ -677,6 +679,62 @@ aggregate and q21.
   `Detail::GroupSort` rather than an `ExNode` field to keep those frames as they were (a field
   made that test overflow by under 128 kB). Release frames are under 4 kB.
 - Every benchmark query's result hash, as above.
+
+## Round 19 (agent 65): streaming results
+
+A SELECT's rows and COPY TO's data now go to the client as the executor makes them (HANDOFF.md,
+"Result rows stream"). Before, a statement's rows were collected, then sent. Workload `stream`
+(`tools/bench/bench.rs`; `stream-load --rows N` makes `stream_t (id int, v int, t text)`,
+10M rows of `g, g % 1000, md5(g::text)`). It reads `SELECT * FROM stream_t` and
+`COPY stream_t TO STDOUT` over the wire as they come (tokio-postgres `simple_query_raw` /
+`copy_out`), keeping no rows, and reports the time to the first row, the whole time, and the
+server's peak memory over what it had before. Release builds of `dd758b2` (before) and of
+this change, on one data directory; PostgreSQL 18.6 with the harness's settings; server on
+CPUs 28-31, client on 32-35; load average about 20 from other agents, so times vary by
+about 15%.
+
+### 10M rows, over the wire (block cache warm; seconds, MB)
+
+| | first row | whole result | server memory for the result |
+|---|---:|---:|---:|
+| PostgreSQL, SELECT | 0.0005–0.0012 | 2.9–3.0 | +0–1.5 (cgroup anon + shmem) |
+| before, SELECT | 1.1–3.8 | 3.8–7.0 | +1,926 (VmHWM 1,687 → 3,613) |
+| after, SELECT | 0.0012–0.013 | 3.5–4.7 | +68 (VmHWM 1,685 → 1,753) |
+| PostgreSQL, COPY TO | 0.0007–0.0010 | 2.7–3.0 | +0 |
+| before, COPY TO | 5.2–8.0 | 6.2–9.1 | +3,079 (VmHWM 1,687 → 4,766) |
+| after, COPY TO | 0.0008–0.014 | 5.2–6.2 | +66 (VmHWM 1,686 → 1,752) |
+
+- The memory after is bounded: the same scan sending 100k / 1M / 10M rows peaked at +15 / +66 /
+  +68 MB (the parallel scan's queues fill while the client reads; a client that stops
+  reading stops the statement, as a full socket stops a backend). Before, the result was held
+  whole: `Vec<Value>` rows, and COPY TO's lines on top of them.
+- The 1.7 GB both start from is the block cache (`--cache-mb 2048`), filled by the first
+  statement that plans `stream_t`, not by the rows.
+- In-process (`Session::query_each`, `run.sh inproc stream`): the first row in 1 ms, the
+  whole 10M rows in 1.4 s, +1–24 MB. In-process COPY TO still collects (`Outcome::CopyOut`).
+
+Found, not output-path work: **the first statement that plans a big table after the engine
+starts takes 2.2–2.7 s** (cold `EXPLAIN SELECT * FROM stream_t` 2.7 s, VmRSS 54 MB → 1.7 GB;
+then `LIMIT 1` takes 2 ms). Planning reads the whole table into the block cache on a cold
+start. That is the first-row time of a fresh engine's first big SELECT (2.4–2.6 s), with or
+without parallel workers.
+
+### Small results: pgbench select-only (scale 10, `-M prepared`, 10 s; TPS, medians of 3)
+
+| clients | before | after |
+|---:|---:|---:|
+| 1 | 13,064 / 11,455 | 11,907 / 12,094 |
+| 8 | 60,713 / 70,402 | 61,356 / 62,813 |
+| 32 | 63,850 / 70,058 | 67,456 / 69,919 |
+
+(Two sets of three rounds, interleaved; five more `-c 8` rounds: before 45–52k, after
+45–62k.) Wall-clock TPS on this machine varies by more than any difference between the
+builds. So, as a steadier measure: engine CPU per transaction over a fixed 160,000
+(`/proc/<pid>/stat`, three rounds each). `-c 1`: before 49.5–57.5 µs, after 50.6–55.9 µs;
+`-c 8`: before 52.1–57.3 µs, after 52.6–57.6 µs. Those ranges overlap, so there is no
+measurable regression. A streamed small result costs a sink (one allocation per statement)
+and, per row, a settings-generation check. The rendering context is still built once per
+statement, as before.
 
 ## Catalog, DDL and sessions (round 18, agent 44)
 

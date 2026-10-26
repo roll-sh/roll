@@ -175,11 +175,28 @@ impl Lazy {
     /// (what a protocol portal's Execute returns: PortalRunSelect); true once it has none
     /// left.
     pub fn next_rows(&mut self, ctx: &ExecCtx, n: usize, out: &mut Vec<Row>) -> Result<bool> {
-        let start = out.len();
+        self.each_row(ctx, n, |r, _| {
+            out.push(r);
+            Ok(())
+        })
+    }
+
+    /// `next_rows`, each row handed to `f` as the executor returns it (with the context the
+    /// query runs in).
+    pub fn each_row(
+        &mut self,
+        ctx: &ExecCtx,
+        n: usize,
+        mut f: impl FnMut(Row, &ExecCtx) -> Result<()>,
+    ) -> Result<bool> {
         self.within(ctx, |ex, ctx| {
-            while n == 0 || out.len() - start < n {
+            let mut got = 0;
+            while n == 0 || got < n {
                 match ex.pull(ctx)? {
-                    Some(r) => out.push(ex.coerce(r, ctx)?),
+                    Some(r) => {
+                        f(ex.coerce(r, ctx)?, ctx)?;
+                        got += 1;
+                    }
                     None => break,
                 }
             }

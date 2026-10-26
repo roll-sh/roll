@@ -60,7 +60,7 @@ there, so fewer of its tests ran than in round 17).
 | Hibernate (hibernate-core subset) | 7.4.14 | 3088 / 0 | | 3080 / 8 | 8: see below |
 | TypeORM (postgres) | 1.1.2 | 3059 / 11 | | 2977 / 56 | 17, and 28 setup hooks: see below |
 | Drizzle (pg integration) | 0.45.4 | 852 / 0 | | 849 / 3 | 3: INSERT ... SELECT parameter typing |
-| ruby-pg (spec/, helper patched to a running server) | 1.7.0 | 1076 / 26 | | 1072 / 30 | 4: rows of a statement still running (single-row mode, COPY TO) |
+| ruby-pg (spec/, helper patched to a running server) | 1.7.0 | 1076 / 26 | | 1072 / 30; round 19: 1076 / 26 | 0 (rows stream since round 19, agent 65) |
 
 ## Differences left, and why
 
@@ -77,11 +77,9 @@ idle_in_transaction_session_timeout isn't enforced, serializable write skew in A
 two cases, FOR UPDATE on a LEFT JOIN's nullable side doesn't error (TypeORM).
 
 Engine, open:
-- A SELECT's rows are made before any goes out: nothing reaches the client while the statement
-  runs (ruby-pg's single-row mode and COPY TO over pg_sleep), notices and rows of one statement
-  don't interleave (notices come first), and a big result is held in memory. Notices themselves
-  stream (round 18). Streaming rows means the executor writing DataRows to the connection as it
-  makes them (the RowDescription first), a change to the executor / wire path (agent 48).
+- pgjdbc TypeCacheDLLStressTest.createDropTableAndGetTypeInfo (round 19): a debug build's
+  assertion on pg_class's row count (`catalog/system.rs`) fails while another session creates
+  and drops tables; the same before round 19's streaming. Release builds don't check it.
 - DML on system catalogs: `UPDATE pg_description SET objoid = ...` (pgjdbc
   DatabaseMetaDataTest's setUp moves a function's comment onto a table, classoid kept: the
   engine's comments have no classoid of their own), `UPDATE pg_class SET relname` (pgjdbc
@@ -104,6 +102,25 @@ Engine, open:
   than the test's 250 ms bound. node-postgres 1105 is timing (a debug build).
 - sqlx it_can_inspect_constraint_errors, it_can_prepare_then_execute,
   test_describe_outer_join_nullable: not looked at yet.
+
+Fixed in round 19, agent 65 (wire tests `rows_stream_as_the_executor_makes_them`,
+`cancel_while_rows_stream`; session test `query_each_streams_rows_to_a_callback`): a SELECT's
+rows and COPY TO's data go to the client as the executor makes them (`session/sink.rs`,
+`server.rs` `WireSink`). The first row arrives while the statement runs, notices come in order
+with the rows, the rows made before an error go ahead of it, and memory stays bounded for any
+result. ruby-pg now matches PostgreSQL (its single-row-mode and COPY TO tests pass).
+Six suites ran again against the round 19 engine (debug build) and a private reference:
+- ruby-pg: 0 differences.
+- psycopg 3: the 9 hstore ones. Its two `test_copy_out_error_with_copy_not_finished` tests
+  found that a cancel didn't stop data streaming from a node that doesn't check for
+  interrupts; each streamed row now checks.
+- asyncpg: the 4 above, plus `test_executemany_server_failure_during_writes`, which is
+  timing-dependent. On this loaded machine it fails two runs in three against both the old
+  and the new engine: whether the error reaches the client before it has written all 128
+  rows.
+- pgx: the 4 hstore ones.
+- node-postgres: 1105, timing.
+- pgjdbc: the 3 above, plus TypeCacheDLLStressTest (see "Engine, open").
 
 Fixed in round 18, agent 51 (each with a golden, `a51_exists_param_join` / `a51_client_catalog`,
 or a wire test, `notices_copy_lines_and_portal_rows_as_they_come` /
