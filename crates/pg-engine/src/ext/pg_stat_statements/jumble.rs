@@ -72,15 +72,19 @@ pub fn is_query(node: &pg_query::NodeEnum) -> bool {
 /// A table's columns: names and type names (`pg_type.typname`).
 pub type Columns<'a> = &'a dyn Fn(Option<&str>, &str) -> Option<Vec<(String, String)>>;
 
+/// The declared parameter types of the one procedure `schema.name` with `n` parameters
+/// (None: no such procedure, or more than one).
+pub type Procs<'a> = &'a dyn Fn(Option<&str>, &str, usize) -> Option<Vec<String>>;
+
 /// Jumble a statement: its query id and constant locations.
 ///
 /// `vars`: names that are parameters (a function's arguments, PL/pgSQL variables), with
 /// their parameter numbers.
-pub fn jumble(node: &pg_query::NodeEnum, columns: Columns, vars: &[(String, i32)]) -> (i64, Jumble) {
+pub fn jumble(node: &pg_query::NodeEnum, columns: Columns, procs: Procs, vars: &[(String, i32)]) -> (i64, Jumble) {
     let v = serde_json::to_value(node).unwrap_or(J::Null);
     let mut j = Jumble::default();
     let utility = !is_query(node);
-    let mut w = Walker { j: &mut j, from_rels: Vec::new(), scope: Vec::new(), columns, target: None, vars };
+    let mut w = Walker { j: &mut j, from_rels: Vec::new(), scope: Vec::new(), columns, procs, target: None, vars };
     if utility {
         w.j.put("Query:utility");
         w.value(&v, Mode::Utility);
@@ -101,6 +105,7 @@ struct Walker<'a> {
     /// The relations seen so far, by the name they are known by, with their columns.
     scope: Vec<(String, Vec<(String, String)>)>,
     columns: Columns<'a>,
+    procs: Procs<'a>,
     /// The columns of the INSERT / MERGE target being walked.
     target: Option<Vec<(String, String)>>,
     vars: &'a [(String, i32)],
@@ -222,13 +227,42 @@ impl Walker<'_> {
                 self.query(f("query"));
             }
             // CALL: the function call as analyzed (funcexpr); the raw one is ignored.
+            // (Its arguments are the procedure's parameters' types once analyzed, a NULL's
+            // too, when the procedure is known.)
             (Mode::Utility, "CallStmt") => {
                 self.j.put(t);
-                self.value(f("funccall"), Mode::Query);
+                if !self.call_args(f("funccall")) {
+                    self.value(f("funccall"), Mode::Query);
+                }
             }
             (Mode::Utility, _) => self.fields(t, o, mode, &[]),
             (Mode::Query, _) => self.query_node(t, o),
         }
+    }
+
+    /// A CALL's procedure and constant arguments as analysis types them (funcexpr and
+    /// outargs: each a Const of its parameter's type): false when the procedure isn't one
+    /// known procedure, or an argument is named.
+    fn call_args(&mut self, call: &J) -> bool {
+        let Some(("FuncCall", o)) = typed(call) else { return false };
+        let mut names = string_list(o.get("funcname").unwrap_or(&J::Null));
+        let Some(name) = names.pop() else { return false };
+        let args = o.get("args").and_then(J::as_array).cloned().unwrap_or_default();
+        if args.iter().any(|a| matches!(typed(a), Some(("NamedArgExpr", _)))) {
+            return false;
+        }
+        let Some(types) = (self.procs)(names.last().map(String::as_str), &name, args.len()) else {
+            return false;
+        };
+        self.j.put("FuncExpr");
+        self.j.put(&name);
+        for (a, ty) in args.iter().zip(&types) {
+            match typed(a) {
+                Some(("AConst", c)) => self.constant(ty, int(c.get("location").unwrap_or(&J::Null))),
+                _ => self.value(a, Mode::Query),
+            }
+        }
+        true
     }
 
     /// An analyzed query (a nested statement's).
@@ -334,13 +368,16 @@ fn element_type(elems: &[J], with: Option<String>) -> String {
 }
 
 /// `select_common_type` over known types: the first, unless a later number type is one
-/// it implicitly casts to; all unknown is text.
+/// it implicitly casts to (oid, the numeric category's preferred type, takes the integers);
+/// all unknown is text.
 fn resolve_common(types: impl IntoIterator<Item = String>) -> String {
     const NUMBERS: [&str; 6] = ["int2", "int4", "int8", "numeric", "float4", "float8"];
     let rank = |t: &str| NUMBERS.iter().position(|n| *n == t);
+    let integer = |t: &str| matches!(t, "int2" | "int4" | "int8");
     let mut common: Option<String> = None;
     for t in types {
         common = Some(match common {
+            Some(c) if integer(&c) && t == "oid" => t,
             Some(c) => match (rank(&c), rank(&t)) {
                 (Some(a), Some(b)) if b > a => t,
                 _ => c,

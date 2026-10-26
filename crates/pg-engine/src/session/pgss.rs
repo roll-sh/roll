@@ -18,6 +18,12 @@ pub(super) struct Tracked {
     /// A query nested in a utility statement (EXPLAIN's, CREATE TABLE AS's, ...), recorded
     /// one level down with the whole query string as its text.
     nested: Option<(NodeEnum, Arc<str>)>,
+    /// COPY's query: its text is the COPY statement's own (BeginCopy gives the query the
+    /// statement's location and length), not the whole string.
+    nested_copy: bool,
+    /// CREATE TABLE AS EXECUTE: the prepared query runs one level down, under its PREPARE's
+    /// entry (id, text).
+    nested_prepared: Option<(i64, Arc<str>)>,
     started: std::time::Instant,
     /// Its planning was counted (once per execution).
     planned: bool,
@@ -64,7 +70,9 @@ fn nested_query(node: &NodeEnum) -> Option<NodeEnum> {
     }?;
     let n = q.node.clone()?;
     match &n {
-        NodeEnum::ExplainStmt(_) | NodeEnum::CreateTableAsStmt(_) => nested_query(&n),
+        NodeEnum::ExplainStmt(_) | NodeEnum::CreateTableAsStmt(_) | NodeEnum::DeclareCursorStmt(_) => {
+            nested_query(&n)
+        }
         n if jumble::is_query(n) => Some(n.clone()),
         _ => None,
     }
@@ -111,7 +119,7 @@ impl Session {
                     return None;
                 }
                 let len = text.len() as i32;
-                Some(Tracked { id, jumble: jumble::Jumble::default(), text, location: 0, len, utility: false, nested: None, started, planned: false, target: None, blocks_before: None, blocks_added: 0 })
+                Some(Tracked { id, jumble: jumble::Jumble::default(), text, location: 0, len, utility: false, nested: None, nested_copy: false, nested_prepared: None, started, planned: false, target: None, blocks_before: None, blocks_added: 0 })
             }
             // PREPARE: its query's entry (the PREPARE's text), made when it has constants.
             NodeEnum::PrepareStmt(ps) => {
@@ -151,9 +159,22 @@ impl Session {
                         _ => None,
                     }
                 });
-                Some(Tracked { id, jumble: j, text: source, location, len, utility, nested, started, planned: false, target, blocks_before: None, blocks_added: 0 })
+                let nested_copy = matches!(n, NodeEnum::CopyStmt(_));
+                let nested_prepared = match n {
+                    NodeEnum::CreateTableAsStmt(c) => match c.query.as_deref().and_then(|q| q.node.as_ref()) {
+                        Some(NodeEnum::ExecuteStmt(e)) => self.state.pgss.borrow().prepared.get(&e.name).cloned(),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                Some(Tracked { id, jumble: j, text: source, location, len, utility, nested, nested_copy, nested_prepared, started, planned: false, target, blocks_before: None, blocks_added: 0 })
             }
         }
+    }
+
+    /// Whether the running statement is a tracked query (whose parallel workers count).
+    pub(super) fn pgss_counts_workers(&self) -> bool {
+        self.pgss_tracked.as_ref().is_some_and(|t| !t.utility)
     }
 
     /// The running top-level query was planned (`pgss_planner`): counted with
@@ -237,15 +258,16 @@ impl Session {
             wal_bytes: if writes { rows * 64 } else { 0 },
             shared_blks: if t.target.is_some_and(|x| !x.1) { t.blocks_added } else { 0 },
             local_blks: if t.target.is_some_and(|x| x.1) { t.blocks_added } else { 0 },
-            workers_to_launch: self.pgss_workers * 2,
-            workers_launched: self.pgss_workers * 2,
+            workers_to_launch: self.pgss_workers,
+            workers_launched: self.pgss_workers,
         };
         // The query a utility statement ran, one level down (track = all).
         if let Some((q, source)) = &t.nested
             && pgss::enabled(&self.state, 1)
         {
             let (id, j) = jumble_in(&self.state, q);
-            let stmt = Stmt { source, location: -1, len: 0 };
+            let (location, len) = if t.nested_copy { (t.location, t.len) } else { (-1, 0) };
+            let stmt = Stmt { source, location, len };
             if !j.locs.is_empty() {
                 pgss::store(&self.state, &stmt, id, &j, 1, None, Usage::default());
             }
@@ -254,6 +276,12 @@ impl Session {
                 _ => rows,
             };
             pgss::store(&self.state, &stmt, id, &j, 1, Some(Kind::Exec), Usage { millis, rows: nested_rows, ..Default::default() });
+        }
+        if let Some((id, text)) = &t.nested_prepared
+            && pgss::enabled(&self.state, 1)
+        {
+            let stmt = Stmt { source: text, location: 0, len: text.len() as i32 };
+            pgss::store(&self.state, &stmt, *id, &jumble::Jumble::default(), 1, Some(Kind::Exec), Usage { millis, rows, ..Default::default() });
         }
         self.pgss_store(&t, 0, Some(Kind::Exec), usage);
     }

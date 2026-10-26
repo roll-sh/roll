@@ -135,7 +135,30 @@ pub fn jumble_vars(s: &SessionState, node: &pg_query::NodeEnum, vars: &[(String,
             _ => None,
         }
     };
-    jumble::jumble(node, &columns, vars)
+    // CALL's procedure: the user procedure of that name and number of parameters, when one.
+    let procs = |schema: Option<&str>, name: &str, n: usize| -> Option<Vec<String>> {
+        let ns = match schema {
+            Some(sc) => Some(cat.schema_by_name(sc)?.oid),
+            None => None,
+        };
+        let mut found = cat.functions.values().filter(|f| {
+            f.procedure && f.name == name && ns.is_none_or(|o| o == f.schema) && f.args.len() + f.modes.iter().filter(|m| **m == 'o').count() == n
+        });
+        let f = found.next()?;
+        if found.next().is_some() {
+            return None;
+        }
+        let (mut ins, mut outs) = (f.args.iter(), f.out_cols.iter());
+        let modes = if f.modes.is_empty() { vec!['i'; f.args.len()] } else { f.modes.clone() };
+        modes
+            .iter()
+            .map(|m| match m {
+                'o' => outs.next().map(|(_, t)| t.typname()),
+                _ => ins.next().map(|(_, t)| t.typname()),
+            })
+            .collect()
+    };
+    jumble::jumble(node, &columns, &procs, vars)
 }
 
 pub fn jumble_in(s: &SessionState, node: &pg_query::NodeEnum) -> (i64, jumble::Jumble) {

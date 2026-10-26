@@ -1096,7 +1096,9 @@ fn call_procedure_in(
                 _ => Value::Null,
             })
             .collect();
+        let started = std::time::Instant::now();
         let rows = ctx.with_outer(Rc::new(values), || collect(&Arc::new(plan), ctx, None))?;
+        sql_fn_pgss(ctx, f, f.body.trim().trim_end_matches(';').trim_end(), rows.len() as u64, started);
         if f.out_cols.is_empty() {
             return Ok(None);
         }
@@ -3288,7 +3290,8 @@ impl<'c, 'a> Interp<'c, 'a> {
                 let (rows, _) = self.spi("SQL statement", &e.text, 0, |me| me.run(&c))?;
                 self.row_count = rows.len() as u64;
                 self.set_found(!rows.is_empty());
-                self.pgss(&format!("SELECT {}", e.text), rows.len() as u64, started);
+                // (Its text is the SELECT it runs already: `parse` made it so.)
+                self.pgss(&e.text, rows.len() as u64, started);
             }
             StmtKind::Sql { sql, into, shown } => self.sql(sql, into.as_ref(), shown)?,
             StmtKind::Execute { query, into, using } => {

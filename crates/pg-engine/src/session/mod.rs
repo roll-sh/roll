@@ -1473,8 +1473,14 @@ impl Session {
         let mut made = Vec::new();
         let mut sent = None;
         let mut parallel = false;
+        // pg_stat_statements: the workers the plan's Gathers launch.
+        let count_workers = self.pgss_counts_workers();
+        let mut workers = 0;
         let r = self.with_ctx(params, |ctx| {
             bq.check_perms(ctx)?;
+            if count_workers {
+                workers = crate::sql::explain::gather_workers(&bq.plan, ctx) as i64;
+            }
             // ExecutorRun begins (past ExecutorStart's permission checks): the RowDescription
             // goes out, so an error from here on follows it.
             let mut feed = sink.as_deref_mut().map(|k| sink::Feed::new(k, &bq.cols));
@@ -1516,9 +1522,12 @@ impl Session {
         self.sent = sent;
         let processed = r?;
         let rows = made;
+        // (debug_parallel_query's single-copy run counts 2, as pg_stat_statements' did before
+        // workers were counted per Gather.)
         if parallel {
-            self.pgss_workers += 1;
+            self.pgss_workers += 2;
         }
+        self.pgss_workers += workers;
         self.pgss_measure(true);
         self.suspended = suspended;
         let tag = query_tag(&bq.plan, stmt, sent.unwrap_or(rows.len()), processed);

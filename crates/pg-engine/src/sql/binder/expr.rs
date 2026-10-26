@@ -2911,6 +2911,32 @@ impl Binder<'_, '_> {
                 all,
             });
         }
+        // An operator whose function is a user routine (bound as its body: no function to
+        // call per element) over an array whose elements are known: each element compared,
+        // ORed (ALL: ANDed), which is what ScalarArrayOpExpr gives too, NULLs included.
+        let known: Option<Vec<Expr>> = match &r {
+            Expr::Array(items, _) => Some(items.clone()),
+            Expr::Const(Value::Array(a), _) if a.dims.len() <= 1 => {
+                Some(a.items.iter().map(|v| Expr::Const(v.clone(), elem.clone())).collect())
+            }
+            _ => None,
+        };
+        if let Some(items) = known
+            && !self.cat.operators.is_empty()
+        {
+            let probe = |t: &DataType| Expr::Const(Value::Null, t.clone());
+            if self.user_operator(None, op, Some(probe(&l.ty())), probe(&elem), loc)?.is_some() {
+                let mut parts = Vec::with_capacity(items.len());
+                for it in items {
+                    parts.push(self.binop(op, l.clone(), it, loc)?);
+                }
+                return Ok(match parts.len() {
+                    0 => Expr::Const(Value::Bool(all), DataType::Bool),
+                    _ if all => Expr::And(parts),
+                    _ => Expr::Or(parts),
+                });
+            }
+        }
         let res = resolve_binop(op, &l.ty(), &elem).map_err(|e| with_pos(e, loc))?;
         if !matches!(res.ret, DataType::Bool) {
             return Err(with_pos(
@@ -7884,6 +7910,15 @@ impl Binder<'_, '_> {
                 def: func::display_def(&fdef),
                 nargs,
                 cost: fdef.procost() as f64,
+                pgss: (fdef.language == "sql" && self.ctx.sess.cluster.statements().is_some()).then(|| {
+                    let vars = fdef
+                        .args
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, (n, _))| Some((n.clone()?, i as i32 + 1)))
+                        .collect();
+                    (Arc::from(fdef.body.trim().trim_end_matches(';').trim_end()), vars)
+                }),
                 inline: !void_mismatch
                     && at.is_some_and(|c| c.fold || matches!(c.at, SqlFnAt::Inlining)),
             })),

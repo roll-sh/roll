@@ -19171,6 +19171,19 @@ pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
     estimate_in(plan, ctx, false, true)
 }
 
+/// The parallel workers the plan's Gather / Gather Merge nodes plan, as EXPLAIN shows them
+/// (what pg_stat_statements' parallel_workers_to_launch counts; the engine's executor runs
+/// them all, so they are the launched ones too).
+pub fn gather_workers(plan: &Arc<Plan>, ctx: &ExecCtx) -> usize {
+    fn sum(n: &ExNode) -> usize {
+        n.details.iter().map(|d| if let Detail::Workers(w) = d { *w } else { 0 }).sum::<usize>()
+            + n.children.iter().map(sum).sum::<usize>()
+    }
+    let o = estimate_options();
+    let mut b = estimate_builder(plan, ctx, &o);
+    sum(&b.level(plan))
+}
+
 /// `estimate` of a sub-select's plan (a level of its own): every `Outer(d, ..)` in it is a
 /// value of an enclosing level, so a sub-select of it reading only those is an InitPlan its
 /// top node pays for once (SS_charge_for_initplans), not a SubPlan run per row.

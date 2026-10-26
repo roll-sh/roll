@@ -80,6 +80,9 @@ pub struct FnShow {
     pub inline: bool,
     /// Its estimated execution cost, in cpu_operator_cost units (procost).
     pub cost: f64,
+    /// A SQL function's statement as pg_stat_statements counts it each time the call runs:
+    /// the body's text and its parameters by name (set only when the library is preloaded).
+    pub pgss: Option<(Arc<str>, Vec<(String, i32)>)>,
 }
 
 /// A domain's NOT NULL and CHECK constraints (its ancestors' too), applied when a value is

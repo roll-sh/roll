@@ -1135,7 +1135,15 @@ impl<'a> ExecCtx<'a> {
                             h.rows.get(&key).cloned().unwrap_or_default()
                         })
                     }
-                    None => self.subquery_rows(s, row, Some(2))?,
+                    None => {
+                        let started = std::time::Instant::now();
+                        let rows = self.subquery_rows(s, row, Some(2))?;
+                        // pg_stat_statements: a SQL function's statement ran, one level down.
+                        if let Some((text, vars)) = s.call.as_ref().and_then(|c| c.pgss.as_ref()) {
+                            crate::ext::pg_stat_statements::nested(self.sess, text, vars, rows.len() as u64, started.elapsed());
+                        }
+                        rows
+                    }
                 };
                 if rows.len() > 1 {
                     return Err(Error::new(
