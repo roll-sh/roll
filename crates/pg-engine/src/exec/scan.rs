@@ -5,7 +5,7 @@ use crate::catalog::{Index, Table};
 use crate::error::{Error, Result, code};
 use crate::sql::expr::{eval, eval_bool};
 use crate::sql::plan::{Access, BitmapQual, IndexBounds, RowMark, ScanPlan, Wait};
-use crate::storage::keys::{encode_index_value, encode_value, index_prefix, prefix_end};
+use crate::storage::keys::{KeyColl, encode_index_value, encode_value, index_prefix, prefix_end};
 use crate::storage::row::decode_row;
 use crate::txn::TxnScan;
 use crate::txn::locks::{RowLockMode, WaitPolicy};
@@ -160,21 +160,20 @@ pub fn data_key(t: &Table, row: &[Value], rowid: Option<i64>) -> Vec<u8> {
     k
 }
 
-/// Key of a secondary index entry: index columns then the row's data key suffix.
-pub fn index_entry_key(t: &Table, ix: &Index, keyvals: &[Value], dkey: &[u8]) -> Vec<u8> {
-    let mut k = index_prefix(t.oid, ix.id);
-    for (v, c) in keyvals.iter().zip(&ix.columns) {
-        encode_index_value(&mut k, v, c.desc, c.nulls_first);
-    }
+/// Key of a secondary index entry: index columns then the row's data key suffix (`colls`:
+/// the columns' key collations, `BoundIndex::colls`).
+pub fn index_entry_key(t: &Table, ix: &Index, keyvals: &[Value], dkey: &[u8], colls: &[Option<KeyColl>]) -> Vec<u8> {
+    let mut k = index_value_prefix(t, ix, keyvals, colls);
     k.extend_from_slice(&dkey[8..]);
     k
 }
 
-/// Prefix of index entries with exactly these key values (for uniqueness checks).
-pub fn index_value_prefix(t: &Table, ix: &Index, keyvals: &[Value]) -> Vec<u8> {
+/// Prefix of index entries with exactly these key values (for uniqueness checks): equal
+/// under the columns' collations.
+pub fn index_value_prefix(t: &Table, ix: &Index, keyvals: &[Value], colls: &[Option<KeyColl>]) -> Vec<u8> {
     let mut k = index_prefix(t.oid, ix.id);
-    for (v, c) in keyvals.iter().zip(&ix.columns) {
-        encode_index_value(&mut k, v, c.desc, c.nulls_first);
+    for (i, (v, c)) in keyvals.iter().zip(&ix.columns).enumerate() {
+        encode_index_value(&mut k, v, c.desc, c.nulls_first, colls.get(i).and_then(Option::as_ref));
     }
     k
 }
@@ -243,7 +242,8 @@ fn ranges(
         if v.is_null() {
             return Ok(Vec::new());
         }
-        encode_value(&mut prefix, &v, ix.columns[i].desc);
+        let c = &ix.columns[i];
+        encode_index_value(&mut prefix, &v, c.desc, c.nulls_first, b.coll(i));
     }
     let ncol = b.eq.len();
     if let Some(any) = &b.any {
@@ -252,13 +252,14 @@ fn ranges(
             return Ok(Vec::new());
         };
         let desc = ix.columns.get(ncol).is_some_and(|c| c.desc);
+        let kc = b.coll(ncol);
         let mut keys: Vec<Vec<u8>> = a
             .items
             .iter()
             .filter(|v| !v.is_null())
             .map(|v| {
                 let mut k = prefix.clone();
-                encode_value(&mut k, v, desc);
+                encode_index_value(&mut k, v, desc, false, kc);
                 k
             })
             .collect();
@@ -277,7 +278,7 @@ fn ranges(
     let nulls_first = ix.columns.get(ncol).is_some_and(|c| c.nulls_first);
     let enc = |v: &Value| {
         let mut k = prefix.clone();
-        encode_index_value(&mut k, v, desc, nulls_first);
+        encode_index_value(&mut k, v, desc, nulls_first, b.coll(ncol));
         k
     };
     // Bounds in key order: for DESC columns, the value's lower bound becomes the key's upper.

@@ -361,9 +361,37 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   multi-database harness: `tests/locale/*.sql` with `\c`, recorded from PostgreSQL),
   golden `a60_locale_libc_c` (goldens can choose their database's locale with a first line
   `-- createdb: <options>`; the default stays the builtin C.UTF-8 they were recorded in).
-  Left: in an ICU-default database, text indexes are still in byte order, so range and
-  ORDER BY index scans PostgreSQL uses become a Sort or a Filter (EXPLAIN only, rows match);
-  citext's order and text range types under an ICU default; non-UTF8 databases.
+  Left: non-UTF8 databases. (Indexes in byte order, citext's order and text range types
+  under an ICU default: round 19, agent 67, below.)
+- **Collation-aware comparisons and indexes** (round 19, agent 67). Btree and hash index
+  entries on a key under a collation that doesn't sort by bytes (ICU) or is nondeterministic
+  are keyed by the collation's sort keys (`storage::keys::KeyColl`: the ICU sort key without
+  its terminating 0, then, deterministic, the string's bytes; bpchar without trailing
+  spaces; an array's elements, a range's bounds and a citext's lowered string alike), so
+  entries are in the collation's order and equal keys share an entry prefix. Index key format
+  2 (`Catalog::index_key_format`; `Engine::reencoded_indexes` rebuilds byte-order indexes of
+  such keys, and expression indexes where a collation could apply, when a database is first
+  opened). Per key column the collation comes from `binder::key_colls` (the index's COLLATE,
+  else the column's, else the expression's, else the database default; a range's subtype
+  collation; none for pattern and made operator classes) and travels in `BoundIndex::colls`
+  and `IndexBounds::colls`. The planner matches index conditions by IndexCollMatchesExprColl
+  (`paths::key_order_op`: the operator's collation is the keys' one; a COLLATE naming it is a
+  relabeling), pathkeys carry their collation (`PathKey::coll`), so ORDER BY, min / max,
+  Merge Append and ranges use the index as PostgreSQL does; the LIKE prefix stays a range
+  only in byte order. Selectivity compares statistics under the operator's collation
+  (`costs::op_coll`; convert_string_datum's strxfrm is the sort key). Unique checks under a
+  nondeterministic collation probe the entry prefix instead of scanning the table (a
+  clustered primary key's data keys stay byte keys: those still scan), and every duplicate
+  check while building or rewriting (`roll_pk_clustered` adding its key included) compares
+  entry prefixes. Text range types' "default" collation is the database's (constructors,
+  operators, sorting), range partition bounds compare under the database default, and
+  citext's own order is the default collation's. Btree dedup isn't modelled under a
+  nondeterministic collation (btvarstrequalimage). Tests: `tests/locale/collated.sql`
+  (ICU-default and C databases, recorded from PostgreSQL), `tests/index_key_format.rs`
+  `collated_index_keys_are_upgraded`, `tests/pk_clustered.rs` `nondeterministic_duplicates`.
+  Left: a `roll_pk_clustered` table's rows under an ICU key are stored in the key's byte
+  order (its physical order only; no plan reads it as sorted); records of text in an index
+  are keyed by bytes (record_cmp's per-field collations).
   **ICU4X verdict: keep ICU4C.** `icu4x.rs`'s `icu4x_parity` (an ignored test, `--features
   icu4x`) compares it with ICU4C 78.1 over 923 locales and a generated corpus: 27 locales
   order differently (en-US-u-va-posix, Sámi, Hawaiian, script variants such as az-Cyrl and
@@ -987,10 +1015,6 @@ Subquery Scan (a table's whole row goes up as `r.*` since round 16, agent 40; a 
 bound as a ROW() of its columns) (`SELECT x.a, s FROM t x, (... OFFSET 0) s`). (Read
 over the subquery's own scan it is `s.*` and its `IS NULL` stays whole since round 16, agent
 29.)
-
-Not started and lower priority: `roll_pk_clustered` adds a primary key's duplicate check by raw
-key bytes, so duplicates that are only equal under a nondeterministic collation aren't caught
-when adding a key to a clustered table.
 
 ## Starting prompt for the next agent
 

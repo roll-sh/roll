@@ -9,7 +9,7 @@ use crate::catalog::{
 };
 use crate::error::{Error, Result, code};
 use crate::exec::dml::with_failing_row;
-use crate::exec::scan::{data_key, encode_table_row, index_entry_key};
+use crate::exec::scan::{data_key, encode_table_row, index_entry_key, index_value_prefix};
 use crate::exec::{Row, collect};
 use crate::sql::binder::ast::{self, inner, names, with_pos};
 use crate::sql::binder::{Clause, bound_indexes, resolve_type_name, serial_type};
@@ -3510,9 +3510,10 @@ impl Ddl<'_, '_> {
         };
         // (Unique keys with the data key of the row that had each first: `build_index`.)
         let mut seen = UniqueKeys::default();
-        let nondet = crate::types::collation::index_nondet(&self.cat, t, ix);
-        let norms: Vec<_> = nondet.iter().cloned().map(crate::exec::agg::KeyNorm::of).collect();
-        let unique_key = |vals: &[Value]| key_bytes(&crate::exec::agg::group_key(vals, &norms));
+        // (Duplicates are keys equal under their collations, a nondeterministic one's too:
+        // the same entry prefix.)
+        let colls = dup_colls(&self.cat, t, &bix);
+        let unique_key = |vals: &[Value]| index_value_prefix(t, ix, vals, &colls);
         let stored_values = |d: &[u8]| -> Result<Option<Vec<Value>>> {
             let bytes = self.ctx.txn.borrow().get(d)?;
             match bytes {
@@ -3582,10 +3583,10 @@ impl Ddl<'_, '_> {
         // Unique keys seen so far, with the data key of the row that had each first (its
         // values are read again for the error).
         let mut seen = UniqueKeys::default();
-        // Keys under a nondeterministic collation are duplicates when it finds them equal.
-        let nondet = crate::types::collation::index_nondet(&self.cat, t, ix);
-        let norms: Vec<_> = nondet.iter().cloned().map(crate::exec::agg::KeyNorm::of).collect();
-        let unique_key = |vals: &[Value]| key_bytes(&crate::exec::agg::group_key(vals, &norms));
+        // (Duplicates are keys equal under their collations, a nondeterministic one's too:
+        // the same entry prefix.)
+        let colls = dup_colls(&self.cat, t, &bix);
+        let unique_key = |vals: &[Value]| index_value_prefix(t, ix, vals, &colls);
         let stored_values = |d: &[u8]| -> Result<Option<Vec<Value>>> {
             let bytes = self.ctx.txn.borrow().get(d)?;
             match bytes {
@@ -3610,7 +3611,7 @@ impl Ddl<'_, '_> {
                 }
             }
             if ix.id != 0 {
-                let k = index_entry_key(t, ix, &vals, &dkey);
+                let k = index_entry_key(t, ix, &vals, &dkey, &bix.colls);
                 self.ctx.txn.borrow_mut().put_new_index_entry(k, dkey)?;
             }
         }
@@ -3715,7 +3716,7 @@ impl Ddl<'_, '_> {
                 };
                 if bix.index.unique
                     && (bix.index.nulls_not_distinct || !vals.iter().any(Value::is_null))
-                    && !seen[n].insert(key_bytes(&vals))
+                    && !seen[n].insert(index_value_prefix(new, &bix.index, &vals, &dup_colls(&self.cat, new, bix)))
                 {
                     return Err(self.duplicate_key(new, bix, &vals, &bix.index.name));
                 }
@@ -3723,7 +3724,7 @@ impl Ddl<'_, '_> {
                     self.ctx
                         .txn
                         .borrow_mut()
-                        .put(index_entry_key(new, &bix.index, &vals, &dkey), dkey.clone())?;
+                        .put(index_entry_key(new, &bix.index, &vals, &dkey, &bix.colls), dkey.clone())?;
                 }
             }
             let xid = self.ctx.txn.borrow_mut().cur_xid();
@@ -3794,9 +3795,15 @@ impl Ddl<'_, '_> {
                     .column(name));
                 }
                 let dkey = data_key(new, &row, None);
-                if !seen.insert(dkey.clone()) {
-                    let vals: Vec<Value> = cols.iter().map(|&c| row[c].clone()).collect();
-                    let pk = bixs.iter().find(|b| Some(b.index.oid) == new.pkey_index);
+                // (Duplicates are keys equal under their collations, a nondeterministic one's
+                // too: the key's entry prefix, not the data key's bytes.)
+                let vals: Vec<Value> = cols.iter().map(|&c| row[c].clone()).collect();
+                let pk = bixs.iter().find(|b| Some(b.index.oid) == new.pkey_index);
+                let dup = match pk {
+                    Some(pk) => index_value_prefix(new, &pk.index, &vals, &dup_colls(&self.cat, new, pk)),
+                    None => dkey.clone(),
+                };
+                if !seen.insert(dup) {
                     if let Some(pk) = pk {
                         return Err(self.duplicate_key(new, pk, &vals, &pk.index.name));
                     }
@@ -3809,7 +3816,7 @@ impl Ddl<'_, '_> {
                     self.ctx
                         .txn
                         .borrow_mut()
-                        .put(index_entry_key(new, &bix.index, &vals, &dkey), dkey.clone())?;
+                        .put(index_entry_key(new, &bix.index, &vals, &dkey, &bix.colls), dkey.clone())?;
                 }
             }
             self.ctx.txn.borrow_mut().put(dkey.clone(), bytes.to_vec())?;
@@ -9500,6 +9507,16 @@ pub(crate) fn rowid_sequence(t: &Table) -> Sequence {
         cycle: false,
         owned_by: None,
         unlogged: None,
+    }
+}
+
+/// The key collations duplicates of an index's keys are found under: its entries' (a
+/// clustered primary key's data keys are bytes, but its duplicates are equal keys too).
+fn dup_colls(cat: &crate::catalog::Catalog, t: &Table, bix: &BoundIndex) -> Vec<Option<crate::storage::keys::KeyColl>> {
+    if bix.index.id == 0 {
+        crate::sql::binder::column_key_colls(cat, t, &bix.index)
+    } else {
+        bix.colls.clone()
     }
 }
 

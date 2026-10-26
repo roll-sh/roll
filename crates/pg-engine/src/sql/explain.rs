@@ -11620,10 +11620,12 @@ impl Builder<'_, '_> {
             {
                 (**inner).clone()
             }
+            // (A COLLATE naming the index column's collation, a relabeling too.)
+            Expr::Collate(inner, ..) if matches!(**inner, Expr::Col(c, _) if plain.contains(&c)) => (**inner).clone(),
             x => x.clone(),
         };
         let e = match e {
-            Expr::Call(d, args, ty) if args.len() == 2 && matches!(args[0], Expr::Cast(..)) => {
+            Expr::Call(d, args, ty) if args.len() == 2 && matches!(args[0], Expr::Cast(..) | Expr::Collate(..)) => {
                 Expr::Call(d.clone(), vec![strip(&args[0]), args[1].clone()], ty.clone())
             }
             e => e.clone(),

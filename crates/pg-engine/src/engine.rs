@@ -796,15 +796,26 @@ impl Engine {
         }
     }
 
-    /// The indexes whose keys the current index key format changed: those with a column
-    /// whose NULLS FIRST / LAST isn't its direction's default (non-temporary, stored).
-    fn reencoded_indexes(cat: &Catalog) -> Vec<String> {
+    /// The indexes whose keys changed since index key format `from` (non-temporary,
+    /// stored): format 1, those with a column whose NULLS FIRST / LAST isn't its direction's
+    /// default; format 2, those keyed under a collation that doesn't sort by bytes (an
+    /// expression key's collation may be one when the database's or a column's is).
+    fn reencoded_indexes(cat: &Catalog, from: u32) -> Vec<String> {
         let mut out = Vec::new();
+        let icu_default = !crate::types::collation::default_for(cat).bytewise();
         for ix in cat.indexes.values() {
-            if ix.id == 0 || !ix.columns.iter().any(|c| c.nulls_first != c.desc) {
+            let Some(t) = cat.table(ix.table) else { continue };
+            let nulls = from < 1 && ix.columns.iter().any(|c| c.nulls_first != c.desc);
+            let collated = from < 2
+                && (!crate::sql::binder::column_key_colls(cat, &t, ix).is_empty()
+                    || (matches!(ix.method.as_str(), "btree" | "hash")
+                        && ix.columns.iter().any(|c| matches!(c.key, crate::catalog::IndexKey::Expr(_)))
+                        && (icu_default
+                            || ix.columns.iter().any(|c| c.collation.is_some())
+                            || t.columns.iter().any(|c| c.collation.is_some()))));
+            if ix.id == 0 || !(nulls || collated) {
                 continue;
             }
-            let Some(t) = cat.table(ix.table) else { continue };
             let schema = cat.schema_name(t.schema);
             if t.partkey.is_some() || schema.starts_with("pg_temp") || schema.starts_with("pg_toast_temp") {
                 continue;
@@ -853,7 +864,7 @@ impl Engine {
         if cat.index_key_format >= crate::storage::keys::INDEX_KEY_FORMAT {
             return Ok(());
         }
-        let names = Self::reencoded_indexes(&cat);
+        let names = Self::reencoded_indexes(&cat, cat.index_key_format);
         drop(cat);
         if !names.is_empty() {
             let mut s = self.internal_session(db);
@@ -873,7 +884,7 @@ impl Engine {
             .entry(dbname)
             .ok_or_else(|| internal(format!("no database {dbname}")))?;
         let db = self.open_db(&entry)?;
-        let names = Self::reencoded_indexes(&db.catalog());
+        let names = Self::reencoded_indexes(&db.catalog(), 0);
         let mut s = self.internal_session(&db);
         crate::storage::keys::with_legacy_index_keys(|| -> Result<()> {
             for n in &names {
@@ -1024,6 +1035,8 @@ impl Engine {
         };
         // (The same ids on every run: the catalog is unchanged until the end.)
         let mut pix = (*pk).clone();
+        // (Keyed under its columns' collations, as the current index key format has them.)
+        let pcolls = crate::sql::binder::column_key_colls(&cat, &t, &pk);
         pix.id = nt.next_index_id;
         nt.next_index_id += 1;
         nt.pkey_unkeyed = true;
@@ -1119,7 +1132,7 @@ impl Engine {
                     }
                     txn.delete(sk.clone())?;
                     txn.put(
-                        crate::exec::scan::index_entry_key(&nt, &pix, &vals, &nkey),
+                        crate::exec::scan::index_entry_key(&nt, &pix, &vals, &nkey, &pcolls),
                         nkey.clone(),
                     )?;
                     let mut mk = map.clone();

@@ -440,8 +440,16 @@ fn slot_values(ty: &DataType, vals: &[String], fmt: &FormatCtx) -> Option<Vec<Va
 
 /// Compare as the column's type does: bpchar ignores trailing spaces.
 fn cmp_as(a: &Value, b: &Value, ty: &DataType) -> Ordering {
-    if let (DataType::Bpchar(_), Value::Text(x), Value::Text(y)) = (ty, a, b) {
-        return x.trim_end_matches(' ').cmp(y.trim_end_matches(' '));
+    if let (Value::Text(x), Value::Text(y)) = (a, b) {
+        let (x, y) = match ty {
+            DataType::Bpchar(_) => (x.trim_end_matches(' '), y.trim_end_matches(' ')),
+            _ => (&**x, &**y),
+        };
+        // (Under the operator's collation, the statistics' values as its function compares.)
+        return OP_COLL.with(|c| match &*c.borrow() {
+            Some(Some(c)) if !c.bytewise() || !c.deterministic => c.cmp(x, y),
+            _ => x.cmp(y),
+        });
     }
     // (A date against a timestamp: the cross-type operators compare the date as the
     // timestamp of its midnight, date2timestamp.)
@@ -451,6 +459,18 @@ fn cmp_as(a: &Value, b: &Value, ty: &DataType) -> Ordering {
         _ => {}
     }
     cmp(a, b)
+}
+
+thread_local! {
+    /// The collation of the operator whose selectivity is being estimated (see `op_coll`;
+    /// None: no operator's, Some(None): an operator without one).
+    static OP_COLL: std::cell::RefCell<Option<Option<std::sync::Arc<crate::types::collation::Collation>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// While the guard lives, statistics' strings compare under operator `d`'s collation.
+fn op_coll(d: &crate::sql::func::FuncDef) -> crate::scoped::RefGuard<Option<Option<std::sync::Arc<crate::types::collation::Collation>>>> {
+    crate::scoped::set_ref(&OP_COLL, Some(d.coll.clone()), "costs::OP_COLL")
 }
 
 /// Microseconds in a day: a date on the timestamps' scale.
@@ -689,6 +709,7 @@ impl Est<'_> {
             },
         };
         let (gt, eq) = ineq(op)?;
+        let _g = op_coll(d);
         Some((
             var.clone(),
             gt,
@@ -768,7 +789,10 @@ impl Est<'_> {
                 }
                 match restrict_default(d) {
                     Some(sel) => sel,
-                    None => self.binary_op(d.name, &args[0], &args[1]),
+                    None => {
+                        let _g = op_coll(d);
+                        self.binary_op(d.name, &args[0], &args[1])
+                    }
                 }
             }
             Expr::Call(..) => DEFAULT_INEQ_SEL,
@@ -793,6 +817,7 @@ impl Est<'_> {
                 let disjoint = if *all { op.name == "<>" } else { op.name == "=" };
                 let mut s = if *all { 1.0 } else { 0.0 };
                 let mut sd = s;
+                let _g = op_coll(op);
                 for item in &items {
                     let s2 = self.binary_op(op.name, left, item);
                     if *all {
@@ -1260,6 +1285,17 @@ impl Est<'_> {
                 sumcommon += n;
             }
         }
+        // (A histogram sorted under another collation than the operator's isn't in its
+        // order: ineq_histogram_selectivity's stacoll check.)
+        let order = |c: Option<std::sync::Arc<crate::types::collation::Collation>>| {
+            c.filter(|c| !c.bytewise() || !c.deterministic).map(|c| c.oid)
+        };
+        let stacoll = s.slots.iter().find(|x| x.kind == 2).map_or(0, |x| x.coll);
+        let hist_ok = hist_ok
+            && (stacoll == 0
+                || OP_COLL.with(|c| c.borrow().clone()).is_none_or(|op| {
+                    order(crate::types::collation::by_oid(self.cat, stacoll)) == order(op)
+                }));
         let hist = if hist_ok {
             self.hist_ineq(v, s, c, gt, eq)
         } else {
@@ -1791,6 +1827,19 @@ fn scalars(v: &Value, lo: &Value, hi: &Value, fmt: &FormatCtx) -> Option<(f64, f
     let (Value::Text(a), Value::Text(b), Value::Text(c)) = (v, lo, hi) else {
         return None;
     };
+    // (convert_string_datum: under a collation other than C, the strings' strxfrm, ICU's
+    // sort keys without their terminating NUL.)
+    let coll = OP_COLL.with(|c| c.borrow().clone()).flatten().filter(|c| !c.collate_is_c && !c.bytewise());
+    if let Some(coll) = coll {
+        let x = |s: &str| {
+            let mut k = coll.sort_key(s);
+            if k.last() == Some(&0) {
+                k.pop();
+            }
+            k
+        };
+        return Some(strings(&x(a), &x(b), &x(c)));
+    }
     Some(strings(a.as_bytes(), b.as_bytes(), c.as_bytes()))
 }
 

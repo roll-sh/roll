@@ -58,13 +58,17 @@ impl RangeType {
         if self.collation == 0 || !self.subtype.collatable() {
             return None;
         }
-        let def = match &self.coll_def {
-            Some(d) => d.clone(),
-            None => crate::types::collation::static_by_oid(self.collation)?.clone(),
+        // ("default" is the database's: that of the statement running on this thread.)
+        let c = if self.collation == crate::types::collation::DEFAULT_OID && self.coll_def.is_none() {
+            crate::types::collation::default()
+        } else {
+            let def = match &self.coll_def {
+                Some(d) => d.clone(),
+                None => crate::types::collation::static_by_oid(self.collation)?.clone(),
+            };
+            crate::types::collation::get(&def).ok()?
         };
-        crate::types::collation::get(&def)
-            .ok()
-            .filter(|c| !c.bytewise() || !c.deterministic)
+        Some(c).filter(|c| !c.bytewise() || !c.deterministic)
     }
 
     /// Whether ranges are canonicalised to `[)` by stepping integer or date bounds.

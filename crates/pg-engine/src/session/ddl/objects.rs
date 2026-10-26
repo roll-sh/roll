@@ -1631,7 +1631,7 @@ impl Ddl<'_, '_> {
                     if !b.index.nulls_not_distinct && vals.iter().any(Value::is_null) {
                         continue;
                     }
-                    let prefix = crate::exec::scan::index_value_prefix(t, &b.index, &vals);
+                    let prefix = crate::exec::scan::index_value_prefix(t, &b.index, &vals, &b.colls);
                     let end = crate::storage::keys::prefix_end(&prefix);
                     if self
                         .ctx

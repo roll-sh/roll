@@ -122,7 +122,10 @@ impl Binder<'_, '_> {
                 }
                 None => None,
             };
+            // (A clustered primary key's entries are its rows' data keys: by bytes.)
+            let colls = if ix.id == 0 { Vec::new() } else { key_colls(&self.cat, t, &ix, &keys) };
             out.push(BoundIndex {
+                colls,
                 index: ix,
                 keys,
                 predicate,
@@ -3462,4 +3465,102 @@ fn value_location(n: &Node) -> i32 {
         }
         _ => ast::location(n),
     }
+}
+
+/// Per key column of an index, the collation its entries are keyed under when that doesn't
+/// sort by bytes or is nondeterministic (`keys::KeyColl`): the index's COLLATE, else the
+/// column's, else the expression's (a COLLATE in it, else its columns' one collation), else
+/// the database default; a range's, its subtype collation. None: by bytes (btree and hash
+/// indexes only; pattern and made operator classes compare bytes).
+pub(crate) fn key_colls(
+    cat: &crate::catalog::Catalog,
+    t: &Table,
+    ix: &crate::catalog::Index,
+    keys: &[Expr],
+) -> Vec<Option<crate::storage::keys::KeyColl>> {
+    use crate::types::collation;
+    if !matches!(ix.method.as_str(), "btree" | "hash") {
+        return Vec::new();
+    }
+    let v: Vec<_> = ix
+        .columns
+        .iter()
+        .zip(keys)
+        .map(|(c, k)| {
+            if matches!(c.opclass, 4217..=4219)
+                || (c.opclass != 0 && cat.opclasses.values().any(|o| o.oid == c.opclass && !o.default))
+            {
+                return None;
+            }
+            let ty = k.ty();
+            let elem = match &ty {
+                DataType::Array(e) => (**e).clone(),
+                t => t.clone(),
+            };
+            let coll = match &elem {
+                DataType::Range(rt) | DataType::Multirange(rt) if rt.collation != 0 && rt.subtype.collatable() => {
+                    if rt.collation == collation::DEFAULT_OID && rt.coll_def.is_none() {
+                        Some(collation::default_for(cat))
+                    } else {
+                        rt.coll()
+                    }
+                }
+                _ if ty.collatable() => {
+                    let name = c.collation.clone().or_else(|| expr_collation(t, k)).unwrap_or_else(|| "default".into());
+                    collation::by_name(cat, &name)
+                }
+                _ => None,
+            };
+            let coll = coll.filter(|c| !c.bytewise() || !c.deterministic)?;
+            Some(crate::storage::keys::KeyColl {
+                coll,
+                bpchar: matches!(elem, DataType::Bpchar(_)),
+            })
+        })
+        .collect();
+    if v.iter().any(Option::is_some) { v } else { Vec::new() }
+}
+
+/// `key_colls` of an index over plain columns (its expression keys keyed by bytes).
+pub(crate) fn column_key_colls(
+    cat: &crate::catalog::Catalog,
+    t: &Table,
+    ix: &crate::catalog::Index,
+) -> Vec<Option<crate::storage::keys::KeyColl>> {
+    let keys: Vec<Expr> = ix
+        .columns
+        .iter()
+        .map(|c| match c.key {
+            IndexKey::Column(i) => Expr::Col(i, t.columns[i].ty.clone()),
+            IndexKey::Expr(_) => Expr::Const(Value::Null, DataType::Int4),
+        })
+        .collect();
+    key_colls(cat, t, ix, &keys)
+}
+
+/// The collation of an index expression without a COLLATE clause of its own (as far as it
+/// isn't the default): a COLLATE in it, else the one collation of its collatable columns.
+fn expr_collation(t: &Table, k: &Expr) -> Option<String> {
+    let mut e = k;
+    loop {
+        match e {
+            Expr::Collate(_, name, _) => return Some(name.clone()),
+            Expr::Relabel(x, _) => e = x,
+            _ => break,
+        }
+    }
+    let mut found: Option<String> = None;
+    let mut many = false;
+    k.walk(&mut |x| {
+        if let Expr::Col(i, ty) = x
+            && ty.collatable()
+        {
+            let c = t.columns.get(*i).and_then(|c| c.collation.clone()).unwrap_or_else(|| "default".into());
+            match &found {
+                Some(f) if *f != c => many = true,
+                _ => found = Some(c),
+            }
+        }
+    });
+    if many { None } else { found }
 }

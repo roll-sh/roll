@@ -394,6 +394,7 @@ fn add_jpath_rows(list: &mut Vec<JP>, new: JP, startup: bool, by_rows: bool) {
                 desc: k.desc,
                 nulls_first: k.nulls_first,
                 cmp: 0,
+                coll: 0,
             })
             .collect(),
         disabled: p.disabled,
@@ -1878,6 +1879,7 @@ impl Search<'_, '_, '_> {
                     desc: q.desc,
                     nulls_first: q.nulls_first,
                     cmp: 0,
+                    coll: 0,
                 }),
                 None => break,
             }

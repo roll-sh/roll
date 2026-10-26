@@ -557,3 +557,25 @@ fn storage_upgrade_leaves_clustered_tables() {
     );
     engine.shutdown();
 }
+
+/// Keys equal only under a nondeterministic collation are duplicates: adding the key to a
+/// clustered table finds them, and so does an insert after.
+#[test]
+fn nondeterministic_duplicates() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    run(
+        &mut s,
+        "CREATE COLLATION ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);\n\
+         CREATE TABLE pk (s text COLLATE ci, v int) WITH (roll_pk_clustered = true);\n\
+         INSERT INTO pk VALUES ('abc', 1), ('ABC', 2)",
+    );
+    let e = err(&mut s, "ALTER TABLE pk ADD PRIMARY KEY (s)");
+    assert!(e.starts_with("could not create unique index \"pk_pkey\""), "{e}");
+    run(&mut s, "DELETE FROM pk WHERE v = 2;\nALTER TABLE pk ADD PRIMARY KEY (s)");
+    let e = err(&mut s, "INSERT INTO pk VALUES ('ABC', 3)");
+    assert!(e.starts_with("duplicate key value violates unique constraint \"pk_pkey\""), "{e}");
+    assert_eq!(rows(&mut s, "SELECT v FROM pk WHERE s = 'aBc'"), ["[Int4(1)]"]);
+    engine.shutdown();
+}

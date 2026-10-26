@@ -257,6 +257,9 @@ struct IndexInfo {
     /// Per key column: its collation (the index's COLLATE, else its column's; None: the
     /// default).
     colls: Vec<Option<String>>,
+    /// Per key column, the collation its entries are in the order of (`BoundIndex::colls`;
+    /// None: bytes).
+    kcolls: Vec<Option<crate::storage::keys::KeyColl>>,
 }
 
 /// A user-defined operator of an index's operator family.
@@ -574,6 +577,7 @@ fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo>
             user_ops: user_ops(&cat, &fam_ops),
             fam_ops,
             colls,
+            kcolls: b.colls.clone(),
         });
     }
     // get_relation_info builds its list with lcons over ascending OIDs.
@@ -884,13 +888,16 @@ fn match_clause(
     };
     match q {
         Expr::Call(def, args, ty)
-            if args.len() == 2 && ops_ok(def.name) && (byte_order_op(def) || own_collation_eq(ii, col, def)) =>
+            if args.len() == 2 && ops_ok(def.name) && key_order_op(ii, col, def) =>
         {
+            // (A COLLATE naming the collation the column's keys are under is a relabeling.)
+            let keyed = def.coll.as_ref().is_some_and(|c| !c.bytewise() || !c.deterministic);
+            let coll_key = |e: &Expr| matches_key(e, key) || (keyed && matches!(key_operand(e), Expr::Collate(x, ..) if matches_key(x, key)));
             let (a, b) = (&args[0], &args[1]);
-            if matches_key(a, key) && scan_const(b) && family(&b.ty()) == kty {
+            if coll_key(a) && scan_const(b) && family(&b.ty()) == kty {
                 return Some(mk(q.clone(), Kind::Op(strat(def.name)), Some(b.clone())));
             }
-            if matches_key(b, key) && scan_const(a) && family(&a.ty()) == kty && !pattern_ops {
+            if coll_key(b) && scan_const(a) && family(&a.ty()) == kty && !pattern_ops {
                 let e = commuted_call(def, b.clone(), a.clone(), ty.clone());
                 return Some(mk(e, Kind::Op(commute(def.name)), Some(a.clone())));
             }
@@ -901,7 +908,7 @@ fn match_clause(
             right,
             op,
             all: false,
-        } if ii.am == Am::Btree && btree_op(op.name) && byte_order_op(op) => {
+        } if ii.am == Am::Btree && btree_op(op.name) && key_order_op(ii, col, op) => {
             let et = right.ty().elem().cloned()?;
             if matches_key(left, key) && scan_const(right) && family(&et) == kty {
                 return Some(mk(q.clone(), Kind::Saop(op.name), Some((**right).clone())));
@@ -938,7 +945,7 @@ fn rowcompare_clause(
     } else {
         return None;
     };
-    let ok_op = |c: &Expr| matches!(c, Expr::Call(d, a, _) if a.len() == 2 && byte_order_op(d) && matches!(d.name, "<" | "<=" | ">" | ">="));
+    let ok_op = |c: &Expr| matches!(c, Expr::Call(d, a, _) if a.len() == 2 && key_order_op(ii, col, d) && matches!(d.name, "<" | "<=" | ">" | ">="));
     if !rc.cmps.iter().all(ok_op) {
         return None;
     }
@@ -1560,6 +1567,8 @@ pub struct PathKey {
     /// The comparison function of the made operator family ordering it (0: the type's
     /// own order).
     pub cmp: u32,
+    /// The collation it sorts under when that doesn't sort by bytes (0: bytes).
+    pub coll: u32,
 }
 
 impl PathKey {
@@ -1567,6 +1576,7 @@ impl PathKey {
         self.desc == o.desc
             && self.nulls_first == o.nulls_first
             && self.cmp == o.cmp
+            && self.coll == o.coll
             && same_key(&self.expr, &o.expr)
     }
 }
@@ -2960,6 +2970,7 @@ fn index_pathkeys(rel: &Rel, ii: &IndexInfo, backward: bool, w: &Want) -> Vec<Pa
             desc: c.desc != backward,
             nulls_first: c.nulls_first != backward,
             cmp: ii.order.get(i).and_then(|o| o.as_ref()).map_or(0, |o| o.0),
+            coll: ii.kcolls.get(i).and_then(Option::as_ref).map_or(0, |k| k.coll.oid),
         };
         // Only keys the query sorts or merges by have an equivalence class to be a
         // pathkey of (a boolean one fixed by a clause has none: past it).
@@ -2986,7 +2997,7 @@ fn index_pathkeys(rel: &Rel, ii: &IndexInfo, backward: bool, w: &Want) -> Vec<Pa
                 .iter()
                 .find(|x| same_key(&x.expr, &k.expr))
                 .is_some_and(|x| x.desc);
-            k.cmp == 0 && k.desc == right_desc && w.merge.iter().any(|m| same_key(m, &k.expr))
+            k.cmp == 0 && k.coll == 0 && k.desc == right_desc && w.merge.iter().any(|m| same_key(m, &k.expr))
         })
         .count();
     keys.truncate(ordering.max(merging));
@@ -3627,7 +3638,7 @@ impl Planner<'_, '_> {
 
 /// The key range an index scan reads for `quals` (the rest is checked on each row).
 fn bounds(ii: &IndexInfo, quals: &[IClause]) -> IndexBounds {
-    let mut b = IndexBounds::default();
+    let mut b = IndexBounds { colls: ii.kcolls.clone(), ..IndexBounds::default() };
     // GiST, SP-GiST, GIN and BRIN scans read the heap, checking their conditions on each
     // row.
     if ii.am.by_family() {
@@ -3664,9 +3675,8 @@ fn bounds(ii: &IndexInfo, quals: &[IClause]) -> IndexBounds {
         }
         let kt = key.ty();
         let cs: Vec<&IClause> = quals.iter().filter(|c| c.col == col).collect();
-        // (An equality the index's byte order can't seek, under a nondeterministic
-        // collation: no range from here on.)
-        if cs.iter().any(|c| matches!(&c.expr, Expr::Call(d, ..) if !byte_order_op(d))) {
+        // (A comparison not in the order of the column's keys: no range from here on.)
+        if cs.iter().any(|c| matches!(&c.expr, Expr::Call(d, ..) if !key_order_op(ii, col, d))) {
             break;
         }
         if let Some(v) = cs.iter().find_map(|c| match (&c.kind, &c.value) {
@@ -5948,23 +5958,10 @@ impl Planner<'_, '_> {
         let Plan::Sort { input, keys } = p else {
             return false;
         };
-        // A USING key: the order of a made operator family (by its comparison function),
-        // else none an index gives.
-        let mut cmps = Vec::new();
-        for k in keys.iter() {
-            cmps.push(match &k.using {
-                None => 0,
-                Some(u) => match u
-                    .coll
-                    .as_deref()
-                    .and_then(crate::catalog::partition::comparator_fn)
-                {
-                    Some(f) if u.name == "<" => f,
-                    _ => return false,
-                },
-            });
-        }
-        let key_exprs: Vec<Expr> = keys.iter().map(|k| k.expr.clone()).collect();
+        let Some(cmps) = keys.iter().map(key_order).collect::<Option<Vec<_>>>() else {
+            return false;
+        };
+        let key_exprs: Vec<Expr> = keys.iter().zip(&cmps).map(|(k, o)| bare_key(&k.expr, o.1)).collect();
         let dirs: Vec<(bool, bool)> = keys.iter().map(|k| (k.desc, k.nulls_first)).collect();
         // The sort input's width, as EXPLAIN shows it.
         let cat = self.cat.clone();
@@ -5984,11 +5981,12 @@ impl Planner<'_, '_> {
                 .into_iter()
                 .zip(dirs)
                 .zip(cmps)
-                .map(|((expr, (desc, nulls_first)), cmp)| PathKey {
-                    expr,
+                .map(|((expr, (desc, nulls_first)), (cmp, coll))| PathKey {
+                    expr: bare_key(&expr, coll),
                     desc,
                     nulls_first,
                     cmp,
+                    coll,
                 })
                 .collect(),
             limit: lim,
@@ -6644,22 +6642,41 @@ pub fn index_order(ctx: &ExecCtx, s: &ScanPlan) -> Vec<SortKey> {
     out
 }
 
-/// An equality under the index column's own (nondeterministic) collation: an index
-/// condition as Postgres has it, though the index's byte order gives no range for it (the
-/// scan checks it on each row).
-fn own_collation_eq(ii: &IndexInfo, col: usize, def: &FuncDef) -> bool {
-    def.name == "="
-        && ii.am == Am::Btree
-        && def.coll.as_ref().is_some_and(|c| !c.deterministic && ii.colls.get(col).cloned().flatten().as_deref() == Some(c.name.as_str()))
+/// The order a sort key wants as a pathkey's (`cmp`, `coll`): a USING key, the order of a
+/// made operator family (by its comparison function) or of a collation that doesn't sort
+/// by bytes (an index keyed under it); None: none an index gives.
+pub(super) fn key_order(k: &SortKey) -> Option<(u32, u32)> {
+    let Some(u) = &k.using else {
+        return Some((0, 0));
+    };
+    let c = u.coll.as_deref().filter(|_| u.name == "<")?;
+    match crate::catalog::partition::comparator_fn(c) {
+        Some(f) => Some((f, 0)),
+        None if !c.bytewise() || !c.deterministic => Some((0, c.oid)),
+        None => None,
+    }
 }
 
-/// Whether a comparison agrees with the indexes' byte order: one under a collation that
-/// sorts otherwise (ICU) only as equality, and only when that is byte equality
-/// (deterministic).
-fn byte_order_op(def: &FuncDef) -> bool {
-    match &def.coll {
-        None => true,
-        Some(c) => c.deterministic && (c.bytewise() || def.name == "="),
+/// A sort key's expression as an index key matches it: a COLLATE naming the collation the
+/// key sorts under (`coll`) is the pathkey's, not the expression's.
+pub(super) fn bare_key(e: &Expr, coll: u32) -> Expr {
+    match e {
+        Expr::Collate(x, ..) if coll != 0 => bare_key(x, coll),
+        e => e.clone(),
+    }
+}
+
+/// Whether a comparison is in the order of index column `col`'s keys: under the collation
+/// they are keyed by (IndexCollMatchesExprColl), or one comparing bytes when they are
+/// bytes (pattern operators always are).
+fn key_order_op(ii: &IndexInfo, col: usize, def: &FuncDef) -> bool {
+    match (&def.coll, ii.kcolls.get(col).and_then(Option::as_ref)) {
+        (None, None) => true,
+        _ if def.name.starts_with('~') => true,
+        // (A pattern operator class's equality is byte equality, a deterministic one's.)
+        (Some(c), None) => c.deterministic && (c.bytewise() || (def.name == "=" && ii.pattern_ops(col))),
+        (Some(c), Some(k)) => c.oid == k.coll.oid,
+        (None, Some(_)) => false,
     }
 }
 

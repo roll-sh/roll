@@ -276,6 +276,15 @@ impl Collation {
         }
     }
 
+    /// A byte string comparing as `strcoll` does (ICU's sort key; the bytes for a collation
+    /// that sorts by them).
+    pub fn sort_key(&self, s: &str) -> Vec<u8> {
+        match &self.icu {
+            Some(i) => i.sort_key(s),
+            None => s.as_bytes().to_vec(),
+        }
+    }
+
     pub fn upper(&self, s: &str) -> String {
         match &self.ctype {
             Ctype::Ascii => s.to_ascii_uppercase(),

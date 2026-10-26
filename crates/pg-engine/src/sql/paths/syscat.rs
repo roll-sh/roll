@@ -196,6 +196,7 @@ pub(super) fn sys_index_infos(t: SysTable, tuples: f64) -> Vec<IndexInfo> {
                 height,
                 order: vec![None; n],
                 colls: vec![None; n],
+                kcolls: Vec::new(),
                 fam_ops: Vec::new(),
                 user_ops: Vec::new(),
             }
@@ -327,6 +328,7 @@ impl Planner<'_, '_> {
                     desc,
                     nulls_first,
                     cmp: 0,
+                    coll: 0,
                 })
                 .collect(),
             limit: lim,

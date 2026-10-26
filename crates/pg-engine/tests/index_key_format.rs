@@ -64,7 +64,7 @@ fn null_ordering_index_keys_are_upgraded() {
     };
     assert_eq!(expected[0].last().unwrap(), "Null");
     assert_eq!(expected[1].first().unwrap(), "Null");
-    assert_eq!(engine.index_key_format_for_test("postgres").unwrap(), 1);
+    assert_eq!(engine.index_key_format_for_test("postgres").unwrap(), pg_engine::storage::keys::INDEX_KEY_FORMAT);
 
     // As a database written by a build from before the format: legacy keys, format 0.
     engine.downgrade_index_keys_for_test("postgres").unwrap();
@@ -75,7 +75,7 @@ fn null_ordering_index_keys_are_upgraded() {
     // Opened again: the first session upgrades it.
     let engine = open(dir.path());
     let mut s = engine.connect(2, "postgres", "postgres", "t").unwrap();
-    assert_eq!(engine.index_key_format_for_test("postgres").unwrap(), 1);
+    assert_eq!(engine.index_key_format_for_test("postgres").unwrap(), pg_engine::storage::keys::INDEX_KEY_FORMAT);
     assert_eq!(ordered(&mut s), expected);
     // Writes after the upgrade keep the order.
     s.query("INSERT INTO t VALUES (NULL), (7)").unwrap();
@@ -103,4 +103,50 @@ fn legacy_keys_misorder_nulls() {
         .unwrap();
     let r = rows(&mut s, "SELECT f1 FROM t ORDER BY f1 DESC NULLS LAST");
     assert_eq!(r.first().unwrap(), "Null", "{r:?}");
+}
+
+/// Format 2: an index on a column under a collation that doesn't sort by bytes (ICU) is
+/// keyed by its sort keys, in the collation's order; one written in byte order is rebuilt.
+#[test]
+fn collated_index_keys_are_upgraded() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let q = "SELECT s FROM c ORDER BY s";
+    let unique = "INSERT INTO n VALUES ('ABC')";
+    let off = "SET enable_seqscan = off; SET enable_sort = off; SET enable_bitmapscan = off";
+    let expected = {
+        let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+        s.query(
+            "CREATE TABLE c (s text COLLATE \"en-x-icu\"); \
+             INSERT INTO c VALUES ('b'), ('A'), ('a'), ('B'), ('_'), ('é'), ('e'); \
+             CREATE INDEX c_s ON c (s); \
+             CREATE COLLATION ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false); \
+             CREATE TABLE n (s text COLLATE ci UNIQUE); \
+             INSERT INTO n VALUES ('abc')",
+        )
+        .unwrap();
+        s.query(off).unwrap();
+        let plan = rows(&mut s, &format!("EXPLAIN (COSTS OFF) {q}"));
+        assert!(plan.iter().any(|l| l.contains("Index Only Scan")), "{plan:?}");
+        let r = rows(&mut s, q);
+        assert_eq!(
+            r.join(" "),
+            r#"Text("_") Text("a") Text("A") Text("b") Text("B") Text("e") Text("é")"#
+        );
+        assert!(s.query(unique).is_err());
+        r
+    };
+    // Written by a build from before: byte-order keys, format 0.
+    engine.downgrade_index_keys_for_test("postgres").unwrap();
+    engine.shutdown();
+    drop(engine);
+    let engine = open(dir.path());
+    let mut s = engine.connect(2, "postgres", "postgres", "t").unwrap();
+    assert_eq!(
+        engine.index_key_format_for_test("postgres").unwrap(),
+        pg_engine::storage::keys::INDEX_KEY_FORMAT
+    );
+    s.query(off).unwrap();
+    assert_eq!(rows(&mut s, q), expected);
+    assert!(s.query(unique).is_err());
 }

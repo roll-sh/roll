@@ -115,6 +115,15 @@ pub struct IndexBounds {
     /// The index's order when a column's made operator class orders it (its storage is in
     /// the values' own byte order): the keys an ordered scan sorts its rows by.
     pub order: Vec<SortKey>,
+    /// Per key column, the collation its entries are keyed under (`BoundIndex::colls`).
+    pub colls: Vec<Option<crate::storage::keys::KeyColl>>,
+}
+
+impl IndexBounds {
+    /// Key column `i`'s key collation.
+    pub fn coll(&self, i: usize) -> Option<&crate::storage::keys::KeyColl> {
+        self.colls.get(i).and_then(Option::as_ref)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -855,6 +864,9 @@ pub struct BoundIndex {
     pub predicate: Option<Expr>,
     /// The primary key, unique or exclusion constraint the index enforces.
     pub constraint: Option<Arc<IndexConstraint>>,
+    /// Per key column, the collation its entries are keyed under (`binder::key_colls`;
+    /// empty: all by bytes).
+    pub colls: Vec<Option<crate::storage::keys::KeyColl>>,
 }
 
 #[derive(Clone, Debug)]

@@ -980,8 +980,8 @@ impl Ddl<'_, '_> {
         let mut items: Vec<(Vec<u8>, (Vec<u8>, Vec<u8>, crate::exec::Row))> = Vec::new();
         for (k, r) in self.table_rows(t)? {
             let vals = super::table::index_values(bix, &r, self)?.unwrap_or_default();
-            let ik = crate::exec::scan::index_entry_key(t, &bix.index, &vals, &k);
-            let key = crate::exec::scan::index_value_prefix(t, &bix.index, &vals);
+            let ik = crate::exec::scan::index_entry_key(t, &bix.index, &vals, &k, &bix.colls);
+            let key = crate::exec::scan::index_value_prefix(t, &bix.index, &vals, &bix.colls);
             items.push((k, (ik, key, r)));
         }
         // plan_cluster_use_sort: with index scans disabled, a sequential scan feeds a sort
@@ -1173,7 +1173,8 @@ impl Ddl<'_, '_> {
                     ix.keys.sort();
                     let dedup = !ix.bix.index.unique
                         && ix.bix.index.include.is_empty()
-                        && ix.types.iter().all(relsize::equal_image);
+                        && ix.types.iter().all(relsize::equal_image)
+                        && ix.bix.colls.iter().flatten().all(|k| k.coll.deterministic);
                     let mut sizes = Vec::with_capacity(ix.keys.len());
                     for group in ix.keys.chunk_by(|a, b| dedup && a.0 == b.0) {
                         relsize::posting_tuples(group[0].1, group.len(), &mut sizes);

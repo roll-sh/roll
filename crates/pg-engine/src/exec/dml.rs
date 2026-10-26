@@ -705,9 +705,19 @@ fn unique_lock_key(t: &Table, bix: &BoundIndex, vals: &[Value], nondet: bool) ->
     if nondet {
         lock_key.extend(index_prefix(t.oid, bix.index.id));
     } else {
-        lock_key.extend(index_value_prefix(t, &bix.index, vals));
+        lock_key.extend(index_value_prefix(t, &bix.index, vals, &bix.colls));
     }
     lock_key
+}
+
+/// The nondeterministic collations of an index's keys whose entries aren't keyed under
+/// them (a clustered primary key's data keys): a unique check looks through the rows. An
+/// index's own entries are (`KeyColl`): equal keys share an entry prefix.
+fn unkeyed_nondet(t: &Table, bix: &BoundIndex, ctx: &ExecCtx) -> Vec<Option<Arc<crate::types::collation::Collation>>> {
+    if bix.index.id != 0 {
+        return Vec::new();
+    }
+    crate::types::collation::index_nondet(&ctx.catalog(), t, &bix.index)
 }
 
 /// Whether evaluating the index's key or predicate can be seen (anything but columns).
@@ -735,7 +745,7 @@ fn find_conflict(
     if !bix.index.nulls_not_distinct && vals.iter().any(Value::is_null) {
         return Ok(None);
     }
-    let nondet = crate::types::collation::index_nondet(&ctx.catalog(), t, &bix.index);
+    let nondet = unkeyed_nondet(t, bix, ctx);
     let lock_key = unique_lock_key(t, bix, vals, !nondet.is_empty());
     let exprs = form_existing && index_has_exprs(bix);
     let name = t.name.clone();
@@ -859,7 +869,7 @@ fn committed_conflict(
         .iter()
         .map(|c| c.opclass == RECORD_IMAGE_OPS)
         .collect();
-    let prefix = index_value_prefix(t, &bix.index, vals);
+    let prefix = index_value_prefix(t, &bix.index, vals, &bix.colls);
     let mut scan = ctx.txn.borrow().scan_latest(&prefix, &prefix_end(&prefix));
     for e in scan.by_ref() {
         let (_, dkey) = e?;
@@ -952,7 +962,7 @@ pub fn exclusion_conflict(
     lock_key.extend(con.oid.to_be_bytes());
     let by_value = con.leading_eq && bix.index.id != 0;
     if by_value {
-        lock_key.extend(index_value_prefix(t, &bix.index, &vals[..1]));
+        lock_key.extend(index_value_prefix(t, &bix.index, &vals[..1], &bix.colls));
     }
     let name = t.name.clone();
     ctx.txn
@@ -961,7 +971,7 @@ pub fn exclusion_conflict(
             format!("exclusion constraint on \"{name}\"")
         })?;
     if by_value {
-        let prefix = index_value_prefix(t, &bix.index, &vals[..1]);
+        let prefix = index_value_prefix(t, &bix.index, &vals[..1], &bix.colls);
         let dkeys: Vec<Vec<u8>> = ctx
             .txn
             .borrow()
@@ -1173,7 +1183,7 @@ fn put_index_entries_with(
             continue;
         }
         if let Some(vals) = vals {
-            let k = index_entry_key(t, &bix.index, vals, dkey);
+            let k = index_entry_key(t, &bix.index, vals, dkey, &bix.colls);
             let tracked = ctx.txn.borrow().serializable_tracked();
             if tracked {
                 let me = ctx.txn.borrow().id;
@@ -1197,7 +1207,7 @@ fn delete_index_entries(
             continue;
         }
         if let Some(vals) = index_values(bix, row, ctx)? {
-            let k = index_entry_key(t, &bix.index, &vals, dkey);
+            let k = index_entry_key(t, &bix.index, &vals, dkey, &bix.colls);
             ctx.txn.borrow_mut().delete(k)?;
         }
     }
@@ -1906,7 +1916,8 @@ fn find_parent(
             && ixcols.len() == cols.len()
             && ixcols.iter().zip(cols).all(|(a, b)| *a == Some(*b))
         {
-            let prefix = index_value_prefix(parent, &ix, &vals);
+            let colls = crate::sql::binder::column_key_colls(&cat, parent, &ix);
+            let prefix = index_value_prefix(parent, &ix, &vals, &colls);
             let entries: Vec<Vec<u8>> = {
                 let txn = ctx.txn.borrow();
                 let scan = if xact_snapshot {
@@ -2627,11 +2638,11 @@ pub fn update_row_rls(
         if let Some(ov) = ov {
             ctx.txn
                 .borrow_mut()
-                .delete(index_entry_key(t, &bix.index, &ov, dkey))?;
+                .delete(index_entry_key(t, &bix.index, &ov, dkey, &bix.colls))?;
         }
         if let Some(nv) = nv {
             ctx.txn.borrow_mut().put(
-                index_entry_key(t, &bix.index, &nv, &new_key),
+                index_entry_key(t, &bix.index, &nv, &new_key, &bix.colls),
                 new_key.clone(),
             )?;
         }
@@ -2914,7 +2925,7 @@ fn index_entries_checked(
             match spec {
                 Some((token, arbiter_of)) if arbiter_of(bix) => {
                     if bix.index.unique {
-                        let nondet = crate::types::collation::index_nondet(&ctx.catalog(), t, &bix.index);
+                        let nondet = unkeyed_nondet(t, bix, ctx);
                         let lk = unique_lock_key(t, bix, v, !nondet.is_empty());
                         let had = ctx.txn.borrow().holds_lock_mode(&lk, LockMode::Exclusive);
                         let entering = Entering { token: Some(token), row: shared };

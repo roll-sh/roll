@@ -28,11 +28,12 @@ pub fn key_collations(cat: &super::Catalog, t: &super::Table) -> Vec<Option<Arc<
             if !k.ty.collatable() {
                 return None;
             }
-            let name = k.collation.clone().or_else(|| {
-                k.col
-                    .and_then(|i| t.columns.get(i))
-                    .and_then(|c| c.collation.clone())
-            })?;
+            // (No collation of its own: the database default's.)
+            let name = k
+                .collation
+                .clone()
+                .or_else(|| k.col.and_then(|i| t.columns.get(i)).and_then(|c| c.collation.clone()))
+                .unwrap_or_else(|| "default".into());
             crate::types::collation::by_name(cat, &name).filter(|c| !c.bytewise() || !c.deterministic)
         })
         .collect()

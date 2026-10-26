@@ -261,7 +261,9 @@ fn btree_opts(bix: &BoundIndex) -> Option<BtreeOpts> {
         unique: ix.unique,
         dedup: dedup_on
             && ix.include.is_empty()
-            && bix.keys.iter().all(|k| relsize::equal_image(&k.ty())),
+            && bix.keys.iter().all(|k| relsize::equal_image(&k.ty()))
+            // (btvarstrequalimage: not under a nondeterministic collation.)
+            && bix.colls.iter().flatten().all(|k| k.coll.deterministic),
         fillfactor: option(&ix.options, "fillfactor")
             .and_then(|v| v.parse().ok())
             .unwrap_or(90),
@@ -1017,7 +1019,7 @@ fn index_key(
         let mut b = Vec::new();
         let desc = bix.index.columns.get(n).is_some_and(|c| c.desc);
         let nulls_first = bix.index.columns.get(n).is_some_and(|c| c.nulls_first);
-        crate::storage::keys::encode_index_value(&mut b, v, desc, nulls_first);
+        crate::storage::keys::encode_index_value(&mut b, v, desc, nulls_first, bix.colls.get(n).and_then(Option::as_ref));
         atts.push(b);
         sizes.push(relsize::index_tuple(&types[..=n], &vals[..=n], &text));
     }

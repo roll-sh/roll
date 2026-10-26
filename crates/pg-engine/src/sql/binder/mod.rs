@@ -32,6 +32,7 @@ mod types;
 pub mod views;
 
 pub use dml::{bound_indexes, partition_routing, table_rules};
+pub(crate) use dml::column_key_colls;
 pub use optimize::width as plan_width;
 pub use types::{
     parse_type_string, resolve_type_name, resolve_type_name_shell, serial_type, type_from_names,

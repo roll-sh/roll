@@ -96,18 +96,19 @@ impl Planner<'_, '_> {
     /// A member's path in the order: its cheapest one already in it (by total cost, or
     /// by startup cost for the fast-start Merge Append), else its cheapest one sorted
     /// (generate_orderedappend_paths).
-    fn member_path(&self, rel: &Rel, keys: &[Expr], dirs: &[(bool, bool)], width: u32, startup: bool, limit: Option<f64>) -> Option<Path> {
+    fn member_path(&self, rel: &Rel, keys: &[Expr], dirs: &[(bool, bool)], colls: &[u32], width: u32, startup: bool, limit: Option<f64>) -> Option<Path> {
         // (Less the keys a clause of the member equates with a constant: redundant.)
         let want = Want {
             keys: keys
                 .iter()
-                .zip(dirs)
+                .zip(dirs.iter().zip(colls))
                 .filter(|(e, _)| !super::eq_const(rel, e))
-                .map(|(e, (desc, nulls_first))| PathKey {
+                .map(|(e, ((desc, nulls_first), coll))| PathKey {
                     expr: e.clone(),
                     desc: *desc,
                     nulls_first: *nulls_first,
                     cmp: 0,
+                    coll: *coll,
                 })
                 .collect(),
             limit: None,
@@ -148,10 +149,10 @@ impl Planner<'_, '_> {
         let Plan::Sort { input, keys } = p else {
             return false;
         };
-        if keys.is_empty() || keys.iter().any(|k| k.using.is_some()) {
+        let Some(colls) = sort_colls(keys) else {
             return false;
-        }
-        let key_exprs: Vec<Expr> = keys.iter().map(|k| k.expr.clone()).collect();
+        };
+        let key_exprs: Vec<Expr> = keys.iter().zip(&colls).map(|(k, c)| super::bare_key(&k.expr, *c)).collect();
         let dirs: Vec<(bool, bool)> = keys.iter().map(|k| (k.desc, k.nulls_first)).collect();
         let cat = self.cat.clone();
         let mut appends = 0;
@@ -221,7 +222,7 @@ impl Planner<'_, '_> {
             let (mut m_startup, mut m_run, mut m_disabled) = (0.0, 0.0, 0u32);
             let mut ps = Vec::new();
             for (l, rel) in found.iter().zip(&rels) {
-                let Some(o) = self.member_path(rel, &l.keys, &dirs, l.width, startup, limit_tuples) else {
+                let Some(o) = self.member_path(rel, &l.keys, &dirs, &colls, l.width, startup, limit_tuples) else {
                     return false;
                 };
                 m_startup += o.startup;
@@ -292,10 +293,8 @@ impl Planner<'_, '_> {
         needed: &[bool],
         startup: bool,
     ) -> Option<(f64, f64, f64, u32)> {
-        if keys.is_empty() || keys.iter().any(|k| k.using.is_some()) {
-            return None;
-        }
-        let key_exprs: Vec<Expr> = keys.iter().map(|k| k.expr.clone()).collect();
+        let colls = sort_colls(keys)?;
+        let key_exprs: Vec<Expr> = keys.iter().zip(&colls).map(|(k, c)| super::bare_key(&k.expr, *c)).collect();
         let dirs: Vec<(bool, bool)> = keys.iter().map(|k| (k.desc, k.nulls_first)).collect();
         let mut appends = 0;
         let mut found = Vec::new();
@@ -310,7 +309,7 @@ impl Planner<'_, '_> {
         let mut indexed = false;
         for l in &found {
             let rel = self.rel(l.scan, &l.needed)?;
-            let o = self.member_path(&rel, &l.keys, &dirs, l.width, startup, None)?;
+            let o = self.member_path(&rel, &l.keys, &dirs, &colls, l.width, startup, None)?;
             indexed |= !matches!(o.kind, PathKind::Sort(_));
             m_startup += o.startup;
             m_run += o.total - o.startup;
@@ -353,6 +352,9 @@ impl Planner<'_, '_> {
                     _ => return,
                 };
                 let dirs: Vec<(bool, bool)> = keys.iter().map(|k| (k.desc, k.nulls_first)).collect();
+                let Some(colls) = sort_colls(keys) else {
+                    return;
+                };
                 for i in inputs.into_iter().filter(|i| !matches!(&***i, Plan::Empty { .. })) {
                     let w = crate::sql::binder::plan_width(i);
                     let n = if w == needed.len() { needed.to_vec() } else { vec![true; w] };
@@ -361,14 +363,14 @@ impl Planner<'_, '_> {
                         continue;
                     }
                     let width = sort_width(&self.cat, i);
-                    let exprs: Vec<Expr> = keys.iter().map(|k| k.expr.clone()).collect();
+                    let exprs: Vec<Expr> = keys.iter().zip(&colls).map(|(k, c)| super::bare_key(&k.expr, *c)).collect();
                     let Some((s, skeys, sneeded)) = member_scan_mut(take(i), exprs, n) else {
                         continue;
                     };
                     let Some(rel) = self.rel(s, &sneeded) else {
                         continue;
                     };
-                    let Some(path) = self.member_path(&rel, &skeys, &dirs, width, startup, limit) else {
+                    let Some(path) = self.member_path(&rel, &skeys, &dirs, &colls, width, startup, limit) else {
                         continue;
                     };
                     match &path.kind {
@@ -391,6 +393,15 @@ impl Planner<'_, '_> {
             _ => {}
         }
     }
+}
+
+/// Per sort key, the collation it sorts under when an index keyed under it can give the
+/// order (`key_order`); None: a key no member's index orders (a USING operator).
+fn sort_colls(keys: &[SortKey]) -> Option<Vec<u32>> {
+    if keys.is_empty() {
+        return None;
+    }
+    keys.iter().map(|k| super::key_order(k).filter(|o| o.0 == 0).map(|o| o.1)).collect()
 }
 
 /// The scan of a member (through projections), with `keys` and `needed` (over the

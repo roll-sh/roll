@@ -17,7 +17,8 @@ pub(super) const TYPE: ExtType = ExtType {
     name: "citext",
     input: |s| Ok(s.as_bytes().to_vec()),
     output: |b, _| String::from_utf8_lossy(b).into_owned(),
-    cmp: |a, b| lower(a).cmp(&lower(b)),
+    // (Under the database default, citext's collation unless a COLLATE says otherwise.)
+    cmp: |a, b| default_cmp(&lower(a), &lower(b)),
     canon: lower,
     key: |a, out| key_bytes(&lower(a), out),
     to_builtin: Some(|b| Value::Text(String::from_utf8_lossy(b).into())),
@@ -41,6 +42,14 @@ fn lower(b: &[u8]) -> Cow<'_, [u8]> {
         Cow::Owned(b.to_ascii_lowercase())
     } else {
         Cow::Borrowed(b)
+    }
+}
+
+/// Lowercased strings under the database default (`varstr_cmp` with DEFAULT_COLLATION_OID).
+fn default_cmp(l: &[u8], r: &[u8]) -> Ordering {
+    match crate::types::collation::default_unless_bytewise() {
+        Some(c) => c.cmp(&String::from_utf8_lossy(l), &String::from_utf8_lossy(r)),
+        None => l.cmp(r),
     }
 }
 

@@ -112,8 +112,9 @@ pub fn with_legacy_index_keys<R>(f: impl FnOnce() -> R) -> R {
 }
 
 /// The index key format this build writes (`Catalog::index_key_format`): 1 places a NULL
-/// as its column's NULLS FIRST / LAST says.
-pub const INDEX_KEY_FORMAT: u32 = 1;
+/// as its column's NULLS FIRST / LAST says; 2 keys strings under a collation that doesn't
+/// sort by bytes by its sort keys (`KeyColl`).
+pub const INDEX_KEY_FORMAT: u32 = 2;
 
 thread_local! {
     /// Store tables with a primary key the way builds before storage format 1
@@ -141,13 +142,83 @@ pub fn primary_key_keys_rows() -> bool {
 
 /// An index column's value: as `encode_value`, a NULL placed first or last in key order as
 /// the column's NULLS FIRST / LAST says (the plain encoding puts it last ascending, first
-/// descending).
-pub fn encode_index_value(out: &mut Vec<u8>, v: &Value, desc: bool, nulls_first: bool) {
-    if v.is_null() && nulls_first != desc && !LEGACY_INDEX_KEYS.with(|l| l.get()) {
+/// descending); strings under `kc`, the column's collation when it doesn't sort by bytes.
+pub fn encode_index_value(out: &mut Vec<u8>, v: &Value, desc: bool, nulls_first: bool, kc: Option<&KeyColl>) {
+    let legacy = LEGACY_INDEX_KEYS.with(|l| l.get());
+    if v.is_null() && nulls_first != desc && !legacy {
         out.push(if desc { NULL } else { !NULL });
         return;
     }
-    encode_value(out, v, desc)
+    match kc {
+        Some(kc) if !legacy => {
+            let start = out.len();
+            encode_collated(out, v, kc);
+            if desc {
+                for b in &mut out[start..] {
+                    *b = !*b;
+                }
+            }
+        }
+        _ => encode_value(out, v, desc),
+    }
+}
+
+/// How an index column's strings are keyed when its collation doesn't sort by bytes (ICU)
+/// or is nondeterministic: by the collation's sort keys, which compare as the collation
+/// does (`varstr_cmp`), then, deterministic, by their bytes. Index key format 2.
+#[derive(Clone, Debug)]
+pub struct KeyColl {
+    pub coll: std::sync::Arc<crate::types::collation::Collation>,
+    /// bpchar: trailing spaces don't count (bpcharcmp).
+    pub bpchar: bool,
+}
+
+impl KeyColl {
+    /// The key of a string: its sort key (without ICU's terminating 0), then its bytes.
+    pub fn put(&self, out: &mut Vec<u8>, s: &str) {
+        let s = if self.bpchar { s.trim_end_matches(' ') } else { s };
+        let mut k = self.coll.sort_key(s);
+        if k.last() == Some(&0) {
+            k.pop();
+        }
+        put_bytes(out, &k);
+        if self.coll.deterministic {
+            put_bytes(out, s.as_bytes());
+        }
+    }
+}
+
+/// `encode_value` (ascending) with strings, also an array's elements, a range's bounds and
+/// a citext's, keyed under `kc`.
+fn encode_collated(out: &mut Vec<u8>, v: &Value, kc: &KeyColl) {
+    match v {
+        Value::Text(s) => {
+            out.push(BYTES);
+            kc.put(out, s);
+        }
+        Value::Ext(k, b) if *k == crate::ext::types::CITEXT => {
+            out.push(EXT);
+            out.extend_from_slice(&k.to_be_bytes());
+            let l = crate::ext::types::canon(*k, b);
+            kc.put(out, &String::from_utf8_lossy(&l));
+        }
+        Value::Array(a) => {
+            out.push(ARRAY);
+            for item in &a.items {
+                encode_collated(out, item, kc);
+            }
+            out.push(ARRAY_END);
+        }
+        Value::Range(r) => encode_range(out, r, Some(kc)),
+        Value::Multirange(m) => {
+            out.push(MULTIRANGE);
+            for r in m.iter() {
+                encode_range(out, r, Some(kc));
+            }
+            out.push(ARRAY_END);
+        }
+        v => encode_value(out, v, false),
+    }
 }
 
 /// Append the ordered encoding of `v`.
@@ -261,11 +332,11 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value, desc: bool) {
             out.push(INT);
             put_u64(out, ((*b as u64) << 16) | *o as u64);
         }
-        Value::Range(r) => encode_range(out, r),
+        Value::Range(r) => encode_range(out, r, None),
         Value::Multirange(m) => {
             out.push(MULTIRANGE);
             for r in m.iter() {
-                encode_range(out, r);
+                encode_range(out, r, None);
             }
             out.push(ARRAY_END);
         }
@@ -302,7 +373,11 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value, desc: bool) {
 /// Ranges order as `range_cmp`: empty first, then by lower bound (unbounded, then inclusive
 /// before exclusive at the same value), then by upper bound (exclusive before inclusive,
 /// unbounded last).
-fn encode_range(out: &mut Vec<u8>, r: &crate::types::range::Range) {
+fn encode_range(out: &mut Vec<u8>, r: &crate::types::range::Range, kc: Option<&KeyColl>) {
+    let bound = |out: &mut Vec<u8>, v: &Value| match kc {
+        Some(kc) => encode_collated(out, v, kc),
+        None => encode_value(out, v, false),
+    };
     out.push(RANGE);
     if r.empty {
         out.push(0);
@@ -313,14 +388,14 @@ fn encode_range(out: &mut Vec<u8>, r: &crate::types::range::Range) {
         None => out.push(0),
         Some(v) => {
             out.push(1);
-            encode_value(out, v, false);
+            bound(out, v);
             out.push(if r.lower_inc { 0 } else { 1 });
         }
     }
     match &r.upper {
         Some(v) => {
             out.push(0);
-            encode_value(out, v, false);
+            bound(out, v);
             out.push(if r.upper_inc { 1 } else { 0 });
         }
         None => out.push(1),
