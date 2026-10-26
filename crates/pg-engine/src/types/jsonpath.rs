@@ -836,7 +836,7 @@ impl Parser {
             }
             // makeItemLikeRegex: the flags must convert, and the pattern compile.
             let cflags = like_regex_cflags(&flags)?;
-            crate::types::regex::Regex::new(&pattern, cflags, crate::types::regex::DEFAULT_STRATEGY)?;
+            crate::types::regex::Regex::new(&pattern, cflags, crate::types::regex::default_strategy())?;
             return Ok(Node::LikeRegex(Box::new(l), pattern, flags));
         }
         Ok(l)
@@ -2950,7 +2950,7 @@ fn like_regex(pattern: &str, flags: &str) -> R<std::sync::Arc<crate::types::rege
     crate::types::regex::compile(
         pattern,
         cflags | crate::types::regex::REG_NOSUB,
-        crate::types::regex::DEFAULT_STRATEGY,
+        crate::types::regex::default_strategy(),
     )
     .map_err(Fail::Hard)
 }

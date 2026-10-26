@@ -21,8 +21,12 @@ pub enum Strategy {
     Icu,
 }
 
-/// The default collation: the builtin provider's C.UTF-8 locale.
-pub const DEFAULT_STRATEGY: Strategy = Strategy::Builtin { posix: true };
+/// The default collation's strategy (`DEFAULT_COLLATION_OID`: the database's locale).
+pub fn default_strategy() -> Strategy {
+    crate::types::collation::default()
+        .regex_strategy()
+        .unwrap_or(Strategy::C)
+}
 
 // Hard-wired character properties for C locale.
 const PG_ISDIGIT: u8 = 0x01;

@@ -3724,12 +3724,14 @@ fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u32>) -> Resu
                 // dathasloginevt: this database's login event triggers.
                 let login = name == ctx.sess.database
                     && cat.event_triggers.values().any(|e| e.event == "login");
+                let l = ctx.sess.cluster.database_locale(&name).unwrap_or_default();
+                let topt = |v: &Option<String>| v.as_deref().map_or(N, nm);
                 out.push(vec![
                     o(oid),
                     nm(name),
                     o(owner),
-                    i4(6),
-                    c('b'),
+                    i4(l.encoding as i64),
+                    c(l.provider),
                     b(false),
                     b(true),
                     b(login),
@@ -3737,11 +3739,11 @@ fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u32>) -> Resu
                     Value::Oid(0),
                     Value::Oid(0),
                     o(1663),
-                    nm("C"),
-                    nm("C"),
-                    nm("C.UTF-8"),
-                    N,
-                    N,
+                    nm(&l.collate),
+                    nm(&l.ctype),
+                    topt(&l.locale),
+                    topt(&l.icu_rules),
+                    topt(&l.collversion),
                     datacl,
                 ]);
             }

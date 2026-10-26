@@ -5431,9 +5431,16 @@ impl Binder<'_, '_> {
                 }
             }
         }
-        // DISTINCT under a nondeterministic collation finds its equal values equal.
+        // DISTINCT under a nondeterministic collation finds its equal values equal; under
+        // one that doesn't sort by bytes, it sorts its input in its order.
         if f.agg_distinct && !self.deparse {
-            a2 = a2.iter().map(|a| self.nondeterministic_key(a)).collect();
+            a2 = a2
+                .iter()
+                .map(|a| match self.nondeterministic_key(a) {
+                    k @ Expr::Collate(..) => k,
+                    _ => self.collated_key(a),
+                })
+                .collect();
         }
         if let Some(u) = user {
             self.require_function(u.oid);

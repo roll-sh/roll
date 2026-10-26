@@ -10,6 +10,8 @@ use pg_engine::session::state::{SessionState, SingleCluster};
 use pg_engine::storage::cache::BlockCache;
 use pg_engine::storage::{Store, StoreOptions};
 use pg_engine::txn::Database;
+use pg_engine::types::collation::dblocale::{self, IcuLevel, LocaleOptions, Reporter};
+use pg_engine::types::collation::{DbDefault, DbLocale};
 use pg_engine::types::text::format_value;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -54,12 +56,71 @@ pub fn open_store(dir: &Path) -> Arc<Store> {
 }
 
 pub fn engine_session(store: Arc<Store>, dbname: &str) -> Session {
+    engine_session_with(store, dbname, createdb_locale(GOLDEN_CREATEDB))
+}
+
+/// A session on database `dbname` of `store`, whose locale is `locale`.
+pub fn engine_session_with(store: Arc<Store>, dbname: &str, locale: DbLocale) -> Session {
     let db = Database::open(dbname, 16384, store, "postgres").expect("open database");
+    db.set_locale(Arc::new(DbDefault::open(locale.clone()).expect("database locale")));
     let cluster = Arc::new(SingleCluster {
         name: dbname.to_string(),
         started: 0,
+        locale,
     });
     Session::new(SessionState::new(db, cluster, "postgres", 4242))
+}
+
+/// The CREATE DATABASE options golden files' databases are made with (on the reference
+/// when recording, on the engine when comparing): the builtin C.UTF-8 locale.
+pub const GOLDEN_CREATEDB: &str = "LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8' LOCALE 'C'";
+
+/// The CREATE DATABASE options of a golden file's database: its first line's
+/// `-- createdb: <options>` (e.g. `LOCALE 'C'`, libc C, the default of a new cluster), else
+/// `GOLDEN_CREATEDB`.
+pub fn createdb_options(src: &str) -> &str {
+    src.lines()
+        .next()
+        .and_then(|l| l.strip_prefix("-- createdb:"))
+        .map_or(GOLDEN_CREATEDB, str::trim)
+}
+
+/// The locale CREATE DATABASE ... TEMPLATE template0 `opts` makes (options as
+/// `KEY 'value'` or `KEY word` pairs).
+pub fn createdb_locale(opts: &str) -> DbLocale {
+    let mut o = LocaleOptions::default();
+    let mut words = Vec::new();
+    let mut rest = opts.trim();
+    while !rest.is_empty() {
+        let (w, r) = match rest.strip_prefix('\'') {
+            Some(q) => q.split_once('\'').expect("closing quote"),
+            None => rest.split_once(' ').unwrap_or((rest, "")),
+        };
+        words.push(w.to_string());
+        rest = r.trim_start();
+    }
+    for kv in words.chunks(2) {
+        let v = kv.get(1).cloned();
+        match kv[0].to_ascii_lowercase().as_str() {
+            "locale" => o.locale = v,
+            "lc_collate" => o.lc_collate = v,
+            "lc_ctype" => o.lc_ctype = v,
+            "icu_locale" => o.icu_locale = v,
+            "builtin_locale" => o.builtin_locale = v,
+            "icu_rules" => o.icu_rules = v,
+            "locale_provider" => o.provider = v.map(|p| match p.to_ascii_lowercase().as_str() {
+                "icu" => 'i',
+                "builtin" => 'b',
+                _ => 'c',
+            }),
+            "encoding" => {}
+            k => panic!("createdb option {k} not supported here"),
+        }
+    }
+    let mut quiet = |_: pg_engine::error::Error, _: IcuLevel| {};
+    let mut r = Reporter { level: IcuLevel::Quiet, report: &mut quiet };
+    dblocale::createdb(&o, "template0", &DbLocale::default(), &|_| None, true, &mut r)
+        .expect("golden database locale")
 }
 
 /// A statement and, for COPY FROM STDIN, its data (the lines up to `\.`).

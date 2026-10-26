@@ -1,0 +1,94 @@
+> SELECT datlocprovider, datcollate, datctype, datlocale, datcollversion FROM pg_database WHERE datname = current_database()
+datlocprovider:char | datcollate:text | datctype:text | datlocale:text | datcollversion:text
+c | C | C | NULL | NULL
+-- SELECT 1
+
+> SELECT upper('é ß ǆ ﬁ i'), lower('É İ Σ ǅ I'), initcap('éa bé ǆx hello-WORLD 1st ßa'), casefold('ß İ Σ ﬁ AB')
+upper:text | lower:text | initcap:text | casefold:text
+é ß ǆ ﬁ I | É İ Σ ǅ i | éA Bé ǆX Hello-World 1st ßA | ß İ Σ ﬁ ab
+-- SELECT 1
+
+> SELECT 'é' ~ '[[:alpha:]]', 'É' ~* 'é', 'É' ILIKE 'é', 'E' ILIKE 'e', '٣' ~ '[[:digit:]]', 'ǅ' ~ '[[:upper:]]', 'ß' ~ '^\w$'
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | f | f | t | f | f | f
+-- SELECT 1
+
+> SELECT regexp_replace('ÀÉÎõü', '[[:lower:]]', 'x', 'g'), regexp_replace('ÀÉÎõüab', '[a-z]', 'x', 'gi'), 'aÉ' SIMILAR TO 'A%' , substring('xÉy' from '[[:alpha:]]+')
+regexp_replace:text | regexp_replace:text | ?column?:bool | substring:text
+ÀÉÎõü | ÀÉÎõüxx | f | x
+-- SELECT 1
+
+> SELECT string_agg(x, ' ' ORDER BY x) FROM (VALUES ('a'),('B'),('é'),('E'),('e'),('Z'),('_'),('1'),('ä'),('z'),('Ä')) v(x)
+string_agg:text
+1 B E Z _ a e z Ä ä é
+-- SELECT 1
+
+> SELECT pg_collation_actual_version(100), collprovider FROM pg_collation WHERE oid = 100
+pg_collation_actual_version:text | collprovider:char
+NULL | d
+-- SELECT 1
+
+> SELECT jsonb_path_query_array('["é","É","e","E"]', '$[*] ? (@ like_regex "^[[:upper:]]")'), jsonb_path_query_array('["é","É","e"]', '$[*] ? (@ like_regex "^é" flag "i")')
+jsonb_path_query_array:jsonb | jsonb_path_query_array:jsonb
+["E"] | ["é"]
+-- SELECT 1
+
+> SELECT to_tsvector('simple', 'Éclair naïve café ÉCOLE École')
+to_tsvector:3614
+'café':3 'naïve':2 'Éclair':1 'École':4,5
+-- SELECT 1
+
+> SELECT upper(x) COLLATE "pg_c_utf8", upper(x COLLATE "pg_unicode_fast"), upper(x COLLATE "und-x-icu"), lower(x COLLATE "C") FROM (VALUES ('ßé')) v(x)
+upper:text | upper:text | upper:text | lower:text
+ßé | SSÉ | SSÉ | ßé
+-- SELECT 1
+
+> SELECT 'é' ~ '[[:alpha:]]' COLLATE "pg_c_utf8", 'É' ILIKE 'é' COLLATE "und-x-icu", 'É' ~* 'é' COLLATE "pg_unicode_fast"
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | t
+-- SELECT 1
+
+> CREATE TABLE a60_lc (t text)
+-- CREATE TABLE
+
+> INSERT INTO a60_lc VALUES ('b'), ('É'), ('a'), ('é'), ('B'), ('ab')
+-- INSERT 0 6
+
+> CREATE INDEX ON a60_lc (t)
+-- CREATE INDEX
+
+> SET enable_seqscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a60_lc WHERE t LIKE 'a%'
+QUERY PLAN:text
+Index Only Scan using a60_lc_t_idx on a60_lc
+  Index Cond: ((t >= 'a'::text) AND (t < 'b'::text))
+  Filter: (t ~~ 'a%'::text)
+-- EXPLAIN
+
+> SELECT * FROM a60_lc WHERE t LIKE 'a%' ORDER BY t
+t:text
+a
+ab
+-- SELECT 2
+
+> SELECT * FROM a60_lc WHERE t ILIKE 'é' ORDER BY t
+t:text
+é
+-- SELECT 1
+
+> RESET enable_seqscan
+-- RESET
+
+> SELECT name, setting FROM pg_settings WHERE name IN ('lc_messages', 'lc_monetary', 'lc_numeric', 'lc_time') ORDER BY 1
+name:text | setting:text
+lc_messages | C
+lc_monetary | C
+lc_numeric | C
+lc_time | C
+-- SELECT 4
+
+> DROP TABLE a60_lc
+-- DROP TABLE
+

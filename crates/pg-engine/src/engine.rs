@@ -10,6 +10,7 @@ use crate::session::state::{Activity, Cluster, SessionState};
 use crate::storage::cache::BlockCache;
 use crate::storage::{Store, StoreOptions};
 use crate::txn::{Database, Isolation, Txn};
+use crate::types::collation::{DbDefault, DbLocale};
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -53,6 +54,9 @@ pub struct EngineOptions {
     /// Libraries loaded at server start (`shared_preload_libraries`): `pg_stat_statements`
     /// collects statement statistics from then on.
     pub shared_preload_libraries: Vec<String>,
+    /// initdb's locale and encoding options, for a new data directory (an existing one keeps
+    /// what it was made with). The default is initdb's `--locale=C --encoding=UTF8`.
+    pub locale: crate::types::collation::dblocale::InitdbLocale,
 }
 
 impl Default for EngineOptions {
@@ -67,6 +71,7 @@ impl Default for EngineOptions {
             password: None,
             server_files: None,
             shared_preload_libraries: Vec::new(),
+            locale: Default::default(),
         }
     }
 }
@@ -79,6 +84,15 @@ struct DbEntry {
     /// template0 does not accept connections.
     #[serde(default = "yes")]
     allow_connections: bool,
+    /// Its encoding and locale (None: a registry from before they were kept, libc C).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    locale: Option<DbLocale>,
+}
+
+impl DbEntry {
+    fn locale(&self) -> DbLocale {
+        self.locale.clone().unwrap_or_default()
+    }
 }
 
 fn yes() -> bool {
@@ -104,6 +118,10 @@ struct Registry {
     /// from before this was kept (every id known).
     #[serde(default)]
     oldest_xid: u64,
+    /// What initdb wrote to postgresql.conf from its locale options (lc_messages,
+    /// lc_monetary, lc_numeric, lc_time; empty: C, a registry from before they were kept).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    config: Vec<(String, String)>,
 }
 
 /// A connected client, for pg_stat_activity and cancel / terminate.
@@ -181,12 +199,28 @@ impl Engine {
             Ok(b) => serde_json::from_slice(&b)
                 .map_err(|e| internal(format!("bad {REGISTRY_FILE}: {e}")))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // initdb: the template databases' locale, and postgresql.conf's lc_*.
+                let init = crate::types::collation::dblocale::initdb(&opts.locale, &|v| {
+                    std::env::var(v).ok()
+                })
+                .map_err(|e| internal(format!("initdb: {}", e.message)))?;
+                if init.db.encoding != crate::types::collation::dblocale::UTF8 {
+                    return Err(internal(format!(
+                        "initdb: encoding \"{}\" is not supported (databases are UTF8)",
+                        crate::types::collation::dblocale::encoding_name(init.db.encoding)
+                    )));
+                }
                 let owner = opts.superuser.clone();
                 let entry = |name: &str, oid, allow| DbEntry {
                     name: name.into(),
                     oid,
                     owner: owner.clone(),
                     allow_connections: allow,
+                    // (template0 records no collation version.)
+                    locale: Some(DbLocale {
+                        collversion: init.db.collversion.clone().filter(|_| oid != 4),
+                        ..init.db.clone()
+                    }),
                 };
                 let r = Registry {
                     next_oid: 16384,
@@ -197,6 +231,7 @@ impl Engine {
                         entry("template0", 4, false),
                         entry("postgres", 5, true),
                     ],
+                    config: init.config.clone(),
                     ..Registry::default()
                 };
                 write_registry(&opts.data_dir, &r)?;
@@ -331,6 +366,9 @@ impl Engine {
         }
         let store = Store::open(&self.db_dir(entry.oid), self.store_options())?;
         let db = Database::open(&entry.name, entry.oid, store, &entry.owner)?;
+        // CheckMyDatabase: its default collation must open (ICU rules may not).
+        let locale = DbDefault::open(entry.locale()).map_err(Error::fatal)?;
+        db.set_locale(Arc::new(locale));
         db.set_oids(self.oids.clone());
         db.set_xids(self.xids.clone());
         info!(database = %entry.name, "opened database");
@@ -596,6 +634,11 @@ impl Engine {
             .filter(|(p, b)| **p != pid && b.activity.user == user)
             .count();
         session.login(dbname, others)?;
+        // CheckMyDatabase: a collation version other than the provider's.
+        let mut session = session;
+        if let Some(w) = entry.locale().version_warning(dbname) {
+            session.notices.push(w);
+        }
         if let Some(b) = self.backends.lock().get_mut(&pid) {
             b.database = entry.oid;
             b.cancel = Some(session.cancel.clone());
@@ -1398,7 +1441,13 @@ impl Cluster for Engine {
         }
     }
 
-    fn create_database(&self, name: &str, owner: &str, template: Option<&str>) -> Result<()> {
+    fn create_database(
+        &self,
+        name: &str,
+        owner: &str,
+        template: Option<&str>,
+        locale: &DbLocale,
+    ) -> Result<()> {
         if self.entry(name).is_some() {
             return Err(Error::new(
                 code::DUPLICATE_DATABASE,
@@ -1441,8 +1490,28 @@ impl Cluster for Engine {
             oid,
             owner: owner.into(),
             allow_connections: true,
+            locale: Some(locale.clone()),
         });
         self.save(&r)
+    }
+
+    fn database_locale(&self, name: &str) -> Option<DbLocale> {
+        self.entry(name).map(|e| e.locale())
+    }
+
+    fn set_database_collversion(&self, name: &str, version: Option<String>) -> Result<()> {
+        let mut r = self.registry.lock();
+        if let Some(d) = r.databases.iter_mut().find(|d| d.name == name) {
+            d.locale = Some(DbLocale {
+                collversion: version,
+                ..d.locale()
+            });
+        }
+        self.save(&r)
+    }
+
+    fn config_settings(&self) -> Vec<(String, String)> {
+        self.registry.lock().config.clone()
     }
 
     fn drop_database(

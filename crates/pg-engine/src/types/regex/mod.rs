@@ -12,7 +12,7 @@ pub(crate) mod unicode_tables;
 
 pub use prefix::Prefix;
 
-pub use locale::{DEFAULT_STRATEGY, Strategy};
+pub use locale::{Strategy, default_strategy};
 
 use crate::error::{Error, Result, code};
 use std::cell::RefCell;

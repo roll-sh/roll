@@ -48,9 +48,17 @@ fn char_at(s: &[u8], i: usize) -> &[u8] {
     &s[i..(i + mblen(s[i])).min(s.len())]
 }
 
-/// `t_isalpha` under the C ctype: ASCII letters.
+/// `t_isalpha`: ASCII letters, and under a database LC_CTYPE other than C libc's (musl's)
+/// letters.
 fn is_alpha(s: &[u8], i: usize) -> bool {
-    mblen(s[i]) == 1 && s[i].is_ascii_alphabetic()
+    if mblen(s[i]) == 1 {
+        return s[i].is_ascii_alphabetic();
+    }
+    !crate::types::collation::database_ctype_is_c()
+        && std::str::from_utf8(char_at(s, i))
+            .ok()
+            .and_then(|c| c.chars().next())
+            .is_some_and(|c| crate::types::collation::probes::libc_isalpha(c as u32))
 }
 
 fn lower(s: &[u8]) -> Vec<u8> {
@@ -509,7 +517,7 @@ impl IspellDict {
             Cond::Regex(Box::new(crate::types::regex::Regex::new(
                 &p,
                 crate::types::regex::REG_ADVANCED | crate::types::regex::REG_NOSUB,
-                crate::types::regex::DEFAULT_STRATEGY,
+                crate::types::regex::default_strategy(),
             )?))
         };
         let mut flagflags = flagflags;

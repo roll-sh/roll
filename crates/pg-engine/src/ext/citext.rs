@@ -28,8 +28,15 @@ pub(super) const TYPE: ExtType = ExtType {
     hash: true,
 };
 
-/// `str_tolower` with the C locale's default collation: ASCII letters lowered.
+/// `str_tolower` under the database's default collation (citext lowers with
+/// DEFAULT_COLLATION_OID): ASCII letters only under a C ctype.
 fn lower(b: &[u8]) -> Cow<'_, [u8]> {
+    let d = crate::types::collation::default();
+    if !d.ctype_is_c()
+        && let Ok(s) = std::str::from_utf8(b)
+    {
+        return Cow::Owned(d.lower(s).into_bytes());
+    }
     if b.iter().any(u8::is_ascii_uppercase) {
         Cow::Owned(b.to_ascii_lowercase())
     } else {

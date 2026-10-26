@@ -642,6 +642,7 @@ pub struct Binder<'b, 'a> {
 pub(crate) fn note_catalog(cat: &crate::catalog::Catalog) {
     crate::types::cast::set_user_casts(cat.casts.values().map(|c| &**c));
     optimize::note_alias_families(cat);
+    crate::types::collation::note_default(cat);
 }
 
 /// The binder's thread-local flags not at rest (`scoped::unsettled_for_test`).

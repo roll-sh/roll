@@ -5,6 +5,7 @@ use super::settings::Settings;
 use crate::error::Result;
 use crate::txn::Database;
 use crate::types::DataType;
+use crate::types::collation::DbLocale;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,7 +18,27 @@ pub trait Cluster: Send + Sync {
     fn activity(&self) -> Vec<Activity>;
     fn cancel_backend(&self, pid: i32) -> bool;
     fn terminate_backend(&self, pid: i32) -> bool;
-    fn create_database(&self, name: &str, owner: &str, template: Option<&str>) -> Result<()>;
+    /// Create database `name` from `template` (None: template1) with `locale` (what
+    /// CREATE DATABASE settled from its options and the template's).
+    fn create_database(
+        &self,
+        name: &str,
+        owner: &str,
+        template: Option<&str>,
+        locale: &DbLocale,
+    ) -> Result<()>;
+    /// A database's encoding and locale (its pg_database row's); None: no such database.
+    fn database_locale(&self, _name: &str) -> Option<DbLocale> {
+        Some(DbLocale::default())
+    }
+    /// Record a database's collation version (ALTER DATABASE ... REFRESH COLLATION VERSION).
+    fn set_database_collversion(&self, _name: &str, _version: Option<String>) -> Result<()> {
+        Err(crate::error::unsupported("ALTER DATABASE REFRESH COLLATION VERSION"))
+    }
+    /// postgresql.conf's settings that initdb chose (lc_messages, lc_monetary, ...).
+    fn config_settings(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
     fn drop_database(
         &self,
         name: &str,
@@ -73,11 +94,16 @@ pub struct Activity {
 pub struct SingleCluster {
     pub name: String,
     pub started: i64,
+    /// The database's locale (what its catalog carries, `Database::set_locale`).
+    pub locale: DbLocale,
 }
 
 impl Cluster for SingleCluster {
     fn databases(&self) -> Vec<(u32, String, u32)> {
         vec![(5, self.name.clone(), 10)]
+    }
+    fn database_locale(&self, name: &str) -> Option<DbLocale> {
+        (name == self.name).then(|| self.locale.clone())
     }
     fn activity(&self) -> Vec<Activity> {
         Vec::new()
@@ -88,7 +114,7 @@ impl Cluster for SingleCluster {
     fn terminate_backend(&self, _: i32) -> bool {
         false
     }
-    fn create_database(&self, _: &str, _: &str, _: Option<&str>) -> Result<()> {
+    fn create_database(&self, _: &str, _: &str, _: Option<&str>, _: &DbLocale) -> Result<()> {
         Err(crate::error::unsupported("CREATE DATABASE"))
     }
     fn drop_database(&self, _: &str, _: bool, _: bool, _: &str) -> Result<bool> {
@@ -219,6 +245,9 @@ impl SessionState {
             .map(|r| r.oid)
             .unwrap_or(crate::catalog::BOOTSTRAP_SUPERUSER_OID);
         let mut settings = Settings::new();
+        for (name, value) in cluster.config_settings() {
+            settings.set_config_file(&name, &value);
+        }
         // A preloaded library's parameters are there from the start.
         if cluster.statements().is_some() {
             let _ = settings.load_module("pg_stat_statements");

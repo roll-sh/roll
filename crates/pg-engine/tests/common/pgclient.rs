@@ -53,6 +53,25 @@ impl PgClient {
         password: &str,
         database: &str,
     ) -> std::io::Result<PgClient> {
+        let (c, events) = Self::connect_events(addr, user, password, database)?;
+        match (c, events.iter().find(|e| matches!(e, Event::Error(_)))) {
+            (Some(c), None) => Ok(c),
+            (_, Some(Event::Error(f))) => {
+                Err(std::io::Error::other(format!("{}: {}", f.code, f.message)))
+            }
+            _ => Err(std::io::Error::other("connection failed")),
+        }
+    }
+
+    /// Connect, reporting what the server sent before it was ready: notices (a collation
+    /// version WARNING, ...) and the error a refused connection ends with (then no client).
+    pub fn connect_events(
+        addr: &str,
+        user: &str,
+        password: &str,
+        database: &str,
+    ) -> std::io::Result<(Option<PgClient>, Vec<Event>)> {
+        let mut events = Vec::new();
         let stream = TcpStream::connect(addr)?;
         stream.set_nodelay(true)?;
         let mut c = PgClient {
@@ -104,10 +123,11 @@ impl PgClient {
                 }
                 Message::AuthenticationSaslFinal(b) => scram.as_mut().unwrap().finish(b.data())?,
                 Message::ErrorResponse(e) => {
-                    let f = fields(e.fields());
-                    return Err(std::io::Error::other(format!("{}: {}", f.code, f.message)));
+                    events.push(Event::Error(fields(e.fields())));
+                    return Ok((None, events));
                 }
-                Message::ReadyForQuery(_) => return Ok(c),
+                Message::NoticeResponse(n) => events.push(Event::Notice(fields(n.fields()))),
+                Message::ReadyForQuery(_) => return Ok((Some(c), events)),
                 _ => {}
             }
         }

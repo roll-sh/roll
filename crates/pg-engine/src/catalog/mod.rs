@@ -1925,6 +1925,10 @@ pub struct Catalog {
     /// The cluster's oid counter, when the database runs in one.
     #[serde(skip)]
     pub oids: Option<Arc<shared::OidGen>>,
+    /// The database's locale (its pg_database row's, which the cluster keeps) with its
+    /// default collation opened; None: libc C (`collation::default_for`).
+    #[serde(skip)]
+    pub db_locale: Option<Arc<crate::types::collation::DbDefault>>,
     /// (Shared by a catalog's copies until one changes it: copying it per DDL statement grew
     /// with the catalog.)
     #[serde(skip)]

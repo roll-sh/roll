@@ -191,6 +191,15 @@ impl Database {
         *w = Arc::new(c);
     }
 
+    /// The database's locale (its pg_database row's), which its catalogs carry from now on.
+    pub fn set_locale(&self, l: Arc<crate::types::collation::DbDefault>) {
+        let mut w = self.catalog.write();
+        let mut c = (**w).clone();
+        c.db_locale = Some(l);
+        c.freeze();
+        *w = Arc::new(c);
+    }
+
     pub fn catalog(&self) -> Arc<Catalog> {
         self.catalog.read().clone()
     }

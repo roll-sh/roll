@@ -30,6 +30,7 @@ fn server(auth: AuthMethod) -> Server {
         password: Some("secret".into()),
         server_files: None,
         shared_preload_libraries: Vec::new(),
+        locale: Default::default(),
     };
     let engine = Engine::open(opts).unwrap();
     let addr = pg_engine::server::spawn(engine.clone(), "127.0.0.1:0", ServerOptions { auth })

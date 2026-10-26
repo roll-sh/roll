@@ -135,9 +135,15 @@ impl Ord for Jsonb {
     }
 }
 
-/// varstr_cmp in the C collation: the first differing bytes' difference, else the shorter
-/// string first.
+/// varstr_cmp under the database's default collation, as jsonb compares strings and keys:
+/// in byte order (C, builtin, libc) the first differing bytes' difference, else the shorter
+/// string first; under another (ICU) its order.
 pub fn varstr_cmp(a: &[u8], b: &[u8]) -> i32 {
+    if let Some(c) = crate::types::collation::default_unless_bytewise()
+        && let (Ok(x), Ok(y)) = (std::str::from_utf8(a), std::str::from_utf8(b))
+    {
+        return c.cmp(x, y) as i32;
+    }
     match a.iter().zip(b).find(|(x, y)| x != y) {
         Some((x, y)) => *x as i32 - *y as i32,
         None => match a.len().cmp(&b.len()) {

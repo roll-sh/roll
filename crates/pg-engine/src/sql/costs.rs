@@ -1593,7 +1593,7 @@ pub fn pattern_prefix(patt: &str, ptype: Ptype) -> (PrefixStatus, String, f64) {
             if ci {
                 cflags |= rx::REG_ICASE;
             }
-            let found = rx::compile(patt, cflags, rx::DEFAULT_STRATEGY)
+            let found = rx::compile(patt, cflags, rx::default_strategy())
                 .map(|re| re.fixed_prefix())
                 .unwrap_or(rx::Prefix::None);
             let text = |cs: &[u32]| cs.iter().filter_map(|c| char::from_u32(*c)).collect::<String>();
@@ -1683,7 +1683,7 @@ impl Est<'_> {
                     if ptype == Ptype::RegexIc {
                         cflags |= rx::REG_ICASE;
                     }
-                    rx::compile_and_match(&p, t, cflags, rx::DEFAULT_STRATEGY).unwrap_or(false)
+                    rx::compile_and_match(&p, t, cflags, rx::default_strategy()).unwrap_or(false)
                 }
             }
         };

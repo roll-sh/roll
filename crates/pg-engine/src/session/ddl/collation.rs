@@ -288,6 +288,17 @@ impl Ddl<'_, '_> {
                     if ctype.is_none() {
                         return Err(must("lc_ctype"));
                     }
+                    // check_encoding_locale_matches: an empty name is the environment's
+                    // locale, the database's LC_CTYPE; when that is C, musl's codeset for it
+                    // ("ASCII") names no encoding.
+                    if coll::db_locale(&self.cat).ctype_is_c() {
+                        for l in [&ctype, &collate].into_iter().flatten().filter(|l| l.is_empty()) {
+                            self.ctx.notice(warning(
+                                code::WARNING,
+                                format!("could not determine encoding for locale \"{l}\": codeset is \"ASCII\""),
+                            ));
+                        }
+                    }
                 }
                 _ => {
                     let l = colllocale.take().ok_or_else(|| must("locale"))?;
@@ -514,16 +525,35 @@ impl Ddl<'_, '_> {
         Ok(())
     }
 
-    /// ALTER DATABASE ... REFRESH COLLATION VERSION: databases here use the builtin provider,
-    /// whose version doesn't change.
+    /// ALTER DATABASE ... REFRESH COLLATION VERSION (`AlterDatabaseRefreshColl`).
     pub(super) fn refresh_database_collation(&mut self, db: &str) -> Result<String> {
-        if !self.ctx.sess.cluster.databases().iter().any(|d| d.1 == db) {
+        let cluster = self.ctx.sess.cluster.clone();
+        let Some(l) = cluster
+            .databases()
+            .iter()
+            .any(|d| d.1 == db)
+            .then(|| cluster.database_locale(db))
+            .flatten()
+        else {
             return Err(Error::new(
                 code::UNDEFINED_DATABASE,
                 format!("database \"{db}\" does not exist"),
             ));
+        };
+        if let Some(owner) = cluster.database_owner(db) {
+            let owner = self.cat.role_by_name(&owner).map_or(0, |r| r.oid);
+            self.require_owner(owner, "database", db)?;
         }
-        self.notice("version has not changed");
+        match (&l.collversion, l.actual_version()?) {
+            (None, Some(_)) | (Some(_), None) => {
+                return Err(Error::new(code::INTERNAL_ERROR, "invalid collation version change"));
+            }
+            (Some(old), Some(new)) if *old != new => {
+                self.notice(format!("changing version from {old} to {new}"));
+                cluster.set_database_collversion(db, Some(new))?;
+            }
+            _ => self.notice("version has not changed"),
+        }
         Ok("ALTER DATABASE".into())
     }
 }

@@ -60,6 +60,62 @@ struct Args {
     /// `pg_stat_statements` collects statement statistics from server start.
     #[arg(long, value_name = "LIBS", value_delimiter = ',')]
     shared_preload_libraries: Vec<String>,
+    /// initdb's locale options, used when the data directory is new (an existing one keeps
+    /// its own). The default is initdb's `--locale=C --encoding=UTF8`, the reference's.
+    #[command(flatten)]
+    initdb: InitdbArgs,
+}
+
+/// initdb's locale and encoding options.
+#[derive(clap::Args)]
+struct InitdbArgs {
+    /// Default locale of new databases (each --lc-* not given, and the ICU or builtin locale).
+    #[arg(long, default_value = "C")]
+    locale: String,
+    #[arg(long)]
+    lc_collate: Option<String>,
+    #[arg(long)]
+    lc_ctype: Option<String>,
+    #[arg(long)]
+    lc_messages: Option<String>,
+    #[arg(long)]
+    lc_monetary: Option<String>,
+    #[arg(long)]
+    lc_numeric: Option<String>,
+    #[arg(long)]
+    lc_time: Option<String>,
+    /// libc, icu or builtin.
+    #[arg(long)]
+    locale_provider: Option<String>,
+    #[arg(long)]
+    icu_locale: Option<String>,
+    /// C, C.UTF-8 or PG_UNICODE_FAST.
+    #[arg(long)]
+    builtin_locale: Option<String>,
+    #[arg(long)]
+    icu_rules: Option<String>,
+    /// Server encoding (UTF8 only).
+    #[arg(long, short = 'E', default_value = "UTF8")]
+    encoding: String,
+}
+
+impl InitdbArgs {
+    fn options(self) -> pg_engine::types::collation::dblocale::InitdbLocale {
+        pg_engine::types::collation::dblocale::InitdbLocale {
+            locale: Some(self.locale),
+            lc_collate: self.lc_collate,
+            lc_ctype: self.lc_ctype,
+            lc_messages: self.lc_messages,
+            lc_monetary: self.lc_monetary,
+            lc_numeric: self.lc_numeric,
+            lc_time: self.lc_time,
+            provider: self.locale_provider,
+            icu_locale: self.icu_locale,
+            builtin_locale: self.builtin_locale,
+            icu_rules: self.icu_rules,
+            encoding: Some(self.encoding),
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -84,6 +140,7 @@ fn main() -> anyhow::Result<()> {
         password: a.password,
         server_files: a.allow_server_files,
         shared_preload_libraries: a.shared_preload_libraries,
+        locale: a.initdb.options(),
         ..EngineOptions::default()
     })?;
     // SIGTERM / SIGINT: a clean shutdown (pg_ctl stop's smart / fast modes end sessions the

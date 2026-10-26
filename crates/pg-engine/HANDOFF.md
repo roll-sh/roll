@@ -240,9 +240,40 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   (`pg_export_snapshot`, `SET TRANSACTION SNAPSHOT`), `roll-engine` shuts down cleanly on
   SIGTERM keeping sequence positions, and CREATE INDEX over keys bigger than a btree page no
   longer loops forever (the page-count model, `relsize::btree_pages`). Open: databases' own
-  options (CONNECTION LIMIT, ALLOW_CONNECTIONS, IS_TEMPLATE, invalid databases) aren't kept,
-  and every engine database reports the builtin C.UTF-8 locale where the reference has libc
-  C (a decision about the default collation).
+  options (CONNECTION LIMIT, ALLOW_CONNECTIONS, IS_TEMPLATE, invalid databases) aren't kept.
+  (Databases' locales are, since round 19: below.)
+- **Database locales and collations** (round 19, agent 60): every database has its own
+  locale, as pg_database has it (`types/collation/dblocale.rs` `DbLocale`: encoding,
+  provider, datcollate, datctype, datlocale, daticurules, datcollversion), kept in the
+  cluster's registry (`DbEntry::locale`) and carried by the database's catalogs
+  (`Catalog::db_locale`, a derived field `Database::set_locale` sets on open). A new
+  cluster is initdb'd from `EngineOptions::locale` / roll-engine's `--locale`, `--lc-*`,
+  `--locale-provider`, `--icu-locale`, `--builtin-locale`, `--icu-rules`, `-E` (default
+  `--locale=C --encoding=UTF8`, the reference's: libc C, so upper('é') is 'é', regex classes
+  and ILIKE know ASCII only); initdb's lc_messages / lc_monetary / lc_numeric / lc_time are
+  the registry's `config`, a "configuration file" layer of `Settings`. CREATE DATABASE takes
+  every locale option with createdb's checks, errors, NOTICEs and order
+  (`session/createdb.rs`, `dblocale::createdb`), musl's names for libc locales (it accepts
+  any name; `C.UTF-8` is `C` for LC_COLLATE), the template rules, collation versions
+  (`pg_database_collation_actual_version`, ALTER DATABASE ... REFRESH COLLATION VERSION, the
+  connection-time mismatch WARNING, the FATAL of an ICU database whose rules don't open).
+  "default" behaves as the database's locale everywhere (`collation::by_name` /
+  `default_for`; `collation::default()` for code without a catalog: text search's
+  str_tolower and character classes by the database's LC_CTYPE, jsonpath's like_regex,
+  citext, jsonb's string order). Encodings other than UTF8 are refused
+  (FEATURE_NOT_SUPPORTED) after createdb's own checks. Tests: `tests/locale.rs` (a
+  multi-database harness: `tests/locale/*.sql` with `\c`, recorded from PostgreSQL),
+  golden `a60_locale_libc_c` (goldens can choose their database's locale with a first line
+  `-- createdb: <options>`; the default stays the builtin C.UTF-8 they were recorded in).
+  Left: in an ICU-default database, text indexes are still in byte order, so range and
+  ORDER BY index scans PostgreSQL uses become a Sort or a Filter (EXPLAIN only, rows match);
+  citext's order and text range types under an ICU default; non-UTF8 databases.
+  **ICU4X verdict: keep ICU4C.** `icu4x.rs`'s `icu4x_parity` (an ignored test, `--features
+  icu4x`) compares it with ICU4C 78.1 over 923 locales and a generated corpus: 27 locales
+  order differently (en-US-u-va-posix, Sámi, Hawaiian, script variants such as az-Cyrl and
+  pa-Arab, `-u-kr` reordering), 440 of 14,400 case mappings differ (titlecasing around
+  Thai / CJK word breaks), tailoring rules aren't applied, and sorting was about 27x
+  slower (debug builds of both); versions and language tags matched.
 - **Isolation suite (`src/test/isolation`, 122 specs, 1,648 permutations): see
   `tests/isolation/STATUS.md`.** Harness: `tests/pg_isolation.rs` (`#[ignore]`d, a port of
   isolationtester driving both servers over the wire; `PGISOLATION_*` variables in its header).
@@ -631,7 +662,9 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
     `subq_cache`, `exists_hash`, `scalar_hash`, `ctes`, `work` are keyed by them, and a SQL
     function's statements (bound by binders of their own) run in their caller's context.
 - **Set from the catalog by `binder::note_catalog`** (every `Binder::new`, every statement a
-  session runs, every DDL command): `cast::USER_CASTS`, `optimize::ALIAS_FAMILIES`. Readers
+  session runs, every DDL command): `cast::USER_CASTS`, `optimize::ALIAS_FAMILIES`,
+  `collation::DEFAULT` (the database's locale, for `collation::default()` /
+  `database_ctype_is_c()`; libc C when no statement has set it). Readers
   outside a binder (CREATE AGGREGATE's lookup, PL/pgSQL assignment casts) see this statement's
   catalog's. `partition::PRUNING` (enable_partition_pruning) is the last `Binder::new`'s: it
   only decides which partitions run-time pruning skips.

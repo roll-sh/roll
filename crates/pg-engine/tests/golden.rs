@@ -15,7 +15,7 @@ mod common;
 
 use common::pgclient::PgClient;
 use common::{
-    engine_fcall, engine_query, engine_session, open_store, parse_fcall, render, set_raw_order,
+    engine_fcall, engine_query, open_store, parse_fcall, render, set_raw_order,
     statements, wants_raw_order,
 };
 use std::path::{Path, PathBuf};
@@ -50,15 +50,20 @@ fn db_name(path: &Path) -> String {
 fn record(addr: &str, path: &Path) -> String {
     let password = std::env::var("GOLDEN_PASSWORD").unwrap_or_else(|_| "pw".into());
     let db = db_name(path);
+    let src = std::fs::read_to_string(path).unwrap();
     {
         let mut admin = PgClient::connect(addr, "postgres", &password, "postgres")
             .expect("connect to reference Postgres");
         admin
             .simple_query(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)"))
             .unwrap();
-        admin.simple_query(&format!("CREATE DATABASE {db} TEMPLATE template0 LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8' LOCALE 'C' ENCODING 'UTF8'")).unwrap();
+        admin
+            .simple_query(&format!(
+                "CREATE DATABASE {db} TEMPLATE template0 {} ENCODING 'UTF8'",
+                common::createdb_options(&src)
+            ))
+            .unwrap();
     }
-    let src = std::fs::read_to_string(path).unwrap();
     set_raw_order(wants_raw_order(&src));
     let mut out = String::new();
     {
@@ -81,8 +86,9 @@ fn record(addr: &str, path: &Path) -> String {
 fn run_engine(path: &Path) -> String {
     let dir = tempfile::tempdir().unwrap();
     let store = open_store(dir.path());
-    let mut s = engine_session(store, &db_name(path));
     let src = std::fs::read_to_string(path).unwrap();
+    let locale = common::createdb_locale(common::createdb_options(&src));
+    let mut s = common::engine_session_with(store, &db_name(path), locale);
     set_raw_order(wants_raw_order(&src));
     let mut out = String::new();
     for stmt in statements(&src) {
@@ -203,6 +209,7 @@ fn golden_wire() {
         password: Some("pw".into()),
         server_files: None,
         shared_preload_libraries: Vec::new(),
+        locale: Default::default(),
     };
     let engine = pg_engine::engine::Engine::open(opts).unwrap();
     let server = pg_engine::server::ServerOptions {
@@ -217,6 +224,7 @@ fn golden_wire() {
 
 fn run_wire(addr: &str, path: &Path) -> String {
     let db = db_name(path);
+    let src = std::fs::read_to_string(path).unwrap();
     {
         let mut admin =
             PgClient::connect(addr, "postgres", "pw", "postgres").expect("connect to the engine");
@@ -224,10 +232,12 @@ fn run_wire(addr: &str, path: &Path) -> String {
             .simple_query(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)"))
             .unwrap();
         admin
-            .simple_query(&format!("CREATE DATABASE {db} TEMPLATE template0"))
+            .simple_query(&format!(
+                "CREATE DATABASE {db} TEMPLATE template0 {}",
+                common::createdb_options(&src)
+            ))
             .unwrap();
     }
-    let src = std::fs::read_to_string(path).unwrap();
     set_raw_order(wants_raw_order(&src));
     let mut out = String::new();
     {

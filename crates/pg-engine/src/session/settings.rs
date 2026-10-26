@@ -380,6 +380,9 @@ pub struct Settings {
     values: NameMap<String>,
     /// Per-role / per-database defaults applied at login (what RESET returns to).
     defaults: NameMap<String>,
+    /// The cluster's postgresql.conf values that differ from `gucs.tsv`'s (what initdb's
+    /// locale options wrote: lc_messages, lc_monetary, lc_numeric, lc_time).
+    config: NameMap<String>,
     /// Saved values by nest level, per parameter (only while a transaction is open).
     stack: NameMap<Vec<Stacked>>,
     /// The current (sub)transaction nest level: 1 in a transaction, +1 per savepoint.
@@ -402,6 +405,7 @@ impl Default for Settings {
         Settings {
             values: NameMap::default(),
             defaults: NameMap::default(),
+            config: NameMap::default(),
             stack: NameMap::default(),
             level: 1,
             reserved: Vec::new(),
@@ -1243,6 +1247,16 @@ impl Settings {
         self.set_full(name, Some(value), false, false, false, true)
     }
 
+    /// A value of the cluster's configuration file (source "configuration file", as
+    /// `gucs.tsv` gives it): what the session starts with and RESET returns to.
+    pub fn set_config_file(&mut self, name: &str, value: &str) {
+        if let Some(d) = self.def(name) {
+            let canon = d.name;
+            self.touched(canon);
+            self.config.insert(canon.to_string(), value.to_string());
+        }
+    }
+
     /// Validate `name = value` as SET would, without applying it.
     pub fn check(&self, name: &str, value: &str) -> Result<()> {
         self.clone().set(name, Some(value), false, false)
@@ -1370,7 +1384,11 @@ impl Settings {
                 .map(String::as_str)
         };
         match self.def(name) {
-            Some(d) => Some(get(d.name).unwrap_or(d.default)),
+            Some(d) => Some(
+                get(d.name)
+                    .or_else(|| self.config.get(d.name).map(String::as_str))
+                    .unwrap_or(d.default),
+            ),
             None if name.bytes().any(|c| c.is_ascii_uppercase()) => {
                 get(&name.to_ascii_lowercase())
             }
@@ -1958,6 +1976,7 @@ impl Settings {
                 let reset = self
                     .defaults
                     .get(d.name)
+                    .or_else(|| self.config.get(d.name))
                     .cloned()
                     .unwrap_or_else(|| d.default.to_string());
                 let reset = match d.kind {

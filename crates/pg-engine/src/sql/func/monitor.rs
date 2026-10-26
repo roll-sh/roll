@@ -585,6 +585,12 @@ fn getdatabaseencoding(_: &[Value], _: &FnCtx) -> Result<Value> {
     Ok(Value::Text(Arc::from("UTF8")))
 }
 
+/// pg_client_encoding(): client_encoding's (canonical) name.
+fn pg_client_encoding(_: &[Value], c: &FnCtx) -> Result<Value> {
+    let v = c.exec.sess.settings.borrow().show_value("client_encoding");
+    Ok(Value::Text(Arc::from(v.as_str())))
+}
+
 /// nameconcatoid: `name_oid`, with the name cut so it all fits in a name.
 fn nameconcatoid(a: &[Value], _: &FnCtx) -> Result<Value> {
     let suffix = format!("_{}", a[1].as_i64().unwrap_or(0) as u32);
@@ -866,6 +872,7 @@ pub fn register(r: &mut Registry) {
     r.from_pg(2599, None, Some(tz_abbrevs));
     r.from_pg(3083, None, Some(extension_versions));
     r.from_pg(1039, Some(getdatabaseencoding), None);
+    r.from_pg(810, Some(pg_client_encoding), None);
     r.from_pg(266, Some(nameconcatoid), None);
     r.from_pg(2289, None, Some(options_to_table));
     r.from_pg(3427, None, Some(mcv_list_items));

@@ -152,6 +152,22 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
 
+## Round 19, agent 60 (database locales: libc C by default, CREATE DATABASE's providers)
+
+The engine's databases reported and behaved as the builtin C.UTF-8 locale; the reference is
+initdb'd `--locale=C` (libc C). Each database now has its own locale (HANDOFF, "Database
+locales and collations"), libc C by default, and CREATE DATABASE takes every locale option.
+The regression database is made with `LOCALE='C'` on both sides, so the suite now runs under
+the reference's locale. Measured by two full debug runs on private references at the same
+time, one of the base (`0a8ec4ee`, `a60-rr1`) and one of the change (`a60-rr2`): both
+**51148**, every file's units, matches, ref=exp and eng=exp identical, so nothing the suite
+checks depended on the old builtin default (its non-ASCII case mapping and classes are
+tested under explicit collations: collate.utf8, collate.icu.utf8). collate.linux.utf8 is
+skipped on the reference too (2 units): it wants glibc (`version() ~ 'linux-gnu'`) and the
+de_DE / en_US / sv_SE / tr_TR libc collations, which musl's `locale -a` doesn't import;
+collate.windows.win1252 isn't in the schedule's results (it needs a WIN1252 database on
+Windows). The generated blocks are left to the next full run.
+
 ## Round 19, agent 61 (partition_prune 410: an accepted internal difference)
 
 partition_prune 410 is `EXPLAIN ANALYZE update ab_a1 set b = 3 from ab where ab.a = 1 and

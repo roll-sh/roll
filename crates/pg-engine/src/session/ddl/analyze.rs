@@ -465,9 +465,8 @@ impl Ddl<'_, '_> {
         // (Values sort and compare under the column's collation, attcollation: a
         // non-byte-order one's groups and order are its own.)
         let coll = (tg.coll != 0)
-            .then(|| crate::types::collation::def_by_oid(&self.cat, tg.coll))
+            .then(|| crate::types::collation::by_oid(&self.cat, tg.coll))
             .flatten()
-            .and_then(|d| crate::types::collation::get(&d).ok())
             .filter(|c| !c.bytewise() || !c.deterministic);
         let mut st = if lt != 0 {
             scalar_stats(tg, values, total, eq, lt, &width, &raw, fmt, coll.as_deref())

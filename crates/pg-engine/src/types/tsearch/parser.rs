@@ -234,6 +234,7 @@ const fn sp(test: T, flags: u8, to: S, ty: u8, special: Sp) -> Item {
 
 use S::Null as N;
 use T::{Alnum, Alpha, Any, Asclet, Digit, Eof, Eq, Special};
+use crate::types::collation::probes;
 
 static BASE: [Item; 13] = [
     i(Eof, NEXT, N, 0),
@@ -982,6 +983,8 @@ struct TParser<'a> {
     lenbytetoken: usize,
     lenchartoken: usize,
     ty: u8,
+    /// The database's LC_CTYPE isn't C: characters classify by libc's (musl's) `isw*`.
+    wide: bool,
 }
 
 fn utf8_len(b: u8) -> usize {
@@ -1028,6 +1031,7 @@ impl<'a> TParser<'a> {
             lenbytetoken: 0,
             lenchartoken: 0,
             ty: 0,
+            wide: !crate::types::collation::database_ctype_is_c(),
         }
     }
 
@@ -1060,18 +1064,25 @@ impl<'a> TParser<'a> {
         self.cur().charlen == 1 && self.byte() == c
     }
 
-    /// The `p_iswhat` tests: non-ASCII is `nonascii`, ASCII uses the C classification.
-    fn class(&self, nonascii: bool, f: fn(&u8) -> bool) -> bool {
+    /// The `p_iswhat` tests: under a C ctype non-ASCII is `nonascii` and ASCII uses the C
+    /// classification; under another, libc's wide one (`w`).
+    fn class(&self, nonascii: bool, f: fn(&u8) -> bool, w: fn(u32) -> bool) -> bool {
         let c = self.ch();
-        if c > 0x7f { nonascii } else { f(&(c as u8)) }
+        if self.wide {
+            w(c)
+        } else if c > 0x7f {
+            nonascii
+        } else {
+            f(&(c as u8))
+        }
     }
 
     fn is_alpha(&self) -> bool {
-        self.class(true, u8::is_ascii_alphabetic)
+        self.class(true, u8::is_ascii_alphabetic, probes::libc_isalpha)
     }
 
     fn is_alnum(&self) -> bool {
-        self.class(true, u8::is_ascii_alphanumeric)
+        self.class(true, u8::is_ascii_alphanumeric, probes::libc_isalnum)
     }
 
     fn is_special(&self) -> bool {
@@ -1145,12 +1156,16 @@ impl<'a> TParser<'a> {
             T::Alpha => self.is_alpha(),
             T::Alnum => self.is_alnum(),
             T::NotAlnum => !self.is_alnum(),
-            T::Digit => self.class(false, u8::is_ascii_digit),
-            T::Xdigit => self.class(false, u8::is_ascii_hexdigit),
-            // C isspace: space, \t \n \v \f \r.
-            T::Space => self.class(false, |c| {
-                matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+            T::Digit => self.class(false, u8::is_ascii_digit, probes::libc_isdigit),
+            T::Xdigit => self.class(false, u8::is_ascii_hexdigit, |c| {
+                char::from_u32(c).is_some_and(|c| c.is_ascii_hexdigit())
             }),
+            // C isspace: space, \t \n \v \f \r.
+            T::Space => self.class(
+                false,
+                |c| matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'),
+                probes::libc_isspace,
+            ),
             T::Special => self.is_special(),
             T::Ignore => self.ignore,
             T::StopHost => std::mem::take(&mut self.wanthost),

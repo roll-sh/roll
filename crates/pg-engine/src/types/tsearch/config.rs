@@ -435,9 +435,10 @@ pub fn file_context(e: Error, lineno: usize, path: &str, line: &str) -> Error {
     ))
 }
 
-/// The C locale's `str_tolower`: ASCII letters only.
+/// `str_tolower(..., DEFAULT_COLLATION_OID)`: lowered under the database's default
+/// collation (ASCII letters only under a C ctype).
 pub fn str_tolower(s: &str) -> String {
-    s.to_ascii_lowercase()
+    crate::types::collation::default().lower(s)
 }
 
 fn is_space(b: u8) -> bool {

@@ -570,3 +570,139 @@ pub fn title(s: &str, lang: &LanguageIdentifier) -> String {
     }
     out
 }
+
+/// Whether ICU4X can stand in for ICU4C 78.1 (the reference's ICU, which crates/pg-icu
+/// builds): every imported ICU collation's locale and a set of keyword variants, over a
+/// generated corpus, compared with ICU4C in this process; order, case mapping, versions,
+/// language tags, tailoring rules, and speed. Run (it needs ICU4C built too):
+///
+///     cargo test -p pg-engine --features icu4x --lib icu4x_parity -- --ignored --nocapture
+#[cfg(test)]
+mod parity {
+    use std::cmp::Ordering;
+    use std::time::Instant;
+
+    /// A deterministic corpus: short strings over Latin (with accents and contractions),
+    /// Greek, Cyrillic, CJK, Hangul, Arabic, Hebrew, Devanagari, Thai, digits,
+    /// punctuation, spaces, combining marks and symbols.
+    fn corpus(n: usize) -> Vec<String> {
+        const PARTS: &[&str] = &[
+            "a", "b", "c", "d", "e", "h", "i", "l", "n", "o", "s", "t", "u", "y", "z", "A", "B",
+            "C", "E", "I", "O", "Z", "ch", "ll", "ss", "ij", "dz", "æ", "Æ", "ø", "å", "ä", "Ä",
+            "ö", "ü", "ß", "é", "è", "ê", "É", "ç", "ñ", "ł", "ı", "İ", "ǅ", "ﬁ", "œ", "þ", "ð",
+            "α", "Σ", "ς", "ω", "я", "Ж", "ё", "ї", "漢", "字", "一", "龍", "가", "힣", "ㄱ",
+            "あ", "ア", "ｱ", "ب", "ي", "א", "क", "ि", "ก", "ไ", "0", "1", "9", "٣", "10", " ",
+            "-", "_", ".", "'", "@", "€", "\u{301}", "\u{308}", "\u{200d}", "😀", "🇩🇪",
+        ];
+        let mut x: u64 = 0x9e3779b97f4a7c15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        (0..n)
+            .map(|_| {
+                let len = 1 + (next() % 6) as usize;
+                (0..len).map(|_| PARTS[(next() % PARTS.len() as u64) as usize]).collect()
+            })
+            .collect()
+    }
+
+    fn utf16(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    #[test]
+    #[ignore]
+    fn icu4x_parity() {
+        assert!(pg_icu::available(), "needs ICU4C built");
+        let words = corpus(600);
+        let mut locales: Vec<String> =
+            super::super::static_icu_locales().iter().map(|l| l.0.clone()).collect();
+        for v in [
+            "und-u-ks-level1", "und-u-ks-level2", "en-u-ks-level1-kc-true", "und-u-kn", "und-u-kf-upper",
+            "und-u-ka-shifted", "und-u-kr-grek-latn", "und-u-kr-digit-latn", "fr-CA", "und-u-kb",
+            "de-u-co-phonebk", "zh-u-co-pinyin", "zh-u-co-stroke", "ja-u-kh", "und-u-va-posix",
+        ] {
+            locales.push(v.to_string());
+        }
+        let (mut order_bad, mut order_locales, mut ver_bad, mut tag_bad) = (0usize, 0usize, 0usize, 0usize);
+        let (mut t4c, mut t4x) = (0f64, 0f64);
+        let mut worst: Vec<(usize, String)> = Vec::new();
+        for loc in &locales {
+            let Ok(c) = pg_icu::Collator::open(loc) else { continue };
+            let Ok(x) = super::open(loc, None) else {
+                order_locales += 1;
+                worst.push((usize::MAX, format!("{loc}: ICU4X can't open it")));
+                continue;
+            };
+            let mut a = words.clone();
+            let t = Instant::now();
+            a.sort_by(|p, q| c.strcoll(p, q).unwrap_or(Ordering::Equal).then_with(|| p.cmp(q)));
+            t4c += t.elapsed().as_secs_f64();
+            let mut b = words.clone();
+            let t = Instant::now();
+            b.sort_by(|p, q| x.collator.compare(p, q).then_with(|| p.cmp(q)));
+            t4x += t.elapsed().as_secs_f64();
+            let bad = a.windows(2).filter(|w| {
+                c.strcoll(&w[0], &w[1]).ok() != Some(x.collator.compare(&w[0], &w[1]))
+            }).count();
+            if bad > 0 || a != b {
+                order_bad += bad.max(1);
+                order_locales += 1;
+                let i = a.windows(2).position(|w| c.strcoll(&w[0], &w[1]).ok() != Some(x.collator.compare(&w[0], &w[1])));
+                let ex = i.map(|i| format!(" e.g. {:?} vs {:?}", a[i], a[i + 1])).unwrap_or_default();
+                worst.push((bad, format!("{loc}: {bad} adjacent pairs differ{ex}")));
+            }
+            if c.version() != super::version(loc) {
+                ver_bad += 1;
+            }
+            let tag4c = pg_icu::to_language_tag(loc, true).map_err(|e| e.name());
+            let tag4x = super::language_tag(loc).map_err(str::to_string);
+            if tag4c != tag4x {
+                tag_bad += 1;
+            }
+        }
+        worst.sort_by(|p, q| q.0.cmp(&p.0));
+        println!("order: {order_locales} of {} locales differ ({order_bad} adjacent pairs)", locales.len());
+        for w in worst.iter().take(25) {
+            println!("  {}", w.1);
+        }
+        println!("versions differ: {ver_bad}; language tags differ: {tag_bad}");
+        println!("sorting {} strings per locale: ICU4C {t4c:.3}s, ICU4X {t4x:.3}s in all", words.len());
+        // Case mapping under a few languages.
+        let mut case_bad = 0;
+        let mut case_ex = Vec::new();
+        for loc in ["und", "en", "tr", "az", "lt", "nl", "el", "de"] {
+            let x = super::open(loc, None).unwrap();
+            for w in &words {
+                for (k, kind) in [("upper", pg_icu::Case::Upper), ("lower", pg_icu::Case::Lower), ("title", pg_icu::Case::Title)] {
+                    let c = pg_icu::to_case(kind, &utf16(w), loc).map(|u| String::from_utf16_lossy(&u)).unwrap_or_default();
+                    let m = match k {
+                        "upper" => super::upper(w, &x.lang),
+                        "lower" => super::lower(w, &x.lang),
+                        _ => super::title(w, &x.lang),
+                    };
+                    if c != m {
+                        case_bad += 1;
+                        if case_ex.len() < 8 {
+                            case_ex.push(format!("{loc} {k}({w:?}): ICU4C {c:?}, ICU4X {m:?}"));
+                        }
+                    }
+                }
+            }
+        }
+        println!("case mapping: {case_bad} of {} differ", 8 * 3 * words.len());
+        for e in case_ex {
+            println!("  {e}");
+        }
+        // Tailoring rules.
+        let rules = "&a < b < c";
+        let all: Vec<u16> = pg_icu::Collator::open("und").unwrap().rules().into_iter().take_while(|&u| u != 0).chain(utf16(rules)).collect();
+        let c = pg_icu::Collator::open_rules(&all).unwrap();
+        let x = super::open("und", Some(rules)).unwrap();
+        let bad = words.iter().zip(words.iter().skip(1)).filter(|(p, q)| c.strcoll(p, q).ok() != Some(x.collator.compare(p, q))).count();
+        println!("rules {rules:?}: {bad} of {} pairs differ", words.len() - 1);
+    }
+}

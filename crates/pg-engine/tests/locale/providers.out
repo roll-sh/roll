@@ -1,0 +1,2360 @@
+> CREATE DATABASE locale_libc LOCALE 'en_US.UTF-8' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_libc_ctype LC_CTYPE 'de_DE.UTF-8' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_libc_cutf8 LOCALE 'C.UTF-8' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_builtin LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_fast LOCALE_PROVIDER builtin BUILTIN_LOCALE 'PG_UNICODE_FAST' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_icu LOCALE_PROVIDER icu ICU_LOCALE 'en-US' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_icu_tr LOCALE_PROVIDER icu LOCALE 'tr-TR' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_icu_sv LOCALE_PROVIDER icu ICU_LOCALE 'sv-SE' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_icu_rules LOCALE_PROVIDER icu ICU_LOCALE 'de' ICU_RULES '&a < b' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_icu_ks LOCALE_PROVIDER icu ICU_LOCALE 'en-u-ks-level1' TEMPLATE template0
+-- CREATE DATABASE
+
+> \c postgres
+
+> SELECT current_database(), datlocprovider, datcollate, datctype, datlocale FROM pg_database WHERE datname = current_database()
+current_database:name | datlocprovider:char | datcollate:text | datctype:text | datlocale:text
+postgres | c | C | C | NULL
+-- SELECT 1
+
+> SELECT upper('é ß ǆ ﬁ ΐ i'), lower('É İ Σ ǅ I'), initcap('éa bé ǆx hello-WORLD 1st ßa'), casefold('ß İ Σ ﬁ')
+upper:text | lower:text | initcap:text | casefold:text
+é ß ǆ ﬁ ΐ I | É İ Σ ǅ i | éA Bé ǆX Hello-World 1st ßA | ß İ Σ ﬁ
+-- SELECT 1
+
+> SELECT upper('ijssel ǉubljana'), lower('ΣΑΣ'), initcap('ΣΑΣ ﬂow'), upper('ÿ'), lower('Ẏ')
+upper:text | lower:text | initcap:text | upper:text | lower:text
+IJSSEL ǉUBLJANA | ΣΑΣ | ΣΑΣ ﬂOw | ÿ | Ẏ
+-- SELECT 1
+
+> SELECT 'é' ~ '[[:alpha:]]' AS alpha, 'É' ~* 'é' AS ci, 'É' ILIKE 'é' AS ilike, '٣' ~ '[[:digit:]]' AS digit,
+>        ' ' ~ '[[:space:]]' AS nbsp, 'ǅ' ~ '[[:upper:]]' AS title_upper, '€' ~ '[[:punct:]]' AS punct, 'ß' ~ '^\w$' AS word
+alpha:bool | ci:bool | ilike:bool | digit:bool | nbsp:bool | title_upper:bool | punct:bool | word:bool
+f | f | f | f | t | f | f | f
+-- SELECT 1
+
+> SELECT regexp_replace('ÀÉÎõü', '[[:lower:]]', 'x', 'g'), regexp_replace('ÀÉÎõü', '[a-z]', 'x', 'gi'), regexp_replace('IiİıX', 'i', '_', 'gi')
+regexp_replace:text | regexp_replace:text | regexp_replace:text
+ÀÉÎõü | ÀÉÎõü | __İıX
+-- SELECT 1
+
+> SELECT string_agg(x, ' ' ORDER BY x) FROM (VALUES ('a'),('B'),('é'),('E'),('e'),('Z'),('_'),('1'),('ä'),('z'),('ø'),('ö'),('ch'),('cz'),('Ä'),('-x'),('x'),(' '),('10'),('9')) v(x)
+string_agg:text
+  -x 1 10 9 B E Z _ a ch cz e x z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT 'a' < 'B' AS ab, 'ä' < 'b' AS aeb, 'cote' < 'côte', 'Apple' > 'apple', 'a-b' < 'ab'
+ab:bool | aeb:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | f | t | f | t
+-- SELECT 1
+
+> SELECT pg_collation_actual_version(100) AS v100, pg_database_collation_actual_version(oid) AS dbv FROM pg_database WHERE datname = current_database()
+v100:text | dbv:text
+NULL | NULL
+-- SELECT 1
+
+> SELECT collname, collprovider, collcollate, collctype, colllocale, collversion FROM pg_collation WHERE oid = 100
+collname:name | collprovider:char | collcollate:text | collctype:text | colllocale:text | collversion:text
+default | d | NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> CREATE TABLE locale_t (id int, t text)
+-- CREATE TABLE
+
+> INSERT INTO locale_t VALUES (1,'a'),(2,'B'),(3,'é'),(4,'E'),(5,'e'),(6,'Z'),(7,'_'),(8,'1'),(9,'ä'),(10,'z'),(11,'ø'),(12,'ö'),(13,'ch'),(14,'cz'),(15,'Ä'),(16,'abc'),(17,'Abd'),(18,'ab'),(19,NULL),(20,'abé')
+-- INSERT 0 20
+
+> CREATE INDEX locale_t_i ON locale_t (t)
+-- CREATE INDEX
+
+> ANALYZE locale_t
+-- ANALYZE
+
+> SELECT string_agg(t, ' ' ORDER BY t DESC NULLS LAST) FROM locale_t
+string_agg:text
+ø ö é ä Ä z e cz ch abé abc ab a _ Z E B Abd 1
+-- SELECT 1
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t ORDER BY t) s
+string_agg:text
+1 Abd B E Z _ a ab abc abé ch cz e z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t > 'b' ORDER BY t) s
+string_agg:text
+ch cz e z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t BETWEEN 'a' AND 'e' ORDER BY t) s
+string_agg:text
+a ab abc abé ch cz e
+-- SELECT 1
+
+> SELECT t FROM locale_t WHERE t LIKE 'ab%' ORDER BY t
+t:text
+ab
+abc
+abé
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t LIKE 'ab%'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Index Cond: ((t >= 'ab'::text) AND (t < 'ac'::text))
+  Filter: (t ~~ 'ab%'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t ~ '^ab'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Index Cond: ((t >= 'ab'::text) AND (t < 'ac'::text))
+  Filter: (t ~ '^ab'::text)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> SELECT min(t), max(t), count(DISTINCT t) FROM locale_t
+min:text | max:text | count:int8
+1 | ø | 19
+-- SELECT 1
+
+> SELECT upper(t) AS u, count(*) FROM locale_t GROUP BY 1 ORDER BY 1
+u:text | count:int8
+1 | 1
+A | 1
+AB | 1
+ABC | 1
+ABD | 1
+ABé | 1
+B | 1
+CH | 1
+CZ | 1
+E | 2
+Z | 2
+_ | 1
+Ä | 1
+ä | 1
+é | 1
+ö | 1
+ø | 1
+NULL | 1
+-- SELECT 18
+
+> SELECT DISTINCT lower(t) FROM locale_t ORDER BY 1
+lower:text
+1
+_
+a
+ab
+abc
+abd
+abé
+b
+ch
+cz
+e
+z
+Ä
+ä
+é
+ö
+ø
+NULL
+-- SELECT 18
+
+> SELECT string_agg(t, ' ' ORDER BY id) FROM locale_t WHERE t ILIKE 'É' OR t ~* '^[[:upper:]]'
+string_agg:text
+a B E e Z z ch cz abc Abd ab abé
+-- SELECT 1
+
+> SELECT t, rank() OVER (ORDER BY t) FROM locale_t WHERE id < 8 ORDER BY t
+t:text | rank:int8
+B | 1
+E | 2
+Z | 3
+_ | 4
+a | 5
+e | 6
+é | 7
+-- SELECT 7
+
+> SELECT array_agg(t ORDER BY t) FILTER (WHERE id < 6), ARRAY['b','é'] < ARRAY['b','f'] FROM locale_t
+array_agg:text[] | ?column?:bool
+{B,E,a,e,é} | f
+-- SELECT 1
+
+> SELECT x FROM (VALUES ('{"a":"é"}'::jsonb),('{"a":"f"}'),('{"a":"E"}'),('{"é":1}'),('{"f":1}')) v(x) ORDER BY x
+x:jsonb
+{"a": "E"}
+{"a": "f"}
+{"a": "é"}
+{"f": 1}
+{"é": 1}
+-- SELECT 5
+
+> SELECT jsonb_path_query_array('["é","É","e","f","٣"]', '$[*] ? (@ like_regex "^[[:upper:]]")'), jsonb_path_query_array('["é","É","e"]', '$[*] ? (@ like_regex "^é" flag "i")')
+jsonb_path_query_array:jsonb | jsonb_path_query_array:jsonb
+[] | ["é"]
+-- SELECT 1
+
+> SELECT to_tsvector('simple', 'Éclair naïve café ﬁsh price€5 a—b x·y ÉCOLE')
+to_tsvector:3614
+'a—b':6 'café':3 'naïve':2 'price€5':5 'x·y':7 'Éclair':1 'École':8 'ﬁsh':4
+-- SELECT 1
+
+> SELECT alias, token FROM ts_debug('simple', 'naïve€x Ω-ray')
+alias:text | token:text
+blank |  
+blank | -
+hword | Ω-ray
+hword_asciipart | ray
+hword_part | Ω
+word | naïve€x
+-- SELECT 6
+
+> SELECT 'x' COLLATE "default" < 'X', 'ä' COLLATE "C" < 'b', 'ä' COLLATE "und-x-icu" < 'b'
+?column?:bool | ?column?:bool | ?column?:bool
+f | f | t
+-- SELECT 1
+
+> DROP TABLE locale_t
+-- DROP TABLE
+
+> \c locale_libc
+
+> SELECT current_database(), datlocprovider, datcollate, datctype, datlocale FROM pg_database WHERE datname = current_database()
+current_database:name | datlocprovider:char | datcollate:text | datctype:text | datlocale:text
+locale_libc | c | en_US.UTF-8 | en_US.UTF-8 | NULL
+-- SELECT 1
+
+> SELECT upper('é ß ǆ ﬁ ΐ i'), lower('É İ Σ ǅ I'), initcap('éa bé ǆx hello-WORLD 1st ßa'), casefold('ß İ Σ ﬁ')
+upper:text | lower:text | initcap:text | casefold:text
+É ẞ Ǆ ﬁ ΐ I | é i σ ǆ i | Éa Bé Ǆx Hello-World 1st ẞa | ß i σ ﬁ
+-- SELECT 1
+
+> SELECT upper('ijssel ǉubljana'), lower('ΣΑΣ'), initcap('ΣΑΣ ﬂow'), upper('ÿ'), lower('Ẏ')
+upper:text | lower:text | initcap:text | upper:text | lower:text
+IJSSEL ǇUBLJANA | σασ | Σασ ﬂow | Ÿ | ẏ
+-- SELECT 1
+
+> SELECT 'é' ~ '[[:alpha:]]' AS alpha, 'É' ~* 'é' AS ci, 'É' ILIKE 'é' AS ilike, '٣' ~ '[[:digit:]]' AS digit,
+>        ' ' ~ '[[:space:]]' AS nbsp, 'ǅ' ~ '[[:upper:]]' AS title_upper, '€' ~ '[[:punct:]]' AS punct, 'ß' ~ '^\w$' AS word
+alpha:bool | ci:bool | ilike:bool | digit:bool | nbsp:bool | title_upper:bool | punct:bool | word:bool
+t | t | t | f | t | t | t | t
+-- SELECT 1
+
+> SELECT regexp_replace('ÀÉÎõü', '[[:lower:]]', 'x', 'g'), regexp_replace('ÀÉÎõü', '[a-z]', 'x', 'gi'), regexp_replace('IiİıX', 'i', '_', 'gi')
+regexp_replace:text | regexp_replace:text | regexp_replace:text
+ÀÉÎxx | ÀÉÎõü | __İıX
+-- SELECT 1
+
+> SELECT string_agg(x, ' ' ORDER BY x) FROM (VALUES ('a'),('B'),('é'),('E'),('e'),('Z'),('_'),('1'),('ä'),('z'),('ø'),('ö'),('ch'),('cz'),('Ä'),('-x'),('x'),(' '),('10'),('9')) v(x)
+string_agg:text
+  -x 1 10 9 B E Z _ a ch cz e x z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT 'a' < 'B' AS ab, 'ä' < 'b' AS aeb, 'cote' < 'côte', 'Apple' > 'apple', 'a-b' < 'ab'
+ab:bool | aeb:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | f | t | f | t
+-- SELECT 1
+
+> SELECT pg_collation_actual_version(100) AS v100, pg_database_collation_actual_version(oid) AS dbv FROM pg_database WHERE datname = current_database()
+v100:text | dbv:text
+NULL | NULL
+-- SELECT 1
+
+> SELECT collname, collprovider, collcollate, collctype, colllocale, collversion FROM pg_collation WHERE oid = 100
+collname:name | collprovider:char | collcollate:text | collctype:text | colllocale:text | collversion:text
+default | d | NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> CREATE TABLE locale_t (id int, t text)
+-- CREATE TABLE
+
+> INSERT INTO locale_t VALUES (1,'a'),(2,'B'),(3,'é'),(4,'E'),(5,'e'),(6,'Z'),(7,'_'),(8,'1'),(9,'ä'),(10,'z'),(11,'ø'),(12,'ö'),(13,'ch'),(14,'cz'),(15,'Ä'),(16,'abc'),(17,'Abd'),(18,'ab'),(19,NULL),(20,'abé')
+-- INSERT 0 20
+
+> CREATE INDEX locale_t_i ON locale_t (t)
+-- CREATE INDEX
+
+> ANALYZE locale_t
+-- ANALYZE
+
+> SELECT string_agg(t, ' ' ORDER BY t DESC NULLS LAST) FROM locale_t
+string_agg:text
+ø ö é ä Ä z e cz ch abé abc ab a _ Z E B Abd 1
+-- SELECT 1
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t ORDER BY t) s
+string_agg:text
+1 Abd B E Z _ a ab abc abé ch cz e z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t > 'b' ORDER BY t) s
+string_agg:text
+ch cz e z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t BETWEEN 'a' AND 'e' ORDER BY t) s
+string_agg:text
+a ab abc abé ch cz e
+-- SELECT 1
+
+> SELECT t FROM locale_t WHERE t LIKE 'ab%' ORDER BY t
+t:text
+ab
+abc
+abé
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t LIKE 'ab%'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Filter: (t ~~ 'ab%'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t ~ '^ab'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Filter: (t ~ '^ab'::text)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> SELECT min(t), max(t), count(DISTINCT t) FROM locale_t
+min:text | max:text | count:int8
+1 | ø | 19
+-- SELECT 1
+
+> SELECT upper(t) AS u, count(*) FROM locale_t GROUP BY 1 ORDER BY 1
+u:text | count:int8
+1 | 1
+A | 1
+AB | 1
+ABC | 1
+ABD | 1
+ABÉ | 1
+B | 1
+CH | 1
+CZ | 1
+E | 2
+Z | 2
+_ | 1
+Ä | 2
+É | 1
+Ö | 1
+Ø | 1
+NULL | 1
+-- SELECT 17
+
+> SELECT DISTINCT lower(t) FROM locale_t ORDER BY 1
+lower:text
+1
+_
+a
+ab
+abc
+abd
+abé
+b
+ch
+cz
+e
+z
+ä
+é
+ö
+ø
+NULL
+-- SELECT 17
+
+> SELECT string_agg(t, ' ' ORDER BY id) FROM locale_t WHERE t ILIKE 'É' OR t ~* '^[[:upper:]]'
+string_agg:text
+a B é E e Z ä z ø ö ch cz Ä abc Abd ab abé
+-- SELECT 1
+
+> SELECT t, rank() OVER (ORDER BY t) FROM locale_t WHERE id < 8 ORDER BY t
+t:text | rank:int8
+B | 1
+E | 2
+Z | 3
+_ | 4
+a | 5
+e | 6
+é | 7
+-- SELECT 7
+
+> SELECT array_agg(t ORDER BY t) FILTER (WHERE id < 6), ARRAY['b','é'] < ARRAY['b','f'] FROM locale_t
+array_agg:text[] | ?column?:bool
+{B,E,a,e,é} | f
+-- SELECT 1
+
+> SELECT x FROM (VALUES ('{"a":"é"}'::jsonb),('{"a":"f"}'),('{"a":"E"}'),('{"é":1}'),('{"f":1}')) v(x) ORDER BY x
+x:jsonb
+{"a": "E"}
+{"a": "f"}
+{"a": "é"}
+{"f": 1}
+{"é": 1}
+-- SELECT 5
+
+> SELECT jsonb_path_query_array('["é","É","e","f","٣"]', '$[*] ? (@ like_regex "^[[:upper:]]")'), jsonb_path_query_array('["é","É","e"]', '$[*] ? (@ like_regex "^é" flag "i")')
+jsonb_path_query_array:jsonb | jsonb_path_query_array:jsonb
+["É"] | ["é", "É"]
+-- SELECT 1
+
+> SELECT to_tsvector('simple', 'Éclair naïve café ﬁsh price€5 a—b x·y ÉCOLE')
+to_tsvector:3614
+'5':6 'a':7 'b':8 'café':3 'naïve':2 'price':5 'x':9 'y':10 'éclair':1 'école':11 'ﬁsh':4
+-- SELECT 1
+
+> SELECT alias, token FROM ts_debug('simple', 'naïve€x Ω-ray')
+alias:text | token:text
+asciiword | x
+blank |  
+blank | -
+blank | €
+hword | Ω-ray
+hword_asciipart | ray
+hword_part | Ω
+word | naïve
+-- SELECT 8
+
+> SELECT 'x' COLLATE "default" < 'X', 'ä' COLLATE "C" < 'b', 'ä' COLLATE "und-x-icu" < 'b'
+?column?:bool | ?column?:bool | ?column?:bool
+f | f | t
+-- SELECT 1
+
+> DROP TABLE locale_t
+-- DROP TABLE
+
+> \c locale_libc_ctype
+
+> SELECT current_database(), datlocprovider, datcollate, datctype, datlocale FROM pg_database WHERE datname = current_database()
+current_database:name | datlocprovider:char | datcollate:text | datctype:text | datlocale:text
+locale_libc_ctype | c | C | de_DE.UTF-8 | NULL
+-- SELECT 1
+
+> SELECT upper('é ß ǆ ﬁ ΐ i'), lower('É İ Σ ǅ I'), initcap('éa bé ǆx hello-WORLD 1st ßa'), casefold('ß İ Σ ﬁ')
+upper:text | lower:text | initcap:text | casefold:text
+É ẞ Ǆ ﬁ ΐ I | é i σ ǆ i | Éa Bé Ǆx Hello-World 1st ẞa | ß i σ ﬁ
+-- SELECT 1
+
+> SELECT upper('ijssel ǉubljana'), lower('ΣΑΣ'), initcap('ΣΑΣ ﬂow'), upper('ÿ'), lower('Ẏ')
+upper:text | lower:text | initcap:text | upper:text | lower:text
+IJSSEL ǇUBLJANA | σασ | Σασ ﬂow | Ÿ | ẏ
+-- SELECT 1
+
+> SELECT 'é' ~ '[[:alpha:]]' AS alpha, 'É' ~* 'é' AS ci, 'É' ILIKE 'é' AS ilike, '٣' ~ '[[:digit:]]' AS digit,
+>        ' ' ~ '[[:space:]]' AS nbsp, 'ǅ' ~ '[[:upper:]]' AS title_upper, '€' ~ '[[:punct:]]' AS punct, 'ß' ~ '^\w$' AS word
+alpha:bool | ci:bool | ilike:bool | digit:bool | nbsp:bool | title_upper:bool | punct:bool | word:bool
+t | t | t | f | t | t | t | t
+-- SELECT 1
+
+> SELECT regexp_replace('ÀÉÎõü', '[[:lower:]]', 'x', 'g'), regexp_replace('ÀÉÎõü', '[a-z]', 'x', 'gi'), regexp_replace('IiİıX', 'i', '_', 'gi')
+regexp_replace:text | regexp_replace:text | regexp_replace:text
+ÀÉÎxx | ÀÉÎõü | __İıX
+-- SELECT 1
+
+> SELECT string_agg(x, ' ' ORDER BY x) FROM (VALUES ('a'),('B'),('é'),('E'),('e'),('Z'),('_'),('1'),('ä'),('z'),('ø'),('ö'),('ch'),('cz'),('Ä'),('-x'),('x'),(' '),('10'),('9')) v(x)
+string_agg:text
+  -x 1 10 9 B E Z _ a ch cz e x z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT 'a' < 'B' AS ab, 'ä' < 'b' AS aeb, 'cote' < 'côte', 'Apple' > 'apple', 'a-b' < 'ab'
+ab:bool | aeb:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | f | t | f | t
+-- SELECT 1
+
+> SELECT pg_collation_actual_version(100) AS v100, pg_database_collation_actual_version(oid) AS dbv FROM pg_database WHERE datname = current_database()
+v100:text | dbv:text
+NULL | NULL
+-- SELECT 1
+
+> SELECT collname, collprovider, collcollate, collctype, colllocale, collversion FROM pg_collation WHERE oid = 100
+collname:name | collprovider:char | collcollate:text | collctype:text | colllocale:text | collversion:text
+default | d | NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> CREATE TABLE locale_t (id int, t text)
+-- CREATE TABLE
+
+> INSERT INTO locale_t VALUES (1,'a'),(2,'B'),(3,'é'),(4,'E'),(5,'e'),(6,'Z'),(7,'_'),(8,'1'),(9,'ä'),(10,'z'),(11,'ø'),(12,'ö'),(13,'ch'),(14,'cz'),(15,'Ä'),(16,'abc'),(17,'Abd'),(18,'ab'),(19,NULL),(20,'abé')
+-- INSERT 0 20
+
+> CREATE INDEX locale_t_i ON locale_t (t)
+-- CREATE INDEX
+
+> ANALYZE locale_t
+-- ANALYZE
+
+> SELECT string_agg(t, ' ' ORDER BY t DESC NULLS LAST) FROM locale_t
+string_agg:text
+ø ö é ä Ä z e cz ch abé abc ab a _ Z E B Abd 1
+-- SELECT 1
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t ORDER BY t) s
+string_agg:text
+1 Abd B E Z _ a ab abc abé ch cz e z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t > 'b' ORDER BY t) s
+string_agg:text
+ch cz e z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t BETWEEN 'a' AND 'e' ORDER BY t) s
+string_agg:text
+a ab abc abé ch cz e
+-- SELECT 1
+
+> SELECT t FROM locale_t WHERE t LIKE 'ab%' ORDER BY t
+t:text
+ab
+abc
+abé
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t LIKE 'ab%'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Index Cond: ((t >= 'ab'::text) AND (t < 'ac'::text))
+  Filter: (t ~~ 'ab%'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t ~ '^ab'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Index Cond: ((t >= 'ab'::text) AND (t < 'ac'::text))
+  Filter: (t ~ '^ab'::text)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> SELECT min(t), max(t), count(DISTINCT t) FROM locale_t
+min:text | max:text | count:int8
+1 | ø | 19
+-- SELECT 1
+
+> SELECT upper(t) AS u, count(*) FROM locale_t GROUP BY 1 ORDER BY 1
+u:text | count:int8
+1 | 1
+A | 1
+AB | 1
+ABC | 1
+ABD | 1
+ABÉ | 1
+B | 1
+CH | 1
+CZ | 1
+E | 2
+Z | 2
+_ | 1
+Ä | 2
+É | 1
+Ö | 1
+Ø | 1
+NULL | 1
+-- SELECT 17
+
+> SELECT DISTINCT lower(t) FROM locale_t ORDER BY 1
+lower:text
+1
+_
+a
+ab
+abc
+abd
+abé
+b
+ch
+cz
+e
+z
+ä
+é
+ö
+ø
+NULL
+-- SELECT 17
+
+> SELECT string_agg(t, ' ' ORDER BY id) FROM locale_t WHERE t ILIKE 'É' OR t ~* '^[[:upper:]]'
+string_agg:text
+a B é E e Z ä z ø ö ch cz Ä abc Abd ab abé
+-- SELECT 1
+
+> SELECT t, rank() OVER (ORDER BY t) FROM locale_t WHERE id < 8 ORDER BY t
+t:text | rank:int8
+B | 1
+E | 2
+Z | 3
+_ | 4
+a | 5
+e | 6
+é | 7
+-- SELECT 7
+
+> SELECT array_agg(t ORDER BY t) FILTER (WHERE id < 6), ARRAY['b','é'] < ARRAY['b','f'] FROM locale_t
+array_agg:text[] | ?column?:bool
+{B,E,a,e,é} | f
+-- SELECT 1
+
+> SELECT x FROM (VALUES ('{"a":"é"}'::jsonb),('{"a":"f"}'),('{"a":"E"}'),('{"é":1}'),('{"f":1}')) v(x) ORDER BY x
+x:jsonb
+{"a": "E"}
+{"a": "f"}
+{"a": "é"}
+{"f": 1}
+{"é": 1}
+-- SELECT 5
+
+> SELECT jsonb_path_query_array('["é","É","e","f","٣"]', '$[*] ? (@ like_regex "^[[:upper:]]")'), jsonb_path_query_array('["é","É","e"]', '$[*] ? (@ like_regex "^é" flag "i")')
+jsonb_path_query_array:jsonb | jsonb_path_query_array:jsonb
+["É"] | ["é", "É"]
+-- SELECT 1
+
+> SELECT to_tsvector('simple', 'Éclair naïve café ﬁsh price€5 a—b x·y ÉCOLE')
+to_tsvector:3614
+'5':6 'a':7 'b':8 'café':3 'naïve':2 'price':5 'x':9 'y':10 'éclair':1 'école':11 'ﬁsh':4
+-- SELECT 1
+
+> SELECT alias, token FROM ts_debug('simple', 'naïve€x Ω-ray')
+alias:text | token:text
+asciiword | x
+blank |  
+blank | -
+blank | €
+hword | Ω-ray
+hword_asciipart | ray
+hword_part | Ω
+word | naïve
+-- SELECT 8
+
+> SELECT 'x' COLLATE "default" < 'X', 'ä' COLLATE "C" < 'b', 'ä' COLLATE "und-x-icu" < 'b'
+?column?:bool | ?column?:bool | ?column?:bool
+f | f | t
+-- SELECT 1
+
+> DROP TABLE locale_t
+-- DROP TABLE
+
+> \c locale_libc_cutf8
+
+> SELECT current_database(), datlocprovider, datcollate, datctype, datlocale FROM pg_database WHERE datname = current_database()
+current_database:name | datlocprovider:char | datcollate:text | datctype:text | datlocale:text
+locale_libc_cutf8 | c | C | C.UTF-8 | NULL
+-- SELECT 1
+
+> SELECT upper('é ß ǆ ﬁ ΐ i'), lower('É İ Σ ǅ I'), initcap('éa bé ǆx hello-WORLD 1st ßa'), casefold('ß İ Σ ﬁ')
+upper:text | lower:text | initcap:text | casefold:text
+É ẞ Ǆ ﬁ ΐ I | é i σ ǆ i | Éa Bé Ǆx Hello-World 1st ẞa | ß i σ ﬁ
+-- SELECT 1
+
+> SELECT upper('ijssel ǉubljana'), lower('ΣΑΣ'), initcap('ΣΑΣ ﬂow'), upper('ÿ'), lower('Ẏ')
+upper:text | lower:text | initcap:text | upper:text | lower:text
+IJSSEL ǇUBLJANA | σασ | Σασ ﬂow | Ÿ | ẏ
+-- SELECT 1
+
+> SELECT 'é' ~ '[[:alpha:]]' AS alpha, 'É' ~* 'é' AS ci, 'É' ILIKE 'é' AS ilike, '٣' ~ '[[:digit:]]' AS digit,
+>        ' ' ~ '[[:space:]]' AS nbsp, 'ǅ' ~ '[[:upper:]]' AS title_upper, '€' ~ '[[:punct:]]' AS punct, 'ß' ~ '^\w$' AS word
+alpha:bool | ci:bool | ilike:bool | digit:bool | nbsp:bool | title_upper:bool | punct:bool | word:bool
+t | t | t | f | t | t | t | t
+-- SELECT 1
+
+> SELECT regexp_replace('ÀÉÎõü', '[[:lower:]]', 'x', 'g'), regexp_replace('ÀÉÎõü', '[a-z]', 'x', 'gi'), regexp_replace('IiİıX', 'i', '_', 'gi')
+regexp_replace:text | regexp_replace:text | regexp_replace:text
+ÀÉÎxx | ÀÉÎõü | __İıX
+-- SELECT 1
+
+> SELECT string_agg(x, ' ' ORDER BY x) FROM (VALUES ('a'),('B'),('é'),('E'),('e'),('Z'),('_'),('1'),('ä'),('z'),('ø'),('ö'),('ch'),('cz'),('Ä'),('-x'),('x'),(' '),('10'),('9')) v(x)
+string_agg:text
+  -x 1 10 9 B E Z _ a ch cz e x z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT 'a' < 'B' AS ab, 'ä' < 'b' AS aeb, 'cote' < 'côte', 'Apple' > 'apple', 'a-b' < 'ab'
+ab:bool | aeb:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | f | t | f | t
+-- SELECT 1
+
+> SELECT pg_collation_actual_version(100) AS v100, pg_database_collation_actual_version(oid) AS dbv FROM pg_database WHERE datname = current_database()
+v100:text | dbv:text
+NULL | NULL
+-- SELECT 1
+
+> SELECT collname, collprovider, collcollate, collctype, colllocale, collversion FROM pg_collation WHERE oid = 100
+collname:name | collprovider:char | collcollate:text | collctype:text | colllocale:text | collversion:text
+default | d | NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> CREATE TABLE locale_t (id int, t text)
+-- CREATE TABLE
+
+> INSERT INTO locale_t VALUES (1,'a'),(2,'B'),(3,'é'),(4,'E'),(5,'e'),(6,'Z'),(7,'_'),(8,'1'),(9,'ä'),(10,'z'),(11,'ø'),(12,'ö'),(13,'ch'),(14,'cz'),(15,'Ä'),(16,'abc'),(17,'Abd'),(18,'ab'),(19,NULL),(20,'abé')
+-- INSERT 0 20
+
+> CREATE INDEX locale_t_i ON locale_t (t)
+-- CREATE INDEX
+
+> ANALYZE locale_t
+-- ANALYZE
+
+> SELECT string_agg(t, ' ' ORDER BY t DESC NULLS LAST) FROM locale_t
+string_agg:text
+ø ö é ä Ä z e cz ch abé abc ab a _ Z E B Abd 1
+-- SELECT 1
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t ORDER BY t) s
+string_agg:text
+1 Abd B E Z _ a ab abc abé ch cz e z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t > 'b' ORDER BY t) s
+string_agg:text
+ch cz e z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t BETWEEN 'a' AND 'e' ORDER BY t) s
+string_agg:text
+a ab abc abé ch cz e
+-- SELECT 1
+
+> SELECT t FROM locale_t WHERE t LIKE 'ab%' ORDER BY t
+t:text
+ab
+abc
+abé
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t LIKE 'ab%'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Index Cond: ((t >= 'ab'::text) AND (t < 'ac'::text))
+  Filter: (t ~~ 'ab%'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t ~ '^ab'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Index Cond: ((t >= 'ab'::text) AND (t < 'ac'::text))
+  Filter: (t ~ '^ab'::text)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> SELECT min(t), max(t), count(DISTINCT t) FROM locale_t
+min:text | max:text | count:int8
+1 | ø | 19
+-- SELECT 1
+
+> SELECT upper(t) AS u, count(*) FROM locale_t GROUP BY 1 ORDER BY 1
+u:text | count:int8
+1 | 1
+A | 1
+AB | 1
+ABC | 1
+ABD | 1
+ABÉ | 1
+B | 1
+CH | 1
+CZ | 1
+E | 2
+Z | 2
+_ | 1
+Ä | 2
+É | 1
+Ö | 1
+Ø | 1
+NULL | 1
+-- SELECT 17
+
+> SELECT DISTINCT lower(t) FROM locale_t ORDER BY 1
+lower:text
+1
+_
+a
+ab
+abc
+abd
+abé
+b
+ch
+cz
+e
+z
+ä
+é
+ö
+ø
+NULL
+-- SELECT 17
+
+> SELECT string_agg(t, ' ' ORDER BY id) FROM locale_t WHERE t ILIKE 'É' OR t ~* '^[[:upper:]]'
+string_agg:text
+a B é E e Z ä z ø ö ch cz Ä abc Abd ab abé
+-- SELECT 1
+
+> SELECT t, rank() OVER (ORDER BY t) FROM locale_t WHERE id < 8 ORDER BY t
+t:text | rank:int8
+B | 1
+E | 2
+Z | 3
+_ | 4
+a | 5
+e | 6
+é | 7
+-- SELECT 7
+
+> SELECT array_agg(t ORDER BY t) FILTER (WHERE id < 6), ARRAY['b','é'] < ARRAY['b','f'] FROM locale_t
+array_agg:text[] | ?column?:bool
+{B,E,a,e,é} | f
+-- SELECT 1
+
+> SELECT x FROM (VALUES ('{"a":"é"}'::jsonb),('{"a":"f"}'),('{"a":"E"}'),('{"é":1}'),('{"f":1}')) v(x) ORDER BY x
+x:jsonb
+{"a": "E"}
+{"a": "f"}
+{"a": "é"}
+{"f": 1}
+{"é": 1}
+-- SELECT 5
+
+> SELECT jsonb_path_query_array('["é","É","e","f","٣"]', '$[*] ? (@ like_regex "^[[:upper:]]")'), jsonb_path_query_array('["é","É","e"]', '$[*] ? (@ like_regex "^é" flag "i")')
+jsonb_path_query_array:jsonb | jsonb_path_query_array:jsonb
+["É"] | ["é", "É"]
+-- SELECT 1
+
+> SELECT to_tsvector('simple', 'Éclair naïve café ﬁsh price€5 a—b x·y ÉCOLE')
+to_tsvector:3614
+'5':6 'a':7 'b':8 'café':3 'naïve':2 'price':5 'x':9 'y':10 'éclair':1 'école':11 'ﬁsh':4
+-- SELECT 1
+
+> SELECT alias, token FROM ts_debug('simple', 'naïve€x Ω-ray')
+alias:text | token:text
+asciiword | x
+blank |  
+blank | -
+blank | €
+hword | Ω-ray
+hword_asciipart | ray
+hword_part | Ω
+word | naïve
+-- SELECT 8
+
+> SELECT 'x' COLLATE "default" < 'X', 'ä' COLLATE "C" < 'b', 'ä' COLLATE "und-x-icu" < 'b'
+?column?:bool | ?column?:bool | ?column?:bool
+f | f | t
+-- SELECT 1
+
+> DROP TABLE locale_t
+-- DROP TABLE
+
+> \c locale_builtin
+
+> SELECT current_database(), datlocprovider, datcollate, datctype, datlocale FROM pg_database WHERE datname = current_database()
+current_database:name | datlocprovider:char | datcollate:text | datctype:text | datlocale:text
+locale_builtin | b | C | C | C.UTF-8
+-- SELECT 1
+
+> SELECT upper('é ß ǆ ﬁ ΐ i'), lower('É İ Σ ǅ I'), initcap('éa bé ǆx hello-WORLD 1st ßa'), casefold('ß İ Σ ﬁ')
+upper:text | lower:text | initcap:text | casefold:text
+É ß Ǆ ﬁ ΐ I | é i σ ǆ i | Éa Bé Ǆx Hello-World 1st ßa | ß İ σ ﬁ
+-- SELECT 1
+
+> SELECT upper('ijssel ǉubljana'), lower('ΣΑΣ'), initcap('ΣΑΣ ﬂow'), upper('ÿ'), lower('Ẏ')
+upper:text | lower:text | initcap:text | upper:text | lower:text
+IJSSEL ǇUBLJANA | σασ | Σασ ﬂow | Ÿ | ẏ
+-- SELECT 1
+
+> SELECT 'é' ~ '[[:alpha:]]' AS alpha, 'É' ~* 'é' AS ci, 'É' ILIKE 'é' AS ilike, '٣' ~ '[[:digit:]]' AS digit,
+>        ' ' ~ '[[:space:]]' AS nbsp, 'ǅ' ~ '[[:upper:]]' AS title_upper, '€' ~ '[[:punct:]]' AS punct, 'ß' ~ '^\w$' AS word
+alpha:bool | ci:bool | ilike:bool | digit:bool | nbsp:bool | title_upper:bool | punct:bool | word:bool
+t | t | t | f | t | f | t | t
+-- SELECT 1
+
+> SELECT regexp_replace('ÀÉÎõü', '[[:lower:]]', 'x', 'g'), regexp_replace('ÀÉÎõü', '[a-z]', 'x', 'gi'), regexp_replace('IiİıX', 'i', '_', 'gi')
+regexp_replace:text | regexp_replace:text | regexp_replace:text
+ÀÉÎxx | ÀÉÎõü | __İıX
+-- SELECT 1
+
+> SELECT string_agg(x, ' ' ORDER BY x) FROM (VALUES ('a'),('B'),('é'),('E'),('e'),('Z'),('_'),('1'),('ä'),('z'),('ø'),('ö'),('ch'),('cz'),('Ä'),('-x'),('x'),(' '),('10'),('9')) v(x)
+string_agg:text
+  -x 1 10 9 B E Z _ a ch cz e x z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT 'a' < 'B' AS ab, 'ä' < 'b' AS aeb, 'cote' < 'côte', 'Apple' > 'apple', 'a-b' < 'ab'
+ab:bool | aeb:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | f | t | f | t
+-- SELECT 1
+
+> SELECT pg_collation_actual_version(100) AS v100, pg_database_collation_actual_version(oid) AS dbv FROM pg_database WHERE datname = current_database()
+v100:text | dbv:text
+1 | 1
+-- SELECT 1
+
+> SELECT collname, collprovider, collcollate, collctype, colllocale, collversion FROM pg_collation WHERE oid = 100
+collname:name | collprovider:char | collcollate:text | collctype:text | colllocale:text | collversion:text
+default | d | NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> CREATE TABLE locale_t (id int, t text)
+-- CREATE TABLE
+
+> INSERT INTO locale_t VALUES (1,'a'),(2,'B'),(3,'é'),(4,'E'),(5,'e'),(6,'Z'),(7,'_'),(8,'1'),(9,'ä'),(10,'z'),(11,'ø'),(12,'ö'),(13,'ch'),(14,'cz'),(15,'Ä'),(16,'abc'),(17,'Abd'),(18,'ab'),(19,NULL),(20,'abé')
+-- INSERT 0 20
+
+> CREATE INDEX locale_t_i ON locale_t (t)
+-- CREATE INDEX
+
+> ANALYZE locale_t
+-- ANALYZE
+
+> SELECT string_agg(t, ' ' ORDER BY t DESC NULLS LAST) FROM locale_t
+string_agg:text
+ø ö é ä Ä z e cz ch abé abc ab a _ Z E B Abd 1
+-- SELECT 1
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t ORDER BY t) s
+string_agg:text
+1 Abd B E Z _ a ab abc abé ch cz e z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t > 'b' ORDER BY t) s
+string_agg:text
+ch cz e z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t BETWEEN 'a' AND 'e' ORDER BY t) s
+string_agg:text
+a ab abc abé ch cz e
+-- SELECT 1
+
+> SELECT t FROM locale_t WHERE t LIKE 'ab%' ORDER BY t
+t:text
+ab
+abc
+abé
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t LIKE 'ab%'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Index Cond: ((t >= 'ab'::text) AND (t < 'ac'::text))
+  Filter: (t ~~ 'ab%'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t ~ '^ab'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Index Cond: ((t >= 'ab'::text) AND (t < 'ac'::text))
+  Filter: (t ~ '^ab'::text)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> SELECT min(t), max(t), count(DISTINCT t) FROM locale_t
+min:text | max:text | count:int8
+1 | ø | 19
+-- SELECT 1
+
+> SELECT upper(t) AS u, count(*) FROM locale_t GROUP BY 1 ORDER BY 1
+u:text | count:int8
+1 | 1
+A | 1
+AB | 1
+ABC | 1
+ABD | 1
+ABÉ | 1
+B | 1
+CH | 1
+CZ | 1
+E | 2
+Z | 2
+_ | 1
+Ä | 2
+É | 1
+Ö | 1
+Ø | 1
+NULL | 1
+-- SELECT 17
+
+> SELECT DISTINCT lower(t) FROM locale_t ORDER BY 1
+lower:text
+1
+_
+a
+ab
+abc
+abd
+abé
+b
+ch
+cz
+e
+z
+ä
+é
+ö
+ø
+NULL
+-- SELECT 17
+
+> SELECT string_agg(t, ' ' ORDER BY id) FROM locale_t WHERE t ILIKE 'É' OR t ~* '^[[:upper:]]'
+string_agg:text
+a B é E e Z ä z ø ö ch cz Ä abc Abd ab abé
+-- SELECT 1
+
+> SELECT t, rank() OVER (ORDER BY t) FROM locale_t WHERE id < 8 ORDER BY t
+t:text | rank:int8
+B | 1
+E | 2
+Z | 3
+_ | 4
+a | 5
+e | 6
+é | 7
+-- SELECT 7
+
+> SELECT array_agg(t ORDER BY t) FILTER (WHERE id < 6), ARRAY['b','é'] < ARRAY['b','f'] FROM locale_t
+array_agg:text[] | ?column?:bool
+{B,E,a,e,é} | f
+-- SELECT 1
+
+> SELECT x FROM (VALUES ('{"a":"é"}'::jsonb),('{"a":"f"}'),('{"a":"E"}'),('{"é":1}'),('{"f":1}')) v(x) ORDER BY x
+x:jsonb
+{"a": "E"}
+{"a": "f"}
+{"a": "é"}
+{"f": 1}
+{"é": 1}
+-- SELECT 5
+
+> SELECT jsonb_path_query_array('["é","É","e","f","٣"]', '$[*] ? (@ like_regex "^[[:upper:]]")'), jsonb_path_query_array('["é","É","e"]', '$[*] ? (@ like_regex "^é" flag "i")')
+jsonb_path_query_array:jsonb | jsonb_path_query_array:jsonb
+["É"] | ["é", "É"]
+-- SELECT 1
+
+> SELECT to_tsvector('simple', 'Éclair naïve café ﬁsh price€5 a—b x·y ÉCOLE')
+to_tsvector:3614
+'a—b':6 'café':3 'naïve':2 'price€5':5 'x·y':7 'éclair':1 'école':8 'ﬁsh':4
+-- SELECT 1
+
+> SELECT alias, token FROM ts_debug('simple', 'naïve€x Ω-ray')
+alias:text | token:text
+blank |  
+blank | -
+hword | Ω-ray
+hword_asciipart | ray
+hword_part | Ω
+word | naïve€x
+-- SELECT 6
+
+> SELECT 'x' COLLATE "default" < 'X', 'ä' COLLATE "C" < 'b', 'ä' COLLATE "und-x-icu" < 'b'
+?column?:bool | ?column?:bool | ?column?:bool
+f | f | t
+-- SELECT 1
+
+> DROP TABLE locale_t
+-- DROP TABLE
+
+> \c locale_fast
+
+> SELECT current_database(), datlocprovider, datcollate, datctype, datlocale FROM pg_database WHERE datname = current_database()
+current_database:name | datlocprovider:char | datcollate:text | datctype:text | datlocale:text
+locale_fast | b | C | C | PG_UNICODE_FAST
+-- SELECT 1
+
+> SELECT upper('é ß ǆ ﬁ ΐ i'), lower('É İ Σ ǅ I'), initcap('éa bé ǆx hello-WORLD 1st ßa'), casefold('ß İ Σ ﬁ')
+upper:text | lower:text | initcap:text | casefold:text
+É SS Ǆ FI Ϊ́ I | é i̇ σ ǆ i | Éa Bé ǅx Hello-World 1st Ssa | ss i̇ σ fi
+-- SELECT 1
+
+> SELECT upper('ijssel ǉubljana'), lower('ΣΑΣ'), initcap('ΣΑΣ ﬂow'), upper('ÿ'), lower('Ẏ')
+upper:text | lower:text | initcap:text | upper:text | lower:text
+IJSSEL ǇUBLJANA | σας | Σας Flow | Ÿ | ẏ
+-- SELECT 1
+
+> SELECT 'é' ~ '[[:alpha:]]' AS alpha, 'É' ~* 'é' AS ci, 'É' ILIKE 'é' AS ilike, '٣' ~ '[[:digit:]]' AS digit,
+>        ' ' ~ '[[:space:]]' AS nbsp, 'ǅ' ~ '[[:upper:]]' AS title_upper, '€' ~ '[[:punct:]]' AS punct, 'ß' ~ '^\w$' AS word
+alpha:bool | ci:bool | ilike:bool | digit:bool | nbsp:bool | title_upper:bool | punct:bool | word:bool
+t | t | t | t | t | f | f | t
+-- SELECT 1
+
+> SELECT regexp_replace('ÀÉÎõü', '[[:lower:]]', 'x', 'g'), regexp_replace('ÀÉÎõü', '[a-z]', 'x', 'gi'), regexp_replace('IiİıX', 'i', '_', 'gi')
+regexp_replace:text | regexp_replace:text | regexp_replace:text
+ÀÉÎxx | ÀÉÎõü | __İıX
+-- SELECT 1
+
+> SELECT string_agg(x, ' ' ORDER BY x) FROM (VALUES ('a'),('B'),('é'),('E'),('e'),('Z'),('_'),('1'),('ä'),('z'),('ø'),('ö'),('ch'),('cz'),('Ä'),('-x'),('x'),(' '),('10'),('9')) v(x)
+string_agg:text
+  -x 1 10 9 B E Z _ a ch cz e x z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT 'a' < 'B' AS ab, 'ä' < 'b' AS aeb, 'cote' < 'côte', 'Apple' > 'apple', 'a-b' < 'ab'
+ab:bool | aeb:bool | ?column?:bool | ?column?:bool | ?column?:bool
+f | f | t | f | t
+-- SELECT 1
+
+> SELECT pg_collation_actual_version(100) AS v100, pg_database_collation_actual_version(oid) AS dbv FROM pg_database WHERE datname = current_database()
+v100:text | dbv:text
+1 | 1
+-- SELECT 1
+
+> SELECT collname, collprovider, collcollate, collctype, colllocale, collversion FROM pg_collation WHERE oid = 100
+collname:name | collprovider:char | collcollate:text | collctype:text | colllocale:text | collversion:text
+default | d | NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> CREATE TABLE locale_t (id int, t text)
+-- CREATE TABLE
+
+> INSERT INTO locale_t VALUES (1,'a'),(2,'B'),(3,'é'),(4,'E'),(5,'e'),(6,'Z'),(7,'_'),(8,'1'),(9,'ä'),(10,'z'),(11,'ø'),(12,'ö'),(13,'ch'),(14,'cz'),(15,'Ä'),(16,'abc'),(17,'Abd'),(18,'ab'),(19,NULL),(20,'abé')
+-- INSERT 0 20
+
+> CREATE INDEX locale_t_i ON locale_t (t)
+-- CREATE INDEX
+
+> ANALYZE locale_t
+-- ANALYZE
+
+> SELECT string_agg(t, ' ' ORDER BY t DESC NULLS LAST) FROM locale_t
+string_agg:text
+ø ö é ä Ä z e cz ch abé abc ab a _ Z E B Abd 1
+-- SELECT 1
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t ORDER BY t) s
+string_agg:text
+1 Abd B E Z _ a ab abc abé ch cz e z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t > 'b' ORDER BY t) s
+string_agg:text
+ch cz e z Ä ä é ö ø
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t BETWEEN 'a' AND 'e' ORDER BY t) s
+string_agg:text
+a ab abc abé ch cz e
+-- SELECT 1
+
+> SELECT t FROM locale_t WHERE t LIKE 'ab%' ORDER BY t
+t:text
+ab
+abc
+abé
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t LIKE 'ab%'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Index Cond: ((t >= 'ab'::text) AND (t < 'ac'::text))
+  Filter: (t ~~ 'ab%'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t ~ '^ab'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Index Cond: ((t >= 'ab'::text) AND (t < 'ac'::text))
+  Filter: (t ~ '^ab'::text)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> SELECT min(t), max(t), count(DISTINCT t) FROM locale_t
+min:text | max:text | count:int8
+1 | ø | 19
+-- SELECT 1
+
+> SELECT upper(t) AS u, count(*) FROM locale_t GROUP BY 1 ORDER BY 1
+u:text | count:int8
+1 | 1
+A | 1
+AB | 1
+ABC | 1
+ABD | 1
+ABÉ | 1
+B | 1
+CH | 1
+CZ | 1
+E | 2
+Z | 2
+_ | 1
+Ä | 2
+É | 1
+Ö | 1
+Ø | 1
+NULL | 1
+-- SELECT 17
+
+> SELECT DISTINCT lower(t) FROM locale_t ORDER BY 1
+lower:text
+1
+_
+a
+ab
+abc
+abd
+abé
+b
+ch
+cz
+e
+z
+ä
+é
+ö
+ø
+NULL
+-- SELECT 17
+
+> SELECT string_agg(t, ' ' ORDER BY id) FROM locale_t WHERE t ILIKE 'É' OR t ~* '^[[:upper:]]'
+string_agg:text
+a B é E e Z ä z ø ö ch cz Ä abc Abd ab abé
+-- SELECT 1
+
+> SELECT t, rank() OVER (ORDER BY t) FROM locale_t WHERE id < 8 ORDER BY t
+t:text | rank:int8
+B | 1
+E | 2
+Z | 3
+_ | 4
+a | 5
+e | 6
+é | 7
+-- SELECT 7
+
+> SELECT array_agg(t ORDER BY t) FILTER (WHERE id < 6), ARRAY['b','é'] < ARRAY['b','f'] FROM locale_t
+array_agg:text[] | ?column?:bool
+{B,E,a,e,é} | f
+-- SELECT 1
+
+> SELECT x FROM (VALUES ('{"a":"é"}'::jsonb),('{"a":"f"}'),('{"a":"E"}'),('{"é":1}'),('{"f":1}')) v(x) ORDER BY x
+x:jsonb
+{"a": "E"}
+{"a": "f"}
+{"a": "é"}
+{"f": 1}
+{"é": 1}
+-- SELECT 5
+
+> SELECT jsonb_path_query_array('["é","É","e","f","٣"]', '$[*] ? (@ like_regex "^[[:upper:]]")'), jsonb_path_query_array('["é","É","e"]', '$[*] ? (@ like_regex "^é" flag "i")')
+jsonb_path_query_array:jsonb | jsonb_path_query_array:jsonb
+["É"] | ["é", "É"]
+-- SELECT 1
+
+> SELECT to_tsvector('simple', 'Éclair naïve café ﬁsh price€5 a—b x·y ÉCOLE')
+to_tsvector:3614
+'a—b':6 'café':3 'naïve':2 'price€5':5 'x·y':7 'éclair':1 'école':8 'ﬁsh':4
+-- SELECT 1
+
+> SELECT alias, token FROM ts_debug('simple', 'naïve€x Ω-ray')
+alias:text | token:text
+blank |  
+blank | -
+hword | Ω-ray
+hword_asciipart | ray
+hword_part | Ω
+word | naïve€x
+-- SELECT 6
+
+> SELECT 'x' COLLATE "default" < 'X', 'ä' COLLATE "C" < 'b', 'ä' COLLATE "und-x-icu" < 'b'
+?column?:bool | ?column?:bool | ?column?:bool
+f | f | t
+-- SELECT 1
+
+> DROP TABLE locale_t
+-- DROP TABLE
+
+> \c locale_icu
+
+> SELECT current_database(), datlocprovider, datcollate, datctype, datlocale FROM pg_database WHERE datname = current_database()
+current_database:name | datlocprovider:char | datcollate:text | datctype:text | datlocale:text
+locale_icu | i | C | C | en-US
+-- SELECT 1
+
+> SELECT upper('é ß ǆ ﬁ ΐ i'), lower('É İ Σ ǅ I'), initcap('éa bé ǆx hello-WORLD 1st ßa'), casefold('ß İ Σ ﬁ')
+upper:text | lower:text | initcap:text | casefold:text
+É SS Ǆ FI Ϊ́ I | é i̇ σ ǆ i | Éa Bé ǅx Hello-World 1st Ssa | ss i̇ σ fi
+-- SELECT 1
+
+> SELECT upper('ijssel ǉubljana'), lower('ΣΑΣ'), initcap('ΣΑΣ ﬂow'), upper('ÿ'), lower('Ẏ')
+upper:text | lower:text | initcap:text | upper:text | lower:text
+IJSSEL ǇUBLJANA | σας | Σας Flow | Ÿ | ẏ
+-- SELECT 1
+
+> SELECT 'é' ~ '[[:alpha:]]' AS alpha, 'É' ~* 'é' AS ci, 'É' ILIKE 'é' AS ilike, '٣' ~ '[[:digit:]]' AS digit,
+>        ' ' ~ '[[:space:]]' AS nbsp, 'ǅ' ~ '[[:upper:]]' AS title_upper, '€' ~ '[[:punct:]]' AS punct, 'ß' ~ '^\w$' AS word
+alpha:bool | ci:bool | ilike:bool | digit:bool | nbsp:bool | title_upper:bool | punct:bool | word:bool
+t | t | t | t | t | f | f | t
+-- SELECT 1
+
+> SELECT regexp_replace('ÀÉÎõü', '[[:lower:]]', 'x', 'g'), regexp_replace('ÀÉÎõü', '[a-z]', 'x', 'gi'), regexp_replace('IiİıX', 'i', '_', 'gi')
+regexp_replace:text | regexp_replace:text | regexp_replace:text
+ÀÉÎxx | ÀÉÎõü | __İıX
+-- SELECT 1
+
+> SELECT string_agg(x, ' ' ORDER BY x) FROM (VALUES ('a'),('B'),('é'),('E'),('e'),('Z'),('_'),('1'),('ä'),('z'),('ø'),('ö'),('ch'),('cz'),('Ä'),('-x'),('x'),(' '),('10'),('9')) v(x)
+string_agg:text
+  _ -x 1 10 9 a ä Ä B ch cz e E é ö ø x z Z
+-- SELECT 1
+
+> SELECT 'a' < 'B' AS ab, 'ä' < 'b' AS aeb, 'cote' < 'côte', 'Apple' > 'apple', 'a-b' < 'ab'
+ab:bool | aeb:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t | t
+-- SELECT 1
+
+> SELECT pg_collation_actual_version(100) AS v100, pg_database_collation_actual_version(oid) AS dbv FROM pg_database WHERE datname = current_database()
+v100:text | dbv:text
+153.136 | 153.136
+-- SELECT 1
+
+> SELECT collname, collprovider, collcollate, collctype, colllocale, collversion FROM pg_collation WHERE oid = 100
+collname:name | collprovider:char | collcollate:text | collctype:text | colllocale:text | collversion:text
+default | d | NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> CREATE TABLE locale_t (id int, t text)
+-- CREATE TABLE
+
+> INSERT INTO locale_t VALUES (1,'a'),(2,'B'),(3,'é'),(4,'E'),(5,'e'),(6,'Z'),(7,'_'),(8,'1'),(9,'ä'),(10,'z'),(11,'ø'),(12,'ö'),(13,'ch'),(14,'cz'),(15,'Ä'),(16,'abc'),(17,'Abd'),(18,'ab'),(19,NULL),(20,'abé')
+-- INSERT 0 20
+
+> CREATE INDEX locale_t_i ON locale_t (t)
+-- CREATE INDEX
+
+> ANALYZE locale_t
+-- ANALYZE
+
+> SELECT string_agg(t, ' ' ORDER BY t DESC NULLS LAST) FROM locale_t
+string_agg:text
+Z z ø ö é E e cz ch B abé Abd abc ab Ä ä a 1 _
+-- SELECT 1
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t ORDER BY t) s
+string_agg:text
+_ 1 a ä Ä ab abc Abd abé B ch cz e E é ö ø z Z
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t > 'b' ORDER BY t) s
+string_agg:text
+B ch cz e E é ö ø z Z
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t BETWEEN 'a' AND 'e' ORDER BY t) s
+string_agg:text
+a ä Ä ab abc Abd abé B ch cz e
+-- SELECT 1
+
+> SELECT t FROM locale_t WHERE t LIKE 'ab%' ORDER BY t
+t:text
+ab
+abc
+abé
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t LIKE 'ab%'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Filter: (t ~~ 'ab%'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t ~ '^ab'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Filter: (t ~ '^ab'::text)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> SELECT min(t), max(t), count(DISTINCT t) FROM locale_t
+min:text | max:text | count:int8
+_ | Z | 19
+-- SELECT 1
+
+> SELECT upper(t) AS u, count(*) FROM locale_t GROUP BY 1 ORDER BY 1
+u:text | count:int8
+_ | 1
+1 | 1
+A | 1
+Ä | 2
+AB | 1
+ABC | 1
+ABD | 1
+ABÉ | 1
+B | 1
+CH | 1
+CZ | 1
+E | 2
+É | 1
+Ö | 1
+Ø | 1
+Z | 2
+NULL | 1
+-- SELECT 17
+
+> SELECT DISTINCT lower(t) FROM locale_t ORDER BY 1
+lower:text
+_
+1
+a
+ä
+ab
+abc
+abd
+abé
+b
+ch
+cz
+e
+é
+ö
+ø
+z
+NULL
+-- SELECT 17
+
+> SELECT string_agg(t, ' ' ORDER BY id) FROM locale_t WHERE t ILIKE 'É' OR t ~* '^[[:upper:]]'
+string_agg:text
+a B é E e Z ä z ø ö ch cz Ä abc Abd ab abé
+-- SELECT 1
+
+> SELECT t, rank() OVER (ORDER BY t) FROM locale_t WHERE id < 8 ORDER BY t
+t:text | rank:int8
+_ | 1
+a | 2
+B | 3
+e | 4
+E | 5
+é | 6
+Z | 7
+-- SELECT 7
+
+> SELECT array_agg(t ORDER BY t) FILTER (WHERE id < 6), ARRAY['b','é'] < ARRAY['b','f'] FROM locale_t
+array_agg:text[] | ?column?:bool
+{a,B,e,E,é} | t
+-- SELECT 1
+
+> SELECT x FROM (VALUES ('{"a":"é"}'::jsonb),('{"a":"f"}'),('{"a":"E"}'),('{"é":1}'),('{"f":1}')) v(x) ORDER BY x
+x:jsonb
+{"a": "E"}
+{"a": "é"}
+{"a": "f"}
+{"é": 1}
+{"f": 1}
+-- SELECT 5
+
+> SELECT jsonb_path_query_array('["é","É","e","f","٣"]', '$[*] ? (@ like_regex "^[[:upper:]]")'), jsonb_path_query_array('["é","É","e"]', '$[*] ? (@ like_regex "^é" flag "i")')
+jsonb_path_query_array:jsonb | jsonb_path_query_array:jsonb
+["É"] | ["é", "É"]
+-- SELECT 1
+
+> SELECT to_tsvector('simple', 'Éclair naïve café ﬁsh price€5 a—b x·y ÉCOLE')
+to_tsvector:3614
+'a—b':6 'café':3 'naïve':2 'price€5':5 'x·y':7 'éclair':1 'école':8 'ﬁsh':4
+-- SELECT 1
+
+> SELECT alias, token FROM ts_debug('simple', 'naïve€x Ω-ray')
+alias:text | token:text
+blank |  
+blank | -
+hword | Ω-ray
+hword_asciipart | ray
+hword_part | Ω
+word | naïve€x
+-- SELECT 6
+
+> SELECT 'x' COLLATE "default" < 'X', 'ä' COLLATE "C" < 'b', 'ä' COLLATE "und-x-icu" < 'b'
+?column?:bool | ?column?:bool | ?column?:bool
+t | f | t
+-- SELECT 1
+
+> DROP TABLE locale_t
+-- DROP TABLE
+
+> \c locale_icu_tr
+
+> SELECT current_database(), datlocprovider, datcollate, datctype, datlocale FROM pg_database WHERE datname = current_database()
+current_database:name | datlocprovider:char | datcollate:text | datctype:text | datlocale:text
+locale_icu_tr | i | tr-TR | tr-TR | tr-TR
+-- SELECT 1
+
+> SELECT upper('é ß ǆ ﬁ ΐ i'), lower('É İ Σ ǅ I'), initcap('éa bé ǆx hello-WORLD 1st ßa'), casefold('ß İ Σ ﬁ')
+upper:text | lower:text | initcap:text | casefold:text
+É SS Ǆ FI Ϊ́ İ | é i σ ǆ ı | Éa Bé ǅx Hello-World 1st Ssa | ss i σ fi
+-- SELECT 1
+
+> SELECT upper('ijssel ǉubljana'), lower('ΣΑΣ'), initcap('ΣΑΣ ﬂow'), upper('ÿ'), lower('Ẏ')
+upper:text | lower:text | initcap:text | upper:text | lower:text
+İJSSEL ǇUBLJANA | σας | Σας Flow | Ÿ | ẏ
+-- SELECT 1
+
+> SELECT 'é' ~ '[[:alpha:]]' AS alpha, 'É' ~* 'é' AS ci, 'É' ILIKE 'é' AS ilike, '٣' ~ '[[:digit:]]' AS digit,
+>        ' ' ~ '[[:space:]]' AS nbsp, 'ǅ' ~ '[[:upper:]]' AS title_upper, '€' ~ '[[:punct:]]' AS punct, 'ß' ~ '^\w$' AS word
+alpha:bool | ci:bool | ilike:bool | digit:bool | nbsp:bool | title_upper:bool | punct:bool | word:bool
+t | t | t | t | t | f | f | t
+-- SELECT 1
+
+> SELECT regexp_replace('ÀÉÎõü', '[[:lower:]]', 'x', 'g'), regexp_replace('ÀÉÎõü', '[a-z]', 'x', 'gi'), regexp_replace('IiİıX', 'i', '_', 'gi')
+regexp_replace:text | regexp_replace:text | regexp_replace:text
+ÀÉÎxx | ÀÉÎõü | __İıX
+-- SELECT 1
+
+> SELECT string_agg(x, ' ' ORDER BY x) FROM (VALUES ('a'),('B'),('é'),('E'),('e'),('Z'),('_'),('1'),('ä'),('z'),('ø'),('ö'),('ch'),('cz'),('Ä'),('-x'),('x'),(' '),('10'),('9')) v(x)
+string_agg:text
+  _ -x 1 10 9 a ä Ä B ch cz e E é ø ö x z Z
+-- SELECT 1
+
+> SELECT 'a' < 'B' AS ab, 'ä' < 'b' AS aeb, 'cote' < 'côte', 'Apple' > 'apple', 'a-b' < 'ab'
+ab:bool | aeb:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t | t
+-- SELECT 1
+
+> SELECT pg_collation_actual_version(100) AS v100, pg_database_collation_actual_version(oid) AS dbv FROM pg_database WHERE datname = current_database()
+v100:text | dbv:text
+153.136.48 | 153.136.48
+-- SELECT 1
+
+> SELECT collname, collprovider, collcollate, collctype, colllocale, collversion FROM pg_collation WHERE oid = 100
+collname:name | collprovider:char | collcollate:text | collctype:text | colllocale:text | collversion:text
+default | d | NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> CREATE TABLE locale_t (id int, t text)
+-- CREATE TABLE
+
+> INSERT INTO locale_t VALUES (1,'a'),(2,'B'),(3,'é'),(4,'E'),(5,'e'),(6,'Z'),(7,'_'),(8,'1'),(9,'ä'),(10,'z'),(11,'ø'),(12,'ö'),(13,'ch'),(14,'cz'),(15,'Ä'),(16,'abc'),(17,'Abd'),(18,'ab'),(19,NULL),(20,'abé')
+-- INSERT 0 20
+
+> CREATE INDEX locale_t_i ON locale_t (t)
+-- CREATE INDEX
+
+> ANALYZE locale_t
+-- ANALYZE
+
+> SELECT string_agg(t, ' ' ORDER BY t DESC NULLS LAST) FROM locale_t
+string_agg:text
+Z z ö ø é E e cz ch B abé Abd abc ab Ä ä a 1 _
+-- SELECT 1
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t ORDER BY t) s
+string_agg:text
+_ 1 a ä Ä ab abc Abd abé B ch cz e E é ø ö z Z
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t > 'b' ORDER BY t) s
+string_agg:text
+B ch cz e E é ø ö z Z
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t BETWEEN 'a' AND 'e' ORDER BY t) s
+string_agg:text
+a ä Ä ab abc Abd abé B ch cz e
+-- SELECT 1
+
+> SELECT t FROM locale_t WHERE t LIKE 'ab%' ORDER BY t
+t:text
+ab
+abc
+abé
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t LIKE 'ab%'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Filter: (t ~~ 'ab%'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t ~ '^ab'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Filter: (t ~ '^ab'::text)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> SELECT min(t), max(t), count(DISTINCT t) FROM locale_t
+min:text | max:text | count:int8
+_ | Z | 19
+-- SELECT 1
+
+> SELECT upper(t) AS u, count(*) FROM locale_t GROUP BY 1 ORDER BY 1
+u:text | count:int8
+_ | 1
+1 | 1
+A | 1
+Ä | 2
+AB | 1
+ABC | 1
+ABD | 1
+ABÉ | 1
+B | 1
+CH | 1
+CZ | 1
+E | 2
+É | 1
+Ø | 1
+Ö | 1
+Z | 2
+NULL | 1
+-- SELECT 17
+
+> SELECT DISTINCT lower(t) FROM locale_t ORDER BY 1
+lower:text
+_
+1
+a
+ä
+ab
+abc
+abd
+abé
+b
+ch
+cz
+e
+é
+ø
+ö
+z
+NULL
+-- SELECT 17
+
+> SELECT string_agg(t, ' ' ORDER BY id) FROM locale_t WHERE t ILIKE 'É' OR t ~* '^[[:upper:]]'
+string_agg:text
+a B é E e Z ä z ø ö ch cz Ä abc Abd ab abé
+-- SELECT 1
+
+> SELECT t, rank() OVER (ORDER BY t) FROM locale_t WHERE id < 8 ORDER BY t
+t:text | rank:int8
+_ | 1
+a | 2
+B | 3
+e | 4
+E | 5
+é | 6
+Z | 7
+-- SELECT 7
+
+> SELECT array_agg(t ORDER BY t) FILTER (WHERE id < 6), ARRAY['b','é'] < ARRAY['b','f'] FROM locale_t
+array_agg:text[] | ?column?:bool
+{a,B,e,E,é} | t
+-- SELECT 1
+
+> SELECT x FROM (VALUES ('{"a":"é"}'::jsonb),('{"a":"f"}'),('{"a":"E"}'),('{"é":1}'),('{"f":1}')) v(x) ORDER BY x
+x:jsonb
+{"a": "E"}
+{"a": "é"}
+{"a": "f"}
+{"é": 1}
+{"f": 1}
+-- SELECT 5
+
+> SELECT jsonb_path_query_array('["é","É","e","f","٣"]', '$[*] ? (@ like_regex "^[[:upper:]]")'), jsonb_path_query_array('["é","É","e"]', '$[*] ? (@ like_regex "^é" flag "i")')
+jsonb_path_query_array:jsonb | jsonb_path_query_array:jsonb
+["É"] | ["é", "É"]
+-- SELECT 1
+
+> SELECT to_tsvector('simple', 'Éclair naïve café ﬁsh price€5 a—b x·y ÉCOLE')
+to_tsvector:3614
+'5':6 'a':7 'b':8 'café':3 'naïve':2 'price':5 'x':9 'y':10 'éclair':1 'école':11 'ﬁsh':4
+-- SELECT 1
+
+> SELECT alias, token FROM ts_debug('simple', 'naïve€x Ω-ray')
+alias:text | token:text
+asciiword | x
+blank |  
+blank | -
+blank | €
+hword | Ω-ray
+hword_asciipart | ray
+hword_part | Ω
+word | naïve
+-- SELECT 8
+
+> SELECT 'x' COLLATE "default" < 'X', 'ä' COLLATE "C" < 'b', 'ä' COLLATE "und-x-icu" < 'b'
+?column?:bool | ?column?:bool | ?column?:bool
+t | f | t
+-- SELECT 1
+
+> DROP TABLE locale_t
+-- DROP TABLE
+
+> \c locale_icu_sv
+
+> SELECT current_database(), datlocprovider, datcollate, datctype, datlocale FROM pg_database WHERE datname = current_database()
+current_database:name | datlocprovider:char | datcollate:text | datctype:text | datlocale:text
+locale_icu_sv | i | C | C | sv-SE
+-- SELECT 1
+
+> SELECT upper('é ß ǆ ﬁ ΐ i'), lower('É İ Σ ǅ I'), initcap('éa bé ǆx hello-WORLD 1st ßa'), casefold('ß İ Σ ﬁ')
+upper:text | lower:text | initcap:text | casefold:text
+É SS Ǆ FI Ϊ́ I | é i̇ σ ǆ i | Éa Bé ǅx Hello-World 1st Ssa | ss i̇ σ fi
+-- SELECT 1
+
+> SELECT upper('ijssel ǉubljana'), lower('ΣΑΣ'), initcap('ΣΑΣ ﬂow'), upper('ÿ'), lower('Ẏ')
+upper:text | lower:text | initcap:text | upper:text | lower:text
+IJSSEL ǇUBLJANA | σας | Σας Flow | Ÿ | ẏ
+-- SELECT 1
+
+> SELECT 'é' ~ '[[:alpha:]]' AS alpha, 'É' ~* 'é' AS ci, 'É' ILIKE 'é' AS ilike, '٣' ~ '[[:digit:]]' AS digit,
+>        ' ' ~ '[[:space:]]' AS nbsp, 'ǅ' ~ '[[:upper:]]' AS title_upper, '€' ~ '[[:punct:]]' AS punct, 'ß' ~ '^\w$' AS word
+alpha:bool | ci:bool | ilike:bool | digit:bool | nbsp:bool | title_upper:bool | punct:bool | word:bool
+t | t | t | t | t | f | f | t
+-- SELECT 1
+
+> SELECT regexp_replace('ÀÉÎõü', '[[:lower:]]', 'x', 'g'), regexp_replace('ÀÉÎõü', '[a-z]', 'x', 'gi'), regexp_replace('IiİıX', 'i', '_', 'gi')
+regexp_replace:text | regexp_replace:text | regexp_replace:text
+ÀÉÎxx | ÀÉÎõü | __İıX
+-- SELECT 1
+
+> SELECT string_agg(x, ' ' ORDER BY x) FROM (VALUES ('a'),('B'),('é'),('E'),('e'),('Z'),('_'),('1'),('ä'),('z'),('ø'),('ö'),('ch'),('cz'),('Ä'),('-x'),('x'),(' '),('10'),('9')) v(x)
+string_agg:text
+  _ -x 1 10 9 a B ch cz e E é x z Z ä Ä ö ø
+-- SELECT 1
+
+> SELECT 'a' < 'B' AS ab, 'ä' < 'b' AS aeb, 'cote' < 'côte', 'Apple' > 'apple', 'a-b' < 'ab'
+ab:bool | aeb:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | f | t | t | t
+-- SELECT 1
+
+> SELECT pg_collation_actual_version(100) AS v100, pg_database_collation_actual_version(oid) AS dbv FROM pg_database WHERE datname = current_database()
+v100:text | dbv:text
+153.136.48 | 153.136.48
+-- SELECT 1
+
+> SELECT collname, collprovider, collcollate, collctype, colllocale, collversion FROM pg_collation WHERE oid = 100
+collname:name | collprovider:char | collcollate:text | collctype:text | colllocale:text | collversion:text
+default | d | NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> CREATE TABLE locale_t (id int, t text)
+-- CREATE TABLE
+
+> INSERT INTO locale_t VALUES (1,'a'),(2,'B'),(3,'é'),(4,'E'),(5,'e'),(6,'Z'),(7,'_'),(8,'1'),(9,'ä'),(10,'z'),(11,'ø'),(12,'ö'),(13,'ch'),(14,'cz'),(15,'Ä'),(16,'abc'),(17,'Abd'),(18,'ab'),(19,NULL),(20,'abé')
+-- INSERT 0 20
+
+> CREATE INDEX locale_t_i ON locale_t (t)
+-- CREATE INDEX
+
+> ANALYZE locale_t
+-- ANALYZE
+
+> SELECT string_agg(t, ' ' ORDER BY t DESC NULLS LAST) FROM locale_t
+string_agg:text
+ø ö Ä ä Z z é E e cz ch B abé Abd abc ab a 1 _
+-- SELECT 1
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t ORDER BY t) s
+string_agg:text
+_ 1 a ab abc Abd abé B ch cz e E é z Z ä Ä ö ø
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t > 'b' ORDER BY t) s
+string_agg:text
+B ch cz e E é z Z ä Ä ö ø
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t BETWEEN 'a' AND 'e' ORDER BY t) s
+string_agg:text
+a ab abc Abd abé B ch cz e
+-- SELECT 1
+
+> SELECT t FROM locale_t WHERE t LIKE 'ab%' ORDER BY t
+t:text
+ab
+abc
+abé
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t LIKE 'ab%'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Filter: (t ~~ 'ab%'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t ~ '^ab'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Filter: (t ~ '^ab'::text)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> SELECT min(t), max(t), count(DISTINCT t) FROM locale_t
+min:text | max:text | count:int8
+_ | ø | 19
+-- SELECT 1
+
+> SELECT upper(t) AS u, count(*) FROM locale_t GROUP BY 1 ORDER BY 1
+u:text | count:int8
+_ | 1
+1 | 1
+A | 1
+AB | 1
+ABC | 1
+ABD | 1
+ABÉ | 1
+B | 1
+CH | 1
+CZ | 1
+E | 2
+É | 1
+Z | 2
+Ä | 2
+Ö | 1
+Ø | 1
+NULL | 1
+-- SELECT 17
+
+> SELECT DISTINCT lower(t) FROM locale_t ORDER BY 1
+lower:text
+_
+1
+a
+ab
+abc
+abd
+abé
+b
+ch
+cz
+e
+é
+z
+ä
+ö
+ø
+NULL
+-- SELECT 17
+
+> SELECT string_agg(t, ' ' ORDER BY id) FROM locale_t WHERE t ILIKE 'É' OR t ~* '^[[:upper:]]'
+string_agg:text
+a B é E e Z ä z ø ö ch cz Ä abc Abd ab abé
+-- SELECT 1
+
+> SELECT t, rank() OVER (ORDER BY t) FROM locale_t WHERE id < 8 ORDER BY t
+t:text | rank:int8
+_ | 1
+a | 2
+B | 3
+e | 4
+E | 5
+é | 6
+Z | 7
+-- SELECT 7
+
+> SELECT array_agg(t ORDER BY t) FILTER (WHERE id < 6), ARRAY['b','é'] < ARRAY['b','f'] FROM locale_t
+array_agg:text[] | ?column?:bool
+{a,B,e,E,é} | t
+-- SELECT 1
+
+> SELECT x FROM (VALUES ('{"a":"é"}'::jsonb),('{"a":"f"}'),('{"a":"E"}'),('{"é":1}'),('{"f":1}')) v(x) ORDER BY x
+x:jsonb
+{"a": "E"}
+{"a": "é"}
+{"a": "f"}
+{"é": 1}
+{"f": 1}
+-- SELECT 5
+
+> SELECT jsonb_path_query_array('["é","É","e","f","٣"]', '$[*] ? (@ like_regex "^[[:upper:]]")'), jsonb_path_query_array('["é","É","e"]', '$[*] ? (@ like_regex "^é" flag "i")')
+jsonb_path_query_array:jsonb | jsonb_path_query_array:jsonb
+["É"] | ["é", "É"]
+-- SELECT 1
+
+> SELECT to_tsvector('simple', 'Éclair naïve café ﬁsh price€5 a—b x·y ÉCOLE')
+to_tsvector:3614
+'a—b':6 'café':3 'naïve':2 'price€5':5 'x·y':7 'éclair':1 'école':8 'ﬁsh':4
+-- SELECT 1
+
+> SELECT alias, token FROM ts_debug('simple', 'naïve€x Ω-ray')
+alias:text | token:text
+blank |  
+blank | -
+hword | Ω-ray
+hword_asciipart | ray
+hword_part | Ω
+word | naïve€x
+-- SELECT 6
+
+> SELECT 'x' COLLATE "default" < 'X', 'ä' COLLATE "C" < 'b', 'ä' COLLATE "und-x-icu" < 'b'
+?column?:bool | ?column?:bool | ?column?:bool
+t | f | t
+-- SELECT 1
+
+> DROP TABLE locale_t
+-- DROP TABLE
+
+> \c locale_icu_rules
+
+> SELECT current_database(), datlocprovider, datcollate, datctype, datlocale FROM pg_database WHERE datname = current_database()
+current_database:name | datlocprovider:char | datcollate:text | datctype:text | datlocale:text
+locale_icu_rules | i | C | C | de
+-- SELECT 1
+
+> SELECT upper('é ß ǆ ﬁ ΐ i'), lower('É İ Σ ǅ I'), initcap('éa bé ǆx hello-WORLD 1st ßa'), casefold('ß İ Σ ﬁ')
+upper:text | lower:text | initcap:text | casefold:text
+É SS Ǆ FI Ϊ́ I | é i̇ σ ǆ i | Éa Bé ǅx Hello-World 1st Ssa | ss i̇ σ fi
+-- SELECT 1
+
+> SELECT upper('ijssel ǉubljana'), lower('ΣΑΣ'), initcap('ΣΑΣ ﬂow'), upper('ÿ'), lower('Ẏ')
+upper:text | lower:text | initcap:text | upper:text | lower:text
+IJSSEL ǇUBLJANA | σας | Σας Flow | Ÿ | ẏ
+-- SELECT 1
+
+> SELECT 'é' ~ '[[:alpha:]]' AS alpha, 'É' ~* 'é' AS ci, 'É' ILIKE 'é' AS ilike, '٣' ~ '[[:digit:]]' AS digit,
+>        ' ' ~ '[[:space:]]' AS nbsp, 'ǅ' ~ '[[:upper:]]' AS title_upper, '€' ~ '[[:punct:]]' AS punct, 'ß' ~ '^\w$' AS word
+alpha:bool | ci:bool | ilike:bool | digit:bool | nbsp:bool | title_upper:bool | punct:bool | word:bool
+t | t | t | t | t | f | f | t
+-- SELECT 1
+
+> SELECT regexp_replace('ÀÉÎõü', '[[:lower:]]', 'x', 'g'), regexp_replace('ÀÉÎõü', '[a-z]', 'x', 'gi'), regexp_replace('IiİıX', 'i', '_', 'gi')
+regexp_replace:text | regexp_replace:text | regexp_replace:text
+ÀÉÎxx | ÀÉÎõü | __İıX
+-- SELECT 1
+
+> SELECT string_agg(x, ' ' ORDER BY x) FROM (VALUES ('a'),('B'),('é'),('E'),('e'),('Z'),('_'),('1'),('ä'),('z'),('ø'),('ö'),('ch'),('cz'),('Ä'),('-x'),('x'),(' '),('10'),('9')) v(x)
+string_agg:text
+  _ -x 1 10 9 a ä Ä B ch cz e E é ö ø x z Z
+-- SELECT 1
+
+> SELECT 'a' < 'B' AS ab, 'ä' < 'b' AS aeb, 'cote' < 'côte', 'Apple' > 'apple', 'a-b' < 'ab'
+ab:bool | aeb:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t | t
+-- SELECT 1
+
+> SELECT pg_collation_actual_version(100) AS v100, pg_database_collation_actual_version(oid) AS dbv FROM pg_database WHERE datname = current_database()
+v100:text | dbv:text
+153.136 | 153.136
+-- SELECT 1
+
+> SELECT collname, collprovider, collcollate, collctype, colllocale, collversion FROM pg_collation WHERE oid = 100
+collname:name | collprovider:char | collcollate:text | collctype:text | colllocale:text | collversion:text
+default | d | NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> CREATE TABLE locale_t (id int, t text)
+-- CREATE TABLE
+
+> INSERT INTO locale_t VALUES (1,'a'),(2,'B'),(3,'é'),(4,'E'),(5,'e'),(6,'Z'),(7,'_'),(8,'1'),(9,'ä'),(10,'z'),(11,'ø'),(12,'ö'),(13,'ch'),(14,'cz'),(15,'Ä'),(16,'abc'),(17,'Abd'),(18,'ab'),(19,NULL),(20,'abé')
+-- INSERT 0 20
+
+> CREATE INDEX locale_t_i ON locale_t (t)
+-- CREATE INDEX
+
+> ANALYZE locale_t
+-- ANALYZE
+
+> SELECT string_agg(t, ' ' ORDER BY t DESC NULLS LAST) FROM locale_t
+string_agg:text
+Z z ø ö é E e cz ch B abé Abd abc ab Ä ä a 1 _
+-- SELECT 1
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t ORDER BY t) s
+string_agg:text
+_ 1 a ä Ä ab abc Abd abé B ch cz e E é ö ø z Z
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t > 'b' ORDER BY t) s
+string_agg:text
+B ch cz e E é ö ø z Z
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t BETWEEN 'a' AND 'e' ORDER BY t) s
+string_agg:text
+a ä Ä ab abc Abd abé B ch cz e
+-- SELECT 1
+
+> SELECT t FROM locale_t WHERE t LIKE 'ab%' ORDER BY t
+t:text
+ab
+abc
+abé
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t LIKE 'ab%'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Filter: (t ~~ 'ab%'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t ~ '^ab'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Filter: (t ~ '^ab'::text)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> SELECT min(t), max(t), count(DISTINCT t) FROM locale_t
+min:text | max:text | count:int8
+_ | Z | 19
+-- SELECT 1
+
+> SELECT upper(t) AS u, count(*) FROM locale_t GROUP BY 1 ORDER BY 1
+u:text | count:int8
+_ | 1
+1 | 1
+A | 1
+Ä | 2
+AB | 1
+ABC | 1
+ABD | 1
+ABÉ | 1
+B | 1
+CH | 1
+CZ | 1
+E | 2
+É | 1
+Ö | 1
+Ø | 1
+Z | 2
+NULL | 1
+-- SELECT 17
+
+> SELECT DISTINCT lower(t) FROM locale_t ORDER BY 1
+lower:text
+_
+1
+a
+ä
+ab
+abc
+abd
+abé
+b
+ch
+cz
+e
+é
+ö
+ø
+z
+NULL
+-- SELECT 17
+
+> SELECT string_agg(t, ' ' ORDER BY id) FROM locale_t WHERE t ILIKE 'É' OR t ~* '^[[:upper:]]'
+string_agg:text
+a B é E e Z ä z ø ö ch cz Ä abc Abd ab abé
+-- SELECT 1
+
+> SELECT t, rank() OVER (ORDER BY t) FROM locale_t WHERE id < 8 ORDER BY t
+t:text | rank:int8
+_ | 1
+a | 2
+B | 3
+e | 4
+E | 5
+é | 6
+Z | 7
+-- SELECT 7
+
+> SELECT array_agg(t ORDER BY t) FILTER (WHERE id < 6), ARRAY['b','é'] < ARRAY['b','f'] FROM locale_t
+array_agg:text[] | ?column?:bool
+{a,B,e,E,é} | t
+-- SELECT 1
+
+> SELECT x FROM (VALUES ('{"a":"é"}'::jsonb),('{"a":"f"}'),('{"a":"E"}'),('{"é":1}'),('{"f":1}')) v(x) ORDER BY x
+x:jsonb
+{"a": "E"}
+{"a": "é"}
+{"a": "f"}
+{"é": 1}
+{"f": 1}
+-- SELECT 5
+
+> SELECT jsonb_path_query_array('["é","É","e","f","٣"]', '$[*] ? (@ like_regex "^[[:upper:]]")'), jsonb_path_query_array('["é","É","e"]', '$[*] ? (@ like_regex "^é" flag "i")')
+jsonb_path_query_array:jsonb | jsonb_path_query_array:jsonb
+["É"] | ["é", "É"]
+-- SELECT 1
+
+> SELECT to_tsvector('simple', 'Éclair naïve café ﬁsh price€5 a—b x·y ÉCOLE')
+to_tsvector:3614
+'a—b':6 'café':3 'naïve':2 'price€5':5 'x·y':7 'éclair':1 'école':8 'ﬁsh':4
+-- SELECT 1
+
+> SELECT alias, token FROM ts_debug('simple', 'naïve€x Ω-ray')
+alias:text | token:text
+blank |  
+blank | -
+hword | Ω-ray
+hword_asciipart | ray
+hword_part | Ω
+word | naïve€x
+-- SELECT 6
+
+> SELECT 'x' COLLATE "default" < 'X', 'ä' COLLATE "C" < 'b', 'ä' COLLATE "und-x-icu" < 'b'
+?column?:bool | ?column?:bool | ?column?:bool
+t | f | t
+-- SELECT 1
+
+> DROP TABLE locale_t
+-- DROP TABLE
+
+> \c locale_icu_ks
+
+> SELECT current_database(), datlocprovider, datcollate, datctype, datlocale FROM pg_database WHERE datname = current_database()
+current_database:name | datlocprovider:char | datcollate:text | datctype:text | datlocale:text
+locale_icu_ks | i | C | C | en-u-ks-level1
+-- SELECT 1
+
+> SELECT upper('é ß ǆ ﬁ ΐ i'), lower('É İ Σ ǅ I'), initcap('éa bé ǆx hello-WORLD 1st ßa'), casefold('ß İ Σ ﬁ')
+upper:text | lower:text | initcap:text | casefold:text
+É SS Ǆ FI Ϊ́ I | é i̇ σ ǆ i | Éa Bé ǅx Hello-World 1st Ssa | ss i̇ σ fi
+-- SELECT 1
+
+> SELECT upper('ijssel ǉubljana'), lower('ΣΑΣ'), initcap('ΣΑΣ ﬂow'), upper('ÿ'), lower('Ẏ')
+upper:text | lower:text | initcap:text | upper:text | lower:text
+IJSSEL ǇUBLJANA | σας | Σας Flow | Ÿ | ẏ
+-- SELECT 1
+
+> SELECT 'é' ~ '[[:alpha:]]' AS alpha, 'É' ~* 'é' AS ci, 'É' ILIKE 'é' AS ilike, '٣' ~ '[[:digit:]]' AS digit,
+>        ' ' ~ '[[:space:]]' AS nbsp, 'ǅ' ~ '[[:upper:]]' AS title_upper, '€' ~ '[[:punct:]]' AS punct, 'ß' ~ '^\w$' AS word
+alpha:bool | ci:bool | ilike:bool | digit:bool | nbsp:bool | title_upper:bool | punct:bool | word:bool
+t | t | t | t | t | f | f | t
+-- SELECT 1
+
+> SELECT regexp_replace('ÀÉÎõü', '[[:lower:]]', 'x', 'g'), regexp_replace('ÀÉÎõü', '[a-z]', 'x', 'gi'), regexp_replace('IiİıX', 'i', '_', 'gi')
+regexp_replace:text | regexp_replace:text | regexp_replace:text
+ÀÉÎxx | ÀÉÎõü | __İıX
+-- SELECT 1
+
+> SELECT string_agg(x, ' ' ORDER BY x) FROM (VALUES ('a'),('B'),('é'),('E'),('e'),('Z'),('_'),('1'),('ä'),('z'),('ø'),('ö'),('ch'),('cz'),('Ä'),('-x'),('x'),(' '),('10'),('9')) v(x)
+string_agg:text
+  _ -x 1 10 9 a Ä ä B ch cz E e é ö ø x Z z
+-- SELECT 1
+
+> SELECT 'a' < 'B' AS ab, 'ä' < 'b' AS aeb, 'cote' < 'côte', 'Apple' > 'apple', 'a-b' < 'ab'
+ab:bool | aeb:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | f | t
+-- SELECT 1
+
+> SELECT pg_collation_actual_version(100) AS v100, pg_database_collation_actual_version(oid) AS dbv FROM pg_database WHERE datname = current_database()
+v100:text | dbv:text
+153.136 | 153.136
+-- SELECT 1
+
+> SELECT collname, collprovider, collcollate, collctype, colllocale, collversion FROM pg_collation WHERE oid = 100
+collname:name | collprovider:char | collcollate:text | collctype:text | colllocale:text | collversion:text
+default | d | NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> CREATE TABLE locale_t (id int, t text)
+-- CREATE TABLE
+
+> INSERT INTO locale_t VALUES (1,'a'),(2,'B'),(3,'é'),(4,'E'),(5,'e'),(6,'Z'),(7,'_'),(8,'1'),(9,'ä'),(10,'z'),(11,'ø'),(12,'ö'),(13,'ch'),(14,'cz'),(15,'Ä'),(16,'abc'),(17,'Abd'),(18,'ab'),(19,NULL),(20,'abé')
+-- INSERT 0 20
+
+> CREATE INDEX locale_t_i ON locale_t (t)
+-- CREATE INDEX
+
+> ANALYZE locale_t
+-- ANALYZE
+
+> SELECT string_agg(t, ' ' ORDER BY t DESC NULLS LAST) FROM locale_t
+string_agg:text
+z Z ø ö é e E cz ch B abé Abd abc ab ä Ä a 1 _
+-- SELECT 1
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t ORDER BY t) s
+string_agg:text
+_ 1 a Ä ä ab abc Abd abé B ch cz E e é ö ø Z z
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t > 'b' ORDER BY t) s
+string_agg:text
+ch cz E e é ö ø Z z
+-- SELECT 1
+
+> SELECT string_agg(t, ' ') FROM (SELECT t FROM locale_t WHERE t BETWEEN 'a' AND 'e' ORDER BY t) s
+string_agg:text
+a Ä ä ab abc Abd abé B ch cz E e
+-- SELECT 1
+
+> SELECT t FROM locale_t WHERE t LIKE 'ab%' ORDER BY t
+t:text
+ab
+abc
+abé
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t LIKE 'ab%'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Filter: (t ~~ 'ab%'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT t FROM locale_t WHERE t ~ '^ab'
+QUERY PLAN:text
+Index Only Scan using locale_t_i on locale_t
+  Filter: (t ~ '^ab'::text)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> SELECT min(t), max(t), count(DISTINCT t) FROM locale_t
+min:text | max:text | count:int8
+_ | z | 19
+-- SELECT 1
+
+> SELECT upper(t) AS u, count(*) FROM locale_t GROUP BY 1 ORDER BY 1
+u:text | count:int8
+_ | 1
+1 | 1
+A | 1
+Ä | 2
+AB | 1
+ABC | 1
+ABD | 1
+ABÉ | 1
+B | 1
+CH | 1
+CZ | 1
+E | 2
+É | 1
+Ö | 1
+Ø | 1
+Z | 2
+NULL | 1
+-- SELECT 17
+
+> SELECT DISTINCT lower(t) FROM locale_t ORDER BY 1
+lower:text
+_
+1
+a
+ä
+ab
+abc
+abd
+abé
+b
+ch
+cz
+e
+é
+ö
+ø
+z
+NULL
+-- SELECT 17
+
+> SELECT string_agg(t, ' ' ORDER BY id) FROM locale_t WHERE t ILIKE 'É' OR t ~* '^[[:upper:]]'
+string_agg:text
+a B é E e Z ä z ø ö ch cz Ä abc Abd ab abé
+-- SELECT 1
+
+> SELECT t, rank() OVER (ORDER BY t) FROM locale_t WHERE id < 8 ORDER BY t
+t:text | rank:int8
+_ | 1
+a | 2
+B | 3
+E | 4
+e | 5
+é | 6
+Z | 7
+-- SELECT 7
+
+> SELECT array_agg(t ORDER BY t) FILTER (WHERE id < 6), ARRAY['b','é'] < ARRAY['b','f'] FROM locale_t
+array_agg:text[] | ?column?:bool
+{a,B,E,e,é} | t
+-- SELECT 1
+
+> SELECT x FROM (VALUES ('{"a":"é"}'::jsonb),('{"a":"f"}'),('{"a":"E"}'),('{"é":1}'),('{"f":1}')) v(x) ORDER BY x
+x:jsonb
+{"a": "E"}
+{"a": "é"}
+{"a": "f"}
+{"é": 1}
+{"f": 1}
+-- SELECT 5
+
+> SELECT jsonb_path_query_array('["é","É","e","f","٣"]', '$[*] ? (@ like_regex "^[[:upper:]]")'), jsonb_path_query_array('["é","É","e"]', '$[*] ? (@ like_regex "^é" flag "i")')
+jsonb_path_query_array:jsonb | jsonb_path_query_array:jsonb
+["É"] | ["é", "É"]
+-- SELECT 1
+
+> SELECT to_tsvector('simple', 'Éclair naïve café ﬁsh price€5 a—b x·y ÉCOLE')
+to_tsvector:3614
+'a—b':6 'café':3 'naïve':2 'price€5':5 'x·y':7 'éclair':1 'école':8 'ﬁsh':4
+-- SELECT 1
+
+> SELECT alias, token FROM ts_debug('simple', 'naïve€x Ω-ray')
+alias:text | token:text
+blank |  
+blank | -
+hword | Ω-ray
+hword_asciipart | ray
+hword_part | Ω
+word | naïve€x
+-- SELECT 6
+
+> SELECT 'x' COLLATE "default" < 'X', 'ä' COLLATE "C" < 'b', 'ä' COLLATE "und-x-icu" < 'b'
+?column?:bool | ?column?:bool | ?column?:bool
+f | f | t
+-- SELECT 1
+
+> DROP TABLE locale_t
+-- DROP TABLE
+

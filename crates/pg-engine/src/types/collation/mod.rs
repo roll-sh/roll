@@ -3,13 +3,17 @@
 //! collations, case mapping (upper, lower, initcap, casefold), and the regex engine's
 //! character classification, per provider:
 //!
-//! - builtin (C, C.UTF-8, PG_UNICODE_FAST) and the database default (the builtin C.UTF-8
-//!   locale with C collation): byte order; Postgres's own Unicode case tables;
+//! - builtin (C, C.UTF-8, PG_UNICODE_FAST): byte order; Postgres's own Unicode case tables;
 //! - libc: C and POSIX are ASCII-only; other locales behave as the reference server's musl
 //!   does (byte order, its Unicode classes and simple case mappings);
 //! - ICU: ICU4C 78.1, the reference server's ICU (see icu.rs).
+//!
+//! The database default ("default", oid 100) is the database's own locale (dblocale.rs:
+//! pg_database's provider and locale, libc C unless initdb or CREATE DATABASE chose
+//! another), which the catalog carries (`Catalog::db_locale`).
 
 pub mod case;
+pub mod dblocale;
 pub mod icu;
 #[cfg(feature = "icu4x")]
 mod icu4x;
@@ -24,6 +28,8 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
+
+pub use dblocale::{DbDefault, DbLocale};
 
 pub const DEFAULT_OID: u32 = 100;
 pub const C_OID: u32 = 950;
@@ -146,6 +152,9 @@ pub struct Collation {
     pub provider: char,
     pub deterministic: bool,
     pub ctype: Ctype,
+    /// `collate_is_c`: strings sort by their bytes, as the planner knows (a libc locale
+    /// other than C or POSIX isn't, though musl's strcoll compares bytes too).
+    pub collate_is_c: bool,
     icu: Option<Arc<icu::Icu>>,
 }
 
@@ -168,7 +177,8 @@ impl Collation {
     pub fn open(def: &CollationDef) -> Result<Collation> {
         let mut icu = None;
         let ctype = match def.provider {
-            'd' => Ctype::Builtin { full: false },
+            // (pg_collation's own "default" row: libc C, the default locale.)
+            'd' => Ctype::Ascii,
             'b' => match def.locale.as_deref().and_then(builtin_canonical) {
                 Some("C") => Ctype::Ascii,
                 Some("PG_UNICODE_FAST") => Ctype::Builtin { full: true },
@@ -199,12 +209,18 @@ impl Collation {
                 }
             }
         };
+        let collate_is_c = match def.provider {
+            'c' => is_c_locale(def.collate.as_deref().unwrap_or("C")),
+            'i' => false,
+            _ => true,
+        };
         Ok(Collation {
             oid: def.oid,
             name: def.name.clone(),
             provider: def.provider,
             deterministic: def.deterministic,
             ctype,
+            collate_is_c,
             icu,
         })
     }
@@ -373,18 +389,84 @@ pub fn get(def: &CollationDef) -> Result<Arc<Collation>> {
     Ok(c)
 }
 
-/// The database's default collation.
-pub fn default() -> Arc<Collation> {
+/// libc C, the default of a database whose catalog carries no locale.
+fn libc_c() -> &'static Arc<Collation> {
     static D: OnceLock<Arc<Collation>> = OnceLock::new();
-    D.get_or_init(|| {
-        Arc::new(Collation::open(static_by_oid(DEFAULT_OID).expect("default collation")).expect("default"))
-    })
-    .clone()
+    D.get_or_init(|| DbDefault::open(DbLocale::default()).expect("libc C").collation)
 }
 
-/// A collation by (unqualified) name: the catalog's own ones, then the built-in ones.
+/// The default collation of the database `cat` is a catalog of (`init_database_collation`).
+pub fn default_for(cat: &crate::catalog::Catalog) -> Arc<Collation> {
+    match &cat.db_locale {
+        Some(d) => d.collation.clone(),
+        None => libc_c().clone(),
+    }
+}
+
+/// The locale of the database `cat` is a catalog of.
+pub fn db_locale(cat: &crate::catalog::Catalog) -> DbLocale {
+    cat.db_locale.as_ref().map(|d| d.locale.clone()).unwrap_or_default()
+}
+
+thread_local! {
+    /// The default collation of the database whose statement runs on this thread, for what
+    /// runs under DEFAULT_COLLATION_OID with no catalog at hand (text search, jsonpath's
+    /// like_regex, calls the binder attached no collation to); set from the catalog by
+    /// `binder::note_catalog`.
+    static DEFAULT: std::cell::RefCell<Option<Arc<DbDefault>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Make `cat`'s database default the thread's (`default`).
+pub fn note_default(cat: &crate::catalog::Catalog) {
+    let d = cat.db_locale.as_ref();
+    DEFAULT.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.as_ref().map(Arc::as_ptr) != d.map(Arc::as_ptr) {
+            *c = d.cloned();
+        }
+    });
+}
+
+/// The default collation of the database whose statement runs on this thread (libc C when
+/// none has run).
+pub fn default() -> Arc<Collation> {
+    DEFAULT
+        .with(|c| c.borrow().as_ref().map(|d| d.collation.clone()))
+        .unwrap_or_else(|| libc_c().clone())
+}
+
+/// `default()` when it doesn't compare by bytes (an ICU database), for what compares
+/// under DEFAULT_COLLATION_OID on its own (jsonb).
+pub fn default_unless_bytewise() -> Option<Arc<Collation>> {
+    DEFAULT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|d| !d.collation.bytewise())
+            .map(|d| d.collation.clone())
+    })
+}
+
+/// `database_ctype_is_c` of the database whose statement runs on this thread: text search
+/// classifies characters by the database's LC_CTYPE (libc's), whatever its provider.
+pub fn database_ctype_is_c() -> bool {
+    DEFAULT.with(|c| c.borrow().as_ref().is_none_or(|d| d.locale.ctype_is_c()))
+}
+
+/// A collation by (unqualified) name: the catalog's own ones, then the built-in ones;
+/// "default" is the database's.
 pub fn by_name(cat: &crate::catalog::Catalog, name: &str) -> Option<Arc<Collation>> {
+    if name == "default" {
+        return Some(default_for(cat));
+    }
     def_by_name(cat, name).and_then(|d| get(&d).ok())
+}
+
+/// A collation by oid, as `by_name`.
+pub fn by_oid(cat: &crate::catalog::Catalog, oid: u32) -> Option<Arc<Collation>> {
+    if oid == DEFAULT_OID {
+        return Some(default_for(cat));
+    }
+    def_by_oid(cat, oid).and_then(|d| get(&d).ok())
 }
 
 /// A collation's definition by (unqualified) name.
@@ -512,14 +594,15 @@ pub fn apply(
     cat: &crate::catalog::Catalog,
     c_def: Option<&crate::sql::func::FuncDef>,
 ) -> Option<Arc<crate::sql::func::FuncDef>> {
-    if matches!(name, "default" | "C" | "POSIX" | "ucs_basic") {
+    if matches!(name, "C" | "POSIX" | "ucs_basic") {
         return None;
     }
     let coll = by_name(cat, name)?;
     if coll.ctype_is_c() && coll.bytewise() && coll.deterministic {
         return c_def.map(|d| Arc::new(d.clone()));
     }
-    if matches!(coll.ctype, Ctype::Builtin { full: false }) && coll.bytewise() && coll.deterministic {
+    // (A call without a collation runs under the database default, `default()`.)
+    if name == "default" && coll.bytewise() {
         return None;
     }
     Some(Arc::new(crate::sql::func::FuncDef {

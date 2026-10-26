@@ -2,6 +2,7 @@
 //! cursors. The wire server drives it message by message; tests drive it directly.
 
 pub mod copy;
+mod createdb;
 pub mod current;
 pub mod cursor;
 pub(crate) mod explain_spi;
@@ -2569,8 +2570,10 @@ impl Session {
                     .map(|r| r.name.clone())
                     .unwrap_or_else(|| self.state.user.clone());
                 let mut template = None;
+                let mut opts = createdb::Options::default();
                 for o in &c.options {
                     if let Some(NodeEnum::DefElem(d)) = inner(o) {
+                        opts.read(d)?;
                         match d.defname.as_str() {
                             "owner" => {
                                 owner = crate::sql::binder::ast::def_arg_str(d).unwrap_or(owner)
@@ -2580,7 +2583,18 @@ impl Session {
                         }
                     }
                 }
-                cluster.create_database(&c.dbname, &owner, template.as_deref())?;
+                // The template's locale is the default (createdb's get_db_info).
+                let tname = template.as_deref().unwrap_or("template1");
+                let src = cluster.database_locale(tname).ok_or_else(|| {
+                    Error::new(
+                        code::INVALID_CATALOG_NAME,
+                        format!("template database \"{tname}\" does not exist"),
+                    )
+                })?;
+                opts.check_strategy()?;
+                let superuser = cat.roles.get(&me).is_some_and(|r| r.superuser);
+                let locale = self.createdb_locale(&opts, tname, &src, superuser)?;
+                cluster.create_database(&c.dbname, &owner, template.as_deref(), &locale)?;
                 Ok(QueryResult::command("CREATE DATABASE"))
             }
             NodeEnum::DropdbStmt(d) => {

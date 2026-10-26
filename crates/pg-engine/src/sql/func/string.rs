@@ -41,28 +41,25 @@ fn bytea_length(a: &[Value], _: &FnCtx) -> Result<Value> {
         _ => 0,
     }))
 }
-// Case mapping follows the default collation (the builtin C.UTF-8 locale) unless the call
-// carries another: Postgres's simple Unicode mappings, so characters whose full mapping
-// expands (ß → SS) are left alone.
-pub(crate) fn simple_lower(c: char) -> char {
-    char::from_u32(case::lower_simple(c as u32)).unwrap_or(c)
-}
+// Case mapping follows the call's collation, or without one the database default
+// (`collation::default()`; the binder gives calls under a C-ctype default their ASCII
+// variants, `c_ctype_variant`).
 fn lower(a: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(text(match c.coll {
         Some(coll) => coll.lower(s(&a[0])),
-        None => case::convert(s(&a[0]), case::CaseKind::Lower, false),
+        None => crate::types::collation::default().lower(s(&a[0])),
     }))
 }
 fn upper(a: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(text(match c.coll {
         Some(coll) => coll.upper(s(&a[0])),
-        None => case::convert(s(&a[0]), case::CaseKind::Upper, false),
+        None => crate::types::collation::default().upper(s(&a[0])),
     }))
 }
 fn casefold(a: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(text(match c.coll {
         Some(coll) => coll.casefold(s(&a[0])),
-        None => case::convert(s(&a[0]), case::CaseKind::Fold, false),
+        None => crate::types::collation::default().casefold(s(&a[0])),
     }))
 }
 fn initcap(a: &[Value], c: &FnCtx) -> Result<Value> {
@@ -1035,9 +1032,8 @@ fn like_tokens_match(toks: &[LikeTok], n: usize, at: impl Fn(usize) -> char) -> 
 pub fn like_match(st: &str, pat: &str, escape: Option<char>, ci: bool) -> Result<bool> {
     // ILIKE lowers both sides with lower() first.
     if ci {
-        let st: String = st.chars().map(simple_lower).collect();
-        let pat: String = pat.chars().map(simple_lower).collect();
-        return like_match(&st, &pat, escape, false);
+        let d = crate::types::collation::default();
+        return like_match(&d.lower(st), &d.lower(pat), escape, false);
     }
     let toks = like_tokens(pat, escape)?;
     // (An ASCII string's characters are its bytes.)
@@ -1265,7 +1261,7 @@ fn re_strategy(c_ctype: bool, fc: &FnCtx) -> Result<Strategy> {
     }
     match fc.coll {
         Some(coll) => coll.regex_strategy(),
-        None => Ok(rx::DEFAULT_STRATEGY),
+        None => crate::types::collation::default().regex_strategy(),
     }
 }
 

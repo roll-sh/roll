@@ -4470,6 +4470,13 @@ pub fn register(r: &mut Registry) {
         collation_actual_version,
     )
     .volatile();
+    r.func(
+        "pg_database_collation_actual_version",
+        vec![Oid],
+        Text,
+        database_collation_actual_version,
+    )
+    .volatile();
     r.func("pg_ts_config_is_visible", vec![Oid], Bool, |a, c| {
         ts_visible(TsKind::Config, a, c)
     })
@@ -4975,8 +4982,9 @@ fn collation_actual_version(a: &[Value], c: &FnCtx) -> Result<Value> {
         v => v.as_i64().unwrap_or(0) as u32,
     };
     let (provider, locale) = if oid == crate::types::collation::DEFAULT_OID {
-        // The database's builtin C.UTF-8 locale.
-        ('b', "C.UTF-8".to_string())
+        // The database's own locale.
+        let l = crate::types::collation::db_locale(&c.exec.catalog());
+        (l.provider, l.version_locale().to_string())
     } else {
         let cat = c.exec.catalog();
         let d = crate::types::collation::def_by_oid(&cat, oid).ok_or_else(|| {
@@ -4989,4 +4997,26 @@ fn collation_actual_version(a: &[Value], c: &FnCtx) -> Result<Value> {
     };
     Ok(crate::types::collation::actual_version(provider, &locale)?
         .map_or(Value::Null, text))
+}
+
+/// pg_database_collation_actual_version(oid): what the provider reports for the database's
+/// locale.
+fn database_collation_actual_version(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let oid = match &a[0] {
+        Value::Oid(o) => *o,
+        v => v.as_i64().unwrap_or(0) as u32,
+    };
+    let cluster = &c.exec.sess.cluster;
+    let l = cluster
+        .databases()
+        .into_iter()
+        .find(|d| d.0 == oid)
+        .and_then(|d| cluster.database_locale(&d.1))
+        .ok_or_else(|| {
+            crate::error::Error::new(
+                crate::error::code::UNDEFINED_OBJECT,
+                format!("database with OID {oid} does not exist"),
+            )
+        })?;
+    Ok(l.actual_version()?.map_or(Value::Null, text))
 }

@@ -20,6 +20,7 @@ fn open(data: &Path, files: Option<&Path>) -> Arc<Engine> {
         password: None,
         server_files: files.map(Path::to_path_buf),
         shared_preload_libraries: Vec::new(),
+        locale: Default::default(),
     })
     .unwrap()
 }

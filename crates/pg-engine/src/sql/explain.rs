@@ -4414,8 +4414,19 @@ fn sort_suffix(k: &SortKey) -> String {
         let _ = write!(s, " USING {op}");
         return s;
     }
-    // A key sorted under its (non-byte-order) collation shows it.
-    if let Some(coll) = k.using.as_ref().and_then(|op| op.coll.as_ref()) {
+    // A key sorted under its (non-byte-order) collation shows it (not the database default,
+    // its `<` / `>` the type's own: show_sortorder_options).
+    let default_coll = k
+        .using
+        .as_ref()
+        .and_then(|op| op.coll.as_ref())
+        .is_some_and(|c| c.oid == crate::types::collation::DEFAULT_OID);
+    if let Some(coll) = k
+        .using
+        .as_ref()
+        .and_then(|op| op.coll.as_ref())
+        .filter(|_| !default_coll)
+    {
         let _ = write!(s, " COLLATE {}", crate::catalog::quote_ident(&coll.name));
         if k.desc {
             s.push_str(" DESC");
@@ -4423,7 +4434,8 @@ fn sort_suffix(k: &SortKey) -> String {
     // (An enum's own `<` / `>`, which the engine carries to compare its labels: its default
     // btree class's, so no USING.)
     } else if let Some(op) = k.using.as_ref().filter(|op| {
-        !(matches!(op.name, "<" | ">") && matches!(k.expr.ty(), crate::types::DataType::Enum(..)))
+        !(matches!(op.name, "<" | ">")
+            && (default_coll || matches!(k.expr.ty(), crate::types::DataType::Enum(..))))
     }) {
         let _ = write!(s, " USING {}", op.name);
     } else if k.desc {

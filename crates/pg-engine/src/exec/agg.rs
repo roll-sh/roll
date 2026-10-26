@@ -2436,11 +2436,25 @@ pub fn finish(call: &AggCall, mut st: AggState, ctx: &ExecCtx) -> Result<Value> 
         }
         if call.distinct {
             let colls = nondeterministic_keys(&call.args, ctx);
+            // (Arguments under a collation that doesn't sort by bytes sort in its order.)
+            let sorts = sort_collations(&call.args, ctx);
             let cmp = |a: &[Value], b: &[Value]| {
-                if colls.iter().all(Option::is_none) {
+                if colls.iter().all(Option::is_none) && sorts.iter().all(Option::is_none) {
                     return cmp_rows(a, b);
                 }
-                cmp_rows(&group_key(a, &colls), &group_key(b, &colls))
+                for (i, (x, y)) in a.iter().zip(b).enumerate() {
+                    let o = match (sorts.get(i).and_then(Option::as_ref), x.is_null() || y.is_null()) {
+                        (Some(c), false) => crate::types::collation::cmp_values(c, x, y),
+                        _ => cmp_rows(
+                            &group_key(std::slice::from_ref(x), &colls[i.min(colls.len())..]),
+                            &group_key(std::slice::from_ref(y), &colls[i.min(colls.len())..]),
+                        ),
+                    };
+                    if o != Ordering::Equal {
+                        return o;
+                    }
+                }
+                Ordering::Equal
             };
             if call.order_by.is_empty() {
                 let mut f = |a: &(Vec<Value>, Vec<Value>), b: &(Vec<Value>, Vec<Value>)| {
@@ -3408,6 +3422,24 @@ pub(crate) fn nondeterministic_keys(
             } else {
                 coll.map(KeyNorm::Coll)
             }
+        })
+        .collect()
+}
+
+/// The collations, when they don't sort by bytes, of keys the binder marked with theirs
+/// (an implicit COLLATE).
+pub(crate) fn sort_collations(
+    keys: &[crate::sql::expr::Expr],
+    ctx: &ExecCtx,
+) -> Vec<Option<Arc<crate::types::collation::Collation>>> {
+    let mut cat = None;
+    keys.iter()
+        .map(|k| match k {
+            crate::sql::expr::Expr::Collate(_, name, _) => {
+                let cat = cat.get_or_insert_with(|| ctx.catalog());
+                crate::types::collation::by_name(cat, name).filter(|c| !c.bytewise())
+            }
+            _ => None,
         })
         .collect()
 }

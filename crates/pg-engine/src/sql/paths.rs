@@ -1097,14 +1097,15 @@ impl Planner<'_, '_> {
         };
         let text = |s: &str| Expr::Const(Value::Text(s.into()), cty.clone());
         let mut b = crate::sql::binder::Binder::new(self.ctx, Vec::new());
-        // (The index condition compares under the index's collation.)
-        let index_coll = ii
-            .colls
-            .get(col)
-            .cloned()
-            .flatten()
-            .and_then(|n| crate::types::collation::by_name(&self.ctx.catalog(), &n))
-            .filter(|c| !c.bytewise());
+        // (The index condition compares under the index's collation, the database default
+        // unless the column has another.)
+        let key_coll = crate::types::collation::by_name(
+            &self.ctx.catalog(),
+            ii.colls.get(col).cloned().flatten().as_deref().unwrap_or("default"),
+        );
+        let index_coll = key_coll.clone().filter(|c| !c.bytewise());
+        // (A range needs an index in byte order, a "C" collation: match_pattern_prefix.)
+        let c_order = key_coll.is_none_or(|c| c.collate_is_c);
         let mut make = |op: &'static str, v: Expr| -> Option<IClause> {
             let Expr::Call(d, _, ty) = b.builtin_binop(op, leftop.clone(), v.clone()).ok()? else {
                 return None;
@@ -1132,8 +1133,7 @@ impl Planner<'_, '_> {
         match status {
             costs::PrefixStatus::None => {}
             costs::PrefixStatus::Exact => out.extend(make("=", text(&prefix))),
-            // (A range needs an index in byte ("C") order: match_pattern_prefix.)
-            costs::PrefixStatus::Partial if !pattern_ops && index_coll.is_some() => {}
+            costs::PrefixStatus::Partial if !pattern_ops && !c_order => {}
             costs::PrefixStatus::Partial => {
                 let (ge, lt) = if pattern_ops {
                     ("~>=~", "~<~")
