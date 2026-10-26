@@ -103,7 +103,7 @@ fn hstore_recv(b: &[u8], ctx: &FormatCtx) -> Result<Vec<u8>> {
     use super::hstore::Pair;
     let mut r = b;
     let count = get_i32(&mut r)?;
-    const MAX_PAIRS: i32 = (0x3fff_ffff / 32) as i32;
+    const MAX_PAIRS: i32 = 0x3fff_ffff / 32;
     if !(0..=MAX_PAIRS).contains(&count) {
         return Err(Error::new(
             code::PROGRAM_LIMIT_EXCEEDED,
