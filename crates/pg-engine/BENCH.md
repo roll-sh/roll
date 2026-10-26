@@ -1702,6 +1702,19 @@ directory.
   newly differing or newly matching against the committed `results.tsv`.
 - `difftest smoke` passes. The isolation suite in full matches STATUS.md's current score:
   109 / 122 specs, 1,616 / 1,648 permutations, 12,154 / 12,238 steps.
+## pgvector (round 20, agent 70)
+
+The distance kernels (`src/ext/vector/dist.rs`) must return pgvector's bits: the reference build
+(the official image's `OPTFLAGS=""`) sums in GCC's 4-lane SSE2 order, so the engine keeps that
+order (four `f32` accumulators, the same tail and the same horizontal reduction), which LLVM
+compiles to the same `subps` / `mulps` / `addps` chain. Wider vectors or several independent
+chains would be faster and would change the last bits of distances (and with them the order of
+near ties), so they aren't used; halfvec uses the reference's own F16C / FMA 8-lane kernel on
+CPUs that have it, as pgvector does. Release build, 1,536 dimensions, one pair: vector l2² 493
+ns, inner product 386 ns, cosine 629 ns, halfvec (F16C) about 250 ns: the latency of one
+4-lane dependency chain, which is also the reference's. Build, insert and query speed of the
+indexes against the reference: the `vector` workload of `tools/bench` (`bench.rs`
+`vector_bench`), measured with the index access methods (next sections).
 
 ## Catalog round 4: racing DDL commits, catalogs after DDL (round 19, agent 62)
 

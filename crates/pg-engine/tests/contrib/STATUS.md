@@ -41,7 +41,7 @@ PGCONTRIB_ONLY=uuid-ossp,citext PGREGRESS_DIR=$D PGREGRESS_CONTAINER=a39-ref \
 
 ## Scores
 
-Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013 (1,013 / 1,013 since round 19, agent 71: a run of that module). Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053; agent 72: postgres_fdw 1,802 / 2,053 (87.8%). Round 19 (agent 66): file_fdw 187 / 187. Round 19 (agent 71), a full run of every module: 7,683 / 8,270 units of 34 modules (pageinspect not applicable, postgres_fdw 1,664 then); the 10 modules with tests added this round 346 / 350 (tsm_system_time 14 / 16, auto_explain 10 / 12, the rest whole); amcheck 203 / 204 in a run after it. Baseline (before any
+Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013 (1,013 / 1,013 since round 19, agent 71: a run of that module). Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053; agent 72: postgres_fdw 1,802 / 2,053 (87.8%). Round 19 (agent 66): file_fdw 187 / 187. Round 19 (agent 71), a full run of every module: 7,683 / 8,270 units of 34 modules (pageinspect not applicable, postgres_fdw 1,664 then); the 10 modules with tests added this round 346 / 350 (tsm_system_time 14 / 16, auto_explain 10 / 12, the rest whole); amcheck 203 / 204 in a run after it. Round 20 (agent 70): pgvector 797 / 915 (its types; pg_trgm, btree_gist and cube unchanged at 261, 613 and 316). Baseline (before any
 extension was ported; CREATE EXTENSION was a stand-in): 2,752 / 7,733
 units (35.6%). The reference matches `expected/` for every module except dblink (the reference
 has no `regress.so`, whose functions dblink's test creates).
@@ -82,6 +82,34 @@ has no `regress.so`, whose functions dblink's test creates).
 | passwordcheck | 12 | 12 | done |
 | auto_explain | 12 | 10 | see below |
 | dblink | 218 | 218 | done |
+| pgvector (0.8.7) | 915 | 797 | types done; ivfflat / hnsw files next (see below) |
+
+### pgvector (round 20, agent 70)
+
+Not a contrib module: pgvector 0.8.7's own suite (`test/sql`, `test/expected` at the v0.8.7
+tag), an external module of the harness (`EXTERNAL_MODULES` in `tests/harness/regress.rs`: cloned
+next to the contrib sources, run like `make installcheck` with `--load-extension=vector`). Its
+reference is the pinned image with pgvector built from source as the official pgvector image
+builds it (a default run leaves pgvector out when the reference doesn't have it):
+
+```sh
+git clone --branch v0.8.7 --depth 1 https://github.com/pgvector/pgvector.git ctx/pgvector
+cat > ctx/Dockerfile <<'EOF2'
+FROM postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+COPY pgvector /tmp/pgvector
+RUN apk add --no-cache --virtual .build build-base && cd /tmp/pgvector \
+ && make OPTFLAGS="" with_llvm=no && make install with_llvm=no && rm -rf /tmp/pgvector && apk del .build
+EOF2
+docker build -t <prefix>-pgvector:0.8.7 ctx
+```
+
+(`OPTFLAGS=""`: the official image's portable build, whose float sums the engine reproduces bit
+for bit; `with_llvm=no`: the Alpine image has no clang for bitcode. Add `-DIVFFLAT_BENCH
+-DHNSW_MEMORY` to OPTFLAGS for a reference whose index builds seed 42 first, what
+`ROLL_VECTOR_BUILD_SEED=42` makes the engine do: HANDOFF "pgvector".)
+
+Round 20: the seven type files (vector_type, halfvec, sparsevec, bit, cast, btree, copy) match
+in full; the ivfflat and hnsw files come with the access methods.
 
 ### What is left, per module
 
