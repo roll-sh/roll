@@ -463,6 +463,10 @@ pub fn inet_cmp(a: &[u8], ma: u8, b: &[u8], mb: u8) -> Ordering {
 
 /// A jsonb value's hash, consistent with its equality (numbers by value: 1.0 = 1).
 fn hash_jsonb<H: Hasher>(j: &Jsonb, state: &mut H) {
+    crate::stack::grow(|| hash_jsonb_here(j, state))
+}
+
+fn hash_jsonb_here<H: Hasher>(j: &Jsonb, state: &mut H) {
     match j {
         Jsonb::Null => 0u8.hash(state),
         Jsonb::Bool(b) => {

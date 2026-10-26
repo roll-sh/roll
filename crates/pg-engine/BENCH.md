@@ -1778,6 +1778,33 @@ and the debug cross-checks (spliced rows against the full generation, a merged c
 index against `reindex`, dropped relations' access methods and file numbers against a scan,
 `referencing_fks` against a scan).
 
+## Deep input (round 19, agent 63)
+
+The stack grows on demand at recursion points (HANDOFF.md, "Deep input"). This section
+measures what the guards cost on ordinary statements. The guards sit on hot paths
+(`eval`, executor `open`, the binder); the fast path is a thread-local load and two
+compares.
+
+The A/B ran in-process (`bench --target inproc`, the client threads 2 MB stacks) against
+the base commit `dd758b2b`, alternating base and new runs on the same loaded machine, over
+the same data:
+
+- **TPC-H SF1:** the 22 queries' median times, base against new, are within -6% to +9% of each
+  other. The geometric mean of the new engine's speed is 1.005.
+- **OLTP** (1 and 8 clients):
+  - The first version mapped a stack segment for every parse on a 2 MB thread, because
+    libpg_query was given 3 MB below it. The simple-query point select ran at 0.71× and
+    0.65×.
+  - Now a parse on the thread's own stack only needs 1 MB, since libpg_query sizes its
+    limit from what is left. Segments are kept per statement, and one small segment
+    between statements. With that, the 18 OLTP results' best-of-3 speed against the base
+    has a geometric mean of 1.04, from 0.92 to 1.35. The spread is machine noise: other
+    agents' builds ran meanwhile.
+
+The server's connection threads (16 MB) never grow at ordinary depths. A statement that
+nests deep pays for its segments: a mapping per segment for each statement, and the page
+faults of the stack it touches. For example, 4,000 `+` terms touch about 30 MB in release.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

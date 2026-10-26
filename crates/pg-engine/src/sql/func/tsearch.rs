@@ -222,6 +222,10 @@ fn jsonb_arg(v: &Value) -> Result<Arc<Jsonb>> {
 
 /// `iterate_jsonb_values`: keys and the scalars the flags select, in jsonb order.
 fn iterate_jsonb(j: &Jsonb, flags: u32, f: &mut dyn FnMut(&str) -> Result<()>) -> Result<()> {
+    crate::stack::guard(|| iterate_jsonb_here(j, flags, f))
+}
+
+fn iterate_jsonb_here(j: &Jsonb, flags: u32, f: &mut dyn FnMut(&str) -> Result<()>) -> Result<()> {
     match j {
         Jsonb::Object(members) => {
             for (k, v) in members {
@@ -660,6 +664,10 @@ fn headline_value(
 }
 
 fn transform_jsonb(j: &Jsonb, f: &mut dyn FnMut(&str) -> Result<String>) -> Result<Jsonb> {
+    crate::stack::guard(|| transform_jsonb_here(j, f))
+}
+
+fn transform_jsonb_here(j: &Jsonb, f: &mut dyn FnMut(&str) -> Result<String>) -> Result<Jsonb> {
     Ok(match j {
         Jsonb::String(s) => Jsonb::String(f(s)?),
         Jsonb::Array(items) => Jsonb::Array(

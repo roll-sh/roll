@@ -152,7 +152,6 @@ impl DomainCoerce {
     }
 }
 
-#[derive(Clone)]
 pub enum Expr {
     Const(Value, DataType),
     /// Column of the current input row.
@@ -231,6 +230,68 @@ pub enum Expr {
     Xml(Box<XmlExpr>),
     /// `ROW(a, b, …) op ROW(x, y, …)` for an ordering operator (RowCompareExpr).
     RowCompare(Box<RowCompare>),
+}
+
+// Expressions nest as deep as the statement does (thousands of levels), so a copy grows the
+// stack as it descends (a derived `Clone` would recurse unguarded).
+impl Clone for Expr {
+    fn clone(&self) -> Self {
+        use Expr as E;
+        crate::stack::grow(|| match self {
+            E::Const(v, t) => E::Const(v.clone(), t.clone()),
+            E::Col(i, t) => E::Col(*i, t.clone()),
+            E::Outer(l, i, t) => E::Outer(*l, *i, t.clone()),
+            E::Param(i, t) => E::Param(*i, t.clone()),
+            E::Call(f, a, t) => E::Call(f.clone(), a.clone(), t.clone()),
+            E::Cast(e, a, b, x) => E::Cast(e.clone(), a.clone(), b.clone(), *x),
+            E::And(a) => E::And(a.clone()),
+            E::Or(a) => E::Or(a.clone()),
+            E::Not(e) => E::Not(e.clone()),
+            E::IsNull(e, n) => E::IsNull(e.clone(), *n),
+            E::BoolTest(e, t) => E::BoolTest(e.clone(), *t),
+            E::IsDistinct(a, b, n, f) => E::IsDistinct(a.clone(), b.clone(), *n, f.clone()),
+            E::Case { operand, whens, else_, ty } => E::Case {
+                operand: operand.clone(),
+                whens: whens.clone(),
+                else_: else_.clone(),
+                ty: ty.clone(),
+            },
+            E::CaseTest(t) => E::CaseTest(t.clone()),
+            E::Coalesce(a, t) => E::Coalesce(a.clone(), t.clone()),
+            E::MinMax(a, g, t, f) => E::MinMax(a.clone(), *g, t.clone(), f.clone()),
+            E::NullIf(a, b, f, t) => E::NullIf(a.clone(), b.clone(), f.clone(), t.clone()),
+            E::InList(e, l, n) => E::InList(e.clone(), l.clone(), *n),
+            E::ArrayOp { left, right, op, all } => E::ArrayOp {
+                left: left.clone(),
+                right: right.clone(),
+                op: op.clone(),
+                all: *all,
+            },
+            E::Subquery(s) => E::Subquery(s.clone()),
+            E::Array(a, t) => E::Array(a.clone(), t.clone()),
+            E::Row(a, t) => E::Row(a.clone(), t.clone()),
+            E::Subscript(e, s, t) => E::Subscript(e.clone(), s.clone(), t.clone()),
+            E::Field(e, i, t) => E::Field(e.clone(), *i, t.clone()),
+            E::Assign { base, subs, field, value, ty } => E::Assign {
+                base: base.clone(),
+                subs: subs.clone(),
+                field: *field,
+                value: value.clone(),
+                ty: ty.clone(),
+            },
+            E::Agg(i, t) => E::Agg(*i, t.clone()),
+            E::Window(i, t) => E::Window(*i, t.clone()),
+            E::Grouping(g) => E::Grouping(g.clone()),
+            E::Srf(i, t) => E::Srf(*i, t.clone()),
+            E::Default(t) => E::Default(t.clone()),
+            E::CoerceToDomain(e, d) => E::CoerceToDomain(e.clone(), d.clone()),
+            E::Relabel(e, t) => E::Relabel(e.clone(), t.clone()),
+            E::SqlSyntax(e) => E::SqlSyntax(e.clone()),
+            E::Collate(e, c, l) => E::Collate(e.clone(), c.clone(), *l),
+            E::Xml(x) => E::Xml(x.clone()),
+            E::RowCompare(r) => E::RowCompare(r.clone()),
+        })
+    }
 }
 
 /// A row comparison, column by column: the first pair that isn't equal decides it (NULL
@@ -382,6 +443,10 @@ impl Expr {
 
     /// Visit every sub-expression (not descending into subquery plans).
     pub fn walk<'e>(&'e self, f: &mut dyn FnMut(&'e Expr)) {
+        crate::stack::grow(|| self.walk_here(f))
+    }
+
+    fn walk_here<'e>(&'e self, f: &mut dyn FnMut(&'e Expr)) {
         f(self);
         match self {
             Expr::Call(_, args, _)
@@ -689,7 +754,7 @@ impl Expr {
 
     /// Rewrite bottom-up.
     pub fn transform(self, f: &mut dyn FnMut(Expr) -> Result<Expr>) -> Result<Expr> {
-        let e = self.map_children(&mut |c| c.transform(f))?;
+        let e = crate::stack::guard(|| self.map_children(&mut |c| c.transform(f)))?;
         f(e)
     }
 
@@ -995,7 +1060,13 @@ fn eval_spread(
 }
 
 /// Evaluate `e` over `row`.
+#[inline]
 pub fn eval(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
+    // (Expressions nest as deep as the statement does.)
+    crate::stack::guard(|| eval_here(e, row, ctx))
+}
+
+fn eval_here(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
     match e {
         Expr::Const(v, _) => Ok(v.clone()),
         Expr::Col(i, _) => row
@@ -1551,6 +1622,13 @@ pub fn build_array(elem: DataType, vals: Vec<Value>) -> Result<Value> {
     }
     let mut all_dims = vec![(vals.len(), 1)];
     all_dims.extend(inner.iter().map(|(l, _)| (*l, 1)));
+    if all_dims.len() > 6 {
+        bail!(
+            PROGRAM_LIMIT_EXCEEDED,
+            "number of array dimensions ({}) exceeds the maximum allowed (6)",
+            all_dims.len()
+        );
+    }
     Ok(Value::Array(Arc::new(ArrayValue {
         elem,
         dims: all_dims,

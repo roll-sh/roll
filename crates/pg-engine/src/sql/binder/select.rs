@@ -108,6 +108,10 @@ impl Binder<'_, '_> {
     }
 
     pub(crate) fn bind_select_stmt(&mut self, s: &pb::SelectStmt) -> Result<(Plan, Vec<OutCol>)> {
+        crate::stack::guard(|| self.bind_select_stmt_here(s))
+    }
+
+    fn bind_select_stmt_here(&mut self, s: &pb::SelectStmt) -> Result<(Plan, Vec<OutCol>)> {
         if let Some(into) = &s.into_clause {
             let at = into.rel.as_ref().map_or(-1, |r| r.location);
             return Err(with_pos(
@@ -3893,6 +3897,14 @@ impl Binder<'_, '_> {
     /// One FROM item: its plan, its scope (columns from position 0), and the params it reads
     /// from items to its left (LATERAL).
     pub(crate) fn bind_from_item(
+        &mut self,
+        item: &Node,
+        locking: Option<&Locking>,
+    ) -> Result<(Plan, Scope, Vec<Expr>)> {
+        crate::stack::guard(|| self.bind_from_item_here(item, locking))
+    }
+
+    fn bind_from_item_here(
         &mut self,
         item: &Node,
         locking: Option<&Locking>,

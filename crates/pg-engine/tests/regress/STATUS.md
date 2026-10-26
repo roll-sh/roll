@@ -8,6 +8,17 @@ file sees the catalogs the files before it left, as `pg_regress` gives them. The
 them (HANDOFF.md, "Regression suite"): edit only the prose by hand. `REPORT.md` and
 `results.tsv` next to this file are that run's report.
 
+Round 19, agent 63 (deep input, HANDOFF "Deep input"): the stack grows on demand at recursion
+points and the depth limit is `max_stack_depth` × a per-profile factor (with PostgreSQL's own
+per-level costs emulated for JSON input, PL/pgSQL calls and jsonpath), so deep input never
+overflows the thread that runs the engine. A release-build run of json, jsonb, jsonpath,
+sqljson, errors, plpgsql, strings, infinite_recurse, xml, arrays, rangefuncs, with, union,
+subselect, regex and create_view matched 6181 of 6181 units, against the committed baseline
+with no newly differing units. json 37/38 and jsonb 38/39 keep their HINT in release builds
+too: the json parser's fixed cap of 6400 levels is gone. A full debug run of `8545fad` (this
+change on `6957f0d7`) against a private reference (`a63-rref`) measured 51148, with no units
+newly differing or newly matching against the committed `results.tsv`.
+
 Round 18, agent 57 (measurement): full runs of `ed6356cc` (6be2da44 plus this round's change)
 against private references measured **51148** in a debug build (`a57-ref1`, the generated
 blocks below) and in a release build (`a57-ref2`), identical per file, per unit and in every

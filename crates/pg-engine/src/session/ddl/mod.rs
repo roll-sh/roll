@@ -285,7 +285,7 @@ impl<'c, 'a> Ddl<'c, 'a> {
     fn run(&mut self, node: &NodeEnum) -> Result<String> {
         use NodeEnum as N;
         // An object put in `pg_temp` creates the session's temporary schema first.
-        let d = format!("{node:?}");
+        let d = crate::stack::with_tree_headroom(|| format!("{node:?}"));
         let names_temp =
             d.contains("sval: \"pg_temp\"") || d.contains("schemaname: \"pg_temp\"");
         // (A statement naming one of the session's temporary tables uses it too.)

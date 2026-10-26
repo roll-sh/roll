@@ -136,6 +136,14 @@ fn result_row(cols: &[OutCol]) -> Vec<(String, u32, i32)> {
         .collect()
 }
 
+impl Drop for Prepared {
+    fn drop(&mut self) {
+        // A long statement's trees are as deep as it nests; their drops recurse that deep.
+        let trees = (self.stmt.take(), self.bound.get_mut().take());
+        crate::stack::drop_deep(trees, self.sql.len());
+    }
+}
+
 impl Prepared {
     /// The parameters' type oids, as a ParameterDescription gives them.
     pub fn param_type_oids(&self) -> Vec<u32> {
@@ -879,6 +887,11 @@ impl Session {
 
     /// `query`, with `copy_data` as the input of a COPY FROM STDIN.
     pub fn query_copy(&mut self, sql: &str, copy_data: &[u8]) -> Result<Vec<QueryResult>> {
+        // (Every entry runs with the red zone below it: an embedder's thread may be small.)
+        crate::stack::grow(|| self.query_copy_here(sql, copy_data))
+    }
+
+    fn query_copy_here(&mut self, sql: &str, copy_data: &[u8]) -> Result<Vec<QueryResult>> {
         let stmts = match self.parse(sql) {
             Ok(s) => s,
             Err(e) => {
@@ -982,6 +995,12 @@ impl Session {
         _max_rows: usize,
     ) -> Result<Outcome> {
         crate::stack::mark();
+        // A long statement's trees are walked deep: it runs with the red zone they need.
+        let _len = crate::stack::StatementLen::enter(p.sql.len());
+        crate::stack::grow(|| self.execute_statement(p, params))
+    }
+
+    fn execute_statement(&mut self, p: &Arc<Prepared>, params: &[Value]) -> Result<Outcome> {
         // (The caller holds `p`: its statement is borrowed, not copied.)
         let p = p.clone();
         let Some(stmt) = p.stmt.as_ref() else {
@@ -1566,6 +1585,16 @@ impl Session {
         sql: &str,
         param_oids: &[u32],
     ) -> Result<Arc<Prepared>> {
+        // (Every entry runs with the red zone below it: an embedder's thread may be small.)
+        crate::stack::grow(|| self.parse_message_here(name, sql, param_oids))
+    }
+
+    fn parse_message_here(
+        &mut self,
+        name: &str,
+        sql: &str,
+        param_oids: &[u32],
+    ) -> Result<Arc<Prepared>> {
         // (`pg_temp` is this session's while it binds, on a thread another session may
         // have run on: an embedder's Parse / Describe before any execute.)
         crate::catalog::set_session_temp_schema(&self.state.temp_schema());
@@ -1782,6 +1811,10 @@ impl Session {
 
     /// Result columns of a statement, without running it.
     pub fn describe(&mut self, p: &Arc<Prepared>) -> Result<Option<Vec<OutCol>>> {
+        crate::stack::grow(|| self.describe_here(p))
+    }
+
+    fn describe_here(&mut self, p: &Arc<Prepared>) -> Result<Option<Vec<OutCol>>> {
         // (`pg_temp` is this session's while it binds, on a thread another session may
         // have run on: an embedder's Parse / Describe before any execute.)
         crate::catalog::set_session_temp_schema(&self.state.temp_schema());
@@ -1868,7 +1901,7 @@ impl Session {
         formats: &[i16],
         result_formats: Vec<i16>,
     ) -> Result<()> {
-        let r = self.bind_inner(portal, stmt, params, formats, result_formats);
+        let r = crate::stack::grow(|| self.bind_inner(portal, stmt, params, formats, result_formats));
         if r.is_err() {
             self.on_error();
         }
@@ -2036,6 +2069,10 @@ impl Session {
 
     /// Execute message. Returns the outcome and whether the portal was suspended (more rows).
     pub fn execute_portal(&mut self, portal: &str, max_rows: usize) -> Result<(Outcome, bool)> {
+        crate::stack::grow(|| self.execute_portal_here(portal, max_rows))
+    }
+
+    fn execute_portal_here(&mut self, portal: &str, max_rows: usize) -> Result<(Outcome, bool)> {
         if !self.portals.contains_key(portal) && self.state.cursors.borrow().contains_key(portal) {
             let r = self.execute_cursor_portal(portal, max_rows);
             if r.is_err() {

@@ -97,9 +97,9 @@ impl<'a> Scan<'a> {
 }
 
 pub(super) fn unescape_json_string(s: &str) -> String {
-    match parse_jsonb(s) {
-        Ok(Jsonb::String(x)) => x,
-        _ => s.trim_matches('"').to_string(),
+    match parse_jsonb(s).ok().and_then(Jsonb::into_string) {
+        Some(x) => x,
+        None => s.trim_matches('"').to_string(),
     }
 }
 
@@ -369,25 +369,29 @@ fn exists_all(a: &[Value], _: &FnCtx) -> Result<Value> {
 
 fn concat(a: &[Value], _: &FnCtx) -> Result<Value> {
     let (x, y) = (jb(&a[0])?, jb(&a[1])?);
-    Ok(jv(match ((*x).clone(), (*y).clone()) {
-        (Jsonb::Object(mut p), Jsonb::Object(q)) => {
-            p.extend(q);
+    let (x, y) = ((*x).clone(), (*y).clone());
+    Ok(jv(match (&x, &y) {
+        (Jsonb::Object(_), Jsonb::Object(_)) => {
+            let mut p = x.into_object().unwrap_or_default();
+            p.extend(y.into_object().unwrap_or_default());
             Jsonb::object(p)
         }
-        (Jsonb::Array(mut p), Jsonb::Array(q)) => {
-            p.extend(q);
+        (Jsonb::Array(_), Jsonb::Array(_)) => {
+            let mut p = x.into_array().unwrap_or_default();
+            p.extend(y.into_array().unwrap_or_default());
             Jsonb::Array(p)
         }
-        (Jsonb::Array(mut p), other) => {
-            p.push(other);
+        (Jsonb::Array(_), _) => {
+            let mut p = x.into_array().unwrap_or_default();
+            p.push(y);
             Jsonb::Array(p)
         }
-        (other, Jsonb::Array(q)) => {
-            let mut v = vec![other];
-            v.extend(q);
+        (_, Jsonb::Array(_)) => {
+            let mut v = vec![x];
+            v.extend(y.into_array().unwrap_or_default());
             Jsonb::Array(v)
         }
-        (p, q) => Jsonb::Array(vec![p, q]),
+        _ => Jsonb::Array(vec![x, y]),
     }))
 }
 
@@ -961,6 +965,10 @@ fn pretty(a: &[Value], _: &FnCtx) -> Result<Value> {
 }
 
 fn strip_nulls_rec(j: &Jsonb, arrays: bool) -> Jsonb {
+    crate::stack::grow(|| strip_nulls_here(j, arrays))
+}
+
+fn strip_nulls_here(j: &Jsonb, arrays: bool) -> Jsonb {
     match j {
         Jsonb::Object(p) => Jsonb::Object(
             p.iter()
@@ -991,6 +999,10 @@ fn strip_nulls(a: &[Value], _: &FnCtx) -> Result<Value> {
     })
 }
 fn write_compact(j: &Jsonb, out: &mut String) {
+    crate::stack::grow(|| write_compact_here(j, out))
+}
+
+fn write_compact_here(j: &Jsonb, out: &mut String) {
     match j {
         Jsonb::Array(items) => {
             out.push('[');
@@ -1777,7 +1789,7 @@ fn json_arg(v: &Value) -> Jv<'_> {
     match v {
         Value::Json(s) | Value::Text(s) => Jv::Json(s),
         Value::Jsonb(j) => Jv::Jsonb(j),
-        _ => Jv::Jsonb(&Jsonb::Null),
+        _ => Jv::Jsonb(&crate::types::json::NULL),
     }
 }
 

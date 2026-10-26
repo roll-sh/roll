@@ -897,7 +897,7 @@ impl<'b, 'a> Binder<'b, 'a> {
         // Postgres folds constant calls when it plans, after parse analysis: a call that
         // fails to fold fails only once the whole statement has been analysed.
         let prev = self.fold_err.replace(Vec::new());
-        let r = self.bind_statement_inner(n);
+        let r = crate::stack::guard(|| self.bind_statement_inner(n));
         let pending = std::mem::replace(&mut self.fold_err, prev).unwrap_or_default();
         match r {
             Ok(q) if !pending.is_empty() => match fold::first_error(&settled(&q.plan), &pending, self.ctx) {
@@ -1737,6 +1737,10 @@ impl<'b, 'a> Binder<'b, 'a> {
     /// `collation_of` with only the first `depth` levels (an outer reference's value is the
     /// level's param, an expression one level out).
     fn collation_at(&self, e: &Expr, depth: usize) -> Result<Coll> {
+        crate::stack::guard(|| self.collation_at_here(e, depth))
+    }
+
+    fn collation_at_here(&self, e: &Expr, depth: usize) -> Result<Coll> {
         let col = match e {
             Expr::Collate(_, c, IMPLICIT_COLLATE) => return Ok(Coll::Implicit(c.clone())),
             Expr::Collate(_, c, l) => return Ok(Coll::Explicit(c.clone(), *l)),

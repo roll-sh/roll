@@ -16,8 +16,7 @@ use std::sync::Arc;
 pub fn open(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
     // (Taken first: a mask is for this node alone, whatever happens next.)
     let need = ctx.need.take();
-    crate::stack::check()?;
-    let node = open_node(plan, need.as_deref(), ctx)?;
+    let node = crate::stack::guard(|| open_node(plan, need.as_deref(), ctx))?;
     Ok(match &*ctx.instr.borrow() {
         Some(i) => super::InstrNode::wrap(node, Arc::as_ptr(plan) as usize, i.clone()),
         None => node,

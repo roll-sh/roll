@@ -29,6 +29,10 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// Postgres's stack per nested PL/pgSQL call (a recursive function of one IF and a
+/// RETURN calling itself: 928 levels fit its default 2MB, 944 don't).
+const PG_CALL_FRAME: usize = 2240;
+
 thread_local! {
     static DEPTH: Cell<u32> = const { Cell::new(0) };
     static PARSED: RefCell<HashMap<String, Rc<Block>>> = RefCell::new(HashMap::new());
@@ -531,10 +535,11 @@ fn internal_pos(mut e: Error) -> Error {
 struct DepthGuard;
 
 impl DepthGuard {
-    /// (Only the stack bounds the nesting, as in Postgres: check_stack_depth.)
+    /// (The stack bounds the nesting, as in Postgres: check_stack_depth, with its frames.)
     fn enter() -> Result<DepthGuard> {
-        crate::stack::check()?;
-        DEPTH.with(|x| x.set(x.get() + 1));
+        let d = DEPTH.with(|d| d.get());
+        crate::stack::check_emulated(d as usize + 1, PG_CALL_FRAME)?;
+        DEPTH.with(|x| x.set(d + 1));
         Ok(DepthGuard)
     }
 }

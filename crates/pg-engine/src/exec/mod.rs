@@ -978,7 +978,15 @@ impl<'a> ExecCtx<'a> {
         row: &[Value],
         limit: Option<usize>,
     ) -> Result<Rc<Vec<Row>>> {
-        crate::stack::check()?;
+        crate::stack::guard(|| self.subquery_rows_here(s, row, limit))
+    }
+
+    fn subquery_rows_here(
+        &self,
+        s: &Subquery,
+        row: &[Value],
+        limit: Option<usize>,
+    ) -> Result<Rc<Vec<Row>>> {
         // An initplan reading a CTE, inside a correlated subquery: the CTE may read the
         // outer row, so it is redone with it (its chgParam).
         fn reads_cte(p: &crate::sql::plan::Plan) -> bool {
@@ -1112,7 +1120,10 @@ impl<'a> ExecCtx<'a> {
     }
 
     pub fn eval_subquery(&self, s: &Subquery, row: &[Value]) -> Result<Value> {
-        crate::stack::check()?;
+        crate::stack::guard(|| self.eval_subquery_here(s, row))
+    }
+
+    fn eval_subquery_here(&self, s: &Subquery, row: &[Value]) -> Result<Value> {
         match s.kind {
             SubqueryKind::Scalar => {
                 let hashed = if !s.params.is_empty() && !self.instrumented() {

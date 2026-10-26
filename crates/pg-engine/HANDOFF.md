@@ -226,14 +226,8 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   aggregates over the rows in the serial plan's sort order, join keys normalised per type
   pair. Not modelled yet: a hash aggregation's spill to disk and external sorts (both change
   orders PostgreSQL shows once work_mem is exceeded).
-  Found and left open (not executor work): **deep expressions overflow a 2 MB thread that
-  embeds the engine** instead of failing with "stack depth limit exceeded": in-process on a
-  plain 2 MB thread, `SELECT 1 + 1 + ...` with 400 terms aborts the process (release build;
-  100 in debug), where PostgreSQL computes it (and errors at 10,000). The server's connection
-  threads have big stacks and error cleanly. The binder's expression recursion checks the
-  stack only at function calls (`bind_func_call`); a check in `bind_node` (as
-  transformExprRecurse has) turns 400 into the error, but 1,000 still overflows elsewhere on
-  the raw parse tree before binding. Probe and partial patch: agent 48's report.
+  Found and left open (not executor work): deep expressions overflowed a 2 MB thread that
+  embeds the engine. Fixed in round 19 by agent 63 ("Deep input", below).
 - **TPC-H plans and analytic speed** (round 20, agent 64; BENCH.md "Round 20", STATUS.md):
   the engine's plans at SF1 compared with PostgreSQL 18.6's on the same data, both analyzed,
   and the causes of the differences fixed in statistics and estimates: ANALYZE samples pages
@@ -247,6 +241,87 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   sorts by the session's work_mem, per-relation group estimates, a grouped CTE's order). Executor: a bitmap heap scan selecting
   many rows of a table too big to model runs as a filtered (parallel) scan of the table,
   outside EXPLAIN ANALYZE and predicate locking (q06 26 s -> about 2 s).
+- **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
+  longer overflows the stack of the thread that runs it, however deep the input nests. A
+  host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the
+  process in a release build and 100 in a debug build.
+  - **Design.** The stack grows on demand. `stack::guard` (recursion that may fail) and
+    `stack::grow` (copies, drops, hashes) run their closure on a fresh segment when less
+    than the red zone is left. Their fast path is one thread-local load and two compares.
+    Segments are mapped once per statement and reused (`psm` switches to them), and they
+    are unmapped when the statement ends.
+    - The red zone is at least 1 MB in debug and 256 kB in release. While a statement runs
+      it is sized for that statement's text (`StatementLen`, `tree_headroom`), so the
+      derived `Clone`, `Drop` and `Debug` of `pg_query` trees and of `Expr`, which have no
+      guards, always have room below a guard.
+    - Every `Session` entry (`query_copy`, `parse_message`, `describe`, `bind_message`,
+      `execute_portal`, `execute_with_inner`) starts under `grow`. So ordinary queries on
+      2 MB threads keep wide headroom (agent 65's `parallel_scan` overflow).
+    - Guards sit in these places:
+      - the binder: `bind_node`, `bind_func_call`, `bind_statement`, `bind_select_stmt`,
+        `bind_from_item`, `bind_subquery` and `collation_at`;
+      - `Expr::walk`, `Expr::transform` and `Expr::clone` (now hand-written);
+      - `eval`, executor `open`, the subquery runners, the deparser's `expr`, and the
+        jsonpath parser, printer and evaluator;
+      - jsonb output, comparison, containment and hashes (`types::hash`, `exec::pghash`,
+        `value.rs`), and `catalog::relsize`, `catalog::jsonbin`;
+      - `strip_nulls` and the tsearch jsonb walkers.
+    - `Jsonb` drops iteratively. It has a `Drop`, so its variants can't be moved out of:
+      use `into_array`, `into_object` and `into_string`. `JsonPath` keeps its tree depth for
+      its own copies and drops.
+  - **libpg_query.** It sizes its own 2 MB limit from the thread's stack bounds. Parses run
+    with 3 MB below them. Its tree output takes more stack per level than PostgreSQL's
+    analysis, so a statement it stops with "stack depth limit exceeded" parses again
+    (`stack::below_thread_stack`) with a 31 MB limit, on a stack mapped below the thread's,
+    where it keeps the limit it is given.
+    - Its protobuf output also stops at 10,000 nested messages. That error and its depth
+      error are now PostgreSQL's 54001 with the HINT. This limit is the one parse-side
+      difference left: about 1,650 nested scalar subqueries, where PostgreSQL goes to
+      2,176, and about 4,900 `NOT`s, where it goes to 8,064.
+  - **The depth limit.** The budget is `max_stack_depth` × `SCALE` bytes of the engine's
+    own stack, summed over segments: SCALE is 32 in release and 160 in debug. These are the
+    deepest inputs that still work, on a release build at the default 2 MB (bisected to
+    about 3%):
+
+    | shape | PostgreSQL 18.6 | engine | what stops the engine |
+    |---|---|---|---|
+    | `+` chains (constants or columns) | 4,032 | 4,875 | the depth limit |
+    | nested `abs()` | 4,032 | 4,875 | the grammar's "memory exhausted" (as in PostgreSQL) |
+    | scalar subqueries | 2,176 | 1,625 | libpg_query's protobuf limit |
+    | FROM subqueries | 1,632 | 1,625 | the grammar |
+    | `NOT` chains | 8,064 | 4,875 | the protobuf limit |
+    | `ROW()` nesting | 4,992 | 4,875 | the grammar |
+    | `UNION ALL` arms | 7,168 | 8,500 | the depth limit |
+    | PL/pgSQL recursion | 928 | 906 | emulated: 2,240 bytes per call |
+    | jsonpath parentheses | 9,984 | 9,750 | bison's 10,000 states |
+
+    - Where PostgreSQL's own frames bound a recursion, the limit is emulated per level with
+      `stack::check_emulated`, so the boundary follows `max_stack_depth` exactly:
+      - JSON input: an array level is 96 bytes in json and 113 in jsonb; an object level
+        is 129. json's 21,760 and jsonb's 18,432 arrays work, and the regress tests' 100 kB
+        cases fail.
+      - PL/pgSQL calls: 2,240 bytes each, so 928 levels run and 944 fail. The fixed cap
+        of 64 is gone.
+      - jsonpath trees: 159 bytes per level. Its nested parentheses also give bison's
+        "memory exhausted" at 10,000.
+    - `SET max_stack_depth` above 7680kB fails as PostgreSQL's check hook does (an 8 MB
+      `ulimit -s`). ARRAY[] beyond 6 dimensions fails with 54000.
+  - **Cost.** The guards sit on hot paths (`eval`, executor `open`), and cost nothing measurable:
+    TPC-H 1.005×, OLTP 1.04× against the base, in-process (BENCH.md, "Deep input").
+  - **Found and left open:**
+    - A recursive SQL function fails at any depth, even `f(1)`: the binder inlines its body
+      at every call, recursing until the depth limit. PostgreSQL's inline_function skips
+      functions already being inlined and runs them through fmgr_sql. PostgreSQL runs
+      8,320 levels of `CASE WHEN n = 0 THEN 0 ELSE f(n - 1) + 1 END`.
+    - CREATE VIEW takes time cubic in expression depth (`nodetree::Tree::collations` runs
+      `collation_at` over every subtree): 300 levels take 1 s and 600 take 8 s (release).
+    - The regex engine's emulated frames are an aarch64 build's. On the x86-64 reference,
+      `((...a...))` works up to 8,704 levels, where the engine stops before 8,000.
+    - An XML document deeper than 256 levels: the engine's error DETAIL adds libxml2's
+      context lines, which the reference doesn't print.
+  - Test: `tests/deep_input.rs` runs every shape through the embedded API on a 2 MB thread
+    and on the test thread, in both build profiles. Its goldens, `tests/deep_input.out`, are
+    recorded from PostgreSQL (`DEEP_RECORD`).
 - **Catalog, DDL and sessions** (round 18, agent 44; BENCH.md "Catalog, DDL and sessions"): the
   catalog is stored as a record per object (`catalog/persist.rs`, catalog format 1: older
   databases are rewritten when first opened), so a DDL commit writes only what changed; its

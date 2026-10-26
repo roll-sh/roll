@@ -271,6 +271,9 @@ fn jsonb_hash(j: &crate::types::json::Jsonb, seed: u64) -> u64 {
         *hash ^= tmp;
     }
     fn walk(j: &J, seed: u64, hash: &mut u64) {
+        crate::stack::grow(|| walk_here(j, seed, hash))
+    }
+    fn walk_here(j: &J, seed: u64, hash: &mut u64) {
         match j {
             J::Array(items) => {
                 *hash ^= ARRAY;

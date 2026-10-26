@@ -32,7 +32,22 @@ struct PgQueryProtobufParseResult {
 unsafe extern "C" {
     fn pg_query_parse_protobuf_opts(input: *const c_char, options: c_int) -> PgQueryProtobufParseResult;
     fn pg_query_free_protobuf_parse_result(result: PgQueryProtobufParseResult);
+    fn assign_max_stack_depth(newval: c_int, extra: *mut std::ffi::c_void);
 }
+
+/// The stack libpg_query gets: its tree output checks a limit (`max_stack_depth`) it sizes
+/// from the thread's stack below the call (less a 512kB slop, at most 2MB), so on the
+/// thread's own stack 1MB is enough; on a segment of the engine's (outside the bounds it
+/// reads) it keeps the 2MB set here, and gets that with its slop.
+const C_PARSE_STACK: usize = 1 << 20;
+const C_PARSE_STACK_ON_SEGMENT: usize = 3 << 20;
+
+/// The stack of a parse the 2MB limit stopped: libpg_query's limit is this less 1MB (its
+/// frames take up to 2kB a level unoptimised; Postgres analyses 4,000 levels in its 2MB).
+const C_DEEP_STACK: usize = 32 << 20;
+
+/// libpg_query's check_stack_depth error.
+const DEPTH_MSG: &[u8] = b"stack depth limit exceeded";
 
 /// Parse a query string into its statements. Syntax errors carry Postgres's message and the
 /// 1-based character position. Strings are read the standard way: this is for text the engine
@@ -223,21 +238,31 @@ pub fn cached_parse(
     if sql.len() > PARSE_CACHE_MAX_TEXT {
         return parse();
     }
+    // (Copying a tree recurses as deep as it goes.)
+    let copy = |r: &Result<Vec<RawStmt>>| {
+        crate::stack::with_headroom(crate::stack::tree_headroom(sql.len()), || r.clone())
+    };
     let key = (tag, Box::<str>::from(sql));
-    if let Some(r) = PARSED.with(|c| c.borrow().map.get(&key).cloned()) {
+    if let Some(r) = PARSED.with(|c| c.borrow().map.get(&key).map(copy)) {
         return r;
     }
     let r = parse();
-    PARSED.with(|c| {
+    let old = PARSED.with(|c| {
         let mut c = c.borrow_mut();
-        if c.map.len() >= PARSE_CACHE_ENTRIES || c.bytes >= PARSE_CACHE_BYTES {
-            c.map.clear();
+        let old = if c.map.len() >= PARSE_CACHE_ENTRIES || c.bytes >= PARSE_CACHE_BYTES {
             c.bytes = 0;
-        }
+            std::mem::take(&mut c.map)
+        } else {
+            Default::default()
+        };
         // (Trees are a few times their text.)
         c.bytes += sql.len() * 8;
-        c.map.insert(key, r.clone());
+        c.map.insert(key, copy(&r));
+        old
     });
+    for ((_, text), trees) in old {
+        crate::stack::drop_deep(trees, text.len());
+    }
     r
 }
 
@@ -253,12 +278,47 @@ fn parse_uncached(sql: &str, options: c_int) -> Result<Vec<RawStmt>> {
         )
     })?;
     // SAFETY: libpg_query takes a NUL-terminated string and returns owned buffers that we free
-    // below exactly once.
+    // below exactly once; the setting is libpg_query's thread-local.
+    let parse = || unsafe {
+        assign_max_stack_depth(2048, std::ptr::null_mut());
+        pg_query_parse_protobuf_opts(input.as_ptr(), options)
+    };
+    // It runs with that stack below it: on the thread's own, or on a segment of 3MB.
+    let mut r = if crate::stack::on_thread_stack(C_PARSE_STACK) {
+        parse()
+    } else {
+        crate::stack::with_headroom(C_PARSE_STACK_ON_SEGMENT, parse)
+    };
+    // Its tree output takes more stack per level than Postgres's analysis does, so a tree
+    // Postgres takes can exceed that 2MB: then it parses again with more, on a stack below
+    // the thread's (where libpg_query keeps the limit it is given), and the depth limits
+    // that apply are the engine's own.
+    // SAFETY: as above.
+    if unsafe { !r.error.is_null() && CStr::from_ptr((*r.error).message).to_bytes() == DEPTH_MSG }
+    {
+        let kb = C_DEEP_STACK / 1024 - 1024;
+        let deep = crate::stack::below_thread_stack(C_DEEP_STACK, || unsafe {
+            assign_max_stack_depth(kb as c_int, std::ptr::null_mut());
+            pg_query_parse_protobuf_opts(input.as_ptr(), options)
+        });
+        if let Some(deep) = deep {
+            // SAFETY: freed once; `r` is replaced.
+            unsafe { pg_query_free_protobuf_parse_result(r) };
+            r = deep;
+        }
+    }
     unsafe {
-        let r = pg_query_parse_protobuf_opts(input.as_ptr(), options);
         let out = if !r.error.is_null() {
             let e = &*r.error;
             let msg = CStr::from_ptr(e.message).to_string_lossy().to_string();
+            // (libpg_query's tree output also stops at 10,000 nested messages: Postgres has
+            // no such limit, but fails with this error not much deeper.)
+            if msg.as_bytes() == DEPTH_MSG
+                || msg == "parse tree is nested too deeply to serialize to protobuf"
+            {
+                pg_query_free_protobuf_parse_result(r);
+                return Err(crate::stack::depth_error());
+            }
             // Grammar errors that aren't syntax errors.
             let c = if msg.starts_with("unsafe use of \\' ") {
                 code::NONSTANDARD_USE_OF_ESCAPE_CHARACTER
@@ -330,24 +390,13 @@ fn parse_uncached(sql: &str, options: c_int) -> Result<Vec<RawStmt>> {
 
 /// The parse tree's protobuf form decoded. Its nesting is the grammar's (Postgres takes a
 /// UNION of hundreds of arms, a list nested as deep), so prost's recursion limit is off; the
-/// decoder recurses once per level, at most one level per two bytes, so a large tree is
-/// decoded on a thread with stack enough for its size.
+/// decoder recurses once per level, at most one level per two bytes, so it runs with stack
+/// enough for the tree's size.
 fn decode_tree(data: &[u8]) -> Result<Vec<RawStmt>> {
-    let decode = |d: &[u8]| {
-        ParseResult::decode(d)
+    crate::stack::with_headroom(crate::stack::tree_headroom(data.len()), || {
+        ParseResult::decode(data)
             .map(|p| p.stmts)
             .map_err(|e| crate::error::internal(format!("parse tree: {e}")))
-    };
-    if data.len() <= 4096 {
-        return decode(data);
-    }
-    std::thread::scope(|s| {
-        std::thread::Builder::new()
-            .stack_size((16 << 20) + data.len() * 512)
-            .spawn_scoped(s, || decode(data))
-            .map_err(|e| crate::error::internal(format!("parse tree: {e}")))?
-            .join()
-            .unwrap_or_else(|_| Err(crate::error::internal("parse tree: decoder panicked")))
     })
 }
 

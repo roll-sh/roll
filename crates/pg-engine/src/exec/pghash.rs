@@ -62,6 +62,9 @@ fn hash_jsonb(j: &crate::types::json::Jsonb) -> u32 {
         *hash = hash.rotate_left(1) ^ tmp;
     }
     fn walk(j: &J, hash: &mut u32) {
+        crate::stack::grow(|| walk_here(j, hash))
+    }
+    fn walk_here(j: &J, hash: &mut u32) {
         match j {
             J::Array(items) => {
                 *hash ^= ARRAY;

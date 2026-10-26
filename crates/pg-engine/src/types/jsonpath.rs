@@ -9,10 +9,70 @@ use std::borrow::Cow;
 
 // ── syntax tree ──
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct JsonPath {
     pub strict: bool,
     pub expr: Node,
+    /// How deep `expr` nests: copies and drops recurse that deep.
+    depth: usize,
+}
+
+/// Postgres's stack per level of a path's tree (flattenJsonPathParseItem's frame).
+const PG_ITEM_FRAME: usize = 159;
+
+impl JsonPath {
+    fn stack(&self) -> usize {
+        self.depth.saturating_mul(if cfg!(debug_assertions) { 2048 } else { 512 })
+    }
+}
+
+impl Clone for JsonPath {
+    fn clone(&self) -> Self {
+        let expr = crate::stack::with_headroom(self.stack(), || self.expr.clone());
+        JsonPath { strict: self.strict, expr, depth: self.depth }
+    }
+}
+
+impl Drop for JsonPath {
+    fn drop(&mut self) {
+        let expr = std::mem::replace(&mut self.expr, Node::Null);
+        crate::stack::with_headroom(self.stack(), move || drop(expr));
+    }
+}
+
+impl Node {
+    /// The levels of the tree.
+    fn depth(&self) -> usize {
+        crate::stack::grow(|| {
+            1 + match self {
+                Node::Chain(base, accs) => accs
+                    .iter()
+                    .map(|a| match a {
+                        Acc::Filter(f) => f.depth(),
+                        Acc::Index(subs) => subs
+                            .iter()
+                            .map(|(a, b)| a.depth().max(b.as_ref().map_or(0, Node::depth)))
+                            .max()
+                            .unwrap_or(0),
+                        _ => 0,
+                    })
+                    .max()
+                    .unwrap_or(0)
+                    .max(base.depth()),
+                Node::Bin(_, l, r)
+                | Node::And(l, r)
+                | Node::Or(l, r)
+                | Node::Cmp(_, l, r)
+                | Node::StartsWith(l, r) => l.depth().max(r.depth()),
+                Node::Unary(_, e)
+                | Node::Not(e)
+                | Node::Exists(e)
+                | Node::IsUnknown(e)
+                | Node::LikeRegex(e, ..) => e.depth(),
+                _ => 0,
+            }
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -641,6 +701,8 @@ struct Parser {
     pos: usize,
     in_filter: usize,
     in_subscript: usize,
+    /// Parentheses open.
+    parens: usize,
 }
 
 const METHODS: &[&str] = &[
@@ -715,6 +777,10 @@ impl Parser {
     }
 
     fn or(&mut self) -> Result<Node> {
+        crate::stack::guard(|| self.or_here())
+    }
+
+    fn or_here(&mut self) -> Result<Node> {
         let mut l = self.and()?;
         while matches!(self.peek(), Tok::P("||")) {
             if !l.is_predicate() {
@@ -1094,7 +1160,17 @@ impl Parser {
                 Node::Current
             }
             Tok::P("(") => {
+                // The grammar's parser stack holds 10,000 states: nested parentheses take one
+                // each (bison's "memory exhausted" beyond).
+                self.parens += 1;
+                if self.parens >= 9998 {
+                    return Err(Error::new(
+                        code::SYNTAX_ERROR,
+                        format!("memory exhausted at or near \"{}\" of jsonpath input", self.toks[self.pos].1),
+                    ));
+                }
                 let e = self.or()?;
+                self.parens -= 1;
                 self.expect(")")?;
                 if e.is_predicate()
                     && self.word("is")
@@ -1151,11 +1227,18 @@ pub fn parse(s: &str) -> Result<JsonPath> {
             format!("invalid input syntax for type jsonpath: \"{s}\""),
         ));
     }
+    // (A tree as deep as the path has tokens may be dropped here, on an error.)
+    let stack = toks.len().saturating_mul(if cfg!(debug_assertions) { 2048 } else { 512 });
+    crate::stack::with_headroom(stack, || parse_tokens(toks))
+}
+
+fn parse_tokens(toks: Vec<(Tok, String)>) -> Result<JsonPath> {
     let mut p = Parser {
         toks,
         pos: 0,
         in_filter: 0,
         in_subscript: 0,
+        parens: 0,
     };
     let mut strict = false;
     if p.word("strict") || p.word("lax") {
@@ -1166,7 +1249,11 @@ pub fn parse(s: &str) -> Result<JsonPath> {
     if !matches!(p.peek(), Tok::End) {
         return Err(p.err());
     }
-    Ok(JsonPath { strict, expr })
+    // Postgres flattens the tree recursively (flattenJsonPathParseItem), its check_stack_depth
+    // stopping at a depth of about 13,200 with the default 2MB.
+    let depth = expr.depth();
+    crate::stack::check_emulated(depth, PG_ITEM_FRAME)?;
+    Ok(JsonPath { strict, expr, depth })
 }
 
 // ── canonical text (printJsonPathItem) ──
@@ -1186,6 +1273,10 @@ fn priority(n: &Node) -> u8 {
 }
 
 fn print(out: &mut String, n: &Node, brackets: bool, has_next: bool) {
+    crate::stack::grow(|| print_here(out, n, brackets, has_next))
+}
+
+fn print_here(out: &mut String, n: &Node, brackets: bool, has_next: bool) {
     let binary = |out: &mut String, op: &str, l: &Node, r: &Node| {
         if brackets {
             out.push('(');
@@ -1604,6 +1695,10 @@ pub fn is_mutable(path: &JsonPath, var: &dyn Fn(&str) -> Option<DtStatus>) -> bo
     }
     impl W<'_> {
         fn node(&mut self, n: &Node, current: DtStatus) -> DtStatus {
+            crate::stack::grow(|| self.node_here(n, current))
+        }
+
+        fn node_here(&mut self, n: &Node, current: DtStatus) -> DtStatus {
             match n {
                 Node::Current => current,
                 Node::Var(v) => (self.var)(v).unwrap_or(DtStatus::Non),
@@ -1862,7 +1957,7 @@ impl<'a> Exec<'a> {
                 It::J(Cow::Borrowed(Jsonb::Array(a))) => {
                     out.extend(a.iter().map(|x| It::J(Cow::Borrowed(x))))
                 }
-                It::J(Cow::Owned(Jsonb::Array(a))) => out.extend(a.into_iter().map(It::owned)),
+                It::J(Cow::Owned(j @ Jsonb::Array(_))) => out.extend(j.into_array().unwrap_or_default().into_iter().map(It::owned)),
                 it => out.push(it),
             }
         }
@@ -1920,6 +2015,10 @@ impl<'a> Exec<'a> {
     }
 
     fn eval(&self, n: &Node, cur: Option<&It<'a>>, last: Option<i64>) -> R<Vec<It<'a>>> {
+        crate::stack::grow(|| self.eval_here(n, cur, last))
+    }
+
+    fn eval_here(&self, n: &Node, cur: Option<&It<'a>>, last: Option<i64>) -> R<Vec<It<'a>>> {
         Ok(match n {
             Node::Null => vec![It::owned(Jsonb::Null)],
             Node::Bool(b) => vec![It::owned(Jsonb::Bool(*b))],
@@ -2103,8 +2202,8 @@ impl<'a> Exec<'a> {
                 It::J(Cow::Borrowed(Jsonb::Object(pairs))) => {
                     out.extend(pairs.iter().map(|(_, v)| It::J(Cow::Borrowed(v))))
                 }
-                It::J(Cow::Owned(Jsonb::Object(pairs))) => {
-                    out.extend(pairs.into_iter().map(|(_, v)| It::owned(v)))
+                It::J(Cow::Owned(j @ Jsonb::Object(_))) => {
+                    out.extend(j.into_object().unwrap_or_default().into_iter().map(|(_, v)| It::owned(v)))
                 }
                 _ if self.strict => {
                     return Err(soft(
@@ -2118,7 +2217,7 @@ impl<'a> Exec<'a> {
                 It::J(Cow::Borrowed(Jsonb::Array(a))) => {
                     out.extend(a.iter().map(|x| It::J(Cow::Borrowed(x))))
                 }
-                It::J(Cow::Owned(Jsonb::Array(a))) => out.extend(a.into_iter().map(It::owned)),
+                It::J(Cow::Owned(j @ Jsonb::Array(_))) => out.extend(j.into_array().unwrap_or_default().into_iter().map(It::owned)),
                 _ if self.strict => {
                     return Err(soft(
                         code::SQL_JSON_ARRAY_NOT_FOUND,
@@ -2132,7 +2231,7 @@ impl<'a> Exec<'a> {
                     It::J(Cow::Borrowed(Jsonb::Array(a))) => {
                         a.iter().map(|x| It::J(Cow::Borrowed(x))).collect()
                     }
-                    It::J(Cow::Owned(Jsonb::Array(a))) => a.into_iter().map(It::owned).collect(),
+                    It::J(Cow::Owned(j @ Jsonb::Array(_))) => j.into_array().unwrap_or_default().into_iter().map(It::owned).collect(),
                     _ if self.strict => {
                         return Err(soft(
                             code::SQL_JSON_ARRAY_NOT_FOUND,
@@ -2668,6 +2767,10 @@ impl<'a> Exec<'a> {
     }
 
     fn pred(&self, n: &Node, cur: Option<&It<'a>>, last: Option<i64>) -> R<Tri> {
+        crate::stack::grow(|| self.pred_here(n, cur, last))
+    }
+
+    fn pred_here(&self, n: &Node, cur: Option<&It<'a>>, last: Option<i64>) -> R<Tri> {
         Ok(match n {
             Node::And(l, r) => {
                 let a = self.pred(l, cur, last)?;
@@ -3133,6 +3236,10 @@ fn numeric_size(v: &Numeric) -> usize {
 
 /// Size of a container's binary form starting at an aligned offset.
 fn container_size(j: &Jsonb) -> usize {
+    crate::stack::grow(|| container_size_here(j))
+}
+
+fn container_size_here(j: &Jsonb) -> usize {
     let mut pos = 4;
     match j {
         Jsonb::Array(items) => {

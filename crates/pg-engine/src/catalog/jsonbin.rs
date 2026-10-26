@@ -289,6 +289,38 @@ fn container(buf: &mut Vec<u8>, v: &J, scalar: bool) {
 
 /// The bytes of a jsonb value after its varlena header.
 pub fn jsonb_bytes(text: &str) -> Vec<u8> {
+    // (Parsing, writing and dropping the value recurse as deep as it nests.)
+    let per_level = if cfg!(debug_assertions) { 4 << 10 } else { 1 << 10 };
+    crate::stack::with_headroom(nesting(text.as_bytes()) * per_level, || jsonb_bytes_here(text))
+}
+
+/// How deep JSON text nests (brackets outside strings).
+fn nesting(s: &[u8]) -> usize {
+    let (mut depth, mut max, mut in_str, mut esc) = (0usize, 0usize, false, false);
+    for &c in s {
+        if in_str {
+            match c {
+                _ if esc => esc = false,
+                b'\\' => esc = true,
+                b'"' => in_str = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            b'"' => in_str = true,
+            b'[' | b'{' => {
+                depth += 1;
+                max = max.max(depth);
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    max
+}
+
+fn jsonb_bytes_here(text: &str) -> Vec<u8> {
     let mut p = P { s: text.as_bytes(), i: 0 };
     let v = p.value();
     let mut buf = Vec::new();

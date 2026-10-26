@@ -967,6 +967,10 @@ impl Deparser<'_, '_> {
 
     /// `get_rule_expr`.
     fn expr(&mut self, e: &Expr, showimplicit: bool) -> Option<()> {
+        crate::stack::grow(|| self.expr_here(e, showimplicit))
+    }
+
+    fn expr_here(&mut self, e: &Expr, showimplicit: bool) -> Option<()> {
         if let Some(row) = crate::sql::binder::nullable_whole_row(e) {
             return self.expr(row, showimplicit);
         }

@@ -103,6 +103,11 @@ impl Binder<'_, '_> {
     }
 
     fn bind_node(&mut self, n: &Node) -> Result<Expr> {
+        // (transformExprRecurse's check_stack_depth.)
+        crate::stack::guard(|| self.bind_node_here(n))
+    }
+
+    fn bind_node_here(&mut self, n: &Node) -> Result<Expr> {
         let Some(e) = inner(n) else {
             return Err(crate::error::internal("empty expression node"));
         };
@@ -4045,7 +4050,8 @@ impl Binder<'_, '_> {
         &mut self,
         n: &Node,
     ) -> Result<(Arc<Plan>, Vec<OutCol>, Vec<Expr>)> {
-        let ((plan, cols), params) = self.in_level(|b| b.bind_select_node(n))?;
+        let ((plan, cols), params) =
+            crate::stack::guard(|| self.in_level(|b| b.bind_select_node(n)))?;
         Ok((Arc::new(plan), cols, params))
     }
 
@@ -4561,8 +4567,7 @@ impl Binder<'_, '_> {
 
     fn bind_func_call(&mut self, f: &pb::FuncCall) -> Result<Expr> {
         // (A function whose body calls it again recurses here, inlined.)
-        crate::stack::check()?;
-        let r = self.bind_func_call_inner(f);
+        let r = crate::stack::guard(|| self.bind_func_call_inner(f));
         // pg_typeof reports the type its argument is declared as, a domain too.
         let r = match r {
             Ok(Expr::Call(def, mut args, ty)) if def.oid == 1619 && args.len() == 1 => {

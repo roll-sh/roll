@@ -215,6 +215,9 @@ impl JsonbSizer<'_> {
     }
     /// An object or array: header, JEntries, then the keys' and values' data.
     fn container(&mut self) {
+        crate::stack::grow(|| self.container_here())
+    }
+    fn container_here(&mut self) {
         let open = self.peek();
         self.i += 1;
         if open == Some(b'[') {

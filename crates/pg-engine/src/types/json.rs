@@ -6,7 +6,7 @@ use crate::error::{Error, Result, code};
 use std::cmp::Ordering;
 use std::fmt::{self, Write};
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum Jsonb {
     Null,
     Bool(bool),
@@ -16,6 +16,78 @@ pub enum Jsonb {
     /// Sorted by `key_cmp`, keys unique.
     Object(Vec<(String, Jsonb)>),
 }
+
+// A value nests as deep as its input (18,000 levels fit Postgres's 2MB stack), so copies grow
+// the stack as they go and drops take no recursion at all.
+impl Clone for Jsonb {
+    fn clone(&self) -> Self {
+        match self {
+            Jsonb::Null => Jsonb::Null,
+            Jsonb::Bool(b) => Jsonb::Bool(*b),
+            Jsonb::Number(n) => Jsonb::Number(n.clone()),
+            Jsonb::String(s) => Jsonb::String(s.clone()),
+            Jsonb::Array(v) => crate::stack::grow(|| Jsonb::Array(v.clone())),
+            Jsonb::Object(p) => crate::stack::grow(|| Jsonb::Object(p.clone())),
+        }
+    }
+}
+
+impl Drop for Jsonb {
+    fn drop(&mut self) {
+        let nested = |j: &Jsonb| match j {
+            Jsonb::Array(v) => v.iter().any(Jsonb::is_container),
+            Jsonb::Object(p) => p.iter().any(|(_, x)| x.is_container()),
+            _ => false,
+        };
+        if !nested(self) {
+            return;
+        }
+        // Containers move to a list of their own, emptied one by one.
+        let mut todo = vec![std::mem::replace(self, Jsonb::Null)];
+        while let Some(mut j) = todo.pop() {
+            match &mut j {
+                Jsonb::Array(v) => todo.extend(v.drain(..).filter(Jsonb::is_container)),
+                Jsonb::Object(p) => {
+                    todo.extend(p.drain(..).map(|(_, x)| x).filter(Jsonb::is_container))
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl Jsonb {
+    fn is_container(&self) -> bool {
+        matches!(self, Jsonb::Array(_) | Jsonb::Object(_))
+    }
+
+    /// An array's elements (matching moves no parts out of a `Jsonb`: it has a `Drop`).
+    pub fn into_array(mut self) -> Option<Vec<Jsonb>> {
+        match &mut self {
+            Jsonb::Array(v) => Some(std::mem::take(v)),
+            _ => None,
+        }
+    }
+
+    /// An object's pairs.
+    pub fn into_object(mut self) -> Option<Vec<(String, Jsonb)>> {
+        match &mut self {
+            Jsonb::Object(p) => Some(std::mem::take(p)),
+            _ => None,
+        }
+    }
+
+    /// A string's text.
+    pub fn into_string(mut self) -> Option<String> {
+        match &mut self {
+            Jsonb::String(s) => Some(std::mem::take(s)),
+            _ => None,
+        }
+    }
+}
+
+/// `null`, to borrow.
+pub static NULL: Jsonb = Jsonb::Null;
 
 /// jsonb key order: shorter keys first, then bytewise.
 pub fn key_cmp(a: &str, b: &str) -> Ordering {
@@ -88,6 +160,10 @@ impl Jsonb {
 
     /// `@>` containment.
     pub fn contains(&self, other: &Jsonb) -> bool {
+        crate::stack::grow(|| self.contains_here(other))
+    }
+
+    fn contains_here(&self, other: &Jsonb) -> bool {
         match (self, other) {
             (Jsonb::Object(a), Jsonb::Object(b)) => {
                 b.iter().all(|(k, bv)| match self.get(k) {
@@ -179,6 +255,10 @@ pub fn compare(a: &Jsonb, b: &Jsonb) -> i32 {
 }
 
 fn compare_inner(a: &Jsonb, b: &Jsonb) -> i32 {
+    crate::stack::grow(|| compare_here(a, b))
+}
+
+fn compare_here(a: &Jsonb, b: &Jsonb) -> i32 {
     // The types' order: null, string, number, boolean, array, object.
     let rank = |j: &Jsonb| match j {
         Jsonb::Null => 0,
@@ -252,6 +332,10 @@ pub fn write_json_string(out: &mut String, s: &str) {
 
 impl Jsonb {
     pub fn write(&self, out: &mut String) {
+        crate::stack::grow(|| self.write_here(out))
+    }
+
+    fn write_here(&self, out: &mut String) {
         match self {
             Jsonb::Null => out.push_str("null"),
             Jsonb::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -292,6 +376,10 @@ impl Jsonb {
     }
 
     fn write_pretty(&self, out: &mut String, depth: usize) {
+        crate::stack::grow(|| self.write_pretty_here(out, depth))
+    }
+
+    fn write_pretty_here(&self, out: &mut String, depth: usize) {
         let indent = |out: &mut String, d: usize| {
             for _ in 0..d {
                 out.push_str("    ");
@@ -470,14 +558,24 @@ impl<'a> Parser<'a> {
                 "The input string ended unexpectedly.".into(),
             ));
         }
-        // Deep nesting fails like Postgres's check_stack_depth instead of overflowing the
-        // thread's stack (frames are much bigger in debug builds).
-        crate::stack::check()?;
-        self.depth += 1;
-        if self.depth > 6400 {
-            return Err(crate::stack::depth_error());
-        }
-        let v = match self.b[self.pos] {
+        // Deep nesting fails where Postgres's check_stack_depth stops its parser: `depth` is
+        // the stack Postgres's frames would take (an array level 96 bytes in json, 113 in
+        // jsonb; an object level 129), and the engine's own stack grows as needed.
+        let frame = match (self.b[self.pos], self.for_jsonb) {
+            (b'{', _) => 129,
+            (b'[', false) => 96,
+            (b'[', true) => 113,
+            _ => 0,
+        };
+        self.depth += frame;
+        crate::stack::check_emulated(self.depth, 1)?;
+        let v = crate::stack::grow(|| self.value_here())?;
+        self.depth -= frame;
+        Ok(v)
+    }
+
+    fn value_here(&mut self) -> Result<Jsonb> {
+        Ok(match self.b[self.pos] {
             b'{' => {
                 self.pos += 1;
                 let mut pairs = Vec::new();
@@ -560,9 +658,7 @@ impl<'a> Parser<'a> {
             b'-' | b'0'..=b'9' => self.number()?,
             b'}' | b']' | b':' | b',' => return Err(self.expected("JSON value")),
             _ => return Err(self.invalid_token(self.pos)),
-        };
-        self.depth -= 1;
-        Ok(v)
+        })
     }
 
     fn ident_continues(&self, len: usize) -> bool {

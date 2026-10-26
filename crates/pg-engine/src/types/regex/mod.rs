@@ -170,8 +170,8 @@ fn too_deep() -> bool {
     if used > MAX_STACK_DEPTH as isize {
         return true;
     }
-    if crate::stack::check().is_err() {
-        // The thread's own stack ran out first: the caller retries on a bigger one.
+    if crate::stack::near_end() || crate::stack::check().is_err() {
+        // The stack it runs on is nearly used up: the caller retries on a bigger one.
         REAL_STACK_OUT.with(|r| r.set(true));
         return true;
     }

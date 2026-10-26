@@ -1039,6 +1039,20 @@ fn normalize(def: &Def, raw: &str) -> Result<String> {
                     def.max as i64
                 );
             }
+            if name == "max_stack_depth" && n > crate::stack::MAX_STACK_DEPTH_KB {
+                // check_max_stack_depth: the platform's limit (Postgres's 8MB `ulimit -s`, less
+                // its 512kB slop; the engine's own stack grows as needed, its budget follows
+                // the setting).
+                return Err(Error::new(
+                    code::INVALID_PARAMETER_VALUE,
+                    format!("invalid value for parameter \"{name}\": {n}"),
+                )
+                .detail(format!(
+                    "\"max_stack_depth\" must not exceed {}kB.",
+                    crate::stack::MAX_STACK_DEPTH_KB
+                ))
+                .hint("Increase the platform's stack depth limit via \"ulimit -s\" or local equivalent."));
+            }
             n.to_string()
         }
         Kind::Real(unit) => {
