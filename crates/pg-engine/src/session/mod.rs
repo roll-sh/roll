@@ -1099,6 +1099,10 @@ impl Session {
                     tag
                 }))
             }
+            n if ddl::is_pg_description_dml(n) => {
+                let tag = self.with_ctx(params, |ctx| ddl::pg_description_dml(ctx, node))?;
+                done(QueryResult::command(tag))
+            }
             NodeEnum::UpdateStmt(u) if ddl::is_pg_class_update(u) => {
                 let tag = self.with_ctx(params, |ctx| ddl::execute(ctx, node, ""))?;
                 done(QueryResult::command(tag))
@@ -1138,7 +1142,14 @@ impl Session {
             | NodeEnum::MergeStmt(_) => done(self.run_query(p, stmt, params)?),
             NodeEnum::TransactionStmt(t) => done(self.transaction_stmt(t)?),
             NodeEnum::ConstraintsSetStmt(s) => done(self.set_constraints(s)?),
-            NodeEnum::VariableSetStmt(s) => done(self.set_stmt(s)?),
+            NodeEnum::VariableSetStmt(s) => {
+                settings::take_name_notices();
+                let r = self.set_stmt(s);
+                for e in settings::take_name_notices() {
+                    self.raise_notice(e);
+                }
+                done(r?)
+            }
             NodeEnum::VariableShowStmt(s) => done(self.show_stmt(&s.name)?),
             NodeEnum::PrepareStmt(s) => {
                 let text = self.whole_query(p);
@@ -1267,9 +1278,13 @@ impl Session {
         }
         let types = p.param_types.clone();
         let no_params = !self.infer_params && params.is_empty() && types.is_empty();
+        // (Parameters a Parse message declared as domains keep them: a bare `$n` of a
+        // domain-array parameter is a column of that type; sqlx.)
+        let domains = p.plans.lock().param_oids.clone();
         let b = self.with_ctx_path(params, Some(path.clone()), |ctx| {
             let mut b = Binder::new(ctx, types);
             b.no_params = no_params;
+            b.param_domains = domains;
             b.bind_statement(stmt)
         })?;
         if let Some(fixed) = &p.plans.lock().fixed_result
@@ -1323,9 +1338,11 @@ impl Session {
     ) -> Result<Arc<BoundQuery>> {
         self.ensure_txn();
         let types = p.param_types.clone();
+        let domains = p.plans.lock().param_oids.clone();
         let b = self.with_ctx(params, |ctx| {
             let mut b = Binder::new(ctx, types);
             b.param_consts = true;
+            b.param_domains = domains;
             b.bind_statement(stmt)
         })?;
         if let Some(fixed) = &p.plans.lock().fixed_result
@@ -1623,8 +1640,25 @@ impl Session {
                 "current transaction is aborted, commands ignored until end of transaction block",
             ));
         }
-        if p.is_query() {
+        // A superuser's DML on a system catalog the engine derives: the query it runs types
+        // its parameters; it returns no rows.
+        if let Some(q) = p.stmt.as_ref().and_then(inner).and_then(ddl::catalog_dml_query) {
+            let types = p.param_types.clone();
+            p.param_types = self.with_ctx(&[], |ctx| {
+                Binder::new(ctx, types).bind_statement(&q).map(|b| b.params)
+            })?;
+            p.plans.lock().fixed_result = Some(result_row(&[]));
+        } else if p.is_query() {
             let stmt = p.stmt.clone().unwrap();
+            {
+                let cat = self.visible_catalog();
+                p.plans.lock().param_oids = param_oids
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, o)| cat.domain_type(**o).is_some())
+                    .map(|(i, o)| (i, *o))
+                    .collect();
+            }
             self.infer_params = true;
             let b = self.bound(&p, &stmt, &[]);
             self.infer_params = false;
@@ -1756,6 +1790,8 @@ impl Session {
         };
         let r = (|| -> Result<Option<Vec<OutCol>>> {
             match inner(&stmt) {
+                // (DML on a derived system catalog: no RETURNING, no rows.)
+                Some(n) if ddl::catalog_dml_query(n).is_some() => Ok(None),
                 Some(NodeEnum::SelectStmt(_)) => Ok(Some(self.bound(p, &stmt, &[])?.cols.clone())),
                 Some(
                     NodeEnum::InsertStmt(_)

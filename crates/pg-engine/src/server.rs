@@ -661,6 +661,7 @@ fn handle(
     // (process_startup_options: the `options` switches first, then the other parameters,
     // which win over them.)
     let mut settings: Vec<(String, String)> = Vec::new();
+    crate::session::settings::take_name_notices();
     for (k, v) in &params {
         if k == "options" {
             settings.extend(parse_options(v));
@@ -685,6 +686,8 @@ fn handle(
         }
     }
     s.take_changed_settings();
+    // (process_startup_options' NOTICEs: an application_name truncated.)
+    let startup_notices = crate::session::settings::take_name_notices();
     // Notifications for an idle session go straight to the client.
     let wr = c.wr.try_clone()?;
     s.attach_notifications(Arc::new(move |notes: &[crate::notify::Notification]| {
@@ -696,6 +699,9 @@ fn handle(
     }));
 
     c.auth(0, &[]);
+    for e in &startup_notices {
+        c.notice(e);
+    }
     {
         let st = s.state.settings.borrow();
         for name in crate::session::settings::REPORTED {

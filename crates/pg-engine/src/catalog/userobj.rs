@@ -684,7 +684,31 @@ impl Catalog {
         {
             return c.oid;
         }
-        super::system::default_opclass(am, ty)
+        let builtin = super::system::default_opclass(am, ty);
+        // (GetDefaultOpClass: else the one default class whose input type the key's type is
+        // binary coercible to, a preferred type's breaking a tie: btree_gist's gist_text_ops,
+        // not gist_bpchar_ops, for varchar; TypeORM.)
+        if builtin == 0 {
+            let casts = self.casts_all();
+            let (mut preferred, mut compatible) = (Vec::new(), Vec::new());
+            for c in self.opclasses.values().filter(|c| {
+                c.method == am
+                    && c.default
+                    && casts
+                        .iter()
+                        .any(|k| k.source == oid && k.target == c.intype && k.method == 'b' && k.context == 'i')
+            }) {
+                if crate::types::DataType::from_oid(c.intype).is_some_and(|t| t.is_preferred()) {
+                    preferred.push(c.oid);
+                } else {
+                    compatible.push(c.oid);
+                }
+            }
+            if let ([one], _) | ([], [one]) = (preferred.as_slice(), compatible.as_slice()) {
+                return *one;
+            }
+        }
+        builtin
     }
 
     /// The hash support function (FUNCTION 2 for the class's input type) of hash

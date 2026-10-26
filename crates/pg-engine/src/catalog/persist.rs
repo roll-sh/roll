@@ -403,6 +403,7 @@ stored_fields! {
         version,
         next_oid,
         comments,
+        class_comments,
         extensions,
         acls,
         default_acls,

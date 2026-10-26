@@ -1805,10 +1805,17 @@ pub struct Catalog {
     pub functions: pmap::PMap<Arc<Function>>,
     #[serde(default)]
     pub roles: BTreeMap<u32, Role>,
-    /// (object oid, sub-id, text): `COMMENT ON`.
+    /// (object oid, sub-id, text): `COMMENT ON`. Their pg_description classoid is their
+    /// object's catalog (`class_of`).
     /// (Shared by the catalog's copies until one changes it: `comments_mut`.)
     #[serde(default)]
     pub comments: Arc<Vec<(u32, i32, String)>>,
+    /// pg_description rows (objoid, classoid, objsubid, text) whose classoid isn't their
+    /// object's own catalog: a superuser's UPDATE / INSERT on pg_description put them there
+    /// (pgjdbc moves a function's comment onto a table). Kept as written, as Postgres keeps
+    /// them; dropping the object doesn't remove them (DeleteComments goes by its class).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub class_comments: Vec<(u32, u32, i32, String)>,
     /// Installed extensions: (oid, name, schema, version).
     #[serde(default)]
     pub extensions: Vec<(u32, String, u32, String)>,
@@ -2493,6 +2500,39 @@ impl Catalog {
         };
         self.next_oid = o + n;
         o
+    }
+
+    /// Whether pg_description has the row (`oid`, `class`, `sub`): its unique index's key.
+    pub fn has_description(&self, oid: u32, class: u32, sub: i32) -> bool {
+        if self.class_of(oid) != Some(class) {
+            return self.class_comments.iter().any(|c| (c.0, c.1, c.2) == (oid, class, sub));
+        }
+        self.comments.iter().any(|c| c.0 == oid && c.1 == sub && !c.2.is_empty())
+            || system::builtin_description(self, oid, Some(class), sub).is_some()
+    }
+
+    /// pg_description's row (`oid`, `class`, `sub`) deleted (a superuser's DML).
+    pub fn remove_description(&mut self, oid: u32, class: u32, sub: i32) {
+        if self.class_of(oid) != Some(class) {
+            self.class_comments.retain(|c| (c.0, c.1, c.2) != (oid, class, sub));
+            return;
+        }
+        self.comments_mut().retain(|c| !(c.0 == oid && c.1 == sub));
+        if system::builtin_description(self, oid, Some(class), sub).is_some() {
+            // (An empty comment hides the one Postgres ships.)
+            self.comments_mut().push((oid, sub, String::new()));
+        }
+    }
+
+    /// pg_description's row (`oid`, `class`, `sub`) set to `text` (a superuser's DML).
+    pub fn put_description(&mut self, oid: u32, class: u32, sub: i32, text: String) {
+        if self.class_of(oid) != Some(class) {
+            self.class_comments.retain(|c| (c.0, c.1, c.2) != (oid, class, sub));
+            self.class_comments.push((oid, class, sub, text));
+            return;
+        }
+        self.comments_mut().retain(|c| !(c.0 == oid && c.1 == sub));
+        self.comments_mut().push((oid, sub, text));
     }
 
     /// The system catalog (pg_class, pg_proc, …) object `oid` of this database is in, for

@@ -3216,3 +3216,64 @@ fn concurrent_index_builds_wait_for_old_snapshots() {
     });
     s.engine.shutdown();
 }
+
+/// Client suites, round 3 (agent 66): a truncated application_name's NOTICE at startup
+/// (tokio-postgres `notices`), pg_database's first row, an empty array received in binary
+/// (array_recv: no dimensions; sqlx), pg_class / pg_description DML over the extended
+/// protocol (pgjdbc).
+#[test]
+fn startup_notice_empty_arrays_and_catalog_dml() {
+    let s = server(AuthMethod::Trust);
+    runtime().block_on(async {
+        let mut cfg = s.config("postgres", "");
+        cfg.application_name("x".repeat(65));
+        let (c, mut conn) = cfg.connect(NoTls).await.unwrap();
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        tokio::spawn(async move {
+            let mut st = futures::stream::poll_fn(move |cx| conn.poll_message(cx));
+            while let Some(Ok(m)) = st.next().await {
+                if let AsyncMessage::Notice(n) = m {
+                    let _ = tx.unbounded_send(n.message().to_string());
+                }
+            }
+        });
+        let name: String = c.query_one("SELECT current_setting('application_name')", &[]).await.unwrap().get(0);
+        assert_eq!(name.len(), 63);
+        assert_eq!(
+            rx.next().await.unwrap(),
+            format!("identifier \"{}\" will be truncated to \"{}\"", "x".repeat(65), "x".repeat(63))
+        );
+        let first: String = c.query("SELECT datname FROM pg_database", &[]).await.unwrap()[0].get(0);
+        assert_eq!(first, "postgres");
+        let empty: Vec<i32> = Vec::new();
+        let row = c
+            .query_one("SELECT array_ndims($1::int4[]), $1::int4[] = '{}'", &[&empty])
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, Option<i32>>(0), None);
+        assert!(row.get::<_, bool>(1));
+        // pgjdbc: an updatable result set writes relname back; a comment moved by objoid.
+        let st = c.prepare("UPDATE pg_class SET \"relname\" = $1 WHERE \"oid\" = $2").await.unwrap();
+        assert_eq!(st.params(), &[tokio_postgres::types::Type::NAME, tokio_postgres::types::Type::OID]);
+        assert!(st.columns().is_empty());
+        assert_eq!(c.execute(&st, &[&"pg_class", &1259u32]).await.unwrap(), 1);
+        c.batch_execute(
+            "CREATE TABLE d (x int); COMMENT ON TABLE d IS 'table'; \
+             CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1'; COMMENT ON FUNCTION f() IS 'function'",
+        )
+        .await
+        .unwrap();
+        let sql = "UPDATE pg_description SET objoid = 'd'::regclass WHERE objoid = 'f'::regproc";
+        assert_eq!(c.execute(sql, &[]).await.unwrap(), 1);
+        let rows = c
+            .query(
+                "SELECT classoid::regclass::text, description FROM pg_description WHERE objoid = 'd'::regclass ORDER BY 2",
+                &[],
+            )
+            .await
+            .unwrap();
+        let got: Vec<(String, String)> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+        assert_eq!(got, [("pg_proc".into(), "function".into()), ("pg_class".into(), "table".into())]);
+    });
+    s.engine.shutdown();
+}

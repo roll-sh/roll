@@ -1,0 +1,377 @@
+> create table duplicate (x text)
+-- CREATE TABLE
+
+> comment on table duplicate is 'duplicate table'
+-- COMMENT
+
+> create function bar() returns integer language sql as $$ select 1 $$
+-- CREATE FUNCTION
+
+> comment on function bar() is 'bar function'
+-- COMMENT
+
+> update pg_description set objoid = 'duplicate'::regclass where objoid = 'bar'::regproc
+-- UPDATE 1
+
+> select classoid::regclass, objsubid, description from pg_description
+>  where objoid = 'duplicate'::regclass order by 3
+classoid:regclass | objsubid:int4 | description:text
+pg_proc | 0 | bar function
+pg_class | 0 | duplicate table
+-- SELECT 2
+
+> select obj_description('duplicate'::regclass, 'pg_class'), obj_description('duplicate'::regclass, 'pg_proc'),
+>        obj_description('bar'::regproc, 'pg_proc')
+obj_description:text | obj_description:text | obj_description:text
+duplicate table | bar function | NULL
+-- SELECT 1
+
+> select c.relname, d.description from pg_class c
+>   join pg_description d on d.objoid = c.oid and d.classoid = 'pg_class'::regclass
+>  where c.relname = 'duplicate'
+relname:name | description:text
+duplicate | duplicate table
+-- SELECT 1
+
+> insert into pg_description (objoid, classoid, objsubid, description)
+>   values ('duplicate'::regclass, 'pg_class'::regclass, 1, 'column x')
+-- INSERT 0 1
+
+> select col_description('duplicate'::regclass, 1)
+col_description:text
+column x
+-- SELECT 1
+
+> update pg_description set description = description || '!' where objoid = 'duplicate'::regclass
+-- UPDATE 3
+
+> select classoid::regclass, objsubid, description from pg_description
+>  where objoid = 'duplicate'::regclass order by 2, 3
+classoid:regclass | objsubid:int4 | description:text
+pg_proc | 0 | bar function!
+pg_class | 0 | duplicate table!
+pg_class | 1 | column x!
+-- SELECT 3
+
+> delete from pg_description where objoid = 'duplicate'::regclass and classoid = 'pg_proc'::regclass
+-- DELETE 1
+
+> select classoid::regclass, objsubid, description from pg_description
+>  where objoid = 'duplicate'::regclass order by 2, 3
+classoid:regclass | objsubid:int4 | description:text
+pg_class | 0 | duplicate table!
+pg_class | 1 | column x!
+-- SELECT 2
+
+> delete from pg_description where objoid = 'pg_catalog.abs(int4)'::regprocedure
+-- DELETE 1
+
+> select obj_description('pg_catalog.abs(int4)'::regprocedure, 'pg_proc')
+obj_description:text
+NULL
+-- SELECT 1
+
+> insert into pg_description values ('pg_catalog.abs(int4)'::regprocedure, 'pg_proc'::regclass, 0, 'absolute')
+-- INSERT 0 1
+
+> select obj_description('pg_catalog.abs(int4)'::regprocedure, 'pg_proc')
+obj_description:text
+absolute
+-- SELECT 1
+
+> insert into pg_description values ('pg_catalog.abs(int4)'::regprocedure, 'pg_proc'::regclass, 0, 'again')
+ERROR 23505: duplicate key value violates unique constraint "pg_description_o_c_o_index"
+DETAIL: Key (objoid, classoid, objsubid)=(1397, 1255, 0) already exists.
+OBJECTS: schema=pg_catalog table=pg_description constraint=pg_description_o_c_o_index
+
+> update pg_description set description = null where objoid = 'pg_catalog.abs(int4)'::regprocedure
+ERROR 23502: null value in column "description" of relation "pg_description" violates not-null constraint
+DETAIL: Failing row contains (1397, 1255, 0, null).
+OBJECTS: schema=pg_catalog table=pg_description column=description
+
+> update pg_description set objsubid = 1 where objoid = 'pg_catalog.abs(int4)'::regprocedure
+-- UPDATE 1
+
+> select objsubid, description from pg_description where objoid = 'pg_catalog.abs(int4)'::regprocedure
+objsubid:int4 | description:text
+1 | absolute
+-- SELECT 1
+
+> drop table duplicate
+-- DROP TABLE
+
+> drop function bar()
+-- DROP FUNCTION
+
+> prepare relname_upd(name, oid) as update pg_class set relname = $1 where oid = $2
+-- PREPARE
+
+> execute relname_upd('pg_class', 'pg_class'::regclass)
+-- UPDATE 1
+
+> select relname from pg_class where oid = 'pg_class'::regclass
+relname:name
+pg_class
+-- SELECT 1
+
+> deallocate relname_upd
+-- DEALLOCATE
+
+> create type onefield as (x int)
+-- CREATE TYPE
+
+> create type twofield as (x int, y text)
+-- CREATE TYPE
+
+> select * from unnest(array[row(1)::onefield, row(2)::onefield])
+x:int4
+1
+2
+-- SELECT 2
+
+> select * from unnest(array[row(1)::onefield]) as q
+x:int4
+1
+-- SELECT 1
+
+> select q.x from unnest(array[row(3)::onefield]) q
+x:int4
+3
+-- SELECT 1
+
+> select * from unnest(array[row(1)::onefield], array['a'])
+x:int4 | unnest:text
+1 | a
+-- SELECT 1
+
+> select * from unnest(array[row(1, 'a')::twofield])
+x:int4 | y:text
+1 | a
+-- SELECT 1
+
+> select unnest(array[row(1)::onefield])
+unnest:user
+(1)
+-- SELECT 1
+
+> drop type onefield, twofield
+-- DROP TYPE
+
+> create table ins_src (id int, n text)
+-- CREATE TABLE
+
+> create table ins_dst (a int, b varchar(20))
+-- CREATE TABLE
+
+> insert into ins_src values (2, 'b'), (1, 'a')
+-- INSERT 0 2
+
+> prepare ins_p as insert into ins_dst (a, b) select id, $1 from ins_src where id > 0 order by id
+-- PREPARE
+
+> prepare ins_q as insert into ins_dst (a, b) select id, $1 from ins_src limit 1
+-- PREPARE
+
+> select name, parameter_types from pg_prepared_statements where name like 'ins_%' order by 1
+name:text | parameter_types:2211
+ins_p | {"character varying"}
+ins_q | {"character varying"}
+-- SELECT 2
+
+> execute ins_p('x')
+-- INSERT 0 2
+
+> select * from ins_dst order by a
+a:int4 | b:varchar
+1 | x
+2 | x
+-- SELECT 2
+
+> deallocate ins_p
+-- DEALLOCATE
+
+> deallocate ins_q
+-- DEALLOCATE
+
+> drop table ins_src, ins_dst
+-- DROP TABLE
+
+> create extension btree_gist
+-- CREATE EXTENSION
+
+> create table gv (a varchar(10), b int, c char(3))
+-- CREATE TABLE
+
+> create index gv_a on gv using gist (a)
+-- CREATE INDEX
+
+> alter table gv add constraint gv_ex exclude using gist (a with =, b with <>)
+-- ALTER TABLE
+
+> insert into gv values ('x', 1, 'a')
+-- INSERT 0 1
+
+> insert into gv values ('x', 2, 'a')
+ERROR 23P01: conflicting key value violates exclusion constraint "gv_ex"
+DETAIL: Key (a, b)=(x, 2) conflicts with existing key (a, b)=(x, 1).
+OBJECTS: schema=public table=gv constraint=gv_ex
+
+> insert into gv values ('y', 2, 'a')
+-- INSERT 0 1
+
+> select i.indexrelid::regclass, k.n, o.opcname
+>   from pg_index i, unnest(i.indclass::oid[]) with ordinality k(c, n), pg_opclass o
+>  where i.indrelid = 'gv'::regclass and o.oid = k.c order by 1, 2
+indexrelid:regclass | n:int8 | opcname:name
+gv_a | 1 | gist_text_ops
+gv_ex | 1 | gist_text_ops
+gv_ex | 2 | gist_int4_ops
+-- SELECT 3
+
+> drop table gv
+-- DROP TABLE
+
+> drop extension btree_gist
+-- DROP EXTENSION
+
+> create extension citext
+-- CREATE EXTENSION
+
+> create table ext_cols (a citext, b citext[], c text)
+-- CREATE TABLE
+
+> select column_name, data_type, udt_schema, udt_name from information_schema.columns
+>  where table_name = 'ext_cols' order by 1
+column_name:name | data_type:varchar | udt_schema:name | udt_name:name
+a | USER-DEFINED | public | citext
+b | ARRAY | public | _citext
+c | text | pg_catalog | text
+-- SELECT 3
+
+> drop table ext_cols
+-- DROP TABLE
+
+> drop extension citext
+-- DROP EXTENSION
+
+> set application_name = 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+NOTICE 42622: identifier "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" will be truncated to "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+-- SET
+
+> show application_name
+application_name:text
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+-- SHOW
+
+> reset application_name
+-- RESET
+
+> create type renamed_enum as enum ('A', 'B')
+-- CREATE TYPE
+
+> create table enum_cols (e renamed_enum, ea renamed_enum[], n varchar(10) collate "POSIX", m text collate "C", o text)
+-- CREATE TABLE
+
+> alter type renamed_enum rename to renamed_enum_old
+-- ALTER TYPE
+
+> select column_name, data_type, udt_schema, udt_name, ('"' || udt_schema || '"."' || udt_name || '"')::regtype,
+>        collation_catalog is not null as has_catalog, collation_schema, collation_name
+>   from information_schema.columns where table_name = 'enum_cols' order by 1
+column_name:name | data_type:varchar | udt_schema:name | udt_name:name | regtype:regtype | has_catalog:bool | collation_schema:name | collation_name:name
+e | USER-DEFINED | public | renamed_enum_old | renamed_enum_old | f | NULL | NULL
+ea | ARRAY | public | _renamed_enum_old | renamed_enum_old[] | f | NULL | NULL
+m | text | pg_catalog | text | text | t | pg_catalog | C
+n | character varying | pg_catalog | varchar | character varying | t | pg_catalog | POSIX
+o | text | pg_catalog | text | text | f | NULL | NULL
+-- SELECT 5
+
+> select udt_schema, udt_name from information_schema.columns
+>  where table_name = 'pg_statistic_ext_data' and column_name = 'stxdexpr'
+udt_schema:name | udt_name:name
+pg_catalog | _pg_statistic
+-- SELECT 1
+
+> drop table enum_cols
+-- DROP TABLE
+
+> drop type renamed_enum_old
+-- DROP TYPE
+
+> create table gk_a (id int primary key, name text)
+-- CREATE TABLE
+
+> create table gk_b (id int primary key, name text)
+-- CREATE TABLE
+
+> insert into gk_a values (1, 'x'), (2, 'y')
+-- INSERT 0 2
+
+> insert into gk_b values (1, 'x')
+-- INSERT 0 1
+
+> select gk_a.id, (select u0.id from gk_a u0, gk_b u2 where u2.name = gk_b.name and u0.name = u2.name) as s
+>   from gk_a, gk_b group by gk_a.id, 2 order by 1
+id:int4 | s:int4
+1 | 1
+2 | 1
+-- SELECT 2
+
+> select count(*) from (select gk_a.id, (select u0.id from gk_a u0, gk_b u2 where u0.id = gk_a.id and u2.name = gk_b.name) as s
+>   from gk_a left join gk_b on gk_b.id = gk_a.id group by gk_a.id, 2) q
+count:int8
+2
+-- SELECT 1
+
+> drop table gk_a, gk_b
+-- DROP TABLE
+
+> select 'b' like 'a\', 'a' like 'a\', '' like '\'
+?column?:bool | ?column?:bool | ?column?:bool
+f | f | f
+-- SELECT 1
+
+> select 'ab' like 'a\'
+ERROR 22025: LIKE pattern must not end with escape character
+
+> select 'ab' like '%\'
+ERROR 22025: LIKE pattern must not end with escape character
+
+> create table "a'" (x int)
+-- CREATE TABLE
+
+> select relname from pg_class c where c.relname like 'a\' and c.relkind = 'r'
+relname:name
+-- SELECT 0
+
+> drop table "a'"
+-- DROP TABLE
+
+> create table lk_user (id int primary key, name text)
+-- CREATE TABLE
+
+> create table lk_post (id int primary key, author int references lk_user)
+-- CREATE TABLE
+
+> insert into lk_user values (1, 'a')
+-- INSERT 0 1
+
+> insert into lk_post values (1, 1)
+-- INSERT 0 1
+
+> select distinct s.pid from (select p.id as pid, u.name from lk_post p left join lk_user u on u.id = p.author
+>   where p.id = 1 for update) s order by 1 limit 1
+ERROR 0A000: FOR UPDATE cannot be applied to the nullable side of an outer join
+
+> select distinct s.pid from (select p.id as pid, u.name from lk_post p left join lk_user u on u.id = p.author
+>   where p.id = 1 for update of p) s order by 1 limit 1
+pid:int4
+1
+-- SELECT 1
+
+> select s.pid from (select p.id as pid from lk_post p left join lk_user u on u.id = p.author for share of u) s
+ERROR 0A000: FOR SHARE cannot be applied to the nullable side of an outer join
+
+> drop table lk_post, lk_user
+-- DROP TABLE
+

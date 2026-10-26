@@ -521,7 +521,14 @@ impl Session {
             Some(NodeEnum::CreateTableAsStmt(c)) if c.is_select_into => c.query.as_deref().cloned(),
             _ => None,
         };
-        if p.is_query() || select_into.is_some() {
+        // A superuser's DML on a derived system catalog: the query it runs types its
+        // parameters (pgjdbc's updatable result sets write pg_class back).
+        if let Some(q) = p.stmt.as_ref().and_then(inner).and_then(crate::session::ddl::catalog_dml_query) {
+            let types = p.param_types.clone();
+            p.param_types = self.with_ctx(&[], |ctx| {
+                crate::sql::binder::Binder::new(ctx, types).bind_statement(&q).map(|b| b.params)
+            })?;
+        } else if p.is_query() || select_into.is_some() {
             let is_select_into = select_into.is_some();
             let stmt = select_into.unwrap_or_else(|| p.stmt.clone().unwrap());
             let q = Prepared {

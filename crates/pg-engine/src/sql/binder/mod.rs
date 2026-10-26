@@ -1529,6 +1529,8 @@ impl<'b, 'a> Binder<'b, 'a> {
         };
         let (level, col) = match e {
             Expr::CoerceToDomain(_, d) => return Some(d.oid),
+            // A parameter declared (by Parse) or cast to a domain.
+            Expr::Param(i, _) => return self.param_domains.iter().find(|(j, _)| j == i).map(|(_, d)| *d),
             Expr::Col(i, _) => (depth.checked_sub(1)?, *i),
             Expr::Outer(up, i, _) => (depth.checked_sub(1 + *up)?, *i),
             Expr::Call(f, _, _) if f.oid >= crate::catalog::FIRST_USER_OID => {

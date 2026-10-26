@@ -1678,8 +1678,8 @@ pub fn rows(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
 /// right after DDL needn't generate the whole catalog to plan). None: another catalog.
 pub fn row_count(table: SysTable, ctx: &ExecCtx) -> Option<usize> {
     use SysTable::*;
-    let cat = ctx.catalog();
-    let cat = &*cat;
+    let held = ctx.catalog();
+    let cat = &*held;
     let in_schema = |r: &&Row| cat.schemas.contains_key(&super::static_rows::oid_at(r, 2));
     // (The relation maps keep their relations' row counts: `relindex::RelRows`.)
     let rels = [
@@ -1713,12 +1713,15 @@ pub fn row_count(table: SysTable, ctx: &ExecCtx) -> Option<usize> {
         IsColumns => sum(|r| r.live) + SysTable::all().map(|s| s.columns().len()).sum::<usize>(),
         _ => return None,
     };
-    debug_assert_eq!(
-        Some(n),
-        rows_generated_for(table, ctx, None).ok().map(|r| r.len()),
-        "{}'s row count",
-        table.name()
-    );
+    // (Unless another session's DDL committed meanwhile and the statement reads the newer
+    // catalog: pgjdbc's TypeCacheDLLStressTest.)
+    #[cfg(debug_assertions)]
+    {
+        let generated = rows_generated_for(table, ctx, None).ok().map(|r| r.len());
+        if std::sync::Arc::ptr_eq(&held, &ctx.catalog()) {
+            assert_eq!(Some(n), generated, "{}'s row count", table.name());
+        }
+    }
     Some(n)
 }
 
@@ -3803,7 +3806,16 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
             }
         }
         PgDatabase => {
-            for (oid, name, owner) in ctx.sess.cluster.databases() {
+            // (Postgres's heap order after initdb: postgres, template1, template0; then the
+            // databases made since. tokio-postgres reads the first row.)
+            let mut dbs = ctx.sess.cluster.databases();
+            dbs.sort_by_key(|d| match d.0 {
+                5 => 0,
+                1 => 1,
+                4 => 2,
+                o => o,
+            });
+            for (oid, name, owner) in dbs {
                 let owner = ctx
                     .sess
                     .cluster
@@ -4608,6 +4620,9 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                     .class_of(*oid)
                     .unwrap_or(crate::catalog::depend::CONSTRAINT);
                 out.push(vec![o(*oid), o(class), i4(*sub as i64), nm(text)]);
+            }
+            for (oid, class, sub, text) in &cat.class_comments {
+                out.push(vec![o(*oid), o(*class), i4(*sub as i64), nm(text)]);
             }
             for (oid, m) in crate::largeobj::all(&ctx.txn.borrow())? {
                 if let Some(text) = &m.comment {
@@ -6791,12 +6806,14 @@ fn info_column(
         _ => N,
     };
     let (udt_schema, udt_name) = match ty {
+        // (By the type's name now: a column's type keeps the name it had when the column was
+        // made, and ALTER TYPE ... RENAME doesn't rewrite it; TypeORM's loadTables.)
         DataType::Enum(oid, n, _) => (
             cat.enums
                 .get(oid)
                 .map(|e| cat.schema_name(e.schema).to_string())
                 .unwrap_or_default(),
-            n.to_string(),
+            cat.enums.get(oid).map_or_else(|| n.to_string(), |e| e.name.clone()),
         ),
         DataType::Array(e) if matches!(**e, DataType::Enum(..)) => {
             let DataType::Enum(oid, n, _) = &**e else {
@@ -6807,7 +6824,9 @@ fn info_column(
                     .get(oid)
                     .map(|e| cat.schema_name(e.schema).to_string())
                     .unwrap_or_default(),
-                format!("_{n}"),
+                cat.enums
+                    .get(oid)
+                    .map_or_else(|| format!("_{n}"), |e| cat.array_typname(e.array_oid, &e.name)),
             )
         }
         t => {
@@ -6816,19 +6835,36 @@ fn info_column(
                 t => t,
             };
             match base {
+                // (A table's or a system catalog's row type too: pg_statistic_ext_data's
+                // stxdexpr is pg_statistic[]; TypeORM casts the names to regtype.)
                 DataType::Row(r) if r.oid != 0 => (
                     cat.composites
                         .get(&r.oid)
-                        .map(|c| cat.schema_name(c.schema).to_string())
-                        .unwrap_or_default(),
+                        .map(|c| c.schema)
+                        .or_else(|| cat.user_type_name(r.oid).map(|(s, _, _)| s))
+                        .map_or_else(|| "pg_catalog".to_string(), |s| cat.schema_name(s).to_string()),
                     t.typname(),
                 ),
-                _ => ("pg_catalog".into(), t.typname()),
+                // A made base type (an extension's citext, hstore): its schema.
+                b => match cat.base_types.values().find(|d| d.oid() == type_oid(cat, b)) {
+                    Some(d) => (cat.schema_name(d.ty.schema).to_string(), t.typname()),
+                    None => ("pg_catalog".into(), t.typname()),
+                },
             }
         }
     };
+    // (Any type outside pg_catalog is USER-DEFINED.)
+    let data_type = match ty {
+        DataType::Array(_) => "ARRAY".to_string(),
+        _ if udt_schema != "pg_catalog" => "USER-DEFINED".to_string(),
+        t => info_data_type(t),
+    };
     let domain = col.and_then(|c| c.domain).and_then(|d| cat.domains.get(&d));
-    let collation = N;
+    // (A collation other than the database default's: collation_catalog / schema / name.)
+    let coll = col
+        .map(|c| column_collation_in(cat, c))
+        .filter(|o| *o != 0 && *o != 100)
+        .and_then(|o| crate::types::collation::def_by_oid(cat, o));
     let identity = col.and_then(|c| c.identity.clone());
     let seq = col.and_then(|c| c.seq).and_then(|s| cat.sequences.get(&s));
     let nullable = !col.is_some_and(|c| c.not_null);
@@ -6840,7 +6876,7 @@ fn info_column(
         i4(pos),
         if identity.is_some() { N } else { opt(default) },
         yn(nullable),
-        nm(info_data_type(ty)),
+        nm(data_type),
         len,
         octet,
         prec,
@@ -6852,9 +6888,9 @@ fn info_column(
         N,
         N,
         N,
-        N,
-        N,
-        collation,
+        coll.as_ref().map_or(N, |_| nm(db)),
+        coll.as_ref().map_or(N, |c| nm(cat.schema_name(c.namespace))),
+        coll.as_ref().map_or(N, |c| nm(&c.name)),
         domain.map(|_| nm(db)).unwrap_or(N),
         domain.map(|d| nm(cat.schema_name(d.schema))).unwrap_or(N),
         domain.map(|d| nm(&d.name)).unwrap_or(N),

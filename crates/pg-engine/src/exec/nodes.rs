@@ -50,10 +50,16 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             if let Some(node) = sys_shared_scan(*table, filter.as_ref(), path.as_deref(), ctx)? {
                 return Ok(node);
             }
-            let rows = match is_named_rows(*table, filter.as_ref(), ctx)? {
+            let mut rows = match is_named_rows(*table, filter.as_ref(), ctx)? {
                 Some(r) => r,
                 None => crate::catalog::system::rows(*table, ctx)?,
             };
+            // An index scan reads only the rows its conditions select, and checks the filter
+            // on those alone (a LIKE's exact prefix as `relname = 'a'`: the pattern `a\` isn't
+            // matched against other names; pgjdbc's getTables).
+            if let Some(sp) = path.as_deref() {
+                rows = sys_index_prefilter(rows, sp, ctx)?;
+            }
             let mut deferred = crate::catalog::system::deferred_errors(*table, ctx, &rows);
             // An index path a sort relies on: the rows in that index's order.
             let rows = match path.as_deref() {
@@ -1078,6 +1084,25 @@ fn sys_shared_scan(
     if !crate::catalog::system::rows_cacheable(table) {
         return Ok(None);
     }
+    // The index conditions first: an index scan checks the filter only on the rows they
+    // select (a LIKE's exact prefix as `relname = 'a'`: the pattern `a\` isn't matched
+    // against other names; pgjdbc's getTables).
+    let quals: Vec<Expr> = match path.map(|sp| &sp.scan.access) {
+        Some(crate::sql::plan::Access::Index { quals, .. }) => quals.iter().map(|q| q.expr.clone()).collect(),
+        _ => Vec::new(),
+    };
+    // (A pg_class scan planned as the index scan its EXPLAIN shows: a LIKE on relname reads
+    // only the names its fixed prefix selects, as the derived index condition does.)
+    let quals = match (quals.is_empty(), path, filter) {
+        (true, None, Some(f)) if table == crate::catalog::system::SysTable::PgClass => like_prefix_quals(f),
+        _ => quals,
+    };
+    let checked = match (quals.is_empty(), filter) {
+        (true, _) => filter.cloned(),
+        (false, Some(f)) => Some(Expr::And(quals.into_iter().chain([f.clone()]).collect())),
+        (false, None) => None,
+    };
+    let filter = checked.as_ref();
     let rows = match sys_rel_rows(table, filter, path, ctx)? {
         Some(r) => r,
         None => crate::catalog::system::rows_shared(table, ctx)?,
@@ -1124,6 +1149,56 @@ fn sys_shared_scan(
         i: 0,
         filter: filter.cloned(),
     })))
+}
+
+/// The rows an index path's conditions select (all of them for another path).
+#[inline(never)]
+fn sys_index_prefilter(rows: Vec<Row>, sp: &crate::sql::plan::SysPath, ctx: &ExecCtx) -> Result<Vec<Row>> {
+    let crate::sql::plan::Access::Index { quals, .. } = &sp.scan.access else { return Ok(rows) };
+    if quals.is_empty() {
+        return Ok(rows);
+    }
+    let mut kept = Vec::with_capacity(rows.len());
+    'rows: for r in rows {
+        for q in quals {
+            if !eval_bool(&q.expr, &r, ctx)? {
+                continue 'rows;
+            }
+        }
+        kept.push(r);
+    }
+    Ok(kept)
+}
+
+/// A filter's `relname LIKE 'const'` conjuncts as the index conditions their fixed prefix
+/// derives (like_support.c: `relname = 'prefix'` for an exact prefix, `relname ^@ 'prefix'`
+/// for a partial one), to be checked before the filter.
+fn like_prefix_quals(f: &Expr) -> Vec<Expr> {
+    let conj: Vec<&Expr> = match f {
+        Expr::And(items) => items.iter().collect(),
+        e => vec![e],
+    };
+    let mut out = Vec::new();
+    for c in conj {
+        let Expr::Call(d, args, _) = c else { continue };
+        if d.name != "~~" || args.len() != 2 || d.coll.as_ref().is_some_and(|c| !c.bytewise()) {
+            continue;
+        }
+        let (Expr::Col(1, _), Expr::Const(Value::Text(p), _)) = (&args[0], &args[1]) else { continue };
+        let (status, prefix, _) = crate::sql::costs::pattern_prefix(p, crate::sql::costs::Ptype::Like);
+        let pre = Expr::Const(Value::Text(prefix.into()), crate::types::DataType::Text);
+        let col = args[0].clone();
+        // (texteq, text_starts_with.)
+        let oid = match status {
+            crate::sql::costs::PrefixStatus::Exact => 67,
+            crate::sql::costs::PrefixStatus::Partial => 3696,
+            crate::sql::costs::PrefixStatus::None => continue,
+        };
+        if let Some(def) = crate::sql::func::def_by_oid(oid) {
+            out.push(Expr::Call(def, vec![col, pre], crate::types::DataType::Bool));
+        }
+    }
+    out
 }
 
 /// The rows of pg_class's `rows` whose `relname` `bounds` admits, in row order.
@@ -1401,6 +1476,9 @@ impl Node for ProjectSetNode {
 struct FunctionScanNode {
     iters: Vec<Option<SrfIter>>,
     ncols: Vec<usize>,
+    /// A call returning a one-field composite whose field isn't composite: a row value it
+    /// returns is unwrapped to the field (unnest of an array of it; Hibernate).
+    one_field: Vec<bool>,
     ordinality: bool,
     n: i64,
 }
@@ -1445,6 +1523,13 @@ impl FunctionScanNode {
         Ok(FunctionScanNode {
             iters,
             ncols: calls.iter().map(|c| c.ncols).collect(),
+            one_field: calls
+                .iter()
+                .map(|c| {
+                    matches!(&c.ty, crate::types::DataType::Row(r) if r.fields.len() == 1
+                        && !matches!(r.fields[0].1, crate::types::DataType::Row(_) | crate::types::DataType::Record))
+                })
+                .collect(),
             ordinality,
             n: 0,
         })
@@ -1456,14 +1541,14 @@ impl Node for FunctionScanNode {
         ctx.check()?;
         let mut any = false;
         let mut row = Vec::new();
-        for (it, n) in self.iters.iter_mut().zip(&self.ncols) {
+        for ((it, n), one) in self.iters.iter_mut().zip(&self.ncols).zip(&self.one_field) {
             match it.as_mut().and_then(|i| i.next()) {
                 Some(r) => {
                     any = true;
                     let mut r = r?;
                     // A function returning a composite value (unnest of a row array): its
                     // fields are the columns.
-                    if *n > 1
+                    if (*n > 1 || *one)
                         && r.len() == 1
                         && let Value::Record(f) = &r[0]
                     {

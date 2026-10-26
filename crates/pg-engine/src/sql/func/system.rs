@@ -1199,6 +1199,13 @@ fn obj_description(a: &[Value], c: &FnCtx) -> Result<Value> {
     {
         return Ok(text(t.as_str()));
     }
+    if let Some(t) = cat
+        .class_comments
+        .iter()
+        .find(|x| x.0 == oid && class.is_none_or(|k| x.1 == k) && x.2 == 0)
+    {
+        return Ok(text(t.3.as_str()));
+    }
     Ok(crate::catalog::system::builtin_description(&cat, oid, class, 0).map_or(Value::Null, text))
 }
 
@@ -1211,10 +1218,11 @@ fn col_description(a: &[Value], c: &FnCtx) -> Result<Value> {
     match cat.comments.iter().find(|(o, s, _)| *o == oid && *s == sub) {
         Some((_, _, t)) if t.is_empty() => Ok(Value::Null),
         Some((_, _, t)) => Ok(text(t.as_str())),
-        None => Ok(
-            crate::catalog::system::builtin_description(&cat, oid, None, sub)
-                .map_or(Value::Null, text),
-        ),
+        None => match cat.class_comments.iter().find(|x| (x.0, x.1, x.2) == (oid, 1259, sub)) {
+            Some(x) => Ok(text(x.3.as_str())),
+            None => Ok(crate::catalog::system::builtin_description(&cat, oid, None, sub)
+                .map_or(Value::Null, text)),
+        },
     }
 }
 fn shobj_description(a: &[Value], c: &FnCtx) -> Result<Value> {

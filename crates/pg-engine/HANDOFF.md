@@ -328,11 +328,18 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   STDIN read its data as it comes (`Session::copy_in_feed`), and a portal's SELECT run only as
   far as each Execute's row count (`cursor::Lazy::next_rows`); it found and fixed a wrong
   result: EXISTS over a join that the subquery's planning had made a parameterized nested loop
-  (`sublink::unparameterized`, a regression of 530923f). Left, besides contrib types and
-  locking: DML on pg_description / pg_class.relname, SQL_ASCII databases, and the new
-  suites' items in STATUS.md (rows stream since round 19, agent 65: below). (Concurrent DDL
-  commits through `txn/catmerge.rs`; its base is the catalog the statement started from,
-  `Txn::stmt_catalog`.)
+  (`sublink::unparameterized`, a regression of 530923f). (Concurrent DDL commits through
+  `txn/catmerge.rs`; its base is the catalog the statement started from,
+  `Txn::stmt_catalog`.) Round 19, agent 66 (round 3 of the suites; with file_fdw and server
+  encodings, above and below): pgjdbc, tokio-postgres, sqlx, Drizzle and Npgsql now match
+  PostgreSQL exactly, TypeORM, Django and Hibernate (all of hibernate-core) differ in one to
+  two tests each (STATUS.md). Superuser DML on pg_description is `session/ddl/
+  description_dml.rs` (a comment DML moves under another catalog keeps that classoid:
+  `Catalog::class_comments`); `catalog_dml::catalog_dml_query` is the query such DML runs,
+  which Parse / PREPARE bind to type its parameters (`UPDATE pg_class SET relname = $1`).
+  GUC_IS_NAME parameters truncate with their NOTICE (`settings::take_name_notices`, sent
+  after AuthenticationOk at startup). Left: a planner bug behind Hibernate's "column #32 out
+  of range", Django's file_fdw `program` table (needs server programs allowed), xml2.
 - **Storage and bulk performance** (round 18, agent 43): compact SST blocks, batched heap
   fetches for index scans (`Store::get_versions`, `Txn::get_many_snap`), index-only scans of
   big tables answered from the index entries (an entry visible to a snapshot points at a row

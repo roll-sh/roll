@@ -374,6 +374,27 @@ struct Stacked {
     masked: Option<String>,
 }
 
+/// The parameters Postgres marks GUC_IS_NAME: a value is truncated to NAMEDATALEN - 1 bytes.
+const IS_NAME: &[&str] = &[
+    "application_name",
+    "cluster_name",
+    "default_table_access_method",
+    "default_tablespace",
+    "role",
+    "session_authorization",
+];
+
+thread_local! {
+    /// The truncation NOTICEs of GUC_IS_NAME values set on this thread, until the session
+    /// sends them (`take_name_notices`).
+    static NAME_NOTICES: std::cell::RefCell<Vec<crate::error::Error>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The truncation NOTICEs of GUC_IS_NAME values set since the last call.
+pub fn take_name_notices() -> Vec<crate::error::Error> {
+    NAME_NOTICES.with(|n| std::mem::take(&mut *n.borrow_mut()))
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     /// Values set in the session, by canonical name (a custom parameter's in lower case).
@@ -1525,6 +1546,13 @@ impl Settings {
                     )?),
                     Some(v) if d.name == "client_encoding" => {
                         Some(self.client_encoding(v, startup)?)
+                    }
+                    // (GUC_IS_NAME: truncate_identifier, with its NOTICE.)
+                    Some(v) if IS_NAME.contains(&d.name) && v.len() > 63 => {
+                        if let Some(e) = crate::sql::scs::truncation_notice(v) {
+                            NAME_NOTICES.with(|n| n.borrow_mut().push(e));
+                        }
+                        Some(normalize(d, &crate::catalog::truncate_ident(v))?)
                     }
                     Some(v) => Some(normalize(d, v)?),
                     None => None,

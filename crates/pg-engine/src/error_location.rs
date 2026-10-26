@@ -16,6 +16,7 @@ const KNOWN: &[(&str, &str, &str, &str, &str, u32)] = &[
     ("23502", "null value in column", "violates not-null constraint", "ReportNotNullViolationError", "execMain.c", 2213),
     ("23503", "insert or update on table", "", "ri_ReportViolation", "ri_triggers.c", 2772),
     ("23503", "update or delete on table", "", "ri_ReportViolation", "ri_triggers.c", 2772),
+    ("23514", "new row for relation", "violates partition constraint", "ExecPartitionCheckEmitError", "execMain.c", 1964),
     ("23514", "new row for relation", "violates check constraint", "ExecConstraints", "execMain.c", 2076),
     ("22001", "value too long for type character varying", "", "varchar", "varchar.c", 637),
     ("22P02", "invalid input syntax for type integer", "", "pg_strtoint32_safe", "numutils.c", 615),
@@ -59,7 +60,12 @@ pub fn location(e: &Error) -> (&'static str, String, &'static str) {
     let m = e.message.as_str();
     match KNOWN
         .iter()
-        .find(|k| k.0 == e.code && m.starts_with(k.1) && m.ends_with(k.2))
+        // (The suffix may be followed by a name: `... violates check constraint "c"`.)
+        .find(|k| {
+            k.0 == e.code
+                && m.starts_with(k.1)
+                && (m.ends_with(k.2) || (k.2.starts_with(" violates") || k.2.starts_with("violates")) && m.contains(k.2))
+        })
     {
         Some(k) => (k.4, k.5.to_string(), k.3),
         None => ("pg-engine", "0".into(), ""),

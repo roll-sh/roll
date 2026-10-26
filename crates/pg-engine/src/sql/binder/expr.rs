@@ -1407,9 +1407,11 @@ impl Binder<'_, '_> {
             }
             self.params.resize(i + 1, DataType::Unknown);
         }
-        // (A void parameter stays one: a function call drops it as an argument.)
+        // (A void parameter stays one: a function call drops it as an argument; so does one
+        // declared as a domain, whose type the result keeps.)
         if self.param_consts
             && !matches!(self.params[i], DataType::Unknown | DataType::Void)
+            && !self.param_domains.iter().any(|(j, _)| *j == i)
             && let Ok(v) = self.ctx.param(i)
         {
             return Ok(Expr::Const(v, self.params[i].clone()));

@@ -9,8 +9,10 @@ mod privs;
 pub(crate) use objects::EXTENSIONS;
 mod aggregate;
 mod catalog_dml;
+mod description_dml;
+pub(crate) use description_dml::{is_pg_description_dml, pg_description_dml};
 pub(crate) use catalog_dml::{
-    apply_depend_update, depend_update_query, is_pg_class_update, is_pg_depend_delete,
+    apply_depend_update, catalog_dml_query, depend_update_query, is_pg_class_update, is_pg_depend_delete,
     is_pg_depend_insert, is_pg_depend_update, merge_pg_class,
     might_merge_pg_class, pg_depend_dml,
 };

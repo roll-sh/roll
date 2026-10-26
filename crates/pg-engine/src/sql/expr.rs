@@ -289,6 +289,27 @@ pub struct XmlExpr {
     pub target: DataType,
 }
 
+/// A plan's Debug text without its joins' `bound` ids (`ExecCtx::bound_trees` entries,
+/// numbered per binding): two bindings of one sub-select (a GROUP BY key by its ordinal and
+/// the select list's item) are the same query.
+fn without_bound_ids(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find(", bound: ") {
+        let after = &rest[i + 9..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        out.push_str(&rest[..i + 9]);
+        if digits == 0 {
+            rest = after;
+            continue;
+        }
+        out.push('_');
+        rest = &after[digits..];
+    }
+    out.push_str(rest);
+    out
+}
+
 impl Expr {
     pub fn ty(&self) -> DataType {
         match self {
@@ -782,7 +803,7 @@ impl Expr {
                     && a.params.iter().zip(&b.params).all(|(x, y)| x.same_query_as(y))
                     && a.left.len() == b.left.len()
                     && a.left.iter().zip(&b.left).all(|(x, y)| x.same_query_as(y))
-                    && format!("{:?}", a.plan) == format!("{:?}", b.plan)
+                    && without_bound_ids(&format!("{:?}", a.plan)) == without_bound_ids(&format!("{:?}", b.plan))
             }
             _ => false,
         }

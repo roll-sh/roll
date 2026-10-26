@@ -969,6 +969,9 @@ enum LikeTok {
     Lit(char),
     One,
     Any,
+    /// An escape character ending the pattern: an error only when matching reaches it with
+    /// text left (MatchText): `'b' LIKE 'a\'` is false, `'ab' LIKE 'a\'` fails.
+    EndEscape,
 }
 
 thread_local! {
@@ -993,10 +996,7 @@ fn like_tokens(pat: &str, escape: Option<char>) -> Result<std::rc::Rc<[LikeTok]>
         if Some(c) == escape {
             match it.next() {
                 Some(n) => toks.push(LikeTok::Lit(n)),
-                None => bail!(
-                    INVALID_ESCAPE_SEQUENCE,
-                    "LIKE pattern must not end with escape character"
-                ),
+                None => toks.push(LikeTok::EndEscape),
             }
         } else if c == '%' {
             if !matches!(toks.last(), Some(LikeTok::Any)) {
@@ -1015,7 +1015,7 @@ fn like_tokens(pat: &str, escape: Option<char>) -> Result<std::rc::Rc<[LikeTok]>
 
 /// Iterative wildcard matching with backtracking on the last '%', over the string's
 /// characters (`at(i)`, `n` of them).
-fn like_tokens_match(toks: &[LikeTok], n: usize, at: impl Fn(usize) -> char) -> bool {
+fn like_tokens_match(toks: &[LikeTok], n: usize, at: impl Fn(usize) -> char) -> Result<bool> {
     let (mut si, mut ti) = (0usize, 0usize);
     let mut star: Option<(usize, usize)> = None;
     while si < n {
@@ -1036,6 +1036,10 @@ fn like_tokens_match(toks: &[LikeTok], n: usize, at: impl Fn(usize) -> char) -> 
                     ti += 1;
                     continue;
                 }
+                LikeTok::EndEscape => bail!(
+                    INVALID_ESCAPE_SEQUENCE,
+                    "LIKE pattern must not end with escape character"
+                ),
                 _ => {}
             }
         }
@@ -1045,13 +1049,13 @@ fn like_tokens_match(toks: &[LikeTok], n: usize, at: impl Fn(usize) -> char) -> 
                 si = s0 + 1;
                 star = Some((t, s0 + 1));
             }
-            None => return false,
+            None => return Ok(false),
         }
     }
     while ti < toks.len() && matches!(toks[ti], LikeTok::Any) {
         ti += 1;
     }
-    ti == toks.len()
+    Ok(ti == toks.len())
 }
 
 /// Match `s` against a LIKE pattern with `escape` (None = no escape character).
@@ -1065,10 +1069,10 @@ pub fn like_match(st: &str, pat: &str, escape: Option<char>, ci: bool) -> Result
     // (An ASCII string's characters are its bytes.)
     if st.is_ascii() {
         let b = st.as_bytes();
-        return Ok(like_tokens_match(&toks, b.len(), |i| b[i] as char));
+        return like_tokens_match(&toks, b.len(), |i| b[i] as char);
     }
     let chars: Vec<char> = st.chars().collect();
-    Ok(like_tokens_match(&toks, chars.len(), |i| chars[i]))
+    like_tokens_match(&toks, chars.len(), |i| chars[i])
 }
 
 fn escape_char(a: &[Value]) -> Result<Option<char>> {

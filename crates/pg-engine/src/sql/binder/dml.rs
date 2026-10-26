@@ -937,15 +937,22 @@ impl Binder<'_, '_> {
                 // (transformInsertStmt's hack: an unknown-typed constant or parameter of the
                 // select list is copied up as it is, not read as the subquery's output, so
                 // coercing it to the column's type makes a constant of that type.)
-                let literal = |i: usize| match &plan {
-                    Plan::Project { exprs, .. } => exprs
-                        .get(i)
-                        .filter(|e| {
-                            matches!(e, Expr::Const(_, DataType::Unknown) | Expr::Param(_, DataType::Unknown))
-                        })
-                        .cloned(),
-                    _ => None,
-                };
+                // (Under the ORDER BY / LIMIT that keep it: `INSERT ... SELECT id, $1 FROM u
+                // ORDER BY id` types $1 as its column, Drizzle.)
+                fn unknown_output(plan: &Plan, i: usize) -> Option<Expr> {
+                    match plan {
+                        Plan::Project { exprs, input } => match exprs.get(i)? {
+                            e @ (Expr::Const(_, DataType::Unknown) | Expr::Param(_, DataType::Unknown)) => {
+                                Some(e.clone())
+                            }
+                            Expr::Col(j, DataType::Unknown) => unknown_output(input, *j),
+                            _ => None,
+                        },
+                        Plan::Sort { input, .. } | Plan::Limit { input, .. } => unknown_output(input, i),
+                        _ => None,
+                    }
+                }
+                let literal = |i: usize| unknown_output(&plan, i);
                 let vals = cols
                     .iter()
                     .enumerate()

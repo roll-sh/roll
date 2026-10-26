@@ -38,7 +38,9 @@ Pass / fail per suite (tests that ran; skips aside), each suite against a fresh 
 is the engine after agent 38's work; "round 18" the engine of round 18, agent 51 (its first
 batch, 0a8ec4ee; the suites marked * after its second, 73e8d070). PostgreSQL's counts are this
 round's runs against a private reference (pgx's pgxpool package stops at TestPoolBeforeClose
-there, so fewer of its tests ran than in round 17).
+there, so fewer of its tests ran than in round 17). "Round 19" counts are round 19, agent 66's
+runs (debug build, a private reference; both sides run again), Hibernate's over all of
+hibernate-core (its failures on PostgreSQL there are the environment's).
 
 | suite | version | PostgreSQL | engine, round 17 | engine, round 18 | differences left |
 |---|---|---:|---:|---:|---|
@@ -49,64 +51,78 @@ there, so fewer of its tests ran than in round 17).
 | lib/pq | 1.10.9 | 232 / 0 | 230 / 2 | 232 / 0 * | 0 |
 | node-postgres (pg integration) | 8.16.0 | 146 / 3 | 146 / 3 | 145 / 4 * | 1: gh-issues/1105 (5000 inserts in 5 s, a debug build) |
 | postgres.js | 3.4.7 | 194 / 62 | 194 / 62 | 194 / 62 | 0 |
-| pgjdbc (jdbc2/3/4/42, core) | 42.7.7 | 8221 / 0 | 8214 / 7 | 8218 / 3 * | 3: DML on pg_description / pg_class |
+| pgjdbc (jdbc2/3/4/42, core) | 42.7.7 | 8221 / 0 | 8214 / 7 | 8218 / 3 *; round 19: 8221 / 0 | 0 (catalog DML, LIKE ending in its escape: round 19, agent 66) |
 | Npgsql (Npgsql.Tests) | 9.0.3 | 1914 / 2 | 1908 / 16 | 1917 / 2 (round 19, agents 53 and 66) | 0 |
 | SQLAlchemy (dialect/postgresql, sql) | 2.0.41 | 15801 / 2 | 15755 / 48 | 15801 / 2 * | 0 |
-| Django (26 apps) | 5.2.4 | 3793 / 15 | 3789 / 19 | 3792 / 16 | 2: a file_fdw program table (see below), an ungrouped column (round 19) |
-| tokio-postgres (tests, postgres, derive) | 0.7.18 | 221 / 0 | | 212 / 9 * | 9: ltree / lquery / ltxtquery / hstore binary (7), startup NOTICE, pg_database order |
-| sqlx (9 postgres targets) | 0.9.0 | 333 / 0 | | 318 / 15 * | 15: contrib types (7), domain arrays (3), empty arrays (2), 3 not looked at (see below) |
+| Django (26 apps) | 5.2.4 | 3793 / 15 | 3789 / 19 | 3792 / 16; round 19: 3792 / 16 | 1: a file_fdw program table (see below) |
+| tokio-postgres (tests, postgres, derive) | 0.7.18 | 221 / 0 | | 212 / 9 *; round 19: 221 / 0 | 0 |
+| sqlx (9 postgres targets) | 0.9.0 | 333 / 0 | | 318 / 15 *; round 19: 333 / 0 | 0 |
 | Prisma (push, pull, migrate, client) | 7.10.1 | 47 / 0 | | 47 / 0 * | 0 (bit(n) lengths in `db pull`, fixed) |
 | ActiveRecord (Rails, PostgreSQL adapter tests) | 8.1.4 | 10159 / 1 | | 748 / 28 | 27: see below (the engine ran adapters/postgresql only) |
-| Hibernate (hibernate-core subset) | 7.4.14 | 3088 / 0 | | 3080 / 8 | 8: see below |
-| TypeORM (postgres) | 1.1.2 | 3059 / 11 | | 2977 / 56 | 17, and 28 setup hooks: see below |
-| Drizzle (pg integration) | 0.45.4 | 852 / 0 | | 849 / 3 | 3: INSERT ... SELECT parameter typing |
+| Hibernate (hibernate-core subset; round 19: all of hibernate-core) | 7.4.14 | 3088 / 0; round 19: 12774 / 858 | | 3080 / 8; round 19: 12772 / 860 | 2: see below |
+| TypeORM (postgres) | 1.1.2 | 3059 / 11 | | 2977 / 56; round 19: 3058 / 12 | 1: xml2 (custom extension installation) |
+| Drizzle (pg integration) | 0.45.4 | 852 / 0 | | 849 / 3; round 19: 852 / 0 | 0 |
 | ruby-pg (spec/, helper patched to a running server) | 1.7.0 | 1076 / 26 | | 1072 / 30; round 19: 1076 / 26 | 0 (rows stream since round 19, agent 65) |
 
 ## Differences left, and why
 
-Contrib types (agent 39): hstore, ltree, lquery, ltxtquery and cube are sent as text when a
-client asks for binary (the RowDescription says format 1; psycopg 3, asyncpg, pgx, Npgsql,
-tokio-postgres, sqlx), and IS [NOT] DISTINCT FROM / NULLIF don't use their `=` (citext compares
-case-sensitively there: sqlx); file_fdw (Django), postgres_fdw (ActiveRecord); btree_gist has no
-varchar opclass (TypeORM's setup hooks); information_schema.columns.udt_schema of an extension
-type is pg_catalog (TypeORM).
+Contrib types (agent 39; binary send / receive and IS DISTINCT FROM since round 19, agent 53):
+postgres_fdw (ActiveRecord; native since round 19, agent 59); xml2 isn't implemented (TypeORM's
+custom extension installation test installs tablefunc and xml2).
 
 Locking and timeouts (agent 34): statement_timeout and pg_cancel_backend don't end a row-lock
 wait, SET LOCAL lock_timeout doesn't stop an UPDATE waiting on a row (ActiveRecord, Hibernate),
 idle_in_transaction_session_timeout isn't enforced, serializable write skew in ActiveRecord's
-two cases, FOR UPDATE on a LEFT JOIN's nullable side doesn't error (TypeORM).
+two cases.
 
 Engine, open:
-- pgjdbc TypeCacheDLLStressTest.createDropTableAndGetTypeInfo (round 19): a debug build's
-  assertion on pg_class's row count (`catalog/system.rs`) fails while another session creates
-  and drops tables; the same before round 19's streaming. Release builds don't check it.
-- DML on system catalogs: `UPDATE pg_description SET objoid = ...` (pgjdbc
-  DatabaseMetaDataTest's setUp moves a function's comment onto a table, classoid kept: the
-  engine's comments have no classoid of their own), `UPDATE pg_class SET relname` (pgjdbc
-  testOidUpdatable). pg_class's statistics columns, reloptions and pg_depend are writable.
-- sqlx: a parameter declared as a domain-array oid is described by its base array type
-  (domain_type_array_1..3), empty binary arrays aren't normalized (1-D with no elements:
-  i32_array_empty, i32_vec; probably Hibernate's ArrayConstructorTest too).
-- ActiveRecord: PL/pgSQL EXECUTE of a string of several statements; ALTER TABLE ... DISABLE /
-  ENABLE TRIGGER ALL is 3-5 ms a table (fixture loading); schema introspection 7-20x slower.
-- Hibernate: unnest() of an array of a one-field composite returns the row, not the field
-  (ArrayUnnestStructTest); "column #32 out of range" in a WITH ... AS MATERIALIZED with an
-  UPDATE CTE (BulkManipulationTest.testUpdateWithWhereExistsSubquery).
-- Drizzle: `INSERT INTO t (a, b) SELECT id, $1 FROM u WHERE ... ORDER BY ...` types $1 text.
-- TypeORM: enum change / rename (loadTables' regtype cast over a renamed enum), table names
-  with quotes, collation change SQL, extension installation.
-- Django (round 19, agent 66): file_fdw is native now (contrib STATUS.md), but inspectdb's
-  test_foreign_data_wrapper reads `SELECT * ... LIMIT 1` from a `program 'echo 1,2,3,4'`
-  table, which runs a server program: refused, as COPY ... PROGRAM is (HANDOFF
-  "Decisions"); it passes only if programs were allowed. aggregation's
-  test_aggregation_subquery_annotation_multivalued fails with "subquery uses ungrouped
-  column" (new since round 18's runs, not from file_fdw; not looked at).
-- tokio-postgres: no NOTICE at startup for a truncated application_name; pg_database's row
-  order.
+- Hibernate BulkManipulationTest.testUpdateWithWhereExistsSubquery: "column #32 out of range"
+  in `WITH id_cte AS MATERIALIZED (SELECT ... JOIN ... JOIN ... WHERE EXISTS (SELECT ... JOIN
+  ...)), update_cte AS (UPDATE ... WHERE id IN (SELECT id FROM id_cte)) SELECT count(*) FROM
+  id_cte`: a parameterized nested loop's parameters index a wider row than its outer side
+  makes (10 columns, Human's). It fails only when the test runs (pgjdbc, after the class's
+  other tests); the same statements replayed through psql or the wire after the same DDL and
+  rows plan otherwise and pass. A planner bug (join search), left to the planner work.
+- Hibernate PackagedEntityManagerTest.testOverriddenPar: `select nextval('Bug_SEQ')` finds no
+  bug_seq (the persistence unit's schema export); not looked at.
+- Django inspectdb's test_foreign_data_wrapper reads `SELECT * ... LIMIT 1` from a file_fdw
+  `program 'echo 1,2,3,4'` table, which runs a server program: refused, as COPY ... PROGRAM is
+  (HANDOFF "Decisions"); it passes only if programs were allowed (an operator setting, as
+  `--allow-server-files` is, would do).
+- ActiveRecord: ALTER TABLE ... DISABLE / ENABLE TRIGGER ALL is about 1.4 ms a table in a debug
+  build (PostgreSQL: 0.1 ms; fixture loading); schema introspection is slower.
 - asyncpg's introspection tests: its type introspection query on a large catalog is slower
   than the test's 250 ms bound. node-postgres 1105 is timing (a debug build).
-- sqlx it_can_inspect_constraint_errors, it_can_prepare_then_execute,
-  test_describe_outer_join_nullable: not looked at yet.
+
+Fixed in round 19, agent 66, client suites round 3 (golden `a66_client_round3`, wire test
+`startup_notice_empty_arrays_and_catalog_dml`; file_fdw and server encodings are below and in
+HANDOFF):
+- DML on pg_description by a superuser (pgjdbc DatabaseMetaDataTest's setUp moves a function's
+  comment onto a table): UPDATE / INSERT / DELETE, its unique index and NOT NULL errors, over
+  the extended protocol and PREPARE too. A comment now has a classoid of its own when DML puts
+  it under another catalog than its object's (`Catalog::class_comments`, a new header field:
+  stored catalogs load as before). `UPDATE pg_class SET relname` to the name it has (pgjdbc's
+  updatable result set writes every column back); a real rename stays refused.
+- tokio-postgres: GUC_IS_NAME values (application_name, ...) are truncated to 63 bytes with
+  their NOTICE, at startup too; pg_database's rows in Postgres's heap order (postgres,
+  template1, template0, then the databases made since).
+- sqlx: an empty array received in binary has no dimensions (array_recv); a parameter Parse
+  declares as a domain array keeps that type as a column (`$2` of `positive_int[]`), in
+  custom plans too; a check constraint's error names its routine ExecConstraints (the routine
+  of a known message followed by a name is found).
+- Drizzle: `INSERT ... SELECT id, $1 FROM u ... ORDER BY / LIMIT` types `$1` as its column.
+- Hibernate: unnest() of an array of a one-field composite in FROM gives the field.
+- TypeORM: btree_gist's gist_text_ops is varchar's default class (the binary-coercible default
+  class, a preferred type's winning a tie); information_schema.columns gives an extension type
+  as USER-DEFINED in its schema, a renamed enum by its name now, a row type's schema
+  (pg_statistic_ext_data.stxdexpr), and a column's collation; a FROM subquery's own FOR UPDATE
+  over its outer join's nullable side errors.
+- Django: a GROUP BY key that is a sub-select over a join, named by its ordinal (two bindings of
+  the sub-select differ in their joins' `bound` ids only).
+- pgjdbc: `relname LIKE 'a\'` (a pattern ending in its escape character) fails only when
+  matching reaches it, and a pg_class scan reads only the names the pattern's fixed prefix
+  selects, as the index scan EXPLAIN shows does; a debug build's pg_class row-count check
+  skips a catalog another session's DDL replaced meanwhile (TypeCacheDLLStressTest).
 
 Fixed in round 19, agent 65 (wire tests `rows_stream_as_the_executor_makes_them`,
 `cancel_while_rows_stream`; session test `query_each_streams_rows_to_a_callback`): a SELECT's

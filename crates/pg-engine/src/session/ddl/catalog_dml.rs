@@ -11,6 +11,23 @@ use crate::types::Value;
 use pg_query::NodeEnum;
 use pg_query::protobuf as pb;
 
+/// The query a superuser's DML on pg_class, pg_depend or pg_description runs, for Parse to
+/// type the statement's parameters by; None for other statements.
+pub(crate) fn catalog_dml_query(node: &NodeEnum) -> Option<pb::Node> {
+    if super::description_dml::is_pg_description_dml(node) {
+        return super::description_dml::description_query(node).ok();
+    }
+    match node {
+        NodeEnum::UpdateStmt(u)
+            if is_pg_class_update(u) && u.relation.as_ref().is_some_and(|rv| rv.relname == "pg_class") =>
+        {
+            class_update_query(u).ok().map(|q| q.0)
+        }
+        NodeEnum::UpdateStmt(u) if is_pg_depend_update(u) => depend_update_query(u).ok(),
+        _ => None,
+    }
+}
+
 /// Whether `s` updates pg_class or pg_database (unqualified or in pg_catalog).
 pub(crate) fn is_pg_class_update(s: &pb::UpdateStmt) -> bool {
     s.relation.as_ref().is_some_and(|rv| {
@@ -59,6 +76,56 @@ fn cast(val: pb::Node, ty: &str) -> pb::Node {
     })))
 }
 
+/// UPDATE pg_class (`is_pg_class_update`) as the query it runs: each row's oid, statistics
+/// and relname, then the values SET gives; with the columns SET names. (Parse binds it to
+/// type the statement's parameters.)
+pub(crate) fn class_update_query(s: &pb::UpdateStmt) -> Result<(pb::Node, Vec<&str>)> {
+    // (column, its type, the new value).
+    let mut sets: Vec<(&str, pb::Node)> = Vec::new();
+    for t in &s.target_list {
+        let Some(NodeEnum::ResTarget(rt)) = inner(t) else {
+            continue;
+        };
+        let ty = match rt.name.as_str() {
+            "reltuples" => "float4",
+            "relpages" | "relallvisible" | "relallfrozen" => "int4",
+            "reloptions" => "_text",
+            // (Setting a relation's own name: pgjdbc's updatable result sets write
+            // every column back.)
+            "relname" => "name",
+            other => {
+                return Err(crate::error::unsupported(format!(
+                    "UPDATE of pg_class.{other}"
+                )));
+            }
+        };
+        let val = rt.val.as_deref().cloned().unwrap_or_else(|| {
+            mk(NodeEnum::AConst(pb::AConst {
+                isnull: true,
+                val: None,
+                location: -1,
+            }))
+        });
+        sets.push((rt.name.as_str(), cast(val, ty)));
+    }
+    let mut targets = vec![
+        target(col("oid")),
+        target(col("relpages")),
+        target(col("reltuples")),
+        target(col("relallvisible")),
+        target(col("relname")),
+    ];
+    targets.extend(sets.iter().map(|(_, v)| target(v.clone())));
+    let sel = pb::SelectStmt {
+        target_list: targets,
+        from_clause: vec![mk(NodeEnum::RangeVar(s.relation.clone().unwrap()))],
+        where_clause: s.where_clause.clone(),
+        ..Default::default()
+    };
+    let names = sets.iter().map(|(n, _)| *n).collect();
+    Ok((mk(NodeEnum::SelectStmt(Box::new(sel))), names))
+}
+
 impl Ddl<'_, '_> {
     pub(super) fn update_pg_class(&mut self, s: &pb::UpdateStmt) -> Result<String> {
         if s.relation.as_ref().is_some_and(|rv| rv.relname == "pg_database") {
@@ -71,47 +138,9 @@ impl Ddl<'_, '_> {
                 "permission denied for table pg_class",
             ));
         }
-        // (column, its type, the new value).
-        let mut sets: Vec<(&str, pb::Node)> = Vec::new();
-        for t in &s.target_list {
-            let Some(NodeEnum::ResTarget(rt)) = inner(t) else {
-                continue;
-            };
-            let ty = match rt.name.as_str() {
-                "reltuples" => "float4",
-                "relpages" | "relallvisible" | "relallfrozen" => "int4",
-                "reloptions" => "_text",
-                other => {
-                    return Err(crate::error::unsupported(format!(
-                        "UPDATE of pg_class.{other}"
-                    )));
-                }
-            };
-            let val = rt.val.as_deref().cloned().unwrap_or_else(|| {
-                mk(NodeEnum::AConst(pb::AConst {
-                    isnull: true,
-                    val: None,
-                    location: -1,
-                }))
-            });
-            sets.push((rt.name.as_str(), cast(val, ty)));
-        }
-        let mut targets = vec![
-            target(col("oid")),
-            target(col("relpages")),
-            target(col("reltuples")),
-            target(col("relallvisible")),
-        ];
-        targets.extend(sets.iter().map(|(_, v)| target(v.clone())));
-        let sel = pb::SelectStmt {
-            target_list: targets,
-            from_clause: vec![mk(NodeEnum::RangeVar(s.relation.clone().unwrap()))],
-            where_clause: s.where_clause.clone(),
-            ..Default::default()
-        };
-        let node = mk(NodeEnum::SelectStmt(Box::new(sel)));
+        let (node, sets) = class_update_query(s)?;
         let query = |this: &mut Self| -> Result<Vec<crate::exec::Row>> {
-            let child = this.ctx.child(&[]);
+            let child = this.ctx.child(this.ctx.params);
             let mut b = Binder::new(&child, Vec::new());
             let bq = b.bind_statement(&node)?;
             crate::exec::collect(&bq.plan, &child, None)
@@ -151,8 +180,26 @@ impl Ddl<'_, '_> {
                 allfrozen: self.cat.relstats.get(&oid).map_or(0, |s| s.allfrozen),
             };
             let mut stats = false;
-            for (i, (name, _)) in sets.iter().enumerate() {
-                let v = &r[4 + i];
+            for (i, name) in sets.iter().enumerate() {
+                let v = &r[5 + i];
+                if *name == "relname" {
+                    let new = match v {
+                        Value::Text(t) => t.to_string(),
+                        Value::Null => {
+                            return Err(Error::new(
+                                code::NOT_NULL_VIOLATION,
+                                "null value in column \"relname\" of relation \"pg_class\" violates not-null constraint",
+                            ));
+                        }
+                        other => crate::types::text::format_value(other, &crate::types::DataType::Text, &Default::default()),
+                    };
+                    if !matches!(&r[4], Value::Text(t) if t.as_ref() == new) {
+                        return Err(crate::error::unsupported(
+                            "UPDATE of pg_class.relname to another name (use ALTER ... RENAME)",
+                        ));
+                    }
+                    continue;
+                }
                 if *name == "reloptions" {
                     // (Stored as given: Postgres doesn't check a direct catalog update.)
                     let opts: Vec<String> = match v {

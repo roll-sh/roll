@@ -1094,6 +1094,10 @@ fn decode_array(mut b: &[u8], elem: &DataType, ctx: &FormatCtx) -> Result<Value>
     } else {
         dims.iter().map(|d| d.0).product()
     };
+    // (array_recv: no elements is the empty array, of no dimensions.)
+    if total == 0 {
+        dims.clear();
+    }
     let mut items = Vec::with_capacity(total);
     for _ in 0..total {
         if b.len() < 4 {

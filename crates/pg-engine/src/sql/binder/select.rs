@@ -2979,6 +2979,15 @@ impl Binder<'_, '_> {
         // (A FROM subquery planned apart: by the query above, `Planner::walk`.)
         let mut plan = plan;
         if self.defer_level == Some(self.levels.len()) && !self.deparse {
+            // (A FROM subquery's own locking clause over its outer join is checked as its
+            // level is planned: `SELECT ... FROM (SELECT ... LEFT JOIN ... FOR UPDATE) s`,
+            // TypeORM's findOne with relations and a lock.)
+            if !s.locking_clause.is_empty()
+                && !self.unplanned
+                && let Some(m) = crate::sql::paths::nullable_side_lock(self.ctx, &plan)
+            {
+                return Err(nullable_lock_error(m));
+            }
             self.defer_level = None;
             self.deferred = true;
             return Ok((plan, cols));
@@ -2996,16 +3005,7 @@ impl Binder<'_, '_> {
                 && !self.unplanned
                 && let Some(m) = crate::sql::paths::nullable_side_lock(self.ctx, &plan)
             {
-                let what = match m {
-                    RowMark::KeyShare => "FOR KEY SHARE",
-                    RowMark::Share => "FOR SHARE",
-                    RowMark::NoKeyUpdate => "FOR NO KEY UPDATE",
-                    RowMark::Update => "FOR UPDATE",
-                };
-                return Err(Error::new(
-                    code::FEATURE_NOT_SUPPORTED,
-                    format!("{what} cannot be applied to the nullable side of an outer join"),
-                ));
+                return Err(nullable_lock_error(m));
             }
             let _own = crate::scoped::set(&crate::sql::paths::OWN_LOCK, own, "rowmarks::OWN_LOCK");
             self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut plan, lim);
@@ -7186,6 +7186,20 @@ fn record_checked(a: &[Value], c: &crate::sql::func::FnCtx) -> Result<Value> {
     } else {
         Value::Record(Arc::new(fields))
     })
+}
+
+/// make_outerjoininfo's error for a lock on the nullable side of an outer join.
+fn nullable_lock_error(m: RowMark) -> Error {
+    let what = match m {
+        RowMark::KeyShare => "FOR KEY SHARE",
+        RowMark::Share => "FOR SHARE",
+        RowMark::NoKeyUpdate => "FOR NO KEY UPDATE",
+        RowMark::Update => "FOR UPDATE",
+    };
+    Error::new(
+        code::FEATURE_NOT_SUPPORTED,
+        format!("{what} cannot be applied to the nullable side of an outer join"),
+    )
 }
 
 /// Whether a query mentions a relation name (to detect recursive CTEs).
