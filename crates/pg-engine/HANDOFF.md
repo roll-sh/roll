@@ -183,15 +183,23 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   Verified: `cargo test -p pg-engine`, clippy, difftest smoke, and the regression suite in
   full against its base `0a8ec4e` with private references: 51,148 / 51,150 both, identical
   per file and hunk.
-- **Client libraries** (round 17, agent 38): drivers' and ORMs' own test suites against the
-  engine and against PostgreSQL 18.6, test by test: `tests/clients/` (runner, per-suite scripts,
-  `STATUS.md` with the per-suite counts and every difference left). psycopg 3, psycopg2,
-  asyncpg, pgx, lib/pq, node-postgres, postgres.js, pgjdbc, Npgsql, SQLAlchemy and Django run;
-  what's left is mostly contrib types (hstore, citext, ltree, pgcrypto: agent 39), LOCK TABLE /
-  SSI semantics (agent 34), notices sent only at statement end, COPY FROM processed only at
-  CopyDone, and DML on system catalogs. (Concurrent DDL commits through `txn/catmerge.rs`;
-  its base is now the catalog the statement started from, `Txn::stmt_catalog`: a newer one
-  made a commit drop what other DDL had committed meanwhile.)
+- **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
+  suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
+  (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference
+  left). psycopg 3, psycopg2, asyncpg, pgx, lib/pq, node-postgres, postgres.js, pgjdbc, Npgsql,
+  SQLAlchemy, Django, and since round 18 tokio-postgres, sqlx, Prisma, ActiveRecord, Hibernate,
+  TypeORM, Drizzle and ruby-pg run. Of the first eleven, lib/pq, psycopg2 and postgres.js now
+  match PostgreSQL exactly and most others differ only in contrib types' binary format
+  (agent 39). Round 18 made notices stream as they are raised (`exec::streaming_notices`, held
+  where code counts or drops what a step raised: `SessionState::hold_notices`), COPY FROM
+  STDIN read its data as it comes (`Session::copy_in_feed`), and a portal's SELECT run only as
+  far as each Execute's row count (`cursor::Lazy::next_rows`); it found and fixed a wrong
+  result: EXISTS over a join that the subquery's planning had made a parameterized nested loop
+  (`sublink::unparameterized`, a regression of 530923f). Left, besides contrib types and
+  locking: rows still go out after the statement has made them all (single-row mode, memory
+  for big results), DML on pg_description / pg_class.relname, SQL_ASCII databases, and the new
+  suites' items in STATUS.md. (Concurrent DDL commits through `txn/catmerge.rs`; its base is
+  the catalog the statement started from, `Txn::stmt_catalog`.)
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
