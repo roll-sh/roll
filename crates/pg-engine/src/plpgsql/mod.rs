@@ -784,7 +784,7 @@ fn call_sql(ctx: &ExecCtx, f: &Function, args: Vec<Value>) -> Result<Vec<Row>> {
         };
         // Each statement is planned when it is reached (PostgreSQL 18's functions.c), under
         // the search path an earlier one may have set.
-        let resynced = caller.path_stale().then(|| caller.resynced());
+        let resynced = (caller.path_stale() || caller.names_stale()).then(|| caller.resynced());
         let ctx = resynced.as_ref().unwrap_or(caller);
         let text = crate::sql::parse::stmt_text(&f.body, raw)
             .trim_end_matches(';')
@@ -1741,18 +1741,25 @@ impl<'c, 'a> Interp<'c, 'a> {
             return;
         }
         self.synced.set(Some(key));
+        // (A context's names, what reg* input and constants resolve through, are those of
+        // the catalog it was made with: DDL an earlier statement ran, an EXECUTE'd RENAME,
+        // leaves them behind, as plancache invalidates plans on it.)
+        let fresh = |c: &ExecCtx| {
+            c.fmt().names.as_ref().and_then(|n| n.catalog_version()).is_none_or(|v| v >= key.1)
+        };
         // The routine's first statement: its caller's context is good unless the session
         // changed under it (a SET clause, a SECURITY DEFINER's role, set_config earlier in
         // the calling statement).
-        if last.is_none() && !self.ctx.path_unsure() {
+        if last.is_none() && !self.ctx.path_unsure() && fresh(self.ctx) {
             return;
         }
         let path = self.ctx.session_path();
-        // (Only the catalog changed: the context is good while the path is the same.)
-        if last.is_some_and(|l| (l.0, l.2) == (key.0, key.2)) && path == self.cx().search_path {
+        // (Only the catalog changed: the context is good while the path is the same and its
+        // names see the catalog.)
+        if last.is_some_and(|l| (l.0, l.2) == (key.0, key.2)) && path == self.cx().search_path && fresh(&self.cx()) {
             return;
         }
-        let next = if key.0 == self.ctx.fmt().settings && path == self.ctx.search_path {
+        let next = if key.0 == self.ctx.fmt().settings && path == self.ctx.search_path && fresh(self.ctx) {
             None
         } else {
             Some(Rc::new(self.ctx.resynced()))

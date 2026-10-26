@@ -98,7 +98,10 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   RestrictSearchPath (`in_index_build`) and every security-restricted operation's nest
   level is discarded at its end (`Settings::pop_restricted`, AtEOXact_GUC(false)). A
   PL/pgSQL function's CONTEXT signature is formatted when it is compiled (validation or first
-  call, `SessionState::pl_signatures`). Golden `a53_plpgsql_search_path`.
+  call, `SessionState::pl_signatures`). Golden `a53_plpgsql_search_path`. After DDL an earlier
+  statement ran (an EXECUTE'd RENAME, a CREATE), the next one binds in a context whose names see
+  the new catalog (`ExecCtx::names_stale`), as plancache invalidates on DDL: golden
+  `a53_plpgsql_ddl_names`.
 - **Hashability** (round 19, agent 53): every hashed plan (HashAggregate for GROUP BY and
   DISTINCT, hashed set operations, hashed SubPlans, hash joins, Memoize) follows
   PostgreSQL's hashability, `catalog::userobj::type_hashable` (`Catalog::type_hashable`

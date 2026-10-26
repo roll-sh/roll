@@ -34,6 +34,10 @@ pub trait NameResolver: Send + Sync {
     fn enum_labels(&self, _oid: u32) -> Option<Vec<String>> {
         None
     }
+    /// The version of the catalog names resolve through (None: not a catalog's).
+    fn catalog_version(&self) -> Option<u64> {
+        None
+    }
     /// A user-defined operator as regoper (`with_args`: regoperator) shows it.
     fn oper_display(&self, _oid: u32, _with_args: bool) -> Option<String> {
         None

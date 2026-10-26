@@ -1,0 +1,131 @@
+> DROP ROLE IF EXISTS regress_a53_ren
+NOTICE 00000: role "regress_a53_ren" does not exist, skipping
+-- DROP ROLE
+
+> CREATE TABLE ren_a (x int)
+-- CREATE TABLE
+
+> CREATE FUNCTION ren_f() RETURNS int LANGUAGE sql AS 'SELECT 1'
+-- CREATE FUNCTION
+
+> CREATE TYPE ren_t AS (a int)
+-- CREATE TYPE
+
+> DO $$
+> DECLARE r regclass; p regproc; t regtype; n int;
+> BEGIN
+>   EXECUTE 'ALTER TABLE ren_a RENAME TO ren_b';
+>   r := 'ren_b'::regclass;
+>   RAISE NOTICE 'regclass %', r;
+>   SELECT count(*) INTO n FROM ren_b;
+>   RAISE NOTICE 'count %', n;
+>   EXECUTE 'ALTER FUNCTION ren_f() RENAME TO ren_g';
+>   p := 'ren_g'::regproc;
+>   RAISE NOTICE 'regproc % %', p, ren_g();
+>   EXECUTE 'ALTER TYPE ren_t RENAME TO ren_u';
+>   t := 'ren_u'::regtype;
+>   RAISE NOTICE 'regtype %', t;
+>   EXECUTE 'CREATE TABLE ren_c (y int)';
+>   INSERT INTO ren_c VALUES (5);
+>   RAISE NOTICE 'c % %', 'ren_c'::regclass, (SELECT y FROM ren_c);
+>   EXECUTE 'ALTER TABLE ren_c ADD COLUMN z int DEFAULT 7';
+>   RAISE NOTICE 'z %', (SELECT z FROM ren_c);
+>   EXECUTE 'CREATE SCHEMA ren_s';
+>   EXECUTE 'CREATE TABLE ren_s.q (v int)';
+>   RAISE NOTICE 'q %', 'ren_s.q'::regclass;
+> END $$
+NOTICE 00000: regclass ren_b
+CONTEXT: PL/pgSQL function inline_code_block line 6 at RAISE
+NOTICE 00000: count 0
+CONTEXT: PL/pgSQL function inline_code_block line 8 at RAISE
+NOTICE 00000: regproc ren_g 1
+CONTEXT: PL/pgSQL function inline_code_block line 11 at RAISE
+NOTICE 00000: regtype ren_u
+CONTEXT: PL/pgSQL function inline_code_block line 14 at RAISE
+NOTICE 00000: c ren_c 5
+CONTEXT: PL/pgSQL function inline_code_block line 17 at RAISE
+NOTICE 00000: z 7
+CONTEXT: PL/pgSQL function inline_code_block line 19 at RAISE
+NOTICE 00000: q ren_s.q
+CONTEXT: PL/pgSQL function inline_code_block line 22 at RAISE
+-- DO
+
+> DO $$
+> BEGIN
+>   FOR i IN 1..2 LOOP
+>     RAISE NOTICE 'loop % %', i, (SELECT count(*) FROM ren_b);
+>     IF i = 1 THEN EXECUTE 'ALTER TABLE ren_b RENAME TO ren_old'; EXECUTE 'CREATE TABLE ren_b AS SELECT 1 AS x UNION ALL SELECT 2'; END IF;
+>   END LOOP;
+> END $$
+NOTICE 00000: loop 1 0
+CONTEXT: PL/pgSQL function inline_code_block line 4 at RAISE
+NOTICE 00000: loop 2 2
+CONTEXT: PL/pgSQL function inline_code_block line 4 at RAISE
+-- DO
+
+> CREATE FUNCTION ren_h() RETURNS text LANGUAGE plpgsql AS $$
+> BEGIN
+>   EXECUTE 'CREATE TABLE ren_d (w int)';
+>   RETURN 'ren_d'::regclass::text;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT ren_h()
+ren_h:text
+ren_d
+-- SELECT 1
+
+> SET check_function_bodies = off
+-- SET
+
+> CREATE FUNCTION ren_sql() RETURNS text LANGUAGE sql AS $$
+>   CREATE TABLE ren_e (w int);
+>   ALTER TABLE ren_e RENAME TO ren_f;
+>   SELECT 'ren_f'::regclass::text || (SELECT count(*) FROM ren_f)
+> $$
+-- CREATE FUNCTION
+
+> SELECT ren_sql()
+ren_sql:text
+ren_f0
+-- SELECT 1
+
+> CREATE PROCEDURE ren_p() LANGUAGE plpgsql AS $$
+> BEGIN
+>   EXECUTE 'CREATE TABLE ren_g (w int)';
+>   COMMIT;
+>   EXECUTE 'ALTER TABLE ren_g RENAME TO ren_h';
+>   RAISE NOTICE '%', 'ren_h'::regclass;
+> END $$
+-- CREATE PROCEDURE
+
+> CALL ren_p()
+NOTICE 00000: ren_h
+CONTEXT: PL/pgSQL function ren_p() line 6 at RAISE
+-- CALL
+
+> DO $$
+> BEGIN
+>   EXECUTE 'CREATE FUNCTION ren_k() RETURNS int LANGUAGE sql AS ''SELECT 42''';
+>   RAISE NOTICE '% %', 'ren_k'::regproc, ren_k();
+>   EXECUTE 'CREATE TYPE ren_m AS ENUM (''a'', ''b'')';
+>   RAISE NOTICE '% %', 'ren_m'::regtype, 'b'::ren_m;
+>   EXECUTE 'CREATE ROLE regress_a53_ren';
+>   RAISE NOTICE '%', 'regress_a53_ren'::regrole;
+>   EXECUTE 'DROP ROLE regress_a53_ren';
+> END $$
+NOTICE 00000: ren_k 42
+CONTEXT: PL/pgSQL function inline_code_block line 4 at RAISE
+NOTICE 00000: ren_m b
+CONTEXT: PL/pgSQL function inline_code_block line 6 at RAISE
+NOTICE 00000: regress_a53_ren
+CONTEXT: PL/pgSQL function inline_code_block line 8 at RAISE
+-- DO
+
+> RESET check_function_bodies
+-- RESET
+
+> DROP ROLE IF EXISTS regress_a53_ren
+NOTICE 00000: role "regress_a53_ren" does not exist, skipping
+-- DROP ROLE
+

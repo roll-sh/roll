@@ -250,6 +250,9 @@ pub fn parse_qualified(s: &str) -> Result<Vec<String>> {
 }
 
 impl NameResolver for CatalogNames {
+    fn catalog_version(&self) -> Option<u64> {
+        Some(self.catalog.version)
+    }
     fn collation_oid(&self, parts: &[String]) -> Option<u32> {
         crate::types::collation::resolve(&self.catalog, &self.search_path, parts).map(|d| d.oid)
     }

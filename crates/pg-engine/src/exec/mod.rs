@@ -607,6 +607,16 @@ impl<'a> ExecCtx<'a> {
         self.path_unsure() && self.session_path() != self.search_path
     }
 
+    /// This context's names (reg* input, constants) resolve through an older catalog than
+    /// the transaction's: DDL ran since it was made (an earlier statement of a routine).
+    pub fn names_stale(&self) -> bool {
+        self.fmt
+            .names
+            .as_ref()
+            .and_then(|n| n.catalog_version())
+            .is_some_and(|v| v < self.txn.borrow().catalog().version)
+    }
+
     /// A child context (as `child`, with this one's parameters and snapshot) whose names and
     /// formatting follow the session as it is now (`session_path`, the settings' current
     /// values): what a routine's next statements run in once a statement changed them.
