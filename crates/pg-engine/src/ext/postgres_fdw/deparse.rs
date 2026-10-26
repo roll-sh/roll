@@ -23,6 +23,9 @@ pub struct Deparser<'a> {
     /// How constants print (the transmission modes: ISO dates, postgres intervals, 3 extra
     /// float digits).
     pub fmt: crate::types::text::FormatCtx,
+    /// The scan row's column holding the remote row's ctid (a scan returning system
+    /// columns), which conditions may send.
+    pub ctid_col: Option<usize>,
 }
 
 /// Collation state of a shippable expression (FDWCollateState).
@@ -99,6 +102,7 @@ impl<'a> Deparser<'a> {
             params: Default::default(),
             alias: None,
             fmt: transmission_fmt(fmt),
+            ctid_col: None,
         }
     }
 
@@ -107,6 +111,21 @@ impl<'a> Deparser<'a> {
         oid < FIRST_GENBKI
             || (!self.extensions.is_empty()
                 && self.extensions.iter().any(|ext| self.cat.extension_info.get(ext).is_some_and(|i| i.members.iter().any(|m| m.1 == oid))))
+    }
+
+    /// A call's function or operator is shippable: a built-in one (the registry's, by
+    /// name and oid: an operator made over a built-in function isn't), or an extension's.
+    fn call_shippable(&self, def: &crate::sql::func::FuncDef) -> bool {
+        let reg = crate::sql::func::registry();
+        let builtin = |list: Option<&Vec<std::sync::Arc<crate::sql::func::FuncDef>>>| {
+            list.is_some_and(|v| v.iter().any(|d| d.oid == def.oid))
+        };
+        let found = if is_operator(def.name) {
+            builtin(reg.binops.get(def.name)) || builtin(reg.prefix.get(def.name))
+        } else {
+            builtin(reg.funcs.get(def.name))
+        };
+        (found && def.oid < FIRST_GENBKI) || (!self.extensions.is_empty() && def.oid >= FIRST_GENBKI && self.object_shippable(def.oid))
     }
 
     fn type_shippable(&self, ty: &DataType) -> bool {
@@ -158,6 +177,7 @@ impl<'a> Deparser<'a> {
             inner.0 == Coll::Safe && inner.1 == coll.or_else(default)
         };
         let (state, coll): (Coll, Option<String>) = match e {
+            Expr::Col(i, _) if Some(*i) == self.ctid_col => (Coll::None, None),
             Expr::Col(i, _) => {
                 if *i >= self.table.columns.len() {
                     return false;
@@ -175,7 +195,7 @@ impl<'a> Deparser<'a> {
                 (Coll::None, None)
             }
             Expr::Call(def, args, ty) => {
-                if def.srf.is_some() || !self.object_shippable(def.oid) {
+                if def.srf.is_some() || !self.call_shippable(def) {
                     return false;
                 }
                 if !args.iter().all(|a| self.walk(a, &mut inner)) {
@@ -309,7 +329,7 @@ fn has_stable(e: &Expr) -> bool {
 impl Deparser<'_> {
     /// A column reference (deparseColumnRef), qualified in joins.
     pub fn column(&self, i: usize) -> String {
-        let name = quote_ident(&column_name(self.table, i));
+        let name = if Some(i) == self.ctid_col { "ctid".to_string() } else { quote_ident(&column_name(self.table, i)) };
         match &self.alias {
             Some(a) => format!("{a}.{name}"),
             None => name,
@@ -373,7 +393,7 @@ impl Deparser<'_> {
             Expr::Cast(x, DataType::Varchar(_), DataType::Text, false) => x,
             e => e,
         };
-        matches!(e, Expr::Col(i, _) if *i < self.table.columns.len())
+        matches!(e, Expr::Col(i, _) if *i < self.table.columns.len() || Some(*i) == self.ctid_col)
     }
 
     /// deparseExpr.

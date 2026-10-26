@@ -197,6 +197,9 @@ pub struct FdwPushdown {
     pub limit: Option<Expr>,
     pub offset: Option<Expr>,
     pub has_limit: bool,
+    /// The scan reads the target of an UPDATE / DELETE: it locks the rows and returns their
+    /// ctids (another relation's row marks copy whole rows, PostgreSQL's ROW_MARK_COPY).
+    pub target: bool,
 }
 
 /// `ScanPlan::params`.

@@ -3153,6 +3153,8 @@ impl InsertNode {
                 }
             };
         }
+        let wants = !self.plan.returning.is_empty() || trigger::any(&rules.triggers, true, false, tt::INSERT, ctx);
+        let _ret = crate::ext::postgres_fdw::modify::returning(wants && rules.table.foreign.is_some());
         let r = match resume {
             Some((None, p)) => insert_prepared(
                 rules,

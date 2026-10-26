@@ -13,6 +13,14 @@ thread_local! {
     /// The columns the running UPDATE assigns (its target list), set around each row's
     /// update.
     static SET_COLS: std::cell::RefCell<Option<Vec<usize>>> = const { std::cell::RefCell::new(None) };
+    /// The running INSERT returns its rows (RETURNING, AFTER ROW triggers): the remote
+    /// statement returns them as stored there.
+    static RETURNING: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
+}
+
+/// While the guard lives, an INSERT's rows come back from the remote server.
+pub(crate) fn returning(on: bool) -> Option<crate::scoped::RefGuard<bool>> {
+    on.then(|| crate::scoped::set_ref(&RETURNING, true, "postgres_fdw::RETURNING"))
 }
 
 /// Run `f` with the UPDATE's assigned columns known (deparseUpdateSql's targetAttrs).
@@ -25,6 +33,9 @@ pub fn with_set_cols<T>(cols: Vec<usize>, f: impl FnOnce() -> T) -> T {
 pub(crate) fn unsettled(out: &mut Vec<&'static str>) {
     if SET_COLS.with_borrow(|c| c.is_some()) {
         out.push("postgres_fdw::SET_COLS");
+    }
+    if RETURNING.with_borrow(|r| *r) {
+        out.push("postgres_fdw::RETURNING");
     }
 }
 
@@ -88,9 +99,28 @@ pub fn insert_sql(cat: &crate::catalog::Catalog, t: &Table) -> (String, Vec<usiz
 /// INSERT of `row` into foreign table `t`.
 pub fn insert(t: &Table, row: Row, ctx: &ExecCtx) -> Result<Row> {
     let cat = ctx.catalog();
-    let (sql, cols) = insert_sql(&cat, t);
-    run(t, &sql, &text_params(t, &row, &cols, ctx), ctx)?;
-    Ok(row)
+    let (mut sql, cols) = insert_sql(&cat, t);
+    let live: Vec<usize> = (0..t.columns.len()).filter(|i| !t.columns[*i].dropped).collect();
+    let returning = RETURNING.with_borrow(|r| *r) && !live.is_empty();
+    if returning {
+        sql.push_str(&format!(
+            " RETURNING {}",
+            live.iter().map(|i| quote_ident(&column_name(t, *i))).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    let back = run(t, &sql, &text_params(t, &row, &cols, ctx), ctx)?;
+    match back.filter(|_| returning) {
+        Some(vals) => {
+            let mut out = vec![Value::Null; t.columns.len()];
+            for (k, &i) in live.iter().enumerate() {
+                if let Some(Some(s)) = vals.get(k) {
+                    out[i] = crate::types::text::parse_value(s, &t.columns[i].ty, ctx.fmt())?;
+                }
+            }
+            Ok(out)
+        }
+        None => Ok(row),
+    }
 }
 
 /// deparseUpdateSql over the assigned columns.

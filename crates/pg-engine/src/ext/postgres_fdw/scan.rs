@@ -52,7 +52,9 @@ fn conjuncts(e: &Expr, out: &mut Vec<Expr>) {
 /// conditions, the shippable conditions in restriction order, and the locking clause.
 pub fn spec(s: &ScanPlan, need: Option<&[bool]>, cat: &Catalog, fmt: &crate::types::text::FormatCtx) -> Spec {
     let t = &s.table;
-    let d = Deparser::new(cat, t, fmt);
+    let mut d = Deparser::new(cat, t, fmt);
+    let ctid_col = s.sys.then(|| t.columns.len() + usize::from(s.with_key));
+    d.ctid_col = ctid_col;
     let mut filter = Vec::new();
     if let Some(f) = &s.filter {
         conjuncts(f, &mut filter);
@@ -76,7 +78,13 @@ pub fn spec(s: &ScanPlan, need: Option<&[bool]>, cat: &Catalog, fmt: &crate::typ
         }
     }
     let retrieved: Vec<usize> = (0..n).filter(|i| used[*i] && !t.columns[*i].dropped).collect();
-    let ctid = s.with_key || s.mark.is_some();
+    let target = s.fdw.as_ref().is_some_and(|f| f.target);
+    // (The ctid also when a condition checked here or the plan above reads it.)
+    let ctid = target
+        || s.mark.is_some()
+        || ctid_col.is_some_and(|c| {
+            need.is_none_or(|m| m.get(c).copied().unwrap_or(false)) || local.iter().any(|x| x.columns().contains(&c))
+        });
     let mut cols: Vec<String> = retrieved.iter().map(|i| d.column(*i)).collect();
     if ctid {
         cols.push("ctid".into());
@@ -119,7 +127,7 @@ pub fn spec(s: &ScanPlan, need: Option<&[bool]>, cat: &Catalog, fmt: &crate::typ
     match s.mark.as_ref().map(|m| m.0) {
         Some(RowMark::Update | RowMark::NoKeyUpdate) => sql.push_str(" FOR UPDATE"),
         Some(RowMark::Share | RowMark::KeyShare) => sql.push_str(" FOR SHARE"),
-        None if s.with_key => sql.push_str(" FOR UPDATE"),
+        None if target => sql.push_str(" FOR UPDATE"),
         None => {}
     }
     let params = d.params.borrow().clone();
@@ -156,6 +164,9 @@ struct ScanNode {
     with_key: bool,
     sys: bool,
     local: Vec<Expr>,
+    /// The remote query and its parameters (`$n`), declared as a cursor at the first row.
+    sql: String,
+    params: Vec<Expr>,
 }
 
 /// make_tuple_from_result_row: a remote row as the table's row (columns not retrieved are
@@ -190,33 +201,10 @@ pub fn open(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNod
     let spec = spec(s, need, &cat, ctx.fmt());
     let m = mapping_for(&s.table, s.check_as, ctx)?;
     let key = connection::get_connection(ctx, &m, false)?;
-    let cursor = format!("c{}", connection::next_cursor(ctx));
-    let values: Vec<Option<String>> = spec
-        .params
-        .iter()
-        .map(|p| {
-            let v = crate::sql::expr::eval(p, &[], ctx)?;
-            let fmt = super::deparse::transmission_fmt(ctx.fmt());
-            Ok((!v.is_null()).then(|| crate::types::text::format_value(&v, &p.ty(), &fmt)))
-        })
-        .collect::<Result<_>>()?;
-    let sql = format!("DECLARE {cursor} CURSOR FOR\n{}", spec.sql);
-    let intr = crate::remote::interrupts(ctx);
-    let res = connection::with_conn(ctx, key, |c| {
-        let r = if values.is_empty() { c.exec(&sql, &intr)? } else { c.exec_params(&sql, None, &values, &intr)? };
-        if r.status != Status::CommandOk {
-            return Err(connection::report(&r, c, Some(&sql)));
-        }
-        Ok(())
-    });
-    if let Err(e) = res {
-        connection::note_error(ctx, key);
-        return Err(e);
-    }
     Ok(Box::new(ScanNode {
         table: s.table.clone(),
         key,
-        cursor,
+        cursor: String::new(),
         fetch: fetch_size(&cat, &s.table),
         batch: VecDeque::new(),
         eof: false,
@@ -225,18 +213,54 @@ pub fn open(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNod
         with_key: s.with_key,
         sys: s.sys,
         local: spec.local,
+        sql: spec.sql,
+        params: spec.params,
     }))
+}
+
+impl ScanNode {
+    /// create_cursor, at the first row asked for (when outer references have values).
+    fn declare(&mut self, ctx: &ExecCtx) -> Result<()> {
+        let fmt = super::deparse::transmission_fmt(ctx.fmt());
+        let values: Vec<Option<String>> = self
+            .params
+            .iter()
+            .map(|p| {
+                let v = crate::sql::expr::eval(p, &[], ctx)?;
+                Ok((!v.is_null()).then(|| crate::types::text::format_value(&v, &p.ty(), &fmt)))
+            })
+            .collect::<Result<_>>()?;
+        self.cursor = format!("c{}", connection::next_cursor(ctx));
+        let declare = format!("DECLARE {} CURSOR FOR\n{}", self.cursor, self.sql);
+        let intr = crate::remote::interrupts(ctx);
+        let query = &self.sql;
+        let res = connection::with_conn(ctx, self.key, |c| {
+            let r = if values.is_empty() { c.exec(&declare, &intr)? } else { c.exec_params(&declare, None, &values, &intr)? };
+            if r.status != Status::CommandOk {
+                return Err(connection::report(&r, c, Some(query)));
+            }
+            Ok(())
+        });
+        if res.is_err() {
+            connection::note_error(ctx, self.key);
+        }
+        res
+    }
 }
 
 impl ScanNode {
     /// fetch_more_data.
     fn fetch(&mut self, ctx: &ExecCtx) -> Result<()> {
+        if self.cursor.is_empty() {
+            self.declare(ctx)?;
+        }
         let sql = format!("FETCH {} FROM {}", self.fetch, self.cursor);
+        let query = &self.sql;
         let intr = crate::remote::interrupts(ctx);
         let r = connection::with_conn(ctx, self.key, |c| {
             let r = c.exec(&sql, &intr)?;
             if r.status != Status::TuplesOk {
-                return Err(connection::report(&r, c, Some(&sql)));
+                return Err(connection::report(&r, c, Some(query)));
             }
             Ok(r)
         });
@@ -334,6 +358,8 @@ pub fn remote_rows(t: &Table, ctx: &ExecCtx) -> Result<(Vec<Row>, i32)> {
         with_key: false,
         sys: false,
         local: Vec::new(),
+        sql: String::new(),
+        params: Vec::new(),
     };
     let rows = res.rows.into_iter().map(|v| make_row(&node, v, ctx)).collect::<Result<Vec<_>>>()?;
     Ok((rows, pages))

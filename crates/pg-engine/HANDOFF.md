@@ -94,7 +94,8 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   transactions and savepoints following the local ones (`session/mod.rs` `finish_txn`, the
   SAVEPOINT statements, PL/pgSQL exception blocks), scans through remote cursors with
   shippable conditions sent (deparse.c's walker and text), ORDER BY / LIMIT of a sort over a
-  foreign scan sent (`pushdown.rs`, run at the end of every `plan_level`), DML per row by
+  foreign scan and a LIMIT over a scan sent (`pushdown.rs`, run at the end of every
+  `plan_level`), ctid conditions shipped, INSERT ... RETURNING the remote row, DML per row by
   remote ctid or sent whole (Foreign Update / Delete), ANALYZE, IMPORT FOREIGN SCHEMA; joins
   and aggregates aren't pushed down yet (contrib STATUS.md has the list).
 - **search_path in routines** (round 19, agent 53): PL/pgSQL functions, DO blocks and SQL

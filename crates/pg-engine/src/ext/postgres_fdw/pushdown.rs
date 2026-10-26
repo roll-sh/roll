@@ -66,7 +66,9 @@ fn order_for(cat: &Catalog, fmt: &crate::types::text::FormatCtx, input: &Plan, k
 pub fn push(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan) {
     // (Children first: a sort under a merge join reads a presorted remote scan too.)
     match p {
-        Plan::Limit { input, limit, offset, with_ties: None } => {
+        Plan::Update(up) => mark_target(&mut up.source, up.rules.table.oid),
+        Plan::Delete(dp) => mark_target(&mut dp.source, dp.table.oid),
+        Plan::Limit { input, limit, offset, with_ties: None } if matches!(&**input, Plan::Sort { .. }) => {
             if let Plan::Sort { input: sin, keys } = &**input
                 && let Some((order, path)) = order_for(cat, fmt, sin, keys)
             {
@@ -81,6 +83,7 @@ pub fn push(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan) {
                     limit: if lim { limit.clone() } else { None },
                     offset: if lim { offset.clone() } else { None },
                     has_limit: lim,
+                    target: false,
                 }));
                 *p = if lim {
                     sin
@@ -90,11 +93,33 @@ pub fn push(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan) {
                 return;
             }
         }
+        // (A LIMIT right over the scan: add_foreign_final_paths without an ordering.)
+        Plan::Limit { input, limit, offset, with_ties: None } if !matches!(&**input, Plan::Sort { .. }) => {
+            if let Some((_, path)) = order_for(cat, fmt, input, &[]) {
+                let mut inp = (**input).clone();
+                if let Some(s) = scan_at(&mut inp, &path) {
+                    let local = !super::scan::spec(s, None, cat, fmt).local.is_empty();
+                    let d = Deparser::new(cat, &s.table, fmt);
+                    let shippable = |e: &Option<Expr>| e.as_ref().is_none_or(|x| d.shippable(x));
+                    if !local && shippable(limit) && shippable(offset) {
+                        s.fdw = Some(Arc::new(FdwPushdown {
+                            order: Vec::new(),
+                            limit: limit.clone(),
+                            offset: offset.clone(),
+                            has_limit: true,
+                            target: false,
+                        }));
+                        *p = inp;
+                        return;
+                    }
+                }
+            }
+        }
         Plan::Sort { input, keys } => {
             if let Some((order, path)) = order_for(cat, fmt, input, keys) {
                 let mut inp = (**input).clone();
                 if let Some(s) = scan_at(&mut inp, &path) {
-                    s.fdw = Some(Arc::new(FdwPushdown { order, limit: None, offset: None, has_limit: false }));
+                    s.fdw = Some(Arc::new(FdwPushdown { order, limit: None, offset: None, has_limit: false, target: false }));
                     *p = inp;
                     return;
                 }
@@ -106,6 +131,30 @@ pub fn push(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan) {
         if has_foreign(c) {
             push(cat, fmt, Arc::make_mut(c));
         }
+    }
+}
+
+/// The target scans of an UPDATE / DELETE of a foreign table (`FdwPushdown::target`): the
+/// scans of it returning their rows' keys, wherever the source has them (joins included).
+fn mark_target(source: &mut Arc<Plan>, oid: u32) {
+    if !has_foreign(source) {
+        return;
+    }
+    let p = Arc::make_mut(source);
+    if let Plan::Scan(s) = p {
+        if s.table.oid == oid && s.table.foreign.is_some() && s.with_key {
+            s.fdw = Some(Arc::new(FdwPushdown {
+                order: Vec::new(),
+                limit: None,
+                offset: None,
+                has_limit: false,
+                target: true,
+            }));
+        }
+        return;
+    }
+    for c in crate::sql::explain::plan_inputs_mut(p) {
+        mark_target(c, oid);
     }
 }
 
