@@ -110,8 +110,8 @@ impl SharedCatalog {
                 || TABLESPACES.contains(&o)
                 || self.tablespaces.contains_key(&o)
         };
-        c.comments.retain(|x| !shared(x.0));
-        c.comments.extend(self.comments.iter().cloned());
+        c.comments_mut().retain(|x| !shared(x.0));
+        c.comments_mut().extend(self.comments.iter().cloned());
         c.acls.retain(|a| !SHARED_CLASSES.contains(&a.class));
         c.acls.extend(self.acls.iter().cloned());
         c.roles = self.roles.clone();

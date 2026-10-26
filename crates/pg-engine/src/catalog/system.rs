@@ -1610,9 +1610,11 @@ impl SysRows {
 }
 
 /// `Database::sys_rows`: the catalogs generated last, for every session of the database.
+/// (The catalogs whose rows the next version reuses, `sysdelta::spliced`, hold the catalog
+/// they were generated for: what the next version's are spliced from.)
 #[derive(Default)]
 pub struct SysRowsCache {
-    entries: std::collections::VecDeque<(SysRowsKey, Arc<SysRows>)>,
+    entries: std::collections::VecDeque<(SysRowsKey, Arc<SysRows>, Option<Arc<Catalog>>)>,
 }
 
 /// How many generated catalogs a database keeps: every cacheable catalog under a couple of
@@ -1648,9 +1650,12 @@ fn rows_key(table: SysTable, ctx: &ExecCtx) -> SysRowsKey {
 
 impl SysRowsKey {
     fn same(&self, o: &SysRowsKey) -> bool {
+        std::sync::Weak::ptr_eq(&self.cat, &o.cat) && self.cat.strong_count() > 0 && self.same_but_catalog(o)
+    }
+
+    /// Alike in everything but the catalog version.
+    fn same_but_catalog(&self, o: &SysRowsKey) -> bool {
         self.table == o.table
-            && std::sync::Weak::ptr_eq(&self.cat, &o.cat)
-            && self.cat.strong_count() > 0
             && self.current_user == o.current_user
             && self.session_user == o.session_user
             && self.login == o.login
@@ -1727,35 +1732,77 @@ pub fn rows_cached(table: SysTable, ctx: &ExecCtx) -> Option<Arc<SysRows>> {
         .lock()
         .entries
         .iter()
-        .find(|(k, _)| k.same(&key))
-        .map(|(_, r)| r.clone())
+        .find(|(k, ..)| k.same(&key))
+        .map(|(_, r, _)| r.clone())
 }
 
 /// `rows` of a cacheable catalog (`rows_cacheable`), shared: generated once per key for all
-/// the database's sessions.
+/// the database's sessions (pg_class, pg_attribute, pg_attrdef and pg_index spliced from an
+/// earlier version's rows when they can be, `sysdelta`).
 pub fn rows_shared(table: SysTable, ctx: &ExecCtx) -> Result<Arc<SysRows>> {
     debug_assert!(rows_cacheable(table));
     let key = rows_key(table, ctx);
     let cache = &ctx.sess.db.sys_rows;
-    let hit = cache
-        .lock()
-        .entries
-        .iter()
-        .find(|(k, _)| k.same(&key))
-        .map(|(_, r)| r.clone());
+    let (hit, base) = {
+        let c = cache.lock();
+        let hit = c.entries.iter().find(|(k, ..)| k.same(&key)).map(|(_, r, _)| r.clone());
+        // (Rows of an earlier version, and that version, to splice this one's from.)
+        let base = (hit.is_none() && super::sysdelta::spliced(table))
+            .then(|| {
+                (c.entries.iter().rev())
+                    .find(|(k, _, held)| held.is_some() && k.same_but_catalog(&key))
+                    .map(|(_, r, held)| (r.clone(), held.clone().unwrap()))
+            })
+            .flatten();
+        (hit, base)
+    };
     if let Some(r) = hit {
         return Ok(r);
     }
     // (Generated outside the lock: another session may generate the same rows meanwhile,
     // and either copy serves.)
-    let rows = Arc::new(SysRows::new(rows_generated(table, ctx)?));
+    let cat = ctx.catalog();
+    let spliced = match &base {
+        Some((rows, held)) => match super::sysdelta::changed_rels(held, &cat) {
+            Some(changed) => super::sysdelta::splice(table, ctx, &rows.rows, &changed)?,
+            None => None,
+        },
+        None => None,
+    };
+    let rows = match spliced {
+        Some(r) => {
+            SPLICED.with(|c| c.set(c.get() + 1));
+            #[cfg(debug_assertions)]
+            {
+                let full = rows_generated_for(table, ctx, None)?;
+                debug_assert!(full == r, "{}'s rows spliced from an earlier version", table.name());
+            }
+            r
+        }
+        None => rows_generated(table, ctx)?,
+    };
+    let rows = Arc::new(SysRows::new(rows));
+    let held = super::sysdelta::spliced(table).then(|| cat.clone());
     let mut c = cache.lock();
-    c.entries.retain(|(k, _)| k.cat.strong_count() > 0 && !k.same(&key));
+    // (The rows of earlier versions under the same key are superseded: these are what the
+    // next version's are spliced from.)
+    c.entries.retain(|(k, _, held)| {
+        k.cat.strong_count() > 0 && !k.same(&key) && !(held.is_some() && k.same_but_catalog(&key))
+    });
     if c.entries.len() >= SYS_ROWS_CACHED {
         c.entries.pop_front();
     }
-    c.entries.push_back((key, rows.clone()));
+    c.entries.push_back((key, rows.clone(), held));
     Ok(rows)
+}
+
+thread_local! {
+    static SPLICED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many catalogs this thread spliced from an earlier version's rows (`sysdelta`).
+pub fn spliced_rows_count() -> u64 {
+    SPLICED.with(|c| c.get())
 }
 
 fn rows_generated(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
@@ -1822,7 +1869,7 @@ impl NameBounds {
 /// Where a relation's pg_class rows lie in the order `rows` generates them (Postgres's own
 /// relations, then tables, views, sequences, indexes, TOAST tables, composite types' rows,
 /// each by oid; `relations_of`'s order).
-fn class_position(cat: &Catalog, oid: u32) -> Option<(u8, u64)> {
+pub(super) fn class_position(cat: &Catalog, oid: u32) -> Option<(u8, u64)> {
     if oid < super::FIRST_USER_OID {
         let at = super::static_rows::rows(SysTable::PgClass)
             .iter()
@@ -1990,7 +2037,7 @@ pub fn rel_rows_generated() -> u64 {
 }
 
 /// `rows_generated`, of relation `only`'s rows alone (`rows_of_rel`).
-fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u32>) -> Result<Vec<Row>> {
+pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u32>) -> Result<Vec<Row>> {
     use SysTable::*;
     let schema = if table.schema() == PGC {
         "pg_catalog"

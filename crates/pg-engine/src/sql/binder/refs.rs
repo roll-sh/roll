@@ -78,6 +78,8 @@ pub struct RefLog {
     pub literals: Vec<(i32, u32, u32)>,
     /// User operators written without a schema: (A_Expr location, operator oid).
     pub opers: Vec<(i32, u32)>,
+    /// User collations of COLLATE clauses: (CollateClause location, collation oid).
+    pub colls: Vec<(i32, u32)>,
     /// Target columns of INSERT / UPDATE SET: (ResTarget location, relation, attnum).
     pub targets: Vec<(i32, u32, i16)>,
     /// WITH query names (a relation renamed to one of them must stay qualified).
@@ -166,6 +168,15 @@ impl Binder<'_, '_> {
             && let Some(log) = self.ref_log()
         {
             log.types.push((loc, oid));
+        }
+    }
+
+    /// A CREATE COLLATION collation named by a COLLATE clause (at `loc`, its keyword).
+    pub(crate) fn note_coll_ref(&mut self, loc: i32, oid: u32) {
+        if loc >= 0
+            && let Some(log) = self.ref_log()
+        {
+            log.colls.push((loc, oid));
         }
     }
 }

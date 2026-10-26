@@ -3086,6 +3086,9 @@ impl Binder<'_, '_> {
                 let e = self.bind_expr(val)?;
                 match e.ty() {
                     DataType::Row(fields) => {
+                        for i in 0..fields.len() {
+                            self.note_field_select(&e, i);
+                        }
                         for (i, (n, ty)) in fields.iter().enumerate() {
                             let fe = match &e {
                                 Expr::Row(items, _) => items[i].clone(),
@@ -5122,6 +5125,25 @@ impl Binder<'_, '_> {
         ))
     }
 
+    /// The relation of the named composite type `oid` (`typrelid`: a table's, a view's or a
+    /// CREATE TYPE AS's pg_class entry) and the attnums of its fields in order (a table's
+    /// numbered with its dropped columns).
+    pub(crate) fn rowtype_attnums(&self, oid: u32) -> Option<(u32, Vec<i16>)> {
+        let rel = (self.cat.tables.ix().rowtypes.get(&oid))
+            .or_else(|| self.cat.views.ix().rowtypes.get(&oid))
+            .filter(|r| !r.1)
+            .map(|r| r.0);
+        if let Some(t) = rel.and_then(|r| self.cat.tables.get(&r)) {
+            let live = t.columns.iter().enumerate().filter(|(_, c)| !c.dropped);
+            return Some((t.oid, live.map(|(i, _)| i as i16 + 1).collect()));
+        }
+        if let Some(v) = rel.and_then(|r| self.cat.views.get(&r)) {
+            return Some((v.oid, (1..=v.columns.len() as i16).collect()));
+        }
+        let c = self.cat.composites.get(&oid)?;
+        Some((c.relid, (1..=c.fields.len() as i16).collect()))
+    }
+
     /// `process_function_rte_ref`: while collecting dependencies, the columns of a FROM
     /// function's named composite result (`results`: each function's result type and column
     /// count) are the columns of the composite type's relation, numbered with its dropped
@@ -5132,18 +5154,7 @@ impl Binder<'_, '_> {
         }
         let mut at = 0;
         for (ty, n) in results {
-            let attnums = ty.row_oid().and_then(|oid| {
-                if let Some(t) = self.cat.tables.values().find(|t| t.rowtype == oid) {
-                    let live = t.columns.iter().enumerate().filter(|(_, c)| !c.dropped);
-                    return Some((t.oid, live.map(|(i, _)| i as i16 + 1).collect::<Vec<_>>()));
-                }
-                if let Some(v) = self.cat.views.values().find(|v| v.rowtype == oid) {
-                    return Some((v.oid, (1..=v.columns.len() as i16).collect()));
-                }
-                let c = self.cat.composites.values().find(|c| c.oid == oid)?;
-                Some((c.relid, (1..=c.fields.len() as i16).collect()))
-            });
-            if let Some((relid, attnums)) = attnums {
+            if let Some((relid, attnums)) = ty.row_oid().and_then(|oid| self.rowtype_attnums(oid)) {
                 for (c, a) in rel.cols.iter_mut().skip(at).take(*n).zip(attnums) {
                     c.rowtype_col = Some((relid, a));
                 }
@@ -5238,7 +5249,25 @@ impl Binder<'_, '_> {
             // function, as the scan reads its result.
             let mut expand: Option<Vec<OutCol>> = None;
             let (body, mut cols) = b.in_sql_fn(&fdef, at, |b| {
-                let (body, bcols) = b.bind_user_body(&fdef, &args)?;
+                let (body, bcols) = match b.bind_user_body(&fdef, &args) {
+                    Ok(x) => x,
+                    // (Collecting dependencies, which a call records whatever its body reads:
+                    // a body that doesn't bind under this search path stands as a row of its
+                    // declared columns.)
+                    Err(_) if b.deps.is_some() => {
+                        let decl: Vec<(String, DataType)> = match &fdef.ret {
+                            _ if !fdef.out_cols.is_empty() => fdef.out_cols.clone(),
+                            DataType::Row(r) if r.oid != 0 => r.fields.clone(),
+                            t => vec![(name.clone(), t.clone())],
+                        };
+                        let plan = Plan::Project {
+                            input: Arc::new(Plan::One),
+                            exprs: decl.iter().map(|(_, t)| Expr::Const(Value::Null, t.clone())).collect(),
+                        };
+                        (plan, decl.into_iter().map(|(n, t)| OutCol::new(n, t)).collect())
+                    }
+                    Err(e) => return Err(e),
+                };
                 if fdef.language == "sql" {
                     super::check_sql_retval(&b.cat, &b.ctx.search_path, &fdef, Some(&bcols))?;
                 }

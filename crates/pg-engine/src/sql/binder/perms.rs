@@ -188,6 +188,18 @@ impl Binder<'_, '_> {
         }
     }
 
+    /// `f`, with what it notes for dependencies dropped: expressions the rewriter or
+    /// planner adds (generated columns, defaults), not part of the statement's query tree.
+    pub(crate) fn unrecorded<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let at = (self.deps.as_ref().map(Vec::len), self.rowtype_deps.len());
+        let r = f(self);
+        if let (Some(n), Some(d)) = (at.0, self.deps.as_mut()) {
+            d.truncate(n);
+        }
+        self.rowtype_deps.truncate(at.1);
+        r
+    }
+
     /// A column of a function's composite result is read: what's collecting dependencies
     /// notes the composite type's relation's column.
     pub(crate) fn note_rowtype_col(&mut self, col: Option<(u32, i16)>) {

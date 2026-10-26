@@ -335,6 +335,7 @@ impl Database {
             catalog_base: None,
             catalog_base_cat: None,
             stmt_catalog: None,
+            read_catalog: None,
             locks_held: HashMap::new(),
             lock_journal: Vec::new(),
             row_locks: Vec::new(),
@@ -739,6 +740,10 @@ pub struct Txn {
     /// statement's DDL is made from, so it can stand as that DDL's base (a newer one would
     /// take what other DDL committed meanwhile for this DDL's removals).
     stmt_catalog: Option<Arc<Catalog>>,
+    /// The catalog the running statement reads (`catalog`, while it has none of its own):
+    /// `stmt_catalog`, then the database's as it is whenever the statement takes a new
+    /// lock. (Never older than `stmt_catalog`, which stays the base of its DDL.)
+    read_catalog: Option<Arc<Catalog>>,
     /// Heavyweight locks held, by key and mode, with the subtransaction depth that took them.
     locks_held: HashMap<(Vec<u8>, LockMode), usize>,
     /// The order they were taken in (released by ROLLBACK TO in reverse).
@@ -947,7 +952,9 @@ impl Txn {
     /// Start a statement: READ COMMITTED takes a fresh snapshot.
     pub fn begin_statement(&mut self, needs_snapshot: bool) -> Result<()> {
         if self.catalog.is_none() {
-            self.stmt_catalog = Some(self.db.catalog());
+            let c = self.db.catalog();
+            self.read_catalog = Some(c.clone());
+            self.stmt_catalog = Some(c);
         }
         self.stmt_snapshot = needs_snapshot;
         // A transaction snapshot is taken by the first statement that needs one.
@@ -1030,7 +1037,11 @@ impl Txn {
         match &self.catalog {
             Some(c) => c.clone(),
             None => {
-                let base = self.db.catalog();
+                // The catalog as the statement began (or as it was when the statement last
+                // took a lock, AcceptInvalidationMessages): every read of one statement sees
+                // one version, however other sessions' DDL commits meanwhile (a scan of
+                // pg_class and one of pg_attribute read different versions).
+                let base = self.read_catalog.clone().unwrap_or_else(|| self.db.catalog());
                 if !self.stmt_snapshot || !base.has_detach_pending() {
                     return base;
                 }
@@ -1835,6 +1846,9 @@ impl Txn {
         if got {
             self.lock_journal.push(k.clone());
             self.locks_held.insert(k, self.savepoints.len());
+            // A new lock may have waited for DDL that then committed: the statement reads the
+            // catalog as it is now (LockRelationOid's AcceptInvalidationMessages).
+            self.accept_catalog();
             // Its own lock (the virtual transaction id's), which waiting for it waits on.
             if !self.xact_locks.contains(&self.id) {
                 self.db.locks.hold_xact_lock(self.id, self.id, self.lock_proc(), self.xid);
@@ -1854,6 +1868,7 @@ impl Txn {
             self.db.locks.acquire(&k, self.id, proc, LockMode::Share, &self.waits(WaitPolicy::Block), &String::new)?;
             self.db.locks.release(&k, self.id, LockMode::Share);
         }
+        self.accept_catalog();
         Ok(())
     }
 
@@ -1935,6 +1950,7 @@ impl Txn {
             )?;
             let Some(&holder) = self.db.locks.row_conflicts(&key, self.id, RowLockMode::NoKeyUpdate).first() else {
                 self.db.locks.release(&tuple, self.id, LockMode::Exclusive);
+                self.accept_catalog();
                 return Ok(());
             };
             let r = self.wait_for_xact(holder);
@@ -1997,7 +2013,17 @@ impl Txn {
             .locks
             .acquire(k, self.id, proc, LockMode::Share, &self.waits(WaitPolicy::Block), &String::new)?;
         self.db.locks.release(k, self.id, LockMode::Share);
+        // (What the transaction waited for may have committed DDL.)
+        self.accept_catalog();
         Ok(())
+    }
+
+    /// The running statement reads the database's catalog as it is now, after a lock or a
+    /// wait (AcceptInvalidationMessages): `catalog`'s `read_catalog`.
+    pub fn accept_catalog(&mut self) {
+        if self.catalog.is_none() && self.read_catalog.is_some() {
+            self.read_catalog = Some(self.db.catalog());
+        }
     }
 
     /// Begin a speculative insertion (SpeculativeInsertionLockAcquire): its token, whose lock
@@ -2074,6 +2100,9 @@ impl Txn {
             }
             self.row_locks.push((key.to_vec(), self.savepoints.len()));
         }
+        // (A row lock may have waited for a transaction that committed DDL: a catalog row's
+        // updater.)
+        self.accept_catalog();
         Ok(got)
     }
 

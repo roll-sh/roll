@@ -708,7 +708,6 @@ impl Session {
         // (What a panic left half-set in an earlier statement goes.)
         crate::scoped::reset_statement_scratch();
         let txn = self.txn.as_ref().unwrap();
-        crate::sql::binder::note_catalog(&txn.borrow().catalog());
         {
             let mut t = txn.borrow_mut();
             if t.isolation == crate::txn::Isolation::Serializable && t.read_only {
@@ -716,6 +715,8 @@ impl Session {
             }
             t.begin_statement(!self.state.no_snapshot.get())?;
         }
+        // (The catalog the statement reads, which `begin_statement` took.)
+        crate::sql::binder::note_catalog(&txn.borrow().catalog());
         let search_path = search_path.unwrap_or_else(|| self.state.search_path());
         let ctx = ExecCtx::with_search_path(
             txn,

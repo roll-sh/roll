@@ -26,6 +26,7 @@ pub mod shdepend;
 pub mod static_rows;
 pub mod sys_rels;
 pub mod sys_sizes;
+pub mod sysdelta;
 pub mod system;
 pub mod tsearch;
 pub mod type_procs;
@@ -1624,7 +1625,7 @@ impl Role {
 }
 
 /// Settings applied when `role` (0: any) connects to `database` (None: any).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RoleSetting {
     pub role: u32,
     pub database: Option<String>,
@@ -1805,8 +1806,9 @@ pub struct Catalog {
     #[serde(default)]
     pub roles: BTreeMap<u32, Role>,
     /// (object oid, sub-id, text): `COMMENT ON`.
+    /// (Shared by the catalog's copies until one changes it: `comments_mut`.)
     #[serde(default)]
-    pub comments: Vec<(u32, i32, String)>,
+    pub comments: Arc<Vec<(u32, i32, String)>>,
     /// Installed extensions: (oid, name, schema, version).
     #[serde(default)]
     pub extensions: Vec<(u32, String, u32, String)>,
@@ -2361,6 +2363,95 @@ impl Catalog {
             self.names
                 .insert((schema, i.name.clone()), (RelKind::Index, i.oid));
         }
+    }
+
+    /// Whether the name index and children lists are alike (debug checks of `reindex_rels`).
+    pub fn names_eq(&self, o: &Catalog) -> bool {
+        let kids = |c: &Catalog| -> BTreeMap<u32, Vec<u32>> {
+            c.children.iter().filter(|(_, v)| !v.is_empty()).map(|(k, v)| (*k, v.clone())).collect()
+        };
+        self.names.len() == o.names.len()
+            && self.names.iter().all(|(k, v)| o.names.get(k) == Some(v))
+            && kids(self) == kids(o)
+    }
+
+    /// The comments, to change (copied first when other catalogs share them).
+    pub fn comments_mut(&mut self) -> &mut Vec<(u32, i32, String)> {
+        Arc::make_mut(&mut self.comments)
+    }
+
+    /// The relation name index's entry of relation `oid` (an index is in its table's schema).
+    fn name_entry(&self, oid: u32) -> Option<((u32, String), (RelKind, u32))> {
+        if let Some(t) = self.tables.get(&oid) {
+            return Some(((t.schema, t.name.clone()), (RelKind::Table, oid)));
+        }
+        if let Some(v) = self.views.get(&oid) {
+            let kind = if v.materialized { RelKind::MaterializedView } else { RelKind::View };
+            return Some(((v.schema, v.name.clone()), (kind, oid)));
+        }
+        if let Some(s) = self.sequences.get(&oid) {
+            return Some(((s.schema, s.name.clone()), (RelKind::Sequence, oid)));
+        }
+        let i = self.indexes.get(&oid)?;
+        let schema = self.index_table(i.table).map_or(PUBLIC_OID, |t| t.schema);
+        Some(((schema, i.name.clone()), (RelKind::Index, oid)))
+    }
+
+    /// `reindex`'s name index and children lists brought up to date for the relations in
+    /// `rels`, whose entries may differ from those of `before` (the catalog this one was
+    /// copied from, whose index was whole): what a merged commit changed, not the whole
+    /// catalog. Err: two relations of one schema took one name
+    /// (pg_class_relname_nsp_index).
+    pub fn reindex_rels(&mut self, before: &Catalog, rels: &std::collections::BTreeSet<u32>) -> Result<()> {
+        // (A table moved to another schema moves its indexes' names too.)
+        let mut rels = rels.clone();
+        for &o in rels.clone().iter() {
+            if let (Some(a), Some(b)) = (before.tables.get(&o), self.tables.get(&o))
+                && a.schema != b.schema
+            {
+                rels.extend(b.indexes.iter().copied().chain(b.pkey_index));
+            }
+        }
+        for &o in &rels {
+            if let Some((k, (_, at))) = before.name_entry(o)
+                && self.names.get(&k).is_some_and(|e| e.1 == at)
+            {
+                self.names.remove(&k);
+            }
+            if let Some(t) = before.tables.get(&o).filter(|t| !t.inherits.is_empty()) {
+                for p in &t.inherits {
+                    if let Some(v) = Arc::make_mut(&mut self.children).get_mut(p) {
+                        v.retain(|c| *c != o);
+                    }
+                }
+            }
+        }
+        for &o in &rels {
+            if let Some((k, e)) = self.name_entry(o) {
+                if let Some(&(_, other)) = self.names.get(&k)
+                    && other != o
+                    && self.name_entry(other).is_some_and(|x| x.0 == k)
+                {
+                    return Err(Error::new(
+                        code::UNIQUE_VIOLATION,
+                        "duplicate key value violates unique constraint \"pg_class_relname_nsp_index\"",
+                    )
+                    .detail(format!("Key (relname, relnamespace)=({}, {}) already exists.", k.1, k.0)));
+                }
+                self.names.insert(k, e);
+            }
+            if let Some(t) = self.tables.get(&o).cloned() {
+                for p in &t.inherits {
+                    let v = Arc::make_mut(&mut self.children).entry(*p).or_default();
+                    // (In table oid order, as `reindex` lists them.)
+                    if !v.contains(&o) {
+                        let at = v.partition_point(|c| *c < o);
+                        v.insert(at, o);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// An even oid (enum labels: comparing them then follows the sort order).
@@ -4166,7 +4257,7 @@ impl Catalog {
         {
             self.remove_name(seq.schema, &seq.name);
         }
-        self.comments.retain(|(o, _, _)| *o != oid);
+        self.comments_mut().retain(|(o, _, _)| *o != oid);
         Some(t)
     }
 
@@ -4328,7 +4419,10 @@ impl Catalog {
     /// Relations that depend on `table` through foreign keys.
     pub fn referencing_fks(&self, table: u32) -> Vec<(Arc<Table>, Constraint)> {
         let mut out = Vec::new();
-        for t in self.tables.values() {
+        // (The tables whose foreign keys reference it, by the tables map's index, in oid
+        // order as the scan of every table found them.)
+        let referencers = self.tables.ix().fk_refs.get(&table);
+        for t in referencers.into_iter().flat_map(|c| c.keys()).filter_map(|o| self.tables.get(&o)) {
             for c in &t.constraints {
                 if let ConstraintKind::ForeignKey { ref_table, .. } = &c.kind
                     && *ref_table == table
@@ -4337,6 +4431,15 @@ impl Catalog {
                 }
             }
         }
+        debug_assert_eq!(
+            out.iter().map(|(t, c)| (t.oid, c.oid)).collect::<Vec<_>>(),
+            (self.tables.values())
+                .flat_map(|t| t.constraints.iter().map(move |c| (t, c)))
+                .filter(|(_, c)| matches!(&c.kind, ConstraintKind::ForeignKey { ref_table, .. } if *ref_table == table))
+                .map(|(t, c)| (t.oid, c.oid))
+                .collect::<Vec<_>>(),
+            "foreign keys referencing a table"
+        );
         out
     }
 
@@ -4366,7 +4469,7 @@ impl Catalog {
 pub type DependRow = ((u32, u32, i32), (u32, u32, i32), char);
 
 /// Superuser DML on pg_depend (see `Catalog::depend_edits`).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct DependEdits {
     #[serde(default)]
     pub removed: Vec<DependRow>,

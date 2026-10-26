@@ -585,7 +585,8 @@ impl Wanted {
                 self.entities.push(Entity::Index(*i));
             }
         }
-        for tg in cat.triggers.values().filter(|tg| tg.table == table) {
+        // (A constraint trigger also depends on its FROM table.)
+        for tg in cat.triggers.values().filter(|tg| tg.table == table || tg.constr_rel == table) {
             self.entities.push(Entity::Trigger(tg.oid));
         }
         for r in cat.rules.values().filter(|r| r.table == table) {
@@ -1192,6 +1193,15 @@ fn derived_depends(ctx: &ExecCtx, cat: &Arc<Catalog>, scope: Option<&Scope>) -> 
             out.add(me, (REL, tg.table, 0), 'S');
         }
         out.add(me, (REL, tg.table, 0), 'a');
+        // CREATE CONSTRAINT TRIGGER: its constraint goes with the trigger and the table, and
+        // the trigger with the table named in FROM.
+        if tg.constraint && tg.con_oid != 0 {
+            out.add((CONSTRAINT, tg.con_oid, 0), (REL, tg.table, 0), 'a');
+            out.add((CONSTRAINT, tg.con_oid, 0), me, 'i');
+        }
+        if tg.constr_rel != 0 {
+            out.add(me, (REL, tg.constr_rel, 0), 'a');
+        }
         for c in &tg.columns {
             out.add(me, (REL, tg.table, *c as i32 + 1), 'n');
         }
@@ -1231,16 +1241,12 @@ fn derived_depends(ctx: &ExecCtx, cat: &Arc<Catalog>, scope: Option<&Scope>) -> 
         let Some(t) = cat.tables.get(&p.table) else {
             continue;
         };
-        let mut refs: Vec<Addr> = Vec::new();
+        // (CreatePolicy records USING's and WITH CHECK's references apart: each list is
+        // deduplicated, not the two together.)
         for sql in [&p.qual, &p.with_check].into_iter().flatten() {
             for r in table_expr_refs(ctx, cat, t, sql, Clause::Policy, None) {
-                if !refs.contains(&r) {
-                    refs.push(r);
-                }
+                out.add(me, r, 'n');
             }
-        }
-        for r in refs {
-            out.add(me, r, 'n');
         }
     }
     for s in pick_b(&cat.statistics, scope.map(|s| &s.statistics)) {
@@ -1299,27 +1305,41 @@ fn publication_depends(ctx: &ExecCtx, cat: &Arc<Catalog>, scope: Option<&Scope>,
 fn rule_depends(ctx: &ExecCtx, cat: &Arc<Catalog>, r: &super::Rule, out: &mut Out) {
     let me = (REWRITE, r.oid, 0);
     out.add(me, (REL, r.table, 0), 'a');
-    let mut refs = Vec::new();
-    let mut b = dep_binder(ctx, cat);
-    // (OLD / NEW read the rule's relation's columns: noted where they resolve.)
-    b.refs = Some(Box::default());
-    if b.rule_refs(r).is_ok() {
-        binder_refs(cat, &b, &mut refs);
-        for c in b.refs.as_deref().map_or(&[][..], |l| &l.cols[..]) {
-            if c.src == Some(-1) && c.rel == r.table && c.attnum > 0 {
-                let a = (REL, c.rel, c.attnum as i32);
-                if !refs.contains(&a) {
-                    refs.push(a);
+    // InsertRule records the actions' references (their range tables hold OLD and NEW, the
+    // rule's relation: a reference to it unless they read its columns) and the WHERE
+    // condition's apart, each list deduplicated on its own.
+    let refs_of = |rule: &super::Rule| -> Vec<Addr> {
+        let mut refs = Vec::new();
+        let mut b = dep_binder(ctx, cat);
+        // (OLD / NEW read the rule's relation's columns: noted where they resolve.)
+        b.refs = Some(Box::default());
+        if b.rule_refs(rule).is_ok() {
+            binder_refs(cat, &b, &mut refs);
+            for c in b.refs.as_deref().map_or(&[][..], |l| &l.cols[..]) {
+                if c.src == Some(-1) && c.rel == rule.table && c.attnum > 0 {
+                    let a = (REL, c.rel, c.attnum as i32);
+                    if !refs.contains(&a) {
+                        refs.push(a);
+                    }
                 }
             }
         }
-        dedupe(&mut refs);
+        refs
+    };
+    let mut actions = refs_of(&super::Rule { qual: None, ..r.clone() });
+    if !actions.iter().any(|x| x.0 == REL && x.1 == r.table) {
+        actions.push((REL, r.table, 0));
     }
-    for x in refs {
-        if x.0 == REL && x.1 == r.table && x.2 == 0 {
-            continue;
-        }
+    dedupe(&mut actions);
+    for x in actions {
         out.add(me, x, 'n');
+    }
+    if r.qual.is_some() {
+        let mut qual = refs_of(&super::Rule { actions: Vec::new(), instead: true, ..r.clone() });
+        dedupe(&mut qual);
+        for x in qual.into_iter().filter(|x| !(x.0 == REL && x.1 == r.table && x.2 == 0)) {
+            out.add(me, x, 'n');
+        }
     }
 }
 
@@ -1469,10 +1489,19 @@ fn collation_depends(cat: &Catalog, scope: Option<&Scope>, out: &mut Out) {
                 out.add((REL, t.oid, i as i32 + 1), (COLLATION, oid, 0), 'n');
             }
         }
+        // StorePartitionKey: each key's collation (written, or its column's).
+        for k in t.partkey.iter().flat_map(|k| &k.cols) {
+            let coll = k.collation.clone().or_else(|| t.columns.get(k.col?)?.collation.clone());
+            if let Some(oid) = user(&coll) {
+                out.add((REL, t.oid, 0), (COLLATION, oid, 0), 'n');
+            }
+        }
     }
     for d in pick_b(&cat.domains, scope.map(|s| &s.domains)) {
         if let Some(oid) = user(&d.collation) {
             out.add((TYPE, d.oid, 0), (COLLATION, oid, 0), 'n');
+            // (Its array type has the collation too.)
+            out.add((TYPE, d.array_oid, 0), (COLLATION, oid, 0), 'n');
         }
     }
     for c in cat.composites.values() {
@@ -1489,11 +1518,12 @@ fn collation_depends(cat: &Catalog, scope: Option<&Scope>, out: &mut Out) {
             }
         }
     }
+    // (The views' rules depend on the collations their expressions name or relabel to,
+    // noted while binding them; not on their columns' collations.)
     for v in pick(&cat.views, scope.map(|s| &s.views)) {
         for (i, c) in v.collations.iter().enumerate() {
             if let Some(oid) = user(c) {
                 out.add((REL, v.oid, i as i32 + 1), (COLLATION, oid, 0), 'n');
-                out.add((REWRITE, v.rule_oid(), 0), (COLLATION, oid, 0), 'n');
             }
         }
     }
@@ -1954,7 +1984,6 @@ pub fn procedure_description(cat: &Catalog, oid: u32, sp: &[String]) -> Option<S
 
 /// `getObjectDescription`: `None` for an object that doesn't exist.
 pub fn describe(cat: &Catalog, sp: &[String], (class, oid, sub): Addr) -> Option<String> {
-    let q = |schema: u32, name: &str| cat.qualified_name(schema, name, sp);
     match class {
         super::shdepend::AUTH_MEMBERS => {
             let m = cat.members.iter().find(|m| m.oid == oid)?;
@@ -2019,6 +2048,14 @@ pub fn describe(cat: &Catalog, sp: &[String], (class, oid, sub): Addr) -> Option
                 {
                     return Some(format!("constraint {}", quote_ident(n)));
                 }
+            }
+            // A constraint trigger's constraint (contype 't').
+            if let Some(tg) = cat.triggers.values().find(|tg| tg.con_oid == oid && tg.con_oid != 0) {
+                return Some(format!(
+                    "constraint {} on {}",
+                    quote_ident(&tg.name),
+                    relation_description(cat, tg.table, sp)?
+                ));
             }
             None
         }
@@ -2092,10 +2129,19 @@ pub fn describe(cat: &Catalog, sp: &[String], (class, oid, sub): Addr) -> Option
                 .find(|e| e.0 == oid)
                 .map(|e| format!("extension {}", e.1))
         }
-        STATEXT => cat
-            .statistics
-            .get(&oid)
-            .map(|s| format!("statistics object {}", q(s.schema, &s.name))),
+        STATEXT => {
+            let s = cat.statistics.get(&oid)?;
+            // StatisticsObjIsVisible: the first statistics object of the name in the path
+            // (the temporary schema isn't searched).
+            let first = (cat.routine_path(sp).into_iter())
+                .find(|n| cat.statistics.values().any(|x| x.schema == *n && x.name == s.name));
+            Some(if first == Some(s.schema) {
+                format!("statistics object {}", quote_ident(&s.name))
+            } else {
+                let schema = quote_ident(cat.schema_name(s.schema));
+                format!("statistics object {schema}.{}", quote_ident(&s.name))
+            })
+        }
         COLLATION => {
             let d = crate::types::collation::def_by_oid(cat, oid)?;
             Some(format!("collation {}", collation_name_in_path(cat, sp, &d)))

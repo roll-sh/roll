@@ -1578,7 +1578,7 @@ impl Binder<'_, '_> {
                         continue;
                     };
                     let Ok(g) = ast::parse_expr(sql) else { continue };
-                    let Ok(e) = self.bind_over_table(&t, &g, Clause::Generated) else {
+                    let Ok(e) = self.unrecorded(|b| b.bind_over_table(&t, &g, Clause::Generated)) else {
                         continue;
                     };
                     let Ok(e) = self.coerce_assign(e, &tc.ty, &tc.name) else {
@@ -1738,7 +1738,7 @@ impl Binder<'_, '_> {
                 let Ok(n) = ast::parse_expr(sql) else {
                     continue;
                 };
-                let Ok(e) = self.bind_over_table(&t, &n, Clause::Generated) else {
+                let Ok(e) = self.unrecorded(|b| b.bind_over_table(&t, &n, Clause::Generated)) else {
                     continue;
                 };
                 let Ok(e) = self.coerce_assign(e, &c.ty, &c.name) else {

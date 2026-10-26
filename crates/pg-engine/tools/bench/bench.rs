@@ -1176,6 +1176,10 @@ fn scale_ops(cx: &Ctx) {
         ("psql_d_lookup_after_ddl", format!("COMMENT ON TABLE sc{ms}.t{mid} IS 'c'; {d_lookup}")),
         ("psql_d_indexes_after_ddl", format!("COMMENT ON TABLE sc{ms}.t{mid} IS 'c'; {d_indexes}")),
         ("information_schema_columns_after_ddl", format!("COMMENT ON TABLE sc{ms}.t{mid} IS 'c'; {is_columns}")),
+        // (Whole catalogs right after DDL, round 19 agent 62.)
+        ("pg_class_count_after_ddl", format!("COMMENT ON TABLE sc{ms}.t{mid} IS 'c'; SELECT count(*) FROM pg_class")),
+        ("pg_class_join_attribute_after_ddl", format!("ALTER TABLE sc{ms}.t{mid} ALTER COLUMN id SET STATISTICS 100; SELECT count(*) FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid WHERE c.relnamespace = 'sc{ms}'::regnamespace")),
+        ("orm_constraints_after_ddl", format!("COMMENT ON TABLE sc{ms}.t{mid} IS 'c'; SELECT con.conname, con.contype, cl.relname, pg_get_constraintdef(con.oid) FROM pg_constraint con JOIN pg_class cl ON cl.oid = con.conrelid JOIN pg_namespace n ON n.oid = cl.relnamespace WHERE n.nspname = 'sc{ms}' ORDER BY cl.relname, con.conname")),
         ("comment_only", format!("COMMENT ON TABLE sc{ms}.t{mid} IS 'c'")),
     ];
     for (name, sql) in &queries {

@@ -511,7 +511,7 @@ impl Ddl<'_, '_> {
             self.drop_trigger_tree(k);
         }
         self.cat.triggers.remove(&oid);
-        self.cat.comments.retain(|(o, _, _)| *o != oid);
+        self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
     }
 
     /// The trigger a DROP TRIGGER [IF EXISTS] name ON table names, checked droppable by the

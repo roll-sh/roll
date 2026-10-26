@@ -830,7 +830,7 @@ impl Ddl<'_, '_> {
             .hint("Use ALTER SUBSCRIPTION ... DISABLE to disable the subscription, and then use ALTER SUBSCRIPTION ... SET (slot_name = NONE) to disassociate it from the slot."));
         }
         self.cat.subscriptions.remove(&x.oid);
-        self.cat.comments.retain(|(o, _, _)| *o != x.oid);
+        self.cat.comments_mut().retain(|(o, _, _)| *o != x.oid);
         self.save()?;
         Ok(TAG.into())
     }

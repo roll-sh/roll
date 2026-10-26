@@ -88,6 +88,9 @@ pub struct DbEntry {
 #[derive(Clone, Debug, Default)]
 pub struct Shared {
     pub tables: HashMap<u32, TabEntry>,
+    /// The catalog version whose dropped relations' and functions' entries were last
+    /// removed (`end_xact`).
+    pub pruned_at: u64,
     pub funcs: HashMap<u32, FuncCounts>,
     pub db: DbEntry,
     /// Database 0: shared relations' counts.
@@ -1178,9 +1181,16 @@ fn end_xact_counts(
             p.wal_pending.2 += 1;
         }
         let mut s = sess.db.pgstat.lock();
-        s.tables.retain(|rel, _| *rel < crate::catalog::FIRST_USER_OID || in_catalog(cat, *rel));
-        s.funcs
-            .retain(|f, _| *f < crate::catalog::FIRST_USER_OID || cat.functions.contains_key(f));
+        // Dropped objects' entries go, once per catalog version, by a transaction that sees
+        // the database's current catalog. (Every transaction's end visited every table's
+        // entry under the lock all sessions share; and one over an older catalog removed
+        // the entries of tables made since.)
+        if s.pruned_at != cat.version && sess.db.catalog().version == cat.version {
+            s.tables.retain(|rel, _| *rel < crate::catalog::FIRST_USER_OID || in_catalog(cat, *rel));
+            s.funcs
+                .retain(|f, _| *f < crate::catalog::FIRST_USER_OID || cat.functions.contains_key(f));
+            s.pruned_at = cat.version;
+        }
         drop(s);
         p.clear_snapshot();
     }

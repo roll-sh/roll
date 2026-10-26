@@ -122,3 +122,96 @@ fn catalog_rescans_dont_grow_with_the_catalog() {
     }
     engine.shutdown();
 }
+
+/// Whole catalogs read right after DDL (round 19, agent 62): pg_class and pg_attribute of the
+/// new catalog version are spliced from the last version's rows (`catalog::sysdelta`), not
+/// generated again, when the DDL changed only some relations. (Debug builds check every
+/// splice against the full generation.)
+#[test]
+fn whole_catalogs_after_ddl_are_spliced() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    add_objects(&mut s, 0, 5);
+    let q = "SELECT count(*) FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid";
+    run(&mut s, q);
+    for ddl in [
+        "COMMENT ON TABLE other1 IS 'x'",
+        "CREATE TABLE fresh (a int PRIMARY KEY, b text DEFAULT 'x')",
+        "ALTER TABLE fresh ADD COLUMN c int",
+        "DROP TABLE other2 CASCADE",
+    ] {
+        run(&mut s, ddl);
+        let spliced = pg_engine::catalog::system::spliced_rows_count();
+        let n = generated(&mut s, q);
+        assert_eq!(n, 0, "{ddl}: catalogs generated whole after it");
+        assert!(pg_engine::catalog::system::spliced_rows_count() > spliced, "{ddl}: nothing spliced");
+    }
+    engine.shutdown();
+}
+
+/// Racing DDL commits (pg_restore -j's indexes, constraints and comments; round 19, agent
+/// 62): a commit whose catalog's base is no longer current is merged onto the current one
+/// under the commit lock, and that must cost what the transactions changed, not the catalog
+/// (it reindexed and checked every relation's name, and merged the header's comment list
+/// pair by pair). Timed: merged commits over 1,500 tables within 6x those over 100 (a debug
+/// build, whose own checks grow with the catalog).
+#[test]
+fn racing_ddl_commits_dont_grow_with_the_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut a = engine.connect(1, "postgres", "postgres", "a").unwrap();
+    let mut b = engine.connect(2, "postgres", "postgres", "b").unwrap();
+    let mut made = 0;
+    let mut timed = |a: &mut Session, b: &mut Session, upto: usize, round: usize| -> f64 {
+        for i in made..upto {
+            run(a, &format!("CREATE TABLE r{i} (a int, b int CHECK (b > 0));\nCOMMENT ON TABLE r{i} IS 'c'"));
+        }
+        made = upto;
+        let t = std::time::Instant::now();
+        for i in 0..20 {
+            let (x, y) = (i + 20 * round, i + 20 * round + 50);
+            run(a, &format!("BEGIN;\nCREATE INDEX ON r{x} (a);\nCOMMENT ON TABLE r{x} IS 'a'"));
+            run(b, &format!("BEGIN;\nCREATE INDEX ON r{y} (b);\nCOMMENT ON TABLE r{y} IS 'b'"));
+            run(a, "COMMIT");
+            run(b, "COMMIT");
+        }
+        t.elapsed().as_secs_f64()
+    };
+    let small = timed(&mut a, &mut b, 100, 0);
+    let large = timed(&mut a, &mut b, 1500, 1);
+    eprintln!("racing commits: {small:.3}s at 100 tables, {large:.3}s at 1,500");
+    assert!(large < small * 6.0 + 0.5, "racing commits: {small:.3}s at 100 tables, {large:.3}s at 1,500");
+    engine.shutdown();
+}
+
+/// Concurrent CREATE / DROP TABLE (pgjdbc's TypeCacheDLLStressTest): the merged catalogs'
+/// relation counts (`relindex::RelRows`, pg_class's planner estimate) stay those of their
+/// entries; debug builds check them against generated rows at every scan.
+#[test]
+fn racing_create_and_drop_keep_catalog_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut a = engine.connect(1, "postgres", "postgres", "a").unwrap();
+    let mut b = engine.connect(2, "postgres", "postgres", "b").unwrap();
+    let count = "SELECT count(*) FROM pg_class";
+    for i in 0..30 {
+        run(&mut a, &format!("BEGIN;\nCREATE TABLE ca{i} (x int PRIMARY KEY, t text)"));
+        run(&mut b, &format!("BEGIN;\nCREATE TABLE cb{i} (x serial, t text)"));
+        if i > 0 {
+            run(&mut b, &format!("DROP TABLE ca{}", i - 1));
+        }
+        run(&mut a, "COMMIT");
+        run(&mut a, count);
+        run(&mut b, "COMMIT");
+        run(&mut b, count);
+        if i > 0 {
+            run(&mut a, &format!("BEGIN;\nDROP TABLE cb{}", i - 1));
+            run(&mut b, &format!("BEGIN;\nCREATE TYPE ty{i} AS (a int)"));
+            run(&mut b, "COMMIT");
+            run(&mut a, "COMMIT");
+            run(&mut a, count);
+        }
+    }
+    engine.shutdown();
+}

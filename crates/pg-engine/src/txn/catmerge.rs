@@ -35,27 +35,32 @@ fn conflict() -> Error {
 pub fn merge(base: &Catalog, mine: &Catalog, cur: &Catalog) -> Result<Catalog> {
     let internal = |e: serde_json::Error| crate::error::internal(e.to_string());
     let mut out = cur.clone();
-    // The header: scalars and lists (comments, ACLs, memberships, ...).
-    let (hb, hm, hc) = (
-        persist::header_fields(base)?,
-        persist::header_fields(mine)?,
-        persist::header_fields(cur)?,
-    );
+    // The header: scalars and lists (comments, ACLs, memberships, ...). Only the fields this
+    // transaction changed are merged (`cur`'s are the rest): serializing all three headers,
+    // whose lists hold an item per commented or granted object, made every racing commit
+    // O(catalog).
     let mut head = Map::new();
-    let keys: BTreeSet<&String> = hb.keys().chain(hm.keys()).chain(hc.keys()).collect();
-    for k in keys {
-        let (bv, mv, cv) = (hb.get(k), hm.get(k), hc.get(k));
-        let v = match k.as_str() {
+    for k in persist::header_changed(base, mine) {
+        let v = match k {
             // (Bumped by the caller; the format is `cur`'s.)
             "version" | "catalog_format" => continue,
-            // Counters: the larger.
-            "next_oid" => Some(max_num(mv, cv)),
             // pg_class's heap order: below.
             "class_tick" => continue,
-            _ => merge_opt(bv, mv, cv)?,
+            // Counters: the larger.
+            "next_oid" => Some(Value::from(mine.next_oid.max(cur.next_oid))),
+            // Comments by object: the current ones, those this transaction set or removed
+            // changed (pg_restore -j comments every object as it goes).
+            "comments" => {
+                out.comments = merge_comments(base, mine, cur);
+                continue;
+            }
+            _ => {
+                let field = |c: &Catalog| persist::header_field(c, k);
+                merge_opt(field(base)?.as_ref(), field(mine)?.as_ref(), field(cur)?.as_ref())?
+            }
         };
         if let Some(v) = v {
-            head.insert(k.clone(), v);
+            head.insert(k.to_string(), v);
         }
     }
     persist::set_header(&mut out, &head)?;
@@ -76,10 +81,15 @@ pub fn merge(base: &Catalog, mine: &Catalog, cur: &Catalog) -> Result<Catalog> {
         HashMap::new()
     };
     let mut moved = Vec::new();
+    // The relations whose name index entries may change (tables, indexes, views, sequences).
+    let mut rels = BTreeSet::new();
     for (tag, oid, v) in changes {
         if tag == persist::CLASS_ORDER_TAG {
             moved.push((oid, v));
             continue;
+        }
+        if matches!(tag, 2..=5) {
+            rels.insert(oid);
         }
         let v = match theirs.get(&(tag, oid)) {
             None => v,
@@ -101,9 +111,40 @@ pub fn merge(base: &Catalog, mine: &Catalog, cur: &Catalog) -> Result<Catalog> {
     class_order(mine, moved, &mut out);
     out.oids = mine.oids.clone();
     out.catalog_format = cur.catalog_format;
-    out.reindex();
-    unique_names(&out)?;
+    // (The name index and children of the relations this transaction changed, and the
+    // check that no two took one name: `cur`'s were whole. Rebuilding them over the whole
+    // catalog, under the commit lock, made every racing DDL commit O(catalog).)
+    out.reindex_rels(cur, &rels)?;
+    // (Checked against the full rebuild in debug builds, over catalogs small enough not to
+    // hide what the merge itself costs: tests/ddl_scaling.rs times it.)
+    #[cfg(debug_assertions)]
+    if out.tables.len() + out.indexes.len() < 500 {
+        let mut full = out.clone();
+        full.reindex();
+        debug_assert!(full.names_eq(&out), "a merged catalog's name index");
+        if unique_names(&full).is_err() {
+            panic!("a merged catalog with a name taken twice");
+        }
+    }
     Ok(out)
+}
+
+/// `cur`'s comments with this transaction's changes since `base`: those it removed or set
+/// (keyed by object and sub-id) go, then those it set follow in its order (a comment set
+/// again is a new row at pg_description's end, as the transaction had it).
+fn merge_comments(base: &Catalog, mine: &Catalog, cur: &Catalog) -> std::sync::Arc<Vec<(u32, i32, String)>> {
+    let key = |c: &(u32, i32, String)| (c.0, c.1);
+    let before: HashMap<(u32, i32), &String> = base.comments.iter().map(|c| (key(c), &c.2)).collect();
+    let after: HashMap<(u32, i32), &String> = mine.comments.iter().map(|c| (key(c), &c.2)).collect();
+    let mut touched: std::collections::HashSet<(u32, i32)> =
+        before.keys().filter(|k| after.get(*k) != before.get(*k)).copied().collect();
+    let set: Vec<&(u32, i32, String)> =
+        mine.comments.iter().filter(|c| before.get(&key(c)) != Some(&&c.2)).collect();
+    touched.extend(set.iter().map(|c| key(c)));
+    let mut out: Vec<(u32, i32, String)> =
+        cur.comments.iter().filter(|c| !touched.contains(&key(c))).cloned().collect();
+    out.extend(set.into_iter().cloned());
+    std::sync::Arc::new(out)
 }
 
 fn max_num(a: Option<&Value>, b: Option<&Value>) -> Value {
@@ -209,10 +250,24 @@ fn merge_value(b: &Value, m: &Value, c: &Value) -> Result<Value> {
             Ok(Value::Object(out))
         }
         (Value::Array(b), Value::Array(m), Value::Array(c)) => {
-            let removed: Vec<&Value> = b.iter().filter(|x| !m.contains(x)).collect();
-            let mut out: Vec<Value> = c.iter().filter(|x| !removed.contains(x)).cloned().collect();
-            for x in m.iter().filter(|x| !b.contains(x)) {
-                if !out.contains(x) {
+            // (By the items' text in hash sets: lists such as the header's comments and ACLs
+            // hold an item per object, and comparing every pair was quadratic.)
+            let key = |x: &Value| x.to_string();
+            let (bk, mk): (std::collections::HashSet<String>, std::collections::HashSet<String>) =
+                (b.iter().map(key).collect(), m.iter().map(key).collect());
+            let removed: std::collections::HashSet<&String> = bk.iter().filter(|x| !mk.contains(*x)).collect();
+            let mut seen = std::collections::HashSet::new();
+            let mut out: Vec<Value> = Vec::with_capacity(c.len() + m.len());
+            for x in c {
+                let k = key(x);
+                if !removed.contains(&k) {
+                    seen.insert(k);
+                    out.push(x.clone());
+                }
+            }
+            for x in m {
+                let k = key(x);
+                if !bk.contains(&k) && seen.insert(k) {
                     out.push(x.clone());
                 }
             }
@@ -246,7 +301,8 @@ fn class_order(mine: &Catalog, moved: Vec<(u32, Option<Bytes>)>, out: &mut Catal
 }
 
 /// pg_class_relname_nsp_index / pg_type_typname_nsp_index: two transactions may not both
-/// have taken a name.
+/// have taken a name. (Debug builds check `Catalog::reindex_rels`'s check with it.)
+#[cfg(debug_assertions)]
 fn unique_names(c: &Catalog) -> Result<()> {
     let mut rels = std::collections::HashSet::new();
     let mut take = |schema: u32, name: &str| {

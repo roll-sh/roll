@@ -369,7 +369,7 @@ fn builtin_rel_acl(oid: u32) -> Option<Acl> {
 pub type AclKey = (u32, u32, i32);
 
 /// The stored ACL of an object, as a serialisable list.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ObjAcl {
     pub class: u32,
     pub oid: u32,
@@ -379,7 +379,7 @@ pub struct ObjAcl {
 }
 
 /// ALTER DEFAULT PRIVILEGES: the ACL objects `role` creates (in `schema`, 0 for any) start with.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct DefaultAcl {
     pub oid: u32,
     pub role: u32,
@@ -390,7 +390,7 @@ pub struct DefaultAcl {
 }
 
 /// A role membership (pg_auth_members).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AuthMember {
     pub oid: u32,
     pub role: u32,

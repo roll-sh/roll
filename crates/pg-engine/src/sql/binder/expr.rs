@@ -313,7 +313,7 @@ impl Binder<'_, '_> {
                         c.location,
                     ));
                 }
-                if crate::types::collation::resolve(&self.cat, &self.ctx.search_path, &coll).is_none() {
+                let Some(def) = crate::types::collation::resolve(&self.cat, &self.ctx.search_path, &coll) else {
                     return Err(with_pos(
                         Error::new(
                             code::UNDEFINED_OBJECT,
@@ -324,6 +324,16 @@ impl Binder<'_, '_> {
                         ),
                         c.location,
                     ));
+                };
+                if self.cat.collations.contains_key(&def.oid) && coll.len() == 1 {
+                    self.note_coll_ref(c.location, def.oid);
+                }
+                // find_expr_references: a CollateExpr depends on its collation.
+                if let Some(d) = self.deps.as_mut()
+                    && self.cat.collations.contains_key(&def.oid)
+                    && !d.contains(&(crate::catalog::depend::COLLATION, def.oid))
+                {
+                    d.push((crate::catalog::depend::COLLATION, def.oid));
                 }
                 Ok(Expr::Collate(
                     Box::new(arg),
@@ -1276,11 +1286,35 @@ impl Binder<'_, '_> {
         Ok(None)
     }
 
+    /// find_expr_references: a FieldSelect of field `i` of `base` (a named composite)
+    /// depends on the composite type's relation's column, noted while collecting
+    /// dependencies. (A field of a relation's whole-row Var is that column's Var,
+    /// ParseComplexProjection: noted as the column.)
+    pub(crate) fn note_field_select(&mut self, base: &Expr, i: usize) {
+        if self.deps.is_none() {
+            return;
+        }
+        let DataType::Row(fields) = base.ty() else {
+            return;
+        };
+        let rel_row = matches!(base, Expr::Row(items, _)
+            if !items.is_empty()
+                && items.iter().all(|x| matches!(x, Expr::Col(..) | Expr::Outer(..))))
+            && !self.cat.composites.contains_key(&fields.oid);
+        if fields.oid == 0 || rel_row || nullable_whole_row(base).is_some() {
+            return;
+        }
+        let col = (self.rowtype_attnums(fields.oid))
+            .and_then(|(rel, attnums)| Some((rel, *attnums.get(i)?)));
+        self.note_rowtype_col(col);
+    }
+
     fn field_select(&mut self, base: Expr, field: &str, loc: i32) -> Result<Expr> {
         match base.ty() {
             DataType::Row(fields) => match fields.iter().position(|(n, _)| n == field) {
                 Some(i) => {
                     let ty = fields[i].1.clone();
+                    self.note_field_select(&base, i);
                     if let Expr::Row(items, _) = base {
                         return Ok(items.into_iter().nth(i).unwrap());
                     }
@@ -1415,7 +1449,11 @@ impl Binder<'_, '_> {
         let (ty, domain) = super::resolve_type_name(&self.cat, &self.ctx.search_path, tn)?;
         if self.refs.is_some() {
             let named = match (&ty, domain) {
-                (_, Some(d)) => d,
+                // (`d[]` names the domain d: its array type has no name of its own here.)
+                (_, Some(d)) => match self.cat.domain_type(d) {
+                    Some((x, true)) if !tn.array_bounds.is_empty() => x.oid,
+                    _ => d,
+                },
                 (DataType::Array(e), None) if !tn.array_bounds.is_empty() => {
                     crate::catalog::system::type_oid(&self.cat, e)
                 }
@@ -1441,6 +1479,20 @@ impl Binder<'_, '_> {
                 .cast_explicit(e, &ty)
                 .map_err(|e| with_pos(e, tc.location))?;
             return match domain {
+                // (An ArrayExpr of the domain's elements, each coerced to the domain: what
+                // collects dependencies records the domain, not its array type.)
+                Some(d) if self.deps.is_some() && self.cat.domain_type(d).is_some_and(|(_, a)| a) => {
+                    let saved = self.deps.take();
+                    let out = self.domain_check(out, d);
+                    self.deps = saved;
+                    let elem = self.cat.domain_type(d).map(|(x, _)| x.oid);
+                    if let (Some(e), Some(deps)) = (elem, self.deps.as_mut())
+                        && !deps.contains(&(1247, e))
+                    {
+                        deps.push((1247, e));
+                    }
+                    out
+                }
                 Some(d) => self.domain_check(out, d),
                 None => Ok(out),
             };

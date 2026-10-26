@@ -821,26 +821,63 @@ impl<'c, 'a> Ddl<'c, 'a> {
                 }
             }
         }
-        // Access methods of relations that are gone.
-        if !self.cat.rel_am.is_empty() {
-            let cat = &self.cat;
-            let live: std::collections::HashSet<u32> = cat
-                .rel_am
-                .keys()
-                .copied()
-                .filter(|o| {
-                    cat.tables.contains_key(o) || cat.views.contains_key(o) || cat.indexes.contains_key(o)
-                })
-                .collect();
-            self.cat.rel_am.retain(|o, _| live.contains(o));
-        }
-        // Dropped relations' file numbers go.
-        if !self.cat.filenodes.is_empty() {
-            let live: std::collections::HashSet<u32> =
-                self.cat.storage_oids().into_iter().collect();
-            self.cat
-                .filenodes
-                .retain(|o, _| *o < crate::catalog::FIRST_USER_OID || live.contains(o));
+        // Access methods and file numbers of relations that are gone (only those this
+        // statement removed are looked for: every statement built a set of every relation).
+        if !self.cat.rel_am.is_empty() || !self.cat.filenodes.is_empty() {
+            let mut gone: Vec<u32> = Vec::new();
+            for (oid, was, now) in before.tables.changes(&self.cat.tables) {
+                if now.is_none() {
+                    gone.push(oid);
+                }
+                // (Its TOAST table, when it went or was replaced: a rewrite's new one.)
+                if let Some(t) = was.filter(|t| t.toast != 0 && now.is_none_or(|n| n.toast != t.toast)) {
+                    gone.extend([t.toast, t.toast + 1]);
+                }
+            }
+            for (oid, was, now) in before.views.changes(&self.cat.views) {
+                if now.is_none() {
+                    gone.push(oid);
+                }
+                let toast = |v: Option<&Arc<crate::catalog::ViewDef>>| {
+                    v.and_then(|v| v.storage.as_ref()).map_or(0, |t| t.toast)
+                };
+                if toast(was) != 0 && toast(now) != toast(was) {
+                    gone.extend([toast(was), toast(was) + 1]);
+                }
+            }
+            for (oid, _, now) in before.indexes.changes(&self.cat.indexes) {
+                if now.is_none() {
+                    gone.push(oid);
+                }
+            }
+            for (oid, _, now) in before.sequences.changes(&self.cat.sequences) {
+                if now.is_none() {
+                    gone.push(oid);
+                }
+            }
+            for o in gone {
+                self.cat.rel_am.remove(&o);
+                if o >= crate::catalog::FIRST_USER_OID {
+                    self.cat.filenodes.remove(&o);
+                }
+            }
+            // (Checked against every relation in debug builds, over catalogs small enough not
+            // to hide the statement's own cost: tests/ddl_scaling.rs.)
+            #[cfg(debug_assertions)]
+            if self.cat.tables.len() < 500 {
+                let cat = &self.cat;
+                debug_assert!(
+                    cat.rel_am.keys().all(|o| {
+                        cat.tables.contains_key(o) || cat.views.contains_key(o) || cat.indexes.contains_key(o)
+                    }),
+                    "access methods of relations that are gone"
+                );
+                let live: std::collections::HashSet<u32> = cat.storage_oids().into_iter().collect();
+                debug_assert!(
+                    cat.filenodes.keys().all(|o| *o < crate::catalog::FIRST_USER_OID || live.contains(o)),
+                    "file numbers of relations that are gone"
+                );
+            }
         }
     }
 

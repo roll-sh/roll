@@ -268,6 +268,42 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   Verified: `cargo test -p pg-engine`, clippy, difftest smoke, and the regression suite in
   full against its base `0a8ec4e` with private references: 51,148 / 51,150 both, identical
   per file and hunk.
+- **Dependencies, catalogs after DDL** (round 19, agent 62; BENCH.md
+  "Catalog round 4"): pg_depend records what PostgreSQL's find_expr_references does for
+  field selections and stores of composite values (`(f(x)).col`, `(col).f`, `(ROW(...)::t).f`,
+  `(expr).*`, `UPDATE ... SET c.f`: `Binder::note_field_select`, the composite's relation's
+  column), CollateExpr and RelabelType collations, user casts' functions, constraint
+  triggers (their constraint and FROM table), rules' actions apart from their WHERE (a
+  rule's own table when its actions read none of its columns), policies' USING and WITH
+  CHECK apart, partition keys' and domain arrays' collations; a view's FROM items inside an
+  indirection (`view_deps`) and a FROM function whose body doesn't bind under the reading
+  session's path no longer lose the view's dependencies; generated columns and defaults
+  bound for a statement aren't its dependencies (`Binder::unrecorded`). ALTER TYPE ... DROP
+  ATTRIBUTE goes through the dependency walk (`drop_objects`), refusing or cascading to
+  everything PostgreSQL does. Stored texts qualify COLLATE collations and `d[]` domain
+  arrays. Statistics objects are described unqualified when visible. Golden
+  `a62_depend_gaps`. (Databases' own options: agent 54's, above.) pg_class, pg_attribute and
+  pg_attrdef of a new catalog
+  version are spliced from the last generated version's rows (`catalog/sysdelta.rs`). A
+  statement reads one catalog version: `Txn::catalog` was the database's latest whenever it
+  was read, so a statement's scans of two system catalogs (or its planning and its run)
+  could see versions on either side of another session's DDL commit (pgjdbc's
+  TypeCacheDLLStressTest tripped the debug check of pg_class's row count over it; in a
+  release build a join of pg_class and pg_attribute could pair different versions'
+  rows). It is now the one the statement began with, refreshed when the statement takes a
+  new lock (`Txn::read_catalog`, LockRelationOid's AcceptInvalidationMessages; the base of
+  its DDL stays `stmt_catalog`). Racing DDL commits merge in what they changed (BENCH.md
+  "Catalog round 4"): `pg_restore -j 4` of 3,000 tables 227 s → 43.5 s, serially 67.8 s → 24.9 s (PostgreSQL 25 s both). Left:
+  a user operator over `ANY (array)` whose function is SQL or PL/pgSQL fails to bind
+  ("operator does not exist"); CREATE MATERIALIZED VIEW populates under the session's
+  path where PostgreSQL restricts it (an SQL function body naming unqualified tables fails
+  there); collations stored by name, so two CREATE COLLATIONs of one name in different
+  schemas make dependencies on the first; domain defaults aren't qualified when stored;
+  comments live in the catalog header, which every DDL commit serializes and writes whole
+  (records of their own need a catalog format change); spliced catalog rows are still copied
+  per version and per scan (shared `Arc` rows are the next step); pg_constraint, pg_type and
+  pg_index aren't spliced; the first connection (135-160 ms at 10,000 tables) and ALTER TABLE
+  ADD COLUMN's overhead weren't worked on.
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference
@@ -915,6 +951,15 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
     relations), generated per scan when the shared rows aren't there; both compared with the
     full generation in debug builds. `explain::sys_tuples` now counts information_schema
     .columns / .tables through `row_count` too. Golden `a58_catalog_scoped`.
+  - Round 19 agent 62's spliced catalogs (`catalog/sysdelta.rs`): a `Database::sys_rows`
+    entry of pg_class, pg_attribute or pg_attrdef holds the catalog it was generated for
+    (an `Arc`, so a later version can be diffed against it; superseded entries of the same
+    key go). A miss splices the next version's rows from it when `sysdelta::changed_rels`
+    can tell which relations' rows differ (`PMap::changes` of the relation maps, relstats
+    and frozen xids, with what they imply: TOAST tables, indexes, parents, partitions, foreign
+    key targets, owned sequences); any change to what every row reads (schemas, roles, ACLs,
+    types, collations, triggers, rules, ...) generates whole. Debug builds compare every
+    splice with the full generation. Test `ddl_scaling.rs whole_catalogs_after_ddl_are_spliced`.
   - `sql::parse` `PARSED` (parse trees, per thread): by the text and the parser options (a
     pure function); `ast::parse_exprs` / `parse_stmt` (stored texts) under tags of their own.
   - `costs::SLOT_VALUES` (statistics slots' parsed values, per thread): by

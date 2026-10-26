@@ -284,6 +284,23 @@ macro_rules! stored_fields {
             Ok(m)
         }
 
+        /// The header fields in which `a` and `b` differ (compared as values, not as JSON).
+        fn header_diff(a: &Catalog, b: &Catalog) -> Vec<&'static str> {
+            let mut out = Vec::new();
+            $(if a.$h != b.$h {
+                out.push(stringify!($h));
+            })*
+            out
+        }
+
+        /// Header field `name` as JSON (None: not a header field).
+        fn header_one(c: &Catalog, name: &str) -> Result<Option<serde_json::Value>> {
+            $(if name == stringify!($h) {
+                return serde_json::to_value(&c.$h).map(Some).map_err(|e| internal(e.to_string()));
+            })*
+            Ok(None)
+        }
+
         /// The header fields `m` has, set in `c`.
         fn set_header_fields(c: &mut Catalog, m: &serde_json::Map<String, serde_json::Value>) -> Result<()> {
             $(if let Some(v) = m.get(stringify!($h)) {
@@ -465,6 +482,16 @@ pub fn apply_record(c: &mut Catalog, tag: u8, oid: u32, v: Option<&[u8]>) -> Res
 /// The header record's fields as JSON.
 pub fn header_fields(c: &Catalog) -> Result<serde_json::Map<String, serde_json::Value>> {
     header_map(c)
+}
+
+/// The header fields in which `a` and `b` differ.
+pub fn header_changed(a: &Catalog, b: &Catalog) -> Vec<&'static str> {
+    header_diff(a, b)
+}
+
+/// One header field as JSON.
+pub fn header_field(c: &Catalog, name: &str) -> Result<Option<serde_json::Value>> {
+    header_one(c, name)
 }
 
 /// Header fields set from JSON (those `m` has).

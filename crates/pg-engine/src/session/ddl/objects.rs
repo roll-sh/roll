@@ -1792,14 +1792,14 @@ impl Ddl<'_, '_> {
         {
             let v = view;
             self.cat.remove_name(v.schema, &v.name);
-            self.cat.comments.retain(|(o, _, _)| *o != oid);
+            self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             if let Some(st) = &v.storage {
                 crate::exec::dml::truncate(st, self.ctx)?;
                 self.ctx.sess.db.reset_seq(st.oid, None)?;
                 for i in &st.indexes {
                     if let Some(ix) = self.cat.indexes.remove(i) {
                         self.cat.remove_name(v.schema, &ix.name);
-                        self.cat.comments.retain(|(o, _, _)| o != i);
+                        self.cat.comments_mut().retain(|(o, _, _)| o != i);
                     }
                     self.cat.relstats.remove(i);
                     self.cat.colstats.remove(i);
@@ -1815,7 +1815,7 @@ impl Ddl<'_, '_> {
                     .collect();
                 for x in stats {
                     self.cat.statistics.remove(&x);
-                    self.cat.comments.retain(|(o, _, _)| *o != x);
+                    self.cat.comments_mut().retain(|(o, _, _)| *o != x);
                 }
             }
         }
@@ -4822,10 +4822,10 @@ impl Ddl<'_, '_> {
                     }
                     let (oid, sub) = (c.relid, i as i32 + 1);
                     self.cat
-                        .comments
+                        .comments_mut()
                         .retain(|(o, sb, _)| !(*o == oid && *sb == sub));
                     if !s.comment.is_empty() {
-                        self.cat.comments.push((oid, sub, s.comment.clone()));
+                        self.cat.comments_mut().push((oid, sub, s.comment.clone()));
                     }
                     self.save()?;
                     return Ok("COMMENT".into());
@@ -5146,11 +5146,11 @@ impl Ddl<'_, '_> {
         };
         self.check_comment_owner(kind, oid)?;
         self.cat
-            .comments
+            .comments_mut()
             .retain(|(o, sb, _)| !(*o == oid && *sb == sub));
         // An empty comment on a built-in object hides the one Postgres ships with it.
         if !s.comment.is_empty() || oid < crate::catalog::FIRST_USER_OID {
-            self.cat.comments.push((oid, sub, s.comment.clone()));
+            self.cat.comments_mut().push((oid, sub, s.comment.clone()));
         }
         self.save()?;
         Ok("COMMENT".into())
@@ -5790,7 +5790,7 @@ impl Ddl<'_, '_> {
             self.cat.remove_name(t.schema, &ix.name);
             self.cat.put_storage(t);
         }
-        self.cat.comments.retain(|(o, _, _)| *o != ix.oid);
+        self.cat.comments_mut().retain(|(o, _, _)| *o != ix.oid);
         Ok(())
     }
 
@@ -6101,7 +6101,7 @@ impl Ddl<'_, '_> {
         self.cat.drop_table(t.oid);
         self.cat.triggers.retain(|_, x| x.table != t.oid);
         self.cat.rules.retain(|_, x| x.table != t.oid);
-        self.cat.comments.retain(|(o, _, _)| *o != t.oid);
+        self.cat.comments_mut().retain(|(o, _, _)| *o != t.oid);
         Ok(())
     }
 
@@ -6312,7 +6312,7 @@ impl Ddl<'_, '_> {
                     self.drop_view_cascade(oid)?;
                 } else if let Some(q) = self.cat.sequences.remove(&oid) {
                     self.cat.remove_name(q.schema, &q.name);
-                    self.cat.comments.retain(|(o, _, _)| *o != oid);
+                    self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
                     self.ctx.sess.db.reset_seq(oid, None)?;
                 } else if let Some(ix) = self.cat.indexes.get(&oid).cloned() {
                     // A constraint's index goes with the constraint.
@@ -6337,7 +6337,7 @@ impl Ddl<'_, '_> {
             }
             PROC => {
                 if self.cat.functions.remove(&oid).is_some() {
-                    self.cat.comments.retain(|(o, _, _)| *o != oid);
+                    self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
                 }
             }
             CONSTRAINT => {
@@ -6410,33 +6410,33 @@ impl Ddl<'_, '_> {
             }
             TRIGGER => {
                 self.cat.triggers.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             }
             REWRITE => {
                 self.cat.rules.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             }
             EVENT_TRIGGER => {
                 self.cat.event_triggers.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             }
             POLICY => {
                 self.cat.policies.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             }
             STATEXT => {
                 self.cat.statistics.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             }
             TSCONFIG | TSDICT | TSPARSER | TSTEMPLATE => {
                 if let Some(k) = ts_kind(class) {
                     self.cat.ts_remove(k, oid);
                 }
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             }
             OPERATOR => {
                 self.cat.operators.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
                 // Operators naming it as their commutator or negator forget it.
                 let linked: Vec<Arc<crate::catalog::Operator>> = self
                     .cat
@@ -6459,15 +6459,15 @@ impl Ddl<'_, '_> {
             EXTENSION => {
                 self.cat.extensions.retain(|e| e.0 != oid);
                 self.cat.extension_info.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             }
             OPCLASS => {
                 self.cat.opclasses.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             }
             OPFAMILY => {
                 self.cat.opfamilies.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             }
             AMOP | AMPROC => {
                 if self.cat.opmembers.remove(&oid).is_none() {
@@ -6476,23 +6476,23 @@ impl Ddl<'_, '_> {
             }
             CAST => {
                 self.cat.casts.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             }
             AM => {
                 self.cat.access_methods.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             }
             CONVERSION => {
                 self.cat.conversions.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             }
             LANGUAGE => {
                 self.cat.languages.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             }
             TRANSFORM => {
                 self.cat.transforms.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             }
             PUBLICATION | PUBLICATION_REL | PUBLICATION_NAMESPACE => {
                 self.delete_publication_object(class, oid);
@@ -6501,16 +6501,16 @@ impl Ddl<'_, '_> {
                 self.cat.fdws.remove(&oid);
                 self.cat.servers.remove(&oid);
                 self.cat.user_mappings.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
                 self.cat.acls.retain(|a| a.oid != oid);
             }
             COLLATION => {
                 self.cat.collations.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             }
             NAMESPACE => {
                 self.cat.schemas.remove(&oid);
-                self.cat.comments.retain(|(o, _, _)| *o != oid);
+                self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
             }
             _ => {}
         }
@@ -6523,7 +6523,7 @@ impl Ddl<'_, '_> {
         self.cat.domains.remove(&oid);
         self.cat.ranges.remove(&oid);
         self.cat.base_types.remove(&oid);
-        self.cat.comments.retain(|(o, _, _)| *o != oid);
+        self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
     }
 
     /// The type a DROP TYPE / DOMAIN names, checked droppable by the current user: its OID

@@ -1077,6 +1077,22 @@ fn qualify_text(text: &str, log: &RefLog, cat: &Catalog, search_path: &[String])
             });
         }
     }
+    // A CREATE COLLATION collation: `COLLATE schema.name`.
+    for &(loc, oid) in &log.colls {
+        if let Some(d) = cat.collations.get(&oid)
+            && let Some(p) = t.pos(loc)
+            && text.get(p..p + 7).is_some_and(|k| k.eq_ignore_ascii_case("collate"))
+        {
+            let (ch, _) = chain_at(text, skip_ws(text.as_bytes(), p + 7));
+            if ch.len() == 1 && ch[0].value == d.name {
+                edits.push(Edit {
+                    start: ch[0].start,
+                    end: ch[0].end,
+                    text: qualified(cat.schema_name(d.namespace), &d.name),
+                });
+            }
+        }
+    }
     for &(loc, class, oid) in &log.literals {
         if class == crate::catalog::depend::REL
             && let Some((schema, name, _)) = rel_names(cat, oid)
@@ -1186,7 +1202,10 @@ fn expr_log(mut log: RefLog) -> RefLog {
     for r in &mut log.rels {
         r.loc -= EXPR_BASE;
     }
-    for x in log.funcs.iter_mut().chain(log.types.iter_mut()).chain(log.opers.iter_mut()) {
+    for x in (log.funcs.iter_mut().chain(log.types.iter_mut()))
+        .chain(log.opers.iter_mut())
+        .chain(log.colls.iter_mut())
+    {
         x.0 -= EXPR_BASE;
     }
     for x in &mut log.literals {

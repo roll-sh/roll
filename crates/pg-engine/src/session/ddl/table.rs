@@ -2473,7 +2473,7 @@ impl Ddl<'_, '_> {
                     }
                     if comments {
                         let mut copied = Vec::new();
-                        for (o, sub, text) in &self.cat.comments {
+                        for (o, sub, text) in self.cat.comments.iter() {
                             if *o == src.oid && *sub > 0 {
                                 let Some(c) = src.columns.get(*sub as usize - 1) else {
                                     continue;
@@ -2507,7 +2507,7 @@ impl Ddl<'_, '_> {
                                 copied.push((tc.oid, 0, text.clone()));
                             }
                         }
-                        self.cat.comments.extend(copied);
+                        self.cat.comments_mut().extend(copied);
                     }
                 }
                 Pending::Fk(f) => {
@@ -7861,16 +7861,27 @@ impl Ddl<'_, '_> {
     /// Relations a view's query reads (for dependency checks).
     pub(super) fn view_deps(&self, q: &pb::Node) -> Vec<u32> {
         let mut out = Vec::new();
+        self.view_deps_in(q, &HashSet::new(), &mut out);
+        out
+    }
+
+    fn view_deps_in(&self, q: &pb::Node, outer_ctes: &HashSet<String>, out: &mut Vec<u32>) {
         let Some(ne) = q.node.as_ref() else {
-            return out;
+            return;
         };
-        let mut ctes = HashSet::new();
+        let mut ctes = outer_ctes.clone();
         for (node, _, _, _) in ne.nodes() {
             if let pg_query::NodeRef::CommonTableExpr(c) = node {
                 ctes.insert(c.ctename.clone());
             }
         }
         for (node, _, _, _) in ne.nodes() {
+            // (The node walk doesn't enter an indirection's argument: `(f(x)).col`.)
+            if let pg_query::NodeRef::AIndirection(ind) = node
+                && let Some(arg) = ind.arg.as_deref()
+            {
+                self.view_deps_in(arg, &ctes, out);
+            }
             // User functions it calls.
             if let pg_query::NodeRef::FuncCall(fc) = node {
                 for f in self.call_targets(fc) {
@@ -7906,7 +7917,6 @@ impl Ddl<'_, '_> {
                 }
             }
         }
-        out
     }
 }
 
@@ -8342,7 +8352,7 @@ impl Ddl<'_, '_> {
                         continue;
                     };
                     // (Made anew by DefineIndex's recursion: no comment comes along.)
-                    self.cat.comments.retain(|c| c.0 != cnew && c.0 != old.oid);
+                    self.cat.comments_mut().retain(|c| c.0 != cnew && c.0 != old.oid);
                     let con_kind = (ct.constraints.iter())
                         .find(|c| c.kind.index() == Some(cnew))
                         .map(|c| c.kind.clone());
@@ -8368,7 +8378,7 @@ impl Ddl<'_, '_> {
                     let mut ccon = 0;
                     if let Some(c) = ct.constraints.iter_mut().find(|c| c.kind.index() == Some(cnew)) {
                         let o = c.oid;
-                        self.cat.comments.retain(|x| x.0 != o);
+                        self.cat.comments_mut().retain(|x| x.0 != o);
                         ccon = self.cat.alloc_con_oid(c.deferrable);
                         c.oid = ccon;
                         c.name = name;
@@ -8482,7 +8492,7 @@ impl Ddl<'_, '_> {
             }
         }
         for (old, new) in remap {
-            for c in self.cat.comments.iter_mut().filter(|c| c.0 == old) {
+            for c in self.cat.comments_mut().iter_mut().filter(|c| c.0 == old) {
                 c.0 = new;
             }
         }
@@ -8634,7 +8644,7 @@ impl Ddl<'_, '_> {
             oid: new,
             ..(*old).clone()
         });
-        for c in self.cat.comments.iter_mut().filter(|c| c.0 == ix) {
+        for c in self.cat.comments_mut().iter_mut().filter(|c| c.0 == ix) {
             c.0 = new;
         }
         if let Some(s) = self.cat.relstats.remove(&ix) {

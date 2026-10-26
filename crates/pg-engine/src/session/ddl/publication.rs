@@ -1131,7 +1131,7 @@ impl Ddl<'_, '_> {
                 }
             }
         }
-        self.cat.comments.retain(|(o, _, _)| *o != oid);
+        self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
     }
 }
 

@@ -1459,6 +1459,12 @@ impl<'b, 'a> Binder<'b, 'a> {
                     args.push(Expr::Const(Value::Bool(explicit), DataType::Bool));
                 }
                 let ret = f.ret.clone();
+                // (A FuncExpr: what's collecting dependencies records the function.)
+                if let Some(d) = self.deps.as_mut()
+                    && !d.contains(&(crate::catalog::depend::PROC, f.oid))
+                {
+                    d.push((crate::catalog::depend::PROC, f.oid));
+                }
                 let call = self.user_call(f, args, -1)?;
                 Ok(if ret.oid() == to.oid() {
                     call
@@ -1887,6 +1893,20 @@ impl<'b, 'a> Binder<'b, 'a> {
     }
 
     fn fold_cast(&mut self, e: Expr, from: DataType, to: DataType, explicit: bool) -> Result<Expr> {
+        // find_expr_references: a RelabelType (text / varchar to text, varchar, bpchar)
+        // depends on its result's collation, its input's.
+        if self.deps.is_some()
+            && !self.cat.collations.is_empty()
+            && matches!(from.without_typmod(), DataType::Text | DataType::Varchar(_))
+            && matches!(to.without_typmod(), DataType::Text | DataType::Varchar(_) | DataType::Bpchar(_))
+            && from.oid() != to.oid()
+            && let Ok(Coll::Implicit(c) | Coll::Explicit(c, _)) = self.collation_of(&e)
+            && let Some(oid) = self.cat.collations.values().find(|d| d.name == c).map(|d| d.oid)
+            && let Some(d) = self.deps.as_mut()
+            && !d.contains(&(crate::catalog::depend::COLLATION, oid))
+        {
+            d.push((crate::catalog::depend::COLLATION, oid));
+        }
         // The cast's function (an array cast's: its elements') must be executable.
         if !self.deparse {
             let (f, t) = match (&from, &to) {

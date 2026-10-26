@@ -218,12 +218,19 @@ impl Binder<'_, '_> {
     /// (Constraints and defaults run with no privilege checks of their own.)
     pub(crate) fn table_rules(&mut self, t: &Arc<Table>) -> Result<TableRules> {
         let saved = std::mem::take(&mut self.perms);
+        // (Nor are they part of the statement's query tree: what collects dependencies
+        // doesn't see them.)
+        let deps = (self.deps.as_ref().map(|d| d.len()), self.rowtype_deps.len());
         let r = self.table_rules_inner(t);
+        if let (Some(n), Some(d)) = (deps.0, self.deps.as_mut()) {
+            d.truncate(n);
+        }
+        self.rowtype_deps.truncate(deps.1);
         let gen_funcs = std::mem::take(&mut self.perms.gen_funcs);
         self.perms = saved;
         // The functions generated columns call are run by the statement: EXECUTE on them
         // is checked (ExecInitFunc).
-        for f in gen_funcs {
+        for f in gen_funcs.into_iter().filter(|_| self.deps.is_none()) {
             if !self.perms.funcs.contains(&f) {
                 self.perms.funcs.push(f);
             }
@@ -2077,6 +2084,12 @@ impl Binder<'_, '_> {
                     loc,
                 ));
             };
+            // (A FieldStore depends on the composite type's relation's column.)
+            if self.deps.is_some() {
+                let col = (self.rowtype_attnums(fields.oid))
+                    .and_then(|(rel, attnums)| Some((rel, *attnums.get(i)?)));
+                self.note_rowtype_col(col);
+            }
             let inner_base = Expr::Field(Box::new(base.clone()), i, fields[i].1.clone());
             let value = if path.len() == 1 {
                 let fty = fields[i].1.clone();

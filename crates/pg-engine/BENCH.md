@@ -1527,6 +1527,81 @@ directory.
 - `difftest smoke` passes. The isolation suite in full matches STATUS.md's current score:
   109 / 122 specs, 1,616 / 1,648 permutations, 12,154 / 12,238 steps.
 
+## Catalog round 4: racing DDL commits, catalogs after DDL (round 19, agent 62)
+
+Same harness and catalogs as agent 58's: PostgreSQL in `a62-pg` (pinned image and settings),
+both servers on cores 16-19, the client on 20-23, other agents' builds and regression runs
+loading the machine (load 15-25). **before** the engine at `47d67b87`, **after** this round's,
+release builds, each run from a copy of the same data directory.
+
+### pg_restore of 3,000 tables (`tests/pg_dump/scale_setup.sql` without the big table, `pg_dump -Fc` from PostgreSQL; seconds, 0 errors, 3,069 tables restored each time)
+
+| | pg | before | after |
+|---|---|---|---|
+| `pg_restore` | 25.6 | 67.8 | 24.9 |
+| `pg_restore -j 4` | 25.3 | 227.1 | 43.5 |
+
+Every DDL commit that raced another (pg_restore -j's indexes, constraints and comments)
+merged its catalog onto the current one under the commit lock, and that was O(catalog):
+the merge rebuilt the relation name index and children lists of every relation
+(`Catalog::reindex`) and checked every name, serialized all three catalogs' headers to JSON
+(their comment lists hold one item per commented object) and merged lists that both sides
+changed pair by pair (quadratic: every COMMENT ON against every other). Now
+(`txn/catmerge.rs`) only the relations whose records this transaction changed are reindexed
+and name-checked (`Catalog::reindex_rels`, checked against the full rebuild in debug builds),
+only the header fields it changed are merged (`persist::header_changed`, compared as values),
+comments by object (`merge_comments`), lists through hash sets. Per statement and
+transaction, outside the merge: `Catalog::comments` is shared by a catalog's copies until one
+changes it (every DDL statement copied every comment), dropped relations' access methods and
+file numbers are found from the statement's changes (every statement built a set of every
+relation), the shared statistics drop dropped objects' entries once per catalog version
+(every transaction's end visited every table's entry under the lock all sessions share), and
+`referencing_fks` reads the foreign key index. A serial restore is now PostgreSQL's speed;
+`pg_restore -j 4` is 5x faster than before but still slower than a serial one: racing commits
+take turns under the commit lock, the header (with every comment) is still serialized,
+compressed and written by every DDL commit, and `SharedCatalog::extract` reads the comments
+per commit (comments as records of their own is the fix: a catalog format change).
+
+### 10,000 tables (ms per statement, medians of 3 runs; `scale-ops`, queries 5 times each)
+
+| case | pg | before | after |
+|---|---|---|---|
+| `count(*)` of pg_class, after DDL (COMMENT, then the count) | 11.4 | 78.6 | 71.4 |
+| pg_class × pg_attribute of a schema, after ALTER TABLE | 14.8 | 282 | 200 |
+| ORM constraints query, after DDL | 29.3 | 340 | 278 |
+| psql `\d t` lookup, after DDL | 0.57 | 12.9 | 1.42 |
+| `count(*)` of pg_class (the first after the setup's DDL included) | 7.7 | 40.8 | 39.9 |
+| DROP TABLE | 4.9 | 2.3 | 1.5 |
+| ALTER TABLE ADD COLUMN | 0.44 | 1.00 | 0.98 |
+| CREATE TABLE | 2.9 | 2.2 | 2.6 |
+
+pg_class, pg_attribute and pg_attrdef of a new catalog version are spliced from the last
+generated version's rows (`catalog/sysdelta.rs`): only the relations whose entries differ
+(found through the relation maps' `PMap::changes`, with what each change implies: TOAST
+tables, indexes, parents, partitions, foreign key targets, owned sequences) are generated
+again; a change to anything every row reads (schemas, roles, privileges, types, collations,
+triggers, rules, ...) generates the catalog whole. That removes the generation, not the
+work proportional to the catalog: the spliced rows are copied, and a scan clones each row it
+returns, so `count(*)` of pg_class after DDL is still 6x PostgreSQL's. pg_constraint and
+pg_type (the ORM query) and pg_index aren't spliced (their rows read more than their
+relation's entry). Rows as shared `Arc`s (a version reusing an unchanged relation's rows by
+pointer) are the next step.
+
+The first connection to a database (agent 58's 135-160 ms at 10,000 tables) and ALTER TABLE
+ADD COLUMN's per-statement overhead weren't worked on this round.
+
+### Verification (round 19, agent 62)
+
+`cargo test -p pg-engine` (every test binary), clippy (no new warnings), `difftest smoke`; the
+isolation suite on a private reference: 120 / 122 specs, 1,646 / 1,648 permutations, as
+committed; the regression suite in full on a private reference against the committed
+`results.tsv`: 51,148 / 51,150, no unit changed. New tests: golden `a62_depend_gaps` (recorded from PostgreSQL),
+`tests/ddl_scaling.rs` `whole_catalogs_after_ddl_are_spliced`,
+`racing_ddl_commits_dont_grow_with_the_catalog`, `racing_create_and_drop_keep_catalog_counts`,
+and the debug cross-checks (spliced rows against the full generation, a merged catalog's name
+index against `reindex`, dropped relations' access methods and file numbers against a scan,
+`referencing_fks` against a scan).
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

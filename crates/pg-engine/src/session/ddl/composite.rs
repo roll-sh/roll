@@ -91,9 +91,17 @@ impl Ddl<'_, '_> {
                             }
                             return Err(missing(&cmd.name));
                         };
-                        // CHECK constraints reading the attribute depend on it.
+                        // What depends on the attribute (performDeletion of the column).
                         let cascade = cmd.behavior == pb::DropBehavior::DropCascade as i32;
-                        self.drop_attribute_dependents(&comp, layout[i].unwrap_or(i), cascade)?;
+                        let at = (self.cat.composites.get(&comp.oid))
+                            .and_then(|c| c.fields.iter().position(|(n, _)| *n == cmd.name));
+                        match at {
+                            Some(a) => self.drop_objects(
+                                &[(crate::catalog::depend::REL, comp.relid, a as i32 + 1)],
+                                cascade,
+                            )?,
+                            None => self.drop_attribute_dependents(&comp, layout[i].unwrap_or(i), cascade)?,
+                        }
                         dims.dims.remove(&fields[i].0);
                         fields.remove(i);
                         layout.remove(i);

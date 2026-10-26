@@ -152,6 +152,18 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
 
+## Round 19, agent 62 (dependencies DDL records, one catalog per statement, racing DDL commits)
+
+pg_depend gained what find_expr_references records and the engine missed (HANDOFF, "Where it
+stands": field selections and stores of composite values, collations, user casts' functions,
+constraint triggers, rules' actions apart from their conditions, policies' two expressions
+apart), golden `a62_depend_gaps`; a statement reads one catalog version (refreshed when it
+takes a new lock); racing DDL commits merge only what they changed. A first full debug run
+of the change against the committed `results.tsv` on a private reference measured 51147:
+stats_ext 50 newly differed, `pg_describe_object` of a temporary schema's statistics object
+unqualified (statistics objects' visibility skips the temporary schema, as
+StatisticsObjIsVisible does: fixed). Full debug runs of the final change on a private reference (`a62-ref1`), before and after its rebase onto `6957f0d7`, measured **51148** both, no unit changed against the baseline; the generated blocks are left to the next full run.
+
 ## Round 19, agent 60 (database locales: libc C by default, CREATE DATABASE's providers)
 
 The engine's databases reported and behaved as the builtin C.UTF-8 locale; the reference is

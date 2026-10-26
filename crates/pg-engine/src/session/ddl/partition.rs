@@ -1705,7 +1705,7 @@ impl Ddl<'_, '_> {
                     .find(|(o, sub, _)| *o == six.oid && *sub == 0)
                     .cloned()
             {
-                self.cat.comments.push((oid, 0, text));
+                self.cat.comments_mut().push((oid, 0, text));
             }
             self.cat.put_index(ix);
         }

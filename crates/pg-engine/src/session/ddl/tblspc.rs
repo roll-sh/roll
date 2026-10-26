@@ -347,7 +347,7 @@ impl Ddl<'_, '_> {
         }
         self.cat.tablespaces.remove(&oid);
         self.cat.acls.retain(|a| !(a.class == 1213 && a.oid == oid));
-        self.cat.comments.retain(|c| c.0 != oid);
+        self.cat.comments_mut().retain(|c| c.0 != oid);
         self.save()?;
         Ok(TAG.into())
     }
