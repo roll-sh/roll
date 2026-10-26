@@ -1296,15 +1296,15 @@ before, 8,048 after, medians of 3; range scans 2,627 / 2,658), the rest of the O
     nothing can roll back to before it but the whole transaction); the undo log is freed
     before a commit copies the buffer. The TPC-H load's peak (lineitem's primary key) 5.3 →
     4.8 GB.
-11. **Size models where clients see them** (`sizing::btree_build_blocks`, `heapsim::placed`):
-    an index measured without its model (CREATE INDEX, ANALYZE) of a table small enough to
-    model is sized by the model's own sorted build, not a rougher estimate (a 300k-row date
-    index 329 → 255 pages, PostgreSQL's 255: the planner reads relpages); a heap laid out
-    again when a database reopens puts its rows back at their stored TIDs (2,250 → 2,521
-    pages after a restart, PostgreSQL's 2,521); `pg_relation_size` of an index on a table too
-    big to model is its measured pages, not 1. Bigger tables keep the cheap estimate (the
-    sorted build cost CREATE INDEX a third more over 1M rows): accepted internal
-    differences, HANDOFF.
+11. **Index sizes where the planner reads them** (`sizing::btree_build_blocks`): an index
+    measured without its model (CREATE INDEX, ANALYZE) of a table small enough to model is
+    sized by the model's own sorted build, not a rougher estimate (a 300k-row date index 329
+    → 255 pages, PostgreSQL's 255: the planner reads relpages); `pg_relation_size` of an
+    index on a table too big to model is its measured pages, not 1. Bigger tables keep the
+    cheap estimate (the sorted build cost CREATE INDEX a third more over 1M rows). A heap
+    laid out again when a database reopens still packs its rows afresh (2,250 pages where
+    PostgreSQL keeps 2,521): putting them back at their stored TIDs changed where new rows
+    go. Both are accepted internal differences (HANDOFF).
 
 ### Durability, crash recovery and the storage format
 

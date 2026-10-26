@@ -218,14 +218,23 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   big tables answered from the index entries (an entry visible to a snapshot points at a row
   version visible to it: the engine's equivalent of an all-visible map), big commits ingested
   as SSTs instead of WAL records and memtable copies (`Store::ingest_locked`, with crash
-  recovery replaying the WAL around them), partial L0 → L1 compaction, COPY FROM read a line
-  at a time (`session/copy/feed.rs`), CREATE INDEX / VACUUM / ANALYZE / ALTER TABLE's checks
-  streaming the table. TPC-H SF1 load peak 18 GB → 4.8 GB, 1M-row bulk steps 1.2–2.4x
-  faster (ANALYZE and the count after unchanged), index scans 1.2–1.4x in-process; the first
-  `count(*)` of lineitem 37–51 s → 11–18 s. Downgrades are supported after a clean shutdown
-  only (BENCH.md's agent 43 section: "Durability"). Big transactions still buffer their
-  writes whole until commit (BENCH.md "Where it is still slower" item 2). The regression
-  suite, goldens and difftest are unchanged unit for unit.
+  recovery replaying the WAL around them), partial L0 → L1 compaction, CREATE INDEX / VACUUM
+  / ANALYZE / ALTER TABLE's checks streaming the table, index sizes by the model's sorted
+  build. TPC-H SF1 load peak 18 GB → 4.8
+  GB, 1M-row bulk steps up to 2.6x faster (VACUUM; COPY and the count after unchanged), index
+  scans 1.2–1.4x in-process; the first `count(*)` of lineitem 37–51 s → 6.6–18 s.
+  Downgrades are supported after a clean shutdown only (BENCH.md's agent 43 section:
+  "Durability"). COPY FROM still parses its rows whole before they go in, and big
+  transactions buffer their writes whole until commit (BENCH.md "Where it is still slower"
+  item 2). The regression suite, goldens and difftest are unchanged unit for unit.
+  - **Accepted internal differences** (the engine's storage needn't imitate PostgreSQL's;
+    only what clients see must match): tables over 400,000 row versions have estimated heap
+    and index sizes (relpages, pg_relation_size) rather than PostgreSQL's page for page;
+    heaps and indexes are laid out afresh when the database reopens, so their pages can be
+    fewer than PostgreSQL's files (a heap of 2,250 pages against 2,521; an index of 543
+    against 604): putting rows back at their stored TIDs would change where new rows go; WAL files are
+    zero-filled ahead and big commits are SST files of their own, so a crashed database must
+    be reopened by this version before an older one.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
